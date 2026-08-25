@@ -2701,6 +2701,23 @@ impl Runtime {
         (self.layout_cell_w, self.layout_cell_h)
     }
 
+    pub fn set_layout_cell_dimensions(&mut self, cell_w: f32, cell_h: f32) {
+        if !cell_w.is_finite() || !cell_h.is_finite() || cell_w <= 0.0 || cell_h <= 0.0 {
+            return;
+        }
+        if (self.layout_cell_w - cell_w).abs() < f32::EPSILON
+            && (self.layout_cell_h - cell_h).abs() < f32::EPSILON
+        {
+            return;
+        }
+        self.layout_cell_w = cell_w;
+        self.layout_cell_h = cell_h;
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
+        self.current_layout = None;
+        self.relayout_current_tree();
+    }
+
     /// Set the text measurer for proportional font layout (Metal backend).
     /// Also stores cell dimensions for pixel↔cell conversion.
     pub fn set_text_measurer(&mut self, measurer: Box<dyn TextMeasurer>, cell_w: f32, cell_h: f32) {

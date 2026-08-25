@@ -92,6 +92,11 @@ mod inner {
             let size_tenths = (font_size * 10.0).round() as u16;
             self.fonts.borrow_mut().line_height(size_tenths)
         }
+
+        fn ascent_px(&self, font_size: f32) -> f32 {
+            let size_tenths = (font_size * 10.0).round() as u16;
+            self.fonts.borrow_mut().ascent(size_tenths)
+        }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,7 +1,7 @@
 use super::{Align, Justify, WidgetDefinition, distribute_justify, resolve_align, resolve_justify};
 use crate::layout::{
     Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
-    get_widget_type, prop_is_keyword, shrink_constraints_xy,
+    prop_is_keyword, shrink_constraints_xy,
 };
 use crate::vm::Value;
 
@@ -69,6 +69,7 @@ impl WidgetDefinition for HStackWidget {
         area: Rect,
         children: &[Value],
         aspect: f32,
+        measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
@@ -127,23 +128,11 @@ impl WidgetDefinition for HStackWidget {
         let (start_offset, effective_gap) =
             distribute_justify(justify, justify_remaining, count, gap);
 
-        // For baseline alignment, compute the baseline offset for each child.
-        // Labels: baseline = ascent ratio × height (~0.75 of line height).
-        // Non-text widgets: center them vertically on the baseline.
         let baseline_offset = |child: &Value, size: &Size| -> f32 {
-            let is_label = get_widget_type(child)
-                .map(|t| t == "label")
-                .unwrap_or(false);
-            if is_label {
-                // Ascent ≈ 75% of line height for most fonts.
-                size.height * 0.75
-            } else {
-                // Center non-text widgets on the baseline.
-                size.height * 0.5
-            }
+            super::widget_baseline_offset(child, *size, measure_ctx)
         };
 
-        // For baseline mode: find the maximum baseline offset.
+        // For baseline mode: find the maximum rendered baseline offset.
         let max_baseline = if align == Align::Baseline {
             measured
                 .iter()
@@ -174,7 +163,7 @@ impl WidgetDefinition for HStackWidget {
                     Align::Center => area.row + pad_y + (inner_height - child_height) / 2.0,
                     Align::End => area.row + pad_y + inner_height - child_height,
                     Align::Baseline => {
-                        // Shift child down so its baseline aligns with max_baseline.
+                        // Shift the child so its rendered baseline aligns with max_baseline.
                         let child_bl = baseline_offset(child, &size);
                         area.row + pad_y + (max_baseline - child_bl)
                     }
@@ -189,5 +178,113 @@ impl WidgetDefinition for HStackWidget {
                 build_child(child, rect, LayoutCtx::default())
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::TextMeasurer;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    struct BaselineMeasurer;
+
+    impl TextMeasurer for BaselineMeasurer {
+        fn measure_text_px(&self, text: &str, font_size: f32) -> f32 {
+            text.chars().count() as f32 * font_size * 0.5
+        }
+
+        fn line_height_px(&self, font_size: f32) -> f32 {
+            font_size
+        }
+
+        fn ascent_px(&self, font_size: f32) -> f32 {
+            if font_size < 9.0 { font_size * 0.75 } else { font_size * 0.7 }
+        }
+    }
+
+    fn widget(widget_type: &str, font_size: f64) -> Value {
+        Value::Map(HashMap::from([
+            (
+                "type".to_string(),
+                Rc::new(RefCell::new(Value::Keyword(widget_type.to_string()))),
+            ),
+            (
+                "font-size".to_string(),
+                Rc::new(RefCell::new(Value::Number(font_size))),
+            ),
+        ]))
+    }
+
+    fn baseline_stack() -> Value {
+        Value::Map(HashMap::from([(
+            "align".to_string(),
+            Rc::new(RefCell::new(Value::Keyword("baseline".to_string()))),
+        )]))
+    }
+
+    #[test]
+    fn baseline_alignment_uses_rendered_label_and_number_picker_baselines() {
+        let children = vec![widget("label", 8.0), widget("number-picker", 10.0)];
+        let ctx = MeasureCtx {
+            text_measurer: Some(&BaselineMeasurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 14.0,
+        };
+        let sizes = [
+            Size {
+                width: 2.0,
+                height: 0.4,
+            },
+            Size {
+                width: 4.0,
+                height: 1.0,
+            },
+        ];
+        let mut rects = Vec::new();
+        HSTACK_WIDGET.layout_children(
+            &baseline_stack(),
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 10.0,
+                height: 1.0,
+            },
+            &children,
+            2.0,
+            &ctx,
+            LayoutCtx::default(),
+            &mut |child, _| {
+                let widget_type = crate::layout::get_widget_type(child)?;
+                Some(if widget_type == "label" { sizes[0] } else { sizes[1] })
+            },
+            &mut |child, rect, _| {
+                rects.push(rect);
+                LayoutNode {
+                    widget_id: rects.len() as u64,
+                    stable_widget_id: None,
+                    subtree_root_id: None,
+                    parent_subtree_root_id: None,
+                    stable_key: None,
+                    widget_type: crate::layout::get_widget_type(child).unwrap(),
+                    rect,
+                    props: HashMap::new(),
+                    children: Vec::new(),
+                    focusable: false,
+                    animation: Default::default(),
+                }
+            },
+        );
+
+        assert_eq!(rects.len(), 2);
+        let label_baseline = rects[0].row
+            + super::super::widget_baseline_offset(&children[0], sizes[0], &ctx);
+        let picker_baseline = rects[1].row
+            + super::super::widget_baseline_offset(&children[1], sizes[1], &ctx);
+        assert!((label_baseline - picker_baseline).abs() < 0.0001);
+        assert!((rects[0].row - rects[1].row).abs() < 0.0001);
     }
 }

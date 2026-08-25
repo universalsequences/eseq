@@ -521,6 +521,17 @@ impl WidgetDefinition for NumberPickerWidget {
         })
     }
 
+    fn baseline_offset(&self, node: &Value, size: Size, ctx: &MeasureCtx<'_>) -> Option<f32> {
+        let font_size = get_prop_num(node, "font-size")
+            .map(f64_to_f32)
+            .unwrap_or(ctx.inherited_font_size);
+        Some(super::proportional_text_baseline_offset(
+            font_size,
+            (size.height - 1.0) * 0.5,
+            ctx,
+        ))
+    }
+
     fn captures_drag(&self) -> bool {
         true
     }

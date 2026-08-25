@@ -392,6 +392,7 @@ impl WidgetDefinition for BoxWidget {
         area: Rect,
         children: &[Value],
         aspect: f32,
+        _measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,

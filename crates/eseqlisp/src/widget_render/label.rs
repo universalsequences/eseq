@@ -350,6 +350,26 @@ impl WidgetDefinition for LabelWidget {
         })
     }
 
+    fn baseline_offset(&self, node: &Value, size: Size, ctx: &MeasureCtx<'_>) -> Option<f32> {
+        let font_size = get_prop_num(node, "font-size")
+            .map(f64_to_f32)
+            .unwrap_or(ctx.inherited_font_size);
+        let row_offset = match get_map(node).and_then(|props| props.get("v-align").cloned()) {
+            Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "center" => {
+                (size.height - 1.0) * 0.5
+            }
+            Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "end" => {
+                size.height - 1.0
+            }
+            _ => 0.0,
+        };
+        Some(super::proportional_text_baseline_offset(
+            font_size,
+            row_offset,
+            ctx,
+        ))
+    }
+
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         tui_render(props, rect, buf);
     }

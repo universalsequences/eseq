@@ -4353,6 +4353,21 @@ impl Editor {
         self.runtime.layout_cell_dims()
     }
 
+    pub fn set_layout_cell_dimensions(&mut self, cell_w: f32, cell_h: f32) {
+        if !cell_w.is_finite() || !cell_h.is_finite() || cell_w <= 0.0 || cell_h <= 0.0 {
+            return;
+        }
+        let old_dims = self.runtime.layout_cell_dims();
+        if (old_dims.0 - cell_w).abs() < f32::EPSILON
+            && (old_dims.1 - cell_h).abs() < f32::EPSILON
+        {
+            return;
+        }
+        self.runtime.set_layout_cell_dimensions(cell_w, cell_h);
+        self.sync_layout_to_active_leaf();
+        self.refresh_all_inactive_tile_layouts();
+    }
+
     pub fn set_text_measurer(
         &mut self,
         measurer: Box<dyn crate::layout::TextMeasurer>,

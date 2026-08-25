@@ -5412,6 +5412,42 @@ fn tiled_mouse_hit_testing_uses_fractional_tile_origin() {
 }
 
 #[test]
+fn scale_factor_cell_update_relayouts_proportional_label_height() {
+    struct ScaleTextMeasurer(std::sync::Arc<std::sync::atomic::AtomicU32>);
+    impl crate::layout::TextMeasurer for ScaleTextMeasurer {
+        fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+            text.chars().count() as f32 * 5.0
+        }
+
+        fn line_height_px(&self, _font_size: f32) -> f32 {
+            f32::from_bits(self.0.load(std::sync::atomic::Ordering::Relaxed))
+        }
+    }
+
+    let line_height_bits = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(8.0f32.to_bits()));
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_text_measurer(
+        Box::new(ScaleTextMeasurer(std::sync::Arc::clone(&line_height_bits))),
+        10.0,
+        20.0,
+    );
+    editor
+        .runtime
+        .eval_str(r#"(effect (label "scaled" :font-size 8))"#)
+        .unwrap();
+    let before = editor.widget_layout().expect("initial label layout");
+    assert!((before.rect.height - 0.4).abs() < 0.0001, "{:?}", before.rect);
+
+    // Wayland reports its real scale after the surface maps. The proportional
+    // measurer updates through its shared scale, and the editor must update the
+    // physical cell metrics and relayout in the same frame.
+    line_height_bits.store(12.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    editor.set_layout_cell_dimensions(15.0, 30.0);
+    let after = editor.widget_layout().expect("scaled label layout");
+    assert!((after.rect.height - 0.4).abs() < 0.0001, "{:?}", after.rect);
+}
+
+#[test]
 fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

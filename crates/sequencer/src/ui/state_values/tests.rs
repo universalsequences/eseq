@@ -36238,12 +36238,18 @@
                     .borrow_mut()
                     .line_height((font_size * 10.0).round() as u16)
             }
+
+            fn ascent_px(&self, font_size: f32) -> f32 {
+                self.0
+                    .borrow_mut()
+                    .ascent((font_size * 10.0).round() as u16)
+            }
         }
 
         const LINUX_SCALE_FACTOR: f64 = 1.6;
         let mono_atlas = eseqlisp::glyph_atlas::GlyphAtlas::new(
             "JetBrainsMono-Regular",
-            16.0 * LINUX_SCALE_FACTOR,
+            crate::ui::editor_setup::METAL_SEQ_TEXT_FONT_SIZE_PT * LINUX_SCALE_FACTOR,
         )
         .expect("Linux-scale monospace atlas");
         let text_measurer = LinuxScaleTextMeasurer(std::cell::RefCell::new(

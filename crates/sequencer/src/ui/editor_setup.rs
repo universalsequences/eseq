@@ -7,7 +7,7 @@ use super::constants::ui_entrypoint_path;
 use super::custom_ui::reload_custom_instrument_ui;
 use super::state_values::push_project_scratch_to_named_buffer;
 
-const METAL_SEQ_TEXT_FONT_SIZE_PT: f64 = 13.0;
+pub(crate) const METAL_SEQ_TEXT_FONT_SIZE_PT: f64 = 13.0;
 const STARTUP_GRID_LAYOUT_EXPR: &str = "(eseq.seq-layout/apply-fx-layout)";
 
 pub(crate) fn create_editor_and_backend(

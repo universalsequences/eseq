@@ -67,6 +67,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 use crate::backend::{Cell, CellStyle, Color};
 use crate::layout::{
     Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, TextMeasurer, get_map,
+    get_widget_type,
 };
 use crate::theme;
 use crate::vm::Value;
@@ -935,12 +936,18 @@ pub trait WidgetDefinition: Sync {
         ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size>;
+    /// Baseline offset from the widget's top edge, in layout rows. Text-bearing
+    /// widgets override this with the baseline they actually render.
+    fn baseline_offset(&self, _node: &Value, _size: Size, _ctx: &MeasureCtx<'_>) -> Option<f32> {
+        None
+    }
     fn layout_children(
         &self,
         node: &Value,
         area: Rect,
         children: &[Value],
         aspect: f32,
+        measure_ctx: &MeasureCtx<'_>,
         layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
@@ -950,6 +957,7 @@ pub trait WidgetDefinition: Sync {
             area,
             children,
             aspect,
+            measure_ctx,
             layout_ctx,
             measure_child,
             build_child,
@@ -1154,6 +1162,40 @@ pub fn is_layout_widget_type(widget_type: &str) -> bool {
     widget_definition(widget_type)
         .map(WidgetDefinition::is_container)
         .unwrap_or(false)
+}
+
+pub fn widget_baseline_offset(node: &Value, size: Size, ctx: &MeasureCtx<'_>) -> f32 {
+    get_widget_type(node)
+        .and_then(|widget_type| widget_definition(&widget_type))
+        .and_then(|definition| definition.baseline_offset(node, size, ctx))
+        // Baseline alignment for non-text widgets follows the documented flex
+        // behavior: their bottom edge sits on the row baseline.
+        .unwrap_or(size.height)
+        // Proportional glyphs render in a full monospace cell even when their
+        // measured line-height box is shorter, so a real text baseline may
+        // legitimately sit below the widget's measured bottom edge.
+        .max(0.0)
+}
+
+/// Baseline used by `GpuProportionalTextPrimitive`: its line box is centered
+/// inside one monospace layout cell, then glyphs are positioned from the
+/// font's real ascent. `row_offset` is the primitive's row within its widget.
+pub fn proportional_text_baseline_offset(
+    font_size: f32,
+    row_offset: f32,
+    ctx: &MeasureCtx<'_>,
+) -> f32 {
+    let cell_h = ctx.cell_h.max(1.0);
+    let (line_height, ascent) = ctx
+        .text_measurer
+        .map(|measurer| {
+            (
+                measurer.line_height_px(font_size),
+                measurer.ascent_px(font_size),
+            )
+        })
+        .unwrap_or((cell_h, cell_h * 0.75));
+    row_offset + (cell_h - line_height) * 0.5 / cell_h + ascent / cell_h
 }
 
 /// Widgets that render as frame-anchored overlay panels (subtree diverted to

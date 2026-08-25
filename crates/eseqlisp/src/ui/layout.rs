@@ -142,6 +142,9 @@ pub fn layout_root_matches_viewport(layout: &LayoutNode, cols: f32, rows: f32) -
 pub trait TextMeasurer {
     fn measure_text_px(&self, text: &str, font_size: f32) -> f32;
     fn line_height_px(&self, font_size: f32) -> f32;
+    fn ascent_px(&self, font_size: f32) -> f32 {
+        self.line_height_px(font_size) * 0.75
+    }
 }
 
 /// Context passed to `WidgetDefinition::measure()` for proportional text support.
@@ -594,6 +597,12 @@ impl<'a> LayoutEngine<'a> {
             .map(|(idx, child)| (child as *const Value as usize, idx))
             .collect::<HashMap<_, _>>();
 
+        let measure_ctx = MeasureCtx {
+            text_measurer: self.text_measurer,
+            cell_w: self.cell_w,
+            cell_h: self.cell_h,
+            inherited_font_size: font_size,
+        };
         let mut build_idx = 0usize;
         let mut visited_target_child = false;
         let mut failure = None::<String>;
@@ -602,6 +611,7 @@ impl<'a> LayoutEngine<'a> {
             rect,
             &children_values,
             self.aspect,
+            &measure_ctx,
             layout_ctx,
             &mut |child, child_constraints| {
                 let child_ptr = child as *const Value as usize;
@@ -890,6 +900,12 @@ impl<'a> LayoutEngine<'a> {
             .map(f64_to_f32)
             .unwrap_or(inherited_font_size);
 
+        let measure_ctx = MeasureCtx {
+            text_measurer: self.text_measurer,
+            cell_w: self.cell_w,
+            cell_h: self.cell_h,
+            inherited_font_size: font_size,
+        };
         widget_render::widget_definition(&widget_type)
             .map(|definition| {
                 definition.layout_children(
@@ -897,6 +913,7 @@ impl<'a> LayoutEngine<'a> {
                     area,
                     children,
                     self.aspect,
+                    &measure_ctx,
                     layout_ctx,
                     &mut |child, child_constraints| {
                         self.measure_layout_child(child, child_constraints, font_size)
