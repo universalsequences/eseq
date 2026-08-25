@@ -31,6 +31,9 @@ have been run in the checkout first — anything that compiles a DGen patch
 hard-fails without them, and that failure accounts for every one of the 66
 failures recorded in this bead's earlier attempt on 2026-08-24.
 
+Baseline on the reference machine, 2026-08-25 at commit 7396708d: **4508 run,
+4508 passed, 33 skipped**, in 534s debug.
+
 Do not use the macOS workspace counts in `docs/test-suite-performance.md` as a
 Linux expectation. The two platforms compile different sets of targets.
 

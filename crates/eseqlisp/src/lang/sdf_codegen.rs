@@ -2090,22 +2090,26 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        // Golden hash captured from the pre-WGSL emitter over the same 63 shaders.
+        // Re-captured at 7396708d, which restyled ui/transport.lisp (theme
+        // keywords for literal colors, and several icon bodies reworked). Both
+        // digests cover the authored corpus, so any deliberate content shader
+        // edit moves them; nothing in the emitters changed here.
         assert_eq!(
             metal_snapshot,
-            "471118d63261518e58894e068bd39596f058034a376e2952c84dfe84307c6d52"
+            "f84ae308e450ed2a5af0ad03b40fd5d3948ba2536509fb6f29e383fbf6b8c7f4"
         );
         let wgsl_snapshot = wgsl_snapshot
             .finalize()
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        // Re-captured in eseq-linux.7 when the emitter stopped emitting its own
-        // `WidgetVaryings`: the struct now comes from the shared WGSL widget
-        // preamble the fragments are assembled onto. Bodies are unchanged.
+        // Captured in eseq-linux.7 when the emitter stopped emitting its own
+        // `WidgetVaryings` (the struct now comes from the shared WGSL widget
+        // preamble the fragments are assembled onto), and re-captured at
+        // 7396708d alongside the MSL digest above for the same content edit.
         assert_eq!(
             wgsl_snapshot,
-            "0367f4d1153ff7326bc8646dc9938b11254fe5ad30c746a4436c5b21300292af"
+            "15b689075410d8913fc1b657ebc1712efcd52a395a06187882e46d6a7cbb4065"
         );
     }
 

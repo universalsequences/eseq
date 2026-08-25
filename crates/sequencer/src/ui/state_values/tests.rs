@@ -22064,10 +22064,10 @@
         let strip = find_layout_node_by_debug_name(&push_layout, "transport-scene-strip")
             .expect("scene strip growth container");
         assert_finite_nonzero_rect(strip, "transport-scene-strip");
-        assert!(matches!(
-            strip.props.get("background"),
-            Some(Value::String(widget)) if widget == "transport-scene-strip-bg"
-        ));
+        // Which background the strip draws with is styling and is free to
+        // change (7396708d swapped the `transport-scene-strip-bg` SDF widget
+        // for a themed box). What this test owns is the push-interpolation
+        // *state* the strip carries, which is what drives the growth animation.
         assert!(matches!(
             strip.props.get("push"),
             Some(Value::Number(value)) if (*value - 0.5).abs() < 1.0e-6
