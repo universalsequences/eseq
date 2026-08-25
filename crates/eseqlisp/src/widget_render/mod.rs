@@ -72,6 +72,78 @@ use crate::layout::{
 use crate::theme;
 use crate::vm::Value;
 
+#[derive(Clone, Copy)]
+enum PointerModifierPlatform {
+    MacOS,
+    Other,
+}
+
+fn additive_selection_modifier_for_platform(
+    modifiers: KeyModifiers,
+    platform: PointerModifierPlatform,
+) -> bool {
+    let modifier = match platform {
+        PointerModifierPlatform::MacOS => KeyModifiers::SUPER,
+        PointerModifierPlatform::Other => KeyModifiers::ALT,
+    };
+    modifiers.contains(modifier)
+}
+
+/// Modifier fields shared by pointer callback event maps.
+///
+/// `additive-selection` is semantic rather than a raw key identity: Command on
+/// macOS preserves the platform's existing selection gesture, while Alt keeps
+/// the same role available to applications on Linux desktops that reserve
+/// Super for the window manager.
+pub(crate) fn pointer_modifier_info(
+    modifiers: KeyModifiers,
+) -> HashMap<String, Rc<RefCell<Value>>> {
+    let platform = if cfg!(target_os = "macos") {
+        PointerModifierPlatform::MacOS
+    } else {
+        PointerModifierPlatform::Other
+    };
+    let super_pressed = modifiers.contains(KeyModifiers::SUPER);
+    HashMap::from([
+        (
+            "shift".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                modifiers.contains(KeyModifiers::SHIFT),
+            ))),
+        ),
+        (
+            "ctrl".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                modifiers.contains(KeyModifiers::CONTROL),
+            ))),
+        ),
+        (
+            "alt".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                modifiers.contains(KeyModifiers::ALT),
+            ))),
+        ),
+        (
+            "super".to_string(),
+            Rc::new(RefCell::new(Value::Bool(super_pressed))),
+        ),
+        (
+            "cmd".to_string(),
+            Rc::new(RefCell::new(Value::Bool(super_pressed))),
+        ),
+        (
+            "meta".to_string(),
+            Rc::new(RefCell::new(Value::Bool(super_pressed))),
+        ),
+        (
+            "additive-selection".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                additive_selection_modifier_for_platform(modifiers, platform),
+            ))),
+        ),
+    ])
+}
+
 // ── Widget state generation counter ─────────────────────────────────────────
 // Bumped whenever a widget's internal state changes (scroll offset, tree
 // expand/collapse, etc.) so that primitive caches can be invalidated.
@@ -3111,6 +3183,26 @@ mod tests {
 
     fn clear_haptic_buckets() {
         HAPTIC_BUCKETS.with(|buckets| buckets.borrow_mut().clear());
+    }
+
+    #[test]
+    fn additive_selection_modifier_preserves_macos_command_and_uses_alt_elsewhere() {
+        assert!(additive_selection_modifier_for_platform(
+            KeyModifiers::SUPER,
+            PointerModifierPlatform::MacOS,
+        ));
+        assert!(!additive_selection_modifier_for_platform(
+            KeyModifiers::ALT,
+            PointerModifierPlatform::MacOS,
+        ));
+        assert!(additive_selection_modifier_for_platform(
+            KeyModifiers::ALT,
+            PointerModifierPlatform::Other,
+        ));
+        assert!(!additive_selection_modifier_for_platform(
+            KeyModifiers::SUPER,
+            PointerModifierPlatform::Other,
+        ));
     }
 
     #[test]

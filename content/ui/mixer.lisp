@@ -175,9 +175,11 @@
     (set! eseq.seq-core-state/selected-bus -1)
     (clear-delete-target)))
 
-;; cmd/super/meta-click on a mixer strip toggles multi-select membership.
+;; The platform selection gesture toggles membership: Command-click on macOS,
+;; Alt-click on Linux. Rust supplies the semantic field so this behavior does
+;; not depend on window-manager ownership of Super.
 (def multi-select-click? (event)
-  (or (get event :cmd) (get event :super) (get event :meta)))
+  (get event :additive-selection))
 
 (def toggle-track-select (i)
   (do
@@ -1461,7 +1463,7 @@
       (c (group-color gidx))
       (bus-idx (bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :key (str "group-bus-strip-" bus-idx)
-      :width 10.2 :height 14.0
+      :width 10.2 :height 13.75
       :corner-radius 12
       :padding 0.1
       :background-color :mixer-strip-bg
@@ -1485,19 +1487,20 @@
           (box :width 0.0 :height 0.0 :bg :transparent))
         (group-control-buttons gidx bus-idx)
         (bus-mod-port-row (get group :bus-id))
-        (box :corner-radius 34 :background-color c :width 9.5 :padding 0.2
+        (box :corner-radius 34 :background-color c :width 9.5 :padding 0.1
+          
           :key (str "group-badge-" (get group :id))
           :selected (group-delete-target? (get group :id))
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (select-group-delete-target gidx))
           :on-right-click (lambda (event) (open-group-menu event gidx))
-          (h-stack :gap 0.2
-            (disclosure-button
-              :width 2.0 :height 0.9
+          (h-stack :gap 0.2 :align :center
+            (box :width 0.01)
+            (box :background "disclosure-button"
+              :width 1.7 :height 0.8
               :collapsed (get group :collapsed)
               :surface-alpha 0.35
               :color :white
-              :focusable true
               :on-click (lambda (event)
                 (do
                   (select-group gidx)

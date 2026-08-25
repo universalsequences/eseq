@@ -1674,7 +1674,7 @@ pub(crate) fn handle_recording_key(
     keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     roll_record: &Arc<Mutex<RollRecordBuffer>>,
-    ui_epoch: &Arc<AtomicUsize>,
+    ui_invalidations: &UiInvalidationQueue,
     sequence_roll_binding: bool,
 ) -> RecordingKeyOutcome {
     use crossterm::event::{KeyCode, KeyEventKind};
@@ -1917,7 +1917,7 @@ pub(crate) fn handle_recording_key(
                     let secs_per_step = 60.0 / bpm / 4.0;
                     let hold_secs = note.press_time.elapsed().as_secs_f64();
                     let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
-                    let mut recorded = false;
+                    let mut recorded_steps: Vec<(usize, usize)> = Vec::new();
 
                     let mut recorded_take = false;
                     let quantize = sequencer::record_quantize::RecordQuantize::from_atomic(
@@ -2008,11 +2008,55 @@ pub(crate) fn handle_recording_key(
                             StepParam::Duration,
                             duration_steps,
                         );
-                        recorded = true;
+                        if !recorded_steps.contains(&(track, local_step)) {
+                            recorded_steps.push((track, local_step));
+                        }
                     }
-                    if recorded {
-                        state.publish_scheduler_snapshot();
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    if !recorded_steps.is_empty() {
+                        // Targeted invalidations instead of a ui_epoch bump
+                        // (the live step-print contract): the epoch resync
+                        // rebuilds every surface and refreshes the sequencer
+                        // layout, which starved queued key events behind each
+                        // recorded release — fast chord stabs sounded their
+                        // second chord late on slow machines. These pushes
+                        // update exactly the recorded trig's bindings on this
+                        // frame's tick.
+                        let mut published_tracks: Vec<usize> = Vec::new();
+                        for &(track, step) in &recorded_steps {
+                            ui_invalidations.push(UiInvalidation::StepBatch {
+                                track,
+                                steps: vec![step],
+                            });
+                            for param in [
+                                StepParam::Transpose,
+                                StepParam::Velocity,
+                                StepParam::Duration,
+                            ] {
+                                ui_invalidations.push(UiInvalidation::Step {
+                                    track,
+                                    step,
+                                    change: StepInvalidation::Param(param.into()),
+                                });
+                            }
+                            ui_invalidations.push(UiInvalidation::Step {
+                                track,
+                                step,
+                                change: StepInvalidation::DurationSpan,
+                            });
+                            if !published_tracks.contains(&track) {
+                                published_tracks.push(track);
+                            }
+                        }
+                        // Copy-on-write per-track publishes: a recorded note
+                        // touches only its target tracks, so the scheduler
+                        // hears it without a full-capture snapshot.
+                        for track in published_tracks {
+                            state.publish_scheduler_track(track);
+                            ui_invalidations.push(UiInvalidation::PianoRoll {
+                                track,
+                                change: PianoRollInvalidation::Items,
+                            });
+                        }
                         return RecordingKeyOutcome::Recorded;
                     }
                     if recorded_take {
@@ -2037,7 +2081,8 @@ mod live_keyboard_tests {
         sequencer_history_shortcut, should_route_to_live_keyboard,
         ExpandedStepProjectionRegistry, ExpandedStepViewport,
         HeldKeyboardNote, LiveNoteTarget, RecordingKeyOutcome, RollRecordBuffer,
-        SequencerHistoryShortcut, SoftStepParamEdit, PROCESS_LANE_MODE_OFFSET,
+        SequencerHistoryShortcut, SoftStepParamEdit, UiInvalidationQueue,
+        PROCESS_LANE_MODE_OFFSET,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -2304,7 +2349,7 @@ mod live_keyboard_tests {
         let keyboard_octave = Arc::new(std::sync::atomic::AtomicI32::new(0));
         let held = Arc::new(Mutex::new(Vec::new()));
         let roll_record = Arc::new(Mutex::new(RollRecordBuffer::default()));
-        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        let ui_invalidations = UiInvalidationQueue::new();
         let press = KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE);
 
         assert!(handle_recording_key(
@@ -2318,7 +2363,7 @@ mod live_keyboard_tests {
             &keyboard_octave,
             &held,
             &roll_record,
-            &ui_epoch,
+            &ui_invalidations,
             true,
         )
         .consumed());
@@ -2341,7 +2386,7 @@ mod live_keyboard_tests {
             &keyboard_octave,
             &held,
             &roll_record,
-            &ui_epoch,
+            &ui_invalidations,
             false,
         )
         .consumed());
@@ -2403,7 +2448,7 @@ mod live_keyboard_tests {
     ) -> RecordingKeyOutcome {
         let keyboard_octave = Arc::new(std::sync::atomic::AtomicI32::new(36));
         let roll_record = Arc::new(Mutex::new(RollRecordBuffer::default()));
-        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        let ui_invalidations = UiInvalidationQueue::new();
         let mut event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE);
         event.kind = KeyEventKind::Press;
         handle_recording_key(
@@ -2417,7 +2462,7 @@ mod live_keyboard_tests {
             &keyboard_octave,
             held,
             &roll_record,
-            &ui_epoch,
+            &ui_invalidations,
             false,
         );
         event.kind = KeyEventKind::Release;
@@ -2432,7 +2477,7 @@ mod live_keyboard_tests {
             &keyboard_octave,
             held,
             &roll_record,
-            &ui_epoch,
+            &ui_invalidations,
             false,
         )
     }

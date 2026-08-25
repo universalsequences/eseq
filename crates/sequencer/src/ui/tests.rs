@@ -3029,6 +3029,11 @@
             const TRACK: usize = 0;
             const WARMUPS: usize = 5;
             const SAMPLES: usize = 20;
+            let additive_selection_modifier = if cfg!(target_os = "macos") {
+                KeyModifiers::SUPER
+            } else {
+                KeyModifiers::ALT
+            };
             let num_steps = state.pattern.track_params[TRACK].get_num_steps();
             assert!(
                 num_steps >= 34,
@@ -3319,8 +3324,8 @@
                     target_row,
                 );
 
-                // (c) cmd-click-drag multi-select: arm with a real cmd-click
-                // on step 20, then time one drag tick onto step 21.
+                // (c) additive-selection drag: Command on macOS, Alt elsewhere.
+                // Arm step 20, then time one drag tick onto step 21.
                 clear_selection(&mut editor, &mut app, &mut finish_visible_update);
                 let (col, row, width, height) = step_center(&mut editor, 20);
                 editor.handle_mouse_precise(
@@ -3328,7 +3333,7 @@
                         kind: MouseEventKind::Down(MouseButton::Left),
                         column: col.floor() as u16,
                         row: row.floor() as u16,
-                        modifiers: KeyModifiers::SUPER,
+                        modifiers: additive_selection_modifier,
                     },
                     0,
                     0,
@@ -3347,7 +3352,7 @@
                         kind: MouseEventKind::Drag(MouseButton::Left),
                         column: target_col.floor() as u16,
                         row: target_row.floor() as u16,
-                        modifiers: KeyModifiers::SUPER,
+                        modifiers: additive_selection_modifier,
                     },
                     0,
                     0,
@@ -3364,14 +3369,14 @@
                 assert_eq!(
                     *selected_steps.lock().unwrap(),
                     HashSet::from([20, 21]),
-                    "cmd drag must add the dragged-over step to the selection",
+                    "additive-selection drag must add the dragged-over step",
                 );
                 editor.handle_mouse_precise(
                     MouseEvent {
                         kind: MouseEventKind::Up(MouseButton::Left),
                         column: target_col.floor() as u16,
                         row: target_row.floor() as u16,
-                        modifiers: KeyModifiers::SUPER,
+                        modifiers: additive_selection_modifier,
                     },
                     0,
                     0,

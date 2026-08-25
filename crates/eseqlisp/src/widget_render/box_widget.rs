@@ -94,7 +94,7 @@ fn box_mouse_info(
     local_col: f32,
     local_row: f32,
 ) -> Value {
-    let mut info = std::collections::HashMap::new();
+    let mut info = super::pointer_modifier_info(modifiers);
     info.insert(
         "phase".to_string(),
         Rc::new(RefCell::new(Value::String(phase.to_string()))),
@@ -144,37 +144,6 @@ fn box_mouse_info(
     info.insert(
         "sy".to_string(),
         Rc::new(RefCell::new(Value::Number(sy as f64))),
-    );
-    info.insert(
-        "shift".to_string(),
-        Rc::new(RefCell::new(Value::Bool(
-            modifiers.contains(KeyModifiers::SHIFT),
-        ))),
-    );
-    info.insert(
-        "ctrl".to_string(),
-        Rc::new(RefCell::new(Value::Bool(
-            modifiers.contains(KeyModifiers::CONTROL),
-        ))),
-    );
-    info.insert(
-        "alt".to_string(),
-        Rc::new(RefCell::new(Value::Bool(
-            modifiers.contains(KeyModifiers::ALT),
-        ))),
-    );
-    let super_pressed = modifiers.contains(KeyModifiers::SUPER);
-    info.insert(
-        "super".to_string(),
-        Rc::new(RefCell::new(Value::Bool(super_pressed))),
-    );
-    info.insert(
-        "cmd".to_string(),
-        Rc::new(RefCell::new(Value::Bool(super_pressed))),
-    );
-    info.insert(
-        "meta".to_string(),
-        Rc::new(RefCell::new(Value::Bool(super_pressed))),
     );
     Value::Map(info)
 }

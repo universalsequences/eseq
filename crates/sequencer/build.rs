@@ -1,5 +1,6 @@
 fn main() {
-    cc::Build::new()
+    let mut audiograph = cc::Build::new();
+    audiograph
         .files([
             "audiograph/graph_api.c",
             "audiograph/graph_edit.c",
@@ -18,8 +19,15 @@ fn main() {
         .include("audiograph")
         .flag("-std=c11")
         .flag("-O2")
-        .flag("-pthread")
-        .compile("audiograph");
+        .flag("-pthread");
+
+    // Strict C11 suppresses glibc's default feature set. Audiograph uses GNU/
+    // POSIX APIs including pthread rwlocks, posix_memalign, strdup, and usleep.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        audiograph.define("_GNU_SOURCE", None);
+    }
+
+    audiograph.compile("audiograph");
 
     // On Apple platforms the DGen ABI v1 host-services table stays vDSP-backed,
     // so the app links Accelerate (generated DGen dylibs never do — they stay

@@ -166,7 +166,7 @@
         (v-stack :gap 0 :height :fill
           (box :debug-name "rack-fx-header-box"
             :width :fill :height 1 :padding 0 :v-align :center :h-align :start
-            (h-stack :debug-name "rack-fx-header-row" :gap 0.6 :align :baseline :width :fill
+            (h-stack :debug-name "rack-fx-header-row" :gap 0.6 :align :center :width :fill
               (pf/fx-panel-header-leading-spacer)
               (label (substring (eseq.drum-rack-v2/group-name gidx) 0 12)
                 :font-size 11 :color :white :bg :transparent)

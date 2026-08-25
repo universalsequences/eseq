@@ -1612,7 +1612,7 @@
     }
 
     #[test]
-    fn cmd_click_toggles_single_step_selection_membership() {
+    fn additive_selection_click_toggles_single_step_selection_membership() {
         let mut h = step_gesture_runtime(&[false, true, false, false, false, true], &[false; 6]);
 
         h.runtime
@@ -1622,21 +1622,25 @@
             .eval_str("(eseq.step-grid-interactions/step-pointer-up 1 (dict))")
             .expect("release selects step 1");
         h.runtime
-            .eval_str("(eseq.step-grid-interactions/step-pointer-down 5 (dict :cmd true))")
-            .expect("cmd click step 5");
+            .eval_str(
+                "(eseq.step-grid-interactions/step-pointer-down 5 (dict :additive-selection true))",
+            )
+            .expect("additive-selection click step 5");
         h.runtime
-            .eval_str("(eseq.step-grid-interactions/step-pointer-up 5 (dict :cmd true))")
-            .expect("release cmd click");
+            .eval_str(
+                "(eseq.step-grid-interactions/step-pointer-up 5 (dict :additive-selection true))",
+            )
+            .expect("release additive-selection click");
 
         assert_eq!(
             *h.ranges.lock().unwrap(),
             vec![(1, 1)],
-            "cmd-click must not replace the selection with a range"
+            "additive-selection click must not replace the selection with a range"
         );
         assert_eq!(
             *h.picks.lock().unwrap(),
             vec![5],
-            "cmd-click should toggle just the clicked step into the selection"
+            "additive-selection click should toggle just the clicked step into the selection"
         );
         assert!(h.toggles.lock().unwrap().is_empty());
     }
@@ -46540,8 +46544,8 @@
             .expect("second shift body click re-extends from the same anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/track-body-click (dict :cmd true) 1)")
-            .expect("cmd body click toggles without moving anchor");
+            .eval_str("(eseq.mixer/track-body-click (dict :additive-selection true) 1)")
+            .expect("additive-selection body click toggles without moving anchor");
         editor
             .runtime_mut()
             .eval_str("(eseq.mixer/track-label-click (dict :shift true) 1)")

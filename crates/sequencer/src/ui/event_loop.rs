@@ -862,7 +862,7 @@ pub(crate) fn run_event_loop(
                             &shared.keyboard_octave,
                             &shared.held_notes,
                             &shared.roll_record,
-                            &shared.ui_epoch,
+                            &shared.ui_invalidations,
                             sequence_roll_binding,
                         )
                     } else {
@@ -876,20 +876,14 @@ pub(crate) fn run_event_loop(
                         editor.mark_needs_redraw();
                     }
                     if recording_key_outcome.recorded() {
+                        // The recorded write bumped ui_epoch, and this same
+                        // iteration ends in the reactive tick, whose
+                        // epoch-driven resync republishes the step grid and
+                        // refreshes the sequencer layout. Repeating that sync
+                        // + relayout inline here doubled the cost of every
+                        // recorded release and made fast chord stabs starve
+                        // the next notes' key events on slow machines.
                         app.mark_recording_take_changed();
-                        let ct = shared.current_track.load(Ordering::Relaxed);
-                        let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "steps", build_steps_value(&shared.state, ct));
-                        sync_all_track_sequencer_state(
-                            rt,
-                            &shared.state,
-                            &app,
-                            ct,
-                            &shared.selected_steps,
-                        );
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
-                        editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
                         editor.mark_needs_redraw();
                     }
                     // Only pass Press events to the editor (Release is only for note-off)

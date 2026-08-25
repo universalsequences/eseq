@@ -153,31 +153,10 @@ fn icon_value(props: &HashMap<String, Value>) -> Option<f32> {
 }
 
 fn click_info(phase: &str, modifiers: KeyModifiers) -> Value {
-    let mut info = HashMap::new();
+    let mut info = super::pointer_modifier_info(modifiers);
     info.insert(
         "phase".to_string(),
         std::rc::Rc::new(std::cell::RefCell::new(Value::String(phase.to_string()))),
-    );
-    info.insert(
-        "shift".to_string(),
-        std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(
-            modifiers.contains(KeyModifiers::SHIFT),
-        ))),
-    );
-    info.insert(
-        "alt".to_string(),
-        std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(
-            modifiers.contains(KeyModifiers::ALT),
-        ))),
-    );
-    let super_pressed = modifiers.contains(KeyModifiers::SUPER);
-    info.insert(
-        "super".to_string(),
-        std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(super_pressed))),
-    );
-    info.insert(
-        "meta".to_string(),
-        std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(super_pressed))),
     );
     Value::Map(info)
 }
