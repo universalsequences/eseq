@@ -402,7 +402,7 @@
       :drop-hover-border-color :mixer-strip-selected-border
       :on-drop (lambda (event) (rack-slot-drop-fx slot event))
       :on-click |x y r| (rack-slot-select slot)
-      (h-stack :width :fill :height :fill :gap 0.15 :align :baseline
+      (h-stack :width :fill :height :fill :gap 0.15 :align :center
         (box :width 1)
         (label (str (+ (get slot :idx) 1))
           :font-size 10
