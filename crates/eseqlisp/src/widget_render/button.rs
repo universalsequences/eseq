@@ -186,6 +186,8 @@ fn normalized_corner_radius(rect: Rect, viewport: super::WidgetViewport, radius_
     if radius_px <= 0.0 {
         return 0.001;
     }
+    // radius_px is design pixels (2x reference); cell_h is framebuffer pixels.
+    let radius_px = radius_px * super::ui_px_scale();
     let px_h = (rect.height * viewport.cell_h).max(1.0);
     ((radius_px * 2.0) / px_h).clamp(0.001, 1.0)
 }
