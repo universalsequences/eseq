@@ -12,6 +12,9 @@
 #ifdef __linux__
 #include <sys/syscall.h>
 #endif
+#if defined(__x86_64__) || defined(__i386__)
+#include <pmmintrin.h>
+#endif
 
 // On Apple platforms, enable QoS hints for worker threads to reduce jitter.
 #ifdef __APPLE__
@@ -757,9 +760,23 @@ void engine_promote_current_thread_rt(void) {
   // callback on a THREAD_TIME_CONSTRAINT_POLICY realtime thread.
 }
 
+// Recursive DSP state decays into the subnormal float range during silence,
+// and x86 resolves subnormal operands in microcode at a 50-150 cycle penalty
+// per op — a silent graph becomes more expensive than a loud one. FTZ/DAZ are
+// per-thread MXCSR state, so every thread that executes graph nodes must set
+// them; the Rust audio callback applies the same mode to itself on first
+// entry. AArch64 handles subnormals at full speed and is left unchanged.
+static void flush_denormals_to_zero(void) {
+#if defined(__x86_64__) || defined(__i386__)
+  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+}
+
 static void *worker_main(void *arg) {
   intptr_t worker_slot = (intptr_t)arg;
   int worker_index = (int)worker_slot - 1;
+  flush_denormals_to_zero();
 #if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
   g_current_execution_slot = (int)worker_slot;
 #endif

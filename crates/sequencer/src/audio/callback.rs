@@ -11,22 +11,48 @@ mix, metering, and CPU-load accounting.
 #[allow(unused_imports)]
 use super::*;
 
+/// Flush subnormal floats to zero for all math on the calling thread.
+///
+/// The intrinsics are deprecated because changing MXCSR behind the compiler is
+/// formally outside the default floating-point environment; setting FTZ/DAZ on
+/// dedicated DSP threads is nonetheless the standard audio-engine practice this
+/// codebase relies on, and nothing on these threads depends on subnormal
+/// precision (f32 subnormals sit below roughly -750 dBFS).
+#[allow(deprecated)]
+pub(super) fn enable_flush_denormals_to_zero() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+        const MXCSR_FLUSH_TO_ZERO: u32 = 1 << 15;
+        const MXCSR_DENORMALS_ARE_ZERO: u32 = 1 << 6;
+        _mm_setcsr(_mm_getcsr() | MXCSR_FLUSH_TO_ZERO | MXCSR_DENORMALS_ARE_ZERO);
+    }
+}
+
 pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
-    // cpal's ALSA backend spawns the callback thread with default scheduling
-    // and no spawn hook, so promote it here on first entry. The callback
-    // thread actively helps drain the graph; leaving it SCHED_OTHER while the
-    // workers run SCHED_FIFO inverts priorities in the audio path.
-    #[cfg(target_os = "linux")]
     if !data.rt_promotion_attempted {
         data.rt_promotion_attempted = true;
-        unsafe { promote_current_thread_rt() };
-        // Direct FIFO promotion is final immediately. An rtkit request is
-        // still pending here; its non-RT helper prints the achieved RR (or
-        // normal-priority) result after the D-Bus reply instead.
-        let status = unsafe { audiograph::rt_status() };
-        if status.callback_reported != 0 {
-            let achieved = audiograph::format_rt_status(status);
-            eprintln!("audiograph: realtime scheduling achieved: {achieved}");
+        // FTZ/DAZ are per-thread MXCSR state and this thread executes graph
+        // nodes, so it needs the same subnormal-flush mode the audiograph
+        // workers set in worker_main (see flush_denormals_to_zero there for
+        // why silence is otherwise more expensive than sound on x86).
+        enable_flush_denormals_to_zero();
+        // cpal's ALSA backend spawns the callback thread with default
+        // scheduling and no spawn hook, so promote it here on first entry.
+        // The callback thread actively helps drain the graph; leaving it
+        // SCHED_OTHER while the workers run SCHED_FIFO inverts priorities in
+        // the audio path.
+        #[cfg(target_os = "linux")]
+        {
+            unsafe { promote_current_thread_rt() };
+            // Direct FIFO promotion is final immediately. An rtkit request is
+            // still pending here; its non-RT helper prints the achieved RR (or
+            // normal-priority) result after the D-Bus reply instead.
+            let status = unsafe { audiograph::rt_status() };
+            if status.callback_reported != 0 {
+                let achieved = audiograph::format_rt_status(status);
+                eprintln!("audiograph: realtime scheduling achieved: {achieved}");
+            }
         }
     }
     let callback_start = Instant::now();
