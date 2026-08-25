@@ -3032,7 +3032,10 @@ impl Editor {
         if switched {
             self.switch_active_tile_with_viewport(tile_id, target_viewport);
         } else if let Some((width, height)) = target_viewport {
-            self.set_layout_viewport_exact(width, height);
+            // Deferring: this runs once per raw event, and settling a pending
+            // invalidation here would rebuild the whole layout for every event
+            // in a scroll burst (eseq-pzp).
+            self.set_layout_viewport_exact_deferring(width, height);
         }
 
         let result = f(self);
@@ -4282,6 +4285,18 @@ impl Editor {
     }
 
     pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
+        self.set_layout_viewport_exact_inner(cols, rows, true);
+    }
+
+    /// `set_layout_viewport_exact` that leaves a pending deferred layout
+    /// invalidation pending (see
+    /// `Runtime::set_layout_viewport_exact_deferring`). Used by input routing,
+    /// which runs once per raw event.
+    pub fn set_layout_viewport_exact_deferring(&mut self, cols: f32, rows: f32) {
+        self.set_layout_viewport_exact_inner(cols, rows, false);
+    }
+
+    fn set_layout_viewport_exact_inner(&mut self, cols: f32, rows: f32, settle_deferred: bool) {
         let cols = cols.max(1.0);
         let rows = rows.max(1.0);
         let runtime_viewport_matches = self.runtime.current_layout.is_some()
@@ -4312,7 +4327,11 @@ impl Editor {
             self.sync_layout_to_active_leaf();
             return;
         }
-        self.runtime.set_layout_viewport_exact(cols, rows);
+        if settle_deferred {
+            self.runtime.set_layout_viewport_exact(cols, rows);
+        } else {
+            self.runtime.set_layout_viewport_exact_deferring(cols, rows);
+        }
         self.position_inline_widget_layout(cols);
         self.sync_layout_to_active_leaf();
     }

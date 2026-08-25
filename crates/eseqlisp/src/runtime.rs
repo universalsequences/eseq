@@ -2605,14 +2605,34 @@ impl Runtime {
     }
 
     pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
+        self.set_layout_viewport_exact_inner(cols, rows, true);
+    }
+
+    /// `set_layout_viewport_exact` that leaves a pending deferred layout
+    /// invalidation pending instead of settling it.
+    ///
+    /// Input routing sets the layout viewport to the tile it is about to
+    /// dispatch into, and it does that once per *raw* event. Settling there
+    /// turns a coalesced scroll burst back into one full relayout per event —
+    /// precisely what `invalidate_layout_deferred` exists to avoid — while the
+    /// layout it would rebuild is thrown away again by the next event in the
+    /// same burst. Render paths still settle; they are the ones that need the
+    /// new geometry.
+    pub fn set_layout_viewport_exact_deferring(&mut self, cols: f32, rows: f32) {
+        self.set_layout_viewport_exact_inner(cols, rows, false);
+    }
+
+    fn set_layout_viewport_exact_inner(&mut self, cols: f32, rows: f32, settle_deferred: bool) {
         let cols = cols.max(1.0);
         let rows = rows.max(1.0);
         if self.layout_cols.to_bits() == cols.to_bits()
             && self.layout_rows.to_bits() == rows.to_bits()
         {
-            self.flush_deferred_layout_invalidation();
+            if settle_deferred {
+                self.flush_deferred_layout_invalidation();
+            }
             if self.current_layout.is_none() && self.current_widget_tree.is_some() {
-                self.relayout_current_tree();
+                self.relayout_current_tree_because("viewport-settle");
             }
             return;
         }
@@ -2623,7 +2643,7 @@ impl Runtime {
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
         self.deferred_layout_invalidated = false;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("viewport-resize");
     }
 
     /// Set the whole-window viewport in the current tile's local cell
@@ -2665,7 +2685,7 @@ impl Runtime {
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
         self.force_layout_revision_bump = true;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("invalidate-layout");
     }
 
     /// Coalesce state-driven relayout work until the next frame build.
@@ -2690,7 +2710,7 @@ impl Runtime {
         let previous_layout = self.current_layout.clone();
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("deferred-invalidation");
     }
 
     pub fn layout_aspect(&self) -> f32 {
@@ -2715,7 +2735,7 @@ impl Runtime {
         let previous_layout = self.current_layout.clone();
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("cell-dimensions");
     }
 
     /// Set the text measurer for proportional font layout (Metal backend).
@@ -2732,7 +2752,7 @@ impl Runtime {
         let previous_layout = self.current_layout.clone();
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("text-measurer");
     }
 
     pub fn set_widget_id_offset(&mut self, offset: u64) {
@@ -2743,7 +2763,7 @@ impl Runtime {
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.widget_id_offset = offset;
         self.current_layout = None;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("widget-id-offset");
     }
 
     pub fn set_layout_aspect(&mut self, aspect: f32) {
@@ -2754,7 +2774,7 @@ impl Runtime {
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.layout_aspect = aspect;
         self.current_layout = None;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("layout-aspect");
     }
 
     pub fn invoke(
@@ -3319,7 +3339,7 @@ impl Runtime {
             None,
             Vec::new(),
         )));
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("layout-snapshot");
         let snapshot = self.current_layout.clone();
 
         self.current_widget_tree = saved_tree;
@@ -3413,7 +3433,7 @@ impl Runtime {
             current_buffer_id,
             Vec::new(),
         )));
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("set-widget-tree");
     }
 
     pub(crate) fn position_current_layout(
@@ -3442,7 +3462,7 @@ impl Runtime {
             current_buffer_id,
             Vec::new(),
         )));
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("restore-widget-tree");
         // Force layout revision bump so GPU caches rebuild
         self.layout_revision = self.layout_revision.wrapping_add(1);
     }
@@ -3488,7 +3508,7 @@ impl Runtime {
             self.layout_revision = layout_revision.wrapping_add(1);
         } else {
             self.current_layout = None;
-            self.relayout_current_tree();
+            self.relayout_current_tree_because("restore-cached-layout-miss");
             self.layout_revision = self.layout_revision.wrapping_add(1);
         }
     }
@@ -3510,7 +3530,7 @@ impl Runtime {
             ))
         });
         self.commit_current_ui_snapshot(snapshot);
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("adopt-snapshot");
         self.layout_revision = self.layout_revision.wrapping_add(1);
     }
 
@@ -3670,7 +3690,7 @@ impl Runtime {
         self.try_upgrade_full_tree_to_current_subtree_without_relayout(pending)
             .inspect(|upgraded| {
                 if *upgraded {
-                    self.relayout_current_tree();
+                    self.relayout_current_tree_because("subtree-upgrade");
                     self.layout_revision = self.layout_revision.wrapping_add(1);
                 }
             })
@@ -3916,7 +3936,7 @@ impl Runtime {
             &mut inactive_pending,
         );
         if active_tree_requires_full_relayout {
-            self.relayout_current_tree();
+            self.relayout_current_tree_because("reactive-full-tree");
             self.layout_revision = self.layout_revision.wrapping_add(1);
         } else if !active_changed_subtree_roots.is_empty()
             && let Err(reason) =
@@ -3925,7 +3945,7 @@ impl Runtime {
             if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                 trace.subtree_failure_reason = Some(reason);
             }
-            self.relayout_current_tree();
+            self.relayout_current_tree_because("reactive-subtree-fallback");
             self.layout_revision = self.layout_revision.wrapping_add(1);
         }
         if trace && pending_widget_tree_count > 0 {
@@ -3960,7 +3980,16 @@ impl Runtime {
         }
     }
 
-    fn relayout_current_tree(&mut self) {
+    /// Relayout the current tree, recording `cause` as the call site that asked
+    /// for it.
+    ///
+    /// Most callers null `current_layout` before calling in, which destroys the
+    /// `previous_layout` the reuse path needs *and* the input
+    /// `reuse_layout_failure_reason` is derived from — so the profiler used to
+    /// report those relayouts as `fail=-`, with no way to tell which setter
+    /// fired. `cause` is the fallback reason so `[ui-profile][runtime] fail=`
+    /// names the caller instead.
+    fn relayout_current_tree_because(&mut self, cause: &'static str) {
         let relayout_started = Instant::now();
         let previous_layout = self.current_layout.clone();
         let Some(tree) = self.current_widget_tree.as_ref() else {
@@ -4000,7 +4029,8 @@ impl Runtime {
         }
         let failure_reason = previous_layout
             .as_ref()
-            .and_then(|existing| reuse_layout_failure_reason(existing.as_ref(), tree));
+            .and_then(|existing| reuse_layout_failure_reason(existing.as_ref(), tree))
+            .or_else(|| Some(format!("cleared:{cause}")));
         let mut engine = if let Some(measurer) = self.text_measurer.as_deref() {
             LayoutEngine::with_text_measurer_exact(
                 self.layout_cols,

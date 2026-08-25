@@ -2120,12 +2120,12 @@ impl Editor {
                 // so we still need to redraw even when there's no EventOutput.
                 self.mark_needs_redraw();
             }
-            if node.widget_type == "scroll"
-                || widget_render::widget_state_generation() != gen_before
+            if widget_render::widget_state_generation() != gen_before
+                || (node.widget_type == "scroll" && scroll_layout_depends_on_offset(&node))
             {
                 self.runtime.invalidate_layout_deferred();
-                self.mark_needs_redraw();
             }
+            self.mark_needs_redraw();
             return true;
         }
         if captures_scroll_gesture(&node) {
@@ -2153,12 +2153,13 @@ impl Editor {
                     if !self.apply_widget_output(output) {
                         self.mark_needs_redraw();
                     }
-                    if scroll_node.widget_type == "scroll"
-                        || widget_render::widget_state_generation() != gen_before
+                    if widget_render::widget_state_generation() != gen_before
+                        || (scroll_node.widget_type == "scroll"
+                            && scroll_layout_depends_on_offset(&scroll_node))
                     {
                         self.runtime.invalidate_layout_deferred();
-                        self.mark_needs_redraw();
                     }
+                    self.mark_needs_redraw();
                     return true;
                 }
             }
@@ -2210,6 +2211,37 @@ fn find_scroll_ancestor_impl(
         }
     }
     None
+}
+
+/// Whether moving `scroll_node`'s offset changes any layout geometry.
+///
+/// A `scroll` container lays its child out at full content height and applies
+/// the offset at render time, so scrolling normally moves nothing the layout
+/// engine computed. The exception is a virtualized stack inside it: that
+/// materializes only the rows in the visible window, and the window comes from
+/// the enclosing scroll offset (`LayoutCtx::with_scroll`, the only reader of
+/// `scroll_offset_y`). A nested `scroll` installs its own offset, so the walk
+/// stops there.
+///
+/// Scrolling a plain container therefore needs a repaint (which the dirty
+/// scroll-key path already schedules) but not a relayout. Asking for one anyway
+/// cost a full `LayoutEngine` pass per raw scroll event — the dominant cost in
+/// the eseq-pzp scroll profile.
+fn scroll_layout_depends_on_offset(scroll_node: &LayoutNode) -> bool {
+    scroll_node
+        .children
+        .iter()
+        .any(subtree_virtualizes_on_scroll)
+}
+
+fn subtree_virtualizes_on_scroll(node: &LayoutNode) -> bool {
+    if node.widget_type == "virtual-v-stack" {
+        return true;
+    }
+    if node.widget_type == "scroll" {
+        return false;
+    }
+    node.children.iter().any(subtree_virtualizes_on_scroll)
 }
 
 #[cfg(test)]

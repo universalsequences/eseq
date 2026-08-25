@@ -10010,6 +10010,127 @@ fn widget_scroll_limit_cache_recomputes_after_layout_revision_changes() {
 }
 
 #[test]
+fn touchpad_scroll_over_plain_scroll_container_does_not_relayout() {
+    // eseq-pzp: a plain scroll container applies its offset at render time, so
+    // moving it changes no layout geometry. Scrolling one used to force a full
+    // LayoutEngine pass per raw event.
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(30, 8);
+    let children = (0..40)
+        .map(|i| {
+            format!(
+                r#"(box :key "item-{i}" :width :fill :height 2
+                     (label "item-{i}"))"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        r#"
+            (scroll :key "plain-scroll" :width :fill :height 8
+              (v-stack :key "plain-list" :width :fill :gap 0 :padding 0
+                {children}))
+            "#
+    );
+    let tree = editor
+        .runtime
+        .eval_str(&source)
+        .unwrap()
+        .expect("widget expression should return a tree");
+    editor.runtime.set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    let _ = crate::frame::build_render_frame(&mut editor, 30, 8);
+    let scroll_key = {
+        let layout = editor.widget_layout().expect("initial widget layout");
+        let scroll = find_widget_of_type(&layout, "scroll").expect("scroll node");
+        crate::widget_render::scroll::scroll_state_key(scroll)
+    };
+    let before = crate::widget_render::scroll::get_scroll_state(scroll_key).offset_y;
+    editor.runtime.drain_rendered_layouts();
+
+    for _ in 0..3 {
+        assert!(
+            editor.handle_touchpad_scroll(1, 1, 4.0, 4.0, 0.0, -140.0),
+            "touchpad scroll should be handled by the scroll widget"
+        );
+    }
+    assert!(
+        crate::widget_render::scroll::get_scroll_state(scroll_key).offset_y > before,
+        "scroll gesture should still move the container offset"
+    );
+    assert!(
+        editor.runtime.drain_rendered_layouts().is_empty(),
+        "scrolling a plain container must not relayout during the gesture"
+    );
+
+    let _ = crate::frame::build_render_frame(&mut editor, 30, 8);
+    assert!(
+        editor.runtime.drain_rendered_layouts().is_empty(),
+        "scrolling a plain container must not relayout on the next frame either"
+    );
+}
+
+#[test]
+fn tiled_touchpad_scroll_burst_relayouts_virtual_stack_once_per_frame() {
+    // eseq-pzp: tile routing set the layout viewport before every raw event,
+    // and that settled the deferred invalidation the previous event had just
+    // queued — one full relayout per scroll event instead of one per frame.
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(30, 8);
+    let children = (0..40)
+        .map(|i| {
+            format!(
+                r#"(box :key "item-{i}" :width :fill :height 2
+                     (label "item-{i}"))"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        r#"
+            (scroll :key "outer-scroll" :width :fill :height 8
+              (virtual-v-stack
+                :key "virtual-list"
+                :width :fill
+                :gap 0
+                :padding 0
+                :estimated-item-height 2
+                :overscan 0
+                {children}))
+            "#
+    );
+    let tree = editor
+        .runtime
+        .eval_str(&source)
+        .unwrap()
+        .expect("widget expression should return a tree");
+    editor.runtime.set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    let _ = crate::frame::build_tiled_render_frame_borderless(&mut editor, 30, 8);
+    editor.runtime.drain_rendered_layouts();
+
+    for _ in 0..4 {
+        assert!(
+            editor.handle_tiled_touchpad_scroll(4.0, 4.0, 0, 0.0, -140.0),
+            "tiled touchpad scroll should be handled by the scroll widget"
+        );
+    }
+    assert!(
+        editor.runtime.drain_rendered_layouts().is_empty(),
+        "a routed scroll burst must not relayout once per event"
+    );
+
+    let _ = crate::frame::build_tiled_render_frame_borderless(&mut editor, 30, 8);
+    assert_eq!(
+        editor.runtime.drain_rendered_layouts().len(),
+        1,
+        "the coalesced burst should rematerialize the virtual stack exactly once"
+    );
+}
+
+#[test]
 fn touchpad_scroll_rematerializes_virtual_stack_on_next_frame() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

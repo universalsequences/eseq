@@ -208,6 +208,52 @@ Attributing which of those callers fires during a scroll is the first task in
 `eseq-pzp`. Note that `set_layout_content_scroll` already documents this exact
 hazard and deliberately does not invalidate.
 
+### Attributed and fixed, 2026-08-25 (`eseq-pzp`)
+
+`relayout_current_tree` is now `relayout_current_tree_because(cause)`, taking a
+`&'static str` from every caller, and it falls back to `cleared:<cause>` when
+the caller nulled `current_layout` and there is therefore no reuse-failure
+reason to report. `[ui-profile][runtime] fail=` names the setter instead of
+printing `-`, and `[ui-trace] fail=` does the same per cycle.
+
+With that in place the ~2.1 relayouts per scroll frame resolve into two call
+sites of the same mechanism, both asking for a *full* relayout that the layout
+could not possibly need.
+
+1. **Every scroll gesture over a `scroll` container invalidated the layout.**
+   `handle_touchpad_scroll_impl` invalidated on `widget_type == "scroll"`
+   unconditionally. A `scroll` container lays its child out at full content
+   height and applies the offset at render time, so the offset changes no
+   geometry the layout engine computed. The one exception is a virtualized
+   stack inside it — `virtual-v-stack` is the only reader of
+   `LayoutCtx::scroll_offset_y`, and it materializes only the visible window.
+   The invalidation is now gated on the scroll subtree actually containing one
+   (`scroll_layout_depends_on_offset`, stopping at nested `scroll` boundaries,
+   which install their own offset). A repaint is still scheduled — the dirty
+   scroll-key path in `widget_render::scroll` already carries offset-only
+   changes through `dirty_widget_ids`, deliberately without bumping the global
+   widget state generation.
+2. **Tile routing settled the deferred invalidation once per raw event.**
+   `Editor::route_event_to_tile` called `set_layout_viewport_exact` before
+   dispatching each event, and that setter's unchanged-viewport branch flushes
+   `deferred_layout_invalidated`. So event *n* queued a deferred relayout and
+   event *n+1* immediately performed it, turning the burst coalescing that
+   `invalidate_layout_deferred` exists to provide back into one full
+   `LayoutEngine` pass per event — at ~45 ms each, that alone caps the loop at
+   the observed ~17 relayouts/s. Routing now uses
+   `set_layout_viewport_exact_deferring`, which leaves the pending invalidation
+   for the frame builder (`build_tiled_render_frame_impl` already flushes it
+   before snapshotting tile revisions). Hit tests during the burst keep using
+   the previous layout, which is what `invalidate_layout_deferred` documents.
+
+Regression coverage, both failing before the change:
+`touchpad_scroll_over_plain_scroll_container_does_not_relayout` and
+`tiled_touchpad_scroll_burst_relayouts_virtual_stack_once_per_frame` in
+`crates/eseqlisp/src/editor/tests.rs`.
+
+The render-side items below are untouched and remain worth doing — the
+measurement puts them at ~12% of the scroll bill, not the dominant cost.
+
 Measured values are recorded in the bead `eseq-linux.12` notes as they are
 captured. Two cases must be in any capture, because both are reported as slow on
 this machine: scrolling a multi-track sequencer buffer vertically, and scrolling
