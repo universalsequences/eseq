@@ -14569,3 +14569,57 @@ fn escape_closes_the_context_menu_first_then_the_modal() {
     );
 }
 
+
+#[test]
+fn routed_input_does_not_relayout_at_a_non_reference_window_scale() {
+    // eseq-pzp, the dominant cost. `border_width_px` is authored in the 2x
+    // design-pixel space. Input routing insets the tile's layout viewport by
+    // `ui_design_px(border_width_px)` (`metal_tile_content_viewport`), matching
+    // what both backends draw and what `tile_content_border_insets` maps
+    // pointer coordinates through; the frame builder used the raw value. At the
+    // 2.0 reference scale `ui_px_scale()` is 1.0 and the two agree, which is why
+    // only the wgpu shell — the one backend that reports a real scale factor —
+    // ever saw it. At any other scale each routed event laid the tree out for
+    // one viewport and the next frame laid it out again for the other: two full
+    // relayouts per frame, on any buffer, with no scroll widget involved.
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(r#"(effect (box :width :fill :height :fill))"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.active_leaf_mut().show_border = true;
+    editor.active_leaf_mut().border_width_px = 2.0;
+    editor.set_layout_cell_dimensions(10.0, 20.0);
+
+    crate::widget_render::set_ui_scale_factor(1.0);
+    let _ = crate::frame::build_tiled_render_frame_borderless(&mut editor, 40, 12);
+    let frame_viewport = (
+        editor.runtime.layout_cols_exact(),
+        editor.runtime.layout_rows_exact(),
+    );
+    editor.runtime.drain_rendered_layouts();
+
+    let _ = editor.handle_tiled_touchpad_scroll(6.0, 6.0, 0, 0.0, -40.0);
+    let routed_viewport = (
+        editor.runtime.layout_cols_exact(),
+        editor.runtime.layout_rows_exact(),
+    );
+    let routed_relayouts = editor.runtime.drain_rendered_layouts().len();
+
+    let _ = crate::frame::build_tiled_render_frame_borderless(&mut editor, 40, 12);
+    let frame_relayouts = editor.runtime.drain_rendered_layouts().len();
+    crate::widget_render::set_ui_scale_factor(crate::widget_render::UI_DESIGN_REFERENCE_SCALE);
+
+    assert_eq!(
+        routed_viewport, frame_viewport,
+        "input routing and the frame builder must derive the same tile layout viewport"
+    );
+    assert_eq!(
+        (routed_relayouts, frame_relayouts),
+        (0, 0),
+        "a routed event on an unchanged tree must not relayout, at any window scale"
+    );
+}

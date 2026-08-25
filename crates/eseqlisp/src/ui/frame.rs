@@ -704,8 +704,17 @@ fn metal_tile_inner_extents(
 ) -> (f32, f32) {
     let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
     let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
+    // `border_width_px` is authored in the 2x design-pixel space, and every
+    // consumer that puts it on screen scales it: both backends draw the border
+    // at `ui_design_px(border_width_px)`, and `tile_content_border_insets` maps
+    // pointer coordinates through the same scale. Laying widgets out against
+    // the raw value made this the one derivation that disagreed, so on any
+    // window scale other than the 2.0 reference the layout viewport differed
+    // from the one input routing computes (`metal_tile_content_viewport`) —
+    // and every routed event then re-laid the tree out for one viewport while
+    // the next frame re-laid it out for the other. See eseq-pzp.
     let border_inset_px = if show_border {
-        border_width_px
+        crate::widget_render::ui_design_px(border_width_px)
             .max(0.0)
             .min(tile_width_px * 0.5)
             .min(tile_height_px * 0.5)

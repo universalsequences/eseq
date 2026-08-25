@@ -216,9 +216,49 @@ the caller nulled `current_layout` and there is therefore no reuse-failure
 reason to report. `[ui-profile][runtime] fail=` names the setter instead of
 printing `-`, and `[ui-trace] fail=` does the same per cycle.
 
-With that in place the ~2.1 relayouts per scroll frame resolve into two call
-sites of the same mechanism, both asking for a *full* relayout that the layout
-could not possibly need.
+With that in place, the ~2.1 relayouts per scroll frame resolve.
+
+#### The dominant cost: two derivations of the tile layout viewport disagreed
+
+`border_width_px` is authored in the 2x design-pixel space. Everything that puts
+it on screen scales it — both backends draw the tile border at
+`ui_design_px(border_width_px)`, and `tile_content_border_insets` maps pointer
+coordinates through the same scale. Input routing inset the tile's *layout*
+viewport the same way (`metal_tile_content_viewport`, `editor/mod.rs`), but the
+frame builder used the **raw** value (`metal_tile_inner_extents`, `ui/frame.rs`).
+
+`ui_px_scale()` is `window_scale_factor / 2.0`, and only the wgpu shell ever
+calls `set_ui_scale_factor` — the Metal path leaves it at the 2.0 default. So on
+macOS the scale is exactly 1.0, the two derivations agree, and nothing happens.
+On this machine at window scale 1.0 the scale is 0.5 and they diverge:
+
+```
+scale=2.0  ui_px_scale=1.0  routing=(39.6, 9.8)  frame=(39.6, 9.8)  relayouts: 0 + 0
+scale=1.0  ui_px_scale=0.5  routing=(39.8, 9.9)  frame=(39.6, 9.8)  relayouts: 1 + 1
+```
+
+Every routed input event set one viewport and re-laid the whole tree out for it;
+the next frame set the other back and re-laid it out again. Two full
+`LayoutEngine` passes per frame, on **any** buffer, with no scroll widget
+involved — which is why it bites the *sequencer* and *fx* buffers, neither of
+which contains one. Scroll is simply the gesture that delivers a dense stream of
+routed events, so it is where the cost becomes visible. It also matches every
+number in the capture: `full=17` with `reused=0`, `fail=-` (both call sites null
+`current_layout` first), `frame_build_avg=50.08ms` for the frame-side pass, and
+`gestures=475.15ms` for the routed-event side.
+
+The frame builder now scales the inset the same way everyone else does. That
+also fixes a latent correctness bug: at any non-reference scale the widget tree
+was being laid out against a viewport that did not match the border actually
+drawn around it.
+
+Regression test: `routed_input_does_not_relayout_at_a_non_reference_window_scale`.
+
+#### Two secondary scroll-path relayouts
+
+Both are real and both are fixed, but neither is what bites the reported
+buffers — the first applies to the *mixer* buffer, which is where `scroll`
+widgets are actually used.
 
 1. **Every scroll gesture over a `scroll` container invalidated the layout.**
    `handle_touchpad_scroll_impl` invalidated on `widget_type == "scroll"`
@@ -236,20 +276,22 @@ could not possibly need.
 2. **Tile routing settled the deferred invalidation once per raw event.**
    `Editor::route_event_to_tile` called `set_layout_viewport_exact` before
    dispatching each event, and that setter's unchanged-viewport branch flushes
-   `deferred_layout_invalidated`. So event *n* queued a deferred relayout and
-   event *n+1* immediately performed it, turning the burst coalescing that
+   `deferred_layout_invalidated`. So whenever anything had queued a deferred
+   relayout, the *next* raw event performed it — turning the burst coalescing
    `invalidate_layout_deferred` exists to provide back into one full
-   `LayoutEngine` pass per event — at ~45 ms each, that alone caps the loop at
-   the observed ~17 relayouts/s. Routing now uses
+   `LayoutEngine` pass per event. Nothing on the reported buffers' scroll path
+   sets that flag, so this did not contribute to the captured numbers, but it
+   does defeat coalescing wherever the flag is set (virtualized lists, tree
+   expand/collapse) during any input burst. Routing now uses
    `set_layout_viewport_exact_deferring`, which leaves the pending invalidation
    for the frame builder (`build_tiled_render_frame_impl` already flushes it
    before snapshotting tile revisions). Hit tests during the burst keep using
    the previous layout, which is what `invalidate_layout_deferred` documents.
 
-Regression coverage, both failing before the change:
-`touchpad_scroll_over_plain_scroll_container_does_not_relayout` and
-`tiled_touchpad_scroll_burst_relayouts_virtual_stack_once_per_frame` in
-`crates/eseqlisp/src/editor/tests.rs`.
+Regression coverage in `crates/eseqlisp/src/editor/tests.rs`, all three failing
+before the change: `routed_input_does_not_relayout_at_a_non_reference_window_scale`,
+`touchpad_scroll_over_plain_scroll_container_does_not_relayout`, and
+`tiled_touchpad_scroll_burst_relayouts_virtual_stack_once_per_frame`.
 
 The render-side items below are untouched and remain worth doing — the
 measurement puts them at ~12% of the scroll bill, not the dominant cost.
