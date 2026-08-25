@@ -613,12 +613,6 @@ impl WgpuAppBackend {
         self.last_precise_mouse.take()
     }
 
-    /// True once per window-system close request (the WM close button,
-    /// super+w, etc.). The app shell routes this into the editor's quit path.
-    pub fn take_close_requested(&mut self) -> bool {
-        std::mem::take(&mut self.close_requested)
-    }
-
     pub fn take_pending_magnify(&mut self) -> Option<(f64, (f32, f32))> {
         self.pending_magnify.pop_front()
     }
@@ -2833,10 +2827,18 @@ impl Backend for WgpuAppBackend {
     }
 
     fn poll_backend_event(&mut self, timeout: Duration) -> Option<BackendEvent> {
+        if std::mem::take(&mut self.close_requested) {
+            return Some(BackendEvent::Quit);
+        }
         if let Some(paths) = self.pending_file_drops.pop_front() {
             return Some(BackendEvent::FileDrop(paths));
         }
-        self.poll_event(timeout).map(BackendEvent::Terminal)
+        let terminal_event = self.poll_event(timeout);
+        if std::mem::take(&mut self.close_requested) {
+            Some(BackendEvent::Quit)
+        } else {
+            terminal_event.map(BackendEvent::Terminal)
+        }
     }
 
     fn poll_event(&mut self, timeout: Duration) -> Option<Event> {
@@ -2889,9 +2891,6 @@ impl Backend for WgpuAppBackend {
             };
             match event {
                 WindowEvent::CloseRequested => {
-                    // Routed to Editor::request_quit by the event loop: quit
-                    // immediately, matching macOS window-close behavior. (The
-                    // Metal backend's synthetic Ctrl+C is bound to nothing.)
                     *close_requested = true;
                 }
                 WindowEvent::Resized(new_size) => {
@@ -3169,5 +3168,24 @@ fn translate_mouse_button(button: WMouseButton) -> Option<MouseButton> {
         WMouseButton::Right => Some(MouseButton::Right),
         WMouseButton::Middle => Some(MouseButton::Middle),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_request_is_reported_as_one_quit_event() {
+        let Ok(mut backend) = WgpuAppBackend::new() else {
+            panic!("backend construction should succeed");
+        };
+        backend.close_requested = true;
+
+        assert_eq!(
+            backend.poll_backend_event(Duration::ZERO),
+            Some(BackendEvent::Quit)
+        );
+        assert_eq!(backend.poll_backend_event(Duration::ZERO), None);
     }
 }

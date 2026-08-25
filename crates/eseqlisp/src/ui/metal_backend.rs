@@ -2295,6 +2295,7 @@ fragment float4 live_spectrogram_frag(
         pending_magnify: VecDeque<(f64, (f32, f32))>,
         pending_scroll: VecDeque<((f32, f32), (f32, f32))>,
         pending_file_drops: VecDeque<Vec<PathBuf>>,
+        close_requested: bool,
         suppress_scroll_until: Option<Instant>,
         modifiers: KeyModifiers,
         pressed_mouse_button: Option<MouseButton>,
@@ -2430,6 +2431,7 @@ fragment float4 live_spectrogram_frag(
                 pending_magnify: VecDeque::new(),
                 pending_scroll: VecDeque::new(),
                 pending_file_drops: VecDeque::new(),
+                close_requested: false,
                 suppress_scroll_until: None,
                 modifiers: KeyModifiers::NONE,
                 pressed_mouse_button: None,
@@ -6314,11 +6316,20 @@ fragment float4 live_spectrogram_frag(
         }
 
         fn poll_backend_event(&mut self, timeout: Duration) -> Option<BackendEvent> {
+            if std::mem::take(&mut self.close_requested) {
+                self.backend_poll_profile.note_immediate();
+                return Some(BackendEvent::Quit);
+            }
             if let Some(paths) = self.pending_file_drops.pop_front() {
                 self.backend_poll_profile.note_immediate();
                 return Some(BackendEvent::FileDrop(paths));
             }
-            self.poll_event(timeout).map(BackendEvent::Terminal)
+            let terminal_event = self.poll_event(timeout);
+            if std::mem::take(&mut self.close_requested) {
+                Some(BackendEvent::Quit)
+            } else {
+                terminal_event.map(BackendEvent::Terminal)
+            }
         }
 
         fn poll_event(&mut self, timeout: Duration) -> Option<Event> {
@@ -6347,6 +6358,7 @@ fragment float4 live_spectrogram_frag(
             let pending_move = &mut self.pending_move;
             let pending_magnify = &mut self.pending_magnify;
             let pending_scroll = &mut self.pending_scroll;
+            let close_requested = &mut self.close_requested;
             let suppress_scroll_until = &mut self.suppress_scroll_until;
             let modifiers = &mut self.modifiers;
             let pressed_mouse_button = &mut self.pressed_mouse_button;
@@ -6373,10 +6385,7 @@ fragment float4 live_spectrogram_frag(
                 };
                 match event {
                     WindowEvent::CloseRequested => {
-                        pending.push_back(Event::Key(KeyEvent::new(
-                            KeyCode::Char('c'),
-                            KeyModifiers::CONTROL,
-                        )));
+                        *close_requested = true;
                     }
                     WindowEvent::Resized(new_size) => {
                         layer_ref.setDrawableSize(CGSize {

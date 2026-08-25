@@ -154,12 +154,6 @@ pub(crate) fn run_event_loop(
     let mut pointer_is_down = false;
 
     loop {
-        // Window-manager close requests (super+w, the close button) quit
-        // immediately, matching macOS window-close behavior.
-        #[cfg(not(target_os = "macos"))]
-        if backend.take_close_requested() {
-            editor.request_quit();
-        }
         let mut pointer_released_this_loop = false;
         for result in app.drain_due_pattern_launches() {
             match result {
@@ -467,6 +461,7 @@ pub(crate) fn run_event_loop(
         if let Some(event) = backend.poll_backend_event(timeout) {
             let event_started = Instant::now();
             match event {
+                BackendEvent::Quit => editor.request_quit(),
                 BackendEvent::FileDrop(paths) => {
                     match SampleImportSession::from_drop(
                         paths,
