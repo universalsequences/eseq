@@ -32,6 +32,37 @@
            (min (max dx dy) 0))
         ,r)))
 
+;; Triangle with counter-clockwise vertices. The distance is exact for both
+;; edges and corners; malformed (coincident) vertices are not supported.
+(defmacro triangle (ax ay bx by cx cy)
+  `(let ((__tri_ax ,ax)
+         (__tri_ay ,ay)
+         (__tri_bx ,bx)
+         (__tri_by ,by)
+         (__tri_cx ,cx)
+         (__tri_cy ,cy))
+     (let ((__tri_distance (min
+                             (sdf/line __tri_ax __tri_ay __tri_bx __tri_by)
+                             (sdf/line __tri_bx __tri_by __tri_cx __tri_cy)
+                             (sdf/line __tri_cx __tri_cy __tri_ax __tri_ay)))
+           (__tri_ab_cross (- (* (- __tri_bx __tri_ax) (- y __tri_ay))
+                              (* (- __tri_by __tri_ay) (- x __tri_ax))))
+           (__tri_bc_cross (- (* (- __tri_cx __tri_bx) (- y __tri_by))
+                              (* (- __tri_cy __tri_by) (- x __tri_bx))))
+           (__tri_ca_cross (- (* (- __tri_ax __tri_cx) (- y __tri_cy))
+                              (* (- __tri_ay __tri_cy) (- x __tri_cx)))))
+       (if (>= (min __tri_ab_cross __tri_bc_cross __tri_ca_cross) 0.0)
+         (- __tri_distance)
+         __tri_distance))))
+
+;; Canonical disclosure symbols. Keeping their geometry here avoids relying on
+;; font coverage and gives every UI surface the same indicator shape.
+(defmacro disclosure-right ()
+  `(sdf/triangle -0.38 -0.56 0.46 0.0 -0.38 0.56))
+
+(defmacro disclosure-down ()
+  `(sdf/triangle -0.56 -0.38 0.56 -0.38 0.0 0.46))
+
 ;; Aspect-aware rounded rect that fills the box minus an inset.
 ;; Uses the implicit `aspect` variable so the shape always covers
 ;; the full widget area regardless of rendered dimensions.

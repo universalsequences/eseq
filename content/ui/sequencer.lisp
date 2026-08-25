@@ -2164,12 +2164,13 @@
           :track-g (nth c 1)
           :track-b (nth c 2)
           :on-click |x y r| (select-group gidx))
-        (button (if (eseq.drum-rack-v2/collapsed? gidx) "▸" "▾")
+        (disclosure-button
           :key (group-element-key gidx "collapse")
-          :width 1.55 :height 1.4 :padding 0 :font-size 15
-          :background-color '(rgba 0.1 0.1 0.1 1.0)
-          :border-color :transparent
+          :width 1.55 :height 1.4
+          :collapsed (eseq.drum-rack-v2/collapsed? gidx)
+          :surface-alpha 1.0
           :color :white
+          :focusable true
           :on-click |x y r| (eseq.drum-rack-v2/toggle-collapsed gidx))
         ;; Arm = drum-rack pad-play mode. A regular group is not an input
         ;; target and therefore contributes no Arm control or placeholder.

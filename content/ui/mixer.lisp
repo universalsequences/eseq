@@ -1492,12 +1492,12 @@
           :on-click (lambda (event) (select-group-delete-target gidx))
           :on-right-click (lambda (event) (open-group-menu event gidx))
           (h-stack :gap 0.2
-            (button (if (get group :collapsed) "▸" "▾")
-              :width 2.0 :height 0.9 :padding 0 :font-size 14
-              :corner-radius 16
-              :background-color '(rgba 0.1 0.1 0.1 0.35)
-              :border-color :transparent
+            (disclosure-button
+              :width 2.0 :height 0.9
+              :collapsed (get group :collapsed)
+              :surface-alpha 0.35
               :color :white
+              :focusable true
               :on-click (lambda (event)
                 (do
                   (select-group gidx)

@@ -37,6 +37,24 @@
         0.055
         (rgba 0.72 0.76 0.84 (* 0.95 active selected))))))
 
+;; ── Shared symbols ──
+
+;; Font-independent collapse/expand control. The whole SDF widget is the hit
+;; target, so consumers can use it directly without a text button wrapper.
+(defwidget disclosure-button
+  :width 1.5 :height 1.5
+  :state (collapsed surface-alpha)
+  :bindable (collapsed surface-alpha)
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/rounded-rect (* width 0.96) (* height 0.96) 0.28)
+      (material :color (rgba 0.1 0.1 0.1 surface-alpha)))
+    (sdf/fill
+      (if (= collapsed 1)
+        (sdf/disclosure-right)
+        (sdf/disclosure-down))
+      (material :color input-color))))
+
 ;; ── Aqua material for sliders ──
 
 
