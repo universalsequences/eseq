@@ -2061,7 +2061,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_set_bang_updates_lisp_state_and_reruns_effects() {
         let mut runtime = Runtime::new();
@@ -3891,7 +3890,6 @@ mod modal_layout_tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn open_modal_emits_overlay_primitives_beyond_a_short_tile() {
         use crate::widget_render::{

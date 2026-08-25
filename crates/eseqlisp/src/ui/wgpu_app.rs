@@ -44,12 +44,14 @@ use crate::layout::TextMeasurer;
 use crate::live_audio;
 use crate::theme;
 use crate::ui::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
+use crate::ui::gpu_adapter;
 use crate::ui::gpu_scene::{self, PatchCableDrawInstance, PropTextLayoutCache, TextOffset};
 use crate::ui::gpu_geometry::{
     LiveSpectrogramInstance, ScissorRect, Vertex, WaveformInstance, WavetableInstance,
 };
 use crate::ui::platform;
 use crate::ui::wgpu_pipelines as pipelines;
+use crate::ui::wgpu_frame_stats::{FrameSample, WgpuFrameStats};
 use crate::ui::wgsl_shaders;
 use crate::widget_render::{self, WidgetInstance, WidgetViewport};
 
@@ -506,7 +508,11 @@ pub struct WgpuAppBackend {
     sdf_widget_pipeline_registry_generation: u64,
     agent_instrument_stub_animation_visible: bool,
     last_window_bg: Option<Color>,
-    logged_adapter: bool,
+    /// Per-frame profiling aggregate; see `ui/wgpu_frame_stats.rs`. Also holds
+    /// the "was the adapter already reported" latch, because both are
+    /// once-per-process startup/diagnostic state.
+    frame_stats: WgpuFrameStats,
+    reported_adapter: bool,
     start_time: Instant,
     initial_window_size: LogicalSize<f64>,
     initial_window_visible: bool,
@@ -581,7 +587,8 @@ impl WgpuAppBackend {
             sdf_widget_pipeline_registry_generation: 0,
             agent_instrument_stub_animation_visible: false,
             last_window_bg: None,
-            logged_adapter: false,
+            frame_stats: WgpuFrameStats::new(),
+            reported_adapter: false,
             start_time: Instant::now(),
             initial_window_size: LogicalSize::new(width as f64, height as f64),
             initial_window_visible: true,
@@ -1484,6 +1491,24 @@ impl WgpuAppBackend {
         let mut plan: Vec<DrawCmd> = Vec::new();
         let full_scissor = gpu_scene::full_viewport_scissor(vp_w, vp_h);
 
+        // Profiling window for this frame. `widget_scene` accumulates across
+        // tiles inside the loop below; the phase boundaries are the same ones
+        // the aggregate reports. Kept unconditional and branch-free: the two
+        // `Instant::now()` pairs per frame are far below the noise floor of the
+        // work they bracket, and a disabled `WgpuFrameStats` drops the sample.
+        let scroll_offsets = tiled.tiles.iter().fold((0.0f32, 0.0f32), |acc, tile| {
+            (
+                acc.0 + tile.frame.widget_layout_scroll_left,
+                acc.1 + tile.frame.text_scroll_top as f32 + tile.frame.widget_scroll_top,
+            )
+        });
+        let scrolled = self.frame_stats.note_scroll_offsets(scroll_offsets);
+        let mut sample = FrameSample {
+            scrolled,
+            ..FrameSample::default()
+        };
+        let plan_start = Instant::now();
+
         // ── Per-tile planning ────────────────────────────────────────────────
         for tile in &tiled.tiles {
             let frame_left_px = tile.rect.col * cell_w;
@@ -1670,12 +1695,14 @@ impl WgpuAppBackend {
                 let content_width_cells = ((content_right_px - content_left_px) / cell_w).max(0.0);
                 let fill_extra_cols = (content_width_cells - layout.rect.width).max(0.0);
 
+                let widget_scene_start = Instant::now();
                 let (primitives, overlay_prims) = widget_render::collect_gpu_primitives(
                     layout,
                     viewport,
                     combined_scroll,
                     inner_rows,
                 );
+                sample.widget_primitives += primitives.len() as u64;
                 let offset_prims: Vec<_> = primitives
                     .into_iter()
                     .map(|p| {
@@ -1706,6 +1733,10 @@ impl WgpuAppBackend {
                     cell_w,
                     cell_h,
                 );
+                // Everything above is scene rebuild: collection, offsetting,
+                // and segment splitting. Buffer creation below belongs to the
+                // plan total, not to the scene, so the two costs stay separable.
+                sample.widget_scene += widget_scene_start.elapsed();
                 for (seg_scissor, seg_range) in &segments {
                     self.plan_dynamic_segment(
                         &mut plan,
@@ -2435,7 +2466,19 @@ impl WgpuAppBackend {
             }
         }
 
+        sample.plan = plan_start.elapsed();
+        sample.draw_commands = plan.len() as u64;
+        // The shell creates exactly one vertex/instance buffer per draw command
+        // and throws it away at end of frame. Reporting the count and the bytes
+        // makes that allocation load visible instead of implied.
+        sample.buffers_created = plan.len() as u64;
+        sample.buffer_bytes = plan.iter().map(|cmd| cmd.buffer.size() as usize).sum();
+
         let gpu = self.gpu.as_ref().expect("gpu initialized");
+        // Under `Fifo` this call blocks until a swapchain image frees up. It is
+        // measured on its own so present backpressure is never mistaken for CPU
+        // frame cost.
+        let acquire_start = Instant::now();
         let frame = match gpu.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Timeout) => return Ok(TiledRenderStatus::NotPresented),
@@ -2445,6 +2488,8 @@ impl WgpuAppBackend {
             }
             Err(_) => return Err(BackendError::MetalError),
         };
+        sample.acquire = acquire_start.elapsed();
+        let encode_start = Instant::now();
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = gpu
             .device
@@ -2556,6 +2601,8 @@ impl WgpuAppBackend {
         }
         gpu.queue.submit(Some(encoder.finish()));
         frame.present();
+        sample.encode = encode_start.elapsed();
+        self.frame_stats.end_frame(sample);
         Ok(TiledRenderStatus::Presented)
     }
 }
@@ -2584,13 +2631,17 @@ impl Backend for WgpuAppBackend {
             force_fallback_adapter: false,
         }))
         .ok_or(BackendError::MetalError)?;
-        if !self.logged_adapter {
-            let info = adapter.get_info();
-            eprintln!(
-                "eseq: wgpu adapter {:?} via {:?} backend",
-                info.name, info.backend
-            );
-            self.logged_adapter = true;
+        // Report and assert the selection before any device work: a silent
+        // fallback to OpenGL or a software rasterizer renders correct pixels at
+        // a completely different cost, so it must not be discovered later from
+        // a performance number.
+        if !self.reported_adapter {
+            self.reported_adapter = true;
+            let policy = gpu_adapter::AdapterPolicy::from_env();
+            if let Err(message) = gpu_adapter::report_and_check(&adapter.get_info(), &policy) {
+                eprintln!("{message}");
+                return Err(BackendError::MetalError);
+            }
         }
         // `downlevel_defaults` caps textures at 2048px, smaller than a
         // fullscreened window on a HiDPI display; take the adapter's real

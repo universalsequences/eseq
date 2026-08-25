@@ -6657,7 +6657,6 @@ fn widget_tree_survives_buffer_switch() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
     fn find_widget<'a>(
@@ -8162,7 +8161,6 @@ fn clicking_folder_tab_switches_buffer_without_dispatching_underlying_widget() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn dropdown_overlay_captures_move_and_mouse_up_without_selecting_the_tile_below() {
     fn find_widget<'a>(
@@ -12388,17 +12386,14 @@ fn inline_widget_dims_in_place_when_its_source_form_is_edited() {
 /// Clears the thread-local overlay stack when the test ends, pass or fail, so
 /// a mid-test assertion failure cannot leak overlay state into whichever test
 /// runs next on the same thread.
-#[cfg(target_os = "macos")]
 struct OverlayClearGuard;
 
-#[cfg(target_os = "macos")]
 impl Drop for OverlayClearGuard {
     fn drop(&mut self) {
         crate::widget_render::clear_overlay();
     }
 }
 
-#[cfg(target_os = "macos")]
 fn find_widget_of_type<'a>(
     node: &'a crate::layout::LayoutNode,
     widget_type: &str,
@@ -12414,7 +12409,6 @@ fn find_widget_of_type<'a>(
 /// Render the active tile's layout once so open overlays (modal panel,
 /// dropdown menus) register their entries on the overlay stack, exactly as a
 /// live frame draw would.
-#[cfg(target_os = "macos")]
 fn register_active_layout_overlays(editor: &mut Editor) {
     let layout = editor
         .runtime
@@ -12445,7 +12439,6 @@ fn register_active_layout_overlays(editor: &mut Editor) {
     );
 }
 
-#[cfg(target_os = "macos")]
 fn modal_two_tile_editor(panel_body: &str) -> Editor {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -12503,7 +12496,6 @@ fn modal_two_tile_editor(panel_body: &str) -> Editor {
     editor
 }
 
-#[cfg(target_os = "macos")]
 const MODAL_PANEL_BODY: &str = r#"
     (modal :is-open modal-open
            :on-close (lambda () (set! modal-open false))
@@ -12513,7 +12505,6 @@ const MODAL_PANEL_BODY: &str = r#"
           :on-click (lambda (event) (set! modal-clicked true)))))
 "#;
 
-#[cfg(target_os = "macos")]
 fn eval_bool(editor: &mut Editor, expr: &str) -> bool {
     match editor.runtime_mut().eval_str(expr).unwrap().unwrap() {
         Value::Bool(value) => value,
@@ -12521,7 +12512,6 @@ fn eval_bool(editor: &mut Editor, expr: &str) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn modal_click_inside_hits_a_modal_child_not_the_tile_below() {
     let _overlay_guard = OverlayClearGuard;
@@ -12574,7 +12564,6 @@ fn modal_click_inside_hits_a_modal_child_not_the_tile_below() {
 /// the next render refreshes the overlay entry. The stale id must not strand
 /// the modal — clicks inside and Escape fall back to the open modal node by
 /// type instead of consuming every event with no effect.
-#[cfg(target_os = "macos")]
 #[test]
 fn stale_overlay_widget_id_cannot_strand_the_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -12623,7 +12612,6 @@ fn stale_overlay_widget_id_cannot_strand_the_modal() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn modal_outside_click_fires_on_close_without_activating_underneath() {
     let _overlay_guard = OverlayClearGuard;
@@ -12664,7 +12652,6 @@ fn modal_outside_click_fires_on_close_without_activating_underneath() {
     );
 }
 
-#[cfg(target_os = "macos")]
 const SCROLLABLE_MODAL_PANEL_BODY: &str = r#"
     (modal :is-open modal-open
            :on-close (lambda () (set! modal-open false))
@@ -12683,7 +12670,6 @@ const SCROLLABLE_MODAL_PANEL_BODY: &str = r#"
 /// runtime.current_layout, so every subsequent pointer event was consumed
 /// with no effect and Escape could not close the modal (sound palette
 /// "completely stuck" bug). Scroll must route to the modal's own tile.
-#[cfg(target_os = "macos")]
 #[test]
 fn touchpad_scroll_over_modal_stays_in_the_modal_tile() {
     let _overlay_guard = OverlayClearGuard;
@@ -12735,7 +12721,6 @@ fn touchpad_scroll_over_modal_stays_in_the_modal_tile() {
 /// with a containment gate at every node — the open modal's own layout node
 /// is zero-size, so the recursion never entered its subtree and inspect
 /// selected the widgets BEHIND the panel.
-#[cfg(target_os = "macos")]
 #[test]
 fn inspect_mode_hits_modal_children_not_the_tile_below() {
     let _overlay_guard = OverlayClearGuard;
@@ -12775,7 +12760,6 @@ fn inspect_mode_hits_modal_children_not_the_tile_below() {
 
 /// Same as above but with the live sound-palette structure around the
 /// modal: subtree wrapper, fill box root, scroll + each-generated rows.
-#[cfg(target_os = "macos")]
 const PALETTE_LIKE_MODAL_PANEL_BODY: &str = r#"
   (v-stack :width :fill :gap 0.0
     (subtree :key "test-sound-palette"
@@ -12792,7 +12776,6 @@ const PALETTE_LIKE_MODAL_PANEL_BODY: &str = r#"
                     :on-click (lambda (event) (set! modal-clicked true)))))))))))
 "#;
 
-#[cfg(target_os = "macos")]
 #[test]
 fn inspect_mode_hits_palette_like_modal_children() {
     let _overlay_guard = OverlayClearGuard;
@@ -12834,7 +12817,6 @@ fn inspect_mode_hits_palette_like_modal_children() {
 /// step/arrangement buffer). Inspect must resolve the tile whose layout
 /// contains the modal instead of hit-testing the active tile's layout —
 /// which has no modal, so hits fell through to the widgets behind.
-#[cfg(target_os = "macos")]
 #[test]
 fn inspect_mode_resolves_a_modal_in_a_non_active_tile() {
     let _overlay_guard = OverlayClearGuard;
@@ -12947,7 +12929,6 @@ fn inspect_mode_resolves_a_modal_in_a_non_active_tile() {
 /// another tile, the modal owner becomes inactive. Its cached layout must be
 /// rebuilt against the resized whole-frame viewport (not its own short tile),
 /// and Escape must dispatch `:on-close` through that owner tile.
-#[cfg(target_os = "macos")]
 #[test]
 fn inactive_modal_survives_frame_resize_and_escape_closes_it() {
     let _overlay_guard = OverlayClearGuard;
@@ -13018,7 +12999,6 @@ fn inactive_modal_survives_frame_resize_and_escape_closes_it() {
 /// A modal remains the exclusive keyboard context when source inspection has
 /// made its owner tile inactive. Focused modal controls still receive keys,
 /// but an unhandled key must not fall through to a global editor binding.
-#[cfg(target_os = "macos")]
 #[test]
 fn inactive_modal_routes_focused_keys_and_blocks_global_bindings() {
     let _overlay_guard = OverlayClearGuard;
@@ -13079,7 +13059,6 @@ fn inactive_modal_routes_focused_keys_and_blocks_global_bindings() {
     assert_eq!(editor.active_tile, source_tile);
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn inactive_modal_close_button_still_dispatches_after_resize() {
     let _overlay_guard = OverlayClearGuard;
@@ -13153,7 +13132,6 @@ fn inactive_modal_close_button_still_dispatches_after_resize() {
     );
 }
 
-#[cfg(target_os = "macos")]
 const MODAL_WITH_DROPDOWN_BODY: &str = r#"
     (modal :is-open modal-open
            :on-close (lambda () (set! modal-open false))
@@ -13165,7 +13143,6 @@ const MODAL_WITH_DROPDOWN_BODY: &str = r#"
           :value "plate")))
 "#;
 
-#[cfg(target_os = "macos")]
 fn open_dropdown_inside_modal(editor: &mut Editor) {
     register_active_layout_overlays(editor);
     let layout = editor.runtime.current_layout.clone().expect("panel layout");
@@ -13195,7 +13172,6 @@ fn open_dropdown_inside_modal(editor: &mut Editor) {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn outside_click_closes_dropdown_inside_modal_but_keeps_the_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -13230,7 +13206,6 @@ fn outside_click_closes_dropdown_inside_modal_but_keeps_the_modal() {
     assert!(!eval_bool(&mut editor, "modal-open"));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn escape_closes_the_dropdown_first_then_the_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -13258,7 +13233,6 @@ fn escape_closes_the_dropdown_first_then_the_modal() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn modal_traps_focus_while_open_and_restores_it_after_close() {
     let _overlay_guard = OverlayClearGuard;
@@ -13347,7 +13321,6 @@ fn modal_traps_focus_while_open_and_restores_it_after_close() {
 /// Inspect mode outranks the modal keyboard boundary: the toggle chord and
 /// the Esc that exits inspect must work while a modal is open, without
 /// disturbing the modal itself.
-#[cfg(target_os = "macos")]
 #[test]
 fn inspect_toggle_and_escape_outrank_an_open_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -13390,7 +13363,6 @@ fn inspect_toggle_and_escape_outrank_an_open_modal() {
 /// An active prompt outranks the modal keyboard boundary: if a save prompt is
 /// on screen while a modal is open, keystrokes must reach the prompt (its
 /// filename input / y-n answers), not be swallowed by the modal.
-#[cfg(target_os = "macos")]
 #[test]
 fn save_prompt_keys_outrank_an_open_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -13787,7 +13759,6 @@ fn mx_command_defined_in_a_declared_module_requires_its_qualified_name() {
 /// module-local fn writing module defstates. Covers the full pointer
 /// pipeline (overlay hit-test → Custom event → closure) with qualified
 /// widget keys and state bindings.
-#[cfg(target_os = "macos")]
 #[test]
 fn module_dropdown_row_click_applies_selection_and_closes_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -13889,7 +13860,6 @@ fn module_dropdown_row_click_applies_selection_and_closes_modal() {
 
 /// Load the REAL ui/choose-model.lisp (agent natives stubbed) and click a
 /// dropdown row — reproduces the in-app ArityMismatch report if present.
-#[cfg(target_os = "macos")]
 #[test]
 fn real_choose_model_dropdown_row_click_selects() {
     let _overlay_guard = OverlayClearGuard;
@@ -13997,7 +13967,6 @@ fn real_choose_model_dropdown_row_click_selects() {
 
 /// Differential probe: identical to module_dropdown_row_click test but the
 /// module fn is named `select` (a builtin widget name).
-#[cfg(target_os = "macos")]
 #[test]
 fn module_fn_named_select_compiles_with_correct_arity() {
     let runtime = Runtime::new();
@@ -14035,7 +14004,6 @@ fn module_fn_named_select_compiles_with_correct_arity() {
 
 // ── Context menu: right-click plumbing + anchored overlay (eseq-dkn) ────────
 
-#[cfg(target_os = "macos")]
 const CONTEXT_MENU_PROGRAM: &str = r#"
     (def menu-open (state false))
     (def menu-col (state 0))
@@ -14073,7 +14041,6 @@ const CONTEXT_MENU_PROGRAM: &str = r#"
 
 /// Same shape, but with a panel far wider and taller than its tile so the
 /// tile can be panned/scrolled underneath the right-click.
-#[cfg(target_os = "macos")]
 const SCROLLED_CONTEXT_MENU_PROGRAM: &str = r#"
     (def menu-open (state false))
     (def menu-col (state 0))
@@ -14107,12 +14074,10 @@ const SCROLLED_CONTEXT_MENU_PROGRAM: &str = r#"
         0.5 (list :buf "*sequencer*" :hide-status true)))
 "#;
 
-#[cfg(target_os = "macos")]
 fn context_menu_two_tile_editor() -> Editor {
     context_menu_two_tile_editor_for(CONTEXT_MENU_PROGRAM)
 }
 
-#[cfg(target_os = "macos")]
 fn context_menu_two_tile_editor_for(program: &str) -> Editor {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -14152,7 +14117,6 @@ fn context_menu_two_tile_editor_for(program: &str) -> Editor {
 
 /// Right-click at the given point, then rebuild the frame and register the
 /// resulting overlay entries, as a live render would.
-#[cfg(target_os = "macos")]
 fn right_click_at(editor: &mut Editor, col: f32, row: f32) {
     for kind in [
         MouseEventKind::Down(MouseButton::Right),
@@ -14164,7 +14128,6 @@ fn right_click_at(editor: &mut Editor, col: f32, row: f32) {
     register_active_layout_overlays(editor);
 }
 
-#[cfg(target_os = "macos")]
 fn eval_string(editor: &mut Editor, expr: &str) -> String {
     match editor.runtime_mut().eval_str(expr).unwrap().unwrap() {
         Value::String(value) => value,
@@ -14172,7 +14135,6 @@ fn eval_string(editor: &mut Editor, expr: &str) -> String {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn find_menu_item<'a>(
     node: &'a crate::layout::LayoutNode,
     text: &str,
@@ -14187,7 +14149,6 @@ fn find_menu_item<'a>(
         .find_map(|child| find_menu_item(child, text))
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn right_click_opens_the_context_menu_at_the_pointer() {
     let _overlay_guard = OverlayClearGuard;
@@ -14211,7 +14172,6 @@ fn right_click_opens_the_context_menu_at_the_pointer() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_flips_and_clamps_near_the_screen_edge() {
     let _overlay_guard = OverlayClearGuard;
@@ -14232,7 +14192,6 @@ fn context_menu_flips_and_clamps_near_the_screen_edge() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_anchors_at_the_pointer_when_the_tile_is_scrolled() {
     // eseq-05t: :col/:row reach the handler in tile CONTENT space (scroll
@@ -14270,7 +14229,6 @@ fn context_menu_anchors_at_the_pointer_when_the_tile_is_scrolled() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_item_hover_schedules_redraw_on_pointer_change() {
     let _overlay_guard = OverlayClearGuard;
@@ -14302,7 +14260,6 @@ fn context_menu_item_hover_schedules_redraw_on_pointer_change() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_item_click_fires_exactly_its_handler_and_closes() {
     let _overlay_guard = OverlayClearGuard;
@@ -14337,7 +14294,6 @@ fn context_menu_item_click_fires_exactly_its_handler_and_closes() {
     assert!(!eval_bool(&mut editor, "underlay-clicked"));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_disabled_item_click_neither_fires_nor_closes() {
     let _overlay_guard = OverlayClearGuard;
@@ -14367,7 +14323,6 @@ fn context_menu_disabled_item_click_neither_fires_nor_closes() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_outside_click_closes_without_firing_items() {
     let _overlay_guard = OverlayClearGuard;
@@ -14394,7 +14349,6 @@ fn context_menu_outside_click_closes_without_firing_items() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_escape_closes_without_firing_items() {
     let _overlay_guard = OverlayClearGuard;
@@ -14416,7 +14370,6 @@ fn context_menu_escape_closes_without_firing_items() {
 
 /// A modal whose body can open a context menu inside itself — the nested
 /// modal-family stack Escape has to unwind one panel at a time.
-#[cfg(target_os = "macos")]
 const MODAL_WITH_CONTEXT_MENU_PROGRAM: &str = r#"
     (def modal-open (state true))
     (def menu-open (state false))
@@ -14450,7 +14403,6 @@ const MODAL_WITH_CONTEXT_MENU_PROGRAM: &str = r#"
         0.5 (list :buf "*sequencer*" :hide-status true)))
 "#;
 
-#[cfg(target_os = "macos")]
 #[test]
 fn escape_closes_the_context_menu_first_then_the_modal() {
     let _overlay_guard = OverlayClearGuard;

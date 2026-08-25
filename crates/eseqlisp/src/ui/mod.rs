@@ -15,8 +15,12 @@ pub mod theme;
 pub mod tui;
 pub mod wgsl_shaders;
 #[cfg(feature = "wgpu")]
+pub mod gpu_adapter;
+#[cfg(feature = "wgpu")]
 pub mod wgpu_app;
 #[cfg(feature = "wgpu")]
 pub mod wgpu_backend;
+#[cfg(feature = "wgpu")]
+pub mod wgpu_frame_stats;
 #[cfg(feature = "wgpu")]
 pub mod wgpu_pipelines;

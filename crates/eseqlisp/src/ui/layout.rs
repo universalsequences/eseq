@@ -2964,7 +2964,6 @@ mod tests {
         )
     }
 
-    #[cfg(target_os = "macos")]
     fn tree_row_selected_bg_count(layout: &LayoutNode) -> usize {
         let viewport = crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -3276,7 +3275,6 @@ mod tests {
         assert_eq!(second_state.offset_y, 0.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn tree_without_external_selection_does_not_render_cursor_as_selected() {
         let engine = LayoutEngine::new(80, 24, 1.0);
@@ -3290,7 +3288,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn tree_external_selection_still_renders_selected_row() {
         let engine = LayoutEngine::new(80, 24, 1.0);
