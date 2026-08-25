@@ -302,7 +302,6 @@
           :value (pc/fx-param-value-for fx p)
           :min (pc/param-control-min fx p) :max (pc/param-control-max fx p) :decimals 2
           :font-size 10.0 :label-font-size 8.8
-          :track-color :mixer-strip-bg
           :text-color (pc/param-plock-text-color fx p) :label-color :dim
           :plock-active (if (pc/param-plock-active? fx p) 1 0)
           :plock-default (pc/param-plock-default fx p)

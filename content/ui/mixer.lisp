@@ -856,7 +856,7 @@
         ;; bus); the container provides the color above. A small spacer keeps
         ;; the pattern grid aligned with loose strips.
         (if (track-grouped? i)
-          (box :width :fill :height 0.85 :bg :transparent)
+          (box :width :fill :height 0.55 :bg :transparent)
           (subtree :key (str "mixer-v2-track-output-sub-" i)
             (dropdown :value (nth SEQ.track-outputs i)
               :key (str "track-output-" i)
@@ -1461,7 +1461,7 @@
       (c (group-color gidx))
       (bus-idx (bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :key (str "group-bus-strip-" bus-idx)
-      :width 10.2 :height 13.72
+      :width 10.2 :height 14.0
       :corner-radius 12
       :padding 0.1
       :background-color :mixer-strip-bg
@@ -1558,7 +1558,7 @@
       (c (group-color gidx)))
     (box
       :corner-radius 16
-      :padding 0.2
+      :padding 0.3
       ;; Selection is a bound state, not a computed color (eseq-4jv): the
       ;; selected look keeps a constant border width so it never relayouts.
       :selected (group-selected-binding gidx)
@@ -1577,7 +1577,7 @@
         (if (get group :collapsed)
           (box :width 0.0 :height 0.0 :bg :transparent)
           (v-stack :gap 0.0
-            (box :width :fill :height 0.2 :bg :transparent)
+            (box :width :fill :height 0.4 :bg :transparent)
             (h-stack :gap 0.1
               (each (get group :members) |m|
                 (subtree :key (str "mixer-v2-track-" m)

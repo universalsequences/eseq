@@ -704,14 +704,14 @@
         (sdf/fill (sdf/circle (* radius 0.8))
           (material
             :lighting (lighting :edge-min -0.12 :edge-max 0.9
-              :light (vec3 -0.3 0.7 0.8) :shininess 92.0)
+              :light (vec3 -0.3 0.7 3.8) :shininess 92.0)
             :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2)) (eseq.materials/color border border)))
           )
         
         (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
           (material
             :lighting (lighting :edge-min -0.15 :edge-max 1.0
-              :light (vec3 0.3 -2.0 2.8) :shininess 92.0)
+              :light (vec3 0.3 -2.0 0.8) :shininess 92.0)
             :color (* (if (= muted 1) 0.3 1) (eseq.materials/color offcol offcol))))
         ;; p-lock indicator
         (sdf/fill
