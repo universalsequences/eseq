@@ -754,7 +754,7 @@
               :active (if SEQ.song-manual-latch 1 0))))))
     
     ;; Single continuous LED panel
-    (box :background-color :mixer-strip-bg :corner-radius 64 :height 1.4 :width 67
+    (box :background-color :mixer-strip-bg :corner-radius 64 :height 1.4 :width 68
       (h-stack
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
@@ -858,21 +858,21 @@
               (subtree :key "master-meter-r"
                 (transport-master-meter :level (bind-seq "master-peak-r"))))))
         (subtree :key "transport-cpu"
-          (h-stack :gap 0 :align :center :padding 0.3
-            (box :height 1.3
+          (h-stack :gap 0 :align :center :padding 0.4
+            (box :height 2.7
               (label "cpu"
-                :font-size 12 :width 2.5
+                :font-size 12 :width 3.0
                 :color '(rgba 0.30 0.30 0.32 1)
                 :bg :transparent))
             (number-label :value (bind-seq "cpu-load-pct")
               :decimals 0 :min-integer-digits 2 :suffix "%"
               :font-size 12 :width 2.0 :height 1
-              :color :gray
+              :color :dim
               :bg :transparent)))
         ;; The latency planner aligns every route to this delay. A latent FX
         ;; therefore delays the whole project, not only the track holding it.
         (subtree :key "transport-output-latency"
-          (h-stack :gap 0 :align :baseline :padding 0.4
+          (h-stack :gap 0 :align :baseline :padding 0.5
             (number-label :key "transport-output-latency-value"
               :value (bind-seq "output-latency-ms")
               :decimals 1 :min-integer-digits 2 :suffix "ms"
