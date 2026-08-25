@@ -60,7 +60,9 @@ idempotent, sha256-verified scripts. Run once per fresh checkout:
 Both install under `crates/sequencer/tools/` (gitignored). Anything that needs
 the compiler and cannot find it hard-fails with a message naming the fetch
 command. `ESEQ_DGENLISP_TOOL=/abs/path` overrides the pinned compiler with a
-locally built one.
+locally built one. Maintainers publishing a new compiler should follow the
+complete [Linux DGenLisp release recipe](docs/dgenlisp-release.md), including
+its container, binary-verification, draft-recovery, and lock re-pin steps.
 
 ## Running
 
