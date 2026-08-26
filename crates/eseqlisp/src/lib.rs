@@ -55,10 +55,11 @@ pub use lang::modules;
 pub use lang::parser;
 pub use lang::vm;
 
+#[cfg(feature = "capture-harness")]
 pub(crate) mod capture_scenes;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "capture-harness"))]
 pub mod metal_shader_capture;
-#[cfg(feature = "wgpu")]
+#[cfg(all(feature = "wgpu", feature = "capture-harness"))]
 pub mod shader_capture;
 
 pub use ui::backend;

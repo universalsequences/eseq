@@ -108,12 +108,12 @@ Stdlib only, like `../../text-capture/goldens/compare_metrics.py`.
 
 ```sh
 # WGSL, any platform with a wgpu adapter
-cargo run -p eseqlisp --features wgpu --bin eseqlisp_shader_capture -- \
+cargo run -p eseqlisp --features wgpu,capture-harness --bin eseqlisp_shader_capture -- \
     --name <language>-<os>-<arch> \
     --output-dir crates/eseqlisp/tests/fixtures/shader-capture/goldens
 
 # MSL, macOS only
-cargo run -p eseqlisp --bin eseqlisp_metal_shader_capture -- \
+cargo run -p eseqlisp --features capture-harness --bin eseqlisp_metal_shader_capture -- \
     --name msl-<os>-<arch> \
     --output-dir crates/eseqlisp/tests/fixtures/shader-capture/goldens
 ```

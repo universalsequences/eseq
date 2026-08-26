@@ -74,7 +74,7 @@ jobs:
         with:
           # Keyed on the feature set so a wgpu-enabled cache is never reused for
           # a build without it.
-          key: wgpu
+          key: wgpu-capture-harness
 
       - uses: taiki-e/install-action@nextest
 
@@ -89,10 +89,10 @@ jobs:
         # rather than an optimization.
 
       - name: Build and check the workspace
-        run: cargo check --workspace --all-targets --features eseqlisp/wgpu
+        run: cargo check --workspace --all-targets --features eseqlisp/wgpu,eseqlisp/capture-harness
 
       - name: Test
-        run: cargo nextest run --workspace --features eseqlisp/wgpu
+        run: cargo nextest run --workspace --features eseqlisp/wgpu,eseqlisp/capture-harness
         # RUST_MIN_STACK comes from .cargo/config.toml; do not set it here.
 
   macos-check:
@@ -107,7 +107,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: macos
+          key: macos-capture-harness
 
       - name: Fetch the pinned DGenLisp compiler
         run: ./scripts/fetch_dgenlisp.sh
@@ -119,7 +119,7 @@ jobs:
         # blocked until a target.arm64-apple-macos.url is published.
 
       - name: Check the workspace
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --features eseqlisp/capture-harness
         # Check-only still catches what this branch put at risk on macOS: cfg
         # gates, the pruned objc2 feature set, ui::gpu_geometry drifting away
         # from the Metal encoder, and the aubio-sys patch.

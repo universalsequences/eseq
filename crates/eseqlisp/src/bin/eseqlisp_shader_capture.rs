@@ -1,7 +1,7 @@
 //! Write the deterministic WGSL shader captures for one host.
 //!
 //! ```text
-//! cargo run -p eseqlisp --features wgpu --bin eseqlisp_shader_capture -- \
+//! cargo run -p eseqlisp --features wgpu,capture-harness --bin eseqlisp_shader_capture -- \
 //!     --name wgsl-linux-x86_64 \
 //!     --output-dir crates/eseqlisp/tests/fixtures/shader-capture/goldens
 //! ```

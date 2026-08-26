@@ -2,7 +2,7 @@
 //! WGSL one must (`shader_capture_cli.rs`): the committed `msl-macos-arm64`
 //! capture is only a usable reference for the shader-port comparison if a
 //! rerun on the same host reproduces it byte for byte.
-#![cfg(target_os = "macos")]
+#![cfg(all(target_os = "macos", feature = "capture-harness"))]
 
 use std::fs;
 use std::process::Command;

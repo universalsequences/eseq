@@ -1,7 +1,7 @@
 //! Write the deterministic MSL shader captures for one macOS host.
 //!
 //! ```text
-//! cargo run -p eseqlisp --bin eseqlisp_metal_shader_capture -- \
+//! cargo run -p eseqlisp --features capture-harness --bin eseqlisp_metal_shader_capture -- \
 //!     --name msl-macos-arm64 \
 //!     --output-dir crates/eseqlisp/tests/fixtures/shader-capture/goldens
 //! ```

@@ -6,6 +6,7 @@ license = "GPL-3.0-only"
 autoexamples = false
 
 [features]
+capture-harness = []
 patcher-test-support = []
 wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]
 
@@ -52,18 +53,19 @@ objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
 [[bin]]
 name = "eseqlisp_shader_capture"
 path = "src/bin/eseqlisp_shader_capture.rs"
-required-features = ["wgpu"]
+required-features = ["wgpu", "capture-harness"]
 
 # Deterministic MSL pipeline captures; the Metal reference half of
 # eseq-linux.25. See crates/eseqlisp/src/metal_shader_capture.rs.
 [[bin]]
 name = "eseqlisp_metal_shader_capture"
 path = "src/bin/eseqlisp_metal_shader_capture.rs"
+required-features = ["capture-harness"]
 
 [[bin]]
 name = "eseqlisp_sdf_lighting_probe"
 path = "src/bin/eseqlisp_sdf_lighting_probe.rs"
-required-features = ["wgpu"]
+required-features = ["wgpu", "capture-harness"]
 
 [[example]]
 name = "embed"

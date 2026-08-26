@@ -1,7 +1,7 @@
 //! The capture harness must be reproducible: the committed goldens are only
 //! useful as a reference for the later Metal comparison if a rerun on the same
 //! host reproduces them byte for byte.
-#![cfg(feature = "wgpu")]
+#![cfg(all(feature = "wgpu", feature = "capture-harness"))]
 
 use std::fs;
 use std::process::Command;

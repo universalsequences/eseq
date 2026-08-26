@@ -10,7 +10,7 @@ loop.
 Run the probe with:
 
 ```sh
-cargo run --release -p eseqlisp --features wgpu \
+cargo run --release -p eseqlisp --features wgpu,capture-harness \
   --bin eseqlisp_sdf_lighting_probe
 ```
 
