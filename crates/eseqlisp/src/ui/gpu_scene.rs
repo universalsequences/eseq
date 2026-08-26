@@ -334,7 +334,19 @@ pub(crate) fn build_widget_primitive_quads(
                     );
                 }
             }
-            _ => {}
+            widget_render::GpuPrimitive::ForegroundRect(_) => {}
+            // Proportional text is rendered in a separate pass with its own atlas.
+            widget_render::GpuPrimitive::ProportionalText(_) => {}
+            widget_render::GpuPrimitive::PatchCable(_) => {}
+            widget_render::GpuPrimitive::Circle(_) => {}
+            widget_render::GpuPrimitive::Waveform(_) => {}
+            widget_render::GpuPrimitive::Wavetable(_) => {}
+            widget_render::GpuPrimitive::LiveSpectrogram(_) => {}
+            widget_render::GpuPrimitive::Image(_) => {}
+            widget_render::GpuPrimitive::WidgetInstance { .. } => {}
+            widget_render::GpuPrimitive::PushClipRect(_)
+            | widget_render::GpuPrimitive::PopClipRect
+            | widget_render::GpuPrimitive::ZLayer { .. } => {}
         }
     }
     verts

@@ -128,7 +128,7 @@
           (sdf/smooth-union (+ 0.001 (* 1.242 amount)) base growth))))
     (sdf/layer
       (sdf/fill shape
-        (material :color (rgba 0.18 0.18 0.20 1.0)
+        (material :color :mixer-strip-bg
           :shadow (shadow :color (rgba 0 0 0 0.4) :blur 0.08 :offset (vec2 0 0.03)))))))
 
 (defwidget transport-led-bg
@@ -883,7 +883,7 @@
     ;; Pattern pills in their own subtree: current-pattern/num-patterns changes
     ;; (every scene switch) rerun just this bar, not the whole transport.
     (subtree :key "transport-pattern-pills"
-      (box :background-color :mixer-strip-bg
+      (box :background "transport-scene-strip-bg" 
         :corner-radius 64
         :key "transport-scene-strip"
         :debug-name "transport-scene-strip"

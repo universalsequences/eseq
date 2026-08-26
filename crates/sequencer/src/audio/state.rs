@@ -175,6 +175,17 @@ impl OutputBlockSizeVerifier {
 /// the contract for every node at once. The cost is up to `block_frames - 1`
 /// frames of extra output latency, and none at all on a host that already
 /// delivers exactly `block_frames` (the scratch drains exactly once per call).
+///
+/// When the device period is *shorter* than `block_frames`, there is a second,
+/// less obvious cost: average CPU is unchanged, but the instantaneous deadline
+/// tightens. Only the callbacks that drain the scratch render — roughly
+/// `device_frames / block_frames` of them — and each of those must complete a
+/// full `block_frames` render inside the much shorter device-period deadline
+/// (with 512-frame blocks against PipeWire's 235-frame periods, about 46% of
+/// callbacks). There is no lookahead past the single scratch block, so only
+/// whatever ring headroom the host keeps beyond one period absorbs the burst:
+/// a per-block render cost that fits the `block_frames` budget on average can
+/// still xrun under small device periods.
 pub(super) struct FixedOutputBlocks {
     scratch: Vec<f32>,
     /// Read cursor into `scratch`, in samples. Starts drained so the first

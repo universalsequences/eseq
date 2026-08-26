@@ -230,12 +230,20 @@ Only after the public download succeeds, update the `linux-x86_64` stanza in
 
 Do not re-pin the bare binary: the archive is the standalone distribution with
 its runtime headers and audit policy. Leave other target stanzas unchanged.
-Then verify the public asset through eseq's normal installation path:
+Then verify the public asset through eseq's normal installation path. The two
+lock files use different target vocabularies on purpose — `dgenlisp.lock` names
+targets `linux-x86_64`/`macos-arm64`, `dgen-toolchain.lock` uses rustc-style
+triples — so the two fetch scripts take different `--target` values. They also differ in
+where they install: `fetch_dgenlisp.sh` installs target-qualified and is safe to
+run cross-target from any machine, while `fetch_dgen_toolchain.sh` installs the
+stage at the single host path `crates/sequencer/tools/dgen-toolchain` and
+therefore refuses any target but the host's — so run this verification on the
+Linux box:
 
 ```sh
 cd "$ESEQ_ROOT"
 ./scripts/fetch_dgenlisp.sh --target linux-x86_64 --force
-./scripts/fetch_dgen_toolchain.sh --target linux-x86_64
+./scripts/fetch_dgen_toolchain.sh --target x86_64-unknown-linux-gnu
 
 export INSTALLED="$ESEQ_ROOT/crates/sequencer/tools/DGenLisp-linux-x86_64"
 export VERIFY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dgenlisp-repin.XXXXXX")"

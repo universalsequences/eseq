@@ -41,6 +41,15 @@ fresh checkout (idempotent, sha256-verified) to install it under
 cannot find it hard-fails naming that command. `ESEQ_DGENLISP_TOOL=/abs/path`
 overrides it with a locally built compiler.
 
+The compiler is only half of it: it shells out to a hermetic clang/lld stage
+pinned in `content/dgen-toolchain.lock` and installed by
+`./scripts/fetch_dgen_toolchain.sh`, also once per fresh checkout. That script
+can only fetch targets with a published `url` in the lock — currently just
+`x86_64-unknown-linux-gnu`. `arm64-apple-macos` is pinned but unpublished and is
+vendored by `./rebuild_dgenlisp_tool.sh` from a local dgen-audio checkout, so a
+Mac without that checkout cannot bootstrap the stage and every DGen compile
+hard-fails.
+
 ### Cheap clean-HEAD check
 
 Do not stash and do not cold-clone the repository to determine whether one test
@@ -52,13 +61,22 @@ it was left at and answer for the wrong tree.
 
 ```sh
 wt=/tmp/eseq-head-test; target="$HOME/.cache/eseq-head-test-target"
+root=$PWD
 head=$(git rev-parse HEAD)
 [ -e "$wt/.git" ] || git worktree add --detach "$wt" "$head"
 git -C "$wt" checkout --detach "$head"
 (cd "$wt" && \
   CARGO_TARGET_DIR="$target" \
+  ESEQ_DGEN_TOOLCHAIN_ROOT="$root/crates/sequencer/tools/dgen-toolchain" \
   cargo nextest run -p <package> -E 'test(=<fully-qualified-test-name>)')
 ```
+
+The fetched compiler and the hermetic clang/lld stage are both gitignored, so a
+worktree does not inherit either one. `ESEQ_DGEN_TOOLCHAIN_ROOT` (resolved in
+the working checkout as `root`, like `head`) points the worktree at the main
+checkout's stage; a test that also needs the compiler itself wants
+`./scripts/fetch_dgenlisp.sh` run inside the worktree, or `ESEQ_DGENLISP_TOOL`
+pointed at the main checkout's binary.
 
 The dedicated target directory keeps Cargo artifacts from the clean checkout
 separate from working-checkout artifacts and off `/tmp`, which is a 3.9 GB tmpfs

@@ -2644,8 +2644,10 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::List(out)
     });
 
-    // `(find-by-key list :key value)` -> the first map in `list` whose `:key`
-    // field equals `value`, or Nil. Equivalent to
+    // `(find-by-key list :key value)` -> the first entry in `list` whose `:key`
+    // field equals `value`, or Nil. Entries are resolved exactly as `get` does,
+    // so maps and keyword-value lists both work and a missing field reads as
+    // Nil (a nil needle therefore matches it). Equivalent to
     // `(nth (filter |item| (= (get item :key) value) list) 0)` but without
     // running a Lisp closure per element: `filter` clones every element into
     // the callback, so scanning a 60-entry parameter list once per rendered
@@ -2656,14 +2658,27 @@ pub fn register_core_natives(vm: &mut VM) {
         else {
             return Value::Nil;
         };
+        let needle_is_nil = matches!(needle, Value::Nil);
         for item in items {
             let borrowed = item.borrow();
-            let Value::Map(map) = &*borrowed else {
-                continue;
+            let matched = match &*borrowed {
+                Value::Map(map) => map
+                    .get(key)
+                    .map_or(needle_is_nil, |field| &*field.borrow() == needle),
+                Value::List(fields) => {
+                    let mut found = None;
+                    let mut i = 0;
+                    while i + 1 < fields.len() {
+                        if matches!(&*fields[i].borrow(), Value::Keyword(kk) if kk == key) {
+                            found = Some(&fields[i + 1]);
+                            break;
+                        }
+                        i += 2;
+                    }
+                    found.map_or(needle_is_nil, |field| &*field.borrow() == needle)
+                }
+                _ => needle_is_nil,
             };
-            let matched = map
-                .get(key)
-                .is_some_and(|field| &*field.borrow() == needle);
             if matched {
                 return borrowed.clone();
             }
@@ -7735,7 +7750,8 @@ mod tests {
   (list (dict :name "a" :idx 0)
         "not-a-map"
         (dict :name "b" :idx 1)
-        (dict :name "b" :idx 2)))
+        (dict :name "b" :idx 2)
+        (list :name "c" :idx 3)))
 "#;
         vm.eval_module_source(temp_lisp_path("find-by-key"), source, 1)
             .expect("module eval");
@@ -7749,6 +7765,19 @@ mod tests {
         assert_eq!(
             vm.eval_str("(get (find-by-key (rows) :idx 0) :name)")
                 .expect("numeric match"),
+            Some(Value::String("a".to_string()))
+        );
+        // Keyword-value lists resolve like `get` does, not just maps.
+        assert_eq!(
+            vm.eval_str("(get (find-by-key (rows) :name \"c\") :idx)")
+                .expect("plist match"),
+            Some(Value::Number(3.0))
+        );
+        // A nil needle matches an entry that lacks the field, as `(= (get item
+        // :absent) nil)` did.
+        assert_eq!(
+            vm.eval_str("(get (find-by-key (rows) :absent nil) :name)")
+                .expect("nil needle"),
             Some(Value::String("a".to_string()))
         );
         for missing in [

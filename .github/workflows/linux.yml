@@ -1,11 +1,19 @@
-name: Linux
+name: CI
 
 # The Linux target is a port (see epic eseq-linux), so it rots silently unless
-# something builds and tests it on every change. This job is that something.
+# something builds and tests it on every change. The `test` job is that
+# something.
 #
 # It runs the same command the Linux workstation baseline is recorded against
 # in docs/linux-validation.md, so a green run here and a green run there mean
 # the same thing.
+#
+# The same argument now cuts the other way: the port also reshaped the macOS
+# build (the DGenLisp compiler is fetched instead of tracked, eseqlisp's objc2
+# feature set was pruned, clip/scissor geometry moved into the shared
+# ui::gpu_geometry the Metal encoder calls, and [patch.crates-io] aubio-sys
+# applies there too), and that half is validated only by hand-run sessions in
+# docs/linux-validation.md. The `macos-check` job covers it.
 
 on:
   push:
@@ -14,7 +22,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: linux-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -86,3 +94,32 @@ jobs:
       - name: Test
         run: cargo nextest run --workspace --features eseqlisp/wgpu
         # RUST_MIN_STACK comes from .cargo/config.toml; do not set it here.
+
+  macos-check:
+    name: aarch64-apple-darwin
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+
+      - name: Fetch the pinned DGenLisp compiler
+        run: ./scripts/fetch_dgenlisp.sh
+        # Only the compiler, not the clang stage: content/dgen-toolchain.lock
+        # pins arm64-apple-macos by sha256 but publishes no url for it, so
+        # scripts/fetch_dgen_toolchain.sh hard-fails on a fresh runner and the
+        # toolchain has to be vendored from a local dgen-audio checkout. That
+        # is why this job stops at `cargo check`: running the suite here is
+        # blocked until a target.arm64-apple-macos.url is published.
+
+      - name: Check the workspace
+        run: cargo check --workspace --all-targets
+        # Check-only still catches what this branch put at risk on macOS: cfg
+        # gates, the pruned objc2 feature set, ui::gpu_geometry drifting away
+        # from the Metal encoder, and the aubio-sys patch.

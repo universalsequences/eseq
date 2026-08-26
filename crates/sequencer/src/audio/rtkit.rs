@@ -15,6 +15,13 @@ const RTKIT_PATH: &str = "/org/freedesktop/RealtimeKit1";
 const RTKIT_INTERFACE: &str = "org.freedesktop.RealtimeKit1";
 const METHOD_TIMEOUT: Duration = Duration::from_secs(2);
 const CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// Upper bound a graph worker will wait on the helper. The helper's own
+/// bounded worst case is a connect plus two property reads and one method
+/// call, but the connect's socket handshake is not covered by
+/// `METHOD_TIMEOUT`, so a wedged system bus could park it indefinitely.
+/// Workers report into the engine startup barrier, so they must never block
+/// forever: past this bound the worker gives up and runs unpromoted.
+const WORKER_PROMOTION_TIMEOUT: Duration = Duration::from_secs(8);
 
 static COORDINATOR: OnceLock<Arc<Coordinator>> = OnceLock::new();
 static UNAVAILABLE_WARNING_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -31,6 +38,7 @@ struct Coordinator {
     workers: mpsc::Sender<WorkerRequest>,
     callback_tid: AtomicU64,
     callback_priority: AtomicI32,
+    print_status_requested: AtomicBool,
     rt_log: bool,
 }
 
@@ -51,6 +59,7 @@ pub(super) fn start(rt_log: bool) {
         workers,
         callback_tid: AtomicU64::new(0),
         callback_priority: AtomicI32::new(0),
+        print_status_requested: AtomicBool::new(false),
         rt_log,
     });
     let helper_coordinator = Arc::clone(&coordinator);
@@ -97,7 +106,28 @@ fn helper_main(coordinator: Arc<Coordinator>, requests: mpsc::Receiver<WorkerReq
                 eprintln!("audiograph: realtime scheduling achieved: {achieved}");
             }
         }
+
+        if coordinator
+            .print_status_requested
+            .swap(false, Ordering::AcqRel)
+        {
+            let achieved =
+                unsafe { super::audiograph::format_rt_status(super::audiograph::rt_status()) };
+            eprintln!("audiograph: realtime scheduling achieved: {achieved}");
+        }
     }
+}
+
+/// Ask the helper to print the current promotion status on its next poll. The
+/// audio callback cannot format or write it itself: `format_rt_status`
+/// allocates and `eprintln!` takes the process stderr lock.
+pub(super) fn request_status_print() {
+    let Some(coordinator) = COORDINATOR.get() else {
+        return;
+    };
+    coordinator
+        .print_status_requested
+        .store(true, Ordering::Release);
 }
 
 fn promote(
@@ -267,9 +297,13 @@ pub extern "C" fn eseq_rtkit_make_worker_realtime(
     {
         return 0;
     }
-    match response.recv() {
+    match response.recv_timeout(WORKER_PROMOTION_TIMEOUT) {
         Ok(Ok(_)) => 1,
-        _ => 0,
+        Ok(Err(_)) => 0,
+        Err(_) => {
+            warn_unavailable("the RealtimeKit helper did not respond in time");
+            0
+        }
     }
 }
 

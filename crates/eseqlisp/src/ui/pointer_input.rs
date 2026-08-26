@@ -5,8 +5,13 @@ use winit::event::MouseScrollDelta;
 ///
 /// Winit's `LineDelta` identifies a unit, not a pixel distance. Treating one
 /// unit as one line made common Linux mouse wheels noticeably slower than
-/// native scrolling, where a detent normally advances multiple lines.
+/// native scrolling, where a detent normally advances multiple lines. Other
+/// platforms keep one unit per line, matching what they shipped before this
+/// helper existed.
+#[cfg(target_os = "linux")]
 const LINES_PER_WHEEL_DETENT: f32 = 3.0;
+#[cfg(not(target_os = "linux"))]
+const LINES_PER_WHEEL_DETENT: f32 = 1.0;
 
 /// Winit 0.29 forwards Wayland's continuous axis distance at a substantially
 /// smaller useful magnitude than AppKit's precise scrolling delta. Normalize
@@ -27,6 +32,12 @@ pub(crate) fn ctrl_scroll_magnify_delta(
     modifiers: KeyModifiers,
     delta_pixels: (f32, f32),
 ) -> Option<f64> {
+    // macOS zooms from the native `TouchpadMagnify` pinch gesture, and the
+    // system reserves Ctrl+scroll for its own screen-zoom accessibility
+    // gesture, so Ctrl+scroll stays an ordinary scroll there.
+    if cfg!(target_os = "macos") {
+        return None;
+    }
     if !modifiers.contains(KeyModifiers::CONTROL) {
         return None;
     }
@@ -65,10 +76,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discrete_wheel_detent_advances_three_lines() {
+    fn discrete_wheel_detent_advances_platform_line_count() {
         assert_eq!(
             scroll_delta_pixels(MouseScrollDelta::LineDelta(-1.0, 1.0), 24.0),
-            (-72.0, 72.0)
+            (
+                -24.0 * LINES_PER_WHEEL_DETENT,
+                24.0 * LINES_PER_WHEEL_DETENT
+            )
         );
     }
 
@@ -76,7 +90,7 @@ mod tests {
     fn discrete_wheel_uses_minimum_line_height() {
         assert_eq!(
             scroll_delta_pixels(MouseScrollDelta::LineDelta(0.0, 1.0), 12.0),
-            (0.0, 60.0)
+            (0.0, 20.0 * LINES_PER_WHEEL_DETENT)
         );
     }
 
@@ -90,6 +104,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn ctrl_vertical_scroll_converts_pixels_to_magnify_delta() {
         assert_eq!(
             ctrl_scroll_magnify_delta(KeyModifiers::CONTROL, (2.0, 120.0)),
@@ -98,6 +113,15 @@ mod tests {
         assert_eq!(
             ctrl_scroll_magnify_delta(KeyModifiers::CONTROL, (-2.0, -120.0)),
             Some(-0.25)
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn ctrl_vertical_scroll_stays_a_scroll_on_macos() {
+        assert_eq!(
+            ctrl_scroll_magnify_delta(KeyModifiers::CONTROL, (2.0, 120.0)),
+            None
         );
     }
 

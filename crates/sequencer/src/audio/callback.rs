@@ -48,10 +48,14 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             // Direct FIFO promotion is final immediately. An rtkit request is
             // still pending here; its non-RT helper prints the achieved RR (or
             // normal-priority) result after the D-Bus reply instead.
+            //
+            // Either way the printing happens on the helper thread: formatting
+            // the status allocates and `eprintln!` takes the process stderr
+            // lock, neither of which belongs on the callback thread. This is a
+            // single atomic store.
             let status = unsafe { audiograph::rt_status() };
             if status.callback_reported != 0 {
-                let achieved = audiograph::format_rt_status(status);
-                eprintln!("audiograph: realtime scheduling achieved: {achieved}");
+                super::rtkit::request_status_print();
             }
         }
     }

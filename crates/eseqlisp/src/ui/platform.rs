@@ -42,6 +42,24 @@ pub fn has_primary_shortcut_modifier(modifiers: KeyModifiers) -> bool {
     has_primary_shortcut_modifier_for(modifiers, CURRENT_SHORTCUT_PLATFORM)
 }
 
+/// Modifier test for global sequencer shortcuts (track grouping, mods view,
+/// pattern length, select-all).
+///
+/// These bindings historically accepted either Ctrl or Cmd on macOS, so the
+/// Ctrl aliases stay alive there. Linux and other targets keep Ctrl as the sole
+/// primary chord; Super remains the window manager's key.
+pub fn has_sequencer_shortcut_modifier_for(
+    modifiers: KeyModifiers,
+    platform: ShortcutPlatform,
+) -> bool {
+    has_primary_shortcut_modifier_for(modifiers, platform)
+        || (platform == ShortcutPlatform::MacOS && modifiers.contains(KeyModifiers::CONTROL))
+}
+
+pub fn has_sequencer_shortcut_modifier(modifiers: KeyModifiers) -> bool {
+    has_sequencer_shortcut_modifier_for(modifiers, CURRENT_SHORTCUT_PLATFORM)
+}
+
 pub fn is_exact_primary_shortcut_modifier_for(
     modifiers: KeyModifiers,
     platform: ShortcutPlatform,
@@ -168,6 +186,28 @@ pub fn trigger_alignment_haptic() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sequencer_shortcuts_keep_the_macos_control_alias() {
+        for modifiers in [KeyModifiers::SUPER, KeyModifiers::CONTROL] {
+            assert!(has_sequencer_shortcut_modifier_for(
+                modifiers,
+                ShortcutPlatform::MacOS
+            ));
+        }
+        assert!(has_sequencer_shortcut_modifier_for(
+            KeyModifiers::CONTROL,
+            ShortcutPlatform::Other
+        ));
+        assert!(!has_sequencer_shortcut_modifier_for(
+            KeyModifiers::SUPER,
+            ShortcutPlatform::Other
+        ));
+        assert!(!has_sequencer_shortcut_modifier_for(
+            KeyModifiers::ALT,
+            ShortcutPlatform::MacOS
+        ));
+    }
 
     #[test]
     fn window_theme_follows_ui_background_luma() {

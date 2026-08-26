@@ -1500,7 +1500,6 @@
               :width 1.7 :height 0.8
               :collapsed (get group :collapsed)
               :surface-alpha 0.35
-              :color :white
               :on-click (lambda (event)
                 (do
                   (select-group gidx)

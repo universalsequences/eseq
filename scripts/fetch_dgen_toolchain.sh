@@ -38,10 +38,12 @@ the staged root at:
 
 The target defaults to the current host. Targets are the target-qualified key
 prefixes in the lock file (currently arm64-apple-macos and
-x86_64-unknown-linux-gnu).
+x86_64-unknown-linux-gnu). Because the install path is not target-qualified,
+only the host target can be installed; run this script on the target machine.
 
 Options:
-  --target TARGET   Fetch for TARGET instead of the current host.
+  --target TARGET   Fetch for TARGET. Must name the current host; it exists to
+                    state the host target explicitly, not to cross-install.
   --force           Re-download and reinstall even if the installed stage
                     already matches the pin.
 USAGE
@@ -73,16 +75,35 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$(uname -s):$(uname -m)" in
+  Darwin:arm64) HOST_TARGET="arm64-apple-macos" ;;
+  Linux:x86_64) HOST_TARGET="x86_64-unknown-linux-gnu" ;;
+  *) HOST_TARGET="" ;;
+esac
+
 if [[ -z "$TARGET" ]]; then
-  case "$(uname -s):$(uname -m)" in
-    Darwin:arm64) TARGET="arm64-apple-macos" ;;
-    Linux:x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
-    *)
-      echo "error: no DGen toolchain target is defined for $(uname -s)/$(uname -m)" >&2
-      echo "Pass --target explicitly to fetch for another platform." >&2
-      exit 1
-      ;;
-  esac
+  if [[ -z "$HOST_TARGET" ]]; then
+    echo "error: no DGen toolchain target is defined for $(uname -s)/$(uname -m)" >&2
+    exit 1
+  fi
+  TARGET="$HOST_TARGET"
+fi
+
+# The stage installs to a single, non-target-qualified path, and installing
+# replaces whatever is there. Cross-installing would therefore destroy the
+# host's stage -- for arm64-apple-macos, one that has no published archive and
+# can only be rebuilt from a local dgen-audio checkout -- and every subsequent
+# DGen compile would hard-fail the VERSION.json target assertion. Refuse before
+# anything is downloaded or removed.
+if [[ "$TARGET" != "$HOST_TARGET" ]]; then
+  echo "error: cannot install a $TARGET toolchain stage on ${HOST_TARGET:-this host ($(uname -s)/$(uname -m))}" >&2
+  echo "The stage installs to the single host path:" >&2
+  echo "  $DEST" >&2
+  echo "so a foreign-target stage would overwrite the host's stage and break" >&2
+  echo "every DGen compile. Run this script on the $TARGET machine instead." >&2
+  echo "(scripts/fetch_dgenlisp.sh does install target-qualified and is safe to" >&2
+  echo "run cross-target.)" >&2
+  exit 1
 fi
 
 if [[ ! -f "$LOCK_FILE" ]]; then
@@ -105,6 +126,18 @@ if [[ -z "$SHA256" ]]; then
   exit 1
 fi
 
+# The pin hashes the archive, which is not kept after extraction; the stamp
+# records which archive the installed stage came from. This check runs before
+# the url check below so that a vendored target whose stage is already staged
+# and matching succeeds idempotently instead of erroring on the missing url.
+STAMP_FILE="$DEST/.dgen-toolchain-sha256"
+
+if [[ "$FORCE" -eq 0 && -f "$STAMP_FILE" && "$(cat "$STAMP_FILE")" == "$SHA256" ]]; then
+  echo "DGen toolchain $LLVM_VERSION for $TARGET is already installed and matches the lock:"
+  echo "  $DEST"
+  exit 0
+fi
+
 # A target may be pinned by identity without being published. That is not a
 # broken lock file -- it is the vendor-locally route -- so say which one this
 # target is on rather than reporting a missing field.
@@ -124,16 +157,6 @@ sha256() {
     shasum -a 256 "$1" | awk '{print $1}'
   fi
 }
-
-# The pin hashes the archive, which is not kept after extraction; the stamp
-# records which archive the installed stage came from.
-STAMP_FILE="$DEST/.dgen-toolchain-sha256"
-
-if [[ "$FORCE" -eq 0 && -f "$STAMP_FILE" && "$(cat "$STAMP_FILE")" == "$SHA256" ]]; then
-  echo "DGen toolchain $LLVM_VERSION for $TARGET is already installed and matches the lock:"
-  echo "  $DEST"
-  exit 0
-fi
 
 if ! command -v curl >/dev/null 2>&1; then
   echo "error: curl is required to fetch the DGen toolchain archive" >&2

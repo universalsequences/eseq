@@ -205,7 +205,6 @@
         (knob-number :debug-name (str "rack-macro-knob-" (get macro :id))
           :value (rack-macro-display-value macro) :min 0 :max 1 :decimals 2
           :width 4.8 :height 2.45 :knob-size 1.8 :font-size 8 :label-font-size 8
-          :track-color '(rgba 0.4, 0.4, 0.4, 1)
           :plock-active (rack-macro-plock-active macro)
           :plock-default (rack-macro-plock-default macro)
           :plock-color-r (pc/param-plock-color-r)

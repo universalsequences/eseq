@@ -2090,13 +2090,16 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        // Re-captured at 7396708d, which restyled ui/transport.lisp (theme
-        // keywords for literal colors, and several icon bodies reworked). Both
-        // digests cover the authored corpus, so any deliberate content shader
-        // edit moves them; nothing in the emitters changed here.
+        // Re-captured after 867fb9a9, which finished the restyle that started at
+        // 7396708d: disclosure glyphs became SDF symbols (new `triangle` and
+        // `disclosure-*` macros in core/sdf-stdlib.lisp, the `disclosure-button`
+        // widget in ui/materials.lisp), ui/transport.lisp icon bodies and theme
+        // keywords moved, and ui/sequencer.lisp lighting `vec3` z values changed.
+        // Both digests cover the authored corpus, so any deliberate content
+        // shader edit moves them; nothing in the emitters changed here.
         assert_eq!(
             metal_snapshot,
-            "f84ae308e450ed2a5af0ad03b40fd5d3948ba2536509fb6f29e383fbf6b8c7f4"
+            "23b6d51596046ab185bcb7d2cc6b749e5345ded16cbd5e33402b320d1bf32358"
         );
         let wgsl_snapshot = wgsl_snapshot
             .finalize()
@@ -2105,11 +2108,11 @@ mod tests {
             .collect::<String>();
         // Captured in eseq-linux.7 when the emitter stopped emitting its own
         // `WidgetVaryings` (the struct now comes from the shared WGSL widget
-        // preamble the fragments are assembled onto), and re-captured at
-        // 7396708d alongside the MSL digest above for the same content edit.
+        // preamble the fragments are assembled onto), and re-captured alongside
+        // the MSL digest above for the same content edits.
         assert_eq!(
             wgsl_snapshot,
-            "15b689075410d8913fc1b657ebc1712efcd52a395a06187882e46d6a7cbb4065"
+            "1a8426d0783e7ad53ee9177d072ce187aa50c19365afdcadbab7c633fd90ae78"
         );
     }
 

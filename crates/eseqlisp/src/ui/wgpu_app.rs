@@ -53,6 +53,7 @@ use crate::ui::gpu_geometry::{
 use crate::ui::platform;
 use crate::ui::wgpu_pipelines as pipelines;
 use crate::ui::wgpu_frame_stats::{FrameSample, WgpuFrameStats};
+use crate::ui::wgpu_backend;
 use crate::ui::wgsl_shaders;
 use crate::widget_render::{self, WidgetInstance, WidgetViewport};
 
@@ -1482,6 +1483,12 @@ impl WgpuAppBackend {
         let mut global_overlay_prims = Vec::new();
         let mut deferred_inspect_overlay: Option<(f32, f32, f32, f32, Color, Color)> = None;
         self.prop_text_layout_cache.begin_frame();
+        // Bank keys are per-publisher and never reused (the Filter Table keys
+        // its bank by node id), so an unpublished key's GPU buffer would
+        // otherwise live until the process exits.
+        for key in widget_render::wavetable_viewer::take_retired_bank_keys() {
+            self.wavetable_buffers.remove(&key);
+        }
 
         let mut plan: Vec<DrawCmd> = Vec::new();
         let full_scissor = gpu_scene::full_viewport_scissor(vp_w, vp_h);
@@ -2685,13 +2692,13 @@ impl Backend for WgpuAppBackend {
         let capabilities = surface.get_capabilities(&adapter);
         // Prefer a non-sRGB format so authored colors match Metal's
         // BGRA8Unorm drawable — see `wgpu_backend::preferred_surface_format`.
-        let format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(|format| !format.is_srgb())
-            .or_else(|| capabilities.formats.first().copied())
+        let format = wgpu_backend::preferred_surface_format(&capabilities.formats)
             .ok_or(BackendError::MetalError)?;
+        if format.is_srgb() {
+            eprintln!(
+                "eseq: surface offers only sRGB formats ({format:?}); colors will render lighter than the Metal backend"
+            );
+        }
         let alpha_mode = capabilities
             .alpha_modes
             .iter()

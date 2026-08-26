@@ -104,7 +104,9 @@ struct GeometryKey {
 /// linear-to-sRGB encode on write, so identical primitives would come out
 /// visibly lighter here than on Metal. Prefer a non-sRGB format to keep the two
 /// backends showing the same colors.
-fn preferred_surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
+pub(crate) fn preferred_surface_format(
+    formats: &[wgpu::TextureFormat],
+) -> Option<wgpu::TextureFormat> {
     formats
         .iter()
         .copied()

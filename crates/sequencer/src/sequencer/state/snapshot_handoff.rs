@@ -15,9 +15,18 @@
 //! This type removes both. Publishers push into a bounded lock-free ring; the
 //! callback pops the newest entry (never touching the mutex) and hands its
 //! outgoing `Arc` to a second bounded ring that non-realtime threads drain and
-//! drop. Neither realtime operation allocates or blocks. When the retire ring is
-//! full the callback falls back to the inline drop — bounded degradation, never
-//! a leak — and counts it so instrumentation can surface the fallback.
+//! drop. Neither realtime operation allocates, takes a lock, or makes a syscall
+//! — but the rings are lock-free, not wait-free. The retire ring has two
+//! producers (the callback retiring the outgoing snapshot, the publisher
+//! retiring superseded ones), so if a non-realtime peer — a drain's pop or the
+//! publisher's push — is preempted mid-slot, the callback's push spins for the
+//! few instructions between that peer's CAS and its stamp store, and only
+//! yields after many consecutive lost rounds. That window is the whole cost
+//! today; adding further producers or consumers widens it and needs a
+//! re-audit. When the retire
+//! ring is full the callback falls back to the inline drop — bounded
+//! degradation, never a leak — and counts it so instrumentation can surface the
+//! fallback.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -64,11 +73,15 @@ impl SchedulerSnapshotHandoff {
     /// Hand a freshly published snapshot to the audio thread. Non-realtime.
     ///
     /// Only the newest publication is ever consumed, so anything the audio
-    /// thread has not picked up yet is superseded and dropped HERE, on this
-    /// non-realtime thread. That keeps the ring's retention at the one snapshot
-    /// actually in flight instead of a queue's worth of dead projects.
+    /// thread has not picked up yet is superseded and retired here for a
+    /// non-realtime drain. That keeps the ring's retention at the one snapshot
+    /// actually in flight instead of a queue's worth of dead projects, and keeps
+    /// the deep free off this call — publishers run inside the published-snapshot
+    /// lock, which the scheduler worker contends on every 1-2 ms.
     pub fn publish(&self, version: u64, snapshot: Arc<SequencerSnapshot>) {
-        while self.published.pop().is_some() {}
+        while let Some((_, superseded)) = self.published.pop() {
+            self.retire(superseded);
+        }
         let mut entry = (version, snapshot);
         while let Err(rejected) = self.published.push(entry) {
             // Unreachable in practice — publishers serialize behind the
@@ -82,7 +95,10 @@ impl SchedulerSnapshotHandoff {
 
     /// Take the newest publication strictly newer than `current_version`, if
     /// any. Realtime-safe: lock-free, allocation-free, and every entry it skips
-    /// is retired rather than dropped here.
+    /// is retired rather than dropped here. Lock-free is not wait-free: with a
+    /// single publisher whose supersede drains this ring empty before each push,
+    /// the pop's yielding back-off path is unreachable in practice, but a second
+    /// producer or consumer on `published` would put it back in play.
     pub fn take_latest(
         &self,
         current_version: u64,
@@ -132,8 +148,13 @@ impl SchedulerSnapshotHandoff {
     }
 
     /// Hand an outgoing snapshot to the reclaimer instead of dropping it on the
-    /// audio thread. Realtime-safe; falls back to an inline drop (counted) when
-    /// the ring is full.
+    /// audio thread. Lock-free and allocation-free, but not wait-free: the
+    /// `retired` ring has two producers — the audio callback (via `take_latest`)
+    /// and the publisher (via `publish` superseding) — so the callback's push
+    /// can spin against a publisher or `drain_retired` pop preempted mid-slot,
+    /// and after enough lost rounds the back-off yields. The window is a few
+    /// instructions on a non-realtime thread. Falls back to an inline drop
+    /// (counted) when the ring is full.
     pub fn retire(&self, snapshot: Arc<SequencerSnapshot>) {
         if let Err(snapshot) = self.retired.push(snapshot) {
             self.retired_inline.fetch_add(1, Ordering::Relaxed);
@@ -228,9 +249,14 @@ mod tests {
 
         handoff.publish(1, superseded);
         handoff.publish(2, Arc::clone(&newest));
-        // The unconsumed publication was freed on the publisher's thread, not
-        // queued for the audio thread to trip over.
+        // The unconsumed publication left the published ring rather than
+        // staying there for the audio thread to trip over, and it went to the
+        // retire ring so the deep free happens outside the publisher's lock.
         assert_eq!(handoff.published_len(), 1);
+        assert_eq!(handoff.retired_len(), 1);
+        assert_eq!(Arc::strong_count(&witness), 2);
+
+        assert_eq!(handoff.drain_retired(), 1);
         assert_eq!(Arc::strong_count(&witness), 1);
 
         let mut current = snapshot();

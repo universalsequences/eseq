@@ -229,11 +229,15 @@ impl AppPaths {
         );
         let hint = if overridden {
             "The stage comes from the ESEQ_DGEN_TOOLCHAIN_ROOT override; point it at a \
-             complete stage (or unset it and run ./rebuild_dgenlisp_tool.sh to stage one \
-             in this checkout)."
+             complete stage (or unset it and stage one in this checkout with \
+             ./scripts/fetch_dgen_toolchain.sh for published targets, or \
+             ./rebuild_dgenlisp_tool.sh for targets vendored from a local dgen-audio \
+             checkout)."
         } else {
-            "Run ./rebuild_dgenlisp_tool.sh at the repo root to stage it (the stage is \
-             gitignored, so fresh checkouts and worktrees start without one)."
+            "Run ./scripts/fetch_dgen_toolchain.sh at the repo root to stage it (published \
+             targets), or ./rebuild_dgenlisp_tool.sh for targets vendored from a local \
+             dgen-audio checkout. The stage is gitignored, so fresh checkouts and worktrees \
+             start without one."
         };
         if !root.is_dir() {
             return Err(format!(

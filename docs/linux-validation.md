@@ -129,14 +129,16 @@ The whole workspace on the same host: `cargo nextest run --workspace
 --no-fail-fast` reports **4528 run, 4526 passed, 2 failed, 39 skipped** in 232s
 debug. macOS compiles more targets than Linux does (Metal backend, capture
 harness), which is why the run and skip counts are both higher than the Linux
-4508/33 — the comparison to make is per test, not per total.
+4508/33 — the comparison to make is per test, not per total. Both failures were
+red at the time of that run; one has since been fixed, so the only currently
+open macOS failure is `content_shader_corpus_emits_valid_wgsl`.
 
 Neither failure is a Linux-port regression and both are filed:
 
 | Test | Cause |
 |---|---|
 | `eseqlisp lang::sdf_codegen::tests::content_shader_corpus_emits_valid_wgsl` | `eseq-5ed`, recurring. Authored content shaders changed after `7396708d` and the two absolute digests were not re-captured. Reproduced at clean `HEAD` in a detached worktree with identical digests, so it is not working-tree drift, and it is not platform-specific. |
-| `sequencer lisp_host::tests::vendored_dgen_abi_header_matches_staged_toolchain_header` | `eseq-linux.75`, macOS-only. `dgen_abi_v1.h` records one `Source-sha256` for a header that differs between the two pinned toolchain archives; `2f5a3cd9` bumped it to the Linux stage's header while the `arm64-apple-macos` pin stayed on the older one. Green on Linux, red on every Mac. |
+| `sequencer lisp_host::tests::vendored_dgen_abi_header_matches_staged_toolchain_header` | `eseq-linux.75`, macOS-only. `dgen_abi_v1.h` records one `Source-sha256` for a header that differs between the two pinned toolchain archives; `2f5a3cd9` bumped it to the Linux stage's header while the `arm64-apple-macos` pin stayed on the older one. Green on Linux, red on every Mac. **Fixed since this run by `36448c46`**, which hashes only the target-neutral ABI section (from `typedef void *DGenFFTSetupV1;` through the `dgen_set_param_value_v1` declaration) instead of the whole header and re-recorded `Source-sha256 2019896b7c69f2…`; the test is green on both platforms now. |
 
 The `eseq-linux.17` clip-math refactor was re-checked here too: every
 clip/scissor/`gpu_geometry`/`metal_backend` test passes on macOS (118 run, 118

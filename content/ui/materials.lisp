@@ -49,13 +49,13 @@
   :shader
   (sdf/layer
     (sdf/stroke (sdf/rounded-rect (* width 0.9) (* height 0.9) 1)
-      0.1 :bg)
-    
+      0.1 (rgba 0.1 0.1 0.1 surface-alpha))
+
     (sdf/fill
       (if (= collapsed 1)
         (sdf/disclosure-right)
         (sdf/disclosure-down))
-      (material :color :bg))))
+      (material :color (rgba 1 1 1 0.95)))))
 
 ;; ── Aqua material for sliders ──
 

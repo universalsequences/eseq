@@ -199,7 +199,7 @@
     (let ((freq-p (param params band "freq"))
           (q-p (param params band "q")))
       (box :width 4.9 :height 7.05 :padding 0.22
-        :background-color :mixer-control-bg :corner-radius 16
+        :background-color :mixer-control-bg :corner-radius 12
         (v-stack :gap 0.22 :align :center
           (selected-knob fx "freq" freq-p 0)
           (selected-knob fx "q" q-p 2))))))
@@ -256,7 +256,7 @@
               :spectrum-peak-color (rgba 0.40 0.92 0.86 0.74)
               :on-action |event| (handle-action fx params event))))
         (box :background-color :mixer-control-bg
-          :corner-radius 16
+          :corner-radius 12
           :padding 0.2
           (v-stack
             (box :width 43.2 :height 1.02 :padding 0.22
@@ -270,6 +270,6 @@
                 (band-button fx params 5)
                 (band-button fx params 6)
                 (band-button fx params 7)))
-            (selected-controls fx params))
-          (eseq.effects.param-grid/fx-param-grid params fx))))
+            (selected-controls fx params))))
+      (eseq.effects.param-grid/fx-param-grid params fx))
     ))

@@ -1,7 +1,8 @@
 use super::*;
 use eseqlisp::ui::platform::{
     has_primary_shortcut_modifier, has_primary_shortcut_modifier_for,
-    is_exact_primary_shortcut_modifier, is_exact_primary_shortcut_modifier_for,
+    has_sequencer_shortcut_modifier, is_exact_primary_shortcut_modifier,
+    is_exact_primary_shortcut_modifier_for,
     ShortcutPlatform, CURRENT_SHORTCUT_PLATFORM,
 };
 use eseqlisp::widget_render::number_picker::{
@@ -388,7 +389,7 @@ fn is_toggle_mods_view_shortcut(key: &crossterm::event::KeyEvent) -> bool {
 
     match key.code {
         KeyCode::Char('m') | KeyCode::Char('M') => {
-            has_primary_shortcut_modifier(key.modifiers)
+            has_sequencer_shortcut_modifier(key.modifiers)
         }
         _ => false,
     }
@@ -403,7 +404,7 @@ enum PatternLengthShortcut {
 fn pattern_length_shortcut(key: &crossterm::event::KeyEvent) -> Option<PatternLengthShortcut> {
     use crossterm::event::{KeyCode, KeyModifiers};
 
-    let has_shortcut_modifier = has_primary_shortcut_modifier(key.modifiers);
+    let has_shortcut_modifier = has_sequencer_shortcut_modifier(key.modifiers);
     if !has_shortcut_modifier || key.modifiers.contains(KeyModifiers::ALT) {
         return None;
     }
@@ -1424,7 +1425,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
 
         match (key.code, key.modifiers) {
             (KeyCode::Char('a') | KeyCode::Char('A'), modifiers)
-                if has_primary_shortcut_modifier(modifiers)
+                if has_sequencer_shortcut_modifier(modifiers)
                     && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
                 let command = if editor.active_buffer().name == "*sequencer*" {
@@ -1493,7 +1494,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         }
     }
 
-    if has_primary_shortcut_modifier(key.modifiers)
+    if has_sequencer_shortcut_modifier(key.modifiers)
         && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
     {
         // The platform-primary chord owns the global track-group dispatcher.
@@ -2157,7 +2158,9 @@ mod live_keyboard_tests {
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use eseqlisp::editor::ViewMode;
-    use eseqlisp::ui::platform::{primary_shortcut_modifier, ShortcutPlatform};
+    use eseqlisp::ui::platform::{
+        primary_shortcut_modifier, ShortcutPlatform, CURRENT_SHORTCUT_PLATFORM,
+    };
     use eseqlisp::mode::BufferMode;
     use eseqlisp::vm::Value;
     use eseqlisp::widget_render::WidgetKeyEvent;
@@ -4148,6 +4151,16 @@ mod live_keyboard_tests {
         );
     }
 
+    /// Modifiers that must reach the global sequencer chords: the platform
+    /// primary everywhere, plus the historical Ctrl alias on macOS.
+    fn sequencer_shortcut_modifiers() -> Vec<KeyModifiers> {
+        let mut modifiers = vec![primary_shortcut_modifier()];
+        if CURRENT_SHORTCUT_PLATFORM == ShortcutPlatform::MacOS {
+            modifiers.push(KeyModifiers::CONTROL);
+        }
+        modifiers
+    }
+
     #[test]
     fn platform_primary_g_dispatches_track_grouping() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
@@ -4163,17 +4176,20 @@ mod live_keyboard_tests {
             .expect("install track group dispatcher");
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
 
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Char('g'), primary_shortcut_modifier()),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
+        let modifiers = sequencer_shortcut_modifiers();
+        for modifiers in &modifiers {
+            assert!(handle_metal_command_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Char('g'), *modifiers),
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ));
+        }
 
         let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands.len(), modifiers.len());
         assert!(commands.iter().all(|command| matches!(
             command,
             HostCommand::Custom { name, .. } if name == "group-selected-tracks"
@@ -4526,6 +4542,23 @@ mod live_keyboard_tests {
             Some(eseqlisp::vm::Value::Number(-1.0))
         );
 
+        // Ctrl stays a live alias for this chord on macOS, and is the primary
+        // everywhere else, so it must toggle the view back off.
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.effects.state/instrument-mods-open")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::Bool(false))
+        );
     }
 
     #[test]
