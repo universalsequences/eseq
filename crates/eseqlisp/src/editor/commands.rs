@@ -29,16 +29,6 @@ impl Editor {
             (KeyCode::Char('w'), KeyModifiers::ALT, "copy-region"),
             (KeyCode::Char('y'), KeyModifiers::CONTROL, "yank"),
             (
-                KeyCode::Char('c'),
-                KeyModifiers::SUPER,
-                "copy-selection-to-clipboard",
-            ),
-            (
-                KeyCode::Char('v'),
-                KeyModifiers::SUPER,
-                "paste-from-clipboard",
-            ),
-            (
                 KeyCode::Char('k'),
                 KeyModifiers::CONTROL,
                 "delete-to-line-end",
@@ -68,6 +58,20 @@ impl Editor {
         for (code, mods, cmd) in binds {
             self.builtins
                 .insert(KeyEvent::new(*code, *mods), cmd.to_string());
+        }
+        for modifiers in crate::ui::platform::primary_clipboard_key_modifiers() {
+            for (code, command) in [
+                (KeyCode::Char('c'), "copy-selection-to-clipboard"),
+                (KeyCode::Char('v'), "paste-from-clipboard"),
+            ] {
+                let key = KeyEvent::new(code, modifiers);
+                self.builtins.insert(key, command.to_string());
+                // Ctrl-C is also the prefix of conventional C-c chords. A
+                // direct binding intentionally outranks prefix detection in
+                // `handle_key`, while still dispatching the builtin command.
+                self.default_lisp_bindings
+                    .insert(key_str(key), command.to_string());
+            }
         }
 
         // Tiling keybindings (C-x chords, registered as Lisp bindings)

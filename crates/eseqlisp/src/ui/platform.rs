@@ -3,9 +3,61 @@
 //! Rendering backends should use these helpers rather than exposing AppKit
 //! types to otherwise portable UI code.
 
+use crossterm::event::KeyModifiers;
 use winit::window::{Theme as WindowTheme, Window};
 
 use crate::backend::Color;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShortcutPlatform {
+    MacOS,
+    Other,
+}
+
+pub const CURRENT_SHORTCUT_PLATFORM: ShortcutPlatform = if cfg!(target_os = "macos") {
+    ShortcutPlatform::MacOS
+} else {
+    ShortcutPlatform::Other
+};
+
+pub const fn primary_shortcut_modifier_for(platform: ShortcutPlatform) -> KeyModifiers {
+    match platform {
+        ShortcutPlatform::MacOS => KeyModifiers::SUPER,
+        ShortcutPlatform::Other => KeyModifiers::CONTROL,
+    }
+}
+
+pub const fn primary_shortcut_modifier() -> KeyModifiers {
+    primary_shortcut_modifier_for(CURRENT_SHORTCUT_PLATFORM)
+}
+
+pub fn has_primary_shortcut_modifier_for(
+    modifiers: KeyModifiers,
+    platform: ShortcutPlatform,
+) -> bool {
+    modifiers.contains(primary_shortcut_modifier_for(platform))
+}
+
+pub fn has_primary_shortcut_modifier(modifiers: KeyModifiers) -> bool {
+    has_primary_shortcut_modifier_for(modifiers, CURRENT_SHORTCUT_PLATFORM)
+}
+
+/// Exact modifier sets accepted by editor keymaps for copy/paste.
+///
+/// Sequencer shortcuts test for containment, so Shift naturally remains an
+/// optional modifier. Editor bindings are exact and therefore need both Linux
+/// forms registered explicitly. macOS intentionally retains its existing
+/// Cmd-only bindings.
+pub fn primary_clipboard_key_modifiers() -> impl Iterator<Item = KeyModifiers> {
+    let primary = primary_shortcut_modifier();
+    [
+        Some(primary),
+        (CURRENT_SHORTCUT_PLATFORM != ShortcutPlatform::MacOS)
+            .then_some(primary | KeyModifiers::SHIFT),
+    ]
+    .into_iter()
+    .flatten()
+}
 
 pub fn window_theme_for_background(background: Color) -> WindowTheme {
     if background.luma() > 0.55 {

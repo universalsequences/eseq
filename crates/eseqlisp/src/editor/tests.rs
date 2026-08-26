@@ -2286,41 +2286,45 @@ fn alt_w_copies_region_and_ctrl_y_yanks_it() {
 }
 
 #[test]
-fn cmd_c_copies_region_to_system_clipboard() {
-    let runtime = Runtime::new();
-    let mut editor = Editor::new(runtime, EditorConfig::default());
-    editor.set_test_clipboard("");
-    editor.open_scratch_buffer("*test*", "abc def");
-    editor.active_buffer_mut().cursor = (0, 0);
+fn platform_copy_shortcuts_copy_region_to_system_clipboard() {
+    for modifiers in crate::ui::platform::primary_clipboard_key_modifiers() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_test_clipboard("");
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().cursor = (0, 0);
 
-    editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('c'), modifiers));
 
-    assert_eq!(editor.test_clipboard(), Some("abc"));
-    assert_eq!(editor.active_buffer().text(), "abc def");
-    assert_eq!(editor.active_region_range(), Some(((0, 0), (0, 3))));
+        assert_eq!(editor.test_clipboard(), Some("abc"), "modifiers: {modifiers:?}");
+        assert_eq!(editor.active_buffer().text(), "abc def");
+        assert_eq!(editor.active_region_range(), Some(((0, 0), (0, 3))));
+    }
 }
 
 #[test]
-fn cmd_v_pastes_system_clipboard_and_replaces_region() {
-    let runtime = Runtime::new();
-    let mut editor = Editor::new(runtime, EditorConfig::default());
-    editor.set_test_clipboard("XYZ");
-    editor.open_scratch_buffer("*test*", "abc def");
-    editor.active_buffer_mut().cursor = (0, 0);
+fn platform_paste_shortcuts_replace_region_from_system_clipboard() {
+    for modifiers in crate::ui::platform::primary_clipboard_key_modifiers() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_test_clipboard("XYZ");
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().cursor = (0, 0);
 
-    editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER));
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('v'), modifiers));
 
-    assert_eq!(editor.active_buffer().text(), "XYZ def");
-    assert_eq!(editor.active_buffer().cursor, (0, 3));
-    assert!(editor.active_region_range().is_none());
+        assert_eq!(editor.active_buffer().text(), "XYZ def", "modifiers: {modifiers:?}");
+        assert_eq!(editor.active_buffer().cursor, (0, 3));
+        assert!(editor.active_region_range().is_none());
+    }
 }
 
 #[test]
