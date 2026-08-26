@@ -76,9 +76,12 @@ The proportional columns exceed the threshold in both comparisons — and in
 both, the resolved face changed, so the rasterizer is not the cause:
 
 * **1-vs-2** (`.SFNS-Regular` → `Helvetica`, same host): `cell_h` −1…−6 px,
-  `ascent` up to −6.3 px, `m` advance within ±0.55 px. fontdb does not
-  enumerate the hidden macOS system face, so `load_system_ui_font` falls
-  through to Helvetica. Filed as **`eseq-linux.42`** (P2).
+  `ascent` up to −6.3 px, `m` advance within ±0.55 px. Later investigation
+  established that fontdb does enumerate `.SFNS-Regular`, but fontdue 0.9
+  rasterizes its glyphs to empty bitmaps. Loading SFNS explicitly would make
+  proportional text invisible. `load_system_ui_font` therefore selects the
+  bundled, fontdue-renderable Helvetica face deliberately. The resulting
+  metric divergence is **ACCEPTED** under **`eseq-linux.42`**.
 * **2-vs-3** (`Helvetica` → `NimbusSansNarrow-Regular`): `m` advance/`cell_w`
   −0.98…−4.8 px (condensed face), `leading` +1.3…+6.4 px, `cell_h` +1…+7 px.
   This is exactly the already-filed **`eseq-linux.19`** (P2): the Linux
@@ -103,8 +106,9 @@ and metrics are unpatched. Noted for awareness; no action needed. The entire
 
 **Signed off.** The rasterizer swap is metrically exact where comparable and
 visually an antialiasing-weight change only. All out-of-bounds deltas are
-attributed to font selection and tracked: `eseq-linux.19` (Linux condensed
-face, pre-existing), `eseq-linux.42` (macOS Helvetica-for-.SFNS, filed by
-this judgement), plus cosmetic backlog `eseq-linux.43`. Re-judge against the
-same thresholds after either font-selection fix by re-running the harness
-and `compare_metrics.py`.
+attributed to font selection: `eseq-linux.19` fixed the Linux condensed face;
+`eseq-linux.42` records macOS Helvetica-for-SFNS as an intentional fallback
+because SFNS produces no visible fontdue glyphs; cosmetic weight differences
+remain in backlog `eseq-linux.43`. Re-judge against the same thresholds after
+any future font-selection or rasterizer change by re-running the harness and
+`compare_metrics.py`.

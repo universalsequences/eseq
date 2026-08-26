@@ -22,6 +22,9 @@ tables.
 * Host: MacBook Pro, Apple M1 Max, macOS 26.5.1 (25F80), arm64.
 * Display: built-in Liquid Retina XDR, 3024×1964, backing scale factor 2.0.
 * Resolved fonts: `JetBrainsMono-Regular` (mono), `Helvetica` (proportional).
+  Helvetica is the deliberate macOS fallback: fontdb enumerates the real SFNS
+  face, but fontdue 0.9 rasterizes its glyphs to empty bitmaps. The bundled,
+  fontdue-renderable Helvetica face therefore remains selected explicitly.
 
 ### `coretext-macos-arm64`
 

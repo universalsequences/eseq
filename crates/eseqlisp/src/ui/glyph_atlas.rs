@@ -300,6 +300,14 @@ fn load_named_font(name: &str) -> Option<NamedFontResolution> {
     })
 }
 
+/// SFNS is the real macOS system UI face, but fontdue 0.9 produces empty
+/// bitmaps for its glyphs. Helvetica is bundled with macOS, is renderable by
+/// fontdue, and preserves the pre-fontdue UI's general proportions better than
+/// an arbitrary generic-sans resolution. Keep this choice explicit: asking for
+/// SFPro-Regular or .AppleSystemUIFont does not resolve SFNS through fontdb.
+#[cfg(target_os = "macos")]
+const MACOS_SYSTEM_UI_FONT: &str = "Helvetica";
+
 #[cfg(target_os = "linux")]
 const LINUX_SYSTEM_UI_FONT_PREFERENCES: &[&str] = &[
     "DejaVu Sans",
@@ -311,10 +319,8 @@ const LINUX_SYSTEM_UI_FONT_PREFERENCES: &[&str] = &[
 
 fn load_system_ui_font() -> Option<LoadedFont> {
     #[cfg(target_os = "macos")]
-    for name in ["SFPro-Regular", ".AppleSystemUIFont", "Helvetica"] {
-        if let Some(font) = load_exact_named_font(name) {
-            return Some(font);
-        }
+    if let Some(font) = load_exact_named_font(MACOS_SYSTEM_UI_FONT) {
+        return Some(font);
     }
     #[cfg(target_os = "linux")]
     for name in LINUX_SYSTEM_UI_FONT_PREFERENCES {
@@ -937,6 +943,19 @@ mod tests {
         assert!(
             Arc::ptr_eq(&small.font, &large.font),
             "atlas size changes must not reparse the selected font"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn system_ui_font_is_the_deliberate_renderable_macos_fallback() {
+        let loaded = load_system_ui_font().expect("the bundled macOS UI fallback");
+        assert_eq!(loaded.post_script_name, MACOS_SYSTEM_UI_FONT);
+
+        let (metrics, pixels) = loaded.font.rasterize('H', 20.0);
+        assert!(
+            metrics.width > 0 && metrics.height > 0 && pixels.iter().any(|pixel| *pixel != 0),
+            "{MACOS_SYSTEM_UI_FONT} must produce visible glyphs through fontdue"
         );
     }
 
