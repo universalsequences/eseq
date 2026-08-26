@@ -36141,10 +36141,10 @@
                     .line_height((font_size * 10.0).round() as u16)
             }
 
-            fn ascent_px(&self, font_size: f32) -> f32 {
+            fn cap_height_px(&self, font_size: f32) -> f32 {
                 self.0
                     .borrow_mut()
-                    .ascent((font_size * 10.0).round() as u16)
+                    .cap_height((font_size * 10.0).round() as u16)
             }
         }
 

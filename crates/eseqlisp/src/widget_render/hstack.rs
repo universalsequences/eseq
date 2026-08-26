@@ -200,8 +200,8 @@ mod tests {
             font_size
         }
 
-        fn ascent_px(&self, font_size: f32) -> f32 {
-            if font_size < 9.0 { font_size * 0.75 } else { font_size * 0.7 }
+        fn cap_height_px(&self, font_size: f32) -> f32 {
+            font_size * 0.7
         }
     }
 
@@ -285,6 +285,11 @@ mod tests {
         let picker_baseline = rects[1].row
             + super::super::widget_baseline_offset(&children[1], sizes[1], &ctx);
         assert!((label_baseline - picker_baseline).abs() < 0.0001);
-        assert!((rects[0].row - rects[1].row).abs() < 0.0001);
+        // Rendered baselines, not widget bottoms: aligning the bottom edges of
+        // a 0.4-cell label and a 1.0-cell picker would leave the label a long
+        // way below where its own text actually sits.
+        assert!(
+            ((rects[0].row + sizes[0].height) - (rects[1].row + sizes[1].height)).abs() > 0.0001
+        );
     }
 }

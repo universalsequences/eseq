@@ -93,9 +93,9 @@ mod inner {
             self.fonts.borrow_mut().line_height(size_tenths)
         }
 
-        fn ascent_px(&self, font_size: f32) -> f32 {
+        fn cap_height_px(&self, font_size: f32) -> f32 {
             let size_tenths = (font_size * 10.0).round() as u16;
-            self.fonts.borrow_mut().ascent(size_tenths)
+            self.fonts.borrow_mut().cap_height(size_tenths)
         }
     }
 
@@ -1601,6 +1601,8 @@ fragment float4 live_spectrogram_frag(
     struct CachedProportionalTextLayout {
         text_width_px: f32,
         line_height_px: f32,
+        descent_px: f32,
+        cap_height_px: f32,
         glyphs: Vec<CachedGlyphPlacement>,
         last_used_frame: u64,
     }
@@ -1727,6 +1729,8 @@ fragment float4 live_spectrogram_frag(
                 let layout = CachedProportionalTextLayout {
                     text_width_px: pen_x,
                     line_height_px: prop_atlas.line_height(key.size_tenths),
+                    descent_px: prop_atlas.descent(key.size_tenths),
+                    cap_height_px: prop_atlas.cap_height(key.size_tenths),
                     glyphs,
                     last_used_frame: self.frame_index,
                 };
@@ -7390,9 +7394,16 @@ fragment float4 live_spectrogram_frag(
             let base_x_px = run.col * mono_cell_w + align_extra_px;
             let base_y_px = run.row * mono_cell_h;
 
-            // Vertical centering: offset glyph bitmap so it's centered within
-            // one mono cell height (widgets center text assuming 1.0 cell units).
-            let y_offset = (mono_cell_h - layout.line_height_px) * 0.5 * scale;
+            // Vertical centering: place the baseline so the cap band is
+            // centered within one mono cell height (widgets center text
+            // assuming 1.0 cell units), then back out to the top of the glyph
+            // raster, whose own baseline sits `descent` above its bottom edge.
+            let baseline_px = crate::ui::glyph_atlas::centered_text_baseline_px(
+                mono_cell_h,
+                layout.cap_height_px,
+                scale,
+            );
+            let y_offset = baseline_px - (layout.line_height_px - layout.descent_px) * scale;
             let mut run_quads = 0;
 
             for glyph in &layout.glyphs {

@@ -142,8 +142,11 @@ pub fn layout_root_matches_viewport(layout: &LayoutNode, cols: f32, rows: f32) -
 pub trait TextMeasurer {
     fn measure_text_px(&self, text: &str, font_size: f32) -> f32;
     fn line_height_px(&self, font_size: f32) -> f32;
-    fn ascent_px(&self, font_size: f32) -> f32 {
-        self.line_height_px(font_size) * 0.75
+    /// Ink height of a capital above the baseline. Vertical centering aligns
+    /// this band, not the line box, so text reads as centered whatever the
+    /// font's ascent/descent split happens to be.
+    fn cap_height_px(&self, font_size: f32) -> f32 {
+        self.line_height_px(font_size) * 0.7
     }
 }
 

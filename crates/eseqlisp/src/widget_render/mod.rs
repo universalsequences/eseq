@@ -1288,25 +1288,22 @@ pub fn widget_baseline_offset(node: &Value, size: Size, ctx: &MeasureCtx<'_>) ->
         .max(0.0)
 }
 
-/// Baseline used by `GpuProportionalTextPrimitive`: its line box is centered
-/// inside one monospace layout cell, then glyphs are positioned from the
-/// font's real ascent. `row_offset` is the primitive's row within its widget.
+/// Baseline used by `GpuProportionalTextPrimitive`: its cap band is centered
+/// inside one monospace layout cell. Must stay in step with the renderers'
+/// `centered_text_baseline_px`, or baseline-aligned rows drift apart from the
+/// glyphs they are aligning to. `row_offset` is the primitive's row within its
+/// widget.
 pub fn proportional_text_baseline_offset(
     font_size: f32,
     row_offset: f32,
     ctx: &MeasureCtx<'_>,
 ) -> f32 {
     let cell_h = ctx.cell_h.max(1.0);
-    let (line_height, ascent) = ctx
+    let cap_height = ctx
         .text_measurer
-        .map(|measurer| {
-            (
-                measurer.line_height_px(font_size),
-                measurer.ascent_px(font_size),
-            )
-        })
-        .unwrap_or((cell_h, cell_h * 0.75));
-    row_offset + (cell_h - line_height) * 0.5 / cell_h + ascent / cell_h
+        .map(|measurer| measurer.cap_height_px(font_size))
+        .unwrap_or(cell_h * 0.7);
+    row_offset + crate::ui::glyph_atlas::centered_text_baseline_px(cell_h, cap_height, 1.0) / cell_h
 }
 
 /// Widgets that render as frame-anchored overlay panels (subtree diverted to

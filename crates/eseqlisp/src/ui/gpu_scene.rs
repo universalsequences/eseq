@@ -21,7 +21,7 @@ use crate::ui::gpu_geometry::{
     ClipStack, ImageVertex, PatchCableInstance, ScissorRect, Vertex, push_solid_quad_vertices,
     push_solid_rect_vertices,
 };
-use crate::ui::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas};
+use crate::ui::glyph_atlas::{self, GlyphAtlas, ProportionalGlyphAtlas};
 use crate::vm::Value;
 use crate::widget_render::{self, WidgetInstance};
 
@@ -407,6 +407,8 @@ struct CachedGlyphPlacement {
 struct CachedProportionalTextLayout {
     text_width_px: f32,
     line_height_px: f32,
+    descent_px: f32,
+    cap_height_px: f32,
     glyphs: Vec<CachedGlyphPlacement>,
     last_used_frame: u64,
 }
@@ -471,6 +473,8 @@ impl PropTextLayoutCache {
             let layout = CachedProportionalTextLayout {
                 text_width_px: pen_x,
                 line_height_px: prop_atlas.line_height(key.size_tenths),
+                descent_px: prop_atlas.descent(key.size_tenths),
+                cap_height_px: prop_atlas.cap_height(key.size_tenths),
                 glyphs,
                 last_used_frame: self.frame_index,
             };
@@ -522,9 +526,13 @@ pub(crate) fn build_proportional_text_quads(
         let base_x_px = run.col * mono_cell_w + align_extra_px;
         let base_y_px = run.row * mono_cell_h;
 
-        // Vertical centering: offset glyph bitmap so it's centered within one
-        // mono cell height (widgets center text assuming 1.0 cell units).
-        let y_offset = (mono_cell_h - layout.line_height_px) * 0.5 * scale;
+        // Vertical centering: place the baseline so the cap band is centered
+        // within one mono cell height (widgets center text assuming 1.0 cell
+        // units), then back out to the top of the glyph raster, whose own
+        // baseline sits `descent` above its bottom edge.
+        let baseline_px =
+            glyph_atlas::centered_text_baseline_px(mono_cell_h, layout.cap_height_px, scale);
+        let y_offset = baseline_px - (layout.line_height_px - layout.descent_px) * scale;
 
         for glyph in &layout.glyphs {
             if glyph.raster_w == 0 || glyph.raster_h == 0 {

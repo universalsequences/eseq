@@ -28,6 +28,14 @@ const ATLAS_SIZE: usize = 1024;
 const PROP_ATLAS_SIZE: usize = 2048;
 const GLYPH_PADDING: usize = 2;
 
+/// Glyphs whose ink defines the cap band used for vertical centering. Flat-
+/// topped capitals only: round ones overshoot the cap line.
+const CAP_HEIGHT_REFERENCE_GLYPHS: [char; 2] = ['H', 'X'];
+
+/// Cap height as a fraction of ascent, for fonts that render no reference
+/// glyph at all.
+const FALLBACK_CAP_HEIGHT_RATIO: f32 = 0.72;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FontLineMetrics {
     pub ascent: f32,
@@ -40,6 +48,19 @@ impl FontLineMetrics {
     pub fn line_height(self) -> f32 {
         (self.ascent + self.descent + self.leading).ceil()
     }
+}
+
+/// Distance from the top of a monospace layout cell to the baseline a
+/// proportional run should sit on, chosen so the font's cap band is optically
+/// centered in the cell.
+///
+/// Centering the font's *line box* instead looks right only when the space
+/// above the caps happens to match the descender space below the baseline.
+/// Helvetica -- what macOS falls back to now that CoreText no longer resolves
+/// the system UI font for us -- has an hhea ascent equal to its cap height, so
+/// line-box centering pushes every glyph up by half the descent.
+pub fn centered_text_baseline_px(cell_h: f32, cap_height_px: f32, scale: f32) -> f32 {
+    cell_h * 0.5 + cap_height_px * scale * 0.5
 }
 
 /// A CPU-owned R8 atlas. Keeping the authoritative bitmap outside a graphics
@@ -469,6 +490,7 @@ impl GlyphAtlas {
 pub struct SizedFontCache {
     font: Arc<Font>,
     line_metrics: HashMap<u16, FontLineMetrics>,
+    cap_heights: HashMap<u16, f32>,
     scale: f32,
     pub post_script_name: String,
 }
@@ -482,6 +504,7 @@ impl SizedFontCache {
         Some(Self {
             font: loaded.font,
             line_metrics: HashMap::new(),
+            cap_heights: HashMap::new(),
             scale: scale as f32,
             post_script_name: loaded.post_script_name,
         })
@@ -508,6 +531,32 @@ impl SizedFontCache {
 
     pub fn descent(&mut self, size_tenths: u16) -> f32 {
         self.metrics(size_tenths).map(|m| m.descent).unwrap_or(0.0)
+    }
+
+    /// Rasterized cap height: how far the ink of a capital reaches above the
+    /// baseline at this size. Measured rather than read from OS/2 so it
+    /// matches the pixels the atlas actually holds, including hinting.
+    pub fn cap_height(&mut self, size_tenths: u16) -> f32 {
+        if let Some(cap) = self.cap_heights.get(&size_tenths) {
+            return *cap;
+        }
+        let px = size_tenths as f32 / 10.0 * self.scale;
+        let measured = CAP_HEIGHT_REFERENCE_GLYPHS
+            .iter()
+            .map(|ch| {
+                let metrics = self.font.metrics(*ch, px);
+                (metrics.ymin + metrics.height as i32) as f32
+            })
+            .fold(0.0_f32, f32::max);
+        // A font that cannot draw the reference glyphs still needs a sane
+        // band; fall back to the usual cap-height-to-ascent ratio.
+        let cap = if measured > 0.0 {
+            measured
+        } else {
+            self.ascent(size_tenths) * FALLBACK_CAP_HEIGHT_RATIO
+        };
+        self.cap_heights.insert(size_tenths, cap);
+        cap
     }
 
     pub fn char_advance(&mut self, ch: char, size_tenths: u16) -> f32 {
@@ -568,6 +617,10 @@ impl ProportionalGlyphAtlas {
 
     pub fn descent(&mut self, size_tenths: u16) -> f32 {
         self.fonts.descent(size_tenths)
+    }
+
+    pub fn cap_height(&mut self, size_tenths: u16) -> f32 {
+        self.fonts.cap_height(size_tenths)
     }
 
     pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
@@ -913,6 +966,61 @@ mod tests {
             face.families,
             face.stretch
         );
+    }
+
+    /// Ink center of a capital, in device pixels from the top of the mono cell
+    /// it is centered in — mirrors what `build_proportional_text_quads` does.
+    fn centered_ink_center_px(
+        atlas: &mut ProportionalGlyphAtlas,
+        ch: char,
+        size_tenths: u16,
+        cell_h: f32,
+    ) -> f32 {
+        let entry = *atlas.get_or_rasterize(ch, size_tenths).expect("glyph");
+        let line_height = atlas.line_height(size_tenths);
+        let descent = atlas.descent(size_tenths);
+        let cap = atlas.cap_height(size_tenths);
+        let y_offset =
+            centered_text_baseline_px(cell_h, cap, 1.0) - (line_height - descent);
+
+        let atlas_w = atlas.bitmap.width();
+        let x0 = (entry.uv_min[0] * atlas_w as f32).round() as usize;
+        let y0 = (entry.uv_min[1] * atlas.bitmap.height() as f32).round() as usize;
+        let pixels = atlas.bitmap.pixels();
+        let inked = |row: usize| {
+            (0..entry.raster_w).any(|col| pixels[(y0 + row) * atlas_w + x0 + col] > 8)
+        };
+        let top = (0..entry.raster_h).find(|row| inked(*row)).expect("ink");
+        let bottom = (0..entry.raster_h)
+            .rev()
+            .find(|row| inked(*row))
+            .expect("ink")
+            + 1;
+        y_offset + (top + bottom) as f32 / 2.0
+    }
+
+    #[test]
+    fn capitals_center_vertically_in_their_layout_cell() {
+        let mut atlas = ProportionalGlyphAtlas::new(2.0).expect("proportional atlas");
+
+        for size_tenths in [100_u16, 120, 140] {
+            for cell_h in [20.0_f32, 26.0, 31.0] {
+                for ch in ['H', 'S', 'R', '1'] {
+                    let ink_center =
+                        centered_ink_center_px(&mut atlas, ch, size_tenths, cell_h);
+                    let offset = ink_center - cell_h * 0.5;
+                    // Round capitals overshoot the cap line slightly and the
+                    // rasterizer rounds to whole pixels; a full pixel of slack
+                    // at 2x is a quarter of what line-box centering drifted by.
+                    assert!(
+                        offset.abs() <= 1.0,
+                        "'{ch}' at {size_tenths} tenths in a {cell_h}px cell is off center \
+                         by {offset:+.2}px (font {})",
+                        atlas.fonts.post_script_name
+                    );
+                }
+            }
+        }
     }
 
     #[test]
