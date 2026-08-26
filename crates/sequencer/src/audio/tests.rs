@@ -19,7 +19,8 @@ use super::{
     live_key_release_cuts_voice, resolve_live_keyboard_transpose,
     resolve_snapshot_instrument_defaults,
     resolve_slice, resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
-    select_output_channels, select_output_config, store_active_keyboard_note,
+    select_output_channels, select_output_config, select_output_config_with_preferred_rate,
+    store_active_keyboard_note,
     swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
     ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
     BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
@@ -1108,6 +1109,60 @@ fn active_keyboard_note_clear_by_lid_preserves_other_slot_voices() {
     let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
 
     assert_eq!(note.voices(), &[voices[0], voices[2]]);
+}
+
+#[test]
+fn output_config_prefers_supported_graph_rate_hint_over_virtual_device_default() {
+    let ranges = [OutputFormatRange {
+        channels: 2,
+        min_sample_rate: 44_100,
+        max_sample_rate: 48_000,
+        supports_f32: true,
+    }];
+
+    assert_eq!(
+        select_output_config_with_preferred_rate(Some(48_000), 44_100, 2, ranges),
+        Some(OutputDeviceConfig {
+            sample_rate: 48_000,
+            channels: 2,
+        })
+    );
+}
+
+#[test]
+fn output_config_ignores_unsupported_graph_rate_hint() {
+    let ranges = [OutputFormatRange {
+        channels: 2,
+        min_sample_rate: 44_100,
+        max_sample_rate: 48_000,
+        supports_f32: true,
+    }];
+
+    assert_eq!(
+        select_output_config_with_preferred_rate(Some(96_000), 44_100, 2, ranges),
+        Some(OutputDeviceConfig {
+            sample_rate: 44_100,
+            channels: 2,
+        })
+    );
+}
+
+#[test]
+fn output_config_without_graph_rate_hint_keeps_device_default() {
+    let ranges = [OutputFormatRange {
+        channels: 2,
+        min_sample_rate: 44_100,
+        max_sample_rate: 48_000,
+        supports_f32: true,
+    }];
+
+    assert_eq!(
+        select_output_config_with_preferred_rate(None, 44_100, 2, ranges),
+        Some(OutputDeviceConfig {
+            sample_rate: 44_100,
+            channels: 2,
+        })
+    );
 }
 
 #[test]

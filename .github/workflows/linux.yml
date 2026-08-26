@@ -41,6 +41,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             libasound2-dev \
+            libpipewire-0.3-dev \
             libudev-dev \
             libwayland-dev \
             libxkbcommon-dev \
@@ -50,8 +51,10 @@ jobs:
             libxrandr-dev \
             mesa-vulkan-drivers \
             fonts-jetbrains-mono
-        # libasound2-dev is cpal's ALSA backend. The X11/Wayland/xkbcommon
-        # headers are what winit links against even in a headless test build.
+        # libasound2-dev is cpal's ALSA backend; libpipewire-0.3-dev exposes
+        # the active graph clock so PipeWire ALSA clients avoid resampling.
+        # The X11/Wayland/xkbcommon headers are what winit links against even
+        # in a headless test build.
         # mesa-vulkan-drivers provides lavapipe so the headless wgpu captures
         # find an adapter instead of skipping. fonts-jetbrains-mono is not
         # optional: glyph metrics come from `fontdb`'s system font database and

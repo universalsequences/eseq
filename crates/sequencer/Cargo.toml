@@ -28,6 +28,11 @@ crossbeam-queue = "0.3.13"
 # Pure-Rust system-bus client for the RealtimeKit fallback. This avoids a
 # libdbus development/runtime dependency in both source builds and packages.
 zbus = "5.12"
+# CPAL uses the ALSA backend on Linux. Resolve whether pcm.default is the
+# PipeWire plugin, then read PipeWire's actual graph clock instead of trusting
+# the virtual PCM's nominal default rate.
+alsa-sys = "0.3"
+pipewire = "0.10"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # The metal_seq app shell renders through eseqlisp's wgpu backend everywhere

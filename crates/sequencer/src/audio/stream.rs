@@ -227,7 +227,13 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
             supports_f32: range.sample_format() == cpal::SampleFormat::F32,
         })
         .collect();
-    let selected = select_output_config(
+    #[cfg(target_os = "linux")]
+    let preferred_sample_rate = pipewire::default_output_graph_rate();
+    #[cfg(not(target_os = "linux"))]
+    let preferred_sample_rate = None;
+
+    let selected = select_output_config_with_preferred_rate(
+        preferred_sample_rate,
         default_config.sample_rate().0,
         default_config.channels(),
         ranges,
@@ -242,6 +248,17 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
             default_config.sample_rate().0
         )
     })?;
+
+    if let Some(graph_rate) = preferred_sample_rate {
+        if selected.sample_rate == graph_rate {
+            eprintln!("audio: matched output to the PipeWire graph rate at {graph_rate} Hz");
+        } else {
+            eprintln!(
+                "audio: PipeWire graph rate {graph_rate} Hz is unsupported by the default output; using {} Hz",
+                selected.sample_rate
+            );
+        }
+    }
 
     Ok((selected.sample_rate, selected.channels))
 }

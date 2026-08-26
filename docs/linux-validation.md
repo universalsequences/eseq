@@ -415,9 +415,12 @@ fix targets whichever one the numbers name.
 `.github/workflows/linux.yml` runs `cargo check --workspace --all-targets` and
 the test command above on `ubuntu-24.04`, so the port cannot rot silently.
 
-Three of its system dependencies are load-bearing and easy to get wrong:
+Four of its system dependencies are load-bearing and easy to get wrong:
 
 - `libasound2-dev` — cpal's ALSA backend; the workspace does not build without it.
+- `libpipewire-0.3-dev` — native graph-clock discovery for PipeWire-routed ALSA
+  output; without its headers and pkg-config metadata the Linux sequencer does
+  not build.
 - `mesa-vulkan-drivers` — lavapipe, so the headless wgpu captures find an
   adapter instead of printing `SKIPPED: no wgpu adapter available` and asserting
   nothing.

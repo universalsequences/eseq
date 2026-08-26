@@ -25,8 +25,10 @@ under [Fetching the DGen compiler](#fetching-the-dgen-compiler).
   is handled via `WindowEvent::ScaleFactorChanged` and
   `wp-fractional-scale-v1`. Running under X11/XWayland is unsupported and
   untested, and will not pick up the compositor scale.
-- **ALSA development libraries** — `libasound2-dev` on Debian/Ubuntu,
-  `alsa-lib` on Arch (cpal's audio backend).
+- **Audio development libraries** — `libasound2-dev` and
+  `libpipewire-0.3-dev` on Debian/Ubuntu; `alsa-lib` and `pipewire` on Arch.
+  CPAL uses ALSA for output, while the PipeWire API supplies the active graph
+  clock when `pcm.default` routes through the PipeWire ALSA plugin.
 - **Windowing libraries** — `libwayland-dev`, `libxkbcommon-dev`, and the X11
   headers (`libx11-dev`, `libxcursor-dev`, `libxi-dev`, `libxrandr-dev`) that
   winit links against; on Arch these come with `wayland` and `libxkbcommon`.
