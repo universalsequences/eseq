@@ -4537,19 +4537,48 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let staged_path = crate::app_paths::app_paths()
             .dgen_toolchain_root()
             .join("include/dgen_runtime.h");
-        let staged = std::fs::read(&staged_path).unwrap_or_else(|e| {
+        let staged = std::fs::read_to_string(&staged_path).unwrap_or_else(|e| {
             panic!(
                 "read staged toolchain header {}: {e} (run rebuild_dgenlisp_tool.sh \
                  to stage the vendored toolchain)",
                 staged_path.display()
             )
         });
-        let staged_sha = format!("{:x}", Sha256::digest(&staged));
+
+        // Hash only the ABI section dgen_abi_v1.h actually vendors, not the
+        // whole upstream header: its math/intrinsics section is per-target
+        // (arm_neon.h on the mac stage, dgen_simd_compat.h on the Linux one)
+        // and one whole-file hash cannot satisfy both pins.
+        const ABI_SECTION_START: &str = "typedef void *DGenFFTSetupV1;";
+        const ABI_SECTION_END: &str =
+            "DGEN_EXPORT void dgen_set_param_value_v1(int32_t cell_id, float value);";
+        let start = staged.find(ABI_SECTION_START).unwrap_or_else(|| {
+            panic!(
+                "staged header {} has no `{ABI_SECTION_START}` line — the ABI \
+                 section markers this test keys on moved; re-vendor \
+                 audiograph/dgen_abi_v1.h and update both the markers and its \
+                 Source-sha256 comment",
+                staged_path.display()
+            )
+        });
+        let end = staged[start..]
+            .find(ABI_SECTION_END)
+            .map(|offset| start + offset + ABI_SECTION_END.len())
+            .unwrap_or_else(|| {
+                panic!(
+                    "staged header {} has no `{ABI_SECTION_END}` line after the \
+                     ABI section start — the markers this test keys on moved; \
+                     re-vendor audiograph/dgen_abi_v1.h and update both the \
+                     markers and its Source-sha256 comment",
+                    staged_path.display()
+                )
+            });
+        let staged_sha = format!("{:x}", Sha256::digest(staged[start..end].as_bytes()));
         assert_eq!(
             staged_sha, recorded_sha,
-            "staged include/dgen_runtime.h drifted from the recorded hash — \
-             re-vendor audiograph/dgen_abi_v1.h from the staged header's ABI \
-             section and update its Source-sha256 comment"
+            "the staged include/dgen_runtime.h ABI section drifted from the \
+             recorded hash — re-vendor audiograph/dgen_abi_v1.h from the staged \
+             header's ABI section and update its Source-sha256 comment"
         );
     }
 
