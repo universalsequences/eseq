@@ -23,6 +23,7 @@ eseqlisp = { path = "../eseqlisp" }
 arrayvec = "0.7"
 notify = "6"
 fs2 = "0.4"
+crossbeam-queue = "0.3.13"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Pure-Rust system-bus client for the RealtimeKit fallback. This avoids a
 # libdbus development/runtime dependency in both source builds and packages.

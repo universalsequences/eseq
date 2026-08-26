@@ -75,11 +75,20 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     // Reading live num_tracks/epochs independently can observe the middle of
     // an add-track publication and clear valid events before the scheduler can
     // possibly have produced replacements.
-    let scheduler_snapshot_version = data.state.scheduler_snapshot_version();
-    if scheduler_snapshot_version != data.scheduler_snapshot_version {
-        data.scheduler_snapshot = data.state.latest_scheduler_snapshot();
-        data.scheduler_snapshot_version = scheduler_snapshot_version;
-    }
+    //
+    // Both halves of this refresh are realtime-safe (bead eseq-sj01): the
+    // snapshot arrives through a bounded lock-free ring rather than
+    // `latest_scheduler_snapshot()`'s `std::sync::Mutex` (no priority
+    // inheritance, so a publish landing here could futex-wait the audio thread
+    // behind the UI thread), and the outgoing `Arc` is handed to the reclaimer
+    // instead of being dropped here. When this thread held the last reference,
+    // that drop freed the whole deep structure — per-step chord `Vec`s,
+    // per-step effect p-locks, `String`-bearing effect descriptors, order tens
+    // of thousands of frees — inside the block budget.
+    data.state.snapshot_handoff().refresh(
+        &mut data.scheduler_snapshot,
+        &mut data.scheduler_snapshot_version,
+    );
     let num_tracks = data.scheduler_snapshot.transport.num_tracks;
     let topology_epoch = data.scheduler_snapshot.transport.topology_epoch;
     if num_tracks != data.last_num_tracks || topology_epoch != data.last_topology_epoch {

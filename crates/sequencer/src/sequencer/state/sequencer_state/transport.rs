@@ -129,7 +129,10 @@ impl SequencerState {
         self.reset_playheads();
         self.transport.playing.store(true, Ordering::Relaxed);
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
-        self.publish_scheduler_snapshot();
+        // Transport atomics only: the published tracks are unchanged, so reuse
+        // their `Arc`s instead of deep-capturing (and later deep-freeing) the
+        // whole project. See `publish_transport_only` (bead eseq-sj01).
+        self.publish_transport_only();
     }
 
     pub fn stop_playback(&self) {
@@ -140,12 +143,12 @@ impl SequencerState {
         self.transport.record_clock.invalidate();
         self.reset_playheads();
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
-        self.publish_scheduler_snapshot();
+        self.publish_transport_only();
     }
 
     pub fn toggle_play(&self) -> bool {
         let playing = self.toggle_play_no_publish();
-        self.publish_scheduler_snapshot();
+        self.publish_transport_only();
         playing
     }
 
