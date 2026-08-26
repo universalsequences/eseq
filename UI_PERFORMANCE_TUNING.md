@@ -541,3 +541,69 @@ Two dead ends worth recording so they are not retried:
   contribute materially here: on this fixture the `*samples*` root rerun is
   2.0-2.3 ms, because an instrument track shows the presets tab rather than a
   large sample list. It is real but independent, and stays open.
+
+## Expanded step-slider drag probe
+
+`tests::project_92_full_layout_expanded_step_slider_drag_end_to_end_perf`
+reproduces the expanded-editor gesture from eseq-z85k. It loads project 92 into
+the production seven-pane layout (`*transport*`, `*samples*`, `*sequencer*`,
+`*step*`, `*track*`, `*mixer*`, and `*fx*`), expands one track and then three
+tracks, presses a velocity vslider, and sends one precise drag event across six
+columns. The normal interpolation path produces 49 sub-samples and 51 hit tests
+per event. Each configuration uses 5 warmups and 20 measured samples and asserts
+all crossed values, both endpoints, the final cursor, and the bound header value.
+
+Run the release probe with:
+
+```sh
+cargo nextest run --release -p sequencer --run-ignored all \
+  -E 'test(=tests::project_92_full_layout_expanded_step_slider_drag_end_to_end_perf)' \
+  --no-capture
+```
+
+### Available-host before and after (2026-08-26)
+
+These provisional measurements use an Apple M1 Max (10 cores, 32 GiB), macOS
+26.5.1, release profile, a 220x110-cell viewport, and the headless retained-
+primitive path. The pre-fix run had load averages 12.97/17.96/15.74. The
+post-fix run had elevated concurrent load, 14.29/27.79/31.35, so the result is
+deliberately not used as a cross-machine absolute ceiling. The
+x86_64 Linux before/after run and platform ceiling remain tracked by
+`eseq-z85k.2`.
+
+| Expanded tracks | Before median / p95 | After median / p95 | Median speedup |
+|---|---:|---:|---:|
+| 1 | 110.103 / 116.681 ms | 9.514 / 9.867 ms | 11.6x |
+| 3 | 145.180 / 150.541 ms | 9.929 / 10.358 ms | 14.6x |
+
+Per-event work changed as follows:
+
+| Expanded tracks | Subtree reruns / roots | Relayout reused / subtree | LayoutNode clones | Interpolation / hit tests |
+|---|---:|---:|---:|---:|
+| 1 before | 7 / 7 | 7 / 7 | 5,045 | 49 / 51 |
+| 1 after | 0 / 0 | 0 / 0 | 197 | 49 / 51 |
+| 3 before | 9 / 9 | 7 / 7 | 6,317 | 49 / 51 |
+| 3 after | 0 / 0 | 0 / 0 | 197 | 49 / 51 |
+
+Full-buffer reruns and full relayouts were zero both before and after. The fixed
+interpolation and hit-test counts prove the improvement did not drop or defer
+pointer samples. Clone counts collapsed because the removed subtree rerenders
+no longer replace large layout branches; no hit-test behavior was changed.
+
+### Root cause and fix
+
+The expanded step columns already consumed float slots from
+`ExpandedStepProjectionRegistry`, but the sibling quick-control header read the
+cursor value directly from `SEQ.velocities` / `SEQ.track-velocities` (and mode 5
+read `SEQ.syncs`) while rendering the keyed track subtree. Every interpolated
+slider write therefore dirtied the expanded track subtree, rebuilt its Lisp
+widget tree, and relaid it out. With three expanded tracks the plain list write
+also increased fan-out.
+
+The projection now publishes the active mode's raw cursor value and a numeric
+sync-label index. The header number-picker binds its `:value` to the former; the
+mode-5 dropdown binds `:value-index` to the latter with static label options.
+Cursor, mode, full-viewport, and incremental step writes synchronize those
+fields alongside the existing slot projection. The post-fix zero rerun and
+relayout counts identify this incomplete projection boundary as the owner; the
+input interpolation and hit-test path was not changed speculatively.

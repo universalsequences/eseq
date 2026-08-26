@@ -6621,10 +6621,25 @@
                     )
                     .and_then(|node| find_layout_node_by_widget_type(node, "number-picker"))
                     .expect("expanded velocity header number-picker");
-                    let header_value = match header.props.get("value") {
-                        Some(Value::Number(value)) => *value as f32,
-                        other => panic!("expanded header value must be numeric: {other:?}"),
-                    };
+                    let header_field =
+                        format!("seqv-cursor-param-value-{}", track_ids[TRACK]);
+                    assert!(
+                        matches!(
+                            header.props.get("value"),
+                            Some(Value::ReactiveRef { namespace, field, index: None, .. })
+                                if namespace == "SEQ" && field == &header_field
+                        ),
+                        "expanded header must bind directly to the cursor projection: {:?}",
+                        header.props.get("value")
+                    );
+                    let header_value = editor
+                        .runtime()
+                        .reactive_field_value("SEQ", &header_field)
+                        .and_then(|value| match value {
+                            Value::Number(value) => Some(*value as f32),
+                            _ => None,
+                        })
+                        .expect("expanded header projection value");
                     assert!(
                         (header_value - expected).abs() <= VELOCITY_EPSILON,
                         "header must show cursor step value {expected}, got {header_value}"

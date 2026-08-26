@@ -1226,6 +1226,12 @@
 (def page-active-binding (track-id page)
   (bind-seq (slot-page-active-field track-id page)))
 
+(def expanded-cursor-param-binding (track-id)
+  (bind-seq (str "seqv-cursor-param-value-" track-id)))
+
+(def expanded-cursor-sync-index-binding (track-id)
+  (bind-seq (str "seqv-cursor-sync-index-" track-id)))
+
 (def step-active-binding (track step)
   (bind-seq (str "seq-track-step-active-" track "-" step)))
 
@@ -1241,9 +1247,11 @@
 (def step-param-haptic-binding (track mode step)
   (bind-seq (str "seq-track-step-param-haptic-" track "-" mode "-" step)))
 
-(def expanded-sync-current-label (track track-id)
-  (nth SEQ.sync-labels
-    (floor (+ 0.5 (eseq.seqv-track-params/seqv-param-value-at track 5 (track-current-step track track-id))))))
+(def expanded-sync-label-index (label)
+  (reduce |acc index|
+    (if (= label (nth SEQ.sync-labels index)) index acc)
+    0
+    (range 0 (len SEQ.sync-labels))))
 
 (def set-expanded-cursor (track track-id step)
   (do
@@ -1470,13 +1478,16 @@
           (label (param-header-name track mode)
             :font-size 11 :width (param-header-width mode) :color :white :bg :transparent))
         (if (= mode 5)
-          (box :width 8 :height 1.3
-            :key (str "expanded-sync-label-" track-id)
-            (label (expanded-sync-current-label track track-id)
-              :font-size 11 :color :white :bg :transparent))
+          (dropdown
+            :key (str "expanded-sync-picker-" track-id)
+            :value-index (expanded-cursor-sync-index-binding track-id)
+            :options SEQ.sync-labels
+            :on-change (lambda (label)
+              (set-expanded-current-param track track-id mode (expanded-sync-label-index label)))
+            :width 8 :height 1.3 :font-size 11)
           (number-picker :key (str "expanded-param-number-picker-" track-id)
             :border-color :white
-            :value (eseq.seqv-track-params/seqv-param-value-at track mode (track-current-step track track-id))
+            :value (expanded-cursor-param-binding track-id)
             :min (eseq.seqv-track-params/seqv-track-param-min track mode) :max (eseq.seqv-track-params/seqv-track-param-max track mode) :decimals (eseq.seqv-track-params/seqv-track-param-decimals track mode)
             :on-change (lambda (v) (set-expanded-current-param track track-id mode v))
             :width 8 :height 1.3 :font-size 11))

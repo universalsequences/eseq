@@ -9397,6 +9397,81 @@
         );
     }
 
+    #[test]
+    fn expanded_cursor_param_projection_tracks_cursor_mode_and_incremental_edits() {
+        const TRACK_ID: usize = 7;
+        const CURSOR_STEP: usize = 3;
+        let app = test_app_with_instrument_descriptor(
+            sequencer::effects::EffectDescriptor::builtin_filter(),
+        );
+        let state = &app.state;
+        state.pattern.track_params[0].set_num_steps(16);
+        state.pattern.step_data[0].set(CURSOR_STEP, StepParam::Velocity, 0.35);
+        state.pattern.step_data[0].set(CURSOR_STEP, StepParam::Sync, 4.0);
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], true);
+
+        let velocity_viewport = ExpandedStepViewport {
+            track: 0,
+            track_id: TRACK_ID,
+            page: 0,
+            mode: 0,
+            cursor_step: CURSOR_STEP,
+        };
+        sync_expanded_step_cursor_param_fields(&mut runtime, state, velocity_viewport);
+        assert_eq!(
+            reactive_number(
+                &runtime,
+                "SEQ",
+                &expanded_step_cursor_param_value_field(TRACK_ID),
+            ),
+            Some(0.35_f32 as f64),
+            "the header projection should publish the active mode at the cursor"
+        );
+        assert_eq!(
+            reactive_number(
+                &runtime,
+                "SEQ",
+                &expanded_step_cursor_sync_index_field(TRACK_ID),
+            ),
+            Some(4.0),
+            "the sync label projection should publish a numeric item index"
+        );
+
+        state.pattern.step_data[0].set(CURSOR_STEP, StepParam::Velocity, 0.8);
+        sync_expanded_step_param_slot(
+            &mut runtime,
+            state,
+            velocity_viewport,
+            0,
+            CURSOR_STEP,
+        );
+        assert_eq!(
+            reactive_number(
+                &runtime,
+                "SEQ",
+                &expanded_step_cursor_param_value_field(TRACK_ID),
+            ),
+            Some(0.8_f32 as f64),
+            "an incremental slider edit at the cursor must patch the header projection"
+        );
+
+        let sync_viewport = ExpandedStepViewport {
+            mode: 5,
+            ..velocity_viewport
+        };
+        sync_expanded_step_cursor_param_fields(&mut runtime, state, sync_viewport);
+        assert_eq!(
+            reactive_number(
+                &runtime,
+                "SEQ",
+                &expanded_step_cursor_param_value_field(TRACK_ID),
+            ),
+            Some(4.0),
+            "changing mode must republish the cursor value for that mode"
+        );
+    }
+
     // The instrument p-lock authoring path no longer bumps `ui_epoch` per drag
     // update, so the reactive tick's full expanded-viewport resync no longer
     // repaints the expanded lane's p-lock tick. The presence sync must write
@@ -14978,6 +15053,16 @@
     ) {
         let rt = editor.runtime_mut();
         let page_count = ((step_count + PAGE_SIZE - 1) / PAGE_SIZE).max(1);
+        rt.set_reactive(
+            "SEQ",
+            &expanded_step_cursor_param_value_field(track_id),
+            Value::Number(if mode == 0 { 1.0 } else { 0.0 }),
+        );
+        rt.set_reactive(
+            "SEQ",
+            &expanded_step_cursor_sync_index_field(track_id),
+            Value::Number(0.0),
+        );
         for candidate in 0..((MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE) {
             rt.set_reactive(
                 "SEQ",
@@ -17602,7 +17687,7 @@
             track_id: 0,
             page: 0,
             mode: PROCESS_LANE_MODE_OFFSET,
-            cursor_step: 0,
+            cursor_step: 1,
         };
         sync_expanded_step_param_slot(
             &mut ui_runtime,
@@ -17626,6 +17711,15 @@
                 &expanded_step_slot_param_haptic_field(0, PROCESS_LANE_MODE_OFFSET, 1),
             ),
             Some(1.0)
+        );
+        assert_eq!(
+            reactive_number(
+                &ui_runtime,
+                "SEQ",
+                &expanded_step_cursor_param_value_field(0),
+            ),
+            Some(1.0),
+            "process-lane modes should publish the same cursor projection as step params"
         );
 
         let Value::List(slots) = build_process_slots_value(&state, 0) else {
@@ -27966,7 +28060,43 @@
             "expanded editor should start from the row's left edge, not after the track header"
         );
 
-        let collapse = find_layout_node_by_stable_key_suffix(&expanded_layout, "/expand-0")
+        let sync_tab = find_layout_node_by_stable_key_suffix(
+            &expanded_layout,
+            "/expanded-param-tab-0-5",
+        )
+        .and_then(|node| node.props.get("on-click"))
+        .cloned()
+        .expect("expanded sync parameter tab callback");
+        editor
+            .runtime_mut()
+            .invoke(
+                sync_tab,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("select expanded sync parameter mode");
+        editor.refresh_runtime_side_effects();
+        let sync_layout = editor
+            .widget_layout()
+            .expect("expanded sync-mode layout should build");
+        let sync_picker = find_layout_node_by_stable_key_suffix(
+            &sync_layout,
+            "/expanded-sync-picker-0",
+        )
+        .expect("expanded sync mode should render an indexed dropdown");
+        assert_eq!(sync_picker.widget_type, "dropdown");
+        assert_finite_nonzero_rect(sync_picker, "expanded sync picker");
+        assert!(
+            matches!(
+                sync_picker.props.get("value-index"),
+                Some(Value::ReactiveRef { namespace, field, index: None, .. })
+                    if namespace == "SEQ"
+                        && field == &expanded_step_cursor_sync_index_field(0)
+            ),
+            "sync picker should bind its numeric item index: {:?}",
+            sync_picker.props.get("value-index")
+        );
+
+        let collapse = find_layout_node_by_stable_key_suffix(&sync_layout, "/expand-0")
             .and_then(|node| node.props.get("on-click"))
             .cloned()
             .expect("expanded sequencer row collapse callback");

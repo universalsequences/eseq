@@ -105,6 +105,14 @@ pub(crate) fn expanded_step_page_active_field(track_id: usize, page: usize) -> S
     format!("seqv-page-active-{track_id}-{page}")
 }
 
+pub(crate) fn expanded_step_cursor_param_value_field(track_id: usize) -> String {
+    format!("seqv-cursor-param-value-{track_id}")
+}
+
+pub(crate) fn expanded_step_cursor_sync_index_field(track_id: usize) -> String {
+    format!("seqv-cursor-sync-index-{track_id}")
+}
+
 pub(crate) fn visible_slot_for_step(viewport: ExpandedStepViewport, step: usize) -> Option<usize> {
     let first_step = viewport.page.saturating_mul(PAGE_SIZE);
     let slot = step.checked_sub(first_step)?;
@@ -130,6 +138,81 @@ pub(super) fn expanded_step_param_slider_value(param: StepParam, value: f32) -> 
     } else {
         value
     }
+}
+
+fn expanded_step_param_value(
+    state: &Arc<SequencerState>,
+    viewport: ExpandedStepViewport,
+    mode: usize,
+) -> f32 {
+    let num_steps = state.pattern.track_params[viewport.track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    if viewport.cursor_step >= num_steps {
+        return 0.0;
+    }
+    expanded_step_param_for_mode(mode)
+        .map(|param| {
+            state.pattern.step_data[viewport.track].get(viewport.cursor_step, param)
+        })
+        .or_else(|| {
+            process_lane_value_for_mode(state, viewport.track, mode, viewport.cursor_step)
+        })
+        .unwrap_or(0.0)
+}
+
+pub(crate) fn sync_expanded_step_cursor_param_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    viewport: ExpandedStepViewport,
+) -> bool {
+    let mut dirty = rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_cursor_param_value_field(viewport.track_id),
+            Value::Number(expanded_step_param_value(state, viewport, viewport.mode) as f64),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_cursor_sync_index_field(viewport.track_id),
+            Value::Number(expanded_step_param_value(state, viewport, 5) as f64),
+        )
+        .effects_dirty;
+    dirty
+}
+
+pub(crate) fn sync_expanded_step_cursor_param_change(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    viewport: ExpandedStepViewport,
+    mode: usize,
+    step: usize,
+) -> bool {
+    if step != viewport.cursor_step {
+        return false;
+    }
+    let mut dirty = false;
+    if mode == viewport.mode {
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &expanded_step_cursor_param_value_field(viewport.track_id),
+                Value::Number(expanded_step_param_value(state, viewport, mode) as f64),
+            )
+            .effects_dirty;
+    }
+    if mode == 5 {
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &expanded_step_cursor_sync_index_field(viewport.track_id),
+                Value::Number(expanded_step_param_value(state, viewport, 5) as f64),
+            )
+            .effects_dirty;
+    }
+    dirty
 }
 
 pub(crate) fn sync_expanded_step_param_slot(
@@ -171,6 +254,7 @@ pub(crate) fn sync_expanded_step_param_slot(
             Value::Number(value as f64),
         )
         .effects_dirty;
+    dirty |= sync_expanded_step_cursor_param_change(rt, state, viewport, mode, step);
     dirty
 }
 
@@ -270,7 +354,7 @@ pub(crate) fn sync_expanded_step_viewport(
     if viewport.track >= app.tracks.len() {
         return false;
     }
-    let mut dirty = false;
+    let mut dirty = sync_expanded_step_cursor_param_fields(rt, state, viewport);
     let page_count = track_playhead_row_count(state, viewport.track).max(1);
     for page in 0..((MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE) {
         dirty |= rt
