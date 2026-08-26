@@ -661,12 +661,13 @@ impl Editor {
 
     /// Whether the focused widget would consume this key itself.
     ///
-    /// NOTE: widget key handlers mutate their own edit state, so this is safe
-    /// only for keys whose handlers are no-ops when idle — Backspace/Delete are
-    /// guarded on `state.editing` in both the number picker and knob-number.
-    /// Do not call it with digits or Enter, which would *start* or *commit* an
-    /// edit as a side effect; use `focused_widget_captures_numeric_input` for
-    /// the numeric case.
+    /// Text entry is identified declaratively: probing its key handler would
+    /// apply the edit to persistent cursor state before the real dispatch.
+    /// Other widget key handlers may also mutate interaction state, so callers
+    /// must still restrict this probe to keys whose non-text handlers are
+    /// known to be no-ops when idle. Backspace/Delete meet that requirement
+    /// for the number picker and knob-number. Do not call this with digits or
+    /// Enter; use `focused_widget_captures_numeric_input` for numeric input.
     ///
     /// Destructive global shortcuts (Backspace/Delete over a step selection)
     /// must defer to a focused widget only when that widget genuinely handles
@@ -680,14 +681,15 @@ impl Editor {
         modifiers: KeyModifiers,
     ) -> bool {
         self.focused_widget_node().is_some_and(|node| {
-            crate::widget_render::map_key_event(
-                &node,
-                WidgetKeyEvent {
-                    code,
-                    modifiers,
-                },
-            )
-            .is_some()
+            node_captures_text_input(&node)
+                || crate::widget_render::map_key_event(
+                    &node,
+                    WidgetKeyEvent {
+                        code,
+                        modifiers,
+                    },
+                )
+                .is_some()
         })
     }
 

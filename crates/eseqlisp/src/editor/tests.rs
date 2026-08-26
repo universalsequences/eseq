@@ -6301,6 +6301,63 @@ fn focused_widget_consumes_key_only_for_real_key_handlers() {
 }
 
 #[test]
+fn probing_focused_text_input_for_backspace_does_not_move_its_caret() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str("(def name (state \"alec\"))")
+        .expect("define text state");
+    let tree = editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (text-input
+              :key "rename-input"
+              :width 20
+              :value "alec"
+              :on-change |value| (set! name value))
+            "#,
+        )
+        .expect("build text input")
+        .expect("text input tree");
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(tree.clone()), None);
+    editor.runtime_mut().set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    let layout = editor.widget_layout().expect("text input layout");
+    let input = super::find_layout_node_by_stable_key(layout.as_ref(), "rename-input")
+        .expect("rename input")
+        .clone();
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            (input.rect.col + input.rect.width - 1.0) as u16,
+            input.rect.row as u16,
+        ),
+        0,
+        0,
+        30,
+        8,
+        input.rect.col + input.rect.width - 1.0,
+        input.rect.row + 0.5,
+    );
+
+    assert!(editor.focused_widget_consumes_key(
+        KeyCode::Backspace,
+        KeyModifiers::NONE,
+    ));
+    editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+    assert_eq!(
+        editor.runtime_mut().eval_str("name"),
+        Ok(Some(Value::String("ale".to_string()))),
+        "the consumption probe must not move the caret before dispatch"
+    );
+}
+
+#[test]
 fn focused_number_picker_escape_cancels_edit_and_runs_global_escape_binding() {
     let init = r#"
         (def escape-count (state 0))
