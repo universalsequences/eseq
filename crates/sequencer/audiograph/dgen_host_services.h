@@ -15,7 +15,14 @@
 
 #include "dgen_abi_v1.h"
 
-/* Returns a process-lifetime static; never NULL. */
+/* Returns process-lifetime statics; never NULL. */
 const DGenHostServicesV1 *eseq_dgen_host_services_v1(void);
+
+/*
+ * The portable C table is exposed separately on every platform for explicit
+ * fallback selection and end-to-end conformance tests. On non-Apple targets
+ * this is distinct from the shipped rustfft-backed table owned by Rust.
+ */
+const DGenHostServicesV1 *eseq_dgen_portable_host_services_v1(void);
 
 #endif

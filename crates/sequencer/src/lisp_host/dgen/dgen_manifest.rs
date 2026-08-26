@@ -678,9 +678,24 @@ pub fn load_dylib(path: &Path) -> Result<LoadedDGenLib, String> {
 /// only its own scratch memory (plus the dylib's internal per-call scratch),
 /// never live node state.
 pub fn load_dylib_prewarmed(manifest: &DGenManifest) -> Result<LoadedDGenLib, String> {
+    load_dylib_prewarmed_with_host_services(manifest, dgen_host_services_v1())
+}
+
+/// Load and prewarm a dylib against an explicitly selected host-services
+/// table. A generated image owns lazily initialized, function-local FFT setup
+/// statics, so its first warm-up and all subsequent renders must use compatible
+/// tables. Callers selecting a non-default table must therefore use a fresh
+/// dylib image and pass that same table while rendering it.
+pub(in crate::lisp_host) fn load_dylib_prewarmed_with_host_services(
+    manifest: &DGenManifest,
+    host_services: *const DGenHostServicesV1,
+) -> Result<LoadedDGenLib, String> {
+    if host_services.is_null() {
+        return Err("DGen host-services table must not be NULL".to_string());
+    }
     let lib = load_dylib(&manifest.dylib_path)?;
     if generated_code_uses_host_fft(&manifest.dylib_path) {
-        prewarm_dgen_process(manifest, &lib);
+        prewarm_dgen_process_with_host_services(manifest, &lib, host_services);
     }
     Ok(lib)
 }
@@ -718,6 +733,15 @@ pub(in crate::lisp_host) fn prewarm_dgen_process(
     manifest: &DGenManifest,
     lib: &LoadedDGenLib,
 ) -> Vec<f32> {
+    prewarm_dgen_process_with_host_services(manifest, lib, dgen_host_services_v1())
+}
+
+pub(in crate::lisp_host) fn prewarm_dgen_process_with_host_services(
+    manifest: &DGenManifest,
+    lib: &LoadedDGenLib,
+    host_services: *const DGenHostServicesV1,
+) -> Vec<f32> {
+    assert!(!host_services.is_null(), "DGen host-services table must not be NULL");
     let n_inputs = manifest.n_inputs.max(4);
     let n_outputs = manifest.n_outputs.max(2);
     let mut memory = vec![0.0f32; manifest.total_memory_slots + DGEN_STATE_REDZONE_SLOTS];
@@ -752,7 +776,7 @@ pub(in crate::lisp_host) fn prewarm_dgen_process(
                 DGEN_PREWARM_BLOCK as u32,
                 memory.as_mut_ptr() as *mut c_void,
                 &context,
-                dgen_host_services_v1(),
+                host_services,
             );
         }
         frames_done += DGEN_PREWARM_BLOCK;

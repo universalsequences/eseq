@@ -23,6 +23,7 @@
  */
 
 #include "dgen_host_services.h"
+#include "dgen_fft.h"
 
 #if defined(__APPLE__)
 
@@ -76,8 +77,6 @@ static void eseq_dgen_complex_multiply_accumulate(
 
 #else
 
-#include "dgen_fft.h"
-
 #define eseq_dgen_fft_setup_create eseq_dgen_portable_fft_setup_create
 #define eseq_dgen_fft_forward eseq_dgen_portable_fft_forward
 #define eseq_dgen_fft_inverse eseq_dgen_portable_fft_inverse
@@ -94,6 +93,19 @@ static const DGenHostServicesV1 kEseqHostServicesV1 = {
   .fft_inverse_fn = eseq_dgen_fft_inverse,
   .complex_multiply_accumulate_fn = eseq_dgen_complex_multiply_accumulate};
 
+static const DGenHostServicesV1 kEseqPortableHostServicesV1 = {
+  .abi_version = DGEN_ABI_VERSION_V1,
+  .struct_size = sizeof(DGenHostServicesV1),
+  .fft_setup_create_fn = eseq_dgen_portable_fft_setup_create,
+  .fft_forward_fn = eseq_dgen_portable_fft_forward,
+  .fft_inverse_fn = eseq_dgen_portable_fft_inverse,
+  .complex_multiply_accumulate_fn =
+    eseq_dgen_portable_complex_multiply_accumulate};
+
 const DGenHostServicesV1 *eseq_dgen_host_services_v1(void) {
   return &kEseqHostServicesV1;
+}
+
+const DGenHostServicesV1 *eseq_dgen_portable_host_services_v1(void) {
+  return &kEseqPortableHostServicesV1;
 }

@@ -108,8 +108,11 @@ pub(in crate::lisp_host) type DGenProcessFn = unsafe extern "C" fn(
     host: *const DGenHostServicesV1,
 );
 
-#[cfg(target_vendor = "apple")]
 extern "C" {
+    /// Portable C host-services table; process-lifetime static on every target.
+    fn eseq_dgen_portable_host_services_v1() -> *const DGenHostServicesV1;
+
+    #[cfg(target_vendor = "apple")]
     /// ESeq's Accelerate-backed host-services table
     /// (audiograph/dgen_host_services.c); process-lifetime static.
     fn eseq_dgen_host_services_v1() -> *const DGenHostServicesV1;
@@ -130,6 +133,13 @@ pub(in crate::lisp_host) fn dgen_host_services_v1() -> *const DGenHostServicesV1
 #[cfg(not(target_vendor = "apple"))]
 pub(in crate::lisp_host) fn dgen_host_services_v1() -> *const DGenHostServicesV1 {
     super::dgen_fft::host_services_v1()
+}
+
+/// The portable C implementation, independent of the platform's shipped
+/// table. Keeping this selectable lets callers load and prewarm a fresh dylib
+/// image against the same table they will use to render it.
+pub(in crate::lisp_host) fn dgen_portable_host_services_v1() -> *const DGenHostServicesV1 {
+    unsafe { eseq_dgen_portable_host_services_v1() }
 }
 
 pub(in crate::lisp_host) fn dgen_process_context_v1(sample_rate: f32) -> DGenProcessContextV1 {

@@ -13796,20 +13796,49 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             (out (partitioned-convolve dry_r impulse @N 16 @hop 8 @gain 0.5) 2 @name Right)
         "#;
 
-        let report = super::render_effect_source_for_test(
-            source,
-            &super::EffectRenderOptions {
-                sample_rate: SAMPLE_RATE,
-                block_size: BLOCK,
-                frames: FRAMES,
-                param_overrides: Vec::new(),
-                param_events: Vec::new(),
-                input_tones: Vec::new(),
-                tensor_overrides: Vec::new(),
-                input_overrides: Vec::new(),
-            },
+        let options = super::EffectRenderOptions {
+            sample_rate: SAMPLE_RATE,
+            block_size: BLOCK,
+            frames: FRAMES,
+            param_overrides: Vec::new(),
+            param_events: Vec::new(),
+            input_tones: Vec::new(),
+            tensor_overrides: Vec::new(),
+            input_overrides: Vec::new(),
+        };
+
+        // Each generated image owns function-local, lazily initialized FFT
+        // setups. Compile distinct images so neither one can inherit a setup
+        // created by the other table during load-time prewarming.
+        let shipped = super::compile_and_load(source, SAMPLE_RATE)
+            .expect("spectral effect should compile against the shipped table");
+        let shipped_report = super::render_loaded_effect_for_test(
+            &shipped.manifest,
+            &shipped.lib,
+            &options,
         )
-        .expect("spectral effect should compile and render");
+        .expect("spectral effect should render against the shipped table");
+
+        let portable_table = super::dgen_portable_host_services_v1();
+        let portable = super::compile_and_load_uncached_with_host_services(
+            source,
+            SAMPLE_RATE,
+            None,
+            portable_table,
+        )
+        .expect("spectral effect should compile against the portable table");
+        let portable_report = super::render_loaded_effect_for_test_with_host_services(
+            &portable.manifest,
+            &portable.lib,
+            &options,
+            portable_table,
+        )
+        .expect("spectral effect should render against the portable table");
+
+        let reports = [
+            ("shipped", shipped_report),
+            ("portable C", portable_report),
+        ];
 
         // The probe signal `render_effect_source_for_test` feeds when no tones
         // or overrides are set, recomputed in the same f32 arithmetic so the
@@ -13867,7 +13896,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         // Worst absolute error over the steady region, skipping the ramp-in
         // where the partition history is still filling.
-        let worst_error = |latency: usize| -> f64 {
+        let worst_error = |report: &super::EffectRenderReport, latency: usize| -> f64 {
             let first_steady = (PARTITION_WEIGHTS.len() - 1) * HOP + latency + N;
             let mut worst = 0.0f64;
             for frame in first_steady..FRAMES {
@@ -13879,29 +13908,34 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             worst
         };
 
-        let error = worst_error(LATENCY);
-        assert!(
-            error <= TOLERANCE,
-            "partitioned convolution disagrees with its closed form by {error:e} \
-             (tolerance {TOLERANCE:e}); peak={}, rms={}",
-            report.peak,
-            report.rms,
-        );
+        for (backend, report) in &reports {
+            let error = worst_error(report, LATENCY);
+            assert!(
+                error <= TOLERANCE,
+                "{backend} partitioned convolution disagrees with its closed form by {error:e} \
+                 (tolerance {TOLERANCE:e}); peak={}, rms={}",
+                report.peak,
+                report.rms,
+            );
 
-        // The tolerance only means something if it is tight enough to reject a
-        // wrong alignment, which is how a bin-ordering error surfaces.
-        let misaligned = worst_error(LATENCY + 1).min(worst_error(LATENCY - 1));
-        assert!(
-            misaligned > TOLERANCE * 100.0,
-            "a one-frame misalignment must land far outside the tolerance, got {misaligned:e}"
-        );
+            // The tolerance only means something if it is tight enough to
+            // reject a wrong alignment, which is how a bin-ordering error
+            // surfaces.
+            let misaligned = worst_error(report, LATENCY + 1)
+                .min(worst_error(report, LATENCY - 1));
+            assert!(
+                misaligned > TOLERANCE * 100.0,
+                "a one-frame {backend} misalignment must land far outside the tolerance, \
+                 got {misaligned:e}"
+            );
 
-        // And only on audio that is actually there.
-        assert!(
-            report.peak > 0.1,
-            "spectral output must carry the convolved probe, peak={}",
-            report.peak
-        );
+            // And only on audio that is actually there.
+            assert!(
+                report.peak > 0.1,
+                "{backend} spectral output must carry the convolved probe, peak={}",
+                report.peak
+            );
+        }
     }
 
     #[test]

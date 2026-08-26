@@ -123,12 +123,26 @@ pub fn compile_and_load_uncached_with_asset_base(
     sample_rate: u32,
     asset_base: Option<&Path>,
 ) -> Result<CompileResult, String> {
+    compile_and_load_uncached_with_host_services(
+        source,
+        sample_rate,
+        asset_base,
+        dgen_host_services_v1(),
+    )
+}
+
+pub(in crate::lisp_host) fn compile_and_load_uncached_with_host_services(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+    host_services: *const DGenHostServicesV1,
+) -> Result<CompileResult, String> {
     let json = compile_lisp_with_asset_base(source, sample_rate, asset_base)?;
     let manifest = parse_manifest(&json)?;
     // Uncached path: the subprocess skipped its inline audit, so audit here
     // before the dylib is loaded (impl spec, slice E5).
     crate::lisp_host::dgen::dgen_audit::audit_dylib(&manifest.dylib_path)?;
-    let lib = load_dylib_prewarmed(&manifest)?;
+    let lib = load_dylib_prewarmed_with_host_services(&manifest, host_services)?;
     Ok(CompileResult {
         manifest,
         lib,
