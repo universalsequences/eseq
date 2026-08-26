@@ -1781,6 +1781,7 @@ impl Runtime {
             ("each", "(each list owner-path callback)", "Map over a list with item index and optional widget ownership metadata."),
             ("map", "(map callback list)", "Return a list containing callback applied to each item."),
             ("filter", "(filter callback list)", "Return list items for which callback is truthy."),
+            ("find-by-key", "(find-by-key list :key value)", "Return the first map in list whose :key field equals value, or nil."),
             ("reduce", "(reduce callback initial list)", "Reduce list by calling callback with accumulator and item."),
             ("for-each", "(for-each callback list)", "Call callback for each item and return nil."),
             ("defhook", "(defhook \"name\")", "Declare an extension hook and define a function of that name that runs its listeners."),

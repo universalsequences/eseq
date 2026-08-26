@@ -21,6 +21,36 @@
     use eseqlisp::parser::{ASTParser, Parser};
     use std::path::{Path, PathBuf};
 
+    /// Placeholder every sample reference in the checked-in `drift-switch`
+    /// fixture carries, so the fixture depends on no private sample library.
+    /// See `scripts/make_drift_switch_fixture.py`.
+    const DRIFT_FIXTURE_SAMPLE_SENTINEL: &str = "@PROBE_SAMPLE@";
+
+    /// Enforced medians for `drift_same_instrument_track_switch_end_to_end_perf`
+    /// (eseq-pgru). These are a COARSE guard, not a tight gate, and the
+    /// reason is measured: on the x86_64 Linux workstation described in
+    /// UI_PERFORMANCE_TUNING.md (a 4-core i5-8250U laptop part) the SAME
+    /// tuned binary measured `drift-b-to-a` at 159 ms running alone on a
+    /// quiet machine, 205 ms sharing a nextest invocation with one other
+    /// test, and 251 ms with the desktop also busy — a 1.6x spread with no
+    /// code change. An absolute ceiling tight enough to prove the eseq-pgru
+    /// speedup would therefore be flaky, so these clear the worst observed
+    /// contended run with margin and only catch a gross regression (the fix
+    /// reverted, or something newly ~1.5x worse).
+    ///
+    /// The meaningful comparison is the quiet-machine median recorded in
+    /// UI_PERFORMANCE_TUNING.md: 149 / 159 / 101 / 72 ms, against a pre-fix
+    /// 235.7 / 243.3 / 161.4 / 94.4 ms. Rerun the probe alone, on a quiet
+    /// machine, in release, and compare medians there. eseq-md1n.5 (a Lisp
+    /// VM profiler) and a quieter CI host would both let this become a real
+    /// gate.
+    const DRIFT_SWITCH_CEILINGS_MS: &[(&str, f64)] = &[
+        ("drift-a-to-b", 260.0),
+        ("drift-b-to-a", 275.0),
+        ("synthid-a-to-b", 185.0),
+        ("synthid-b-to-a", 130.0),
+    ];
+
     fn perf_probe_project_fixture(name: &str) -> PathBuf {
         let path = sequencer::app_paths::app_paths()
             .perf_probe_projects_dir()
@@ -2387,6 +2417,35 @@
             .expect("project 92 full-layout group/track selection probe should pass");
     }
 
+    #[test]
+    #[ignore = "eseq-pgru: release-mode perf probe: same-instrument track switching (two factory:core/drift tracks, and the two factory:drums/synthid-808 tracks as a same-project comparison) on the checked-in drift-switch fixture, under the production multi-pane layout"]
+    fn drift_same_instrument_track_switch_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("drift-same-instrument-track-switch-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::DriftTrackSwitch))
+            .expect("spawn drift track-switch probe")
+            .join()
+            .expect("drift track-switch probe should pass");
+    }
+
+    /// The always-run functional half of the drift track-switch probe: same
+    /// fixture, real clicks, panel-identity and param-isolation assertions,
+    /// but one sample per transition and no timing ceilings. Unlike the
+    /// project-92 owner-switch smoke test this one is NOT ignored - the
+    /// drift-switch fixture ships with the repository and its only sample
+    /// reference is rewritten to a checked-in factory WAV.
+    #[test]
+    fn drift_same_instrument_track_switch_owner_state_smoke() {
+        std::thread::Builder::new()
+            .name("drift-same-instrument-track-switch-smoke".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::DriftTrackSwitchSmoke))
+            .expect("spawn drift track-switch smoke")
+            .join()
+            .expect("drift track-switch smoke should pass");
+    }
+
     /// The functional half of the owner-switch probe uses the same real clicks,
     /// tick replay, and correctness assertions as the release probe above, but
     /// without timing ceilings. It remains ignored because project 92 references
@@ -2533,6 +2592,21 @@
         /// final values exactly once. Cold press + first drag is timed
         /// separately from warm drags, as in `InstrumentKnobColdFocusDrag`.
         TritonAdsrDrag,
+        /// Same-instrument track switching on the checked-in `drift-switch`
+        /// fixture (eseq-pgru): the reported nine-track project with two
+        /// `factory:core/drift` tracks (3 and 4), two
+        /// `factory:drums/synthid-808` tracks (0 and 1), a `factory:core/triton`
+        /// track, four sampler tracks and a six-member group, under the
+        /// production multi-pane layout. Neither direction changes the fx
+        /// owner *kind* - the panel stays a custom-instrument panel for the
+        /// same instrument - so everything the transition costs is
+        /// re-published, re-rendered or re-laid-out work the destination
+        /// track did not need done from scratch.
+        DriftTrackSwitch,
+        /// The always-run functional variant of `DriftTrackSwitch`: same
+        /// fixture, clicks, panel-identity and param-isolation assertions,
+        /// 0 warmups + 1 sample, no timing ceilings (debug-safe).
+        DriftTrackSwitchSmoke,
     }
 
     fn project_92_ui_performance_probe_impl(probe: Project92UiProbe) {
@@ -2568,16 +2642,24 @@
                 | Project92UiProbe::GroupTrackSelectionSmoke
                 | Project92UiProbe::InstrumentKnobColdFocusDrag
                 | Project92UiProbe::TritonAdsrDrag
+                | Project92UiProbe::DriftTrackSwitch
+                | Project92UiProbe::DriftTrackSwitchSmoke
         );
         // The production layout packs seven tiles; 180x70 leaves the smaller
         // step-panel tile too short to keep all 64 step cells on screen, so
         // the full-layout variant runs at a larger cell viewport with the
         // same ~1250x850 production aspect.
         let (vp_cols, vp_rows): (u16, u16) = if full_layout { (220, 110) } else { (180, 70) };
-        let project_name = if probe == Project92UiProbe::PianoholdSelection {
-            "pianohold"
-        } else {
-            "92"
+        let drift_switch = matches!(
+            probe,
+            Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke
+        );
+        let project_name = match probe {
+            Project92UiProbe::PianoholdSelection => "pianohold",
+            Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke => {
+                "drift-switch"
+            }
+            _ => "92",
         };
         let project_fixture = perf_probe_project_fixture(project_name);
         // Project 92 references content-addressed samples from the author's
@@ -2593,7 +2675,36 @@
         // ceiling (apply_coalesced_device_plock_batch cost 8-12ms here), so
         // un-stranding the rest of the family needs its own ceiling
         // decision (bead filed by eseq-eeng).
-        let project_fixture = if matches!(
+        // The `drift-switch` fixture (scripts/make_drift_switch_fixture.py)
+        // is derived from the reported private project with every sample
+        // reference replaced by one sentinel, so the checked-in file carries
+        // no dependency on the author's sample library. Resolve the sentinel
+        // to a checked-in factory WAV before the load.
+        let project_fixture = if drift_switch {
+            let source = std::fs::read_to_string(&project_fixture).expect("read probe fixture");
+            let fixture_wav = sequencer::app_paths::app_paths()
+                .factory_root()
+                .join("impulses/prepared/king-tubby.wav");
+            assert!(
+                fixture_wav.is_file(),
+                "checked-in fixture sample missing: {}",
+                fixture_wav.display()
+            );
+            assert!(
+                source.contains(DRIFT_FIXTURE_SAMPLE_SENTINEL),
+                "the drift-switch fixture must carry the {DRIFT_FIXTURE_SAMPLE_SENTINEL} sentinel"
+            );
+            let patched = source.replace(
+                DRIFT_FIXTURE_SAMPLE_SENTINEL,
+                &fixture_wav.display().to_string(),
+            );
+            let patched_path = std::env::temp_dir().join(format!(
+                "eseq-pgru-probe-{project_name}-{}.json",
+                std::process::id()
+            ));
+            std::fs::write(&patched_path, patched).expect("write patched drift-switch fixture");
+            patched_path
+        } else if matches!(
             probe,
             Project92UiProbe::InstrumentKnobColdFocusDrag | Project92UiProbe::TritonAdsrDrag
         ) {
@@ -2766,9 +2877,12 @@
             !app.has_pending_project_load(),
             "project {project_name} load did not finish"
         );
+        // The drift-switch fixture is the reported project verbatim: one
+        // scene. Every other probe fixture is multi-scene.
+        let required_scenes = if drift_switch { 1 } else { 2 };
         assert!(
-            app.state.scene_count() >= 2,
-            "project {project_name} should have multiple scenes"
+            app.state.scene_count() >= required_scenes,
+            "project {project_name} should have at least {required_scenes} scene(s)"
         );
 
         if probe == Project92UiProbe::ArrangedStepInteractions {
@@ -8470,24 +8584,45 @@
 
         if matches!(
             probe,
-            Project92UiProbe::GroupTrackSelection | Project92UiProbe::GroupTrackSelectionSmoke
+            Project92UiProbe::GroupTrackSelection
+                | Project92UiProbe::GroupTrackSelectionSmoke
+                | Project92UiProbe::DriftTrackSwitch
+                | Project92UiProbe::DriftTrackSwitchSmoke
         ) {
             // Smoke mode is the always-run functional variant: same fixture,
             // clicks, and assertions, minimal iterations, no ceilings.
-            let smoke = probe == Project92UiProbe::GroupTrackSelectionSmoke;
+            let smoke = matches!(
+                probe,
+                Project92UiProbe::GroupTrackSelectionSmoke
+                    | Project92UiProbe::DriftTrackSwitchSmoke
+            );
             // Smoke budget: one iteration per transition (every correctness
             // assertion runs on iteration 0) keeps the always-run variant
             // inside a ~10s debug budget; the ignored release probe keeps the
             // statistical 5+20 configuration.
             let warmups: usize = if smoke { 0 } else { 5 };
             let sample_count: usize = if smoke { 1 } else { 20 };
-            let probe_prefix = "project-92-fullayout-owner-switch";
+            let probe_prefix = if drift_switch {
+                "drift-switch"
+            } else {
+                "project-92-fullayout-owner-switch"
+            };
             // Fixture indices (see the GroupTrackSelection fixture block):
             // the group holds tracks {0,2..=7,10}; 10 is the 1-slot rack.
+            // The drift-switch fixture is the reported project verbatim:
+            // 0/1 are the two synthid-808 tracks, 3/4 the two drift tracks,
+            // 2 a sampler and 5 a triton.
             let rack_track = 10usize;
             let sampler_track = 2usize;
+            // Both fixtures put the same-instrument pair at 3 and 4:
+            // project 92's two saved custom-instrument tracks, and
+            // drift-switch's two factory:core/drift tracks.
             let plain_a = 3usize;
             let plain_b = 4usize;
+            // drift-switch's same-project comparison pair: the two
+            // factory:drums/synthid-808 tracks.
+            let compare_a = 0usize;
+            let compare_b = 1usize;
             let group_id = app.groups[0].id;
             let group_bus_idx = {
                 let bus_id = app.groups[0].bus_id;
@@ -8758,6 +8893,9 @@
                 dirty_fields: usize,
                 full_buffer_reruns: usize,
                 subtree_reruns: usize,
+                /// Slowest effect bodies the reactive cycle re-ran, as
+                /// (name, ms), for the phase breakdown.
+                rerun_cost: Vec<(String, f64)>,
                 tiles: Vec<(String, usize, f64, bool)>,
             }
 
@@ -9096,21 +9234,36 @@
                 // reactive work inline in the dispatch (process_dirty_reactive
                 // inside Runtime::invoke), which leaves the trace stale — so
                 // only report counts for updates that actually ran a cycle.
-                let (dirty_fields, full_buffer_reruns, subtree_reruns) =
+                let (dirty_fields, full_buffer_reruns, subtree_reruns, rerun_cost) =
                     if track_switch_fired || ui_epoch_fired || fx_epoch_fired {
                         editor
                             .runtime()
                             .last_ui_invalidation_trace()
                             .map(|trace| {
+                                // Which effect bodies the cycle actually
+                                // re-ran, slowest first. A selection change
+                                // should dirty widgets, not re-run buffer
+                                // roots, so this list is the work count that
+                                // matters most for a track switch.
+                                let mut timings = trace
+                                    .reactive_exec_timings
+                                    .iter()
+                                    .map(|(name, elapsed)| {
+                                        (name.clone(), duration_ms(*elapsed))
+                                    })
+                                    .collect::<Vec<_>>();
+                                timings.sort_by(|a, b| b.1.total_cmp(&a.1));
+                                timings.truncate(6);
                                 (
                                     trace.dirty_fields.len(),
                                     trace.full_buffer_reruns,
                                     trace.subtree_reruns,
+                                    timings,
                                 )
                             })
-                            .unwrap_or((0, 0, 0))
+                            .unwrap_or((0, 0, 0, Vec::new()))
                     } else {
-                        (0, 0, 0)
+                        (0, 0, 0, Vec::new())
                     };
                 let frame_built = eseqlisp::frame::build_tiled_render_frame_borderless(
                     editor,
@@ -9187,6 +9340,7 @@
                     dirty_fields,
                     full_buffer_reruns,
                     subtree_reruns,
+                    rerun_cost,
                     tiles: tile_stats,
                 }
             };
@@ -9288,6 +9442,95 @@
                 )
             };
 
+            // Which tracks the *fx* tile's instrument controls are actually
+            // bound to. Every custom-instrument control binds the SEQ float
+            // field `track-<track>-instrument-param-<idx>-<name>`
+            // (state_values::shared::instrument_param_value_field), so the
+            // set of track indices in the rendered tile is the panel's real
+            // identity: a stale panel keeps binding the previous track.
+            let fx_instrument_binding_tracks =
+                |editor: &mut Editor| -> std::collections::BTreeSet<usize> {
+                    fn collect_binding_tracks(
+                        node: &eseqlisp::layout::LayoutNode,
+                        out: &mut std::collections::BTreeSet<usize>,
+                    ) {
+                        for value in node.props.values() {
+                            let Value::ReactiveRef {
+                                namespace, field, ..
+                            } = value
+                            else {
+                                continue;
+                            };
+                            if namespace != "SEQ" {
+                                continue;
+                            }
+                            let Some(rest) = field.strip_prefix("track-") else {
+                                continue;
+                            };
+                            let Some((track, tail)) = rest.split_once('-') else {
+                                continue;
+                            };
+                            if !tail.starts_with("instrument-param-") {
+                                continue;
+                            }
+                            if let Ok(track) = track.parse::<usize>() {
+                                out.insert(track);
+                            }
+                        }
+                        for child in &node.children {
+                            collect_binding_tracks(child, out);
+                        }
+                    }
+                    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                        editor,
+                        vp_cols as usize,
+                        vp_rows as usize,
+                    );
+                    let tile = frame
+                        .tiles
+                        .iter()
+                        .find(|tile| tile.frame.buffer_name == "*fx*")
+                        .expect("visible fx tile");
+                    let layout = tile.frame.widget_layout.as_ref().expect("fx tile layout");
+                    let mut tracks = std::collections::BTreeSet::new();
+                    collect_binding_tracks(layout, &mut tracks);
+                    tracks
+                };
+
+            // The instrument name the *fx* tile displays, read off the
+            // rendered header label the panel builds from
+            // `SEQ.instrument-panel`'s `:display-name`.
+            let fx_shows_instrument_label = |editor: &mut Editor, label: &str| -> bool {
+                let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                let Some(tile) = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*fx*")
+                else {
+                    return false;
+                };
+                let Some(layout) = tile.frame.widget_layout.as_ref() else {
+                    return false;
+                };
+                let mut labels = Vec::new();
+                collect_layout_nodes(
+                    layout,
+                    &mut |node| {
+                        node.widget_type == "label"
+                            && matches!(
+                                node.props.get("text"),
+                                Some(Value::String(text)) if text == label
+                            )
+                    },
+                    &mut labels,
+                );
+                !labels.is_empty()
+            };
+
             let percentile = |samples: &mut Vec<f64>, fraction: f64| {
                 samples.sort_by(|a, b| a.total_cmp(b));
                 let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
@@ -9312,6 +9555,7 @@
                 dirty_fields: usize,
                 full_buffer_reruns: usize,
                 subtree_reruns: usize,
+                rerun_cost: std::collections::BTreeMap<String, Vec<f64>>,
                 track_switch_updates: usize,
                 ui_epoch_updates: usize,
                 fx_epoch_updates: usize,
@@ -9344,6 +9588,12 @@
                     self.dirty_fields += update.dirty_fields;
                     self.full_buffer_reruns += update.full_buffer_reruns;
                     self.subtree_reruns += update.subtree_reruns;
+                    for (name, elapsed) in &update.rerun_cost {
+                        self.rerun_cost
+                            .entry(name.clone())
+                            .or_default()
+                            .push(*elapsed);
+                    }
                     if update.track_switch_fired {
                         self.track_switch_updates += 1;
                     }
@@ -9422,6 +9672,23 @@
                     .collect::<Vec<_>>()
                     .join(" ");
                 eprintln!("[{probe_prefix}-{label}-retained-tiles] {tile_breakdown}");
+                let mut rerun_medians = samples
+                    .rerun_cost
+                    .iter_mut()
+                    .map(|(name, values)| {
+                        (name.clone(), percentile(values, 0.50), values.len())
+                    })
+                    .collect::<Vec<_>>();
+                rerun_medians.sort_by(|a, b| b.1.total_cmp(&a.1));
+                rerun_medians.truncate(6);
+                eprintln!(
+                    "[{probe_prefix}-{label}-reruns] {}",
+                    rerun_medians
+                        .iter()
+                        .map(|(name, median, count)| format!("{name}={median:.3}(n={count})"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
                 reports.push(ScenarioReport {
                     label: label.to_string(),
                     median_ms: median,
@@ -9493,6 +9760,11 @@
                  timed_suffix: &str,
                  expect_track: Option<usize>,
                  expect_bus: Option<usize>,
+                 // Instrument header the *fx* tile must show after the
+                 // switch. Only the drift-switch probe checks it; the
+                 // owner-switch scenarios pass "" and rely on the
+                 // bus/rack/sampler marker check instead.
+                 instrument_label: &str,
                  editor: &mut Editor,
                  app: &mut app::App,
                  frame_diff: &mut FrameDiffState,
@@ -9591,10 +9863,34 @@
                                 );
                             }
                         }
+                        if drift_switch {
+                            // Panel identity: after the switch the *fx*
+                            // tile's instrument controls must bind the
+                            // destination track and nothing else. This is
+                            // checked on EVERY sample, not just iteration 0
+                            // — a one-frame-late panel is exactly the
+                            // failure a faster switch could introduce.
+                            let track = expect_track.expect("drift transitions select a track");
+                            let bound = fx_instrument_binding_tracks(editor);
+                            assert_eq!(
+                                bound,
+                                std::collections::BTreeSet::from([track]),
+                                "{label} click {iteration}: the fx tile must bind only track {track}'s instrument params"
+                            );
+                        }
                         if iteration == 0 {
                             let (bus_chain, sampler_panel, rack_panel) =
                                 fx_owner_markers(editor);
-                            if expect_bus.is_some() {
+                            if drift_switch {
+                                assert!(
+                                    !bus_chain && !rack_panel && !sampler_panel,
+                                    "{label}: a custom-instrument track must show a plain instrument panel"
+                                );
+                                assert!(
+                                    fx_shows_instrument_label(editor, instrument_label),
+                                    "{label}: the fx tile must show the {instrument_label} instrument header"
+                                );
+                            } else if expect_bus.is_some() {
                                 assert!(
                                     bus_chain,
                                     "{label}: the fx tile must show the group's bus chain"
@@ -9643,6 +9939,194 @@
                 };
 
             let plain_a_suffix = track_select_suffix(plain_a);
+            if drift_switch {
+                // eseq-pgru: the reported gesture is a plain same-instrument
+                // track switch. Both directions of the drift pair are
+                // measured (the acceptance gate is the SLOWER of the two),
+                // and the two synthid-808 tracks give a same-project,
+                // different-instrument comparison that separates
+                // instrument-UI complexity from the shared selection cost.
+                let drift_a = track_select_suffix(plain_a);
+                let drift_b = track_select_suffix(plain_b);
+                let compare_a_suffix = track_select_suffix(compare_a);
+                let compare_b_suffix = track_select_suffix(compare_b);
+                for (label, setup, timed, expect, instrument) in [
+                    ("drift-a-to-b", &drift_a, &drift_b, plain_b, "drift"),
+                    ("drift-b-to-a", &drift_b, &drift_a, plain_a, "drift"),
+                    (
+                        "synthid-a-to-b",
+                        &compare_a_suffix,
+                        &compare_b_suffix,
+                        compare_b,
+                        "synthid-808",
+                    ),
+                    (
+                        "synthid-b-to-a",
+                        &compare_b_suffix,
+                        &compare_a_suffix,
+                        compare_a,
+                        "synthid-808",
+                    ),
+                ] {
+                    run_transition(
+                        label,
+                        &[setup.as_str()],
+                        timed.as_str(),
+                        Some(expect),
+                        None,
+                        instrument,
+                        &mut editor,
+                        &mut app,
+                        &mut frame_diff,
+                        &mut tile_retained,
+                        &mut scenario_reports,
+                    );
+                }
+
+                // eseq-pgru correctness: a parameter edit after the switch
+                // must reach ONLY the destination instrument instance. The
+                // edit goes through the same `set-instrument-param` host
+                // command the real knob lowers to, and both the app-side
+                // value and the SEQ float field the panel binds are checked.
+                {
+                    let param_idx = app
+                        .graph
+                        .instrument_descriptors
+                        .get(plain_b)
+                        .expect("drift destination instrument descriptor")
+                        .params
+                        .iter()
+                        .position(|param| {
+                            matches!(
+                                param.kind,
+                                sequencer::effects::ParamKind::Continuous { .. }
+                            ) && param.max > param.min
+                        })
+                        .expect("drift must expose a continuous instrument param");
+                    let descriptor = app.graph.instrument_descriptors[plain_b].params
+                        [param_idx]
+                        .clone();
+                    let before_source = app
+                        .effective_instrument_param_value(plain_a, param_idx)
+                        .unwrap_or(descriptor.default);
+                    let before_dest = app
+                        .effective_instrument_param_value(plain_b, param_idx)
+                        .unwrap_or(descriptor.default);
+                    // Pick a target far from the current value so a dropped
+                    // write cannot look like a pass.
+                    let target = if (before_dest - descriptor.min).abs()
+                        >= (descriptor.max - before_dest).abs()
+                    {
+                        descriptor.min
+                    } else {
+                        descriptor.max
+                    };
+                    assert!(
+                        (target - before_dest).abs() > f32::EPSILON,
+                        "the isolation probe must actually change the destination value"
+                    );
+                    // Park on the source drift track, then switch to the
+                    // destination through the real header click.
+                    for suffix in [&drift_a, &drift_b] {
+                        let (col, row) = locate_seq_target(&mut editor, suffix);
+                        for kind in [
+                            MouseEventKind::Down(MouseButton::Left),
+                            MouseEventKind::Up(MouseButton::Left),
+                        ] {
+                            editor.handle_tiled_mouse_precise(
+                                mouse_event(kind, col.floor() as u16, row.floor() as u16),
+                                col,
+                                row,
+                                0,
+                            );
+                            let commands = editor.drain_host_commands();
+                            apply_host_commands(&mut editor, &mut app, &mut frame_diff, commands);
+                        }
+                        finish_visible_update(
+                            &mut editor,
+                            &mut app,
+                            &mut frame_diff,
+                            &mut tile_retained,
+                        );
+                    }
+                    assert_eq!(current_track.load(Ordering::Relaxed), plain_b);
+
+                    let mut payload = std::collections::HashMap::new();
+                    payload.insert(
+                        "param-idx".to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::Number(
+                            param_idx as f64,
+                        ))),
+                    );
+                    payload.insert(
+                        "value".to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::Number(
+                            descriptor.stored_to_user(target) as f64,
+                        ))),
+                    );
+                    apply_host_commands(
+                        &mut editor,
+                        &mut app,
+                        &mut frame_diff,
+                        vec![HostCommand::Custom {
+                            name: "set-instrument-param".to_string(),
+                            payload: Value::Map(payload),
+                        }],
+                    );
+                    finish_visible_update(
+                        &mut editor,
+                        &mut app,
+                        &mut frame_diff,
+                        &mut tile_retained,
+                    );
+
+                    let after_source = app
+                        .effective_instrument_param_value(plain_a, param_idx)
+                        .unwrap_or(descriptor.default);
+                    let after_dest = app
+                        .effective_instrument_param_value(plain_b, param_idx)
+                        .unwrap_or(descriptor.default);
+                    assert!(
+                        (after_dest - target).abs() <= 1e-3,
+                        "the post-switch edit must land on track {plain_b}: {before_dest} -> {after_dest}, wanted {target}"
+                    );
+                    assert!(
+                        (after_source - before_source).abs() <= f32::EPSILON,
+                        "the post-switch edit must NOT touch track {plain_a}: {before_source} -> {after_source}"
+                    );
+                    // Same spelling as
+                    // state_values::shared::instrument_param_value_field.
+                    let field = format!(
+                        "track-{plain_b}-instrument-param-{param_idx}-{}",
+                        descriptor
+                            .name
+                            .chars()
+                            .map(|ch| if ch.is_ascii_alphanumeric()
+                                || ch == '_'
+                                || ch == '-'
+                            {
+                                ch
+                            } else {
+                                '_'
+                            })
+                            .collect::<String>()
+                    );
+                    let published = match editor.runtime_mut().eval_str(&format!(
+                        "(reactive-value (bind \"SEQ\" \"{field}\"))"
+                    )) {
+                        Ok(Some(Value::Number(value))) => value,
+                        other => panic!("SEQ.{field} must eval to a number, got {other:?}"),
+                    };
+                    assert!(
+                        (published as f32 - after_dest).abs() <= 1e-2,
+                        "SEQ.{field} must publish the destination instance's value: {published} vs {after_dest}"
+                    );
+                    eprintln!(
+                        "[{probe_prefix}-param-isolation] param={} idx={param_idx} track-{plain_a}={after_source} track-{plain_b}={after_dest}",
+                        descriptor.name
+                    );
+                }
+            } else {
             let rack_suffix = track_select_suffix(rack_track);
             run_transition(
                 "group-to-rack-track",
@@ -9650,6 +10134,7 @@
                 &rack_suffix,
                 Some(rack_track),
                 None,
+                "",
                 &mut editor,
                 &mut app,
                 &mut frame_diff,
@@ -9662,6 +10147,7 @@
                 &group_select_suffix,
                 None,
                 Some(group_bus_idx),
+                "",
                 &mut editor,
                 &mut app,
                 &mut frame_diff,
@@ -9674,6 +10160,7 @@
                 &track_select_suffix(sampler_track),
                 Some(sampler_track),
                 None,
+                "",
                 &mut editor,
                 &mut app,
                 &mut frame_diff,
@@ -9686,12 +10173,14 @@
                 &track_select_suffix(plain_b),
                 Some(plain_b),
                 None,
+                "",
                 &mut editor,
                 &mut app,
                 &mut frame_diff,
                 &mut tile_retained,
                 &mut scenario_reports,
             );
+            }
 
             eprintln!(
                 "[{probe_prefix}-comparison] {}",
@@ -9724,6 +10213,24 @@
                     "[{probe_prefix}-{}] ceilings skipped",
                     if smoke { "smoke-mode" } else { "baseline-mode" }
                 );
+                return;
+            }
+            if drift_switch {
+                for report in &scenario_reports {
+                    let ceiling_ms = DRIFT_SWITCH_CEILINGS_MS
+                        .iter()
+                        .find(|(label, _)| *label == report.label)
+                        .map(|(_, ceiling)| *ceiling)
+                        .unwrap_or_else(|| {
+                            panic!("unknown drift-switch scenario {}", report.label)
+                        });
+                    assert!(
+                        report.median_ms < ceiling_ms,
+                        "{}: track-switch median {:.3}ms exceeded the {ceiling_ms:.0}ms ceiling",
+                        report.label,
+                        report.median_ms,
+                    );
+                }
                 return;
             }
             for report in &scenario_reports {

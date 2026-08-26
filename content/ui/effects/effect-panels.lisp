@@ -37,7 +37,7 @@
   (rgba 1 1 1 1))
 
 (def enabled-param (params)
-  (nth (filter |p| (= (get p :name) "enabled") params) 0))
+  (find-by-key params :name "enabled"))
 
 (def visible-params (params)
   (filter |p| (not (= (get p :name) "enabled")) params))

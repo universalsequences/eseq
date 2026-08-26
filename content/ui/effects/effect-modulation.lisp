@@ -51,7 +51,7 @@
        0))
 
 (def source-param (section name)
-  (nth (filter |p| (= (get p :name) name) (get section :params)) 0))
+  (find-by-key (get section :params) :name name))
 
 (def source-param-value (fx p fallback)
   (if p (pc/fx-param-value-for fx p) fallback))

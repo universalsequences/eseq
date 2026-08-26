@@ -363,3 +363,181 @@ rebuild is gone on repeated toggles); the other three transitions are
 unchanged within noise. VM-level regression tests:
 `keyed_subtree_reused_across_absence_when_dependencies_unchanged` and
 `keyed_subtree_rerenders_when_captured_inputs_change` (eseqlisp).
+
+## Same-instrument track-switch probe (Linux)
+
+`drift_same_instrument_track_switch_end_to_end_perf` (eseq-pgru) measures the
+gesture the user complained about: clicking between two tracks that use the
+*same* custom instrument, with nothing else changing — no fx owner change, no
+group, no relayout that the destination track genuinely needs.
+
+```sh
+cargo nextest run -p sequencer --release \
+  --run-ignored only --no-capture \
+  -E 'test(=tests::drift_same_instrument_track_switch_end_to_end_perf)'
+```
+
+### Reproducer topology
+
+The fixture is `crates/sequencer/tests/fixtures/projects/drift-switch.json`,
+derived from the reported private project with
+`scripts/make_drift_switch_fixture.py`. It is the reported project verbatim
+except that every sample reference is replaced by the sentinel
+`@PROBE_SAMPLE@`, which the probe rewrites to the checked-in
+`content/impulses/prepared/king-tubby.wav` at load time — so the fixture has
+no dependency on the author's sample library and the probe runs on any
+machine. Nine tracks: two `factory:drums/synthid-808` (0, 1), a sampler (2),
+two `factory:core/drift` (3, 4), a `factory:core/triton` (5), three more
+samplers (6-8), one six-member group with a rack, one scene,
+`use_arrangement`.
+
+Four transitions are driven through the real sequencer header clicks
+(`handle_tiled_mouse_precise` on `select-<track>`), 5 warmups + 20 samples
+each, under the production multi-pane layout (transport, samples sidebar,
+sequencer, step/track panels, mixer, *fx*) at 220x110 cells. Both drift
+directions are measured because the acceptance gate is the *slower* of the
+two; the two synthid-808 tracks are a same-project comparison that separates
+instrument-UI complexity from the shared per-switch cost. Every sample
+asserts that the application current track, the `*sel-sync*` highlight
+projection, and the `*fx*` tile's instrument bindings all name the
+destination track (the probe collects every `SEQ` `track-<n>-instrument-param-*`
+`ReactiveRef` in the rendered fx layout and requires the set to be exactly
+`{destination}`), and iteration 0 also asserts the fx tile shows a plain
+instrument panel with the expected instrument header. After the timed
+scenarios the probe switches to the destination drift track and edits one
+continuous instrument param through the real `set-instrument-param` host
+command, asserting the value lands on the destination instance, does not move
+the source instance, and is published on the destination's bound `SEQ` field.
+
+### Machine and build
+
+x86_64 Linux workstation, Intel i5-8250U (4 cores / 8 threads, 1.6 GHz base),
+Arch, `--release` with `wgpu`. This is a laptop part: an idle run and a run
+with the desktop busy differ by up to ~1.6x, so quote medians from a quiet
+machine and never compare these numbers with the Apple-silicon tables above.
+
+### Before / after (2026-08-25)
+
+| Transition | Pre-fix median | Pre-fix p95 | Tuned median | Tuned p95 | Ceiling |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| drift 3 -> 4 | 235.7 ms | 301.0 ms | 149.2 ms | 180.2 ms | 260 ms |
+| drift 4 -> 3 | 243.3 ms | 310.4 ms | 159.3 ms | 204.3 ms | 275 ms |
+| synthid 0 -> 1 | 161.4 ms | 226.2 ms | 100.9 ms | 129.9 ms | 185 ms |
+| synthid 1 -> 0 | 94.4 ms | 109.5 ms | 72.1 ms | 82.7 ms | 130 ms |
+
+That is 1.58x / 1.53x / 1.60x / 1.31x. It does NOT meet the eseq-pgru goal of
+8x; see "What is still slow" below and epic eseq-md1n.
+
+Both the pre-fix and tuned columns are medians from running this probe ALONE
+on a quiet machine. Rerun it that way; the numbers are not comparable
+otherwise. Measured on this machine with the identical tuned binary,
+`drift 4 -> 3` was 159 ms alone, 205 ms sharing one nextest invocation with a
+second test, and 251 ms with the desktop also busy — a 1.6x spread with no
+code change.
+
+Because of that spread the enforced `DRIFT_SWITCH_CEILINGS_MS` are a coarse
+guard, not a proof of the speedup: they clear the worst observed contended run
+with margin, so they catch the fix being reverted or something becoming ~1.5x
+worse, and nothing finer. Two of them sit above their pre-fix median for that
+reason. A quieter CI host, or the VM profiler in eseq-md1n.5, would let this
+become a real gate; that is deliberately left open rather than papered over
+with a flaky assertion.
+
+`synthid 0 -> 1` is dearer than `1 -> 0` because track 1 also carries a
+`builtin:EQ8`, so its fx tile renders an extra effect panel.
+
+### Phase breakdown
+
+Per-effect rerun costs come from the probe's `-reruns` record, which reports
+the slowest effect bodies the reactive cycle actually re-ran (from
+`UiInvalidationTrace::reactive_exec_timings`). For `drift 4 -> 3`:
+
+| Phase | Pre-fix | Tuned |
+| --- | ---: | ---: |
+| host dispatch (input) | 1.6 ms | 0.8 ms |
+| track-switch publication | 14.3 ms | 13.8 ms |
+| epoch resync | 5.9 ms | 5.4 ms |
+| reactive cycle | 180.8 ms | 97.1 ms |
+| — of which the `*fx*` root rerun | 141.5 ms | 87.5 ms |
+| side effects (layout refresh) | 38.1 ms | 38.1 ms |
+| frame construction | 1.3 ms | 1.3 ms |
+| retained primitive refresh | 2.6 ms | 2.8 ms |
+
+Work counts are unchanged and are the point: one track switch re-runs 5
+buffer roots and dirties 10 reactive fields, and `subtree_reruns` stays 0.
+The `*fx*` root re-runs because the destination track's panel really is
+different content; everything else follows from that tree changing.
+
+### Root cause
+
+The `*fx*` buffer root re-renders the whole custom-instrument UI on every
+track switch, and that render cost ~2.2 ms **per rendered control** — Drift
+draws ~52 controls, hence ~126 ms. Bisecting the Lisp (each control stubbed
+out in turn, medians taken as min-of-N smoke runs) found three pathologies,
+all in shared VM/UI machinery rather than anything Drift- or project-specific:
+
+1. **`Vm::current_reactive_value` cloned the whole namespace map to read one
+   field.** It went through `global_value(namespace)`, which returns
+   `value.borrow().clone()` — and `SEQV` holds one entry per bound widget
+   field in the entire UI, so every `reactive-get` allocated tens of thousands
+   of `String` keys. Measured at ~0.22 ms per call; custom panels call it
+   several times per control. `Runtime::reactive_field_value` already existed
+   for the Rust side with exactly this warning in its doc comment; the VM path
+   the Lisp natives use had never been given the same treatment. Fixed by
+   borrowing the namespace slot and reading one key.
+2. **Find-first-by-key was a `filter` over the whole parameter list per
+   control.** `inst-param` and its siblings ran
+   `(nth (filter |p| (= (get p :name) name) (get inst :synth)) 0)`, and
+   `filter` clones every element into the callback, so each of Drift's ~52
+   controls deep-touched all 62 parameter maps. Fixed with a new
+   `find-by-key` native — `(find-by-key list :key value)` — which scans
+   without cloning or invoking a Lisp closure; the eleven hot call sites in
+   `content/ui/effects/**` and `content/ui/macros.lisp` now use it.
+3. **Every reactive read linearly scanned `global_names`.** Both
+   `resolve_global_read_index` and the `LoadReactive` / `LoadReactiveNth` /
+   `LoadReactiveLen` opcodes did `global_names.iter().position(...)`, so the
+   cost of a reactive read grew with the total amount of loaded Lisp (the
+   generated custom-instrument UI alone defines helpers for every installed
+   instrument). Fixed with a self-validating name -> index cache: each entry is
+   re-checked against the live `global_names` before use and recomputed on a
+   miss, so the many paths that replace that Vec wholesale need no
+   invalidation hook and a stale entry can only cost one extra scan.
+
+Together these took the `*fx*` root rerun from ~126 ms to ~58 ms on a quiet
+machine (~87 ms inside the full 25-iteration probe) and the drift switch from
+243 ms to 159 ms.
+
+### What is still slow (does not meet the eseq-pgru 8x goal)
+
+The bead asks for at least 8x on the slower drift direction, i.e. a median
+under ~30 ms. The delivered result is 1.5-1.6x. The remaining 159 ms is:
+~87 ms `*fx*` root rerun, ~38 ms side-effect layout refresh, ~14 ms
+track-switch publication, ~5 ms epoch resync, ~7 ms the other buffer roots,
+~4 ms frame + retained.
+
+Even a free fx render would leave ~72 ms, so 8x is not reachable by making the
+panel render faster; the panel must stop being re-rendered at all. The
+architectural blocker is that the fx panel's parameter descriptors are
+*track-addressed*: each control's keyed subtree
+(`custom-ui-lego-knob-<scope>-<name>` and friends) closes over the parameter
+map `p`, which carries `:value-field` (`track-<n>-instrument-param-...`),
+`:value`, `:text-value` and `:mod-targets`, all of which change when the
+current track changes. So the eseq-4kd subtree cache can never hit across a
+same-instrument switch, the widget tree always differs, and the full relayout
+follows. Making those inputs track-invariant (the fx panel only ever shows the
+current track, so it could bind "the current track's param N") would let every
+control subtree cache, keep the widget tree identical, and remove the relayout
+— but it touches p-locks, key locks, mod targets, patch-learn and the rack
+panels, which is well beyond this bead.
+
+Two dead ends worth recording so they are not retried:
+
+- Wrapping the whole instrument panel in one keyed subtree
+  (`(subtree :key (str "instrument-panel-" (get inst :track) ...))`) makes it
+  **worse**: the cache never hits (the captured `inst` differs per track) and
+  `store_subtree_render_cache` deep-clones every upvalue on each render, so
+  the fx rerun went 126 ms -> 220 ms.
+- eseq-tcx (the ~35 ms samples-sidebar rebuild on every track switch) does not
+  contribute materially here: on this fixture the `*samples*` root rerun is
+  2.0-2.3 ms, because an instrument track shows the presets tab rather than a
+  large sample list. It is real but independent, and stays open.
