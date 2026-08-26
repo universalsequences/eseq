@@ -641,6 +641,10 @@ pub struct WidgetInstance {
 /// same on-screen proportions relative to the cell grid.
 pub const UI_DESIGN_REFERENCE_SCALE: f32 = 2.0;
 
+/// Extra design-pixel margin around a patch cable's raster bounds. Shared by
+/// both GPU backends so cable thickness and antialiasing have identical room.
+pub(crate) const PATCH_CABLE_DRAW_PADDING_PX: f32 = 16.0;
+
 // Bits of 2.0f32: the macOS reference, so backends that never report a scale
 // (tests, capture harnesses, the Metal path today) render unchanged.
 static UI_WINDOW_SCALE_FACTOR_BITS: std::sync::atomic::AtomicU32 =

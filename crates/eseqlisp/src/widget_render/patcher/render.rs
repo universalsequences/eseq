@@ -6,7 +6,7 @@ use super::super::{CellBuffer, styled_cell};
 use super::super::{
     GpuCirclePrimitive, GpuCircleVisibleHalf, GpuPatchCablePrimitive, GpuPrimitive,
     GpuProportionalTextPrimitive, GpuQuadPrimitive, GpuRectPrimitive, WidgetInstance,
-    WidgetViewport, ndc_bounds, z_layer,
+    WidgetViewport, ndc_bounds, ui_design_px, z_layer,
 };
 use crate::backend::{
     AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX, AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
@@ -32,7 +32,8 @@ use super::metrics::{
     AGENTIC_HEADER_ROW_H, AGENTIC_HEADER_TEXT_ROWS, AGENTIC_INNER_PAD_X, AGENTIC_INNER_PAD_Y,
     AGENTIC_INNER_RADIUS_PX, AGENTIC_INNER_TOP, AGENTIC_LINE_H, AGENTIC_MORPH_COLOR_SECS,
     AGENTIC_MORPH_SHAPE_SECS, AGENTIC_SEND_DIAMETER_PX,
-    AGENTIC_SEND_ROW_H, AGENTIC_SPINNER_DIAMETER_PX, AGENTIC_SPINNER_GAP, CABLE_HANDLE_RADIUS_PX,
+    AGENTIC_SEND_ROW_H, AGENTIC_SPINNER_DIAMETER_PX, AGENTIC_SPINNER_GAP,
+    CABLE_FEEDBACK_RADIUS_PX, CABLE_FORWARD_RADIUS_PX, CABLE_HANDLE_RADIUS_PX,
     NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX, NODE_RESIZE_HANDLE_SIZE_CELLS,
     NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
     SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
@@ -571,7 +572,8 @@ fn draw_agentic_bubbles(
         let header_left = x + AGENTIC_CARD_PAD_X * zoom;
         let pending = matches!(bubble.state, AgenticBubbleState::Pending { .. });
         // The spinner's own width, in cells, plus the gap after it.
-        let spinner_slot = AGENTIC_SPINNER_DIAMETER_PX * zoom / viewport.cell_w.max(0.001)
+        let spinner_slot = ui_design_px(AGENTIC_SPINNER_DIAMETER_PX) * zoom
+            / viewport.cell_w.max(0.001)
             + AGENTIC_SPINNER_GAP * zoom;
         let (status_left, status_width) = if pending {
             push_agentic_spinner(
@@ -891,7 +893,7 @@ fn push_agentic_inner_box(
         theme::PATCHER_AGENTIC_BOX_BORDER(),
         viewport,
         zoom,
-        AGENTIC_INNER_RADIUS_PX,
+        ui_design_px(AGENTIC_INNER_RADIUS_PX),
         AGENTIC_INNER_BORDER_WIDTH_PX * zoom,
     );
 }
@@ -910,8 +912,9 @@ fn push_agentic_spinner(
     time_seconds: f32,
 ) {
     const DOTS: usize = 8;
-    let diameter_w = AGENTIC_SPINNER_DIAMETER_PX * zoom / viewport.cell_w.max(0.001);
-    let diameter_h = AGENTIC_SPINNER_DIAMETER_PX * zoom / viewport.cell_h.max(0.001);
+    let diameter_px = ui_design_px(AGENTIC_SPINNER_DIAMETER_PX);
+    let diameter_w = diameter_px * zoom / viewport.cell_w.max(0.001);
+    let diameter_h = diameter_px * zoom / viewport.cell_h.max(0.001);
     let center_x = left + diameter_w * 0.5;
     let dot_w = diameter_w * 0.24;
     let dot_h = diameter_h * 0.24;
@@ -943,8 +946,9 @@ fn push_agentic_send_chevron(
     viewport: WidgetViewport,
     zoom: f32,
 ) -> Rect {
-    let width = AGENTIC_SEND_DIAMETER_PX * zoom / viewport.cell_w.max(0.001);
-    let height = AGENTIC_SEND_DIAMETER_PX * zoom / viewport.cell_h.max(0.001);
+    let diameter_px = ui_design_px(AGENTIC_SEND_DIAMETER_PX);
+    let width = diameter_px * zoom / viewport.cell_w.max(0.001);
+    let height = diameter_px * zoom / viewport.cell_h.max(0.001);
     let disc = Rect {
         col: box_rect.col + box_rect.width - AGENTIC_INNER_PAD_X * zoom - width,
         row: box_rect.row + box_rect.height - AGENTIC_INNER_PAD_Y * zoom - height,
@@ -1006,7 +1010,7 @@ fn push_agentic_model_chip(
         theme::PATCHER_AGENTIC_CHIP_BORDER(),
         viewport,
         zoom,
-        AGENTIC_MODEL_CHIP_RADIUS_PX,
+        ui_design_px(AGENTIC_MODEL_CHIP_RADIUS_PX),
         AGENTIC_INNER_BORDER_WIDTH_PX * zoom,
     );
     prims.push(GpuPrimitive::ProportionalText(
@@ -1530,7 +1534,7 @@ fn push_hovered_port_tooltip(
         theme::PATCHER_TOOLTIP_BORDER(),
         viewport,
         zoom,
-        PATCHER_TOOLTIP_CORNER_RADIUS_PX,
+        ui_design_px(PATCHER_TOOLTIP_CORNER_RADIUS_PX),
         AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
     );
     prims.push(GpuPrimitive::ProportionalText(
@@ -1576,7 +1580,7 @@ fn alignment_guide_rect(
     origin: (f32, f32),
     zoom: f32,
 ) -> Option<Rect> {
-    let thickness_px = 2.0;
+    let thickness_px = ui_design_px(2.0);
     match guide.kind {
         AlignmentGuideKind::Vertical => {
             let x = origin.0 + guide.position * zoom;
@@ -1709,7 +1713,7 @@ fn push_autocomplete_panel(
         theme::COMP_BORDER(),
         viewport,
         zoom,
-        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+        ui_design_px(AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX),
         AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
     );
     let name_font_size = 11.5;
@@ -1731,7 +1735,7 @@ fn push_autocomplete_panel(
                 },
                 theme::COMP_SELECTED_BG(),
                 viewport,
-                AUTOCOMPLETE_ROW_CORNER_RADIUS_PX * zoom,
+                ui_design_px(AUTOCOMPLETE_ROW_CORNER_RADIUS_PX) * zoom,
                 false,
             );
         }
@@ -1884,7 +1888,7 @@ fn push_autocomplete_documentation_panel(
         theme::COMP_DOC_BORDER(),
         viewport,
         zoom,
-        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+        ui_design_px(AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX),
         AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
     );
     let max_chars = autocomplete_doc_wrap_chars(align_width, viewport, zoom);
@@ -2042,11 +2046,11 @@ fn push_cable(
         control1: [curve.p1.0, curve.p1.1],
         control2: [curve.p2.0, curve.p2.1],
         end: [curve.p3.0, curve.p3.1],
-        radius_px: if connection.kind == ConnectionKind::Feedback {
-            3.6 * zoom
+        radius_px: ui_design_px(if connection.kind == ConnectionKind::Feedback {
+            CABLE_FEEDBACK_RADIUS_PX
         } else {
-            4.4 * zoom
-        },
+            CABLE_FORWARD_RADIUS_PX
+        }) * zoom,
         color,
         is_segmented,
         segment_row: connection
@@ -2090,13 +2094,13 @@ fn push_cable_handles(
     for center in [from_handle, to_handle] {
         prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
             center: [center.0, center.1],
-            radius_px: CABLE_HANDLE_RADIUS_PX * zoom,
+            radius_px: ui_design_px(CABLE_HANDLE_RADIUS_PX) * zoom,
             color: theme::PATCHER_ERROR(),
             visible_half: GpuCircleVisibleHalf::Full,
         }));
         prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
             center: [center.0, center.1],
-            radius_px: CABLE_HANDLE_RADIUS_PX * 0.52 * zoom,
+            radius_px: ui_design_px(CABLE_HANDLE_RADIUS_PX) * 0.52 * zoom,
             color: theme::PATCHER_BG(),
             visible_half: GpuCircleVisibleHalf::Full,
         }));
@@ -2168,7 +2172,7 @@ fn push_node(
                 chrome_bg,
                 chrome_border,
                 viewport,
-                NODE_BORDER_WIDTH_PX * zoom,
+                ui_design_px(NODE_BORDER_WIDTH_PX) * zoom,
                 corner_radius,
                 flatness,
             );
@@ -2285,14 +2289,15 @@ fn push_node_chrome(
     viewport: WidgetViewport,
     zoom: f32,
 ) {
-    let corner_radius = normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom);
+    let corner_radius =
+        normalized_corner_radius(rect, viewport, ui_design_px(NODE_CORNER_RADIUS_PX) * zoom);
     push_node_chrome_with_corner(
         prims,
         rect,
         bg,
         border,
         viewport,
-        NODE_BORDER_WIDTH_PX * zoom,
+        ui_design_px(NODE_BORDER_WIDTH_PX) * zoom,
         corner_radius,
         NODE_CHROME_FLATNESS,
     );
@@ -2575,7 +2580,7 @@ fn push_port(
     } else {
         theme::PATCHER_PORT_OUTPUT()
     };
-    let outer_radius_px = PORT_OUTER_DIAMETER_PX * 0.5 * zoom;
+    let outer_radius_px = ui_design_px(PORT_OUTER_DIAMETER_PX) * 0.5 * zoom;
     let rect = Rect {
         row: center.1 - outer_radius_px / viewport.cell_h.max(1.0),
         col: center.0 - outer_radius_px / viewport.cell_w.max(1.0),
@@ -2751,7 +2756,7 @@ fn agentic_scaled_chrome(
     let start_radius = normalized_corner_radius(
         scaled,
         viewport,
-        AGENTIC_APPEAR_START_RADIUS_PX / PATCHER_NODE_RADIUS_GAIN * zoom,
+        ui_design_px(AGENTIC_APPEAR_START_RADIUS_PX) / PATCHER_NODE_RADIUS_GAIN * zoom,
     );
     (
         scaled,
@@ -2840,7 +2845,11 @@ pub(super) fn agentic_morph_chrome(
     let Some(from) = morph.from else {
         return Some((
             rect,
-            normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom),
+            normalized_corner_radius(
+                rect,
+                viewport,
+                ui_design_px(NODE_CORNER_RADIUS_PX) * zoom,
+            ),
             resting_bg,
             border,
             NODE_CHROME_FLATNESS,
@@ -2858,8 +2867,11 @@ pub(super) fn agentic_morph_chrome(
     let shape_t = ease_out_cubic(progress);
     // Normalize against the rect actually being drawn so the radius tracks the
     // chrome as it resizes.
-    let target_corner =
-        normalized_corner_radius(chrome_rect, viewport, NODE_CORNER_RADIUS_PX * zoom);
+    let target_corner = normalized_corner_radius(
+        chrome_rect,
+        viewport,
+        ui_design_px(NODE_CORNER_RADIUS_PX) * zoom,
+    );
     // The card starts at its own resting radius and opens up into the node's,
     // so the morph still carries a shape beat now that the bubble is no longer
     // drawn square.
@@ -2909,7 +2921,7 @@ pub(super) fn agentic_card_corner_radius(
     normalized_corner_radius(
         rect,
         viewport,
-        AGENTIC_CARD_RADIUS_PX / PATCHER_NODE_RADIUS_GAIN * zoom,
+        ui_design_px(AGENTIC_CARD_RADIUS_PX) / PATCHER_NODE_RADIUS_GAIN * zoom,
     )
 }
 

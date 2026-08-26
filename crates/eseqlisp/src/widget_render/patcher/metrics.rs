@@ -30,14 +30,15 @@ pub(super) const AGENTIC_APPEAR_SECS: f32 = 0.18;
 pub(super) const AGENTIC_APPEAR_START_SCALE: f32 = 0.72;
 pub(super) const AGENTIC_APPEAR_START_RADIUS_PX: f32 = 30.0;
 
-/// Resting corner radius of the bubble card, in true pixels at zoom 1.
+/// Resting corner radius of the bubble card, in design pixels at zoom 1.
 ///
-/// Every agentic radius is quoted in true pixels and scaled by `zoom` at the
-/// point of use. `normalized_corner_radius` divides by the rect's pixel height,
-/// so that product is the only form that holds a constant pixel radius as the
-/// card grows line by line *and* as the canvas zooms — quoting a radius in
-/// cells would make a one-line bubble and a seven-line bubble round differently.
-/// It also has to stay under `normalized_corner_radius`' 0.5 clamp at the
+/// Every agentic radius is quoted in the macOS 2x design-pixel space, converted
+/// by `ui_design_px`, and scaled by `zoom` at the point of use.
+/// `normalized_corner_radius` divides by the rect's framebuffer-pixel height,
+/// so that product is the only form that holds a constant proportional radius
+/// as the card grows line by line *and* as the canvas zooms — quoting a radius
+/// in cells would make a one-line bubble and a seven-line bubble round
+/// differently. It also has to stay under `normalized_corner_radius`' 0.5 clamp at the
 /// smallest box it is used on, or that box silently renders as a pill.
 pub(super) const AGENTIC_CARD_RADIUS_PX: f32 = 16.0;
 /// Radius of the inset text box, concentric with the card: the card's radius
@@ -119,6 +120,8 @@ pub(super) const CABLE_HANDLE_DISTANCE_CELLS: f32 = 1.15;
 pub(super) const CABLE_HANDLE_MAX_SPAN_FRACTION: f32 = 0.35;
 pub(super) const CABLE_HANDLE_HIT_RADIUS_CELLS: f32 = 0.9;
 pub(super) const CABLE_HANDLE_RADIUS_PX: f32 = 13.0;
+pub(super) const CABLE_FEEDBACK_RADIUS_PX: f32 = 3.6;
+pub(super) const CABLE_FORWARD_RADIUS_PX: f32 = 4.4;
 pub(super) const SEGMENTED_CABLE_CORNER_RADIUS_CELLS: f32 = 0.72;
 pub(super) const SEGMENTED_CABLE_DRAG_PADDING_CELLS: f32 = 0.35;
 pub(super) const SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS: f32 = 5.4;

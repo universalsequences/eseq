@@ -689,7 +689,8 @@ fn patch_cable_draw_instance_from_primitive(
     let end = (cable.end[0] * cell_w, cable.end[1] * cell_h);
     let segment_y_px = cable.segment_row * cell_h;
     let corner_radius_px = cable.corner_radius_cells * cell_w.min(cell_h);
-    let padding = cable.radius_px + 16.0;
+    let padding = cable.radius_px
+        + widget_render::ui_design_px(widget_render::PATCH_CABLE_DRAW_PADDING_PX);
     let (min_x, max_x, min_y, max_y) = if cable.is_segmented {
         let needs_five = end.1 < segment_y_px;
         if needs_five {
