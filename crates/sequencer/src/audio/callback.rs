@@ -30,8 +30,8 @@ pub(super) fn enable_flush_denormals_to_zero() {
 }
 
 pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
-    if !data.rt_promotion_attempted {
-        data.rt_promotion_attempted = true;
+    if !data.callback_thread_initialized {
+        data.callback_thread_initialized = true;
         // FTZ/DAZ are per-thread MXCSR state and this thread executes graph
         // nodes, so it needs the same subnormal-flush mode the audiograph
         // workers set in worker_main (see flush_denormals_to_zero there for

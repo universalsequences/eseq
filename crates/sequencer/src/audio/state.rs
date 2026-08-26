@@ -198,12 +198,13 @@ pub(super) struct AudioCallbackData {
     pub(super) block_events_need_sort: bool,
     pub(super) current_callback_nframes: usize,
     pub(super) output_block_size: OutputBlockSizeVerifier,
-    /// One-shot latch for promoting the cpal callback thread to SCHED_FIFO.
-    /// cpal exposes no thread-spawn hook, but the callback IS that thread, so
-    /// the first entry promotes itself (Linux only; CoreAudio already hands
-    /// macOS clients a realtime callback thread).
-    #[cfg(target_os = "linux")]
-    pub(super) rt_promotion_attempted: bool,
+    /// One-shot latch for per-thread setup that can only run on the cpal
+    /// callback thread itself: FTZ/DAZ subnormal flushing everywhere, plus
+    /// SCHED_FIFO promotion on Linux. cpal exposes no thread-spawn hook, but
+    /// the callback IS that thread, so the first entry initializes itself.
+    /// (CoreAudio already hands macOS clients a realtime callback thread, so
+    /// only the subnormal-flush half applies there.)
+    pub(super) callback_thread_initialized: bool,
     pub(super) rendered_samples: Arc<AtomicU64>,
     /// Bus effect slots, published by the UI thread so the callback can reach
     /// each bus effect's modulator node for the transport clock/phase
