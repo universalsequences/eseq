@@ -2604,18 +2604,26 @@ impl WgpuAppBackend {
 
 #[cfg(target_os = "linux")]
 fn create_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
-    use winit::platform::x11::EventLoopBuilderExtX11;
+    let mut builder = winit::event_loop::EventLoopBuilder::new();
 
-    // winit 0.29 has no Wayland data-device implementation, so its native
-    // Wayland backend cannot emit DroppedFile.  X11 implements XDND, and
-    // compositors bridge native Wayland drags to XWayland windows.  Select X11
-    // explicitly instead of relying on winit's Wayland-first auto-selection.
-    winit::event_loop::EventLoopBuilder::new()
-        .with_x11()
-        // Rust's test harness runs tests off the main thread. Production keeps
-        // winit's safer main-thread requirement.
-        .with_any_thread(cfg!(test))
-        .build()
+    // Production deliberately leaves backend selection to winit: a Wayland
+    // session must get a native Wayland surface so fractional-scale events are
+    // authoritative, while an actual X11 session naturally selects X11. Winit
+    // 0.29 does not support file drops on Wayland; forcing the whole app onto
+    // XWayland to obtain XDND breaks that scale contract and is not acceptable.
+    //
+    // Test binaries create event loops off the main thread, so explicitly pick
+    // the available backend there and opt only the test loop into that mode.
+    #[cfg(test)]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        use winit::platform::wayland::EventLoopBuilderExtWayland;
+        builder.with_wayland().with_any_thread(true);
+    } else {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        builder.with_x11().with_any_thread(true);
+    }
+
+    builder.build()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -3198,15 +3206,17 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn event_loop_uses_x11_for_external_file_drop_support() {
+    fn event_loop_uses_the_native_linux_session_backend() {
+        use winit::platform::wayland::EventLoopWindowTargetExtWayland;
         use winit::platform::x11::EventLoopWindowTargetExtX11;
 
-        if std::env::var_os("DISPLAY").is_none() {
-            return;
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            let event_loop = create_event_loop().expect("Wayland event loop should initialize");
+            assert!(event_loop.is_wayland());
+        } else if std::env::var_os("DISPLAY").is_some() {
+            let event_loop = create_event_loop().expect("X11 event loop should initialize");
+            assert!(event_loop.is_x11());
         }
-
-        let event_loop = create_event_loop().expect("X11 event loop should initialize");
-        assert!(event_loop.is_x11());
     }
 
     #[test]
