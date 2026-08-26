@@ -95,9 +95,10 @@ texel. `widget-timeline-cursor-marker` differs on 16.70% of pixels at a maximum
 of 1: a gradient, quantised one step apart. Same shape in `widget-knob`: 869
 of 1 033 differing pixels differ by 1.
 
-The two `widget-roar-*` rows of this column are omitted deliberately — capture
-3 is still at schema 2 and drew those two scenes from different uniforms, so
-those rows compare nothing. `compare_captures.py` prints that warning itself.
+Capture 3 was regenerated at schema 3 under `eseq-linux.77`, so this column
+now covers all 38 scenes, the two `widget-roar-*` rows included. Both land at
+the quiet end of the noise floor — maxd 1 over 0.15% and 0.02% of pixels — as
+expected once the mode selectors are off the tie.
 
 ## Filed
 
@@ -110,7 +111,7 @@ Both from the diff review, neither blocking the sign-off:
   made both scenes byte-identical. No shipped widget passes a tie today; the
   bead is to make the two languages agree by construction rather than by luck.
 * `eseq-linux.77` — regenerate `wgsl-linux-x86_64` at schema 3 on the Linux
-  host, which the schema-2 caveats above are waiting on.
+  host. Done; the 2-vs-3 numbers above are from the regenerated capture.
 
 One gap was found and closed rather than filed: `dropdown-checkmark` had a
 fragment in both languages and a capture scene in neither, so

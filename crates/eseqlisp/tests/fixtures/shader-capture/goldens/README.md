@@ -79,12 +79,9 @@ languages break in opposite directions (`eseq-linux.76`).
 * Host: Omarchy (Arch Linux), kernel 6.19.8-arch1-3-surface, x86_64.
 * Adapter: `Intel(R) UHD Graphics 620 (KBL GT2)` via Vulkan
   (`mesa 1:26.1.7-1`, `vulkan-intel 1:26.1.7-1`).
-* **Still at schema 2**, because it can only be regenerated on the Linux host
-  (`eseq-linux.77`). Two consequences, both surfaced by
-  `compare_captures.py` rather than left implicit: it has no
-  `widget-dropdown-checkmark` scene, and its `widget-roar-shaper` /
-  `widget-roar-filter` scenes were drawn from the schema-2 uniforms, so those
-  two rows in any comparison against it are meaningless.
+* Regenerated at schema 3 on that host under `eseq-linux.77`, so all three
+  captures now hold the same 38 scenes drawn from the same uniforms and every
+  row of both comparisons is meaningful.
 
 ## Determinism
 

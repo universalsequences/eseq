@@ -16,6 +16,7 @@
     "widget-box": "7c48df9c471b38724a6dc72330515f9bc81b8de93eb32c6280ae92f8e0985903",
     "widget-button": "6717824745e69f638cdda2b8b222999aea59c09ed61ec08605563d636dca9bd8",
     "widget-button-icon": "de58d3c0afcdebad939f1d327fd62695e806262aef49b1b1fa9e2ef6c241ae18",
+    "widget-dropdown-checkmark": "611961081ba0d39bae46afa6f708978524c9f17d56654c4ef2c33aecfb3a1ffe",
     "widget-dropdown-chevron": "a4dc8997012889ab301fc80704018fe690c2f612b4a5f820956348129db59e57",
     "widget-knob": "6a232ebcf002d7be04052eca0defd4dccd231cc7598bdc21262e5d3ce481f3e3",
     "widget-knob-number": "dade55d4a7dc228e44e10861b510c0c910296179f9599c4905be5567aa9b45db",
@@ -30,8 +31,8 @@
     "widget-patcher-port": "3ca5521b67a2c63fb11ec6ae3a6e5c73ed8bdc6fecd6c11ea29840811a7c7348",
     "widget-phaser-notch": "27b98992dca7dfa8c24a66dea725751852034de54005ad0089e14637e0ba1687",
     "widget-response-curve-editor": "9b7b3dca7afc45a6c84ed13195eae1c7869c9b8d5446a2eaa25ab1af2bfff025",
-    "widget-roar-filter": "d5c85d7bec72e0ed97ee6aae10a3d920d55f9f26966be3f13020399c8def8884",
-    "widget-roar-shaper": "cc9e07ca02531ad2da675d8dcaff0cc552b08c44f45faff9247613addf85629a",
+    "widget-roar-filter": "b6e1c7f1dfd58be1cf29816841f99a9fef809052595a26faf79330b31412fc9f",
+    "widget-roar-shaper": "2b7f42ea4689ab833c941be4d7d9620cbd752d9730208ca565a5ecfc70dae244",
     "widget-scroll": "4fe0e116533e9c9e0682ef15ca64fa55893bcc713f240fa502565210fc66da49",
     "widget-slider": "0688db2ebee3694db49abc500bd679afbd982f1d65a3efbac912e990ec238bef",
     "widget-sound-glyph": "cc44253cf1f9888a2b63166e8f38d3ab1fb9cf0b5c3d36924515ff3158214185",
@@ -80,8 +81,9 @@
     "widget-patcher-panel",
     "widget-patcher-port",
     "widget-patcher-back-chevron",
-    "widget-patcher-node"
+    "widget-patcher-node",
+    "widget-dropdown-checkmark"
   ],
-  "schema_version": 2,
+  "schema_version": 3,
   "width": 512
 }
