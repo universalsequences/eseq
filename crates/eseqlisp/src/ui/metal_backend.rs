@@ -110,7 +110,7 @@ mod inner {
     // Buffer-based vertex input: no vertex descriptor needed.
     // Glyph atlas pixels and UVs use the same explicit top-left, Y-down
     // convention as Metal textures; no backend-specific flip is required.
-    const SHADER_SRC: &str = r#"
+    pub const SHADER_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -157,7 +157,7 @@ fragment float4 frag(
     /// Fragment shader for proportional text. Uses linear filtering and alpha
     /// blending so that glyph quads overlay each other without clipping.
     /// The background rect is drawn separately; glyphs are composited on top.
-    const PROP_FRAG_SRC: &str = r#"
+    pub const PROP_FRAG_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -181,7 +181,7 @@ fragment float4 prop_frag(
 }
 "#;
 
-    const IMAGE_SHADER_SRC: &str = r#"
+    pub const IMAGE_SHADER_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -257,7 +257,7 @@ fragment float4 image_frag(
 }
 "#;
 
-    const PATCH_CABLE_SHADER_SRC: &str = r#"
+    pub const PATCH_CABLE_SHADER_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -523,7 +523,7 @@ fragment float4 patch_cable_frag(PatchCableVaryings in [[stage_in]])
     // pixel using UV coordinates and per-instance data.
     // ── Shared shader preamble (instance struct, varyings, SDF utils) ──────
 
-    const WIDGET_SHADER_PREAMBLE: &str = r#"
+    pub const WIDGET_SHADER_PREAMBLE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -582,7 +582,7 @@ float compute_border_mask(float2 localPos, float2 outerSize, float cornerRadius,
 }
 "#;
 
-    const DEFAULT_WIDGET_VERTEX_SHADER: &str = r#"
+    pub const DEFAULT_WIDGET_VERTEX_SHADER: &str = r#"
 vertex WidgetVaryings widget_vert(
     uint vid [[vertex_id]],
     uint iid [[instance_id]],
@@ -774,7 +774,7 @@ vertex WidgetVaryings widget_vert(
         }
     }
 
-    const WAVETABLE_SHADER_SRC: &str = r#"
+    pub const WAVETABLE_SHADER_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -936,7 +936,7 @@ fragment float4 wavetable_frag(
 }
 "#;
 
-    const WAVEFORM_SHADER_SRC: &str = r#"
+    pub const WAVEFORM_SHADER_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -1182,7 +1182,7 @@ fragment float4 waveform_frag(
 }
 "#;
 
-    const LIVE_SPECTROGRAM_SHADER_SRC: &str = r#"
+    pub const LIVE_SPECTROGRAM_SHADER_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -10661,3 +10661,13 @@ fragment float4 live_spectrogram_frag(
 
 #[cfg(target_os = "macos")]
 pub use inner::{MetalBackend, TiledRenderStatus};
+
+/// The MSL sources the Metal backend compiles, re-exported so
+/// [`crate::metal_shader_capture`] renders the reference captures from exactly
+/// the shader text this backend runs — not a copy that can drift from it.
+#[cfg(target_os = "macos")]
+pub use inner::{
+    DEFAULT_WIDGET_VERTEX_SHADER, IMAGE_SHADER_SRC, LIVE_SPECTROGRAM_SHADER_SRC,
+    PATCH_CABLE_SHADER_SRC, PROP_FRAG_SRC, SHADER_SRC, WAVEFORM_SHADER_SRC, WAVETABLE_SHADER_SRC,
+    WIDGET_SHADER_PREAMBLE,
+};

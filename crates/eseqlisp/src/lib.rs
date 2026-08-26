@@ -55,6 +55,9 @@ pub use lang::modules;
 pub use lang::parser;
 pub use lang::vm;
 
+pub(crate) mod capture_scenes;
+#[cfg(target_os = "macos")]
+pub mod metal_shader_capture;
 #[cfg(feature = "wgpu")]
 pub mod shader_capture;
 

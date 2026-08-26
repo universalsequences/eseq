@@ -54,6 +54,12 @@ name = "eseqlisp_shader_capture"
 path = "src/bin/eseqlisp_shader_capture.rs"
 required-features = ["wgpu"]
 
+# Deterministic MSL pipeline captures; the Metal reference half of
+# eseq-linux.25. See crates/eseqlisp/src/metal_shader_capture.rs.
+[[bin]]
+name = "eseqlisp_metal_shader_capture"
+path = "src/bin/eseqlisp_metal_shader_capture.rs"
+
 [[bin]]
 name = "eseqlisp_sdf_lighting_probe"
 path = "src/bin/eseqlisp_sdf_lighting_probe.rs"
