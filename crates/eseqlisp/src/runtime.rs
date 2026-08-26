@@ -93,6 +93,21 @@ pub struct UiInvalidationTrace {
     pub relayout_failure_reason: Option<String>,
 }
 
+/// Monotonic UI work counters suitable for event-boundary snapshots.
+///
+/// Unlike the one-second `ESEQLISP_PROFILE_UI` aggregate, these counters are
+/// always available and never reset, so probes can subtract snapshots around
+/// one input event without depending on wall-clock logging windows.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UiWorkCounters {
+    pub full_buffer_reruns: u64,
+    pub subtree_reruns: u64,
+    pub reevaluated_subtree_roots: u64,
+    pub relayout_reused: u64,
+    pub relayout_full: u64,
+    pub relayout_subtree: u64,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReactiveSetResult {
     pub changed: bool,
@@ -1220,6 +1235,7 @@ pub struct Runtime {
     widget_id_offset: u64,
     text_measurer: Option<Rc<dyn TextMeasurer>>,
     perf_stats: RuntimePerfStats,
+    ui_work_counters: UiWorkCounters,
     last_ui_invalidation_trace: Option<UiInvalidationTrace>,
 }
 
@@ -1285,6 +1301,7 @@ impl Runtime {
             widget_id_offset: 0,
             text_measurer: None,
             perf_stats: RuntimePerfStats::new(),
+            ui_work_counters: UiWorkCounters::default(),
             last_ui_invalidation_trace: None,
         };
         runtime.document_builtin_symbols();
@@ -3058,6 +3075,10 @@ impl Runtime {
         self.last_ui_invalidation_trace.clone()
     }
 
+    pub fn ui_work_counters(&self) -> UiWorkCounters {
+        self.ui_work_counters
+    }
+
     pub(crate) fn drain_host_commands(&mut self) -> Vec<HostCommand> {
         let mut shared = self.shared.borrow_mut();
         std::mem::take(&mut shared.queued_commands)
@@ -3679,6 +3700,8 @@ impl Runtime {
             None,
             relayout_started.elapsed(),
         );
+        self.ui_work_counters.relayout_reused += 1;
+        self.ui_work_counters.relayout_subtree += 1;
         self.perf_stats
             .note_relayout(true, true, relayout_started.elapsed(), None);
         Ok(())
@@ -3968,6 +3991,10 @@ impl Runtime {
             .extend(inactive_pending);
         let mut affected_buffers = affected_buffers.into_iter().collect::<Vec<_>>();
         affected_buffers.sort();
+        self.ui_work_counters.full_buffer_reruns += full_buffer_reruns as u64;
+        self.ui_work_counters.subtree_reruns += subtree_reruns as u64;
+        self.ui_work_counters.reevaluated_subtree_roots +=
+            reevaluated_subtree_roots as u64;
         ReactiveFlushStats {
             widget_tree_flushes: pending_widget_tree_count,
             pending_widget_tree_count,
@@ -4003,6 +4030,7 @@ impl Runtime {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
             self.update_last_trace_relayout("clear", None, relayout_started.elapsed());
+            self.ui_work_counters.relayout_reused += 1;
             self.perf_stats
                 .note_relayout(true, false, relayout_started.elapsed(), None);
             return;
@@ -4024,6 +4052,7 @@ impl Runtime {
             }
             self.force_layout_revision_bump = false;
             self.update_last_trace_relayout("reuse", None, relayout_started.elapsed());
+            self.ui_work_counters.relayout_reused += 1;
             self.perf_stats
                 .note_relayout(true, false, relayout_started.elapsed(), None);
             return;
@@ -4075,6 +4104,7 @@ impl Runtime {
                 failure_reason.clone(),
                 relayout_started.elapsed(),
             );
+            self.ui_work_counters.relayout_full += 1;
             self.perf_stats
                 .note_relayout(false, false, relayout_started.elapsed(), failure_reason);
         }

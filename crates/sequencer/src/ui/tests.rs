@@ -2382,6 +2382,20 @@
     }
 
     #[test]
+    #[ignore = "eseq-z85k.1: Linux release-mode perf probe: cross-slider velocity sweeps in the expanded track editor with one and three expanded tracks"]
+    fn project_92_full_layout_expanded_step_slider_drag_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-expanded-step-slider-drag-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| {
+                project_92_ui_performance_probe_impl(Project92UiProbe::ExpandedStepSliderDrag)
+            })
+            .expect("spawn project 92 expanded step-slider drag probe")
+            .join()
+            .expect("project 92 expanded step-slider drag probe should pass");
+    }
+
+    #[test]
     #[ignore = "eseq-4tl: release-mode perf probe: *step*-buffer Transpose/Velocity/Duration number-picker drags (real mouse -> lisp -> set-step-param-history handler) under the production multi-pane layout"]
     fn project_92_full_layout_step_buffer_param_drag_end_to_end_perf() {
         std::thread::Builder::new()
@@ -2538,6 +2552,13 @@
         /// `dispatch_custom_host_command` seam (not a mirror of it) so the
         /// handler's own epoch/invalidation policy is what the probe measures.
         StepBufferParamDrag,
+        /// Cross-slider velocity sweeps over the expanded track editor's real
+        /// 16-column vslider grid, measured with one and three expanded track
+        /// subtrees. Each coalesced-size drag event crosses six columns, so
+        /// interpolation, hit testing, callback dispatch, targeted host
+        /// invalidations, reactive work, tiled-frame construction, and
+        /// retained primitive updates all remain inside the timed region.
+        ExpandedStepSliderDrag,
         /// Scene launch and track-clip launch under the production
         /// multi-pane layout, at "large project" clip scale: after loading
         /// project 92 the fixture grows every track's pattern pool to 20
@@ -2637,6 +2658,7 @@
                 | Project92UiProbe::InstrumentPlockKnobDrag
                 | Project92UiProbe::ResponseCurveEditorDrag
                 | Project92UiProbe::StepBufferParamDrag
+                | Project92UiProbe::ExpandedStepSliderDrag
                 | Project92UiProbe::SceneAndClipLaunch
                 | Project92UiProbe::GroupTrackSelection
                 | Project92UiProbe::GroupTrackSelectionSmoke
@@ -2706,7 +2728,9 @@
             patched_path
         } else if matches!(
             probe,
-            Project92UiProbe::InstrumentKnobColdFocusDrag | Project92UiProbe::TritonAdsrDrag
+            Project92UiProbe::InstrumentKnobColdFocusDrag
+                | Project92UiProbe::TritonAdsrDrag
+                | Project92UiProbe::ExpandedStepSliderDrag
         ) {
             let source = std::fs::read_to_string(&project_fixture).expect("read probe fixture");
             let fallback_wav = sequencer::app_paths::app_paths()
@@ -6123,6 +6147,549 @@
                 assert!(
                     warm_median < 30.0,
                     "warm drag median {warm_median:.3}ms"
+                );
+            }
+            return;
+        }
+
+        // ---------------------------------------------------------------
+        // Expanded-editor cross-slider sweep. The pointer moves six full
+        // columns in one event, deliberately exercising the distance-based
+        // interpolation path rather than a one-cell synthetic drag.
+        // ---------------------------------------------------------------
+        if probe == Project92UiProbe::ExpandedStepSliderDrag {
+            const TRACK: usize = 0;
+            const FIRST_SLOT: usize = 2;
+            const LAST_SLOT: usize = 8;
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+            const VELOCITY_EPSILON: f32 = 0.0001;
+            let probe_prefix = "project-92-expanded-step-slider-drag";
+
+            let sequencer_buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == "*sequencer*")
+                .expect("sequencer buffer index");
+            let sequencer_tile = editor
+                .tile_root
+                .leaf_ids()
+                .into_iter()
+                .find(|tile_id| {
+                    editor
+                        .tile_root
+                        .find_leaf(*tile_id)
+                        .is_some_and(|leaf| leaf.buffer_idx == sequencer_buffer_idx)
+                })
+                .expect("the production layout must show *sequencer*");
+            editor.switch_active_tile(sequencer_tile);
+
+            let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
+            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
+            assert!(transport_visible && fx_visible && mixer_visible);
+            assert!(!editor_has_visible_buffer(&editor, "*arrangement*"));
+            assert!(app.tracks.len() >= 3, "project 92 must have at least three tracks");
+            for track in 0..3 {
+                state.pattern.track_params[track].set_num_steps(16);
+            }
+
+            sync_all_track_sequencer_state(
+                editor.runtime_mut(),
+                &state,
+                &app,
+                TRACK,
+                &selected_steps,
+            );
+            {
+                let rt = editor.runtime_mut();
+                sync_step_param_lists(rt, &state, TRACK);
+                rt.set_reactive("SEQ", "steps", build_steps_value(&state, TRACK));
+            }
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.update_tile_rects(vp_cols, vp_rows);
+
+            struct TileRetained {
+                buffer_name: String,
+                viewport: eseqlisp::widget_render::WidgetViewport,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
+            }
+            let initial_frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                &mut editor,
+                vp_cols as usize,
+                vp_rows as usize,
+            );
+            let visible_buffers = initial_frame
+                .tiles
+                .iter()
+                .map(|tile| tile.frame.buffer_name.clone())
+                .collect::<Vec<_>>();
+            eprintln!("[{probe_prefix}-visible-buffers] {visible_buffers:?}");
+            let mut tile_retained = initial_frame
+                .tiles
+                .iter()
+                .map(|tile| {
+                    let layout = tile.frame.widget_layout.as_ref().unwrap_or_else(|| {
+                        panic!("visible tile {} must have a layout", tile.frame.buffer_name)
+                    });
+                    let viewport = eseqlisp::widget_render::WidgetViewport {
+                        cell_w: 8.0,
+                        cell_h: 16.0,
+                        vp_w: vp_cols as f32 * 8.0,
+                        vp_h: vp_rows as f32 * 16.0,
+                        time_seconds: 0.0,
+                        focused_widget_id: tile.frame.focused_widget_id,
+                        focused_branch: tile.is_active,
+                        overlay_viewport_bottom: vp_rows as f32,
+                        scroll_top: tile.frame.widget_scroll_top
+                            + tile.frame.text_scroll_top as f32,
+                        scroll_left: tile.frame.widget_layout_scroll_left,
+                        inherited_hover: false,
+                    };
+                    let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
+                        layout,
+                        viewport,
+                        viewport.scroll_top,
+                        vp_rows,
+                    );
+                    let indices =
+                        eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
+                    TileRetained {
+                        buffer_name: tile.frame.buffer_name.clone(),
+                        viewport,
+                        runs,
+                        indices,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let cached_track_peak_levels = vec![0.0; app.tracks.len()];
+            let shared = SharedHandles {
+                state: state.clone(),
+                lg_raw,
+                current_track: current_track.clone(),
+                selected_tracks: selected_tracks.clone(),
+                selected_steps: selected_steps.clone(),
+                selected_neural_neurons: selected_neural_neurons.clone(),
+                piano_roll_selection: piano_roll_selection.clone(),
+                piano_roll_move_state: piano_roll_move_state.clone(),
+                piano_roll_focus: piano_roll_focus.clone(),
+                step_clipboard: Arc::new(Mutex::new(None)),
+                ui_epoch: ui_epoch.clone(),
+                fx_epoch: fx_epoch.clone(),
+                fx_value_epoch: fx_value_epoch.clone(),
+                ui_invalidations: ui_invalidations.clone(),
+                expanded_step_projection: expanded_step_projection.clone(),
+                active_delete_target: active_delete_target.clone(),
+                active_delete_target_version: active_delete_target_version.clone(),
+                auto_follow_override_until: auto_follow_override_until.clone(),
+                track_pan_ids: track_pan_ids.clone(),
+                track_collapsed: track_collapsed.clone(),
+                bus_state: bus_state.clone(),
+                bus_node_ids: bus_node_ids.clone(),
+                track_groups: track_groups.clone(),
+                record_armed: record_armed.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
+                recording: recording.clone(),
+                master_recording: master_recording.clone(),
+                held_notes: Arc::new(Mutex::new(Vec::new())),
+                roll_record: Arc::new(Mutex::new(RollRecordBuffer::default())),
+                step_print: Arc::new(Mutex::new(StepPrintState::default())),
+                keyboard_octave: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+                sample_browser: sample_browser.clone(),
+                keyboard_tx: keyboard_tx.clone(),
+                accumulator_names: accumulator_names.clone(),
+                piano_roll_clipboard: piano_roll_clipboard.clone(),
+                arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
+            };
+            let mut sessions = EditSessionState::default();
+            let mut frame_diff = FrameDiffState::default();
+            let mut gesture_state = GestureState::default();
+            let mut meters = MeterCache {
+                cached_peak_l_level: 0.0,
+                cached_peak_r_level: 0.0,
+                cached_track_peak_levels: cached_track_peak_levels.clone(),
+                cached_rack_slot_peak_levels: Vec::new(),
+                cached_bus_peak_levels: cached_bus_peak_levels.clone(),
+                cached_modulator_phases: Vec::new(),
+                cached_modulator_levels: Vec::new(),
+                cached_cpu_load_bits: 0.0f32.to_bits(),
+                last_meter_poll_at: Instant::now(),
+                last_cpu_ui_poll_at: Instant::now(),
+                last_neural_visualization_poll_at: Instant::now(),
+                visualization_liveness: VisualizationLiveness::default(),
+                last_voice_count_log_at: Instant::now(),
+            };
+            let mut ctx_track_names = track_names.clone();
+            let mut apply_host_commands = |editor: &mut Editor,
+                                           app: &mut app::App,
+                                           commands: Vec<HostCommand>| {
+                let mut names = Vec::new();
+                for command in commands {
+                    let HostCommand::Custom { name, payload } = command else {
+                        continue;
+                    };
+                    let mut ctx = LoopCtx {
+                        sessions: &mut sessions,
+                        meters: &mut meters,
+                        frame: &mut frame_diff,
+                        gesture: &mut gesture_state,
+                        track_names: &mut ctx_track_names,
+                        shared: &shared,
+                    };
+                    dispatch_custom_host_command(&name, payload, app, editor, &mut ctx);
+                    names.push(name);
+                }
+                names
+            };
+
+            let neural = selected_neural_neurons.lock().unwrap().clone();
+            let mut song_frame = super::state_values::SongFrameState::default();
+            let mut prev_auto_follow =
+                super::state_values::auto_follow_enabled(&auto_follow_override_until);
+            let mut finish_visible_update = |editor: &mut Editor,
+                                             app: &mut app::App,
+                                             retained: &mut Vec<TileRetained>| {
+                app.sync_track_sound_bindings();
+                super::state_values::sync_song_state(
+                    editor.runtime_mut(),
+                    app,
+                    &mut song_frame,
+                    transport_visible,
+                );
+                let invalidations = ui_invalidations.drain();
+                if !invalidations.is_empty() {
+                    apply_ui_invalidations(
+                        invalidations,
+                        UiInvalidationApplyCtx {
+                            app,
+                            editor,
+                            state: &state,
+                            track_collapsed: &track_collapsed,
+                            bus_state: &bus_state,
+                            current_track_idx: TRACK,
+                            selected_steps: &selected_steps,
+                            selected_neural_neurons: &neural,
+                            piano_roll_selection: &piano_roll_selection,
+                            accumulator_names: &accumulator_names,
+                            cached_track_peak_levels: &cached_track_peak_levels,
+                            cached_bus_peak_levels: &cached_bus_peak_levels,
+                            record_armed: &record_armed,
+                            active_delete_target: &active_delete_target,
+                            active_delete_target_version: &active_delete_target_version,
+                            expanded_step_projection: &expanded_step_projection,
+                            fx_visible,
+                            sequencer_visible: true,
+                            mixer_visible,
+                        },
+                    );
+                }
+                let auto_follow =
+                    super::state_values::auto_follow_enabled(&auto_follow_override_until);
+                if auto_follow != prev_auto_follow {
+                    editor
+                        .runtime_mut()
+                        .set_reactive("SEQ", "auto-follow", Value::Bool(auto_follow));
+                    prev_auto_follow = auto_follow;
+                }
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                for tile in &frame.tiles {
+                    let entry = retained
+                        .iter_mut()
+                        .find(|entry| entry.buffer_name == tile.frame.buffer_name)
+                        .expect("retained visible tile");
+                    let layout = tile.frame.widget_layout.as_ref().expect("visible tile layout");
+                    let (_, stats) =
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
+                            layout,
+                            entry.viewport,
+                            entry.viewport.scroll_top,
+                            vp_rows,
+                            &mut entry.runs,
+                            &entry.indices,
+                            &tile.frame.dirty_widget_ids,
+                        );
+                    if stats.missing_previous_runs > 0 || stats.invalid_previous_runs > 0 {
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
+                            layout,
+                            entry.viewport,
+                            entry.viewport.scroll_top,
+                            vp_rows,
+                        );
+                        entry.indices =
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
+                        entry.runs = runs;
+                    }
+                }
+            };
+
+            let track_ids = app
+                .graph
+                .track_node_ids
+                .iter()
+                .take(3)
+                .map(|ids| ids.pan_id)
+                .collect::<Vec<_>>();
+            let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                samples[((samples.len() - 1) as f64 * fraction).round() as usize]
+            };
+            let counter_delta = |after: eseqlisp::runtime::UiWorkCounters,
+                                 before: eseqlisp::runtime::UiWorkCounters| {
+                eseqlisp::runtime::UiWorkCounters {
+                    full_buffer_reruns: after.full_buffer_reruns - before.full_buffer_reruns,
+                    subtree_reruns: after.subtree_reruns - before.subtree_reruns,
+                    reevaluated_subtree_roots: after.reevaluated_subtree_roots
+                        - before.reevaluated_subtree_roots,
+                    relayout_reused: after.relayout_reused - before.relayout_reused,
+                    relayout_full: after.relayout_full - before.relayout_full,
+                    relayout_subtree: after.relayout_subtree - before.relayout_subtree,
+                }
+            };
+
+            for expanded_tracks in [1usize, 3usize] {
+                for track_id in track_ids.iter().take(expanded_tracks) {
+                    editor
+                        .runtime_mut()
+                        .eval_str(&format!(
+                            "(eseq.sequencer/set-track-expanded {track_id} true)"
+                        ))
+                        .unwrap_or_else(|error| panic!("expand track {track_id}: {error:?}"));
+                }
+                finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+
+                let (start, end, slider_rect, seq_body) = {
+                    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                        &mut editor,
+                        vp_cols as usize,
+                        vp_rows as usize,
+                    );
+                    let tile = frame
+                        .tiles
+                        .iter()
+                        .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                        .expect("visible sequencer tile");
+                    let layout = tile.frame.widget_layout.as_ref().expect("sequencer layout");
+                    for track_id in track_ids.iter().take(expanded_tracks) {
+                        for slot in 0..16 {
+                            assert!(
+                                find_layout_node_by_stable_key_suffix(
+                                    layout,
+                                    &format!("/expanded-step-slider-{track_id}-{slot}"),
+                                )
+                                .is_some(),
+                                "expanded track editor {track_id} must contain slider {slot}"
+                            );
+                        }
+                    }
+                    let first = find_layout_node_by_stable_key_suffix(
+                        layout,
+                        &format!("/expanded-step-slider-{}-{FIRST_SLOT}", track_ids[TRACK]),
+                    )
+                    .expect("first sweep slider");
+                    let last = find_layout_node_by_stable_key_suffix(
+                        layout,
+                        &format!("/expanded-step-slider-{}-{LAST_SLOT}", track_ids[TRACK]),
+                    )
+                    .expect("last sweep slider");
+                    let origin_col = tile.body_rect.col.floor();
+                    let origin_row = tile.body_rect.row.floor();
+                    let scroll_top = tile.frame.widget_scroll_top
+                        + tile.frame.text_scroll_top as f32;
+                    let scroll_left = tile.frame.widget_layout_scroll_left;
+                    (
+                        origin_col + first.rect.col + first.rect.width * 0.5 - scroll_left,
+                        origin_col + last.rect.col + last.rect.width * 0.5 - scroll_left,
+                        (
+                            origin_row + first.rect.row - scroll_top,
+                            first.rect.height,
+                        ),
+                        tile.body_rect,
+                    )
+                };
+                assert!(
+                    start >= seq_body.col
+                        && end < seq_body.col + seq_body.width
+                        && slider_rect.0 >= seq_body.row
+                        && slider_rect.0 + slider_rect.1 <= seq_body.row + seq_body.height,
+                    "the measured sweep must be visible inside the sequencer tile"
+                );
+
+                let mut total_samples = Vec::with_capacity(SAMPLES);
+                let mut input_samples = Vec::with_capacity(SAMPLES);
+                let mut host_samples = Vec::with_capacity(SAMPLES);
+                let mut work_samples = Vec::with_capacity(SAMPLES);
+                let mut drag_samples = Vec::with_capacity(SAMPLES);
+                for iteration in 0..(WARMUPS + SAMPLES) {
+                    let forward = iteration % 2 == 0;
+                    // Change the target value on every event. Direction and
+                    // value alternate independently enough to exercise both
+                    // sweep directions without timing handler NoOps.
+                    let fraction = if iteration % 2 == 0 { 0.25 } else { 0.75 };
+                    let row = slider_rect.0 + slider_rect.1 * fraction;
+                    let (from, to, final_slot) = if forward {
+                        (start, end, LAST_SLOT)
+                    } else {
+                        (end, start, FIRST_SLOT)
+                    };
+                    editor.handle_tiled_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Down(MouseButton::Left),
+                            from.floor() as u16,
+                            row.floor() as u16,
+                        ),
+                        from,
+                        row,
+                        0,
+                    );
+                    let down_commands = editor.drain_host_commands();
+                    assert!(down_commands.is_empty(), "vslider down must not edit");
+
+                    let work_before = editor.runtime().ui_work_counters();
+                    let started = Instant::now();
+                    editor.handle_tiled_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Drag(MouseButton::Left),
+                            to.floor() as u16,
+                            row.floor() as u16,
+                        ),
+                        to,
+                        row,
+                        0,
+                    );
+                    let commands = editor.drain_host_commands();
+                    let dispatch_done = Instant::now();
+                    let drag_stats = eseqlisp::ui::drag_profile::take_last_drag_path_stats()
+                        .expect("cross-slider drag path counters");
+                    assert!(
+                        drag_stats.interpolation_subsamples > LAST_SLOT as u64 - FIRST_SLOT as u64,
+                        "the drag must interpolate more samples than crossed sliders"
+                    );
+                    assert!(
+                        commands.len() >= LAST_SLOT - FIRST_SLOT + 1,
+                        "the sweep must dispatch every crossed slider, got {} commands",
+                        commands.len()
+                    );
+                    let names = apply_host_commands(&mut editor, &mut app, commands);
+                    let host_done = Instant::now();
+                    assert!(
+                        names.iter().all(|name| name == "set-step-param-history"),
+                        "expanded sliders must lower to set-step-param-history: {names:?}"
+                    );
+                    finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                    let total_ms = duration_ms(started.elapsed());
+                    let work = counter_delta(
+                        editor.runtime().ui_work_counters(),
+                        work_before,
+                    );
+                    let expected = 1.0 - fraction;
+                    for step in FIRST_SLOT..=LAST_SLOT {
+                        let actual = state.pattern.step_data[TRACK]
+                            .get(step, StepParam::Velocity);
+                        assert!(
+                            (actual - expected).abs() <= VELOCITY_EPSILON,
+                            "crossed step {step} must hold {expected}, got {actual}"
+                        );
+                    }
+                    let cursor_field = format!("cursor-step-{}", track_ids[TRACK]);
+                    assert_eq!(
+                        editor
+                            .runtime()
+                            .reactive_field_value("SEQV", &cursor_field)
+                            .and_then(|value| match value {
+                                Value::Number(value) => Some(*value as usize),
+                                _ => None,
+                            }),
+                        Some(final_slot),
+                        "cursor must land on the last crossed step"
+                    );
+                    let layout = editor.widget_layout().expect("expanded sequencer layout");
+                    let header = find_layout_node_by_stable_key_suffix(
+                        &layout,
+                        &format!(
+                            "/expanded-param-number-picker-{}",
+                            track_ids[TRACK]
+                        ),
+                    )
+                    .and_then(|node| find_layout_node_by_widget_type(node, "number-picker"))
+                    .expect("expanded velocity header number-picker");
+                    let header_value = match header.props.get("value") {
+                        Some(Value::Number(value)) => *value as f32,
+                        other => panic!("expanded header value must be numeric: {other:?}"),
+                    };
+                    assert!(
+                        (header_value - expected).abs() <= VELOCITY_EPSILON,
+                        "header must show cursor step value {expected}, got {header_value}"
+                    );
+
+                    editor.handle_tiled_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Up(MouseButton::Left),
+                            to.floor() as u16,
+                            row.floor() as u16,
+                        ),
+                        to,
+                        row,
+                        0,
+                    );
+                    let up_commands = editor.drain_host_commands();
+                    apply_host_commands(&mut editor, &mut app, up_commands);
+                    app::edit::finish_active_gesture(&mut app);
+
+                    if iteration >= WARMUPS {
+                        total_samples.push(total_ms);
+                        input_samples.push(duration_ms(dispatch_done - started));
+                        host_samples.push(duration_ms(host_done - dispatch_done));
+                        work_samples.push(work);
+                        drag_samples.push(drag_stats);
+                    }
+                }
+
+                let median = percentile(&mut total_samples, 0.50);
+                let p95 = percentile(&mut total_samples, 0.95);
+                let work_sum = work_samples.iter().fold(
+                    eseqlisp::runtime::UiWorkCounters::default(),
+                    |mut sum, work| {
+                        sum.full_buffer_reruns += work.full_buffer_reruns;
+                        sum.subtree_reruns += work.subtree_reruns;
+                        sum.reevaluated_subtree_roots += work.reevaluated_subtree_roots;
+                        sum.relayout_reused += work.relayout_reused;
+                        sum.relayout_full += work.relayout_full;
+                        sum.relayout_subtree += work.relayout_subtree;
+                        sum
+                    },
+                );
+                let drag_sum = drag_samples.iter().fold(
+                    eseqlisp::ui::drag_profile::DragPathStats::default(),
+                    |mut sum, stats| {
+                        sum.interpolation_subsamples += stats.interpolation_subsamples;
+                        sum.hit_tests += stats.hit_tests;
+                        sum.layout_node_clones += stats.layout_node_clones;
+                        sum
+                    },
+                );
+                let n = SAMPLES as u64;
+                eprintln!(
+                    "[{probe_prefix}-{expanded_tracks}-tracks] samples={SAMPLES} warmups={WARMUPS} viewport={vp_cols}x{vp_rows} median_ms={median:.3} p95_ms={p95:.3} input_median_ms={:.3} host_median_ms={:.3} work/event=reruns(full:{:.2} sub:{:.2} roots:{:.2}) relayout(reused:{:.2} full:{:.2} subtree:{:.2}) drag(interpolation:{:.2} hit_tests:{:.2} layout_node_clones:{:.2})",
+                    percentile(&mut input_samples, 0.50),
+                    percentile(&mut host_samples, 0.50),
+                    work_sum.full_buffer_reruns as f64 / n as f64,
+                    work_sum.subtree_reruns as f64 / n as f64,
+                    work_sum.reevaluated_subtree_roots as f64 / n as f64,
+                    work_sum.relayout_reused as f64 / n as f64,
+                    work_sum.relayout_full as f64 / n as f64,
+                    work_sum.relayout_subtree as f64 / n as f64,
+                    drag_sum.interpolation_subsamples as f64 / n as f64,
+                    drag_sum.hit_tests as f64 / n as f64,
+                    drag_sum.layout_node_clones as f64 / n as f64,
                 );
             }
             return;

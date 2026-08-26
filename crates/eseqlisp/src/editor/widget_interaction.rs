@@ -1401,6 +1401,7 @@ impl Editor {
         start: (f32, f32),
         end: (f32, f32),
     ) {
+        let _drag_path_profile = crate::ui::drag_profile::begin_drag_path();
         let start_local = (start.0 - content_col as f32, start.1 - content_row as f32);
         let end_local = (end.0 - content_col as f32, end.1 - content_row as f32);
         let start_node = self.widget_node_at_local(start_local.0, start_local.1);
@@ -1467,6 +1468,7 @@ impl Editor {
             let steps = ((end.0 - start.0).abs().max((end.1 - start.1).abs()) * 2.0)
                 .ceil()
                 .max(1.0) as usize;
+            crate::ui::drag_profile::note_interpolation_subsamples(steps + 1);
             let mut last_hit_slider_id: Option<u64> = None;
             let mut target_slider: Option<LayoutNode> = None;
             for step in 0..=steps {
@@ -1527,6 +1529,7 @@ impl Editor {
         let steps = ((end.0 - start.0).abs().max((end.1 - start.1).abs()) * 2.0)
             .ceil()
             .max(1.0) as usize;
+        crate::ui::drag_profile::note_interpolation_subsamples(steps + 1);
         let mut last_hit: Option<LayoutNode> = None;
         for step in 0..=steps {
             let t = step as f32 / steps as f32;
@@ -1555,6 +1558,7 @@ impl Editor {
         local_col: f32,
         local_row: f32,
     ) -> Option<LayoutNode> {
+        crate::ui::drag_profile::note_hit_test();
         let layout = self.runtime.current_layout.as_ref()?;
         let hscroll = self.widget_layout_scroll_left();
 

@@ -3,6 +3,7 @@
 pub(crate) const DEFAULT_MONOSPACE_FONT_SIZE_PT: f64 = 16.0;
 
 pub mod backend;
+pub mod drag_profile;
 pub mod frame;
 pub(crate) mod gpu_geometry;
 pub(crate) mod gpu_scene;

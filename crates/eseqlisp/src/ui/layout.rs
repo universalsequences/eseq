@@ -49,7 +49,7 @@ impl LayoutCtx {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct LayoutNode {
     pub widget_id: u64,
     pub stable_widget_id: Option<u64>,
@@ -62,6 +62,25 @@ pub struct LayoutNode {
     pub children: Vec<LayoutNode>,
     pub focusable: bool,
     pub animation: LayoutAnimationHints,
+}
+
+impl Clone for LayoutNode {
+    fn clone(&self) -> Self {
+        crate::ui::drag_profile::note_layout_node_clone();
+        Self {
+            widget_id: self.widget_id,
+            stable_widget_id: self.stable_widget_id,
+            subtree_root_id: self.subtree_root_id,
+            parent_subtree_root_id: self.parent_subtree_root_id,
+            stable_key: self.stable_key.clone(),
+            widget_type: self.widget_type.clone(),
+            rect: self.rect,
+            props: self.props.clone(),
+            children: self.children.clone(),
+            focusable: self.focusable,
+            animation: self.animation,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
