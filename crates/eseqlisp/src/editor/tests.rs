@@ -4493,6 +4493,7 @@ fn cmd_y_toggles_visible_patcher_selected_cable_without_widget_focus() {
 
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
     editor.set_layout_viewport(40, 12);
     editor
         .runtime
@@ -4522,7 +4523,10 @@ fn cmd_y_toggles_visible_patcher_selected_cable_without_widget_focus() {
             .expect("selected cable should have segmentation state");
     editor.clear_focused_widget();
 
-    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SUPER));
+    editor.handle_key(KeyEvent::new(
+        KeyCode::Char('y'),
+        crate::ui::platform::primary_shortcut_modifier(),
+    ));
 
     let after =
         crate::widget_render::patcher::selected_patcher_cable_is_segmented_for_test(&patcher)
@@ -4537,6 +4541,7 @@ fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
 
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
     editor.set_layout_viewport(40, 12);
     editor
         .runtime
@@ -4565,7 +4570,10 @@ fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
         0
     );
 
-    editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::SUPER));
+    editor.handle_key(KeyEvent::new(
+        KeyCode::Char('k'),
+        crate::ui::platform::primary_shortcut_modifier(),
+    ));
 
     assert_eq!(
         crate::widget_render::patcher::patcher_agentic_bubble_count(&patcher),
@@ -4578,6 +4586,48 @@ fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
             .expect("cmd+k should focus the patcher it opened a bubble on")
             .widget_type,
         "patcher"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn linux_control_k_and_y_stay_with_text_editor_when_a_patcher_is_visible() {
+    let path = temp_file_path("patcher-visible-linux-control-k");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"(effect (patcher :height 10 :path "{}"))"#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+    let patcher = first_patcher_layout_node(
+        editor.runtime.current_layout.as_ref().expect("patcher layout"),
+    )
+    .expect("patcher node");
+    crate::widget_render::patcher::select_first_patcher_cable_for_test(&patcher)
+        .expect("selected cable");
+    let initially_segmented =
+        crate::widget_render::patcher::selected_patcher_cable_is_segmented_for_test(&patcher)
+            .expect("selected cable state");
+    editor.clear_focused_widget();
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+
+    assert_eq!(
+        crate::widget_render::patcher::patcher_agentic_bubble_count(&patcher),
+        0,
+        "Ctrl+K must retain its text-editor kill-line meaning on Linux",
+    );
+    assert_eq!(
+        crate::widget_render::patcher::selected_patcher_cable_is_segmented_for_test(&patcher),
+        Some(initially_segmented),
+        "Ctrl+Y must retain its text-editor yank meaning on Linux",
     );
 }
 

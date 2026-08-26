@@ -28,6 +28,7 @@ use crate::defmacro_library::DefmacroLibrary;
 use crate::editor::{Editor, EditorConfig};
 use crate::layout::{LayoutNode, MeasureCtx, Rect, TextMeasurer};
 use crate::runtime::Runtime;
+use crate::ui::platform::primary_shortcut_modifier;
 use crate::theme;
 use crate::vm::Value;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -2995,7 +2996,7 @@ fn agentic_bubble_cmd_k_creates_ephemeral_prompt_without_source_write() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
 
@@ -3097,7 +3098,7 @@ fn agentic_bubble_cmd_k_uses_last_pointer_model_position() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
 
@@ -3122,7 +3123,7 @@ fn agentic_bubble_enter_emits_submit_payload_and_pending_state() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let key = patcher_state_key(&node);
@@ -3481,7 +3482,7 @@ fn agentic_bubble_resolve_writes_macro_and_keeps_instance_edit_ephemeral() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let key = patcher_state_key(&node);
@@ -3527,7 +3528,7 @@ fn agentic_bubble_resolve_ignores_unrelated_invalid_created_nodes() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let key = patcher_state_key(&node);
@@ -3612,7 +3613,7 @@ fn cmd_k_on_a_library_macro_targets_that_macro_rather_than_creating_a_new_one() 
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
 
@@ -3650,7 +3651,7 @@ fn agentic_bubble_cmd_k_on_selected_macro_creates_edit_target() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
 
@@ -3695,7 +3696,7 @@ fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let mut state = get_patcher_interaction_state(key);
@@ -3830,7 +3831,7 @@ fn agentic_bubble_edit_submit_payload_includes_macro_context() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let mut state = get_patcher_interaction_state(key);
@@ -4038,7 +4039,7 @@ fn agentic_bubble_follow_up_leaves_command_chords_to_the_patcher() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let state = get_patcher_interaction_state(key);
@@ -13459,7 +13460,7 @@ fn segment_row_drag_clamps_normal_and_wraparound_cases() {
 }
 
 #[test]
-fn super_y_initializes_selected_cable_segment_at_rendered_midpoint_after_zoom() {
+fn platform_primary_y_initializes_selected_cable_segment_at_rendered_midpoint_after_zoom() {
     let source = r#"
         (def pitch (in 1 @name pitch))
         (def sig (phasor pitch))
@@ -13563,7 +13564,7 @@ fn super_y_initializes_selected_cable_segment_at_rendered_midpoint_after_zoom() 
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Char('y'),
-                    modifiers: KeyModifiers::SUPER,
+                    modifiers: primary_shortcut_modifier(),
                 },
             )
             .is_some()
@@ -14550,7 +14551,7 @@ fn patcher_alignment_group_drag_applies_primary_adjustment_to_all_selected_nodes
 }
 
 #[test]
-fn patcher_alignment_super_drag_bypasses_snapping() {
+fn patcher_alignment_platform_primary_drag_bypasses_snapping() {
     let path = temp_patcher_source_path("patcher-alignment-super-bypass");
     fs::write(&path, "(def a (in 1 @name a))\n(def b (phasor a))").unwrap();
     let node = patcher_test_node(&path);
@@ -14590,7 +14591,7 @@ fn patcher_alignment_super_drag_bypasses_snapping() {
         &node,
         start.0 + delta_x,
         start.1,
-        KeyModifiers::SUPER,
+        primary_shortcut_modifier(),
         10.0,
         20.0,
     );
@@ -20805,7 +20806,7 @@ fn cmd_enter_creates_empty_node_below_selected_node() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Enter,
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(event.is_some(), "cmd+enter should be consumed");
@@ -20860,7 +20861,7 @@ fn cmd_up_connects_last_two_touched_nodes_on_first_ports() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Up,
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(
@@ -20917,7 +20918,7 @@ fn cmd_up_touch_order_ignores_vertical_order_for_direction() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Up,
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
 
@@ -20952,7 +20953,7 @@ fn patcher_undo_redo_round_trips_created_node() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(undone.is_some(), "undo should be consumed");
@@ -20972,7 +20973,7 @@ fn patcher_undo_redo_round_trips_created_node() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('Z'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
     assert!(redone.is_some(), "redo should be consumed");
@@ -20990,7 +20991,7 @@ fn patcher_undo_redo_round_trips_created_node() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
     assert!(
@@ -21036,7 +21037,7 @@ fn patcher_undo_restores_deleted_selection() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(undone.is_some());
@@ -21099,7 +21100,7 @@ fn patcher_copy_paste_duplicates_selection_and_wires() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(copied.is_some(), "copy should be consumed");
@@ -21161,7 +21162,7 @@ fn patcher_copy_paste_duplicates_selection_and_wires() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(undone.is_some());
@@ -21266,7 +21267,7 @@ fn encapsulate_via_key_event(node: &LayoutNode) -> Option<WidgetEvent> {
         node,
         WidgetKeyEvent {
             code: KeyCode::Char('e'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     )
 }
@@ -21604,7 +21605,7 @@ fn cmd_e_encapsulation_is_a_single_undo_step() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(event.is_some(), "cmd+z consumed");
@@ -22566,7 +22567,7 @@ fn cmd_shift_k_opens_a_connect_bubble_for_the_selected_macro_instance() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
 
@@ -22607,7 +22608,7 @@ fn cmd_shift_k_without_a_single_selection_is_not_consumed() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
     assert!(event.is_none(), "no selection should not open a bubble");
@@ -22620,7 +22621,7 @@ fn cmd_shift_k_without_a_single_selection_is_not_consumed() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
     assert!(event.is_none(), "multi-selection should not open a bubble");
@@ -22996,7 +22997,7 @@ fn connect_bubble_submit_payload_carries_the_patch_context() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
     let mut state = get_patcher_interaction_state(key);
@@ -23056,7 +23057,7 @@ fn connect_bubble_renders_its_placeholder_and_subject_badge() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
 

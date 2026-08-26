@@ -42,6 +42,17 @@ pub fn has_primary_shortcut_modifier(modifiers: KeyModifiers) -> bool {
     has_primary_shortcut_modifier_for(modifiers, CURRENT_SHORTCUT_PLATFORM)
 }
 
+pub fn is_exact_primary_shortcut_modifier_for(
+    modifiers: KeyModifiers,
+    platform: ShortcutPlatform,
+) -> bool {
+    modifiers == primary_shortcut_modifier_for(platform)
+}
+
+pub fn is_exact_primary_shortcut_modifier(modifiers: KeyModifiers) -> bool {
+    is_exact_primary_shortcut_modifier_for(modifiers, CURRENT_SHORTCUT_PLATFORM)
+}
+
 /// Exact modifier sets accepted by editor keymaps for copy/paste.
 ///
 /// Sequencer shortcuts test for containment, so Shift naturally remains an

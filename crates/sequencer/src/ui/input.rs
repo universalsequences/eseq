@@ -1,6 +1,7 @@
 use super::*;
 use eseqlisp::ui::platform::{
     has_primary_shortcut_modifier, has_primary_shortcut_modifier_for,
+    is_exact_primary_shortcut_modifier, is_exact_primary_shortcut_modifier_for,
     ShortcutPlatform, CURRENT_SHORTCUT_PLATFORM,
 };
 use eseqlisp::widget_render::number_picker::{
@@ -259,7 +260,14 @@ fn shortcut_context_allows_sequencer_tab_switch(editor: &Editor) -> bool {
 }
 
 fn sequencer_tab_shortcut_index(key: &crossterm::event::KeyEvent) -> Option<usize> {
-    if key.modifiers != crossterm::event::KeyModifiers::SUPER {
+    sequencer_tab_shortcut_index_for(key, CURRENT_SHORTCUT_PLATFORM)
+}
+
+fn sequencer_tab_shortcut_index_for(
+    key: &crossterm::event::KeyEvent,
+    platform: ShortcutPlatform,
+) -> Option<usize> {
+    if !is_exact_primary_shortcut_modifier_for(key.modifiers, platform) {
         return None;
     }
     let crossterm::event::KeyCode::Char(ch) = key.code else {
@@ -358,12 +366,17 @@ fn focused_samples_search_should_hand_off_to_tree(
 }
 
 fn sample_browser_search_shortcut(key: &crossterm::event::KeyEvent) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
+    sample_browser_search_shortcut_for(key, CURRENT_SHORTCUT_PLATFORM)
+}
 
-    matches!(
-        (key.code, key.modifiers),
-        (KeyCode::Char('f') | KeyCode::Char('F'), KeyModifiers::SUPER)
-    )
+fn sample_browser_search_shortcut_for(
+    key: &crossterm::event::KeyEvent,
+    platform: ShortcutPlatform,
+) -> bool {
+    use crossterm::event::KeyCode;
+
+    matches!(key.code, KeyCode::Char('f') | KeyCode::Char('F'))
+        && is_exact_primary_shortcut_modifier_for(key.modifiers, platform)
 }
 
 fn is_toggle_mods_view_shortcut(key: &crossterm::event::KeyEvent) -> bool {
@@ -374,9 +387,9 @@ fn is_toggle_mods_view_shortcut(key: &crossterm::event::KeyEvent) -> bool {
     }
 
     match key.code {
-        KeyCode::Char('m') | KeyCode::Char('M') => key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER),
+        KeyCode::Char('m') | KeyCode::Char('M') => {
+            has_primary_shortcut_modifier(key.modifiers)
+        }
         _ => false,
     }
 }
@@ -390,9 +403,7 @@ enum PatternLengthShortcut {
 fn pattern_length_shortcut(key: &crossterm::event::KeyEvent) -> Option<PatternLengthShortcut> {
     use crossterm::event::{KeyCode, KeyModifiers};
 
-    let has_shortcut_modifier = key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+    let has_shortcut_modifier = has_primary_shortcut_modifier(key.modifiers);
     if !has_shortcut_modifier || key.modifiers.contains(KeyModifiers::ALT) {
         return None;
     }
@@ -407,12 +418,37 @@ fn pattern_length_shortcut(key: &crossterm::event::KeyEvent) -> Option<PatternLe
 }
 
 fn is_trigger_recording_shortcut(key: &crossterm::event::KeyEvent) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crossterm::event::KeyCode;
 
-    matches!(
-        (key.code, key.modifiers),
-        (KeyCode::Char(','), KeyModifiers::SUPER)
-    )
+    key.code == KeyCode::Char(',') && is_exact_primary_shortcut_modifier(key.modifiers)
+}
+
+fn is_new_instrument_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    is_new_instrument_shortcut_for(key, CURRENT_SHORTCUT_PLATFORM)
+}
+
+fn is_new_instrument_shortcut_for(
+    key: &crossterm::event::KeyEvent,
+    platform: ShortcutPlatform,
+) -> bool {
+    use crossterm::event::KeyCode;
+
+    matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I'))
+        && is_exact_primary_shortcut_modifier_for(key.modifiers, platform)
+}
+
+fn is_duplicate_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    is_duplicate_shortcut_for(key, CURRENT_SHORTCUT_PLATFORM)
+}
+
+fn is_duplicate_shortcut_for(
+    key: &crossterm::event::KeyEvent,
+    platform: ShortcutPlatform,
+) -> bool {
+    use crossterm::event::KeyCode;
+
+    matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D'))
+        && is_exact_primary_shortcut_modifier_for(key.modifiers, platform)
 }
 
 fn is_plain_tab_shortcut(key: &crossterm::event::KeyEvent) -> bool {
@@ -530,15 +566,24 @@ pub(crate) fn should_route_to_live_keyboard(
 pub(crate) fn normalize_command_shortcuts(
     key: crossterm::event::KeyEvent,
 ) -> crossterm::event::KeyEvent {
+    normalize_command_shortcuts_for(key, CURRENT_SHORTCUT_PLATFORM)
+}
+
+fn normalize_command_shortcuts_for(
+    key: crossterm::event::KeyEvent,
+    platform: ShortcutPlatform,
+) -> crossterm::event::KeyEvent {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    if matches!(
-        key.code,
-        KeyCode::Char('a') | KeyCode::Char('A')
-    ) && key.modifiers.contains(KeyModifiers::SUPER)
+    // The editor's select-all command is represented internally as Ctrl+A.
+    // Only macOS input needs translating; Linux's platform-primary chord is
+    // already Ctrl+A. Global UI dispatch sees the raw event before this step.
+    if platform == ShortcutPlatform::MacOS
+        && matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
+        && has_primary_shortcut_modifier_for(key.modifiers, platform)
     {
         let mut modifiers = key.modifiers;
-        modifiers.remove(KeyModifiers::SUPER);
+        modifiers.remove(eseqlisp::ui::platform::primary_shortcut_modifier_for(platform));
         modifiers.insert(KeyModifiers::CONTROL);
         return KeyEvent::new(key.code, modifiers);
     }
@@ -1379,7 +1424,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
 
         match (key.code, key.modifiers) {
             (KeyCode::Char('a') | KeyCode::Char('A'), modifiers)
-                if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                if has_primary_shortcut_modifier(modifiers)
                     && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
                 let command = if editor.active_buffer().name == "*sequencer*" {
@@ -1430,16 +1475,14 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 editor.refresh_runtime_side_effects();
                 return true;
             }
-            (KeyCode::Char('i') | KeyCode::Char('I'), KeyModifiers::SUPER) => {
+            _ if is_new_instrument_shortcut(key) => {
                 let _ = editor
                     .runtime_mut()
                     .eval_str("(host-command \"enter-new-instrument-editor\" (dict))");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
-            (KeyCode::Char('d') | KeyCode::Char('D'), KeyModifiers::SUPER)
-                if editor.active_buffer().name == "*mixer*" =>
-            {
+            _ if is_duplicate_shortcut(key) && editor.active_buffer().name == "*mixer*" => {
                 let _ = editor
                     .runtime_mut()
                     .eval_str("(seq-clone-active-track-pattern)");
@@ -1450,12 +1493,10 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         }
     }
 
-    if key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+    if has_primary_shortcut_modifier(key.modifiers)
         && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
     {
-        // Ctrl+G and Cmd+G share the same global track-group dispatcher.
+        // The platform-primary chord owns the global track-group dispatcher.
         let _ = editor.runtime_mut().eval_str("(eseq.mixer/seq-ctrl-g)");
         editor.refresh_runtime_side_effects();
         return true;
@@ -2102,9 +2143,11 @@ mod live_keyboard_tests {
         handle_arrangement_region_shortcut, handle_metal_command_shortcut,
         handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
         handle_recording_key, held_note_for_key,
-        is_active_roll_rate_key, normalize_command_shortcuts, note_from_key,
-        number_picker_edit_state, quantized_record_position,
-        sequencer_history_shortcut, should_route_to_live_keyboard,
+        is_active_roll_rate_key, is_duplicate_shortcut_for, is_new_instrument_shortcut_for,
+        normalize_command_shortcuts, normalize_command_shortcuts_for, note_from_key,
+        number_picker_edit_state, quantized_record_position, sample_browser_search_shortcut_for,
+        sequencer_history_shortcut, sequencer_tab_shortcut_index_for,
+        should_route_to_live_keyboard,
         ExpandedStepProjectionRegistry, ExpandedStepViewport,
         HeldKeyboardNote, LiveNoteTarget, RecordingKeyOutcome, RollRecordBuffer,
         SequencerHistoryShortcut, SoftStepParamEdit, StepClipboardShortcut,
@@ -2114,7 +2157,7 @@ mod live_keyboard_tests {
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use eseqlisp::editor::ViewMode;
-    use eseqlisp::ui::platform::ShortcutPlatform;
+    use eseqlisp::ui::platform::{primary_shortcut_modifier, ShortcutPlatform};
     use eseqlisp::mode::BufferMode;
     use eseqlisp::vm::Value;
     use eseqlisp::widget_render::WidgetKeyEvent;
@@ -3022,15 +3065,67 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn command_copy_and_paste_are_not_normalized_before_editor_routing() {
-        for key in ['c', 'v'] {
-            let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::SUPER);
-            assert_eq!(normalize_command_shortcuts(event), event);
+    fn platform_primary_shortcut_shapes_cover_tabs_browser_focus_and_duplicate() {
+        for (platform, primary, non_primary) in [
+            (ShortcutPlatform::MacOS, KeyModifiers::SUPER, KeyModifiers::CONTROL),
+            (ShortcutPlatform::Other, KeyModifiers::CONTROL, KeyModifiers::SUPER),
+        ] {
+            let tab = KeyEvent::new(KeyCode::Char('3'), primary);
+            assert_eq!(sequencer_tab_shortcut_index_for(&tab, platform), Some(3));
+            assert!(sample_browser_search_shortcut_for(
+                &KeyEvent::new(KeyCode::Char('f'), primary),
+                platform,
+            ));
+            assert!(is_duplicate_shortcut_for(
+                &KeyEvent::new(KeyCode::Char('d'), primary),
+                platform,
+            ));
+            assert!(is_new_instrument_shortcut_for(
+                &KeyEvent::new(KeyCode::Char('i'), primary),
+                platform,
+            ));
+
+            assert_eq!(
+                sequencer_tab_shortcut_index_for(
+                    &KeyEvent::new(KeyCode::Char('3'), non_primary),
+                    platform,
+                ),
+                None,
+            );
+            assert!(!sample_browser_search_shortcut_for(
+                &KeyEvent::new(KeyCode::Char('f'), non_primary),
+                platform,
+            ));
+            assert!(!is_duplicate_shortcut_for(
+                &KeyEvent::new(KeyCode::Char('d'), non_primary),
+                platform,
+            ));
         }
     }
 
     #[test]
-    fn command_comma_toggles_trigger_recording_without_claiming_plain_comma() {
+    fn command_shortcut_normalization_preserves_raw_clipboard_events_and_linux_control_a() {
+        for key in ['c', 'v'] {
+            let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::SUPER);
+            assert_eq!(normalize_command_shortcuts(event), event);
+        }
+
+        let linux_select_all = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(
+            normalize_command_shortcuts_for(linux_select_all, ShortcutPlatform::Other),
+            linux_select_all,
+        );
+        assert_eq!(
+            normalize_command_shortcuts_for(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SUPER),
+                ShortcutPlatform::MacOS,
+            ),
+            linux_select_all,
+        );
+    }
+
+    #[test]
+    fn platform_primary_comma_toggles_trigger_recording_without_claiming_plain_comma() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.open_scratch_buffer("*source*", "");
         editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
@@ -3048,7 +3143,7 @@ mod live_keyboard_tests {
 
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char(','), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char(','), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -3098,13 +3193,13 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn command_f_focuses_sample_browser_search_from_ui_buffers() {
+    fn platform_primary_f_focuses_sample_browser_search_from_ui_buffers() {
         let mut editor = sample_browser_keyboard_editor();
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
 
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('f'), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -3117,6 +3212,26 @@ mod live_keyboard_tests {
             .expect("Cmd+F should focus the browser search");
         assert_eq!(focused.widget_type, "text-input");
         assert_eq!(focused.stable_key.as_deref(), Some("sbrowser-search-input"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_control_f_remains_available_to_text_mode() {
+        let mut editor = sample_browser_keyboard_editor();
+        editor.open_scratch_buffer("*source*", "line one\nline two\n");
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(editor.active_buffer().name, "*source*");
+        assert!(editor.focused_widget_node().is_none());
     }
 
     #[test]
@@ -3182,7 +3297,7 @@ mod live_keyboard_tests {
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('f'), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -3218,7 +3333,7 @@ mod live_keyboard_tests {
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('f'), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -3247,7 +3362,7 @@ mod live_keyboard_tests {
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('f'), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -3680,7 +3795,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn cmd_number_selects_visible_sequencer_step_tab() {
+    fn platform_primary_number_selects_visible_sequencer_step_tab() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         let sequencer_id =
             editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
@@ -3731,7 +3846,7 @@ mod live_keyboard_tests {
 
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('2'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('2'), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -3970,7 +4085,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn command_or_control_a_selects_current_sequencer_track_steps() {
+    fn platform_primary_a_selects_current_sequencer_track_steps() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
@@ -4012,7 +4127,7 @@ mod live_keyboard_tests {
 
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('a'), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -4034,7 +4149,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn command_and_control_g_share_track_group_dispatcher() {
+    fn platform_primary_g_dispatches_track_grouping() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         editor
@@ -4048,19 +4163,17 @@ mod live_keyboard_tests {
             .expect("install track group dispatcher");
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
 
-        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
-            assert!(handle_metal_command_shortcut(
-                &mut editor,
-                &KeyEvent::new(KeyCode::Char('g'), modifiers),
-                &state,
-                &current_track,
-                &selected_steps,
-                &step_clipboard,
-            ));
-        }
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('g'), primary_shortcut_modifier()),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
 
         let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 1);
         assert!(commands.iter().all(|command| matches!(
             command,
             HostCommand::Custom { name, .. } if name == "group-selected-tracks"
@@ -4103,7 +4216,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn command_i_queues_new_instrument_editor() {
+    fn platform_primary_i_queues_new_instrument_editor() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         let state = Arc::new(SequencerState::new(1, vec![]));
@@ -4114,7 +4227,7 @@ mod live_keyboard_tests {
 
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('i'), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -4131,7 +4244,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn command_d_clones_selected_track_pattern_in_mixer() {
+    fn platform_primary_d_clones_selected_track_pattern_in_mixer() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.open_scratch_buffer("*mixer*", "");
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
@@ -4154,7 +4267,7 @@ mod live_keyboard_tests {
 
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('d'), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -4210,7 +4323,7 @@ mod live_keyboard_tests {
             .expect("reset action");
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('='), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('='), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -4312,7 +4425,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn command_plus_and_minus_resize_all_patterns_when_drum_rack_bus_is_selected() {
+    fn platform_primary_plus_and_minus_resize_all_patterns_when_drum_rack_bus_is_selected() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         editor
@@ -4345,7 +4458,7 @@ mod live_keyboard_tests {
         for (key, operation) in [('+', "double"), ('-', "halve")] {
             assert!(handle_metal_command_shortcut(
                 &mut editor,
-                &KeyEvent::new(KeyCode::Char(key), KeyModifiers::SUPER),
+                &KeyEvent::new(KeyCode::Char(key), primary_shortcut_modifier()),
                 &state,
                 &current_track,
                 &selected_steps,
@@ -4359,7 +4472,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn command_or_control_m_toggles_current_track_mods_view() {
+    fn platform_primary_m_toggles_current_track_mods_view() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         editor
@@ -4388,7 +4501,7 @@ mod live_keyboard_tests {
 
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('m'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('m'), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,
@@ -4413,25 +4526,10 @@ mod live_keyboard_tests {
             Some(eseqlisp::vm::Value::Number(-1.0))
         );
 
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.effects.state/instrument-mods-open")
-                .unwrap(),
-            Some(eseqlisp::vm::Value::Bool(false))
-        );
     }
 
     #[test]
-    fn command_m_toggles_mods_view_outside_ui_buffers() {
+    fn platform_primary_m_toggles_mods_view_outside_ui_buffers() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.active_buffer_mut().read_only = true;
         editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
@@ -4456,7 +4554,7 @@ mod live_keyboard_tests {
 
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('m'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('m'), primary_shortcut_modifier()),
             &state,
             &current_track,
             &selected_steps,

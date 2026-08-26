@@ -1,10 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::layout::LayoutNode;
+use crate::ui::platform::{
+    has_primary_shortcut_modifier, ShortcutPlatform, CURRENT_SHORTCUT_PLATFORM,
+};
 use crate::vm::Value;
 use crate::widget_render::{WidgetEvent, WidgetKeyEvent, handle_event, map_key_event};
 
-use super::{Editor, key_str};
+use super::{Editor, ViewMode, key_str};
 
 impl Editor {
     pub(super) fn set_focused_widget(&mut self, node: LayoutNode) {
@@ -492,7 +495,7 @@ impl Editor {
 
     pub(super) fn handle_visible_patcher_selected_cable_shortcut(&mut self, key: KeyEvent) -> bool {
         if !matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
-            || !key.modifiers.contains(KeyModifiers::SUPER)
+            || !has_primary_shortcut_modifier(key.modifiers)
         {
             return false;
         }
@@ -501,8 +504,11 @@ impl Editor {
             self.active_buffer().name,
             self.active_leaf().focused_widget_id
         );
-        if self.focused_widget_captures_text_input() {
-            eprintln!("[patcher cmd-y] ignored: focused widget is capturing text input");
+        if self.focused_widget_captures_text_input()
+            || (CURRENT_SHORTCUT_PLATFORM != ShortcutPlatform::MacOS
+                && self.active_buffer().view_mode == ViewMode::TextOnly)
+        {
+            eprintln!("[patcher cmd-y] ignored: active context is capturing text input");
             return false;
         }
         let Some(layout) = self.runtime.current_layout.clone() else {
@@ -556,12 +562,16 @@ impl Editor {
     /// clicking the canvas to focus it.
     pub(super) fn handle_visible_patcher_agentic_shortcut(&mut self, key: KeyEvent) -> bool {
         if !matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K'))
-            || !key.modifiers.contains(KeyModifiers::SUPER)
+            || !has_primary_shortcut_modifier(key.modifiers)
         {
             return false;
         }
-        // A focused text field keeps Cmd+K for itself.
-        if self.focused_widget_captures_text_input() {
+        // Text editing keeps Ctrl+K (kill line) on Linux. A focused widget
+        // keeps the platform-primary chord for itself on every platform.
+        if self.focused_widget_captures_text_input()
+            || (CURRENT_SHORTCUT_PLATFORM != ShortcutPlatform::MacOS
+                && self.active_buffer().view_mode == ViewMode::TextOnly)
+        {
             return false;
         }
         let Some(layout) = self.runtime.current_layout.clone() else {
