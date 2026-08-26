@@ -66,9 +66,8 @@ impl Editor {
             ] {
                 let key = KeyEvent::new(code, modifiers);
                 self.builtins.insert(key, command.to_string());
-                // Ctrl-C is also the prefix of conventional C-c chords. A
-                // direct binding intentionally outranks prefix detection in
-                // `handle_key`, while still dispatching the builtin command.
+                // Linux uses Ctrl-Shift-C/V so conventional C-c chords remain
+                // available. Direct clipboard bindings still outrank prefixes.
                 self.default_lisp_bindings
                     .insert(key_str(key), command.to_string());
             }

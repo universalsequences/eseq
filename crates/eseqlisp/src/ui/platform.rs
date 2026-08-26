@@ -71,21 +71,19 @@ pub fn is_exact_primary_shortcut_modifier(modifiers: KeyModifiers) -> bool {
     is_exact_primary_shortcut_modifier_for(modifiers, CURRENT_SHORTCUT_PLATFORM)
 }
 
-/// Exact modifier sets accepted by editor keymaps for copy/paste.
+/// Exact modifier accepted by editor keymaps for copy/paste.
 ///
-/// Sequencer shortcuts test for containment, so Shift naturally remains an
-/// optional modifier. Editor bindings are exact and therefore need both Linux
-/// forms registered explicitly. macOS intentionally retains its existing
-/// Cmd-only bindings.
+/// macOS uses Cmd-C/V. Linux and other targets use Ctrl-Shift-C/V, preserving
+/// Ctrl-C as the prefix of conventional editor chords such as C-c C-c.
+pub const fn clipboard_shortcut_modifier_for(platform: ShortcutPlatform) -> KeyModifiers {
+    match platform {
+        ShortcutPlatform::MacOS => KeyModifiers::SUPER,
+        ShortcutPlatform::Other => KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
+    }
+}
+
 pub fn primary_clipboard_key_modifiers() -> impl Iterator<Item = KeyModifiers> {
-    let primary = primary_shortcut_modifier();
-    [
-        Some(primary),
-        (CURRENT_SHORTCUT_PLATFORM != ShortcutPlatform::MacOS)
-            .then_some(primary | KeyModifiers::SHIFT),
-    ]
-    .into_iter()
-    .flatten()
+    [clipboard_shortcut_modifier_for(CURRENT_SHORTCUT_PLATFORM)].into_iter()
 }
 
 pub fn window_theme_for_background(background: Color) -> WindowTheme {
@@ -207,6 +205,18 @@ mod tests {
             KeyModifiers::ALT,
             ShortcutPlatform::MacOS
         ));
+    }
+
+    #[test]
+    fn clipboard_shortcuts_preserve_control_chords_off_macos() {
+        assert_eq!(
+            clipboard_shortcut_modifier_for(ShortcutPlatform::MacOS),
+            KeyModifiers::SUPER
+        );
+        assert_eq!(
+            clipboard_shortcut_modifier_for(ShortcutPlatform::Other),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        );
     }
 
     #[test]
