@@ -3,7 +3,8 @@
 What "the Linux port works" means, how it is checked, and what the numbers were
 when it was last checked. Tracked by bead `eseq-linux.12`.
 
-Reference machine for every measurement below:
+Reference machine for every Linux measurement below (the macOS host used for
+the `eseq-linux.26` cross-checks is named where its numbers appear):
 
 | | |
 |---|---|
@@ -16,6 +17,41 @@ This is deliberately a weak integrated GPU on a laptop CPU. The renderer was
 tuned for Apple GPUs (see `UI_PERFORMANCE_TUNING.md`), and SDF-heavy fragment
 shaders with per-widget instancing behave differently when memory bandwidth is
 shared with the CPU.
+
+## Supported build targets
+
+Exactly two, and the set is enforced at compile time. `app_paths/mod.rs` selects
+the bundled DGenLisp compiler filename and toolchain target from the build
+target and ends the `cfg` chain with
+
+```rust
+compile_error!("no bundled DGenLisp compiler exists for this target");
+```
+
+so anything else fails the build with that message rather than picking a
+host-incompatible binary at runtime:
+
+| Target | Toolchain stage | Status |
+|---|---|---|
+| `aarch64-apple-darwin` | `arm64-apple-macos` | supported |
+| `x86_64-unknown-linux-gnu` | `x86_64-unknown-linux-gnu` | supported |
+| `x86_64-apple-darwin` | none | **not supported** |
+
+`eseq-linux.22` recorded its deferred cross-check as `x86_64-apple-darwin`; that
+was wrong. Confirmed on a macOS host on 2026-08-25 (`eseq-linux.26`):
+
+- `cargo check --workspace --all-targets --target aarch64-apple-darwin` — clean.
+- The same with `--features eseqlisp/wgpu` (the Linux CI check's feature set) —
+  clean.
+- `--target x86_64-apple-darwin` — 8 errors in `sequencer` (lib) and 17 in
+  `sequencer` (lib test), all cascading from the `compile_error!` above through
+  `DGENLISP_TOOL_FILENAME`, `DGEN_TOOLCHAIN_TARGET`,
+  `DGEN_TOOLCHAIN_REQUIRED_FILES` and `CACHE_TARGET_TRIPLE`. That is the gate
+  working, not a port gap.
+
+Adding an Intel-Mac target would mean publishing an `x86_64-apple-macos`
+DGenLisp distribution and toolchain archive first; nothing in the Rust tree
+blocks it.
 
 ## Test suite
 
@@ -49,8 +85,8 @@ and `sequencer/src/ui/state_values/tests.rs`. None of them were testing Metal.
 They were gated because the primitive IR they assert against
 (`GpuPrimitive`, `WidgetInstance`, `WidgetViewport`, `collect_gpu_primitives`)
 was itself macOS-gated before `eseq-linux.1` made it backend-neutral; the gates
-outlived the reason. All 36 now run on both platforms. `eseq-linux.26` covers
-re-confirming them on a macOS host.
+outlived the reason. All 36 now run on both platforms, and
+`eseq-linux.26` re-confirmed them on a macOS host — see below.
 
 What remains:
 
@@ -69,6 +105,53 @@ one that needs a sample WAV from the author's local library.
 `cargo nextest run --workspace --features eseqlisp/wgpu` therefore reports
 exactly 33 skipped on Linux, and every one of them would also be skipped on
 macOS.
+
+### Re-confirmed on macOS, 2026-08-25
+
+`eseq-linux.26` ran the ungated set on an Apple M1 Max (macOS 26.5.1) to check
+that none of the 36 gates had been hiding a real failure rather than an obsolete
+one. All 35 gate-and-`#[test]` pairs recoverable from `733af2a0^` pass:
+
+```sh
+# The 35 names come from the `#[cfg(target_os = "macos")]` + `#[test]` pairs
+# in 733af2a0^, alternated into one nextest filter:
+cargo nextest run --workspace --no-fail-fast -E 'test(/^(.*::)?(name1|name2|...)$/)'
+# 35 tests run: 35 passed, 4532 skipped
+```
+
+33 in `eseqlisp` (`editor::tests` modal/dropdown/context-menu routing,
+`ui::layout::tests` tree selection, `modal_layout_tests`, `tests`) and 2 in the
+`metal_seq` bin (`state_values::tests`). The 36th was
+`metal_seq_transport_view_buttons_switch_to_wide_arrangement_layout`, deleted in
+`733af2a0` rather than ungated. Nothing platform-specific was buried.
+
+The whole workspace on the same host: `cargo nextest run --workspace
+--no-fail-fast` reports **4528 run, 4526 passed, 2 failed, 39 skipped** in 232s
+debug. macOS compiles more targets than Linux does (Metal backend, capture
+harness), which is why the run and skip counts are both higher than the Linux
+4508/33 — the comparison to make is per test, not per total.
+
+Neither failure is a Linux-port regression and both are filed:
+
+| Test | Cause |
+|---|---|
+| `eseqlisp lang::sdf_codegen::tests::content_shader_corpus_emits_valid_wgsl` | `eseq-5ed`, recurring. Authored content shaders changed after `7396708d` and the two absolute digests were not re-captured. Reproduced at clean `HEAD` in a detached worktree with identical digests, so it is not working-tree drift, and it is not platform-specific. |
+| `sequencer lisp_host::tests::vendored_dgen_abi_header_matches_staged_toolchain_header` | `eseq-linux.75`, macOS-only. `dgen_abi_v1.h` records one `Source-sha256` for a header that differs between the two pinned toolchain archives; `2f5a3cd9` bumped it to the Linux stage's header while the `arm64-apple-macos` pin stayed on the older one. Green on Linux, red on every Mac. |
+
+The `eseq-linux.17` clip-math refactor was re-checked here too: every
+clip/scissor/`gpu_geometry`/`metal_backend` test passes on macOS (118 run, 118
+passed), so sharing `ui::gpu_geometry::{ScissorRect, ClipStack}` with the Metal
+encoder did not regress the Metal-only side that Linux cannot exercise.
+
+`eseq-linux.9`'s numeric-equivalence half closes here as well:
+`cargo nextest run -p sequencer --lib -E 'test(/dgen_host_services_tests/)'`
+passes all 10 on macOS. The `portable_*` tests pin the replacement FFT and the
+`host_services_*` tests drive whatever backend the platform ships — vDSP here,
+since `dgen_host_services.c` keeps the Accelerate calls under `#if
+defined(__APPLE__)` and `build.rs` links the framework only on
+`target_os = "macos"`. Both groups compare against the same naive f64 DFT, so
+passing on both platforms is what turns "each matches the reference" into "the
+portable FFT matches vDSP within tolerance".
 
 ## Which GPU backend the app actually got
 
@@ -114,6 +197,13 @@ GPU, 96 generated SDF controls at 1920×1080:
 This is the GPU half and it is not the constraint: the whole authored control
 surface fits in a 16.6 ms frame with room to spare, which matches the observation
 that SDF-heavy panels feel fine on this machine.
+
+The macOS half of that comparison was captured on 2026-08-25 under
+`eseq-linux.26`, on an Apple M1 Max through wgpu's Metal backend: 1.293 ms
+median full against 1.281 ms flat, a 0.9% difference that a repeat run
+reversed. The finite-difference lighting term is measurable on the UHD 620 and
+below the noise floor on Apple silicon, which is the whole argument for keeping
+the flat tier as an opt-in low-end fallback rather than a per-platform default.
 
 ### Application frame cost
 
