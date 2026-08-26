@@ -862,7 +862,7 @@
             (box :height 2.7
               (label "cpu"
                 :font-size 12 :width 3.0
-                :color '(rgba 0.30 0.30 0.32 1)
+                :color :gray
                 :bg :transparent))
             (number-label :value (bind-seq "cpu-load-pct")
               :decimals 0 :min-integer-digits 2 :suffix "%"
