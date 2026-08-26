@@ -1,19 +1,32 @@
-//! Cross-platform glyph measurement, rasterization, and atlas packing.
+//! Glyph measurement, rasterization, and atlas packing.
 //!
-//! Font discovery is provided by `fontdb` and outlines are measured and
-//! rasterized by `fontdue` on every platform. Atlas pixels use one explicit
-//! convention: row zero is the top row and increasing V moves down. GPU
-//! backends must preserve that convention when uploading the R8 bitmap.
+//! Two font backends sit behind one API. macOS measures and rasterizes with
+//! CoreText, so the UI keeps the real system UI face along with Apple's
+//! hinting and font smoothing; every other platform discovers fonts with
+//! `fontdb` and rasterizes them with `fontdue`. Both fill the same CPU
+//! `AtlasBitmap`, so the Metal and wgpu upload paths never learn which
+//! backend drew the pixels. Atlas pixels use one explicit convention: row
+//! zero is the top row and increasing V moves down. GPU backends must
+//! preserve that convention when uploading the R8 bitmap.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
 
 use etagere::{AtlasAllocator, Size};
+
+#[cfg(not(target_os = "macos"))]
 use fontdb::{Database, Family, Query};
-use fontdue::{Font, FontSettings, Metrics};
+#[cfg(not(target_os = "macos"))]
+use fontdue::{Font, FontSettings};
+#[cfg(not(target_os = "macos"))]
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(target_os = "macos")]
-use std::ptr::NonNull;
+use objc2_core_foundation::{CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize};
+#[cfg(target_os = "macos")]
+use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph};
+#[cfg(target_os = "macos")]
+use objc2_core_text::{CTFont, CTFontOrientation, CTFontUIFontType};
+
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
@@ -23,6 +36,10 @@ use objc2_metal::{
     MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MTLTexture,
     MTLTextureDescriptor,
 };
+#[cfg(target_os = "macos")]
+use std::cell::RefCell;
+#[cfg(target_os = "macos")]
+use std::ptr::NonNull;
 
 const ATLAS_SIZE: usize = 1024;
 const PROP_ATLAS_SIZE: usize = 2048;
@@ -50,6 +67,20 @@ impl FontLineMetrics {
     }
 }
 
+/// Raster metrics for one glyph, in device pixels. Mirrors the fields of
+/// `fontdue::Metrics` that the atlas needs so the CoreText backend can hand
+/// back exactly the same shape.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GlyphMetrics {
+    pub width: usize,
+    pub height: usize,
+    /// Left edge of the ink relative to the pen.
+    pub xmin: i32,
+    /// Bottom edge of the ink relative to the baseline, positive upward.
+    pub ymin: i32,
+    pub advance_width: f32,
+}
+
 /// Distance from the top of a run's row to the baseline it should sit on,
 /// chosen so the font's cap band is optically centered in the row.
 ///
@@ -63,10 +94,10 @@ impl FontLineMetrics {
 ///
 /// Centering the font's *line box* instead of the cap band looks right only
 /// when the space above the caps happens to match the descender space below
-/// the baseline. Helvetica -- what macOS falls back to now that CoreText no
-/// longer resolves the system UI font for us -- has an hhea ascent equal to
-/// its cap height, so line-box centering pushes every glyph up by half the
-/// descent, and by half a descent times the zoom in the patcher.
+/// the baseline, which is a coincidence no font owes us. Working from the
+/// measured cap band keeps this correct for both backends' metric shapes: a
+/// face whose ascent equals its cap height would otherwise ride half a
+/// descent high, and half a descent times the zoom in the patcher.
 pub fn centered_text_baseline_px(cell_h: f32, cap_height_px: f32, scale: f32) -> f32 {
     (cell_h + cap_height_px) * 0.5 * scale
 }
@@ -119,8 +150,11 @@ impl AtlasBitmap {
     }
 }
 
+/// A resolved face, plus the name it actually resolved to. `face` is
+/// size-independent; every measurement and rasterization names its own pixel
+/// size, so one `LoadedFont` serves every zoom level.
 struct LoadedFont {
-    font: Arc<Font>,
+    face: FontFace,
     post_script_name: String,
 }
 
@@ -129,6 +163,52 @@ struct NamedFontResolution {
     used_fallback: bool,
 }
 
+// ── fontdb/fontdue backend (every platform except macOS) ──────────────────
+
+/// A parsed outline face. Cloning shares the parsed font.
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone)]
+struct FontFace {
+    font: Arc<Font>,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl FontFace {
+    fn line_metrics(&self, px: f32) -> Option<FontLineMetrics> {
+        let metrics = self.font.horizontal_line_metrics(px)?;
+        Some(FontLineMetrics {
+            ascent: metrics.ascent,
+            descent: -metrics.descent,
+            leading: metrics.line_gap,
+        })
+    }
+
+    fn metrics(&self, ch: char, px: f32) -> GlyphMetrics {
+        convert_metrics(self.font.metrics(ch, px))
+    }
+
+    fn advance(&self, ch: char, px: f32) -> f32 {
+        self.font.metrics(ch, px).advance_width
+    }
+
+    fn rasterize(&self, ch: char, px: f32) -> (GlyphMetrics, Vec<u8>) {
+        let (metrics, pixels) = self.font.rasterize(ch, px);
+        (convert_metrics(metrics), pixels)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn convert_metrics(metrics: fontdue::Metrics) -> GlyphMetrics {
+    GlyphMetrics {
+        width: metrics.width,
+        height: metrics.height,
+        xmin: metrics.xmin,
+        ymin: metrics.ymin,
+        advance_width: metrics.advance_width,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 fn system_fonts() -> &'static Database {
     static SYSTEM_FONTS: OnceLock<Database> = OnceLock::new();
     SYSTEM_FONTS.get_or_init(|| {
@@ -138,17 +218,20 @@ fn system_fonts() -> &'static Database {
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 fn load_font(query: Query<'_>) -> Option<LoadedFont> {
     let db = system_fonts();
     load_font_by_id(db.query(&query)?)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn parsed_fonts() -> &'static Mutex<HashMap<fontdb::ID, Option<Arc<Font>>>> {
     static PARSED_FONTS: OnceLock<Mutex<HashMap<fontdb::ID, Option<Arc<Font>>>>> =
         OnceLock::new();
     PARSED_FONTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn load_font_by_id(id: fontdb::ID) -> Option<LoadedFont> {
     let db = system_fonts();
     let face = db.face(id)?;
@@ -176,11 +259,12 @@ fn load_font_by_id(id: fontdb::ID) -> Option<LoadedFont> {
         parsed?
     };
     Some(LoadedFont {
-        font,
+        face: FontFace { font },
         post_script_name,
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 fn load_exact_named_font(name: &str) -> Option<LoadedFont> {
     // The application historically names fonts by PostScript name, while
     // fontdb's family query expects a family name. Try both representations.
@@ -217,6 +301,7 @@ fn font_family_stem(name: &str) -> String {
 /// routinely suffix the family the caller asked for -- a machine carrying
 /// "JetBrainsMono Nerd Font" has no plain "JetBrains Mono" -- and that variant
 /// is a far better answer than the next entry in a hardcoded preference list.
+#[cfg(not(target_os = "macos"))]
 fn find_family_by_stem(stem: &str) -> Option<&'static str> {
     if stem.is_empty() {
         return None;
@@ -239,6 +324,7 @@ fn find_family_by_stem(stem: &str) -> Option<&'static str> {
     exact.or(prefixed)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn load_font_by_family_stem(name: &str) -> Option<LoadedFont> {
     // Query by family so fontdb still picks the upright regular weight within
     // whichever variant family matched.
@@ -251,6 +337,7 @@ fn load_font_by_family_stem(name: &str) -> Option<LoadedFont> {
 
 /// Last resort: any face at all that fontdue can parse, preferring upright
 /// regular weights and, when asked, faces flagged monospaced.
+#[cfg(not(target_os = "macos"))]
 fn load_any_font(monospaced_only: bool) -> Option<LoadedFont> {
     let db = system_fonts();
     let candidates = |upright: bool| {
@@ -268,6 +355,7 @@ fn load_any_font(monospaced_only: bool) -> Option<LoadedFont> {
         .or_else(|| candidates(false).find_map(load_font_by_id))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn load_named_font(name: &str) -> Option<NamedFontResolution> {
     const MONOSPACE_PREFERENCES: &[&str] = &[
         "JetBrains Mono",
@@ -308,14 +396,6 @@ fn load_named_font(name: &str) -> Option<NamedFontResolution> {
     })
 }
 
-/// SFNS is the real macOS system UI face, but fontdue 0.9 produces empty
-/// bitmaps for its glyphs. Helvetica is bundled with macOS, is renderable by
-/// fontdue, and preserves the pre-fontdue UI's general proportions better than
-/// an arbitrary generic-sans resolution. Keep this choice explicit: asking for
-/// SFPro-Regular or .AppleSystemUIFont does not resolve SFNS through fontdb.
-#[cfg(target_os = "macos")]
-const MACOS_SYSTEM_UI_FONT: &str = "Helvetica";
-
 #[cfg(target_os = "linux")]
 const LINUX_SYSTEM_UI_FONT_PREFERENCES: &[&str] = &[
     "DejaVu Sans",
@@ -325,11 +405,8 @@ const LINUX_SYSTEM_UI_FONT_PREFERENCES: &[&str] = &[
     "Inter",
 ];
 
+#[cfg(not(target_os = "macos"))]
 fn load_system_ui_font() -> Option<LoadedFont> {
-    #[cfg(target_os = "macos")]
-    if let Some(font) = load_exact_named_font(MACOS_SYSTEM_UI_FONT) {
-        return Some(font);
-    }
     #[cfg(target_os = "linux")]
     for name in LINUX_SYSTEM_UI_FONT_PREFERENCES {
         if let Some(font) = load_exact_named_font(name) {
@@ -343,18 +420,291 @@ fn load_system_ui_font() -> Option<LoadedFont> {
     .or_else(|| load_any_font(false))
 }
 
-fn line_metrics(font: &Font, px: f32) -> Option<FontLineMetrics> {
-    let metrics = font.horizontal_line_metrics(px)?;
-    Some(FontLineMetrics {
-        ascent: metrics.ascent,
-        descent: -metrics.descent,
-        leading: metrics.line_gap,
+// ── CoreText backend (macOS) ──────────────────────────────────────────────
+
+/// Size a face is created at before anything asks for a specific one. CTFont
+/// instances are size-bound, so the base font exists only to be copied at the
+/// sizes callers actually request.
+#[cfg(target_os = "macos")]
+const CORE_TEXT_BASE_SIZE: CGFloat = 16.0;
+
+/// Slack around a glyph's typographic bounds, so antialiased and smoothed
+/// edges are not clipped by the ink box CoreText reports.
+#[cfg(target_os = "macos")]
+const GLYPH_INK_BLEED_PX: i32 = 1;
+
+/// A CoreText face and the sized CTFont instances derived from it. Cloning
+/// shares nothing but the base font; the size cache is per-owner and cheap to
+/// refill.
+#[cfg(target_os = "macos")]
+struct FontFace {
+    base: CFRetained<CTFont>,
+    sized: RefCell<HashMap<u32, CFRetained<CTFont>>>,
+}
+
+#[cfg(target_os = "macos")]
+impl Clone for FontFace {
+    fn clone(&self) -> Self {
+        Self::new(self.base.clone())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl FontFace {
+    fn new(base: CFRetained<CTFont>) -> Self {
+        Self {
+            base,
+            sized: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// The face at `px`, memoized. Returned by value so no `RefCell` borrow
+    /// outlives the lookup.
+    fn sized(&self, px: f32) -> CFRetained<CTFont> {
+        let key = px.to_bits();
+        let mut cache = self.sized.borrow_mut();
+        cache
+            .entry(key)
+            .or_insert_with(|| unsafe {
+                self.base
+                    .copy_with_attributes(px as CGFloat, std::ptr::null(), None)
+            })
+            .clone()
+    }
+
+    fn line_metrics(&self, px: f32) -> Option<FontLineMetrics> {
+        let font = self.sized(px);
+        Some(FontLineMetrics {
+            ascent: unsafe { font.ascent() } as f32,
+            // CTFontGetDescent is already the positive distance below the
+            // baseline, which is the convention `FontLineMetrics` uses.
+            descent: unsafe { font.descent() } as f32,
+            leading: unsafe { font.leading() } as f32,
+        })
+    }
+
+    fn metrics(&self, ch: char, px: f32) -> GlyphMetrics {
+        let font = self.sized(px);
+        match glyph_id(&font, ch) {
+            Some(glyph) => glyph_metrics(&font, glyph),
+            None => GlyphMetrics::default(),
+        }
+    }
+
+    /// Advance only. Text measurement runs over every label on every layout
+    /// pass, so it skips the glyph bounding box it would never look at.
+    fn advance(&self, ch: char, px: f32) -> f32 {
+        let font = self.sized(px);
+        let Some(glyph) = glyph_id(&font, ch) else {
+            return 0.0;
+        };
+        glyph_advance(&font, glyph)
+    }
+
+    fn rasterize(&self, ch: char, px: f32) -> (GlyphMetrics, Vec<u8>) {
+        let font = self.sized(px);
+        let Some(glyph) = glyph_id(&font, ch) else {
+            return (GlyphMetrics::default(), Vec::new());
+        };
+        let tight = glyph_metrics(&font, glyph);
+        if tight.width == 0 || tight.height == 0 {
+            return (tight, Vec::new());
+        }
+        let bled = GlyphMetrics {
+            width: tight.width + 2 * GLYPH_INK_BLEED_PX as usize,
+            height: tight.height + 2 * GLYPH_INK_BLEED_PX as usize,
+            xmin: tight.xmin - GLYPH_INK_BLEED_PX,
+            ymin: tight.ymin - GLYPH_INK_BLEED_PX,
+            ..tight
+        };
+        match draw_glyph(&font, glyph, bled) {
+            Some(pixels) => (bled, pixels),
+            None => (
+                GlyphMetrics {
+                    width: 0,
+                    height: 0,
+                    ..tight
+                },
+                Vec::new(),
+            ),
+        }
+    }
+}
+
+/// The glyph CoreText maps `ch` to, or `None` when the face cannot draw it.
+/// Characters outside the BMP are passed as their surrogate pair, which
+/// CTFontGetGlyphsForCharacters resolves into the first output slot.
+#[cfg(target_os = "macos")]
+fn glyph_id(font: &CTFont, ch: char) -> Option<CGGlyph> {
+    let mut utf16 = [0u16; 2];
+    let encoded = ch.encode_utf16(&mut utf16);
+    let count = encoded.len();
+    let mut glyphs = [0 as CGGlyph; 2];
+    unsafe {
+        font.glyphs_for_characters(
+            NonNull::new(utf16.as_mut_ptr()).unwrap(),
+            NonNull::new(glyphs.as_mut_ptr()).unwrap(),
+            count as isize,
+        );
+    }
+    (glyphs[0] != 0).then_some(glyphs[0])
+}
+
+#[cfg(target_os = "macos")]
+fn glyph_advance(font: &CTFont, glyph: CGGlyph) -> f32 {
+    let mut glyphs = [glyph];
+    let mut advance = CGSize {
+        width: 0.0,
+        height: 0.0,
+    };
+    unsafe {
+        font.advances_for_glyphs(
+            CTFontOrientation::Default,
+            NonNull::new(glyphs.as_mut_ptr()).unwrap(),
+            &mut advance,
+            1,
+        );
+    }
+    advance.width as f32
+}
+
+/// Tight ink box and advance, in the CTFont's own pixel size. The box is
+/// snapped outwards to whole pixels so it can address bitmap rows directly.
+#[cfg(target_os = "macos")]
+fn glyph_metrics(font: &CTFont, glyph: CGGlyph) -> GlyphMetrics {
+    let mut glyphs = [glyph];
+    let mut bounds = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize {
+            width: 0.0,
+            height: 0.0,
+        },
+    };
+    let mut advance = CGSize {
+        width: 0.0,
+        height: 0.0,
+    };
+    unsafe {
+        font.bounding_rects_for_glyphs(
+            CTFontOrientation::Default,
+            NonNull::new(glyphs.as_mut_ptr()).unwrap(),
+            &mut bounds,
+            1,
+        );
+        font.advances_for_glyphs(
+            CTFontOrientation::Default,
+            NonNull::new(glyphs.as_mut_ptr()).unwrap(),
+            &mut advance,
+            1,
+        );
+    }
+    let advance_width = advance.width as f32;
+    if !(bounds.size.width > 0.0 && bounds.size.height > 0.0) {
+        // Spaces and other blank glyphs still carry an advance.
+        return GlyphMetrics {
+            advance_width,
+            ..GlyphMetrics::default()
+        };
+    }
+    let xmin = bounds.origin.x.floor() as i32;
+    let ymin = bounds.origin.y.floor() as i32;
+    let xmax = (bounds.origin.x + bounds.size.width).ceil() as i32;
+    let ymax = (bounds.origin.y + bounds.size.height).ceil() as i32;
+    GlyphMetrics {
+        width: (xmax - xmin).max(0) as usize,
+        height: (ymax - ymin).max(0) as usize,
+        xmin,
+        ymin,
+        advance_width,
+    }
+}
+
+/// Rasterize one glyph into a top-down R8 coverage buffer of `metrics`' size.
+#[cfg(target_os = "macos")]
+fn draw_glyph(font: &CTFont, glyph: CGGlyph, metrics: GlyphMetrics) -> Option<Vec<u8>> {
+    let (width, height) = (metrics.width, metrics.height);
+    let mut pixels = vec![0u8; width * height];
+    {
+        let gray = CGColorSpace::new_device_gray()?;
+        // kCGImageAlphaNone = 0: one byte per pixel, no alpha. The context
+        // draws straight into `pixels` and does not free the buffer.
+        let context = unsafe {
+            CGBitmapContextCreate(
+                pixels.as_mut_ptr() as *mut _,
+                width,
+                height,
+                8,
+                width,
+                Some(&gray),
+                0,
+            )
+        }?;
+        CGContext::set_allows_font_smoothing(Some(&context), true);
+        CGContext::set_should_smooth_fonts(Some(&context), true);
+        CGContext::set_should_antialias(Some(&context), true);
+        // White on the zeroed (black) buffer, so the bytes are coverage.
+        let white: [CGFloat; 2] = [1.0, 1.0];
+        unsafe { CGContext::set_fill_color(Some(&context), white.as_ptr()) };
+
+        // Place the pen so the ink box lands on the buffer's origin.
+        let mut glyphs = [glyph];
+        let mut position = CGPoint {
+            x: -(metrics.xmin as CGFloat),
+            y: -(metrics.ymin as CGFloat),
+        };
+        unsafe {
+            font.draw_glyphs(
+                NonNull::new(glyphs.as_mut_ptr()).unwrap(),
+                NonNull::new(&mut position).unwrap(),
+                1,
+                &context,
+            );
+        }
+    }
+    // Core Graphics draws with the origin at the lower left but stores the
+    // bitmap top row first, which is already the atlas convention.
+    Some(pixels)
+}
+
+#[cfg(target_os = "macos")]
+fn post_script_name(font: &CTFont) -> String {
+    unsafe { font.post_script_name() }.to_string()
+}
+
+/// CTFontCreateWithName accepts both PostScript and family names and silently
+/// substitutes a default face for anything it cannot resolve, so the caller
+/// only learns about a fallback by comparing what came back.
+#[cfg(target_os = "macos")]
+fn load_named_font(name: &str) -> Option<NamedFontResolution> {
+    let requested = CFString::from_str(name);
+    let font = unsafe { CTFont::with_name(&requested, CORE_TEXT_BASE_SIZE, std::ptr::null()) };
+    let resolved = post_script_name(&font);
+    let used_fallback = normalized_font_key(&resolved) != normalized_font_key(name)
+        && font_family_stem(&resolved) != font_family_stem(name);
+    Some(NamedFontResolution {
+        loaded: LoadedFont {
+            face: FontFace::new(font),
+            post_script_name: resolved,
+        },
+        used_fallback,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn load_system_ui_font() -> Option<LoadedFont> {
+    let font = unsafe {
+        CTFont::new_ui_font_for_language(CTFontUIFontType::System, CORE_TEXT_BASE_SIZE, None)
+    }?;
+    let post_script_name = post_script_name(&font);
+    Some(LoadedFont {
+        face: FontFace::new(font),
+        post_script_name,
     })
 }
 
 fn copy_glyph_into_line(
     glyph_pixels: &[u8],
-    glyph: Metrics,
+    glyph: GlyphMetrics,
     destination: &mut [u8],
     destination_w: usize,
     destination_h: usize,
@@ -364,8 +714,9 @@ fn copy_glyph_into_line(
     if glyph.width == 0 || glyph.height == 0 {
         return;
     }
-    // fontdue returns top-down glyph pixels. `ymin` locates the bottom of the
-    // glyph relative to the baseline, so this converts to our top-down atlas.
+    // Both backends hand back top-down glyph pixels. `ymin` locates the bottom
+    // of the glyph relative to the baseline, so this converts to our top-down
+    // atlas.
     let dst_x = glyph.xmin - origin_x;
     let dst_y = (baseline - (glyph.ymin + glyph.height as i32) as f32).round() as i32;
     for src_y in 0..glyph.height as i32 {
@@ -397,7 +748,7 @@ pub struct GlyphAtlas {
     pub bitmap: AtlasBitmap,
     allocator: AtlasAllocator,
     glyphs: HashMap<char, GlyphEntry>,
-    font: Arc<Font>,
+    face: FontFace,
     font_size: f32,
     descent: f32,
     leading: f32,
@@ -420,13 +771,8 @@ impl GlyphAtlas {
             );
         }
         let font_size = font_size as f32;
-        let metrics = line_metrics(&loaded.font, font_size)?;
-        let cell_w = loaded
-            .font
-            .metrics('m', font_size)
-            .advance_width
-            .ceil()
-            .max(1.0) as usize;
+        let metrics = loaded.face.line_metrics(font_size)?;
+        let cell_w = loaded.face.advance('m', font_size).ceil().max(1.0) as usize;
         let cell_h = metrics.line_height().max(1.0) as usize;
         Some(Self {
             cell_w,
@@ -436,7 +782,7 @@ impl GlyphAtlas {
             bitmap: AtlasBitmap::new(ATLAS_SIZE, ATLAS_SIZE),
             allocator: AtlasAllocator::new(Size::new(ATLAS_SIZE as i32, ATLAS_SIZE as i32)),
             glyphs: HashMap::new(),
-            font: loaded.font,
+            face: loaded.face,
             font_size,
             leading: metrics.leading,
             post_script_name: loaded.post_script_name,
@@ -451,7 +797,7 @@ impl GlyphAtlas {
     }
 
     fn rasterize(&mut self, ch: char) -> Option<()> {
-        let (glyph_metrics, glyph_pixels) = self.font.rasterize(ch, self.font_size);
+        let (glyph_metrics, glyph_pixels) = self.face.rasterize(ch, self.font_size);
         let mut pixels = vec![0; self.cell_w * self.cell_h];
         copy_glyph_into_line(
             &glyph_pixels,
@@ -496,13 +842,13 @@ impl GlyphAtlas {
     }
 
     pub fn char_advance(&self, ch: char) -> f32 {
-        self.font.metrics(ch, self.font_size).advance_width
+        self.face.advance(ch, self.font_size)
     }
 }
 
 /// Shared scalable system font and cached line metrics for proportional text.
 pub struct SizedFontCache {
-    font: Arc<Font>,
+    face: FontFace,
     line_metrics: HashMap<u16, FontLineMetrics>,
     cap_heights: HashMap<u16, f32>,
     scale: f32,
@@ -516,7 +862,7 @@ impl SizedFontCache {
         }
         let loaded = load_system_ui_font()?;
         Some(Self {
-            font: loaded.font,
+            face: loaded.face,
             line_metrics: HashMap::new(),
             cap_heights: HashMap::new(),
             scale: scale as f32,
@@ -527,7 +873,7 @@ impl SizedFontCache {
     pub fn metrics(&mut self, size_tenths: u16) -> Option<FontLineMetrics> {
         if !self.line_metrics.contains_key(&size_tenths) {
             let px = size_tenths as f32 / 10.0 * self.scale;
-            let metrics = line_metrics(&self.font, px)?;
+            let metrics = self.face.line_metrics(px)?;
             self.line_metrics.insert(size_tenths, metrics);
         }
         self.line_metrics.get(&size_tenths).copied()
@@ -558,7 +904,7 @@ impl SizedFontCache {
         let measured = CAP_HEIGHT_REFERENCE_GLYPHS
             .iter()
             .map(|ch| {
-                let metrics = self.font.metrics(*ch, px);
+                let metrics = self.face.metrics(*ch, px);
                 (metrics.ymin + metrics.height as i32) as f32
             })
             .fold(0.0_f32, f32::max);
@@ -575,7 +921,7 @@ impl SizedFontCache {
 
     pub fn char_advance(&mut self, ch: char, size_tenths: u16) -> f32 {
         let px = size_tenths as f32 / 10.0 * self.scale;
-        self.font.metrics(ch, px).advance_width
+        self.face.advance(ch, px)
     }
 
     pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
@@ -584,9 +930,9 @@ impl SizedFontCache {
             .sum()
     }
 
-    fn rasterize(&self, ch: char, size_tenths: u16) -> (Metrics, Vec<u8>) {
+    fn rasterize(&self, ch: char, size_tenths: u16) -> (GlyphMetrics, Vec<u8>) {
         let px = size_tenths as f32 / 10.0 * self.scale;
-        self.font.rasterize(ch, px)
+        self.face.rasterize(ch, px)
     }
 }
 
@@ -865,6 +1211,24 @@ fn upload_metal_region(
 mod tests {
     use super::*;
 
+    /// PostScript name of some monospace face this machine really has, so the
+    /// backend-neutral tests below do not depend on either backend's discovery.
+    #[cfg(target_os = "macos")]
+    fn installed_monospace_font_name() -> String {
+        // Bundled with every macOS install.
+        "Menlo-Regular".to_string()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn installed_monospace_font_name() -> String {
+        load_font(Query {
+            families: &[Family::Monospace],
+            ..Query::default()
+        })
+        .map(|loaded| loaded.post_script_name)
+        .expect("an installed monospace font")
+    }
+
     #[test]
     fn unknown_monospace_font_name_falls_back_to_an_installed_font() {
         let name = "ThisFontNameDeliberatelyDoesNotExist";
@@ -877,6 +1241,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn the_last_resort_fallback_ignores_every_configured_family_name() {
         // The tail of the chain must not depend on fontconfig aliases or on the
         // preference list, so text still renders on a machine whose fonts are
@@ -897,6 +1262,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn a_postscript_name_resolves_to_a_suffixed_family_variant() {
         // Machine-independent: derive a PostScript-style request from a family
         // that is actually installed here, then require the stem lookup to find
@@ -927,6 +1293,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn an_exact_name_still_wins_over_every_fallback() {
         let expected = system_fonts()
             .faces()
@@ -939,32 +1306,56 @@ mod tests {
     }
 
     #[test]
+    // The CoreText backend derives every size from one base CTFont instead.
+    #[cfg(not(target_os = "macos"))]
     fn atlas_rebuilds_at_new_sizes_reuse_the_parsed_font() {
-        let expected = system_fonts()
-            .faces()
-            .find(|face| face.monospaced)
-            .map(|face| face.post_script_name.clone())
-            .expect("the test machine must have at least one monospace font installed");
+        let expected = installed_monospace_font_name();
         let small = GlyphAtlas::new(&expected, 12.0).expect("small atlas");
         let large = GlyphAtlas::new(&expected, 24.0).expect("large atlas");
 
         assert!(
-            Arc::ptr_eq(&small.font, &large.font),
+            Arc::ptr_eq(&small.face.font, &large.face.font),
             "atlas size changes must not reparse the selected font"
         );
     }
 
+    /// The UI font must be the real system face CoreText resolves, not a
+    /// substitute: the fontdue port could not rasterize SFNS and pinned
+    /// Helvetica instead, which changed every proportional label on macOS.
     #[test]
     #[cfg(target_os = "macos")]
-    fn system_ui_font_is_the_deliberate_renderable_macos_fallback() {
-        let loaded = load_system_ui_font().expect("the bundled macOS UI fallback");
-        assert_eq!(loaded.post_script_name, MACOS_SYSTEM_UI_FONT);
+    fn the_macos_ui_font_is_the_core_text_system_face() {
+        let loaded = load_system_ui_font().expect("the macOS system UI font");
+        let name = normalized_font_key(&loaded.post_script_name);
+        assert!(
+            name.contains("sfns") || name.contains("sfpro") || name.contains("systemui"),
+            "expected the San Francisco system UI face, got {:?}",
+            loaded.post_script_name
+        );
 
-        let (metrics, pixels) = loaded.font.rasterize('H', 20.0);
+        let (metrics, pixels) = loaded.face.rasterize('H', 20.0);
         assert!(
             metrics.width > 0 && metrics.height > 0 && pixels.iter().any(|pixel| *pixel != 0),
-            "{MACOS_SYSTEM_UI_FONT} must produce visible glyphs through fontdue"
+            "{:?} must produce visible glyphs through CoreText",
+            loaded.post_script_name
         );
+    }
+
+    /// CoreText's JetBrains Mono cell at 16pt, as it was before the fontdue
+    /// port.
+    #[cfg(target_os = "macos")]
+    const JETBRAINS_MONO_16PT_CELL: (usize, usize) = (10, 22);
+
+    /// The monospace cell is the one number every layout in the app is built
+    /// on. These are the CoreText values from before the fontdue port; a
+    /// change here silently reflows the entire UI.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_jetbrains_mono_cell_matches_the_pre_port_core_text_metrics() {
+        let atlas = GlyphAtlas::new("JetBrainsMono-Regular", 16.0)
+            .expect("JetBrains Mono is the application's monospace font");
+        assert_eq!(atlas.post_script_name, "JetBrainsMono-Regular");
+        assert_eq!((atlas.cell_w, atlas.cell_h), JETBRAINS_MONO_16PT_CELL);
     }
 
     #[test]
@@ -1075,12 +1466,7 @@ mod tests {
 
     #[test]
     fn cpu_atlases_measure_and_rasterize_on_every_platform() {
-        let mut mono = load_font(Query {
-            families: &[Family::Monospace],
-            ..Query::default()
-        })
-            .map(|loaded| loaded.post_script_name)
-            .and_then(|name| GlyphAtlas::new(&name, 13.0))
+        let mut mono = GlyphAtlas::new(&installed_monospace_font_name(), 13.0)
             .expect("an installed monospace font");
         let entry = *mono.get_or_rasterize('M').expect("M glyph");
         assert!(mono.cell_w > 0 && mono.cell_h > 0);
@@ -1102,22 +1488,25 @@ mod tests {
 
     #[test]
     fn atlas_uvs_follow_top_down_bitmap_rows() {
-        let loaded = load_font(Query {
-            families: &[Family::Monospace],
-            ..Query::default()
-        })
-        .expect("an installed monospace font");
-        let mut atlas = GlyphAtlas::new(&loaded.post_script_name, 24.0).unwrap();
+        let mut atlas = GlyphAtlas::new(&installed_monospace_font_name(), 24.0).unwrap();
         let entry = *atlas.get_or_rasterize('T').unwrap();
         let x0 = (entry.uv_min[0] * ATLAS_SIZE as f32).round() as usize;
         let y0 = (entry.uv_min[1] * ATLAS_SIZE as f32).round() as usize;
-        let top_half_coverage: usize = (0..atlas.cell_h / 2)
-            .flat_map(|row| {
+        let coverage = |rows: std::ops::Range<usize>| -> usize {
+            rows.flat_map(|row| {
                 &atlas.bitmap.pixels()
                     [(y0 + row) * ATLAS_SIZE + x0..(y0 + row) * ATLAS_SIZE + x0 + atlas.cell_w]
             })
             .map(|v| *v as usize)
-            .sum();
-        assert!(top_half_coverage > 0, "T must occupy the top half of its cell");
+            .sum()
+        };
+        // A 'T' is bar-heavy at the top and a bare stem below, so a backend
+        // that hands back bottom-up rows inverts this comparison.
+        let top = coverage(0..atlas.cell_h / 2);
+        let bottom = coverage(atlas.cell_h / 2..atlas.cell_h);
+        assert!(
+            top > bottom && bottom > 0,
+            "T should be top-heavy in a top-down cell, got top={top} bottom={bottom}"
+        );
     }
 }

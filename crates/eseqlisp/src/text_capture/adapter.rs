@@ -17,7 +17,11 @@ impl PlatformTextCaptureSource {
 
 impl TextCaptureSource for PlatformTextCaptureSource {
     fn backend_name(&self) -> &'static str {
-        "fontdue"
+        if cfg!(target_os = "macos") {
+            "coretext"
+        } else {
+            "fontdue"
+        }
     }
 
     fn mono_font_name(&self) -> Result<String, String> {

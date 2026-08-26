@@ -38,7 +38,12 @@ fn text_capture_artifacts_are_stable_and_cover_all_fixed_cases() {
 
     let json: serde_json::Value = serde_json::from_slice(&first_metrics).unwrap();
     assert_eq!(json["schema_version"], 1);
-    assert_eq!(json["backend"], "fontdue");
+    let expected_backend = if cfg!(target_os = "macos") {
+        "coretext"
+    } else {
+        "fontdue"
+    };
+    assert_eq!(json["backend"], expected_backend);
     let measurements = json["measurements"].as_array().unwrap();
     assert_eq!(measurements.len(), 39);
     assert!(measurements.iter().all(|measurement| {
