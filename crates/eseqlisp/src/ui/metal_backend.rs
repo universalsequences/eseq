@@ -6502,7 +6502,13 @@ fragment float4 live_spectrogram_frag(
                             delta,
                             cell_size.1 as f32,
                         );
-                        pending_scroll.push_back((delta, *cursor_pos));
+                        if let Some(magnify_delta) =
+                            crate::ui::pointer_input::ctrl_scroll_magnify_delta(*modifiers, delta)
+                        {
+                            pending_magnify.push_back((magnify_delta, *cursor_pos));
+                        } else {
+                            pending_scroll.push_back((delta, *cursor_pos));
+                        }
                     }
                     WindowEvent::TouchpadMagnify { delta, phase, .. } => {
                         if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {

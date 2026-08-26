@@ -1,3 +1,4 @@
+use crossterm::event::KeyModifiers;
 use winit::event::MouseScrollDelta;
 
 /// Conventional number of content lines advanced by one discrete wheel detent.
@@ -15,6 +16,30 @@ const LINES_PER_WHEEL_DETENT: f32 = 3.0;
 const PIXEL_SCROLL_SCALE: f32 = 2.0;
 #[cfg(not(target_os = "linux"))]
 const PIXEL_SCROLL_SCALE: f32 = 1.0;
+
+/// Vertical scroll distance corresponding to one octave of cursor-anchored zoom.
+///
+/// Keeping this in normalized pixel units makes Ctrl+trackpad-scroll smooth while
+/// giving a discrete wheel detent a modest, predictable zoom step.
+const CTRL_SCROLL_PIXELS_PER_ZOOM_OCTAVE: f32 = 480.0;
+
+pub(crate) fn ctrl_scroll_magnify_delta(
+    modifiers: KeyModifiers,
+    delta_pixels: (f32, f32),
+) -> Option<f64> {
+    if !modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    let (delta_x, delta_y) = delta_pixels;
+    if !delta_x.is_finite()
+        || !delta_y.is_finite()
+        || delta_y == 0.0
+        || delta_y.abs() <= delta_x.abs()
+    {
+        return None;
+    }
+    Some((delta_y / CTRL_SCROLL_PIXELS_PER_ZOOM_OCTAVE) as f64)
+}
 
 pub(crate) fn scroll_delta_pixels(
     delta: MouseScrollDelta,
@@ -62,5 +87,33 @@ mod tests {
             24.0,
         );
         assert_eq!(normalized, (2.5 * PIXEL_SCROLL_SCALE, -4.0 * PIXEL_SCROLL_SCALE));
+    }
+
+    #[test]
+    fn ctrl_vertical_scroll_converts_pixels_to_magnify_delta() {
+        assert_eq!(
+            ctrl_scroll_magnify_delta(KeyModifiers::CONTROL, (2.0, 120.0)),
+            Some(0.25)
+        );
+        assert_eq!(
+            ctrl_scroll_magnify_delta(KeyModifiers::CONTROL, (-2.0, -120.0)),
+            Some(-0.25)
+        );
+    }
+
+    #[test]
+    fn ordinary_scroll_is_not_converted_to_magnify() {
+        assert_eq!(
+            ctrl_scroll_magnify_delta(KeyModifiers::NONE, (0.0, 120.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn ctrl_horizontal_scroll_is_not_converted_to_magnify() {
+        assert_eq!(
+            ctrl_scroll_magnify_delta(KeyModifiers::CONTROL, (120.0, 2.0)),
+            None
+        );
     }
 }
