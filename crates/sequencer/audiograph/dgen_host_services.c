@@ -9,9 +9,17 @@
  * depends on it.
  *
  * Apple platforms keep the original Accelerate/vDSP backing, byte-for-byte
- * unchanged. Everywhere else the same four callbacks are served by the
- * portable implementation in dgen_fft.c, which reproduces vDSP_fft_zip's and
- * vDSP_zvma's documented conventions (eseq-linux.9).
+ * unchanged, and this is the table the app ships there.
+ *
+ * Off Apple the *shipped* table is no longer this one: it is the rustfft-backed
+ * table in src/lisp_host/dgen/dgen_fft.rs, because the portable kernel below
+ * measured ~16x slower than rustfft and underran ALSA on spectral effects
+ * (eseq-linux.78). This non-Apple branch stays compiled and pinned by the
+ * host-services tests as the reference wiring of the portable kernel, and the
+ * kernel itself is still linked: it is what the Rust table falls back to when
+ * a setup's workspace pool is contended, and what ESEQ_DGEN_PORTABLE_FFT=1
+ * forces. Both reproduce vDSP_fft_zip's and vDSP_zvma's documented conventions
+ * (eseq-linux.9).
  */
 
 #include "dgen_host_services.h"

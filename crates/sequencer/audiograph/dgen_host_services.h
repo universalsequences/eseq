@@ -8,6 +8,9 @@
  * DGenHostSupport.c. Backed by Accelerate/vDSP on Apple platforms — where the
  * *app* links Accelerate and generated dylibs never do — and by the portable
  * dgen_fft.c everywhere else (eseq-linux.9).
+ *
+ * Off Apple this table is no longer the one the app installs; see the note in
+ * dgen_host_services.c (eseq-linux.78).
  */
 
 #include "dgen_abi_v1.h"

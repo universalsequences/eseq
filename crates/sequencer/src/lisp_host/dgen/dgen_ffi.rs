@@ -108,14 +108,28 @@ pub(in crate::lisp_host) type DGenProcessFn = unsafe extern "C" fn(
     host: *const DGenHostServicesV1,
 );
 
+#[cfg(target_vendor = "apple")]
 extern "C" {
     /// ESeq's Accelerate-backed host-services table
     /// (audiograph/dgen_host_services.c); process-lifetime static.
     fn eseq_dgen_host_services_v1() -> *const DGenHostServicesV1;
 }
 
+/// The ABI v1 host-services table generated dylibs are handed on every
+/// `dgen_process_v1` call, so this stays a pointer read with no work in it.
+///
+/// Apple keeps the Accelerate/vDSP table in `dgen_host_services.c`. Everywhere
+/// else the table is the rustfft-backed one in `dgen_fft.rs`: the portable C
+/// kernel it replaces measured ~16x slower than rustfft on x86_64 and pushed
+/// spectral effects into ALSA underruns (eseq-linux.78).
+#[cfg(target_vendor = "apple")]
 pub(in crate::lisp_host) fn dgen_host_services_v1() -> *const DGenHostServicesV1 {
     unsafe { eseq_dgen_host_services_v1() }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+pub(in crate::lisp_host) fn dgen_host_services_v1() -> *const DGenHostServicesV1 {
+    super::dgen_fft::host_services_v1()
 }
 
 pub(in crate::lisp_host) fn dgen_process_context_v1(sample_rate: f32) -> DGenProcessContextV1 {

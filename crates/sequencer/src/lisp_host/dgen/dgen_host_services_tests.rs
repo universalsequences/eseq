@@ -7,9 +7,10 @@ replacement match vDSP?" is checked transitively against a shared reference
 rather than by linking both backends at once: every test here compares against
 a naive double-precision DFT written straight from `vDSP_fft_zip`'s documented
 pseudocode. `host_services_*` tests drive whichever backend this platform ships
-(vDSP on macOS, portable elsewhere); `portable_*` tests drive the portable
-implementation directly and compile everywhere. Run the suite once on each host
-and both backends have been pinned to the same reference.
+(vDSP on macOS, rustfft elsewhere); `portable_*` tests drive the portable C
+implementation directly and `rustfft_*` tests drive the rustfft-backed table
+directly — both compile everywhere. Run the suite once on each host and all
+three backends have been pinned to the same reference.
 
 The conventions being pinned are the ones easy to get silently wrong:
 unscaled in *both* directions (so a round trip scales by N, and generated
@@ -19,6 +20,7 @@ the multiply-accumulate.
 */
 
 use super::super::{dgen_host_services_v1, DGenFFTSetupV1, DGEN_ABI_VERSION_V1};
+use super::dgen_fft;
 
 extern "C" {
     fn eseq_dgen_portable_fft_setup_create(log2_size: u32) -> DGenFFTSetupV1;
@@ -327,7 +329,211 @@ fn portable_complex_multiply_accumulate_tolerates_empty_span() {
     }
 }
 
-// ── the table this platform actually ships (vDSP on macOS, portable here) ──
+// ── the rustfft-backed table, on every platform (eseq-linux.78) ──
+//
+// `dgen_fft::host_services_v1()` is the table the app installs off Apple. It
+// is driven directly here (rather than only through `dgen_host_services_v1()`)
+// so a macOS run pins it to the same reference DFT the shipped vDSP table is
+// pinned to — the whole point of the shared-reference scheme above.
+
+#[test]
+fn rustfft_table_matches_unscaled_dft_convention() {
+    let table = unsafe { &*dgen_fft::host_services_v1() };
+    let setup_create = table.fft_setup_create_fn.expect("fft_setup_create_fn");
+    let forward = table.fft_forward_fn.expect("fft_forward_fn");
+    let inverse = table.fft_inverse_fn.expect("fft_inverse_fn");
+
+    for log2_size in LOG2_SIZES {
+        let n = 1usize << log2_size;
+        let setup = unsafe { setup_create(log2_size) };
+        assert!(!setup.is_null(), "rustfft setup for log2 {log2_size}");
+
+        let (mut real, mut imaginary) = pseudo_random_signal(n, 0x51fe_0001 ^ log2_size);
+        let (expected_real, expected_imaginary) = naive_dft(&real, &imaginary, false);
+        unsafe { forward(setup, real.as_mut_ptr(), imaginary.as_mut_ptr(), log2_size) };
+        assert_close(
+            &format!("rustfft forward log2 {log2_size}"),
+            &real,
+            &imaginary,
+            &expected_real,
+            &expected_imaginary,
+            tolerance(n),
+        );
+
+        let (mut real, mut imaginary) = pseudo_random_signal(n, 0x51fe_0002 ^ log2_size);
+        let (expected_real, expected_imaginary) = naive_dft(&real, &imaginary, true);
+        unsafe { inverse(setup, real.as_mut_ptr(), imaginary.as_mut_ptr(), log2_size) };
+        assert_close(
+            &format!("rustfft inverse log2 {log2_size}"),
+            &real,
+            &imaginary,
+            &expected_real,
+            &expected_imaginary,
+            tolerance(n),
+        );
+    }
+}
+
+/// Same contract as `portable_fft_setup_serves_shorter_transforms`: generated
+/// code creates one setup per call site and runs every length up to it.
+#[test]
+fn rustfft_table_setup_serves_shorter_transforms() {
+    let table = unsafe { &*dgen_fft::host_services_v1() };
+    let setup_create = table.fft_setup_create_fn.expect("fft_setup_create_fn");
+    let forward = table.fft_forward_fn.expect("fft_forward_fn");
+
+    let setup = unsafe { setup_create(10) };
+    assert!(!setup.is_null());
+
+    for log2_size in LOG2_SIZES {
+        let n = 1usize << log2_size;
+        let (mut real, mut imaginary) = pseudo_random_signal(n, 0x51fe_0003 ^ log2_size);
+        let (expected_real, expected_imaginary) = naive_dft(&real, &imaginary, false);
+        unsafe { forward(setup, real.as_mut_ptr(), imaginary.as_mut_ptr(), log2_size) };
+        assert_close(
+            &format!("rustfft oversized setup, log2 {log2_size}"),
+            &real,
+            &imaginary,
+            &expected_real,
+            &expected_imaginary,
+            tolerance(n),
+        );
+    }
+}
+
+/// vDSP returns NULL for a request it cannot serve and generated code
+/// NULL-checks before running the spectral op; the replacement has to agree.
+#[test]
+fn rustfft_table_setup_rejects_oversized_request() {
+    let table = unsafe { &*dgen_fft::host_services_v1() };
+    let setup_create = table.fft_setup_create_fn.expect("fft_setup_create_fn");
+    let setup = unsafe { setup_create(31) };
+    assert!(setup.is_null(), "log2 31 must be refused, not attempted");
+}
+
+/// The rustfft table's multiply-accumulate is a Rust loop with an AVX2/FMA
+/// specialisation; 37 elements is neither a power of two nor a vector multiple,
+/// so this exercises the scalar tail of whichever path this CPU takes.
+#[test]
+fn rustfft_table_complex_multiply_accumulate_matches_reference() {
+    let table = unsafe { &*dgen_fft::host_services_v1() };
+    let multiply_accumulate = table
+        .complex_multiply_accumulate_fn
+        .expect("complex_multiply_accumulate_fn");
+
+    let n = 37usize;
+    let (lhs_real, lhs_imaginary) = pseudo_random_signal(n, 0x00c0_ffee);
+    let (rhs_real, rhs_imaginary) = pseudo_random_signal(n, 0x00de_1e7e);
+    let (seed_real, seed_imaginary) = pseudo_random_signal(n, 0x00ab_cdef);
+
+    let mut accumulator_real = seed_real.clone();
+    let mut accumulator_imaginary = seed_imaginary.clone();
+    unsafe {
+        multiply_accumulate(
+            lhs_real.as_ptr(),
+            lhs_imaginary.as_ptr(),
+            rhs_real.as_ptr(),
+            rhs_imaginary.as_ptr(),
+            accumulator_real.as_mut_ptr(),
+            accumulator_imaginary.as_mut_ptr(),
+            n as u32,
+        );
+    }
+
+    for i in 0..n {
+        let expected_real = seed_real[i] as f64
+            + (lhs_real[i] as f64 * rhs_real[i] as f64
+                - lhs_imaginary[i] as f64 * rhs_imaginary[i] as f64);
+        let expected_imaginary = seed_imaginary[i] as f64
+            + (lhs_real[i] as f64 * rhs_imaginary[i] as f64
+                + lhs_imaginary[i] as f64 * rhs_real[i] as f64);
+        assert!(
+            (accumulator_real[i] as f64 - expected_real).abs() <= 1e-6
+                && (accumulator_imaginary[i] as f64 - expected_imaginary).abs() <= 1e-6,
+            "element {i}: {}{:+}i, expected {expected_real}{expected_imaginary:+}i",
+            accumulator_real[i],
+            accumulator_imaginary[i],
+        );
+    }
+}
+
+#[test]
+fn rustfft_table_complex_multiply_accumulate_tolerates_empty_span() {
+    let table = unsafe { &*dgen_fft::host_services_v1() };
+    let multiply_accumulate = table
+        .complex_multiply_accumulate_fn
+        .expect("complex_multiply_accumulate_fn");
+    unsafe {
+        multiply_accumulate(
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+}
+
+/// Generated code caches one setup per call site in a static and the audiograph
+/// engine runs graph nodes on a worker pool, so one setup is driven from many
+/// threads at once. The portable C setup was immutable and safe by
+/// construction; the rustfft setup owns mutable scratch, so this hammers a
+/// single setup from well over its workspace-pool size — which also forces the
+/// pool-exhausted fallback — and requires every thread's result to match the
+/// single-threaded one exactly.
+#[test]
+fn rustfft_table_setup_is_safe_to_share_across_threads() {
+    let table = unsafe { &*dgen_fft::host_services_v1() };
+    let setup_create = table.fft_setup_create_fn.expect("fft_setup_create_fn");
+    let forward = table.fft_forward_fn.expect("fft_forward_fn");
+
+    const LOG2_SIZE: u32 = 8;
+    let n = 1usize << LOG2_SIZE;
+    let setup = unsafe { setup_create(LOG2_SIZE) };
+    assert!(!setup.is_null());
+    let setup = setup as usize; // raw pointers are not Send; the setup is.
+
+    // Both the pooled rustfft path and the pool-exhausted portable fallback are
+    // checked against the shared f64 reference rather than against each other:
+    // they agree to tolerance, not bit-for-bit.
+    let (signal_real, signal_imaginary) = pseudo_random_signal(n, 0x51fe_0004);
+    let (expected_real, expected_imaginary) = naive_dft(&signal_real, &signal_imaginary, false);
+    let expected = std::sync::Arc::new((expected_real, expected_imaginary));
+
+    let threads: Vec<_> = (0..32)
+        .map(|thread_index| {
+            let expected = std::sync::Arc::clone(&expected);
+            std::thread::spawn(move || {
+                for _ in 0..64 {
+                    let (mut real, mut imaginary) = pseudo_random_signal(n, 0x51fe_0004);
+                    unsafe {
+                        forward(
+                            setup as DGenFFTSetupV1,
+                            real.as_mut_ptr(),
+                            imaginary.as_mut_ptr(),
+                            LOG2_SIZE,
+                        )
+                    };
+                    assert_close(
+                        &format!("concurrent forward on thread {thread_index}"),
+                        &real,
+                        &imaginary,
+                        &expected.0,
+                        &expected.1,
+                        tolerance(n),
+                    );
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("worker thread");
+    }
+}
+
+// ── the table this platform actually ships (vDSP on macOS, rustfft here) ──
 
 #[test]
 fn host_services_table_exposes_all_four_abi_v1_callbacks() {
@@ -414,4 +620,110 @@ fn host_services_complex_multiply_accumulate_accumulates_a_true_product() {
     }
     assert_eq!(accumulator_real[0], 95.0);
     assert_eq!(accumulator_imaginary[0], 210.0);
+}
+
+// ── throughput (eseq-linux.78) ──
+
+/// Not a correctness test and not part of the default run — the reproducible
+/// measurement behind eseq-linux.78, kept so the claim can be re-checked on a
+/// new host. Release only; a debug build measures the optimiser being off.
+///
+///   cargo nextest run -p sequencer --release --run-ignored all \
+///     -E 'test(=lisp_host::dgen::dgen_host_services_tests::\
+///              throughput_of_the_shipped_table_against_the_portable_kernel)' \
+///     --no-capture
+///
+/// These are hot-cache micro-benchmarks — every buffer stays resident across
+/// iterations — so read them as a ratio between the two kernels, not as the
+/// cost of a real spectral hop. Measured on the i5-8250U (Surface, x86_64
+/// Linux) 2026-08-26: 4.99 us per 2048-point forward transform through the
+/// shipped table (rustfft, including the split <-> interleaved conversion)
+/// against 34.1 us through the portable kernel, and 16.8 us for the
+/// 128x513-bin partition sweep through the shipped multiply-accumulate.
+#[test]
+#[ignore = "benchmark; run explicitly with --run-ignored all --no-capture"]
+fn throughput_of_the_shipped_table_against_the_portable_kernel() {
+    use std::time::Instant;
+
+    const LOG2_SIZE: u32 = 11; // 2048, the Filter Table spectral length
+    const TRANSFORMS: u32 = 2_000;
+    let n = 1usize << LOG2_SIZE;
+
+    let table = unsafe { &*dgen_fft::host_services_v1() };
+    let setup_create = table.fft_setup_create_fn.expect("fft_setup_create_fn");
+    let forward = table.fft_forward_fn.expect("fft_forward_fn");
+    let multiply_accumulate = table
+        .complex_multiply_accumulate_fn
+        .expect("complex_multiply_accumulate_fn");
+
+    let shipped = unsafe { setup_create(LOG2_SIZE) };
+    let portable = unsafe { eseq_dgen_portable_fft_setup_create(LOG2_SIZE) };
+    assert!(!shipped.is_null() && !portable.is_null());
+
+    let (signal_real, signal_imaginary) = pseudo_random_signal(n, 0x51fe_0005);
+
+    let time_transform = |label: &str, run: &mut dyn FnMut(&mut [f32], &mut [f32])| {
+        let (mut real, mut imaginary) = (signal_real.clone(), signal_imaginary.clone());
+        run(&mut real, &mut imaginary); // warm up
+        let started = Instant::now();
+        for _ in 0..TRANSFORMS {
+            real.copy_from_slice(&signal_real);
+            imaginary.copy_from_slice(&signal_imaginary);
+            run(&mut real, &mut imaginary);
+        }
+        let per_transform = started.elapsed() / TRANSFORMS;
+        println!("{label}: {per_transform:?} per {n}-point forward transform");
+    };
+
+    time_transform("shipped table", &mut |real, imaginary| unsafe {
+        forward(
+            shipped,
+            real.as_mut_ptr(),
+            imaginary.as_mut_ptr(),
+            LOG2_SIZE,
+        )
+    });
+    time_transform("portable kernel", &mut |real, imaginary| unsafe {
+        eseq_dgen_portable_fft_forward(
+            portable,
+            real.as_mut_ptr(),
+            imaginary.as_mut_ptr(),
+            LOG2_SIZE,
+        )
+    });
+
+    // The conv-reverb partition sweep the bead measured: 128 partitions of 513
+    // bins each, accumulated into one spectrum.
+    const PARTITIONS: usize = 128;
+    const BINS: usize = 513;
+    const SWEEPS: u32 = 200;
+    let (lhs_real, lhs_imaginary) = pseudo_random_signal(BINS, 0x51fe_0006);
+    let (rhs_real, rhs_imaginary) = pseudo_random_signal(BINS, 0x51fe_0007);
+    let mut accumulator_real = vec![0.0_f32; BINS];
+    let mut accumulator_imaginary = vec![0.0_f32; BINS];
+
+    let mut sweep = || unsafe {
+        for _ in 0..PARTITIONS {
+            multiply_accumulate(
+                lhs_real.as_ptr(),
+                lhs_imaginary.as_ptr(),
+                rhs_real.as_ptr(),
+                rhs_imaginary.as_ptr(),
+                accumulator_real.as_mut_ptr(),
+                accumulator_imaginary.as_mut_ptr(),
+                BINS as u32,
+            );
+        }
+    };
+    sweep(); // warm up
+    let started = Instant::now();
+    for _ in 0..SWEEPS {
+        sweep();
+    }
+    println!(
+        "shipped table: {:?} per {PARTITIONS}x{BINS} multiply-accumulate sweep",
+        started.elapsed() / SWEEPS
+    );
+
+    unsafe { eseq_dgen_portable_fft_setup_destroy(portable) };
 }
