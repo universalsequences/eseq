@@ -2602,10 +2602,31 @@ impl WgpuAppBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn create_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
+    use winit::platform::x11::EventLoopBuilderExtX11;
+
+    // winit 0.29 has no Wayland data-device implementation, so its native
+    // Wayland backend cannot emit DroppedFile.  X11 implements XDND, and
+    // compositors bridge native Wayland drags to XWayland windows.  Select X11
+    // explicitly instead of relying on winit's Wayland-first auto-selection.
+    winit::event_loop::EventLoopBuilder::new()
+        .with_x11()
+        // Rust's test harness runs tests off the main thread. Production keeps
+        // winit's safer main-thread requirement.
+        .with_any_thread(cfg!(test))
+        .build()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
+    EventLoop::new()
+}
+
 impl Backend for WgpuAppBackend {
     fn initialize(&mut self) -> Result<(), BackendError> {
         // ── Window ───────────────────────────────────────────────────────────
-        let event_loop = EventLoop::new().map_err(|_| BackendError::MetalError)?;
+        let event_loop = create_event_loop().map_err(|_| BackendError::MetalError)?;
         let window = winit::window::WindowBuilder::new()
             .with_title("eseq")
             .with_inner_size(self.initial_window_size)
@@ -3174,6 +3195,19 @@ fn translate_mouse_button(button: WMouseButton) -> Option<MouseButton> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn event_loop_uses_x11_for_external_file_drop_support() {
+        use winit::platform::x11::EventLoopWindowTargetExtX11;
+
+        if std::env::var_os("DISPLAY").is_none() {
+            return;
+        }
+
+        let event_loop = create_event_loop().expect("X11 event loop should initialize");
+        assert!(event_loop.is_x11());
+    }
 
     #[test]
     fn close_request_is_reported_as_one_quit_event() {
