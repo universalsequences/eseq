@@ -559,6 +559,7 @@ CONSTANTS = [
     {"name": "twopi", "value": "2*pi", "summary": "Two pi."},
     {"name": "tau", "value": "2*pi", "summary": "Alias for twopi."},
     {"name": "e", "value": "Euler's number", "summary": "Euler's constant."},
+    {"name": "samplerate", "value": "host sample rate in Hz", "summary": "The host sample rate in Hz. Alias: sample-rate."},
     {"name": "true", "value": 1.0, "summary": "Boolean true as float."},
     {"name": "false", "value": 0.0, "summary": "Boolean false as float."},
 ]

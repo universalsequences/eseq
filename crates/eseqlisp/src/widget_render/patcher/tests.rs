@@ -15291,6 +15291,13 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
     assert_eq!(constant.args.len(), 0);
     assert_eq!(constant.outputs.len(), 1);
 
+    let samplerate = node_from_editor_text("sr", "samplerate", (0.0, 0.0), &macro_arities, false);
+    assert_eq!(samplerate.kind, NodeKind::Constant);
+    assert_eq!(node_display_label(&samplerate), "samplerate");
+    assert_eq!(samplerate.diagnostic, None);
+    assert_eq!(samplerate.args.len(), 0);
+    assert_eq!(samplerate.outputs.len(), 1);
+
     let number = node_from_editor_text("num", "3", (0.0, 0.0), &macro_arities, false);
     assert_eq!(number.kind, NodeKind::Constant);
     assert_eq!(node_display_label(&number), "3");
