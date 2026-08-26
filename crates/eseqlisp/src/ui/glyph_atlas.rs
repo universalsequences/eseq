@@ -50,17 +50,25 @@ impl FontLineMetrics {
     }
 }
 
-/// Distance from the top of a monospace layout cell to the baseline a
-/// proportional run should sit on, chosen so the font's cap band is optically
-/// centered in the cell.
+/// Distance from the top of a run's row to the baseline it should sit on,
+/// chosen so the font's cap band is optically centered in the row.
 ///
-/// Centering the font's *line box* instead looks right only when the space
-/// above the caps happens to match the descender space below the baseline.
-/// Helvetica -- what macOS falls back to now that CoreText no longer resolves
-/// the system UI font for us -- has an hhea ascent equal to its cap height, so
-/// line-box centering pushes every glyph up by half the descent.
+/// The row is one monospace layout cell tall *at the run's own scale*: a run
+/// drawn at `scale` occupies `cell_h * scale` pixels, which is the band every
+/// caller reserves for it -- the patcher, the only place `scale` is not 1,
+/// centers its text by handing over a row of exactly `1.0 * zoom` cells.
+/// Everything here therefore scales together; holding `cell_h` at its
+/// unscaled value would peg the text to a fixed height while the box around
+/// it grew with zoom.
+///
+/// Centering the font's *line box* instead of the cap band looks right only
+/// when the space above the caps happens to match the descender space below
+/// the baseline. Helvetica -- what macOS falls back to now that CoreText no
+/// longer resolves the system UI font for us -- has an hhea ascent equal to
+/// its cap height, so line-box centering pushes every glyph up by half the
+/// descent, and by half a descent times the zoom in the patcher.
 pub fn centered_text_baseline_px(cell_h: f32, cap_height_px: f32, scale: f32) -> f32 {
-    cell_h * 0.5 + cap_height_px * scale * 0.5
+    (cell_h + cap_height_px) * 0.5 * scale
 }
 
 /// A CPU-owned R8 atlas. Keeping the authoritative bitmap outside a graphics
@@ -994,13 +1002,14 @@ mod tests {
         ch: char,
         size_tenths: u16,
         cell_h: f32,
+        scale: f32,
     ) -> f32 {
         let entry = *atlas.get_or_rasterize(ch, size_tenths).expect("glyph");
         let line_height = atlas.line_height(size_tenths);
         let descent = atlas.descent(size_tenths);
         let cap = atlas.cap_height(size_tenths);
         let y_offset =
-            centered_text_baseline_px(cell_h, cap, 1.0) - (line_height - descent);
+            centered_text_baseline_px(cell_h, cap, scale) - (line_height - descent) * scale;
 
         let atlas_w = atlas.bitmap.width();
         let x0 = (entry.uv_min[0] * atlas_w as f32).round() as usize;
@@ -1015,7 +1024,7 @@ mod tests {
             .find(|row| inked(*row))
             .expect("ink")
             + 1;
-        y_offset + (top + bottom) as f32 / 2.0
+        y_offset + (top + bottom) as f32 / 2.0 * scale
     }
 
     #[test]
@@ -1026,7 +1035,7 @@ mod tests {
             for cell_h in [20.0_f32, 26.0, 31.0] {
                 for ch in ['H', 'S', 'R', '1'] {
                     let ink_center =
-                        centered_ink_center_px(&mut atlas, ch, size_tenths, cell_h);
+                        centered_ink_center_px(&mut atlas, ch, size_tenths, cell_h, 1.0);
                     let offset = ink_center - cell_h * 0.5;
                     // Round capitals overshoot the cap line slightly and the
                     // rasterizer rounds to whole pixels; a full pixel of slack
@@ -1038,6 +1047,28 @@ mod tests {
                         atlas.fonts.post_script_name
                     );
                 }
+            }
+        }
+    }
+
+    /// A scaled run — the patcher at any zoom other than 1 — is centered in a
+    /// row that scaled with it, not in a fixed one-cell row.
+    #[test]
+    fn scaled_runs_center_in_a_row_that_scaled_with_them() {
+        let mut atlas = ProportionalGlyphAtlas::new(2.0).expect("proportional atlas");
+        let cell_h = 26.0_f32;
+
+        for scale in [0.35_f32, 0.7, 1.0, 1.8, 2.5] {
+            for ch in ['H', 'R'] {
+                let ink_center = centered_ink_center_px(&mut atlas, ch, 160, cell_h, scale);
+                let offset = ink_center - cell_h * scale * 0.5;
+                assert!(
+                    offset.abs() <= 1.0 * scale.max(1.0),
+                    "'{ch}' at zoom {scale} is off the center of its {:.1}px row by \
+                     {offset:+.2}px (font {})",
+                    cell_h * scale,
+                    atlas.fonts.post_script_name
+                );
             }
         }
     }

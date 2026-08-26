@@ -477,7 +477,10 @@ mod tests {
         let samples = [0_i16, i16::MAX / 2, -i16::MAX / 2, i16::MAX / 4];
         let bytes = pcm16_wav(&samples);
 
-        let path = std::env::temp_dir().join("eseqlisp-waveform-test.wav");
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-waveform-test-{}.wav",
+            std::process::id()
+        ));
         fs::write(&path, &bytes).expect("write wav");
         let sample = SampleBuffer::load_wav(&path).expect("load wav");
         assert_eq!(sample.sample_rate, 44_100);

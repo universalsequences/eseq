@@ -691,7 +691,10 @@ mod tests {
         set_global_load_fallback_roots(vec![root.clone()]);
 
         let mut manager = SourceManager::new();
-        manager.cwd = std::env::temp_dir().join("eseqlisp-load-fallback-elsewhere");
+        manager.cwd = std::env::temp_dir().join(format!(
+            "eseqlisp-load-fallback-elsewhere-{}",
+            std::process::id()
+        ));
 
         assert_eq!(
             manager.resolve_load_path("scripts/demo-seq.lisp"),
@@ -706,7 +709,8 @@ mod tests {
 
     #[test]
     fn explicit_cwd_relative_load_ignores_the_active_module_directory() {
-        let cwd = std::env::temp_dir().join("eseqlisp-source-root");
+        let cwd =
+            std::env::temp_dir().join(format!("eseqlisp-source-root-{}", std::process::id()));
         let mut manager = SourceManager::new();
         manager.cwd = cwd.clone();
         manager.enter_file(cwd.join("ui/main.lisp"), 1);

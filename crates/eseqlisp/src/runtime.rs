@@ -522,6 +522,67 @@ use std::hash::{Hash, Hasher};
 
 thread_local! {
     static MATERIAL_SHADER_CACHE: RefCell<HashMap<u64, String>> = RefCell::new(HashMap::new());
+    /// Theme generation the SDF widget registry was last recompiled against.
+    static SDF_THEME_RECOMPILE_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Iterative walk — SDF expressions can nest deeply enough that recursion is a
+/// stack risk (see Expression::clone).
+fn expression_contains_keyword(expr: &crate::parser::Expression) -> bool {
+    use crate::parser::Expression;
+    let mut stack = vec![expr];
+    while let Some(e) = stack.pop() {
+        match e {
+            Expression::Keyword(_) => return true,
+            Expression::List(items) | Expression::QuoteList(items) => stack.extend(items.iter()),
+            Expression::Quasiquote(inner)
+            | Expression::Unquote(inner)
+            | Expression::UnquoteSplicing(inner) => stack.push(inner),
+            Expression::Symbol(_)
+            | Expression::String(_)
+            | Expression::QuoteSymbol(_)
+            | Expression::Number(_) => {}
+        }
+    }
+    false
+}
+
+/// Theme keyword colors are baked into SDF shader source as literals at emit
+/// time, so a theme switch has to re-emit those shaders. Re-registering a def
+/// under the same name changes its stored source and bumps the registry
+/// generation, which makes both render backends rebuild exactly the changed
+/// pipelines on the next frame. Returns true if any shader source changed.
+pub fn recompile_theme_dependent_sdf_shaders() -> bool {
+    let generation = crate::ui::theme::generation();
+    if SDF_THEME_RECOMPILE_GENERATION.with(|g| g.get()) == generation {
+        return false;
+    }
+    SDF_THEME_RECOMPILE_GENERATION.with(|g| g.set(generation));
+    let options = match crate::lang::sdf_codegen::SdfShaderOptions::from_env() {
+        Ok(options) => options,
+        Err(_) => return false,
+    };
+    let mut changed = false;
+    for def in crate::widget_render::sdf_widget::sdf_widget_defs() {
+        if !expression_contains_keyword(&def.sdf_expr) {
+            continue;
+        }
+        match compile_sdf_for_platform_backend(&def.sdf_expr, &def.state_uniforms, options) {
+            Ok(output) => {
+                if output.shader_source != def.shader_source {
+                    let mut new_def = (*def).clone();
+                    new_def.shader_source = output.shader_source;
+                    new_def.region_count = output.region_count;
+                    crate::widget_render::sdf_widget::register_sdf_widget(new_def);
+                    changed = true;
+                }
+            }
+            Err(e) => {
+                eprintln!("theme recompile of SDF widget '{}' failed: {}", def.name, e);
+            }
+        }
+    }
+    changed
 }
 
 /// Extract origin_t from a widget's min/max/origin props.
@@ -690,6 +751,7 @@ fn compile_widget_material(
     crate::widget_render::sdf_widget::register_inline_shader(
         shader_name.clone(),
         output.shader_source,
+        expanded,
         state_symbols,
         paint_margin,
     );
@@ -4161,5 +4223,52 @@ fn collect_shader_widget_ids_recursive(node: &LayoutNode, ids: &mut Vec<u64>) {
     }
     for child in &node.children {
         collect_shader_widget_ids_recursive(child, ids);
+    }
+}
+
+#[cfg(test)]
+mod theme_shader_recompile_tests {
+    use crate::backend::Color;
+    use crate::parser::Expression;
+    use crate::ui::theme;
+    use crate::widget_render::sdf_widget::{SdfWidgetDef, register_sdf_widget, sdf_widget_def};
+
+    fn parse_one(src: &str) -> Expression {
+        let tokens = crate::parser::Parser::new(src.to_string()).parse().unwrap();
+        let mut ast = crate::parser::ASTParser::new(tokens);
+        ast.parse().unwrap().into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn theme_change_reemits_keyword_baked_shaders() {
+        let expr = parse_one("(sdf/layer (sdf/fill (- x 0.5) :accent))");
+        let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env().unwrap();
+        let baked = super::compile_sdf_for_platform_backend(&expr, &[], options).unwrap();
+        register_sdf_widget(SdfWidgetDef {
+            name: "theme-recompile-probe".into(),
+            shader_source: baked.shader_source.clone(),
+            sdf_expr: expr,
+            state_uniforms: Vec::new(),
+            bindable_props: Vec::new(),
+            region_count: baked.region_count,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: false,
+        });
+
+        // Same theme the shader was baked against: nothing to re-emit.
+        assert!(!super::recompile_theme_dependent_sdf_shaders());
+
+        let mut theme = theme::current();
+        theme.accent = Color::from_hex(0x01, 0x02, 0x03);
+        theme::set_current(theme);
+
+        assert!(super::recompile_theme_dependent_sdf_shaders());
+        let def = sdf_widget_def("theme-recompile-probe").unwrap();
+        assert_ne!(def.shader_source, baked.shader_source);
+
+        // Guarded by theme generation: a second pass is a no-op.
+        assert!(!super::recompile_theme_dependent_sdf_shaders());
     }
 }

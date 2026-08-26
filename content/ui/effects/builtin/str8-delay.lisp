@@ -84,10 +84,11 @@
 (def sync-button (fx p)
   (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "s8-sync")
     (button "Sync"
+      :corner-radius 1
       :width 4.95 :height 0.88 :padding 0 :font-size 8.5
       :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
       :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
-          :border-color :transparent
+      :border-color :transparent
       :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -96,7 +97,7 @@
 
 (def div-button (fx p label-text)
   (button label-text
-    :width 2.72 :height 0.92 :padding 0 :font-size 8.0
+    :width 2.72 :height 1.12 :padding 0 :font-size 8.0
     :background-color (if (= (get p :text-value) label-text) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
         :border-color :transparent
     :color (if (= (get p :text-value) label-text) :black :dim)
@@ -129,7 +130,7 @@
         (box :width 2.72 :height 0.82)))))
 
 (def side (fx title sync-p div-p offset-p time-p)
-  (box :width 6.15 :height 7.45 :padding 0.18
+  (box :width 6.15 :height 9.45 :padding 0.18
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.14 :align :center
       (sync-button fx sync-p)

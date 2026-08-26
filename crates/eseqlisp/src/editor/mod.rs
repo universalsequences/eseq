@@ -8905,6 +8905,13 @@ impl Editor {
             self.mark_needs_redraw();
         }
 
+        // Generation-guarded: no-op unless the theme changed since the last
+        // pass. Catches every path that bumps the theme generation (apply-theme
+        // above, direct reactive THEME.* writes), not just the drain.
+        if crate::runtime::recompile_theme_dependent_sdf_shaders() {
+            self.mark_needs_redraw();
+        }
+
         if self.runtime.take_pending_cycle_view_mode() {
             self.toggle_active_buffer_view_mode();
         }

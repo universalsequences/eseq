@@ -754,7 +754,7 @@
               :active (if SEQ.song-manual-latch 1 0))))))
     
     ;; Single continuous LED panel
-    (box :background-color :mixer-strip-bg :corner-radius 64 :height 1.4 :width 68
+    (box :background-color :mixer-strip-bg :corner-radius 64 :height 1.4 :width 69
       (h-stack
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
@@ -801,7 +801,7 @@
                 :options record-quantize-options
                 :on-change seq-set-record-quantize
                 :width 5.2 :height 1.15 :font-size 9))
-            (box :width 0.5)
+            (box :width 1.5)
             (subtree :key "transport-metronome-toggle"
               (box :debug-name "transport-metronome-toggle"
                 :width 3.4 :height 1.1

@@ -481,18 +481,20 @@ pub fn register_sdf_widget(def: SdfWidgetDef) {
 }
 
 /// Register a compiled shader for use as a built-in widget's visual override.
-/// Unlike full SdfWidgetDef, this doesn't need width/height/sdf_expr since the
-/// built-in widget handles layout and hit testing.
+/// Unlike full SdfWidgetDef, this doesn't need width/height since the built-in
+/// widget handles layout and hit testing; sdf_expr is kept only so the shader
+/// can be re-emitted when the theme changes.
 pub fn register_inline_shader(
     name: String,
     shader_source: String,
+    sdf_expr: Expression,
     state_uniforms: Vec<String>,
     paint_margin: f32,
 ) {
     let def = SdfWidgetDef {
         name: name.clone(),
         shader_source,
-        sdf_expr: crate::parser::Expression::Number(0.0), // placeholder — not used for hit testing
+        sdf_expr,
         state_uniforms,
         bindable_props: Vec::new(),
         region_count: 0,
@@ -507,6 +509,10 @@ pub fn register_inline_shader(
 
 pub fn sdf_widget_def(name: &str) -> Option<Rc<SdfWidgetDef>> {
     SDF_WIDGETS.with(|w| w.borrow().get(name).cloned())
+}
+
+pub fn sdf_widget_defs() -> Vec<Rc<SdfWidgetDef>> {
+    SDF_WIDGETS.with(|w| w.borrow().values().cloned().collect())
 }
 
 pub fn sdf_widget_registry_generation() -> u64 {

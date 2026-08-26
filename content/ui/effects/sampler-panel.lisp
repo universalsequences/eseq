@@ -202,12 +202,13 @@
 
 (def sampler-param-button (p key)
   (subtree :key key
-    (v-stack :align :center :gap 0.2
+    (v-stack :align :center :gap 0.5
       (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
       (button (if (pc/fx-param-on? p) "ON" "OFF")
         :width 3.2 :height 1.5 :padding 0 :font-size 10
         :background-color (if (pc/fx-param-on? p) (rgba 0.95 0.48 0.18 1.0) (rgba 0.1 0.1 0.1 0.5))
         :color (if (pc/fx-param-on? p) :black :dim)
+        :border-color :transparent
         :plock-active (if (pc/param-plock-active? false p) 1 0)
         :plock-color-r (pc/param-plock-color-r)
         :plock-color-g (pc/param-plock-color-g)
@@ -235,11 +236,12 @@
         :width 5.8 :height 1.0 :font-size 9))))
 
 (def sampler-gate-button ()
-  (v-stack :align :center :gap 0.2
+  (v-stack :align :center :gap 0.5
     (label "gate" :font-size 10 :color :dim :bg :transparent)
     (button (if SEQ.tp-gate "ON" "OFF")
       :width 3.2 :height 1.5 :padding 0 :font-size 10
       :background-color (if SEQ.tp-gate (rgba 0.95 0.48 0.18 1.0) (rgba 0.1 0.1 0.1 0.5))
+      :border-color :transparent
       :color (if SEQ.tp-gate :black :dim)
       :on-click |x y r| (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :gate (if SEQ.tp-gate 0 1))))))
 
@@ -287,9 +289,12 @@
 
 (def sampler-mode-cell (mode text label active)
   (button text
-    :width 5.2 :height 1.75 :padding 0 :font-size 9
-    :background-color (if active (rgba 0.95 0.48 0.18 1.0) (rgba 0.1 0.1 0.1 0.5))
-    :color (if active :black :dim)
+    :width 5.2 :height 2.45 :padding 0 :font-size 9
+    :background-color :transparent
+    :active active
+    :active-color :yellow
+    :border-color :transparent
+    :color :dim
     :plock-active (if (pc/param-plock-active? false mode) 1 0)
     :plock-color-r (pc/param-plock-color-r)
     :plock-color-g (pc/param-plock-color-g)
@@ -380,12 +385,14 @@
       (box :height 0.02)
       (v-stack :gap 0.2
         (button "1/2"
-          :width 2.25 :height 1.02 :padding 0 :font-size 8
-          :background-color :mixer-control-bg :color :dim
+          :width 2.45 :height 1.22 :padding 0 :font-size 8
+          :background-color :mixer-strip-bg :color :dim
+          :border-color :transparent
           :on-click |x y r| (pc/fx-set-instrument-value p (min 400 (* (get p :value) 2))))
         (button "2x"
-          :width 2.25 :height 1.02 :padding 0 :font-size 8
-          :background-color :mixer-control-bg :color :dim
+          :width 2.45 :height 1.22 :padding 0 :font-size 8
+          :border-color :transparent
+          :background-color :mixer-strip-bg :color :dim
           :on-click |x y r| (pc/fx-set-instrument-value p (max 20 (/ (get p :value) 2))))))))
 
 (def sampler-param-pickers (params inst)
@@ -401,7 +408,8 @@
     (box :width 0.01 :height 0.01)))
 
 (def sampler-param-knobs (params inst)
-  (h-stack :debug-name "sampler-main-param-row" :gap 0.85 :padding 0.15 :align :start
+  (h-stack :debug-name "sampler-main-param-row" :gap 0.85 :padding 0.13 :align :start
+    (box :width 0.1)
     (sampler-gate-button)
     (each (sampler-main-params params) |p pi|
       (sampler-param-control p))
@@ -447,13 +455,13 @@
         (v-stack
           (box :background-color :instrument-control-bg :corner-radius 10
             (v-stack :gap 0.0
-              (box :height 0.3)
+              (box :height 0.01)
               (h-stack :debug-name "sampler-waveform-row" :gap 0.35 :align :start
                 (sampler-mode-switch (get inst :synth))
                 (v-stack :gap 0.0
               (if (get inst :buffer)
                 (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                  (box :width 75 :height 4.4
+                  (box :width 77.0 :height 5.2 :padding 0.2
                     (waveform
                       :height 3.6
                       :header-height 0.3
@@ -511,7 +519,7 @@
         (h-stack :gap 0.5 :align :center :width :fill
           (pf/fx-panel-header-leading-spacer)
           (ep/enabled-toggle (ep/enabled-param (get inst :synth)) false "sampler-enabled")
-          (label "Sampler" :font-size 11 :color :white :bg :transparent)
+          (label "Sampler" :v-align :center :font-size 11 :color :white :bg :transparent)
           (ep/instrument-synth-button)
           (ep/instrument-mods-toggle-button)
           (box :flex 1 :height 0.15)

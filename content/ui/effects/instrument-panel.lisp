@@ -407,6 +407,7 @@
         (label (str (+ (get slot :idx) 1))
           :font-size 10
           :color (if selected :white :gray)
+          :v-align :center
           :width 1.0
           :bg :transparent)
         (box :width 1)
@@ -425,7 +426,7 @@
               :active delete-target
               :active-color :white
               :bg :transparent)))
-
+        
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "T" :font-size 8.2 :color :dim :bg :transparent)
           (number-picker :value (rack-slot-display-value slot :base-note :base-note-field)
