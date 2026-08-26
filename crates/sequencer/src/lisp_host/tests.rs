@@ -13744,6 +13744,166 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(first.rms, second.rms);
     }
 
+    /// Numeric end-to-end pin for the FFT backend generated spectral code runs
+    /// on (eseq-linux.40).
+    ///
+    /// `dgen_host_services_tests` pins each of the four host callbacks against
+    /// an f64 reference DFT, and
+    /// `spectral_effect_renders_finite_nonzero_audio_through_host_services`
+    /// proves a real generated `.so` renders finite, nonzero, repeatable audio.
+    /// Neither sees a scaling or bin-ordering error that only exists once
+    /// generated code *composes* those callbacks: one lazily created setup per
+    /// call site, hop-gated overlap-add, the partitioned complex MAC, and the
+    /// gain compensation codegen bakes in against vDSP's unscaled convention.
+    /// That composition is what changes when the backend does — vDSP on Apple,
+    /// rustfft elsewhere (eseq-linux.78) — and it fails as wrong gain or a
+    /// wrong spectrum, not as a crash. So this asserts the samples, against a
+    /// reference that is neither backend: a closed form evaluated in f64.
+    #[test]
+    fn spectral_partitioned_convolution_matches_closed_form() {
+        const N: usize = 16;
+        const HOP: usize = 8;
+        const GAIN: f64 = 0.5;
+        /// One IR tap per partition, each at its partition's first sample. That
+        /// is what collapses the STFT into the closed form below: every tap
+        /// shifts a frame by a whole hop, so the analysis and synthesis windows
+        /// stay aligned and factor out of the sum.
+        const PARTITION_WEIGHTS: [f64; 4] = [1.0, 0.35, 0.15, 0.05];
+        /// Algorithmic delay of the operator, measured from its own output and
+        /// pinned here: a backend swap that moved the whole result in time
+        /// would leave every individual sample's magnitude untouched.
+        const LATENCY: usize = N - 1;
+        const SAMPLE_RATE: u32 = 48_000;
+        /// A whole multiple of @hop, so every block boundary is a hop boundary
+        /// and the wet arm is never gated off (eseq-linux.73).
+        const BLOCK: usize = 128;
+        const FRAMES: usize = 4096;
+        /// The tolerance the dgen fixtures use. Measured on x86_64 Linux
+        /// 2026-08-26 (rustfft backend): worst error 5.2e-8, ~390x inside it.
+        /// The `misaligned` guard below keeps that from being vacuous — one
+        /// frame of slip costs 1.0e-2, five orders of magnitude more.
+        const TOLERANCE: f64 = 2.0e-5;
+
+        let source = r#"
+            (def dry_l (in 1 @name Left))
+            (def dry_r (in 2 @name Right))
+            (def impulse (tensor @shape [32] @data [
+              1 0 0 0 0 0 0 0
+              0.35 0 0 0 0 0 0 0
+              0.15 0 0 0 0 0 0 0
+              0.05 0 0 0 0 0 0 0]))
+            (out (partitioned-convolve dry_l impulse @N 16 @hop 8 @gain 0.5) 1 @name Left)
+            (out (partitioned-convolve dry_r impulse @N 16 @hop 8 @gain 0.5) 2 @name Right)
+        "#;
+
+        let report = super::render_effect_source_for_test(
+            source,
+            &super::EffectRenderOptions {
+                sample_rate: SAMPLE_RATE,
+                block_size: BLOCK,
+                frames: FRAMES,
+                param_overrides: Vec::new(),
+                param_events: Vec::new(),
+                input_tones: Vec::new(),
+                tensor_overrides: Vec::new(),
+                input_overrides: Vec::new(),
+            },
+        )
+        .expect("spectral effect should compile and render");
+
+        // The probe signal `render_effect_source_for_test` feeds when no tones
+        // or overrides are set, recomputed in the same f32 arithmetic so the
+        // reference differs from the render only by the convolution. With no
+        // param events every block starts at its own frame index, so the
+        // harness's per-block `t` is just `frame / sample_rate`.
+        let probe = |frame: usize| -> (f32, f32) {
+            let t = frame as f32 / SAMPLE_RATE as f32;
+            let impulse = if frame == 0 { 0.45 } else { 0.0 };
+            let burst_env = (1.0 - (t * 4.0)).max(0.0);
+            let left = impulse
+                + 0.18
+                    * burst_env
+                    * ((2.0 * std::f32::consts::PI * 220.0 * t).sin()
+                        + 0.5 * (2.0 * std::f32::consts::PI * 997.0 * t).sin());
+            let right = 0.12
+                * burst_env
+                * ((2.0 * std::f32::consts::PI * 330.0 * t).sin()
+                    + 0.5 * (2.0 * std::f32::consts::PI * 1409.0 * t).sin());
+            (left, right)
+        };
+
+        // Overlap-add envelope: the operator windows each frame on both
+        // analysis and synthesis, and hann^2 at 50% overlap does *not* sum to
+        // unity, so the steady-state gain is periodic in `HOP` rather than
+        // flat. Building it from the window definition rather than from
+        // measured numbers is what makes this a reference and not a snapshot.
+        let hann = |t: usize| -> f64 {
+            0.5 * (1.0 - (2.0 * std::f64::consts::PI * t as f64 / N as f64).cos())
+        };
+        let envelope: Vec<f64> = (0..HOP)
+            .map(|phase| {
+                (phase..N)
+                    .step_by(HOP)
+                    .map(|t| hann(t) * hann(t))
+                    .sum::<f64>()
+            })
+            .collect();
+
+        // Each tap sits at the head of its own partition, so the windows factor
+        // out and the whole chain reduces to
+        //   y[n] = gain * envelope[n % hop] * sum_k w_k * x[n - k*hop - latency]
+        let reference = |frame: usize, channel: usize, latency: usize| -> f64 {
+            let mut acc = 0.0f64;
+            for (partition, weight) in PARTITION_WEIGHTS.iter().enumerate() {
+                // `first_steady` below keeps every tap in range; underflowing
+                // here would mean the skip is wrong, so let it panic rather
+                // than fold a NaN into a `max` that would quietly drop it.
+                let source_frame = frame - (partition * HOP + latency);
+                let (left, right) = probe(source_frame);
+                acc += weight * if channel == 0 { left } else { right } as f64;
+            }
+            GAIN * envelope[frame % HOP] * acc
+        };
+
+        // Worst absolute error over the steady region, skipping the ramp-in
+        // where the partition history is still filling.
+        let worst_error = |latency: usize| -> f64 {
+            let first_steady = (PARTITION_WEIGHTS.len() - 1) * HOP + latency + N;
+            let mut worst = 0.0f64;
+            for frame in first_steady..FRAMES {
+                for channel in 0..2 {
+                    let rendered = report.samples[frame * 2 + channel] as f64;
+                    worst = worst.max((rendered - reference(frame, channel, latency)).abs());
+                }
+            }
+            worst
+        };
+
+        let error = worst_error(LATENCY);
+        assert!(
+            error <= TOLERANCE,
+            "partitioned convolution disagrees with its closed form by {error:e} \
+             (tolerance {TOLERANCE:e}); peak={}, rms={}",
+            report.peak,
+            report.rms,
+        );
+
+        // The tolerance only means something if it is tight enough to reject a
+        // wrong alignment, which is how a bin-ordering error surfaces.
+        let misaligned = worst_error(LATENCY + 1).min(worst_error(LATENCY - 1));
+        assert!(
+            misaligned > TOLERANCE * 100.0,
+            "a one-frame misalignment must land far outside the tolerance, got {misaligned:e}"
+        );
+
+        // And only on audio that is actually there.
+        assert!(
+            report.peak > 0.1,
+            "spectral output must carry the convolved probe, peak={}",
+            report.peak
+        );
+    }
+
     #[test]
     fn prewarm_gate_follows_generated_code_fft_usage() {
         // The load-time warm-up exists only to create FFT setups off the audio
