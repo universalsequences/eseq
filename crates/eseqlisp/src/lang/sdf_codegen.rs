@@ -1993,6 +1993,16 @@ mod tests {
         assert_eq!(output.region_count, 0);
     }
 
+    /// Every authored widget shader must survive the whole pipeline: parse,
+    /// macro expansion, and both emitters, agreeing on region count and
+    /// producing WGSL that naga accepts.
+    ///
+    /// This deliberately does not digest the corpus. Hashing the live authored
+    /// content made every ordinary widget edit fail a test that could only
+    /// report two hex strings, never the shader that moved. Emitter drift is
+    /// covered by the targeted tests around this one; if a corpus-wide tripwire
+    /// is ever wanted back, it belongs over fixed fixtures that move only when
+    /// the emitters do.
     #[test]
     fn content_shader_corpus_emits_valid_wgsl() {
         use crate::runtime::Runtime;
@@ -2005,11 +2015,7 @@ mod tests {
             (!is_materials, path.clone())
         });
 
-        use sha2::{Digest, Sha256};
-
         let mut runtime = Runtime::new();
-        let mut metal_snapshot = Sha256::new();
-        let mut wgsl_snapshot = Sha256::new();
         let mut shader_count = 0;
         for path in files {
             let source = std::fs::read_to_string(&path).unwrap();
@@ -2073,10 +2079,6 @@ mod tests {
                     panic!("WGSL codegen failed for {}: {error}", path.display())
                 });
                 assert_eq!(metal.region_count, wgsl.region_count, "{}", path.display());
-                metal_snapshot.update(metal.shader_source.as_bytes());
-                metal_snapshot.update([0]);
-                wgsl_snapshot.update(wgsl.shader_source.as_bytes());
-                wgsl_snapshot.update([0]);
                 assert_valid_wgsl(&wgsl.shader_source);
                 shader_count += 1;
             }
@@ -2084,35 +2086,6 @@ mod tests {
         assert!(
             shader_count >= 60,
             "expected the full content shader corpus"
-        );
-        let metal_snapshot = metal_snapshot
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        // Re-captured after 867fb9a9, which finished the restyle that started at
-        // 7396708d: disclosure glyphs became SDF symbols (new `triangle` and
-        // `disclosure-*` macros in core/sdf-stdlib.lisp, the `disclosure-button`
-        // widget in ui/materials.lisp), ui/transport.lisp icon bodies and theme
-        // keywords moved, and ui/sequencer.lisp lighting `vec3` z values changed.
-        // Both digests cover the authored corpus, so any deliberate content
-        // shader edit moves them; nothing in the emitters changed here.
-        assert_eq!(
-            metal_snapshot,
-            "23b6d51596046ab185bcb7d2cc6b749e5345ded16cbd5e33402b320d1bf32358"
-        );
-        let wgsl_snapshot = wgsl_snapshot
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        // Captured in eseq-linux.7 when the emitter stopped emitting its own
-        // `WidgetVaryings` (the struct now comes from the shared WGSL widget
-        // preamble the fragments are assembled onto), and re-captured alongside
-        // the MSL digest above for the same content edits.
-        assert_eq!(
-            wgsl_snapshot,
-            "1a8426d0783e7ad53ee9177d072ce187aa50c19365afdcadbab7c633fd90ae78"
         );
     }
 
