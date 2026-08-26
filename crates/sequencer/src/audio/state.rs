@@ -159,6 +159,57 @@ impl OutputBlockSizeVerifier {
     }
 }
 
+/// Feeds `audio_callback` a fixed number of frames per invocation, whatever
+/// the device asks for.
+///
+/// CPAL's ALSA backend serves whatever `snd_pcm_avail_update` reports, so on
+/// Linux (PipeWire in particular) a `BufferSize::Fixed(512)` request is routinely
+/// answered with odd sizes like 235 — and the graph then renders a 235-frame
+/// slice. Generated DGenLisp spectral code cannot survive that: its
+/// `overlap-add` emits a hop's worth of output only when a hop boundary lands on
+/// a block boundary, so a block size that is not hop-compatible silences the wet
+/// arm of every FFT-based effect (Convolution Reverb, Filter Table) while the dry
+/// arm keeps passing (eseq-linux.73).
+///
+/// Rendering into a full-block scratch and serving the device out of it restores
+/// the contract for every node at once. The cost is up to `block_frames - 1`
+/// frames of extra output latency, and none at all on a host that already
+/// delivers exactly `block_frames` (the scratch drains exactly once per call).
+pub(super) struct FixedOutputBlocks {
+    scratch: Vec<f32>,
+    /// Read cursor into `scratch`, in samples. Starts drained so the first
+    /// device request renders.
+    position: usize,
+}
+
+impl FixedOutputBlocks {
+    pub(super) fn new(block_frames: usize, channels: usize) -> Self {
+        let samples = block_frames.max(1) * channels.max(1);
+        Self {
+            scratch: vec![0.0; samples],
+            position: samples,
+        }
+    }
+
+    /// Fill `output` (interleaved) by repeatedly rendering exact blocks.
+    /// `render` is always called with a slice of exactly `block_frames *
+    /// channels` samples. Allocation-free, so it is safe on the audio thread.
+    pub(super) fn serve(&mut self, output: &mut [f32], mut render: impl FnMut(&mut [f32])) {
+        let mut written = 0;
+        while written < output.len() {
+            if self.position >= self.scratch.len() {
+                render(&mut self.scratch);
+                self.position = 0;
+            }
+            let take = (output.len() - written).min(self.scratch.len() - self.position);
+            output[written..written + take]
+                .copy_from_slice(&self.scratch[self.position..self.position + take]);
+            self.position += take;
+            written += take;
+        }
+    }
+}
+
 pub(super) struct AudioCallbackData {
     pub(super) lg: LiveGraphPtr,
     pub(super) state: Arc<SequencerState>,

@@ -158,19 +158,43 @@ pub fn build_output_stream(
         buffer_size: cpal::BufferSize::Fixed(block_size as u32),
     };
 
-    start_cpal_output_stream(&device, &config, cb_data)
+    start_cpal_output_stream(&device, &config, block_size, cb_data)
 }
 
 fn start_cpal_output_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
+    block_size: usize,
     mut cb_data: Box<AudioCallbackData>,
 ) -> Result<Stream, String> {
+    let channels = cb_data.num_channels;
+    // CPAL honors `BufferSize::Fixed` only as a hint on ALSA; PipeWire answers a
+    // 512-frame request with whatever `avail_update` reports (235 frames on the
+    // Linux workstation). Render exact graph blocks and serve the device out of
+    // them so every node — spectral DGenLisp effects above all — sees the block
+    // size it was compiled for (eseq-linux.73).
+    let mut blocks = FixedOutputBlocks::new(block_size, channels);
     let stream = device
         .build_output_stream(
             config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                audio_callback(&mut cb_data, data);
+                if let Some(observation) =
+                    cb_data.output_block_size.observe(data.len() / channels.max(1))
+                {
+                    match observation {
+                        OutputBlockSizeObservation::Matched { frames } => {
+                            eprintln!(
+                                "audio: output callback block size verified at {frames} frames"
+                            );
+                        }
+                        OutputBlockSizeObservation::Mismatched { requested, actual } => {
+                            eprintln!(
+                                "audio: output callback uses {actual} frames after requesting {requested}; rendering fixed {requested}-frame graph blocks"
+                            );
+                        }
+                    }
+                }
+                blocks.serve(data, |block| audio_callback(&mut cb_data, block));
             },
             |err| eprintln!("Audio stream error: {err}"),
             None,

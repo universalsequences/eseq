@@ -23,8 +23,8 @@ use super::{
     swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
     ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
     BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
-    FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
-    HostTransportClockRuntime, MetronomeState, OutputBlockSizeObservation,
+    FixedOutputBlocks, FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent,
+    GateOffTarget, HostTransportClockRuntime, MetronomeState, OutputBlockSizeObservation,
     OutputBlockSizeVerifier, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
     SliceTriggerVerdict, FALLBACK_SAMPLE_RATE,
 };
@@ -182,6 +182,64 @@ fn output_block_size_verifier_confirms_match_and_reports_first_later_mismatch() 
         })
     );
     assert_eq!(verifier.observe(1024), None);
+}
+
+// eseq-linux.73: CPAL/ALSA hands the callback whatever `avail_update` reports
+// (235 frames on the Linux workstation for a 512-frame request), and generated
+// DGenLisp spectral code only emits overlap-add output on hop-aligned block
+// boundaries — so a 235-frame graph block silences the wet arm of every
+// FFT-based effect. The adapter must therefore render exact blocks no matter
+// what the device asks for.
+#[test]
+fn fixed_output_blocks_renders_exact_blocks_for_odd_device_requests() {
+    const BLOCK: usize = 512;
+    const CHANNELS: usize = 2;
+    let mut blocks = FixedOutputBlocks::new(BLOCK, CHANNELS);
+    let mut render_sizes = Vec::new();
+    let mut next_sample = 0.0f32;
+
+    // The device request pattern PipeWire actually produced, plus a request
+    // larger than one block so the multi-block path is covered too.
+    let mut served = Vec::new();
+    for frames in [235usize, 235, 235, 1024, 7, 512] {
+        let mut device = vec![0.0f32; frames * CHANNELS];
+        blocks.serve(&mut device, |block| {
+            render_sizes.push(block.len());
+            for sample in block.iter_mut() {
+                *sample = next_sample;
+                next_sample += 1.0;
+            }
+        });
+        served.extend_from_slice(&device);
+    }
+
+    assert!(
+        render_sizes.iter().all(|len| *len == BLOCK * CHANNELS),
+        "every render must see one whole graph block, got {render_sizes:?}"
+    );
+    // Nothing is dropped or repeated: the device sees the rendered stream verbatim.
+    let expected: Vec<f32> = (0..served.len()).map(|index| index as f32).collect();
+    assert_eq!(served, expected, "adapter must not drop or duplicate samples");
+}
+
+// A host that already delivers exactly the requested block (CoreAudio) must not
+// pay any latency for the adapter: one device request renders one block and
+// drains it completely.
+#[test]
+fn fixed_output_blocks_adds_no_latency_when_device_matches_block() {
+    const BLOCK: usize = 512;
+    const CHANNELS: usize = 2;
+    let mut blocks = FixedOutputBlocks::new(BLOCK, CHANNELS);
+    for round in 0..4 {
+        let mut renders = 0;
+        let mut device = vec![0.0f32; BLOCK * CHANNELS];
+        blocks.serve(&mut device, |block| {
+            renders += 1;
+            block.fill(round as f32);
+        });
+        assert_eq!(renders, 1, "one device block must cost exactly one render");
+        assert!(device.iter().all(|sample| *sample == round as f32));
+    }
 }
 
 #[test]
