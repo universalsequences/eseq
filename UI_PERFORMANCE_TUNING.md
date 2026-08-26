@@ -567,9 +567,8 @@ These provisional measurements use an Apple M1 Max (10 cores, 32 GiB), macOS
 26.5.1, release profile, a 220x110-cell viewport, and the headless retained-
 primitive path. The pre-fix run had load averages 12.97/17.96/15.74. The
 post-fix run had elevated concurrent load, 14.29/27.79/31.35, so the result is
-deliberately not used as a cross-machine absolute ceiling. The
-x86_64 Linux before/after run and platform ceiling remain tracked by
-`eseq-z85k.2`.
+deliberately not used as a cross-machine absolute ceiling. The x86_64 Linux
+before/after run and the final attribution are in the next section.
 
 | Expanded tracks | Before median / p95 | After median / p95 | Median speedup |
 |---|---:|---:|---:|
@@ -589,6 +588,133 @@ Full-buffer reruns and full relayouts were zero both before and after. The fixed
 interpolation and hit-test counts prove the improvement did not drop or defer
 pointer samples. Clone counts collapsed because the removed subtree rerenders
 no longer replace large layout branches; no hit-test behavior was changed.
+
+### x86_64 Linux before and after (2026-08-26, eseq-z85k.2)
+
+Machine `omarchy`: Intel Core i5-8250U (4 cores / 8 threads, 1.6 GHz base,
+3.4 GHz max), 7.7 GiB RAM, Omarchy on kernel 6.19.8-arch1-3-surface, rustc
+1.98.0, release profile, 220x110-cell viewport, headless retained-primitive
+path. The probe asserted the full production pane set in every run —
+`*transport*`, `*samples*`, `*sequencer*`, `*step*`, `*track*`, `*mixer*`,
+`*fx*`, with `*arrangement*` hidden.
+
+"Before" is the checked-in probe at `1b1ee16b` in a detached worktree; "after"
+is the same probe at `3260d893`. Each configuration used 5 warmups and 20
+measured samples. This laptop is shared with other work, and the probe's own
+audio graph takes roughly 80% of process CPU while the UI thread runs (see the
+profile below), so the 1-minute load average was 8.17 entering the before run
+and 5.74 entering the after run. Repeats spread the before 1-track median over
+347-484 ms and the after 1-track median over 33-41 ms. Read these as this
+machine's regime, not as a cross-machine ceiling.
+
+| Expanded tracks | Before median / p95 | After median / p95 | Median speedup |
+|---|---:|---:|---:|
+| 1 | 376.826 / 478.348 ms | 41.482 / 45.255 ms | 9.1x |
+| 3 | 457.304 / 622.519 ms | 43.039 / 53.196 ms | 10.6x |
+
+Per-event medians by phase (each percentile is taken independently, so the
+columns do not sum exactly to the total):
+
+| Expanded tracks | Input dispatch | Host commands | Reactive + frame |
+|---|---:|---:|---:|
+| 1 before | 278.709 ms | 37.907 ms | ~60 ms |
+| 1 after | 5.094 ms | 32.594 ms | ~4 ms |
+| 3 before | 304.205 ms | 40.855 ms | ~112 ms |
+| 3 after | 5.533 ms | 34.222 ms | ~3 ms |
+
+Per-event work counts are identical to the macOS run, before and after:
+
+| Expanded tracks | Subtree reruns / roots | Relayout reused / subtree | LayoutNode clones | Interpolation / hit tests |
+|---|---:|---:|---:|---:|
+| 1 before | 7 / 7 | 7 / 7 | 5,045 | 49 / 51 |
+| 1 after | 0 / 0 | 0 / 0 | 197 | 49 / 51 |
+| 3 before | 9 / 9 | 7 / 7 | 6,317 | 49 / 51 |
+| 3 after | 0 / 0 | 0 / 0 | 197 | 49 / 51 |
+
+The fan-out is therefore platform independent; Linux only multiplies the
+constant by roughly 3.4x.
+
+### Linux traces and CPU attribution (eseq-z85k.2)
+
+`ESEQLISP_TRACE_UI=1` with
+`ESEQLISP_TRACE_UI_FILTER=SEQ.velocities,SEQ.track-velocities` prints 49
+reactive cycles across the before sweep, one per drag event, each of the form
+
+```
+[ui-trace] dirty=[SEQ.velocities x7,SEQ.track-velocities] affected=[*sequencer*]
+  reruns=full:0 sub:3 roots:3 patches:3 apply_ms=52-83 flush_ms=38-55
+  relayout=subtree-reuse relayout_ms=26-39
+  hot=[*sequencer*|target:*sequencer*|root:<keyed track root>:17-30ms x3]
+```
+
+The same filter over the after sweep prints **zero** such cycles. That directly
+confirms the hypothesized expanded-track subtree fan-out and its removal.
+
+CPU profile method. `perf` was not installed when this run started (Arch
+`extra/perf`, group `linux-tools`, root required); it was installed partway
+through the session, and `kernel.perf_event_paranoid=2` restricts unprivileged
+sampling to user space (`cpu/cycles/Pu`), which is all this attribution needs.
+The release profile carries no frame pointers, so `perf --call-graph dwarf,8192`
+truncated stacks to 1-4 frames and could not attribute a call tree; its flat
+per-thread self time was still usable. The call-tree numbers below come from an
+in-process SIGPROF sampler (pprof 0.15 at 997 Hz, 1024-frame depth) started
+inside the test process around a replay of the same gesture with the probe's
+assertions removed — a launch-time in-process profiler, not an attach
+workaround. Both the sampler and the replay pass are diagnostic scaffolding and
+are deliberately not checked in; timings above come from the uninstrumented
+build. Thread names are inherited on Linux, so samples are attributed by
+anchoring on the probe's own frame rather than by thread name.
+
+Before, 1 expanded track (2,552 UI samples out of 12,489 process samples — the
+other ~80% is the project's own audio graph, `worker_main` / `dgen_process_v1`):
+
+| Path | Share of UI CPU |
+|---|---:|
+| `handle_tiled_mouse_precise` -> `try_handle_widget_drag_segment` -> `dispatch_slider_drag_to_node` -> `apply_widget_output` | 82% |
+| ... of which `process_dirty_reactive` | 43% |
+| ... of which relayout | 30% |
+| ... of which Lisp compilation | 15% |
+| `hit_test_layout` / `widget_node_at_local` | 0.8% |
+| `dispatch_custom_host_command` | 4.7% |
+| tiled-frame build + retained primitive refresh | 0.9% |
+
+Three expanded tracks are the same shape: drag path 68%, reactive 42%, relayout
+35%, hit tests 0.4%, host commands 4.1%.
+
+After, both configurations (154 UI samples each):
+
+| Path | Share of UI CPU |
+|---|---:|
+| `dispatch_custom_host_command` -> `apply_recorded_step_mutation` | 60% |
+| ... of which `replay_step_patch` / `replay_step_patch_cells` | 42-46% |
+| ... of which `publish_scheduler_track` -> `SequencerSnapshot::capture_live_track` | 33-34% |
+| `try_handle_widget_drag_segment` (interpolation + hit tests) | 23-25% |
+| ... of which `hit_test_layout` | 7-10% |
+| `process_dirty_reactive` / relayout | 0% |
+
+### Attribution verdict (eseq-z85k H1/H2/H3)
+
+- **H1 — a non-reactive value read forcing whole-subtree re-evaluation:
+  confirmed, and the dominant owner.** It held 82% of before UI CPU at one
+  expanded track and 68% at three, and removing it accounts for essentially all
+  of the 9.1x-10.6x median improvement. Already fixed in `78ad4c8c`; Linux only
+  confirms it.
+- **H2 — an O(distance x tree) drag hit-test path with deep clones: refuted as
+  an independent owner.** Hit-testing is 0.8% of before UI CPU. The 5,045 /
+  6,317 LayoutNode clones were a consequence of H1's subtree rerun and relayout,
+  not of hit-testing: interpolation sub-samples (49) and hit tests (51) are
+  unchanged before and after, yet clones fell to 197. Post-fix hit-testing is
+  7-10% of a ~4.8 ms input phase, roughly 0.4 ms per event.
+- **H3 — redundant per-tick selection work: refuted.** No selection-sync frames
+  appear in either profile, and no selection field is dirtied during the sweep.
+- **H4 — per-interpolated-write step-history replay and scheduler republish: a
+  new owner, visible only on Linux.** Post-fix the residual is no longer the
+  input path (~5 ms) but host-command application, 32.6 ms at one expanded track
+  and 34.2 ms at three — 79% of the post-fix median. Each drag event dispatches
+  seven `set-step-param-history` commands, and each one runs
+  `apply_recorded_step_mutation` (capture-before, mutate, `replay_step_patch`)
+  and republishes a complete scheduler track snapshot. On the M1 Max this phase
+  was ~9 ms and hid inside an already fast frame. Tracked as `eseq-z85k.3`.
 
 ### Root cause and fix
 
