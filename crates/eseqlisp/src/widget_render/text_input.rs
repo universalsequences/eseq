@@ -1,7 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
@@ -192,7 +190,7 @@ fn delete_edit(text: &str, state: &mut TextInputState) -> Option<String> {
 
 fn copy_selection_to_clipboard(text: &str, state: &TextInputState) {
     if let Some(range) = selection_range(state) {
-        let _ = write_system_clipboard(&selected_text(text, range));
+        let _ = crate::clipboard::write(&selected_text(text, range));
     }
 }
 
@@ -234,7 +232,7 @@ pub(crate) fn apply_text_entry_key(
             }
         }
         KeyCode::Char('v') | KeyCode::Char('V') if clipboard_modifier(key.modifiers) => {
-            match read_system_clipboard() {
+            match crate::clipboard::read() {
                 Ok(mut paste) if !paste.is_empty() => {
                     if !allow_newline {
                         paste = paste.replace("\r\n", " ").replace('\n', " ");
@@ -335,39 +333,6 @@ fn text_entry_key_event(
 
 fn clipboard_modifier(modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::CONTROL)
-}
-
-fn write_system_clipboard(text: &str) -> Result<(), String> {
-    let mut child = Command::new("pbcopy")
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start pbcopy: {error}"))?;
-    let stdin = child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| "failed to open pbcopy stdin".to_string())?;
-    stdin
-        .write_all(text.as_bytes())
-        .map_err(|error| format!("failed to write to pbcopy: {error}"))?;
-    let status = child
-        .wait()
-        .map_err(|error| format!("failed to wait for pbcopy: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("pbcopy exited with {status}"))
-    }
-}
-
-fn read_system_clipboard() -> Result<String, String> {
-    let output = Command::new("pbpaste")
-        .output()
-        .map_err(|error| format!("failed to start pbpaste: {error}"))?;
-    if !output.status.success() {
-        return Err(format!("pbpaste exited with {}", output.status));
-    }
-    String::from_utf8(output.stdout)
-        .map_err(|error| format!("clipboard did not contain UTF-8 text: {error}"))
 }
 
 pub(crate) fn get_text(props: &HashMap<String, Value>) -> String {

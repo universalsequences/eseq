@@ -76,6 +76,7 @@ pub use ui::wgpu_backend;
 // ── Root-level modules ───────────────────────────────────────────────────
 pub mod audio;
 pub mod buffer;
+pub(crate) mod clipboard;
 pub mod defmacro_library;
 mod dgenlisp;
 pub mod editor;

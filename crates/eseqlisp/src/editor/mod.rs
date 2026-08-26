@@ -5,9 +5,7 @@ pub(crate) mod widget_focus;
 mod widget_interaction;
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -9437,25 +9435,7 @@ impl Editor {
             return Ok(());
         }
 
-        let mut child = Command::new("pbcopy")
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("failed to start pbcopy: {error}"))?;
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "failed to open pbcopy stdin".to_string())?;
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|error| format!("failed to write to pbcopy: {error}"))?;
-        let status = child
-            .wait()
-            .map_err(|error| format!("failed to wait for pbcopy: {error}"))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("pbcopy exited with {status}"))
-        }
+        crate::clipboard::write(text)
     }
 
     fn read_system_clipboard(&mut self) -> Result<String, String> {
@@ -9464,14 +9444,7 @@ impl Editor {
             return Ok(text.clone());
         }
 
-        let output = Command::new("pbpaste")
-            .output()
-            .map_err(|error| format!("failed to start pbpaste: {error}"))?;
-        if !output.status.success() {
-            return Err(format!("pbpaste exited with {}", output.status));
-        }
-        String::from_utf8(output.stdout)
-            .map_err(|error| format!("clipboard did not contain UTF-8 text: {error}"))
+        crate::clipboard::read()
     }
 
     #[cfg(test)]
