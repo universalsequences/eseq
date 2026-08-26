@@ -4520,6 +4520,48 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
     }
 
+    const DGEN_ABI_SECTION_START: &str = "typedef void *DGenFFTSetupV1;";
+    const DGEN_ABI_SECTION_END: &str =
+        "DGEN_EXPORT void dgen_set_param_value_v1(int32_t cell_id, float value);";
+
+    fn dgen_abi_section(header: &str) -> Result<&str, &'static str> {
+        let start = header
+            .find(DGEN_ABI_SECTION_START)
+            .ok_or("ABI section start marker is missing")?;
+        let end = header[start..]
+            .find(DGEN_ABI_SECTION_END)
+            .map(|offset| start + offset + DGEN_ABI_SECTION_END.len())
+            .ok_or("ABI section end marker is missing after its start marker")?;
+        Ok(&header[start..end])
+    }
+
+    #[test]
+    fn dgen_abi_section_hash_ignores_target_specific_intrinsics() {
+        use sha2::{Digest, Sha256};
+
+        let abi = format!(
+            "{DGEN_ABI_SECTION_START}\ntypedef struct {{ uint32_t size; }} DGenExampleV1;\n\
+             {DGEN_ABI_SECTION_END}"
+        );
+        let mac_header = format!("#include <arm_neon.h>\n{abi}\n#define DGEN_BARRIER()\n");
+        let linux_header = format!(
+            "#include \"dgen_simd_compat.h\"\n{abi}\n#define DGEN_BARRIER() asm volatile(\"\")\n"
+        );
+
+        let mac_section = dgen_abi_section(&mac_header).expect("mac ABI section");
+        let linux_section = dgen_abi_section(&linux_header).expect("Linux ABI section");
+        assert_eq!(Sha256::digest(mac_section), Sha256::digest(linux_section));
+
+        let changed_abi_header = linux_header.replace("uint32_t size", "uint64_t size");
+        let changed_section =
+            dgen_abi_section(&changed_abi_header).expect("changed ABI section");
+        assert_ne!(
+            Sha256::digest(linux_section),
+            Sha256::digest(changed_section),
+            "changes inside the vendored ABI must still be detected"
+        );
+    }
+
     #[test]
     fn vendored_dgen_abi_header_matches_staged_toolchain_header() {
         use sha2::{Digest, Sha256};
@@ -4549,31 +4591,15 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // whole upstream header: its math/intrinsics section is per-target
         // (arm_neon.h on the mac stage, dgen_simd_compat.h on the Linux one)
         // and one whole-file hash cannot satisfy both pins.
-        const ABI_SECTION_START: &str = "typedef void *DGenFFTSetupV1;";
-        const ABI_SECTION_END: &str =
-            "DGEN_EXPORT void dgen_set_param_value_v1(int32_t cell_id, float value);";
-        let start = staged.find(ABI_SECTION_START).unwrap_or_else(|| {
+        let staged_section = dgen_abi_section(&staged).unwrap_or_else(|error| {
             panic!(
-                "staged header {} has no `{ABI_SECTION_START}` line — the ABI \
-                 section markers this test keys on moved; re-vendor \
-                 audiograph/dgen_abi_v1.h and update both the markers and its \
-                 Source-sha256 comment",
+                "staged header {} cannot identify its vendored ABI section: \
+                 {error}; re-vendor audiograph/dgen_abi_v1.h and update its \
+                 section markers and Source-sha256 comment",
                 staged_path.display()
             )
         });
-        let end = staged[start..]
-            .find(ABI_SECTION_END)
-            .map(|offset| start + offset + ABI_SECTION_END.len())
-            .unwrap_or_else(|| {
-                panic!(
-                    "staged header {} has no `{ABI_SECTION_END}` line after the \
-                     ABI section start — the markers this test keys on moved; \
-                     re-vendor audiograph/dgen_abi_v1.h and update both the \
-                     markers and its Source-sha256 comment",
-                    staged_path.display()
-                )
-            });
-        let staged_sha = format!("{:x}", Sha256::digest(staged[start..end].as_bytes()));
+        let staged_sha = format!("{:x}", Sha256::digest(staged_section.as_bytes()));
         assert_eq!(
             staged_sha, recorded_sha,
             "the staged include/dgen_runtime.h ABI section drifted from the \
