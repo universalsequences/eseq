@@ -598,6 +598,27 @@ impl WgpuAppBackend {
         })
     }
 
+    /// Release wgpu/EGL objects while winit's native display connection is
+    /// still alive. On Wayland the event loop owns that connection; dropping
+    /// it first leaves Mesa's EGL destructors marshaling through a dead
+    /// `wl_display` and can segfault during otherwise normal shutdown.
+    ///
+    /// GPU resources outside `GpuState` can retain the wgpu global, so release
+    /// those children before the device/surface. This method is intentionally
+    /// idempotent because both explicit backend teardown and `Drop` call it.
+    fn release_platform_resources(&mut self) {
+        self.image_textures.clear();
+        self.live_spectrogram_buffers.clear();
+        self.wavetable_buffers.clear();
+        self.waveform_buffers.clear();
+        drop(self.prop_atlas.take());
+        drop(self.text_atlas.take());
+        drop(self.atlas.take());
+        drop(self.gpu.take());
+        drop(self.window.take());
+        drop(self.event_loop.take());
+    }
+
     fn elapsed_time_seconds(&self) -> f32 {
         self.start_time.elapsed().as_secs_f32()
     }
@@ -2609,6 +2630,12 @@ impl WgpuAppBackend {
     }
 }
 
+impl Drop for WgpuAppBackend {
+    fn drop(&mut self) {
+        self.release_platform_resources();
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn create_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
     let mut builder = winit::event_loop::EventLoopBuilder::new();
@@ -2842,8 +2869,7 @@ impl Backend for WgpuAppBackend {
     }
 
     fn teardown(&mut self) -> Result<(), BackendError> {
-        self.window = None;
-        self.event_loop = None;
+        self.release_platform_resources();
         Ok(())
     }
 
