@@ -1371,7 +1371,7 @@ pub(super) fn sync_instrument_param_authoring_display(
             sync.selected_steps,
         );
     }
-    ui_dirty |= sync_instrument_param_value_field_with_neural_selection(
+    ui_dirty |= sync_fx_instrument_param_value_field_with_neural_selection(
         editor.runtime_mut(),
         sync.app,
         sync.track,
@@ -1449,7 +1449,7 @@ pub(super) fn sync_instrument_param_batch_display(
         );
     }
     for &param_idx in param_indices {
-        ui_dirty |= sync_instrument_param_value_field_with_neural_selection(
+        ui_dirty |= sync_fx_instrument_param_value_field_with_neural_selection(
             editor.runtime_mut(),
             app,
             track,
@@ -2153,12 +2153,22 @@ pub(super) fn apply_ui_invalidations(
                     displayed_plock_step(state, track, selected_plock_step(selected_steps));
                 match change {
                     InstrumentInvalidation::Param { param } => {
-                        needs_reactive_cycle |=
-                            sync_instrument_param_value_field(rt, app, track, param, display_step);
+                        needs_reactive_cycle |= if track == current_track_idx {
+                            sync_fx_instrument_param_value_field(
+                                rt, app, track, param, display_step,
+                            )
+                        } else {
+                            sync_instrument_param_value_field(rt, app, track, param, display_step)
+                        };
                     }
                     InstrumentInvalidation::Plock { param } => {
-                        needs_reactive_cycle |=
-                            sync_instrument_param_value_field(rt, app, track, param, display_step);
+                        needs_reactive_cycle |= if track == current_track_idx {
+                            sync_fx_instrument_param_value_field(
+                                rt, app, track, param, display_step,
+                            )
+                        } else {
+                            sync_instrument_param_value_field(rt, app, track, param, display_step)
+                        };
                         if track == current_track_idx {
                             needs_reactive_cycle |= sync_instrument_plock_presence_fields(
                                 rt,
@@ -2170,8 +2180,11 @@ pub(super) fn apply_ui_invalidations(
                         }
                     }
                     InstrumentInvalidation::BaseNote => {
-                        needs_reactive_cycle |=
-                            sync_instrument_base_note_value_field(rt, app, track);
+                        needs_reactive_cycle |= if track == current_track_idx {
+                            sync_fx_instrument_base_note_value_field(rt, app, track)
+                        } else {
+                            sync_instrument_base_note_value_field(rt, app, track)
+                        };
                     }
                     InstrumentInvalidation::SamplerSelectionTime => {
                         needs_reactive_cycle |=

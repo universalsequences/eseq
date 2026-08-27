@@ -355,8 +355,11 @@
   (nth st/instrument-key-lock-selected-notes 0))
 
 (def instrument-param-key-lock-row (p note)
-  (nth (filter |row| (= (get row :note) note) (get p :key-locks))
-    0))
+  (let ((inst (nth SEQ.instrument-panel 0))
+        (rows (if (and inst (fx-param-has-idx? p))
+                (nth (get inst :key-locks) (get p :idx))
+                '())))
+    (nth (filter |row| (= (get row :note) note) rows) 0)))
 
 (def instrument-param-key-lock-active? (p)
   (let ((note (instrument-selected-key-note)))
@@ -537,8 +540,11 @@
       (get p :value)))))
 
 (def fx-param-text-value-for (fx p)
-  (if (and (not fx) (instrument-keys-active?) (get p :options))
-    (nth (get p :options) (fx-param-value-for fx p))
+  (if (get p :options)
+    (if (or (get p :value-field)
+            (and (not fx) (instrument-keys-active?)))
+      (nth (get p :options) (fx-param-value-for fx p))
+      (get p :text-value))
     (get p :text-value)))
 
 (def param-plock-row-target (fx)

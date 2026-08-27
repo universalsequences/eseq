@@ -283,7 +283,7 @@
                :height (compact-control-height) :gap 0.12 :align :center
         (label (compact-label p) :font-size 8.7 :width (compact-control-width)
                :color :dim :bg :transparent)
-        (dropdown :value (get p :text-value)
+        (dropdown :value (pc/fx-param-text-value-for fx p)
           :options (get p :options)
           :on-change (lambda (v) (pc/param-set-option fx p v))
           :plock-active (if (pc/param-plock-active? fx p) 1 0)

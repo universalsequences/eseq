@@ -7600,7 +7600,7 @@
     #[test]
     fn instrument_keys_tab_reads_and_writes_key_lock_values() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let mut cutoff = test_param_map("cutoff", 0, 0.5, 0.0, 1.0);
+        let cutoff = test_param_map("cutoff", 0, 0.5, 0.0, 1.0);
         let mut key_lock = std::collections::HashMap::new();
         key_lock.insert(
             "note".to_string(),
@@ -7610,14 +7610,16 @@
             "value".to_string(),
             Rc::new(RefCell::new(Value::Number(0.8))),
         );
-        cutoff.insert(
-            "key-locks".to_string(),
-            Rc::new(RefCell::new(test_list(vec![Value::Map(key_lock)]))),
-        );
         let mut inst = test_instrument_map();
         inst.insert(
             "synth".to_string(),
             Rc::new(RefCell::new(test_list(vec![Value::Map(cutoff)]))),
+        );
+        inst.insert(
+            "key-locks".to_string(),
+            Rc::new(RefCell::new(test_list(vec![test_list(vec![Value::Map(
+                key_lock,
+            )])]))),
         );
         inst.insert(
             "key-lock-note-variants".to_string(),
@@ -9787,56 +9789,44 @@
     }
 
     #[test]
-    fn instrument_panel_restores_value_field_after_selection_clears() {
+    fn instrument_panel_uses_track_invariant_bound_value_field() {
         let desc = sequencer::effects::EffectDescriptor::builtin_filter();
         let cutoff_idx = desc
             .params
             .iter()
             .position(|param| param.name == "cutoff")
             .expect("filter descriptor should include cutoff");
-        let app = test_app_with_instrument_descriptor(desc.clone());
+        let mut app = test_app_with_instrument_descriptor(desc.clone());
+        app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Custom];
         app.state.pattern.instrument_slots[0]
             .defaults
             .set(cutoff_idx, 5000.0);
         app.state.pattern.instrument_slots[0].set_plock(3, cutoff_idx, 1200.0);
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let value_field =
-            instrument_param_value_field(0, cutoff_idx, &desc.params[cutoff_idx].name);
+            fx_instrument_param_value_field(cutoff_idx, &desc.params[cutoff_idx].name);
+        let mut runtime = Runtime::new();
 
         let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(
-            value_param_number(&default_panel, "cutoff"),
-            Some(5000.0),
-            "unselected instrument panel should show the default value"
-        );
+        assert_eq!(value_param_number(&default_panel, "cutoff"), None);
         assert!(
             value_param_has_value_field(&default_panel, "cutoff", &value_field),
-            "unselected instrument panel should bind cutoff to its default value field"
+            "custom instrument controls must use the current-fx-relative field"
         );
+        sync_fx_instrument_param_value_field(&mut runtime, &app, 0, cutoff_idx, None);
+        assert_eq!(reactive_number(&runtime, "SEQ", &value_field), Some(5000.0));
 
         selected_steps.lock().unwrap().insert(3);
         let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(
-            value_param_number(&selected_panel, "cutoff"),
-            Some(1200.0),
-            "selected instrument panel should show the selected step p-lock"
-        );
-        assert!(
-            value_param_has_value_field(&selected_panel, "cutoff", &value_field),
-            "selected p-lock panel should keep a reactive display value field"
-        );
+        assert_eq!(default_panel, selected_panel);
+        sync_fx_instrument_param_value_field(&mut runtime, &app, 0, cutoff_idx, Some(3));
+        assert_eq!(reactive_number(&runtime, "SEQ", &value_field), Some(1200.0));
 
         selected_steps.lock().unwrap().clear();
         let cleared_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(
-            value_param_number(&cleared_panel, "cutoff"),
-            Some(5000.0),
-            "cleared selection should return the panel to default values"
-        );
-        assert!(
-            value_param_has_value_field(&cleared_panel, "cutoff", &value_field),
-            "cleared selection should restore default value binding"
-        );
+        assert_eq!(default_panel, cleared_panel);
+        sync_fx_instrument_param_value_field(&mut runtime, &app, 0, cutoff_idx, None);
+        assert_eq!(reactive_number(&runtime, "SEQ", &value_field), Some(5000.0));
     }
 
     #[test]
@@ -9910,7 +9900,7 @@
             .set_plock_cell(5, 0, 2, 0.95)
             .expect("tensor p-lock edit");
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let field = instrument_tensor_value_field(0, 0, "strike_mask");
+        let field = fx_instrument_tensor_value_field(0, "strike_mask");
 
         let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
         let tensor = tensor_map_owned(&default_panel, "strike_mask").expect("tensor panel map");
@@ -9923,22 +9913,14 @@
             tensor.get("value-field"),
             Some(&Value::String(field.clone()))
         );
-        assert_numbers_close(
-            number_list(tensor.get("value").expect("tensor value")),
-            &[0.1, 0.2, 0.3, 0.4],
-        );
+        assert!(!tensor.contains_key("value"));
 
         selected_steps.lock().unwrap().insert(5);
         let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        let selected_tensor =
-            tensor_map_owned(&selected_panel, "strike_mask").expect("selected tensor panel map");
-        assert_numbers_close(
-            number_list(selected_tensor.get("value").expect("selected tensor value")),
-            &[0.1, 0.2, 0.95, 0.4],
-        );
+        assert_eq!(default_panel, selected_panel);
 
         let mut runtime = Runtime::new();
-        sync_instrument_tensor_value_field(&mut runtime, &app, 0, 0, Some(5));
+        sync_fx_instrument_tensor_value_field(&mut runtime, &app, 0, 0, Some(5));
         let Value::Map(seq) = runtime.global_value("SEQ").expect("SEQ namespace") else {
             panic!("SEQ should be a map");
         };

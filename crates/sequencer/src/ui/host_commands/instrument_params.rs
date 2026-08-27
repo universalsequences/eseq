@@ -439,7 +439,7 @@ pub(super) fn handle(
                                     value: next,
                                 },
                             );
-                            if sync_instrument_param_value_field(
+                            if sync_fx_instrument_param_value_field(
                                 editor.runtime_mut(),
                                 &app,
                                 track,
@@ -728,7 +728,7 @@ pub(super) fn handle(
                             track,
                             selected_plock_step(&selected_steps),
                         );
-                        if sync_instrument_tensor_value_field(
+                        if sync_fx_instrument_tensor_value_field(
                             editor.runtime_mut(),
                             &app,
                             track,

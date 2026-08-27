@@ -737,7 +737,6 @@ pub(crate) fn build_instrument_panel_value(
         value_field: Option<String>,
         mod_targets: Option<&Vec<UiModMetadata>>,
         ui_metadata: Option<&sequencer::effects::ParamUiMetadata>,
-        key_locks: &[(u8, f32)],
     ) {
         let is_boolean_name = name == "enabled" || name == "sync";
         let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -755,10 +754,12 @@ pub(crate) fn build_instrument_panel_value(
                 Rc::new(RefCell::new(Value::Number(idx as f64))),
             );
         }
-        pmap.insert(
-            "value".to_string(),
-            Rc::new(RefCell::new(Value::Number(value as f64))),
-        );
+        if value_field.is_none() {
+            pmap.insert(
+                "value".to_string(),
+                Rc::new(RefCell::new(Value::Number(value as f64))),
+            );
+        }
         pmap.insert(
             "min".to_string(),
             Rc::new(RefCell::new(Value::Number(min as f64))),
@@ -768,19 +769,21 @@ pub(crate) fn build_instrument_panel_value(
             Rc::new(RefCell::new(Value::Number(max as f64))),
         );
         if let Some(labels) = options {
-            let selected = labels
-                .get(value.round() as usize)
-                .cloned()
-                .unwrap_or_default();
             let option_values = labels
                 .iter()
                 .cloned()
                 .map(|label| Rc::new(RefCell::new(Value::String(label))))
                 .collect();
-            pmap.insert(
-                "text-value".to_string(),
-                Rc::new(RefCell::new(Value::String(selected))),
-            );
+            if value_field.is_none() {
+                let selected = labels
+                    .get(value.round() as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                pmap.insert(
+                    "text-value".to_string(),
+                    Rc::new(RefCell::new(Value::String(selected))),
+                );
+            }
             pmap.insert(
                 "options".to_string(),
                 Rc::new(RefCell::new(Value::List(option_values))),
@@ -794,27 +797,6 @@ pub(crate) fn build_instrument_panel_value(
         }
         if let Some(value_field) = value_field {
             insert_string_prop(&mut pmap, "value-field", value_field);
-        }
-        if !key_locks.is_empty() {
-            let rows = key_locks
-                .iter()
-                .map(|(note, value)| {
-                    let mut row = HashMap::new();
-                    row.insert(
-                        "note".to_string(),
-                        Rc::new(RefCell::new(Value::Number(*note as f64))),
-                    );
-                    row.insert(
-                        "value".to_string(),
-                        Rc::new(RefCell::new(Value::Number(*value as f64))),
-                    );
-                    Rc::new(RefCell::new(Value::Map(row)))
-                })
-                .collect();
-            pmap.insert(
-                "key-locks".to_string(),
-                Rc::new(RefCell::new(Value::List(rows))),
-            );
         }
         if let Some(targets) = mod_targets {
             pmap.insert(
@@ -835,20 +817,24 @@ pub(crate) fn build_instrument_panel_value(
                         "depth-idx".to_string(),
                         Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
                     );
-                    target.insert(
-                        "source-slot".to_string(),
-                        Rc::new(RefCell::new(Value::Number(meta.source_slot as f64))),
-                    );
+                    if meta.source_value_field.is_none() {
+                        target.insert(
+                            "source-slot".to_string(),
+                            Rc::new(RefCell::new(Value::Number(meta.source_slot as f64))),
+                        );
+                    }
                     if let Some(field) = &meta.source_value_field {
                         target.insert(
                             "source-value-field".to_string(),
                             Rc::new(RefCell::new(Value::String(field.clone()))),
                         );
                     }
-                    target.insert(
-                        "depth".to_string(),
-                        Rc::new(RefCell::new(Value::Number(meta.depth_value as f64))),
-                    );
+                    if meta.depth_value_field.is_none() {
+                        target.insert(
+                            "depth".to_string(),
+                            Rc::new(RefCell::new(Value::Number(meta.depth_value as f64))),
+                        );
+                    }
                     if let Some(field) = &meta.depth_value_field {
                         target.insert(
                             "depth-value-field".to_string(),
@@ -924,6 +910,27 @@ pub(crate) fn build_instrument_panel_value(
             }
         }
     }
+    let key_locks = key_locks_by_param
+        .iter()
+        .map(|rows| {
+            let rows = rows
+                .iter()
+                .map(|(note, value)| {
+                    let mut row = HashMap::new();
+                    row.insert(
+                        "note".to_string(),
+                        Rc::new(RefCell::new(Value::Number(*note as f64))),
+                    );
+                    row.insert(
+                        "value".to_string(),
+                        Rc::new(RefCell::new(Value::Number(*value as f64))),
+                    );
+                    Rc::new(RefCell::new(Value::Map(row)))
+                })
+                .collect();
+            Rc::new(RefCell::new(Value::List(rows)))
+        })
+        .collect();
     let key_lock_assignments = app
         .state
         .reconcile_key_lock_variant_registry_for_track(track);
@@ -1074,11 +1081,10 @@ pub(crate) fn build_instrument_panel_value(
                         .unwrap_or(source_current),
                     source_value_field: target.source_param_idx.map(|source_param_idx| {
                         let source_desc = &desc.params[source_param_idx];
-                        instrument_param_value_field(track, source_param_idx, &source_desc.name)
+                        fx_instrument_param_value_field(source_param_idx, &source_desc.name)
                     }),
                     depth_value: depth_desc.stored_to_user(depth_current),
-                    depth_value_field: Some(instrument_param_value_field(
-                        track,
+                    depth_value_field: Some(fx_instrument_param_value_field(
                         target.depth_param_idx,
                         &depth_desc.name,
                     )),
@@ -1103,10 +1109,9 @@ pub(crate) fn build_instrument_panel_value(
         -48.0,
         48.0,
         None,
-        Some(instrument_base_note_value_field(track)),
+        Some(fx_instrument_base_note_value_field().to_string()),
         None,
         None,
-        &[],
     );
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
@@ -1143,13 +1148,9 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
-                Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
+                Some(fx_instrument_param_value_field(param_idx, &pdesc.name)),
                 None,
                 None,
-                key_locks_by_param
-                    .get(param_idx)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
             );
         } else {
             push_param(
@@ -1161,13 +1162,9 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
-                Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
+                Some(fx_instrument_param_value_field(param_idx, &pdesc.name)),
                 modulation_targets.get(&param_idx),
                 pdesc.ui_metadata.as_ref(),
-                key_locks_by_param
-                    .get(param_idx)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
             );
         }
     }
@@ -1206,13 +1203,9 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
-                Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
+                Some(fx_instrument_param_value_field(param_idx, &pdesc.name)),
                 None,
                 None,
-                key_locks_by_param
-                    .get(param_idx)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
             );
             if sequencer::instruments::voice_modulator::source_type_name_from_param_name(&pdesc.name)
                 == Some("source")
@@ -1242,14 +1235,6 @@ pub(crate) fn build_instrument_panel_value(
 
     let mut tensor_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     for (tensor_idx, tensor_desc) in desc.tensor_params.iter().enumerate() {
-        let values = slot
-            .tensor_params
-            .resolved_values(plock_step, tensor_idx)
-            .unwrap_or_else(|| tensor_desc.default.clone());
-        let value_list = values
-            .into_iter()
-            .map(|value| Rc::new(RefCell::new(Value::Number(value as f64))))
-            .collect();
         let mut tensor_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
         tensor_map.insert(
             "idx".to_string(),
@@ -1277,15 +1262,10 @@ pub(crate) fn build_instrument_panel_value(
         );
         tensor_map.insert(
             "value-field".to_string(),
-            Rc::new(RefCell::new(Value::String(instrument_tensor_value_field(
-                track,
+            Rc::new(RefCell::new(Value::String(fx_instrument_tensor_value_field(
                 tensor_idx,
                 &tensor_desc.name,
             )))),
-        );
-        tensor_map.insert(
-            "value".to_string(),
-            Rc::new(RefCell::new(Value::List(value_list))),
         );
         tensor_params.push(Rc::new(RefCell::new(Value::Map(tensor_map))));
     }
@@ -1388,6 +1368,10 @@ pub(crate) fn build_instrument_panel_value(
     panel_map.insert(
         "sources".to_string(),
         Rc::new(RefCell::new(Value::List(source_sections))),
+    );
+    panel_map.insert(
+        "key-locks".to_string(),
+        Rc::new(RefCell::new(Value::List(key_locks))),
     );
     panel_map.insert(
         "key-lock-note-variants".to_string(),

@@ -19,9 +19,23 @@ pub(crate) fn instrument_param_value_field(track: usize, param_idx: usize, name:
     )
 }
 
+pub(crate) fn fx_instrument_param_value_field(param_idx: usize, name: &str) -> String {
+    format!(
+        "fx-instrument-param-{param_idx}-{}",
+        field_safe_name(name)
+    )
+}
+
 pub(crate) fn instrument_tensor_value_field(track: usize, tensor_idx: usize, name: &str) -> String {
     format!(
         "track-{track}-instrument-tensor-{tensor_idx}-{}",
+        field_safe_name(name)
+    )
+}
+
+pub(crate) fn fx_instrument_tensor_value_field(tensor_idx: usize, name: &str) -> String {
+    format!(
+        "fx-instrument-tensor-{tensor_idx}-{}",
         field_safe_name(name)
     )
 }
@@ -40,6 +54,10 @@ pub(crate) fn rack_slot_sampler_selection_time_field(
 
 pub(crate) fn instrument_base_note_value_field(track: usize) -> String {
     format!("track-{track}-instrument-base-note")
+}
+
+pub(crate) fn fx_instrument_base_note_value_field() -> &'static str {
+    "fx-instrument-base-note"
 }
 
 pub(crate) fn rack_macro_value_field(track: usize, macro_idx: usize) -> String {

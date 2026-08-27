@@ -145,6 +145,7 @@ pub(crate) fn poll_learn_job(
     app: &mut app::App,
     sessions: &mut EditSessionState,
     editor: &mut Editor,
+    current_track: usize,
 ) {
     if sessions.instrument_edit_session.is_none() {
         if let Some(pending) = sessions.pending_learn_job.take() {
@@ -154,6 +155,7 @@ pub(crate) fn poll_learn_job(
             app,
             editor.runtime_mut(),
             &mut sessions.learn_param_preview,
+            current_track,
         ) {
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -204,6 +206,7 @@ pub(crate) fn poll_learn_job(
                         rt,
                         &mut sessions.learn_param_preview,
                         preview_track,
+                        current_track,
                         &values,
                     ) {
                         pending.saw_host_error = true;
@@ -260,7 +263,12 @@ pub(crate) fn poll_learn_job(
         sessions.pending_learn_job = None;
     }
     if clear_preview {
-        clear_learn_param_preview(app, editor.runtime_mut(), &mut sessions.learn_param_preview);
+        clear_learn_param_preview(
+            app,
+            editor.runtime_mut(),
+            &mut sessions.learn_param_preview,
+            current_track,
+        );
     }
     if dirty {
         editor.runtime_mut().run_reactive_cycle();
@@ -273,6 +281,7 @@ pub(crate) fn clear_learn_param_preview(
     app: &app::App,
     rt: &mut Runtime,
     preview: &mut Option<LearnParamPreview>,
+    current_track: usize,
 ) -> bool {
     let Some(preview) = preview.take() else {
         return false;
@@ -286,11 +295,19 @@ pub(crate) fn clear_learn_param_preview(
                 .get(preview.track)
                 .and_then(|descriptor| descriptor.params.get(param_idx))
             {
+                let value = Value::Number(f64::from(param.stored_to_user(value)));
                 rt.set_reactive(
                     "SEQ",
                     &instrument_param_value_field(preview.track, param_idx, &param.name),
-                    Value::Number(f64::from(param.stored_to_user(value))),
+                    value.clone(),
                 );
+                if preview.track == current_track {
+                    rt.set_reactive(
+                        "SEQ",
+                        &fx_instrument_param_value_field(param_idx, &param.name),
+                        value,
+                    );
+                }
             }
         }
     }
@@ -302,10 +319,11 @@ fn set_learn_param_preview(
     rt: &mut Runtime,
     preview: &mut Option<LearnParamPreview>,
     track: usize,
+    current_track: usize,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Result<(), String> {
     if preview.as_ref().is_some_and(|active| active.track != track) {
-        clear_learn_param_preview(app, rt, preview);
+        clear_learn_param_preview(app, rt, preview, current_track);
     }
     let descriptor = app
         .graph
@@ -331,11 +349,19 @@ fn set_learn_param_preview(
         let stored = *stored;
         app.send_instrument_param(track, param_idx, stored);
         let display_value = descriptor.params[param_idx].stored_to_user(stored);
+        let value = Value::Number(f64::from(display_value));
         rt.set_reactive(
             "SEQ",
             &instrument_param_value_field(track, param_idx, name),
-            Value::Number(f64::from(display_value)),
+            value.clone(),
         );
+        if track == current_track {
+            rt.set_reactive(
+                "SEQ",
+                &fx_instrument_param_value_field(param_idx, name),
+                value,
+            );
+        }
     }
     let active = preview.get_or_insert_with(|| LearnParamPreview {
         track,
@@ -628,7 +654,9 @@ mod tests {
         set_learn_param_preview,
         take_learn_updates_through_epoch,
     };
-    use crate::{app, instrument_param_value_field, Runtime, Value};
+    use crate::{
+        app, fx_instrument_param_value_field, instrument_param_value_field, Runtime, Value,
+    };
     use sequencer::learn_job::{LearnEvent, LearnJobUpdate};
     use std::collections::BTreeMap;
 
@@ -809,6 +837,7 @@ mod tests {
             .defaults
             .set(cutoff_idx, seed_stored);
         let field = instrument_param_value_field(0, cutoff_idx, &cutoff.name);
+        let fx_field = fx_instrument_param_value_field(cutoff_idx, &cutoff.name);
         let mut runtime = Runtime::new();
         let mut preview = None;
 
@@ -817,17 +846,34 @@ mod tests {
             &mut runtime,
             &mut preview,
             0,
+            0,
             &BTreeMap::from([("cutoff".to_string(), 1125.0)]),
         )
         .unwrap();
         assert!((reactive_number(&runtime, &field) - 1125.0).abs() < 0.01);
+        assert!((reactive_number(&runtime, &fx_field) - 1125.0).abs() < 0.01);
         assert!((cutoff.stored_to_user(app.state.pattern.instrument_slots[0].defaults.get(cutoff_idx))
             - 520.0)
             .abs()
             < 0.01, "preview must not mutate the saved instrument default");
 
-        assert!(clear_learn_param_preview(&app, &mut runtime, &mut preview));
+        assert!(clear_learn_param_preview(&app, &mut runtime, &mut preview, 0));
         assert!((reactive_number(&runtime, &field) - 520.0).abs() < 0.01);
+        assert!((reactive_number(&runtime, &fx_field) - 520.0).abs() < 0.01);
+
+        runtime.set_reactive("SEQ", &fx_field, Value::Number(777.0));
+        set_learn_param_preview(
+            &app,
+            &mut runtime,
+            &mut preview,
+            0,
+            1,
+            &BTreeMap::from([("cutoff".to_string(), 1125.0)]),
+        )
+        .unwrap();
+        assert_eq!(reactive_number(&runtime, &fx_field), 777.0);
+        assert!(clear_learn_param_preview(&app, &mut runtime, &mut preview, 1));
+        assert_eq!(reactive_number(&runtime, &fx_field), 777.0);
     }
 
     #[test]
@@ -849,6 +895,7 @@ mod tests {
             &app,
             &mut runtime,
             &mut preview,
+            0,
             0,
             &BTreeMap::from([("cutoff".to_string(), 1125.0)]),
         )
