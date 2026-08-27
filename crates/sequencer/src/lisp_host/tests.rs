@@ -9172,6 +9172,91 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_implicit_cyc_lists_read_as_cyc_recursively() {
+        // Tidal-style terse alternation: a list headed by a value is an
+        // implicit cyc, recursively — (1 2 (1 3)) = (cyc 1 2 (cyc 1 3)).
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "terse" :16
+                 .
+                 -> (1 2 (1 3)))"#,
+        )
+        .expect("jak with implicit cyc destination");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            1.5,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        // one-unit cycles: outer index c%3, the nested (1 3) resolves c%2
+        let tracks: Vec<usize> = out.iter().filter_map(|e| e.event.track).collect();
+        assert_eq!(tracks, vec![1, 2, 1, 1, 2, 3]);
+    }
+
+    #[test]
+    fn jaki_implicit_cyc_targets_on_control_routes() {
+        // Terse per-cycle control targets: (mute (1 2)) and
+        // (group ("Drums" "Synths")) rotate exactly like their explicit
+        // (cyc ...) spellings.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "terse2" :16
+                 . .
+                 -> (mute (1 2))
+                 -> (solo (group ("Drums" "Synths"))))"#,
+        )
+        .expect("jak with implicit cyc control targets");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        generators.process_block_with_controls(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+            &mut controls,
+        );
+
+        use crate::mixer_control::{MixerControlOp, MixerControlTarget as Target};
+        let mutes: Vec<Target> = controls
+            .iter()
+            .filter(|c| c.control.op == MixerControlOp::Mute)
+            .map(|c| c.control.target.clone())
+            .collect();
+        assert_eq!(
+            mutes,
+            vec![Target::Track(1), Target::Track(1), Target::Track(2), Target::Track(2)]
+        );
+        let solos: Vec<Target> = controls
+            .iter()
+            .filter(|c| c.control.op == MixerControlOp::Solo)
+            .map(|c| c.control.target.clone())
+            .collect();
+        assert_eq!(
+            solos,
+            vec![
+                Target::Group("Drums".to_string()),
+                Target::Group("Drums".to_string()),
+                Target::Group("Synths".to_string()),
+                Target::Group("Synths".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn jaki_control_route_targets_cycle_with_cyc() {
         // Targets are per-cycle argument data: (mute (cyc 1 2)) and
         // (group (cyc "Drums" "Synths")) rotate the destination each cycle.

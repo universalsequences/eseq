@@ -205,6 +205,16 @@
 
 ;; ── per-cycle argument resolution ((cyc ...), (chan ...), expressions) ──────
 
+;; Tidal-style implicit cyc: a list whose head is a VALUE — a number, a
+;; string, or a nested list — is never a callable form, so it reads as
+;; (cyc ...) over all its elements, recursively: (1 2 (1 3)) means
+;; (cyc 1 2 (cyc 1 3)), and (group ("Drums" "Synths")) rotates group names.
+(def implicit-cyc? (raw)
+  (let ((h (nth raw 0)))
+    (if (= h nil)
+        false
+        (or (number? h) (or (string? h) (not (= (nth h 0) nil)))))))
+
 (def resolve-arg (raw cycle)
   (if (= raw nil)
       1
@@ -214,8 +224,10 @@
               (resolve-arg (nth vals (imod cycle (max 1 (len vals)))) cycle))
             (if (= h 'chan)
                 (chan-get (nth raw 1) (nth raw 2))
-                ;; numbers, symbols, and other forms evaluate as source
-                (eval (source raw)))))))
+                (if (implicit-cyc? raw)
+                    (resolve-arg (nth raw (imod cycle (max 1 (len raw)))) cycle)
+                    ;; numbers, symbols, and other forms evaluate as source
+                    (eval (source raw))))))))
 
 (def round-int (x) (floor (+ x 0.5)))
 (def every-active? (n cycle) (and (> n 0) (= 0 (imod (+ cycle 1) n))))
@@ -711,7 +723,13 @@
 (def arg-period (raw)
   (if (= raw nil)
       1
-      (if (= (nth raw 0) 'cyc) (max 1 (len (rest raw))) 1)))
+      (if (= (nth raw 0) 'cyc)
+          (reduce (lambda (a x) (lcm* a (arg-period x)))
+                  (max 1 (len (rest raw))) (rest raw))
+          (if (implicit-cyc? raw)
+              (reduce (lambda (a x) (lcm* a (arg-period x)))
+                      (max 1 (len raw)) raw)
+              1))))
 
 (def xf-period (f)
   (let ((h (first f)))
@@ -878,6 +896,8 @@
 ;;   left right accent rev stac ghost swap
 ;;   (shift n) (rot n) (trunc n) (every n t) (for-hand h t)
 ;;   (fast n) (slow n) — n may be (cyc …) for conditional retiming
+;;   Any per-cycle arg also reads Tidal-style implicit cyc: a list headed by
+;;   a value is (cyc …) recursively — (1 2 (1 3)) = (cyc 1 2 (cyc 1 3))
 ;;   (vel s) (note n)
 ;;   (gate s) / (dur s) — multiply every gate by s (per-cycle arg: number,
 ;;   (cyc …), (chan …)); applies in authored word order like stac

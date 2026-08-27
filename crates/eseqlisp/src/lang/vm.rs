@@ -2860,6 +2860,14 @@ pub fn register_core_natives(vm: &mut VM) {
         _ => Value::Bool(false),
     });
 
+    vm.register_native("number?", |args| {
+        Value::Bool(matches!(args.first(), Some(Value::Number(_))))
+    });
+
+    vm.register_native("string?", |args| {
+        Value::Bool(matches!(args.first(), Some(Value::String(_))))
+    });
+
     vm.register_native("set-nth", |args| {
         let (Some(Value::List(items)), Some(Value::Number(idx)), Some(value)) =
             (args.first(), args.get(1), args.get(2))
@@ -3528,7 +3536,7 @@ pub fn register_core_natives(vm: &mut VM) {
         "dict", "get", "merge", "keys", "first", "rest", "cons", "len",
         "append", "list", "empty?", "set-nth", "map", "filter", "reduce",
         "zip", "nth", "reverse", "chunks", "range", "not", "str", "substring",
-        "str-contains?", "gensym", "source", "fmt",
+        "str-contains?", "gensym", "source", "fmt", "number?", "string?",
     ]);
 }
 
