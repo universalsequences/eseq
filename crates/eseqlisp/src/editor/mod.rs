@@ -697,6 +697,7 @@ pub struct Editor {
     text_cell_width_scale: f32,
     text_cell_height_scale: f32,
     last_layout_refresh_timings: Vec<LayoutRefreshTiming>,
+    deferred_effect_resume_depth: u8,
     inspect_mode: bool,
     inspect_hover_tile_id: Option<TileId>,
     inspect_hover_widget_id: Option<u64>,
@@ -853,6 +854,7 @@ impl Editor {
             text_cell_width_scale: DEFAULT_TEXT_ZOOM,
             text_cell_height_scale: DEFAULT_TEXT_ZOOM,
             last_layout_refresh_timings: Vec::new(),
+            deferred_effect_resume_depth: 0,
             inspect_mode: false,
             inspect_hover_tile_id: None,
             inspect_hover_widget_id: None,
@@ -1412,6 +1414,7 @@ impl Editor {
             viewport,
             layout_revision,
         );
+        self.resume_deferred_effects_for_presentation();
         self.mark_needs_redraw();
     }
 
@@ -1425,6 +1428,8 @@ impl Editor {
             .split_leaf(target, split_id, new_tile_id, new_buffer_idx, dir)
         {
             self.refresh_inactive_tile_layouts_for_buffer(new_buffer_idx);
+            self.sync_visible_effect_buffers();
+            self.resume_deferred_effects_for_presentation();
             self.mark_needs_redraw();
             Some(new_tile_id)
         } else {
@@ -1516,6 +1521,7 @@ impl Editor {
         let new_id = self.alloc_tile_id();
         self.tile_root.collapse_to_single(new_id, buffer_idx);
         self.active_tile = new_id;
+        self.sync_visible_effect_buffers();
         self.mark_needs_redraw();
     }
 
@@ -1867,6 +1873,7 @@ impl Editor {
                 layout_revision,
             );
         }
+        self.resume_deferred_effects_for_presentation();
         self.mark_needs_redraw();
     }
 
@@ -2975,9 +2982,16 @@ impl Editor {
                 self.buffers[new_buffer_idx].view_mode = ViewMode::UiOnly;
             }
             self.record_buffer_access_by_idx(new_buffer_idx);
+            // Re-syncs the hidden-effect buffer set for the new selection.
             self.sync_runtime_context();
             self.restore_buffer_widget_tree();
             self.refresh_inactive_tile_layouts_for_buffer(new_buffer_idx);
+            // A cross-tile click already resumed inside
+            // `switch_active_tile_with_viewport`, but that ran before
+            // `leaf.buffer_idx` moved to the clicked tab, so it could not see
+            // this buffer. Resume here, after the swap is complete, like every
+            // other presentation path.
+            self.resume_deferred_effects_for_presentation();
         } else {
             self.active_leaf_mut().selected_tab = Some(tab_index);
         }
@@ -4866,7 +4880,9 @@ impl Editor {
                     self.restore_buffer_widget_tree();
                 } else {
                     self.refresh_inactive_tile_layouts_for_buffer(new);
+                    self.sync_visible_effect_buffers();
                 }
+                self.resume_deferred_effects_for_presentation();
                 self.mark_needs_redraw();
                 return true;
             }
@@ -5028,6 +5044,7 @@ impl Editor {
             self.completion = None;
             self.clear_mark();
             self.restore_buffer_widget_tree();
+            self.resume_deferred_effects_for_presentation();
         }
     }
 
@@ -7334,17 +7351,66 @@ impl Editor {
             .unwrap_or_default();
         let current_view_mode = active.view_mode.label().to_string();
         let buffer_names = self.buffer_names_by_recency();
-        let mut shared = self.runtime.shared.borrow_mut();
-        shared.current_buffer_id = Some(current_buffer_id);
-        shared.current_buffer_name = current_buffer_name;
-        shared.current_buffer_path = current_buffer_path;
-        shared.current_buffer_read_only = current_buffer_read_only;
-        shared.current_buffer_mode = current_buffer_mode;
-        shared.current_line_number = current_line_number;
-        shared.current_line_text = current_line_text;
-        shared.buffer_names = buffer_names;
-        shared.current_view_mode = current_view_mode;
-        shared.current_text_zoom = self.text_zoom as f64;
+        {
+            let mut shared = self.runtime.shared.borrow_mut();
+            shared.current_buffer_id = Some(current_buffer_id);
+            shared.current_buffer_name = current_buffer_name;
+            shared.current_buffer_path = current_buffer_path;
+            shared.current_buffer_read_only = current_buffer_read_only;
+            shared.current_buffer_mode = current_buffer_mode;
+            shared.current_line_number = current_line_number;
+            shared.current_line_text = current_line_text;
+            shared.buffer_names = buffer_names;
+            shared.current_view_mode = current_view_mode;
+            shared.current_text_zoom = self.text_zoom as f64;
+        }
+        self.sync_visible_effect_buffers();
+    }
+
+    fn sync_visible_effect_buffers(&mut self) {
+        let visible_names = self
+            .tile_root
+            .leaf_ids()
+            .into_iter()
+            .filter_map(|tile_id| self.tile_root.find_leaf(tile_id))
+            .filter_map(|leaf| self.buffers.get(leaf.buffer_idx))
+            .map(|buffer| buffer.name.as_str())
+            .collect::<HashSet<_>>();
+        // Only presentation buffers (a committed widget tree) can defer:
+        // inert nil-returning projections like *sel-sync* exist purely for
+        // their reactive-set side effects and must keep running while hidden.
+        let hidden_names = self
+            .buffers
+            .iter()
+            .filter(|buffer| !visible_names.contains(buffer.name.as_str()))
+            .filter(|buffer| {
+                buffer
+                    .widget_tree
+                    .as_ref()
+                    .is_some_and(|tree| !matches!(tree, Value::Nil))
+            })
+            .map(|buffer| buffer.name.clone())
+            .collect::<HashSet<_>>();
+        self.runtime.set_hidden_effect_buffer_names(hidden_names);
+    }
+
+    /// Run effects that deferred while their target buffer was hidden and
+    /// whose target is now visible, so a newly presented buffer is current in
+    /// the frame it appears rather than one reactive tick late. Call this
+    /// only after a presentation change has fully completed (never from
+    /// inside a tile mutation): the refresh it triggers re-enters editor
+    /// state. Depth-guarded; each pass either clears the deferred work or
+    /// leaves it hidden again.
+    fn resume_deferred_effects_for_presentation(&mut self) {
+        if self.deferred_effect_resume_depth >= 3
+            || !self.runtime.has_resumable_hidden_effect_work()
+        {
+            return;
+        }
+        self.deferred_effect_resume_depth += 1;
+        self.runtime.run_reactive_cycle();
+        self.refresh_runtime_side_effects();
+        self.deferred_effect_resume_depth -= 1;
     }
 
     fn sync_runtime_source_context(&mut self) {
@@ -7509,44 +7575,61 @@ impl Editor {
                     );
                 Some((layout, current_tree, current_viewport))
             });
-            let cached_layout = existing_layout
-                .as_ref()
-                .filter(|(_, current_tree, current_viewport)| *current_tree && *current_viewport)
-                .map(|(layout, _, _)| layout.clone());
-            let reused_layout_and_dirty = if cached_layout.is_some() {
-                None
-            } else {
-                tree.as_ref().and_then(|tree| {
-                    let (existing, _, current_viewport) = existing_layout.as_ref()?;
-                    if !current_viewport {
-                        return None;
-                    }
-                    let mut dirty_widget_ids = Vec::new();
-                    crate::layout::reuse_layout_node(existing, tree, &mut dirty_widget_ids)
-                        .map(|layout| (std::sync::Arc::new(layout), dirty_widget_ids))
-                })
-            };
             let mut mode = "none";
-            let (layout, dirty_widget_ids) = if let Some(layout) = cached_layout {
-                mode = "cached";
-                (Some(layout), Vec::new())
-            } else if let Some((layout, dirty_widget_ids)) = reused_layout_and_dirty {
-                mode = "reuse";
-                (Some(layout), dirty_widget_ids)
-            } else {
-                if tree.is_some() {
-                    mode = "full";
+            let mut reconciled: Option<(std::sync::Arc<crate::layout::LayoutNode>, Vec<u64>)> =
+                None;
+            if let Some((layout, current_tree, current_viewport)) = existing_layout {
+                if current_viewport && current_tree {
+                    mode = "cached";
+                    reconciled = Some((layout, Vec::new()));
+                } else if current_viewport && let Some(tree) = tree.as_ref() {
+                    // Reconcile against the cached layout before falling back
+                    // to a full relayout: unchanged descendants are reused,
+                    // and changed subtrees that still occupy the same rect
+                    // are rebuilt in place (eseq-md1n.3 — a same-instrument
+                    // track switch changes only the *fx* header label/badge,
+                    // so the full-tree fallback re-laid out the whole panel
+                    // for two tiny widgets).
+                    let mut dirty_widget_ids = Vec::new();
+                    match self.runtime.reconcile_layout_for_tree_with_viewport(
+                        &layout,
+                        tree,
+                        Some((cols, rows)),
+                        frame_viewport,
+                        &mut dirty_widget_ids,
+                    ) {
+                        Ok((layout, rebuilds)) => {
+                            mode = if rebuilds == 0 { "reuse" } else { "reconcile" };
+                            reconciled =
+                                Some((std::sync::Arc::new(layout), dirty_widget_ids));
+                        }
+                        Err(reason) => {
+                            if trace_ui_invalidation_enabled() {
+                                eprintln!(
+                                    "[ui-trace][inactive-full-reconcile-miss] buffer={buffer_name} reason={reason}",
+                                );
+                            }
+                        }
+                    }
                 }
-                let layout = tree.as_ref().and_then(|tree| {
-                    self.runtime
-                        .layout_snapshot_for_tree_with_geometry_and_offset(
-                            tree,
-                            Some((cols, rows)),
-                            frame_viewport,
-                            buffer_id * 100_000,
-                        )
-                });
-                (layout, Vec::new())
+            }
+            let (layout, dirty_widget_ids) = match reconciled {
+                Some((layout, dirty_widget_ids)) => (Some(layout), dirty_widget_ids),
+                None => {
+                    if tree.is_some() {
+                        mode = "full";
+                    }
+                    let layout = tree.as_ref().and_then(|tree| {
+                        self.runtime
+                            .layout_snapshot_for_tree_with_geometry_and_offset(
+                                tree,
+                                Some((cols, rows)),
+                                frame_viewport,
+                                buffer_id * 100_000,
+                            )
+                    });
+                    (layout, Vec::new())
+                }
             };
             self.trace_ui_layout_event(
                 &buffer_name,
@@ -8378,7 +8461,21 @@ impl Editor {
             );
         }
         let widget_trees_started = std::time::Instant::now();
-        let mut inactive_buffers_to_refresh: HashMap<usize, Option<Vec<u64>>> = HashMap::new();
+        /// How one inactive buffer's visible tiles get refreshed at the end
+        /// of the flush: targeted subtree roots, or a full-tree refresh.
+        enum InactiveBufferRefresh {
+            Subtrees(Vec<u64>),
+            Full,
+        }
+        impl InactiveBufferRefresh {
+            fn push_root(&mut self, root: u64) {
+                if let InactiveBufferRefresh::Subtrees(roots) = self {
+                    roots.push(root);
+                }
+            }
+        }
+        let mut inactive_buffers_to_refresh: HashMap<usize, InactiveBufferRefresh> =
+            HashMap::new();
         let mut active_subtree_replacements = Vec::<EditorSubtreeReplacement>::new();
         let mut inactive_subtree_batches: HashMap<
             usize,
@@ -8459,9 +8556,8 @@ impl Editor {
                         } else {
                             inactive_buffers_to_refresh
                                 .entry(buffer_idx)
-                                .or_insert_with(|| Some(Vec::new()))
-                                .as_mut()
-                                .map(|roots| roots.push(subtree_root_id));
+                                .or_insert_with(|| InactiveBufferRefresh::Subtrees(Vec::new()))
+                                .push_root(subtree_root_id);
                         }
                     } else if is_active {
                         if debug_ui_updates_enabled() {
@@ -8483,7 +8579,7 @@ impl Editor {
                             buffer.view_mode =
                                 view_mode_for_widget_tree(buffer.widget_tree.as_ref());
                         }
-                        inactive_buffers_to_refresh.insert(buffer_idx, None);
+                        inactive_buffers_to_refresh.insert(buffer_idx, InactiveBufferRefresh::Full);
                     }
                     self.trace_ui_tree_event_with(&buffer_name, "applied-full", || {
                         format!(
@@ -8585,12 +8681,13 @@ impl Editor {
             if batch_applied {
                 self.buffers[buffer_idx].view_mode =
                     view_mode_for_widget_tree(self.buffers[buffer_idx].widget_tree.as_ref());
-                if let Some(roots) = inactive_buffers_to_refresh
-                    .entry(buffer_idx)
-                    .or_insert_with(|| Some(Vec::new()))
-                    .as_mut()
                 {
-                    roots.extend(replacements.iter().map(|(root_id, _, _)| *root_id));
+                    let entry = inactive_buffers_to_refresh
+                        .entry(buffer_idx)
+                        .or_insert_with(|| InactiveBufferRefresh::Subtrees(Vec::new()));
+                    for (root_id, _, _) in &replacements {
+                        entry.push_root(*root_id);
+                    }
                 }
                 self.trace_ui_tree_event_with(&buffer_name, "applied-subtree", || {
                     format!(
@@ -8623,9 +8720,8 @@ impl Editor {
                 if replaced {
                     inactive_buffers_to_refresh
                         .entry(buffer_idx)
-                        .or_insert_with(|| Some(Vec::new()))
-                        .as_mut()
-                        .map(|roots| roots.push(subtree_root_id));
+                        .or_insert_with(|| InactiveBufferRefresh::Subtrees(Vec::new()))
+                        .push_root(subtree_root_id);
                 }
                 self.trace_ui_tree_event_with(
                     &buffer_name,
@@ -8686,7 +8782,8 @@ impl Editor {
                             self.runtime.set_widget_tree(tree);
                             self.remap_focused_widget_after_layout_change();
                         } else {
-                            inactive_buffers_to_refresh.insert(buffer_idx, None);
+                            inactive_buffers_to_refresh
+                                .insert(buffer_idx, InactiveBufferRefresh::Full);
                         }
                     } else if self.buffers[buffer_idx]
                         .widget_tree
@@ -8727,9 +8824,9 @@ impl Editor {
         // The visible-binding scan walks every visible layout; defer it so
         // refreshing N buffers in this flush pays for one scan, not N.
         self.visible_binding_sync_deferred = true;
-        for (buffer_idx, subtree_roots) in inactive_buffers_to_refresh {
-            match subtree_roots {
-                Some(subtree_roots) => {
+        for (buffer_idx, refresh) in inactive_buffers_to_refresh {
+            match refresh {
+                InactiveBufferRefresh::Subtrees(subtree_roots) => {
                     let per_buffer = std::time::Instant::now();
                     let root_count = subtree_roots.len();
                     self.refresh_inactive_tile_layouts_for_buffer_subtrees(
@@ -8745,7 +8842,7 @@ impl Editor {
                         );
                     }
                 }
-                None => {
+                InactiveBufferRefresh::Full => {
                     let per_buffer = std::time::Instant::now();
                     self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
                     if scene_trace {
@@ -8966,6 +9063,12 @@ impl Editor {
         }
 
         self.sync_layout_to_active_leaf();
+        // A tile op above (set-layout, window-buffer swap, split) may have
+        // revealed a buffer whose effect deferred while hidden; re-sync the
+        // hidden set and resume any newly visible deferred work.
+        self.sync_visible_effect_buffers();
+        self.resume_deferred_effects_for_presentation();
+
         if scene_trace {
             eprintln!(
                 "[side-effects-trace] total={:.3}ms",

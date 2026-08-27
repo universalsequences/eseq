@@ -277,7 +277,12 @@ pub fn materialize_forked_assets(
             "Failed to write preset bank '{}': {error}",
             target_bank.display()
         )
-    })
+    })?;
+    // This writes a bank behind `save_instrument_presets`'s back, so drop any
+    // cached copy here rather than relying on an earlier call in the finalize
+    // sequence to have invalidated the same key.
+    crate::lisp_host::invalidate_instrument_preset_bank_cache_at(&target_bank);
+    Ok(())
 }
 
 #[cfg(test)]

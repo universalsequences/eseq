@@ -355,8 +355,11 @@
   (nth st/instrument-key-lock-selected-notes 0))
 
 (def instrument-param-key-lock-row (p note)
-  (nth (filter |row| (= (get row :note) note) (get p :key-locks))
-    0))
+  (let ((inst (nth SEQ.instrument-panel 0))
+        (rows (if (and inst (fx-param-has-idx? p))
+                (nth (get inst :key-locks) (get p :idx))
+                '())))
+    (nth (filter |row| (= (get row :note) note) rows) 0)))
 
 (def instrument-param-key-lock-active? (p)
   (let ((note (instrument-selected-key-note)))
@@ -536,9 +539,27 @@
       (bind-seq (get p :value-field))
       (get p :value)))))
 
+;; Options are indexed by the param's stored value, which is not guaranteed to
+;; be in range: a synced Delay time, for instance, stores milliseconds while its
+;; sync options list holds a dozen divisions. `nth` past the end returns nil and
+;; the dropdown then renders "nil", so clamp the index the way the old Rust
+;; builder did.
+(def fx-param-option-at (options value)
+  (nth options (clamp (round value) 0 (- (len options) 1))))
+
+;; `fx-param-value-for` returns a reactive binding for bound params, and `nth`
+;; treats a binding index as nil — deref with `reactive-value` before indexing.
+;; The mods-open depth branch must not leak into the label, so bound params
+;; read their field directly.
 (def fx-param-text-value-for (fx p)
-  (if (and (not fx) (instrument-keys-active?) (get p :options))
-    (nth (get p :options) (fx-param-value-for fx p))
+  (if (get p :options)
+    (if (and (not fx) (instrument-keys-active?))
+      (fx-param-option-at (get p :options) (reactive-value (fx-param-value-for fx p)))
+      (if (get p :value-field)
+        (fx-param-option-at
+          (get p :options)
+          (reactive-value (bind-seq (get p :value-field))))
+        (get p :text-value)))
     (get p :text-value)))
 
 (def param-plock-row-target (fx)

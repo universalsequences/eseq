@@ -114,6 +114,77 @@ fn sync_fx_param_bindings_delta(
     dirty
 }
 
+/// The slice of fx panel publication that buffers other than `*fx*` read:
+/// `*samples*` and `*macro-mappings*` read `SEQ.instrument-panel`
+/// (content/ui/browser.lisp `rack-panel-open?`, content/ui/macros.lisp), and
+/// `*metal*` reads `SEQ.step-has-plocks` (content/ui/step-grid.lisp). These
+/// must stay current for the selected track even while `*fx*` is hidden.
+pub(super) fn sync_shared_panel_state(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: Option<usize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    structural: bool,
+) {
+    let instrument_panel = track.map_or_else(
+        || Value::List(vec![]),
+        |track| build_instrument_panel_value(app, track, selected_steps),
+    );
+    if structural {
+        rt.set_reactive("SEQ", "instrument-panel", instrument_panel);
+    } else {
+        rt.set_reactive_value_patch("SEQ", "instrument-panel", instrument_panel);
+    }
+    rt.set_reactive(
+        "SEQ",
+        "step-has-plocks",
+        track.map_or_else(
+            || Value::List(vec![]),
+            |track| build_step_has_plocks(state, track, &app.graph.effect_descriptors),
+        ),
+    );
+}
+
+pub(super) fn sync_fx_panel_state(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: Option<usize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    structural: bool,
+) {
+    let publish = |rt: &mut Runtime, field: &str, value: Value| {
+        if structural {
+            rt.set_reactive("SEQ", field, value);
+        } else {
+            rt.set_reactive_value_patch("SEQ", field, value);
+        }
+    };
+    publish(
+        rt,
+        "effects",
+        track.map_or_else(
+            || Value::List(vec![]),
+            |track| build_effects_value(state, track, &app.graph.effect_descriptors, selected_steps),
+        ),
+    );
+    publish(
+        rt,
+        "midi-effects",
+        track.map_or_else(
+            || Value::List(vec![]),
+            |track| build_midi_effects_value(state, track, selected_steps),
+        ),
+    );
+    sync_shared_panel_state(rt, app, state, track, selected_steps, structural);
+    publish(
+        rt,
+        "bus-effects",
+        build_bus_effects_value_for_selection(app, Some(selected_steps)),
+    );
+}
+
 /// Post-event reactive sync + render: diffs sequencer/transport state against
 /// the previous frame, republishes reactives, and renders when dirty.
 #[allow(clippy::too_many_lines)]
@@ -344,9 +415,6 @@ pub(crate) fn reactive_tick_and_render(
             let param_sync_revision =
                 capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
             let rt = editor.runtime_mut();
-            sync_shared_track_collapsed(&ctx.shared.track_collapsed, &app);
-            sync_track_name_state(rt, &mut *ctx.track_names, &app);
-            sync_pattern_state(rt, &ctx.shared.state);
             set_current_track_reactive(rt, app.tracks.len(), ct);
             if current_track_playhead_visible {
                 sync_playhead_fields(
@@ -371,38 +439,9 @@ pub(crate) fn reactive_tick_and_render(
                 &ctx.shared.piano_roll_selection,
             );
             sync_step_param_lists(rt, &ctx.shared.state, ct);
-            sync_track_mixer_state(rt, &app, &ctx.shared.state);
-            sync_bus_mixer_state(rt, &app);
-            sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
-            sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-            sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
-            sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
-            // Full set_reactive, NOT set_reactive_value_patch: ui_epoch bumps
-            // come from edits (e.g. Boolean/Enum fx params) whose values drive
-            // conditional panel STRUCTURE, so the *fx* root must re-eval. A
-            // silent in-place patch here also poisons the fx-epoch branch
-            // below (equalized tree -> is_unchanged fast path -> no re-eval).
-            rt.set_reactive(
-                "SEQ",
-                "effects",
-                build_effects_value(
-                    &ctx.shared.state,
-                    ct,
-                    &app.graph.effect_descriptors,
-                    &ctx.shared.selected_steps,
-                ),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "midi-effects",
-                build_midi_effects_value(&ctx.shared.state, ct, &ctx.shared.selected_steps),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "instrument-panel",
-                build_instrument_panel_value(&app, ct, &ctx.shared.selected_steps),
-            );
-            *ctx.shared.accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+            // A track switch changes only track-addressed publication. Global
+            // topology, mixer, meter, modulator, and accumulator snapshots are
+            // unchanged and retain their already-published values.
             sync_track_params_delta(
                 &mut ctx.frame.track_param_sync_revision,
                 param_sync_revision.clone(),
@@ -423,11 +462,54 @@ pub(crate) fn reactive_tick_and_render(
                 &ctx.shared.selected_steps,
                 &selected_neural_snapshot,
             );
-            rt.set_reactive(
-                "SEQ",
-                "step-has-plocks",
-                build_step_has_plocks(&ctx.shared.state, ct, &app.graph.effect_descriptors),
-            );
+            // The selecting native already issued the structural fx
+            // revision for this owner change. Leave the panel values to
+            // that branch below instead of building them twice. Direct
+            // current-track writers that did not issue an fx revision
+            // still get a complete destination panel here.
+            let fx_ep = ctx.shared.fx_epoch.load(Ordering::Relaxed);
+            let fx_value_ep = ctx.shared.fx_value_epoch.load(Ordering::Relaxed);
+            if fx_visible
+                && fx_ep == ctx.frame.prev_fx_epoch
+                && fx_value_ep == ctx.frame.prev_fx_value_epoch
+            {
+                sync_fx_panel_state(
+                    rt,
+                    &app,
+                    &ctx.shared.state,
+                    Some(ct),
+                    &ctx.shared.selected_steps,
+                    true,
+                );
+            } else {
+                if !fx_visible {
+                    // Both this frame's publication and the fx-epoch catch-up
+                    // branch below are gated on *fx* visibility, so nothing
+                    // else refreshes the panel state that non-*fx* buffers
+                    // read (*samples* / *macro-mappings* read
+                    // SEQ.instrument-panel, *metal* reads
+                    // SEQ.step-has-plocks). Publish that slice for the new
+                    // track now; the heavier *fx*-only lists still wait for
+                    // *fx* to be shown.
+                    sync_shared_panel_state(
+                        rt,
+                        &app,
+                        &ctx.shared.state,
+                        Some(ct),
+                        &ctx.shared.selected_steps,
+                        true,
+                    );
+                }
+                if fx_ep == ctx.frame.prev_fx_epoch {
+                    // No structural fx revision is pending, yet the panel was
+                    // not rebuilt above — either *fx* is hidden, or only a
+                    // value revision is pending (a value patch cannot carry
+                    // the new owner's panel STRUCTURE). Bump fx_epoch so the
+                    // fx-epoch branch rebuilds structurally: this frame if
+                    // visible, else on the first frame *fx* is shown again.
+                    ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             sync_sidebar_browser(rt, &app, ct);
             ctx.frame.prev_current_track = ct;
             ctx.frame.prev_playhead = playhead;
@@ -1419,59 +1501,13 @@ pub(crate) fn reactive_tick_and_render(
             // conditional layout. fx_value_epoch alone = value-only scene/clip
             // launch: in-place patch, field bindings carry the visuals.
             let structural = fx_ep != ctx.frame.prev_fx_epoch;
-            let rt = editor.runtime_mut();
-            let publish = |rt: &mut Runtime, field: &str, value: Value| {
-                if structural {
-                    rt.set_reactive("SEQ", field, value);
-                } else {
-                    rt.set_reactive_value_patch("SEQ", field, value);
-                }
-            };
-            publish(
-                rt,
-                "effects",
-                if app.tracks.is_empty() {
-                    Value::List(vec![])
-                } else {
-                    build_effects_value(
-                        &ctx.shared.state,
-                        ct,
-                        &app.graph.effect_descriptors,
-                        &ctx.shared.selected_steps,
-                    )
-                },
-            );
-            publish(
-                rt,
-                "midi-effects",
-                if app.tracks.is_empty() {
-                    Value::List(vec![])
-                } else {
-                    build_midi_effects_value(&ctx.shared.state, ct, &ctx.shared.selected_steps)
-                },
-            );
-            publish(
-                rt,
-                "instrument-panel",
-                if app.tracks.is_empty() {
-                    Value::List(vec![])
-                } else {
-                    build_instrument_panel_value(&app, ct, &ctx.shared.selected_steps)
-                },
-            );
-            rt.set_reactive(
-                "SEQ",
-                "step-has-plocks",
-                if app.tracks.is_empty() {
-                    Value::List(vec![])
-                } else {
-                    build_step_has_plocks(&ctx.shared.state, ct, &app.graph.effect_descriptors)
-                },
-            );
-            publish(
-                rt,
-                "bus-effects",
-                build_bus_effects_value_for_selection(&app, Some(&ctx.shared.selected_steps)),
+            sync_fx_panel_state(
+                editor.runtime_mut(),
+                &app,
+                &ctx.shared.state,
+                (!app.tracks.is_empty()).then_some(ct),
+                &ctx.shared.selected_steps,
+                structural,
             );
             ctx.frame.prev_fx_epoch = fx_ep;
             ctx.frame.prev_fx_value_epoch = fx_value_ep;

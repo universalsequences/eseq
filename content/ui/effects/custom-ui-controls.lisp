@@ -137,7 +137,7 @@
 
 (def ui-param-value (name fallback)
   (let ((p (rt/custom-ui-current-param name)))
-    (if p (get p :value) fallback)))
+    (if p (rt/custom-ui-param-value p) fallback)))
 
 (def ui-param-bound-value (name fallback)
   (let ((p (rt/custom-ui-current-param name)))

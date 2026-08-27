@@ -15,7 +15,8 @@
         (subtree :key (str "digitone-mode-dropdown-" synth-ui-current-name)
           (v-stack :width 5.0 :height 1.12 :gap 0.08 :align :start
             (label "mode" :font-size 8.2 :width 5.0 :color :dim :bg :transparent)
-            (dropdown :value (digitone-filter-mode-label (get p :value))
+            (dropdown :value (digitone-filter-mode-label
+                               (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)))
               :options '("lowpass" "highpass" "bandpass")
               :width 5.6 :height 0.78 :font-size 8.0
               :on-change (lambda (v)

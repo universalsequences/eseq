@@ -184,7 +184,7 @@ pub struct BufferTextStyle {
     pub bold: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CommittedSubtreeSnapshot {
     pub stable_widget_id: Option<u64>,
     pub subtree_root_id: Option<u64>,
@@ -196,16 +196,69 @@ pub struct CommittedSubtreeSnapshot {
     pub children: Vec<Arc<CommittedSubtreeSnapshot>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Manual equality so that snapshots built with node reuse compare in time
+/// proportional to what changed: shared child `Arc`s and shared tree cells
+/// short-circuit. Where nothing is shared this matches the derived impl.
+impl PartialEq for CommittedSubtreeSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.stable_widget_id == other.stable_widget_id
+            && self.subtree_root_id == other.subtree_root_id
+            && self.parent_subtree_root_id == other.parent_subtree_root_id
+            && self.stable_key == other.stable_key
+            && self.widget_type == other.widget_type
+            && self.reactive_dependencies == other.reactive_dependencies
+            && widget_tree_values_equal(&self.tree, &other.tree)
+            && self.children.len() == other.children.len()
+            && self
+                .children
+                .iter()
+                .zip(other.children.iter())
+                .all(|(left, right)| Arc::ptr_eq(left, right) || left == right)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct CommittedBufferUiSnapshot {
     pub source_buffer_id: Option<BufferId>,
     pub tree: Value,
+    /// The snapshot node for the whole tree. Kept so a follow-up rebuild can
+    /// reuse the `Arc`s of unchanged subtrees instead of re-snapshotting
+    /// every widget (see `CommittedSubtreeSnapshot::from_tree_reusing`).
+    pub root: Arc<CommittedSubtreeSnapshot>,
     pub root_stable_widget_id: Option<u64>,
     pub root_subtree_root_id: Option<u64>,
     pub field_to_subtree_roots: HashMap<ReactiveFieldKey, Vec<u64>>,
     pub subtree_root_dependencies: HashMap<u64, Vec<ReactiveFieldKey>>,
     pub subtree_roots: HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
     pub widgets: HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
+}
+
+/// Manual equality mirroring the derived impl, but comparing the tree with
+/// the cell-pointer fast path and the node maps with an `Arc` fast path, so
+/// comparing two snapshots that share most of their nodes stays cheap.
+impl PartialEq for CommittedBufferUiSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        fn node_maps_equal(
+            left: &HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
+            right: &HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
+        ) -> bool {
+            left.len() == right.len()
+                && left.iter().all(|(key, left_node)| {
+                    right.get(key).is_some_and(|right_node| {
+                        Arc::ptr_eq(left_node, right_node) || left_node == right_node
+                    })
+                })
+        }
+        self.source_buffer_id == other.source_buffer_id
+            && self.root_stable_widget_id == other.root_stable_widget_id
+            && self.root_subtree_root_id == other.root_subtree_root_id
+            && widget_tree_values_equal(&self.tree, &other.tree)
+            && (Arc::ptr_eq(&self.root, &other.root) || self.root == other.root)
+            && self.field_to_subtree_roots == other.field_to_subtree_roots
+            && self.subtree_root_dependencies == other.subtree_root_dependencies
+            && node_maps_equal(&self.subtree_roots, &other.subtree_roots)
+            && node_maps_equal(&self.widgets, &other.widgets)
+    }
 }
 
 pub struct Buffer {
@@ -242,6 +295,32 @@ fn flush_identical_cell(
     b: &std::rc::Rc<std::cell::RefCell<Value>>,
 ) -> bool {
     std::rc::Rc::ptr_eq(a, b) || widget_tree_flush_identical(&a.borrow(), &b.borrow())
+}
+
+/// `Value` equality with a pointer fast path for shared cells: stored widget
+/// trees are frozen (immutable after annotation), so two positions holding
+/// the same `Rc` cell are equal without walking the subtree. Anywhere the
+/// trees actually differ this matches `Value == Value` exactly.
+fn widget_tree_values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::List(x), Value::List(y)) => {
+            x.len() == y.len()
+                && x.iter().zip(y.iter()).all(|(left, right)| {
+                    std::rc::Rc::ptr_eq(left, right)
+                        || widget_tree_values_equal(&left.borrow(), &right.borrow())
+                })
+        }
+        (Value::Map(x), Value::Map(y)) => {
+            x.len() == y.len()
+                && x.iter().all(|(key, left)| {
+                    y.get(key).is_some_and(|right| {
+                        std::rc::Rc::ptr_eq(left, right)
+                            || widget_tree_values_equal(&left.borrow(), &right.borrow())
+                    })
+                })
+        }
+        _ => a == b,
+    }
 }
 
 /// Structural identity for pending widget-tree flushes. Matches `Value`
@@ -942,9 +1021,27 @@ impl Buffer {
         if let Some(tree) = tree.as_ref() {
             crate::vm::freeze_widget_tree(tree);
         }
-        let tree_unchanged = self.widget_tree.as_ref() == tree.as_ref();
+        let tree_unchanged = match (self.widget_tree.as_ref(), tree.as_ref()) {
+            (Some(current), Some(next)) => widget_tree_values_equal(current, next),
+            (None, None) => true,
+            _ => false,
+        };
         let source_unchanged = self.widget_tree_source == source;
         if tree_unchanged && source_unchanged {
+            // The committed snapshot for an identical tree is already
+            // current; rebuilding it from scratch (and deep-comparing the
+            // rebuild against the current one) dominated the cost of a
+            // no-change full-tree flush. Reactive dependencies recorded by
+            // earlier subtree replacements stay in place, which keeps
+            // field-targeted patching working across a no-change flush.
+            if self.committed_ui_snapshot.is_some() == tree.is_some()
+                && self
+                    .committed_ui_snapshot
+                    .as_ref()
+                    .is_none_or(|snapshot| snapshot.source_buffer_id == source)
+            {
+                return;
+            }
             self.set_committed_ui_snapshot(
                 tree.map(|tree| CommittedBufferUiSnapshot::from_tree(tree, source, Vec::new())),
             );
@@ -958,9 +1055,27 @@ impl Buffer {
             .map(|tree| crate::vm::probed_shallow_clone("w2:buffer-set-widget-tree", tree));
         self.widget_tree_source = source;
         self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
-        self.set_committed_ui_snapshot(
-            tree.map(|tree| CommittedBufferUiSnapshot::from_tree(tree, source, Vec::new())),
-        );
+        match tree {
+            Some(tree) => {
+                // Rebuild the snapshot around the previous one: subtrees
+                // whose cells the rerun reused are adopted wholesale (and
+                // keep their recorded reactive dependencies) instead of
+                // being re-indexed. The tree changed, so the snapshot
+                // necessarily changed too — set it directly instead of
+                // paying `set_committed_ui_snapshot`'s deep comparison.
+                let previous_snapshot = self.committed_ui_snapshot.take();
+                let snapshot = match previous_snapshot {
+                    Some(previous) => {
+                        CommittedBufferUiSnapshot::from_tree_reusing(tree, source, &previous)
+                    }
+                    None => CommittedBufferUiSnapshot::from_tree(tree, source, Vec::new()),
+                };
+                self.committed_ui_snapshot = Some(snapshot);
+                self.committed_ui_revision = self.committed_ui_revision.wrapping_add(1);
+                self.committed_ui_runtime_generation = None;
+            }
+            None => self.set_committed_ui_snapshot(None),
+        }
     }
 
     pub fn adopt_committed_ui_snapshot(&mut self, snapshot: CommittedBufferUiSnapshot) {
@@ -1551,11 +1666,28 @@ impl CommittedBufferUiSnapshot {
             tree,
             root_stable_widget_id: root.stable_widget_id,
             root_subtree_root_id: root.subtree_root_id,
+            root,
             field_to_subtree_roots,
             subtree_root_dependencies,
             subtree_roots,
             widgets,
         }
+    }
+
+    /// Rebuild a full-tree snapshot around `previous`, reusing the snapshot
+    /// nodes of every subtree whose widget-tree cell the new tree shares with
+    /// the previous one, along with their recorded reactive dependencies.
+    pub fn from_tree_reusing(
+        tree: Value,
+        source_buffer_id: Option<BufferId>,
+        previous: &Self,
+    ) -> Self {
+        Self::from_tree_with_dependency_lookup_reusing(
+            tree,
+            source_buffer_id,
+            &previous.subtree_root_dependencies,
+            Some(&previous.root),
+        )
     }
 
     pub fn subtree_roots_for_field(&self, field: &ReactiveFieldKey) -> Vec<u64> {
@@ -1632,14 +1764,17 @@ impl CommittedBufferUiSnapshot {
         }
 
         let merged_tree = replace_subtree_in_value(&self.tree, subtree_root_id, &replacement_tree)?;
+        let previous_root = Arc::clone(&self.root);
+        let source_buffer_id = self.source_buffer_id;
         let mut dependency_lookup = self.subtree_root_dependencies;
         for root_id in collect_subtree_root_ids(&replacement_tree) {
             dependency_lookup.insert(root_id, reactive_dependencies.clone());
         }
-        Some(Self::from_tree_with_dependency_lookup(
+        Some(Self::from_tree_with_dependency_lookup_reusing(
             merged_tree,
-            self.source_buffer_id,
+            source_buffer_id,
             &dependency_lookup,
+            Some(&previous_root),
         ))
     }
 
@@ -1701,16 +1836,19 @@ impl CommittedBufferUiSnapshot {
             .map(|replacement| (replacement.root_id, replacement.tree))
             .collect::<HashMap<_, _>>();
         let merged_tree = replace_subtrees_in_value(&self.tree, &replacement_lookup)?;
+        let previous_root = Arc::clone(&self.root);
+        let source_buffer_id = self.source_buffer_id;
         let mut dependency_lookup = self.subtree_root_dependencies;
         for replacement in valid_replacements {
             for root_id in collect_subtree_root_ids(replacement.tree) {
                 dependency_lookup.insert(root_id, replacement.reactive_dependencies.to_vec());
             }
         }
-        Some(Self::from_tree_with_dependency_lookup(
+        Some(Self::from_tree_with_dependency_lookup_reusing(
             merged_tree,
-            self.source_buffer_id,
+            source_buffer_id,
             &dependency_lookup,
+            Some(&previous_root),
         ))
     }
 
@@ -1719,11 +1857,26 @@ impl CommittedBufferUiSnapshot {
         source_buffer_id: Option<BufferId>,
         dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
     ) -> Self {
+        Self::from_tree_with_dependency_lookup_reusing(tree, source_buffer_id, dependency_lookup, None)
+    }
+
+    /// Like `from_tree_with_dependency_lookup`, but reuses the previous
+    /// snapshot's node `Arc`s for every subtree whose widget-tree cell is
+    /// pointer-identical to the previous tree's (stored trees are frozen, so
+    /// cell identity proves the subtree — and its snapshot — is unchanged).
+    /// A reused subtree keeps the reactive dependencies it already carried.
+    fn from_tree_with_dependency_lookup_reusing(
+        tree: Value,
+        source_buffer_id: Option<BufferId>,
+        dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
+        previous_root: Option<&Arc<CommittedSubtreeSnapshot>>,
+    ) -> Self {
         crate::vm::freeze_widget_tree(&tree);
-        let root = CommittedSubtreeSnapshot::from_tree_with_dependency_lookup(
+        let root = CommittedSubtreeSnapshot::from_tree_reusing(
             tree.clone(),
             &[],
             dependency_lookup,
+            previous_root,
         );
         let mut subtree_roots = HashMap::new();
         let mut widgets = HashMap::new();
@@ -1740,6 +1893,7 @@ impl CommittedBufferUiSnapshot {
             tree,
             root_stable_widget_id: root.stable_widget_id,
             root_subtree_root_id: root.subtree_root_id,
+            root,
             field_to_subtree_roots,
             subtree_root_dependencies,
             subtree_roots,
@@ -1776,6 +1930,65 @@ fn replacement_has_valid_replaced_ancestor(
 impl CommittedSubtreeSnapshot {
     pub fn from_tree(tree: Value, reactive_dependencies: &[ReactiveFieldKey]) -> Arc<Self> {
         Self::from_tree_with_dependency_lookup(tree, reactive_dependencies, &HashMap::new())
+    }
+
+    /// Like `from_tree_with_dependency_lookup`, reusing `previous`'s child
+    /// snapshot `Arc`s wherever the widget-tree child cell is pointer-equal
+    /// to the previous tree's cell at the same position. Stored trees are
+    /// frozen (immutable after annotation), so pointer identity proves the
+    /// whole subtree is unchanged; the reused snapshot keeps the reactive
+    /// dependencies it already carried.
+    fn from_tree_reusing(
+        tree: Value,
+        reactive_dependencies: &[ReactiveFieldKey],
+        dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
+        previous: Option<&Arc<Self>>,
+    ) -> Arc<Self> {
+        let stable_widget_id = prop_u64_from_value(&tree, "__stable-widget-id");
+        let subtree_root_id = prop_u64_from_value(&tree, "__subtree-root-id");
+        let parent_subtree_root_id = prop_u64_from_value(&tree, "__parent-subtree-root-id");
+        let stable_key = prop_string_from_value(&tree, "__stable-key");
+        let widget_type = prop_widget_type_from_value(&tree);
+        let subtree_dependencies = subtree_root_id
+            .and_then(|root_id| dependency_lookup.get(&root_id).cloned())
+            .unwrap_or_else(|| reactive_dependencies.to_vec());
+        let previous_cells = previous
+            .map(|previous| child_value_cells(&previous.tree))
+            .unwrap_or_default();
+        let previous_children: &[Arc<Self>] = previous
+            .filter(|previous| previous.children.len() == previous_cells.len())
+            .map(|previous| previous.children.as_slice())
+            .unwrap_or(&[]);
+        let children = child_value_cells(&tree)
+            .into_iter()
+            .enumerate()
+            .map(|(idx, cell)| {
+                let previous_pair = previous_children
+                    .get(idx)
+                    .zip(previous_cells.get(idx));
+                if let Some((previous_child, previous_cell)) = previous_pair
+                    && std::rc::Rc::ptr_eq(&cell, previous_cell)
+                {
+                    return Arc::clone(previous_child);
+                }
+                Self::from_tree_reusing(
+                    cell.borrow().clone(),
+                    reactive_dependencies,
+                    dependency_lookup,
+                    previous_pair.map(|(previous_child, _)| previous_child),
+                )
+            })
+            .collect();
+        Arc::new(Self {
+            stable_widget_id,
+            subtree_root_id,
+            parent_subtree_root_id,
+            stable_key,
+            widget_type,
+            reactive_dependencies: subtree_dependencies,
+            tree,
+            children,
+        })
     }
 
     fn from_tree_with_dependency_lookup(
@@ -1863,6 +2076,20 @@ fn value_map(value: &Value) -> Option<HashMap<String, Value>> {
                 .collect(),
         ),
         _ => None,
+    }
+}
+
+/// The raw child cells of a widget-tree node, for pointer-identity reuse.
+fn child_value_cells(value: &Value) -> Vec<std::rc::Rc<std::cell::RefCell<Value>>> {
+    match value {
+        Value::Map(map) => match map.get("children").map(|value| value.borrow()) {
+            Some(child) => match &*child {
+                Value::List(children) => children.clone(),
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
     }
 }
 

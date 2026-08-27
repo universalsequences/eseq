@@ -2127,7 +2127,12 @@ pub(crate) fn run_event_loop(
                 }
             }
         }
-        poll_learn_job(&mut app, &mut sessions, &mut editor);
+        poll_learn_job(
+            &mut app,
+            &mut sessions,
+            &mut editor,
+            shared.current_track.load(Ordering::Relaxed),
+        );
         let mut completed_agentic = Vec::new();
         for (key, pending) in &sessions.pending_agentic_bubbles {
             match pending.receiver.try_recv() {

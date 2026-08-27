@@ -88,6 +88,7 @@ pub struct UiInvalidationTrace {
     pub reactive_flush_duration: Duration,
     pub reactive_cycle_duration: Duration,
     pub reactive_exec_timings: Vec<(String, Duration)>,
+    pub reactive_function_profiles: Vec<crate::vm::ReactiveFunctionProfile>,
     pub relayout_mode: Option<String>,
     pub relayout_duration: Duration,
     pub relayout_failure_reason: Option<String>,
@@ -2998,13 +2999,32 @@ impl Runtime {
         self.invoke(callable, args)
     }
 
+    /// Install the editor's authoritative set of named buffers that hold a
+    /// committed widget tree but are not presented by any tile. Effects
+    /// targeting them stay dirty in the VM; `run_reactive_cycle` resumes them
+    /// as soon as their target leaves this set.
+    pub fn set_hidden_effect_buffer_names(&mut self, names: HashSet<String>) {
+        self.vm.set_hidden_effect_buffer_names(names);
+    }
+
+    /// True when an effect deferred while its target buffer was hidden is now
+    /// visible and waiting for a reactive cycle to resume it.
+    pub fn has_resumable_hidden_effect_work(&self) -> bool {
+        self.vm.has_visible_deferred_effects()
+    }
+
     pub fn run_reactive_cycle(&mut self) {
         let total_started = Instant::now();
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_context(current_buffer_id);
         let dirty = self.reactive_registry.drain_dirty();
         let injected = std::mem::take(&mut self.pending_injected_reactive_invalidations);
-        if dirty.is_empty() && injected.is_empty() {
+        // Deferred effects for hidden buffers stay in the DAG's dirty set
+        // indefinitely, so `process_dirty_reactive` would pay a full
+        // `topo_sort_dirty` every idle cycle to produce no work. Skip that
+        // unless a deferred effect's target has become visible, which is the
+        // only other reason an empty-dirty cycle has anything to do.
+        if dirty.is_empty() && injected.is_empty() && !self.vm.has_visible_deferred_effects() {
             if trace_ui_enabled() {
                 eprintln!("[ui-trace][reactive-cycle] dirty=[] no-op");
             }
@@ -3030,7 +3050,7 @@ impl Runtime {
         }
         let apply_started = Instant::now();
         let apply_result = if dirty.is_empty() {
-            self.vm.process_dirty_reactive()
+            self.vm.process_visible_dirty_effects()
         } else {
             self.vm.apply_reactive_changes(dirty)
         };
@@ -3038,6 +3058,13 @@ impl Runtime {
             Ok(()) => {
                 let apply_elapsed = apply_started.elapsed();
                 let exec_timings = self.vm.take_reactive_exec_timings();
+                let function_profiles = self.vm.take_reactive_function_profiles();
+                if dirty_len == 0 && exec_timings.is_empty() {
+                    if trace_ui_enabled() {
+                        eprintln!("[ui-trace][reactive-cycle] dirty=[] no-op");
+                    }
+                    return;
+                }
                 self.flush_vm_reactive_sets();
                 if self.sync_theme_to_global {
                     self.sync_theme_from_vm();
@@ -3049,6 +3076,7 @@ impl Runtime {
                         .iter()
                         .map(|timing| (timing.profile_label(), timing.elapsed))
                         .collect(),
+                    reactive_function_profiles: function_profiles,
                     ..UiInvalidationTrace::default()
                 });
                 let flush_started = Instant::now();
@@ -3609,6 +3637,38 @@ impl Runtime {
         engine.frame_viewport = frame_viewport;
         engine.content_scroll = self.layout_content_scroll;
         relayout_subtree_path_result(existing, tree, child_path, dirty_widget_ids, &engine)
+    }
+
+    /// Reconcile a cached layout against a changed widget tree, reusing every
+    /// unchanged descendant and rebuilding changed subtrees in place when the
+    /// change occupies exactly the space its predecessor did (see
+    /// `layout::reconcile_layout_node`). Errs when a changed subtree needs
+    /// different space, in which case the caller falls back to a full
+    /// relayout.
+    pub(crate) fn reconcile_layout_for_tree_with_viewport(
+        &self,
+        existing: &LayoutNode,
+        tree: &Value,
+        viewport: Option<(f32, f32)>,
+        frame_viewport: Option<crate::layout::Rect>,
+        dirty_widget_ids: &mut Vec<u64>,
+    ) -> Result<(LayoutNode, usize), String> {
+        let (cols, rows) = viewport.unwrap_or((self.layout_cols, self.layout_rows));
+        let mut engine = if let Some(measurer) = self.text_measurer.as_deref() {
+            LayoutEngine::with_text_measurer_exact(
+                cols,
+                rows,
+                self.layout_aspect,
+                measurer,
+                self.layout_cell_w,
+                self.layout_cell_h,
+            )
+        } else {
+            LayoutEngine::new_exact(cols, rows, self.layout_aspect)
+        };
+        engine.frame_viewport = frame_viewport;
+        engine.content_scroll = self.layout_content_scroll;
+        crate::layout::reconcile_layout_node(existing, tree, &engine, dirty_widget_ids)
     }
 
     /// Clear the current widget tree and layout without destroying reactive effects.

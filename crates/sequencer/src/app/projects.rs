@@ -2092,10 +2092,11 @@ impl App {
                     .get(engine_id)
                     .map(|engine| engine.name.clone())
                     .ok_or_else(|| "Current custom instrument is unavailable".to_string())?;
-                let preset = crate::lisp_host::load_instrument_presets(&instrument_name)
+                let preset = crate::lisp_host::load_instrument_presets_shared(&instrument_name)
                     .map_err(|error| error.to_string())?
-                    .into_iter()
+                    .iter()
                     .find(|preset| preset.name == preset_name)
+                    .cloned()
                     .ok_or_else(|| format!("Preset '{preset_name}' not found"))?;
                 let descriptor = self
                     .graph

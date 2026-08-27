@@ -3228,9 +3228,8 @@ impl App {
         let instrument_name = current_instrument_name?;
         let desc = self.graph.instrument_descriptors.get(track)?;
         let slot = self.state.pattern.instrument_slots.get(track)?;
-        let existing_presets = crate::lisp_host::load_instrument_presets(instrument_name)
-            .map(|presets| presets.into_iter().map(|preset| preset.name).collect())
-            .unwrap_or_default();
+        let existing_presets =
+            crate::lisp_host::load_instrument_preset_names(instrument_name).unwrap_or_default();
         let synth_indices = self.synth_param_indices(track);
         let mod_indices = self.mod_param_indices(track);
         let source_indices = self.source_param_actual_indices(track);

@@ -91,6 +91,7 @@ pub(super) fn handle(
                                 selection: &neural_selection,
                                 expanded_step_projection: &expanded_step_projection,
                                 track,
+                                current_track_idx: track,
                                 param_idx,
                                 display_step: None,
                                 sync_plock_list: wrote_neural_plock,
@@ -423,6 +424,7 @@ pub(super) fn handle(
                                     selection: &neural_selection,
                                     expanded_step_projection: &expanded_step_projection,
                                     track,
+                                    current_track_idx: track,
                                     param_idx,
                                     display_step: None,
                                     sync_plock_list: true,
@@ -439,7 +441,7 @@ pub(super) fn handle(
                                     value: next,
                                 },
                             );
-                            if sync_instrument_param_value_field(
+                            if sync_fx_instrument_param_value_field(
                                 editor.runtime_mut(),
                                 &app,
                                 track,
@@ -472,6 +474,7 @@ pub(super) fn handle(
                                     selection: &neural_selection,
                                     expanded_step_projection: &expanded_step_projection,
                                     track,
+                                    current_track_idx: track,
                                     param_idx,
                                     display_step,
                                     sync_plock_list: false,
@@ -544,6 +547,7 @@ pub(super) fn handle(
                                     selection: &neural_selection,
                                     expanded_step_projection: &expanded_step_projection,
                                     track,
+                                    current_track_idx: track,
                                     param_idx,
                                     display_step: None,
                                     sync_plock_list: wrote_neural_plock,
@@ -648,6 +652,7 @@ pub(super) fn handle(
                                 selection: &neural_selection,
                                 expanded_step_projection: &expanded_step_projection,
                                 track,
+                                current_track_idx: track,
                                 param_idx,
                                 display_step,
                                 // Publish the row list only when the row set can
@@ -728,7 +733,7 @@ pub(super) fn handle(
                             track,
                             selected_plock_step(&selected_steps),
                         );
-                        if sync_instrument_tensor_value_field(
+                        if sync_fx_instrument_tensor_value_field(
                             editor.runtime_mut(),
                             &app,
                             track,
@@ -814,6 +819,7 @@ pub(super) fn handle(
                                     selection: &neural_selection,
                                     expanded_step_projection: &expanded_step_projection,
                                     track,
+                                    current_track_idx: track,
                                     param_idx,
                                     display_step,
                                     sync_plock_list: wrote_neural_plock,

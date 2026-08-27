@@ -318,6 +318,22 @@ pub struct ReactiveExecTiming {
     pub subtree_root_id: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct LispFunctionTiming {
+    pub function: String,
+    pub calls: u64,
+    pub self_time: Duration,
+    pub inclusive_time: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReactiveFunctionProfile {
+    pub target: EffectTarget,
+    pub subtree_root_id: Option<u64>,
+    pub elapsed: Duration,
+    pub functions: Vec<LispFunctionTiming>,
+}
+
 impl ReactiveExecTiming {
     pub fn profile_label(&self) -> String {
         let owner = self
@@ -365,6 +381,11 @@ struct RegisteredSubtreeOwner {
 /// dependency mean the render is reproducible.
 struct SubtreeRenderCache {
     value: Value,
+    /// Stable-id annotation of `value` for its most recent embedding context.
+    /// The raw cached value is sealed before insertion, so matching its marker
+    /// cell is a sufficient identity check: its contents cannot change behind
+    /// this memo.
+    annotation: Option<CachedWidgetAnnotation>,
     chunk_idx: usize,
     /// Deep-cloned captured upvalues from render time. Live cells can be
     /// mutated in place by reactive writes, so the snapshot must not share
@@ -376,6 +397,20 @@ struct SubtreeRenderCache {
     reactive_reads: HashSet<ReactiveFieldKey>,
     /// Every global symbol read during the render, descendants included.
     symbol_reads: HashSet<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct WidgetAnnotationContext {
+    source_buffer_id: Option<BufferId>,
+    source_file: Option<std::path::PathBuf>,
+    target: EffectTarget,
+    parent_stable_id: Option<u64>,
+    path: Vec<usize>,
+}
+
+struct CachedWidgetAnnotation {
+    context: WidgetAnnotationContext,
+    value: Value,
 }
 
 /// Equality for cached subtree captured inputs. Deliberately stricter than
@@ -587,6 +622,27 @@ thread_local! {
     static FROZEN_TREE_PRUNE_THRESHOLD: std::cell::Cell<usize> = const { std::cell::Cell::new(4096) };
 }
 
+// Pre-annotation subtree cache entries need a release-build immutability
+// guarantee: stable-id annotation is memoized by their cell identity. Keep a
+// separate registry so ordinary committed-tree freezing remains a zero-cost
+// debug assertion in release builds.
+thread_local! {
+    static SEALED_ANNOTATION_INPUT_CELLS: RefCell<HashMap<usize, std::rc::Weak<RefCell<Value>>>> =
+        RefCell::new(HashMap::new());
+    static SEALED_ANNOTATION_PRUNE_THRESHOLD: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(4096) };
+    /// Registry size, mirrored in a `Cell` so the per-write guard can skip the
+    /// `RefCell` borrow and the hash lookup entirely while nothing is sealed
+    /// (the guard runs on every reactive/field write, including knob drags).
+    static SEALED_ANNOTATION_INPUT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// Set when a release build *tolerated* a write into a sealed render
+    /// (debug builds panic instead). The identity memo behind the annotation
+    /// cache is no longer trustworthy, so the VM drops its cached renders.
+    static SEALED_ANNOTATION_VIOLATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// Register every list/map cell reachable from `tree` as frozen. Idempotent
 /// and cheap on re-freeze: an already-registered live cell short-circuits its
 /// whole subtree (shared cells imply shared subtrees). No-op in release.
@@ -643,11 +699,108 @@ fn freeze_tree_cell(
     freeze_value_cells(&cell.borrow(), cells);
 }
 
+/// Seal an identity-keyed annotation input in every build. Unlike committed
+/// widget trees, these values exist before annotation and are otherwise live
+/// Lisp data; allowing a later field write would make an identity cache return
+/// stale annotated content.
+fn seal_widget_tree_annotation_input(tree: &Value) {
+    SEALED_ANNOTATION_INPUT_CELLS.with(|cells| {
+        let mut cells = cells.borrow_mut();
+        SEALED_ANNOTATION_PRUNE_THRESHOLD.with(|threshold| {
+            if cells.len() > threshold.get() {
+                cells.retain(|_, weak| weak.strong_count() > 0);
+                threshold.set((cells.len() * 2).max(4096));
+            }
+        });
+        seal_annotation_value_cells(tree, &mut cells);
+        SEALED_ANNOTATION_INPUT_COUNT.with(|count| count.set(cells.len()));
+    });
+}
+
+fn seal_annotation_value_cells(
+    value: &Value,
+    cells: &mut HashMap<usize, std::rc::Weak<RefCell<Value>>>,
+) {
+    match value {
+        Value::List(items) => {
+            for cell in items {
+                seal_annotation_cell(cell, cells);
+            }
+        }
+        Value::Map(map) => {
+            for cell in map.values() {
+                seal_annotation_cell(cell, cells);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn seal_annotation_cell(
+    cell: &Rc<RefCell<Value>>,
+    cells: &mut HashMap<usize, std::rc::Weak<RefCell<Value>>>,
+) {
+    let ptr = Rc::as_ptr(cell) as usize;
+    if cells
+        .get(&ptr)
+        .is_some_and(|existing| existing.strong_count() > 0)
+    {
+        return;
+    }
+    cells.insert(ptr, Rc::downgrade(cell));
+    seal_annotation_value_cells(&cell.borrow(), cells);
+}
+
+/// Report a write into a sealed annotation-cache input.
+///
+/// Debug builds panic: engine code must deep-clone before mutating a cached
+/// render. Release builds must not abort the app over user/third-party Lisp
+/// that mutates a map handed to it inside a cached `(subtree :key ...)` render
+/// — that was silently tolerated before the render cache existed. Instead the
+/// cell is unsealed and a violation is recorded so the VM drops its cached
+/// renders (the identity memo they are keyed by is no longer trustworthy).
+#[inline]
+fn check_sealed_annotation_input(cell: &Rc<RefCell<Value>>, context: &'static str) {
+    // Hot path: nothing sealed, so no borrow and no hash lookup.
+    if SEALED_ANNOTATION_INPUT_COUNT.with(|count| count.get()) == 0 {
+        return;
+    }
+    let sealed = SEALED_ANNOTATION_INPUT_CELLS.with(|cells| {
+        let mut cells = cells.borrow_mut();
+        let ptr = Rc::as_ptr(cell) as usize;
+        // Drop the entry either way: a live one is now knowingly mutated, and a
+        // dead one is a stale address that a new allocation reused.
+        let removed = cells.remove(&ptr);
+        SEALED_ANNOTATION_INPUT_COUNT.with(|count| count.set(cells.len()));
+        removed.is_some_and(|sealed| sealed.strong_count() > 0)
+    });
+    if !sealed {
+        return;
+    }
+    #[cfg(debug_assertions)]
+    panic!(
+        "widget-tree annotation cache violation: {context} mutating a sealed \
+         subtree render; render-cache values are immutable"
+    );
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = context;
+        SEALED_ANNOTATION_VIOLATION.with(|flag| flag.set(true));
+    }
+}
+
+/// Take (and clear) the "a sealed render was mutated" flag set by release
+/// builds in [`check_sealed_annotation_input`].
+fn take_sealed_annotation_violation() -> bool {
+    SEALED_ANNOTATION_VIOLATION.with(|flag| flag.replace(false))
+}
+
 /// Panic (debug builds only) if `cell` belongs to a frozen widget tree.
 /// Mutation of a stored tree must instead deep-clone at the mutation site,
 /// scoped to the subtree it modifies (spec §3.2).
 #[inline]
 pub fn debug_assert_cell_not_frozen(cell: &Rc<RefCell<Value>>, context: &'static str) {
+    check_sealed_annotation_input(cell, context);
     #[cfg(debug_assertions)]
     FROZEN_TREE_CELLS.with(|cells| {
         let mut cells = cells.borrow_mut();
@@ -1958,6 +2111,19 @@ fn explicit_subtree_root_metadata(value: &Value) -> Option<(u64, String)> {
     Some((root_id, stable_key))
 }
 
+fn same_subtree_render_identity(a: &Value, b: &Value) -> bool {
+    let (Value::Map(a), Value::Map(b)) = (a, b) else {
+        return false;
+    };
+    match (
+        a.get(SUBTREE_ROOT_ID_PROP),
+        b.get(SUBTREE_ROOT_ID_PROP),
+    ) {
+        (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
 fn annotate_explicit_subtree_root(
     value: &Value,
     subtree_root_id: u64,
@@ -2038,6 +2204,7 @@ fn annotate_widget_tree_stable_ids(
     target: &EffectTarget,
     parent_stable_id: Option<u64>,
     path: &mut Vec<usize>,
+    subtree_render_cache: &mut HashMap<u64, SubtreeRenderCache>,
 ) -> Value {
     let Value::Map(map) = value else {
         return value.deep_clone();
@@ -2049,6 +2216,28 @@ fn annotate_widget_tree_stable_ids(
     }) else {
         return value.deep_clone();
     };
+
+    let cached_subtree_root_id = prop_u64_rc(map, SUBTREE_ROOT_ID_PROP).filter(|root_id| {
+        subtree_render_cache
+            .get(root_id)
+            .is_some_and(|cached| same_subtree_render_identity(value, &cached.value))
+    });
+    // Context owns a path and module path, so construct it only for an actual
+    // cache input rather than allocating once per ordinary widget.
+    let annotation_context = cached_subtree_root_id.map(|_| WidgetAnnotationContext {
+        source_buffer_id,
+        source_file: source_file.map(std::path::Path::to_path_buf),
+        target: target.clone(),
+        parent_stable_id,
+        path: path.clone(),
+    });
+    if let Some(annotation) = cached_subtree_root_id
+        .and_then(|root_id| subtree_render_cache.get(&root_id))
+        .and_then(|cached| cached.annotation.as_ref())
+        .filter(|annotation| Some(&annotation.context) == annotation_context.as_ref())
+    {
+        return annotation.value.clone();
+    }
 
     let key = prop_string_rc(map, STABLE_KEY_PROP).or_else(|| stable_key_value(map));
     let stable_id = stable_widget_hash(
@@ -2077,6 +2266,7 @@ fn annotate_widget_tree_stable_ids(
                                 target,
                                 Some(stable_id),
                                 path,
+                                subtree_render_cache,
                             );
                             path.pop();
                             Rc::new(RefCell::new(annotated_child))
@@ -2132,7 +2322,18 @@ fn annotate_widget_tree_stable_ids(
         );
     }
 
-    Value::Map(annotated)
+    let annotated = Value::Map(annotated);
+    if let (Some(root_id), Some(annotation_context)) =
+        (cached_subtree_root_id, annotation_context)
+        && let Some(cached) = subtree_render_cache.get_mut(&root_id)
+        && same_subtree_render_identity(value, &cached.value)
+    {
+        cached.annotation = Some(CachedWidgetAnnotation {
+            context: annotation_context,
+            value: annotated.clone(),
+        });
+    }
+    annotated
 }
 
 struct ActiveExpansionSite {
@@ -2145,6 +2346,81 @@ struct Frame {
     upvalues: Vec<Rc<RefCell<Value>>>,
     pc: usize,
     chunk_idx: usize,
+}
+
+struct ActiveProfileCall {
+    function: String,
+    started: Instant,
+    child_time: Duration,
+}
+
+#[derive(Default)]
+struct FunctionTimingAccumulator {
+    calls: u64,
+    self_time: Duration,
+    inclusive_time: Duration,
+}
+
+struct FunctionProfiler {
+    started: Instant,
+    calls: Vec<ActiveProfileCall>,
+    timings: HashMap<String, FunctionTimingAccumulator>,
+}
+
+impl FunctionProfiler {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            calls: Vec::new(),
+            timings: HashMap::new(),
+        }
+    }
+
+    fn enter(&mut self, function: String) {
+        self.calls.push(ActiveProfileCall {
+            function,
+            started: Instant::now(),
+            child_time: Duration::ZERO,
+        });
+    }
+
+    fn exit(&mut self) {
+        let Some(call) = self.calls.pop() else {
+            return;
+        };
+        let inclusive_time = call.started.elapsed();
+        let self_time = inclusive_time.saturating_sub(call.child_time);
+        let timing = self.timings.entry(call.function).or_default();
+        timing.calls += 1;
+        timing.self_time += self_time;
+        timing.inclusive_time += inclusive_time;
+        if let Some(parent) = self.calls.last_mut() {
+            parent.child_time += inclusive_time;
+        }
+    }
+
+    fn finish(mut self) -> (Duration, Vec<LispFunctionTiming>) {
+        while !self.calls.is_empty() {
+            self.exit();
+        }
+        let elapsed = self.started.elapsed();
+        let mut functions = self
+            .timings
+            .into_iter()
+            .map(|(function, timing)| LispFunctionTiming {
+                function,
+                calls: timing.calls,
+                self_time: timing.self_time,
+                inclusive_time: timing.inclusive_time,
+            })
+            .collect::<Vec<_>>();
+        functions.sort_by(|a, b| {
+            b.self_time
+                .cmp(&a.self_time)
+                .then_with(|| a.function.cmp(&b.function))
+        });
+        (elapsed, functions)
+    }
 }
 
 pub struct VM {
@@ -2174,10 +2450,19 @@ pub struct VM {
     execution_depth: usize,
     processing_reactive: bool,
     reactive_exec_timings: Vec<ReactiveExecTiming>,
+    function_profile_filter: Option<String>,
+    active_function_profiler: Option<FunctionProfiler>,
+    reactive_function_profiles: Vec<ReactiveFunctionProfile>,
     last_reactive_error_context: Option<String>,
     last_reactive_error_detail: Option<String>,
     current_effect_source_buffer_id: Option<BufferId>,
     current_effect_target: EffectTarget,
+    /// Named effect-buffer targets that hold a committed widget tree but are
+    /// not presented by any editor tile. Effects targeting these stay dirty
+    /// instead of rerendering; everything else (visible buffers, inert
+    /// nil-returning projections like `*sel-sync*`, standalone Runtimes with
+    /// no editor) runs eagerly. The Editor owns this set.
+    hidden_effect_buffer_names: HashSet<String>,
     current_effect_reactive_reads: Option<HashSet<ReactiveFieldKey>>,
     current_effect_symbol_reads: Option<HashSet<String>>,
     current_subtree_capture_stack: Vec<SubtreeCaptureContext>,
@@ -3944,10 +4229,17 @@ impl VM {
             execution_depth: 0,
             processing_reactive: false,
             reactive_exec_timings: Vec::new(),
+            function_profile_filter: std::env::var("ESEQLISP_PROFILE_LISP")
+                .ok()
+                .filter(|value| !value.is_empty() && value != "0")
+                .map(|value| if value == "1" { "*fx*".to_string() } else { value }),
+            active_function_profiler: None,
+            reactive_function_profiles: Vec::new(),
             last_reactive_error_context: None,
             last_reactive_error_detail: None,
             current_effect_source_buffer_id: None,
             current_effect_target: EffectTarget::BufferId(None),
+            hidden_effect_buffer_names: HashSet::new(),
             current_effect_reactive_reads: None,
             current_effect_symbol_reads: None,
             current_subtree_capture_stack: Vec::new(),
@@ -5655,6 +5947,115 @@ impl VM {
         std::mem::take(&mut self.reactive_exec_timings)
     }
 
+    pub fn take_reactive_function_profiles(&mut self) -> Vec<ReactiveFunctionProfile> {
+        std::mem::take(&mut self.reactive_function_profiles)
+    }
+
+    fn effect_target_profile_name(target: &EffectTarget) -> String {
+        match target {
+            EffectTarget::BufferId(Some(id)) => format!("buf#{id}"),
+            EffectTarget::BufferId(None) => "active-buffer".to_string(),
+            EffectTarget::BufferName(name) => name.clone(),
+        }
+    }
+
+    fn begin_function_profile(&mut self) -> bool {
+        let Some(filter) = self.function_profile_filter.as_deref() else {
+            return false;
+        };
+        if self.active_function_profiler.is_some() {
+            return false;
+        }
+        let target = Self::effect_target_profile_name(&self.current_effect_target);
+        if filter != "all" && filter != target {
+            return false;
+        }
+        self.active_function_profiler = Some(FunctionProfiler::new());
+        true
+    }
+
+    fn finish_function_profile(&mut self, started: bool, subtree_root_id: Option<u64>) {
+        if !started {
+            return;
+        }
+        let Some(profiler) = self.active_function_profiler.take() else {
+            return;
+        };
+        let (elapsed, functions) = profiler.finish();
+        let target = Self::effect_target_profile_name(&self.current_effect_target);
+        let ranked = functions
+            .iter()
+            .take(15)
+            .enumerate()
+            .map(|(index, timing)| {
+                format!(
+                    "{}:{} self={:.3}ms incl={:.3}ms calls={}",
+                    index + 1,
+                    timing.function,
+                    timing.self_time.as_secs_f64() * 1000.0,
+                    timing.inclusive_time.as_secs_f64() * 1000.0,
+                    timing.calls,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "[lisp-profile] target={target} root={} total={:.3}ms ranked=[{ranked}]",
+            subtree_root_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            elapsed.as_secs_f64() * 1000.0,
+        );
+        self.reactive_function_profiles.push(ReactiveFunctionProfile {
+            target: self.current_effect_target.clone(),
+            subtree_root_id,
+            elapsed,
+            functions,
+        });
+    }
+
+    fn profile_chunk_name(&self, chunk_idx: usize) -> String {
+        let Some(chunk) = self.chunks.get(chunk_idx) else {
+            return format!("<chunk:{chunk_idx}>");
+        };
+        if let Some(symbol) = chunk.source_symbol.as_ref() {
+            return symbol.clone();
+        }
+        let source = chunk
+            .source_file
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("repl");
+        format!("<anonymous:{source}#{chunk_idx}>")
+    }
+
+    fn profile_enter_chunk(&mut self, chunk_idx: usize) {
+        let function = self.profile_chunk_name(chunk_idx);
+        if let Some(profiler) = self.active_function_profiler.as_mut() {
+            profiler.enter(function);
+        }
+    }
+
+    fn profile_exit_chunk(&mut self) {
+        if let Some(profiler) = self.active_function_profiler.as_mut() {
+            profiler.exit();
+        }
+    }
+
+    fn profile_stack_depth(&self) -> usize {
+        self.active_function_profiler
+            .as_ref()
+            .map(|profiler| profiler.calls.len())
+            .unwrap_or(0)
+    }
+
+    fn unwind_profile_stack(&mut self, depth: usize) {
+        while self.profile_stack_depth() > depth {
+            self.profile_exit_chunk();
+        }
+    }
+
     pub fn take_last_reactive_error_context(&mut self) -> Option<String> {
         self.last_reactive_error_context.take()
     }
@@ -5874,6 +6275,7 @@ impl VM {
         parent_root_id: Option<u64>,
         callable: &Value,
     ) -> Option<Value> {
+        self.drop_render_caches_after_sealed_violation();
         let node_id = self.dag.effect_id_for_subtree_root(root_id)?;
         if self.dag.is_dirty(node_id) {
             return None;
@@ -5933,6 +6335,15 @@ impl VM {
         result.map(|value| (value, captured_reactive_reads, captured_symbol_reads))
     }
 
+    /// Release builds tolerate a write into a sealed render instead of
+    /// aborting; the cached renders are keyed by the cell identity that write
+    /// just invalidated, so drop them all before anything reuses one.
+    fn drop_render_caches_after_sealed_violation(&mut self) {
+        if take_sealed_annotation_violation() {
+            self.subtree_render_cache.clear();
+        }
+    }
+
     fn store_subtree_render_cache(
         &mut self,
         owner: &RegisteredSubtreeOwner,
@@ -5948,10 +6359,15 @@ impl VM {
             .iter()
             .map(|cell| cell.borrow().deep_clone())
             .collect();
+        // Stable-id annotation memoizes this graph by cell identity. Sealing
+        // makes that identity meaningful in release builds too: VM field
+        // writes cannot mutate a cached render behind the memo.
+        seal_widget_tree_annotation_input(rendered);
         self.subtree_render_cache.insert(
             owner.root_id,
             SubtreeRenderCache {
                 value: rendered.clone(),
+                annotation: None,
                 chunk_idx: *chunk_idx,
                 upvalues,
                 parent_root_id: owner.parent_root_id,
@@ -6487,6 +6903,49 @@ impl VM {
         self.mark_source_dependents_dirty(source_id, current);
     }
 
+    fn effect_target_is_visible(&self, node_id: NodeId) -> bool {
+        if self.hidden_effect_buffer_names.is_empty() {
+            return true;
+        }
+        match self.dag.nodes.get(&node_id) {
+            Some(ReactiveNode::Effect {
+                target: EffectTarget::BufferName(name),
+                ..
+            }) => !self.hidden_effect_buffer_names.contains(name),
+            _ => true,
+        }
+    }
+
+    pub(crate) fn set_hidden_effect_buffer_names(&mut self, names: HashSet<String>) {
+        self.hidden_effect_buffer_names = names;
+    }
+
+    pub(crate) fn process_visible_dirty_effects(&mut self) -> Result<(), VMError> {
+        self.process_dirty_reactive()
+    }
+
+    /// True when a named effect deferred while its buffer was hidden now
+    /// targets a visible buffer, so a reactive cycle would resume real work.
+    pub(crate) fn has_visible_deferred_effects(&self) -> bool {
+        // Mid-cycle the dirty set is live working state, not deferred work;
+        // resuming from inside an effect run would reorder the cycle.
+        if self.processing_reactive {
+            return false;
+        }
+        self.dag.dirty_nodes.iter().any(|node_id| {
+            if self.dag.is_detached_subtree_effect(*node_id) {
+                return false;
+            }
+            matches!(
+                self.dag.nodes.get(node_id),
+                Some(ReactiveNode::Effect {
+                    target: EffectTarget::BufferName(name),
+                    ..
+                }) if !self.hidden_effect_buffer_names.contains(name)
+            )
+        })
+    }
+
     pub(crate) fn process_dirty_reactive(&mut self) -> Result<(), VMError> {
         if self.processing_reactive {
             return Ok(());
@@ -6528,6 +6987,14 @@ impl VM {
                     // detached this subtree (its panel left the tree); leave
                     // it dirty for a future re-registration to see.
                     if self.dag.is_detached_subtree_effect(node_id) {
+                        continue;
+                    }
+                    // Keep hidden named buffers dirty rather than spending the
+                    // frame rebuilding a tree no tile can present. Visibility
+                    // changes resume these nodes before the newly visible tile
+                    // is rendered, so the cached tree never becomes canonical
+                    // stale state.
+                    if !self.effect_target_is_visible(node_id) {
                         continue;
                     }
                     let Some(chunk_idx) = self.dag.chunk_idx(node_id) else {
@@ -6587,9 +7054,11 @@ impl VM {
                             self.current_effect_symbol_reads = Some(HashSet::new());
                             let label = self.reactive_node_label(node_id);
                             let started = Instant::now();
+                            let profile_started = self.begin_function_profile();
                             self.tracking_stack.push(node_id);
                             let render_result = self.render_registered_subtree_owner(&owner);
                             let _ = self.tracking_stack.pop();
+                            self.finish_function_profile(profile_started, Some(root_id));
                             let rendered_tree = render_result.map_err(|error| {
                                 self.last_reactive_error_context =
                                     label.clone().or_else(|| Some(format!("node:{node_id}")));
@@ -6613,6 +7082,7 @@ impl VM {
                             // Ancestors' cached trees now embed a stale copy
                             // of this subtree; they must re-render if reused.
                             self.invalidate_ancestor_subtree_render_caches(root_id);
+                            self.drop_render_caches_after_sealed_violation();
                             let mut path = Vec::new();
                             let annotated_tree = annotate_widget_tree_stable_ids(
                                 &rendered_tree,
@@ -6621,6 +7091,7 @@ impl VM {
                                 &self.current_effect_target,
                                 None,
                                 &mut path,
+                                &mut self.subtree_render_cache,
                             );
                             freeze_widget_tree(&annotated_tree);
                             {
@@ -6702,7 +7173,15 @@ impl VM {
                     }
                     let label = self.reactive_node_label(node_id);
                     let started = Instant::now();
+                    let profile_started = self.begin_function_profile();
                     let execute_result = self.execute_from(chunk_idx);
+                    self.finish_function_profile(
+                        profile_started,
+                        self.dag.nodes.get(&node_id).and_then(|node| match node {
+                            ReactiveNode::Effect { subtree_root_id, .. } => *subtree_root_id,
+                            _ => None,
+                        }),
+                    );
                     if capturing_effect_reads {
                         let _ = self.tracking_stack.pop();
                     }
@@ -6828,7 +7307,24 @@ impl VM {
         self.execute_with_frames(vec![self.new_frame()])
     }
 
-    fn execute_with_frames(&mut self, mut frames: Vec<Frame>) -> Result<Option<Value>, VMError> {
+    fn execute_with_frames(&mut self, frames: Vec<Frame>) -> Result<Option<Value>, VMError> {
+        if self.active_function_profiler.is_some() {
+            let profile_depth = self.profile_stack_depth();
+            for frame in &frames {
+                self.profile_enter_chunk(frame.chunk_idx);
+            }
+            let result = self.execute_with_frames_impl::<true>(frames);
+            self.unwind_profile_stack(profile_depth);
+            result
+        } else {
+            self.execute_with_frames_impl::<false>(frames)
+        }
+    }
+
+    fn execute_with_frames_impl<const PROFILE: bool>(
+        &mut self,
+        mut frames: Vec<Frame>,
+    ) -> Result<Option<Value>, VMError> {
         let mut stack: Vec<Rc<RefCell<Value>>> = vec![];
 
         while frames.last().unwrap().pc < self.chunks[self.current_chunk].ops.len() {
@@ -7592,6 +8088,9 @@ impl VM {
                                     *slot = stack.pop();
                                 }
                                 frames.last_mut().unwrap().pc += 1;
+                                if PROFILE {
+                                    self.profile_enter_chunk(chunk_idx);
+                                }
                                 frames.push(frame);
                             }
                             Value::NativeFunction(native) => {
@@ -7703,6 +8202,7 @@ impl VM {
                 }
                 OpCode::EmitTree => match stack.pop() {
                     Some(tree) => {
+                        self.drop_render_caches_after_sealed_violation();
                         let mut path = Vec::new();
                         let annotated_tree = annotate_widget_tree_stable_ids(
                             &tree.borrow(),
@@ -7711,6 +8211,7 @@ impl VM {
                             &self.current_effect_target,
                             None,
                             &mut path,
+                            &mut self.subtree_render_cache,
                         );
                         freeze_widget_tree(&annotated_tree);
                         if let Some((subtree_root_id, _stable_key)) =
@@ -7748,6 +8249,9 @@ impl VM {
                 },
                 OpCode::Return => match stack.pop() {
                     Some(return_value) => {
+                        if PROFILE {
+                            self.profile_exit_chunk();
+                        }
                         frames.pop();
                         if let Some(caller_frame) = frames.last() {
                             self.current_chunk = caller_frame.chunk_idx;
@@ -7784,6 +8288,47 @@ mod tests {
         SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, STABLE_KEY_PROP, VM,
         VMError, Value, debug_assert_cell_not_frozen, freeze_widget_tree,
     };
+
+    #[test]
+    fn lisp_function_profiler_attributes_nested_calls_by_chunk_name() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.eval_str(
+            "(def profile-inner (x) (+ x 1))\n\
+             (def profile-outer (x) (profile-inner (profile-inner x)))",
+        )
+        .expect("compile profile fixture");
+        vm.function_profile_filter = Some("*fx*".to_string());
+        vm.current_effect_target = EffectTarget::BufferName("*fx*".to_string());
+
+        assert!(vm.begin_function_profile());
+        let callable = vm.global_value("profile-outer").expect("profile-outer");
+        assert_eq!(
+            vm.invoke(callable, vec![Value::Number(1.0)])
+                .expect("invoke profile fixture"),
+            Some(Value::Number(3.0)),
+        );
+        vm.finish_function_profile(true, None);
+
+        let profiles = vm.take_reactive_function_profiles();
+        assert_eq!(profiles.len(), 1);
+        let profile = &profiles[0];
+        assert_eq!(profile.target, EffectTarget::BufferName("*fx*".to_string()));
+        let outer = profile
+            .functions
+            .iter()
+            .find(|timing| timing.function.ends_with("profile-outer"))
+            .expect("outer attribution");
+        let inner = profile
+            .functions
+            .iter()
+            .find(|timing| timing.function.ends_with("profile-inner"))
+            .expect("inner attribution");
+        assert_eq!(outer.calls, 1);
+        assert_eq!(inner.calls, 2);
+        assert!(outer.inclusive_time >= outer.self_time);
+        assert!(inner.inclusive_time >= inner.self_time);
+    }
 
     fn hook_test_vm() -> (VM, Rc<RefCell<Vec<f64>>>) {
         let mut vm = VM::new(Vec::new());
@@ -10651,6 +11196,57 @@ counter
         let (tree, label_cell) = tree_with_label("frozen");
         freeze_widget_tree(&tree);
         debug_assert_cell_not_frozen(&label_cell, "test mutation");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "widget-tree annotation cache violation")]
+    fn sealed_annotation_input_panics_on_mutation_in_debug() {
+        let (tree, label_cell) = tree_with_label("sealed");
+        super::seal_widget_tree_annotation_input(&tree);
+        debug_assert_cell_not_frozen(&label_cell, "test sealed mutation");
+    }
+
+    /// Release builds must not abort the app over Lisp that mutates a value
+    /// handed to it inside a cached subtree render; they record a violation so
+    /// the VM drops its (now untrustworthy) cached renders instead.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn sealed_annotation_input_mutation_is_tolerated_in_release() {
+        let (tree, label_cell) = tree_with_label("sealed");
+        super::seal_widget_tree_annotation_input(&tree);
+        assert!(!super::take_sealed_annotation_violation());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            debug_assert_cell_not_frozen(&label_cell, "test sealed mutation");
+        }));
+        assert!(result.is_ok(), "release builds must tolerate the write");
+        assert!(
+            super::take_sealed_annotation_violation(),
+            "the violation must be recorded so cached renders are dropped"
+        );
+        assert!(
+            !super::take_sealed_annotation_violation(),
+            "taking the violation clears it"
+        );
+    }
+
+    /// The guard runs on every reactive/field write, so the sealed-cell count
+    /// must gate it: with nothing sealed there is no registry work at all, and
+    /// an unsealed cell never disturbs the registry.
+    #[test]
+    fn unsealed_cell_mutation_leaves_the_sealed_registry_alone() {
+        let count = || super::SEALED_ANNOTATION_INPUT_COUNT.with(|count| count.get());
+        let (_unsealed_tree, unsealed_cell) = tree_with_label("unsealed");
+        assert_eq!(count(), 0, "nothing is sealed on a fresh thread");
+        debug_assert_cell_not_frozen(&unsealed_cell, "test mutation");
+        assert_eq!(count(), 0);
+
+        let (sealed_tree, _sealed_cell) = tree_with_label("sealed");
+        super::seal_widget_tree_annotation_input(&sealed_tree);
+        let sealed_count = count();
+        assert!(sealed_count > 0);
+        debug_assert_cell_not_frozen(&unsealed_cell, "test mutation");
+        assert_eq!(count(), sealed_count, "an unsealed cell is not registered");
     }
 
     #[test]

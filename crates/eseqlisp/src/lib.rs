@@ -2447,6 +2447,29 @@ mod tests {
         );
     }
 
+    fn keyed_subtree_prop_cell(
+        value: &Value,
+        stable_key: &str,
+        prop: &str,
+    ) -> Option<Rc<RefCell<Value>>> {
+        let Value::Map(map) = value else {
+            return None;
+        };
+        if matches!(
+            map.get("__stable-key").map(|cell| cell.borrow().clone()),
+            Some(Value::String(key)) if key == stable_key
+        ) {
+            return map.get(prop).cloned();
+        }
+        let children = map.get("children")?;
+        let Value::List(children) = &*children.borrow() else {
+            return None;
+        };
+        children
+            .iter()
+            .find_map(|child| keyed_subtree_prop_cell(&child.borrow(), stable_key, prop))
+    }
+
     /// Recursively finds the first `label` text in a rendered widget tree.
     fn first_label_text(value: &Value) -> Option<String> {
         let Value::Map(map) = value else {
@@ -2550,6 +2573,65 @@ mod tests {
             panic!("expected full tree update");
         };
         assert_eq!(first_label_text(&update.tree).as_deref(), Some("value: 2"));
+    }
+
+    #[test]
+    fn cached_subtree_annotation_preserves_cells_only_in_the_same_stable_id_context() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "APP",
+            vec![
+                ("rerun", Value::Number(0.0)),
+                ("leading-sibling", Value::Bool(false)),
+            ],
+            false,
+        );
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*annotation-identity*"
+                  (let ((_ APP.rerun))
+                    (v-stack
+                      (if APP.leading-sibling (label "leading") nil)
+                      (subtree :key "panel"
+                        (box (label "cached"))))))
+                "#,
+            )
+            .expect("eval annotation identity effect");
+        let initial = runtime.take_pending_buffer_widget_trees();
+        let crate::vm::PendingUiUpdate::FullTree(initial) = &initial[0] else {
+            panic!("expected initial full tree");
+        };
+        let initial_children = keyed_subtree_prop_cell(&initial.tree, "panel", "children")
+            .expect("initial cached subtree children");
+
+        runtime.set_reactive("APP", "rerun", Value::Number(1.0));
+        runtime.run_reactive_cycle();
+        let same_context = runtime.take_pending_buffer_widget_trees();
+        let crate::vm::PendingUiUpdate::FullTree(same_context) = &same_context[0] else {
+            panic!("expected same-context full tree");
+        };
+        let same_context_children =
+            keyed_subtree_prop_cell(&same_context.tree, "panel", "children")
+                .expect("same-context cached subtree children");
+        assert!(
+            Rc::ptr_eq(&initial_children, &same_context_children),
+            "unchanged cached subtree annotation must preserve cell identity"
+        );
+
+        runtime.set_reactive("APP", "leading-sibling", Value::Bool(true));
+        runtime.run_reactive_cycle();
+        let changed_context = runtime.take_pending_buffer_widget_trees();
+        let crate::vm::PendingUiUpdate::FullTree(changed_context) = &changed_context[0] else {
+            panic!("expected changed-context full tree");
+        };
+        let changed_context_children =
+            keyed_subtree_prop_cell(&changed_context.tree, "panel", "children")
+                .expect("changed-context cached subtree children");
+        assert!(
+            !Rc::ptr_eq(&same_context_children, &changed_context_children),
+            "a changed tree path must not reuse stable-id annotation"
+        );
     }
 
     /// eseq-4kd: reuse is refused when the subtree body's captured inputs

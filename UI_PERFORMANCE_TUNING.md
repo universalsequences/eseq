@@ -80,6 +80,42 @@ dirty widgets, relayouts, and primitive runs rebuilt. Counts often expose the
 root cause more clearly than elapsed time. Remove noisy ad hoc logging when the
 investigation is complete, or turn generally useful data into a compact trace.
 
+### Built-in profiling switches
+
+The profiling switches are independent and may be combined:
+
+- `ESEQLISP_PROFILE_UI=1` prints one-second runtime/render aggregates and hot
+  reactive effects.
+- `ESEQLISP_TRACE_UI=1` prints individual reactive cycles;
+  `ESEQLISP_TRACE_UI_FILTER` limits the dirty fields shown.
+- `ESEQLISP_PROFILE_CLONES=1` prints the VM's clone counters once per second.
+- `ESEQLISP_PROFILE_LISP=1` instruments Lisp calls made by the `*fx*` reactive
+  root and prints the 15 functions with the most exclusive (self) time after
+  each rerun. Set the value to another buffer name, such as `*sequencer*`, to
+  profile that root, or to `all` to profile every reactive target.
+
+A Lisp profile record has this form:
+
+```text
+[lisp-profile] target=*fx* root=- total=14.972ms ranked=[1:custom-ui-lego-knob self=3.181ms incl=4.925ms calls=52, ...]
+```
+
+`self` excludes time in called Lisp functions; `incl` includes it. Native work
+is charged to the Lisp function that invoked the native. Anonymous closures are
+reported as `<anonymous:file#chunk>`, while named chunks use their Lisp function
+name. The profiler is call instrumentation rather than a statistical OS CPU
+sampler, so enabled timings include profiler overhead and should be used for
+attribution, not latency baselines. When the switch is unset, the VM selects an
+uninstrumented execution-loop specialization once per execution entry: it does
+not read the clock, allocate profile state, or branch per opcode or Lisp call.
+Run the release drift probe with attribution using:
+
+```sh
+ESEQLISP_PROFILE_LISP=1 cargo nextest run -p sequencer --release \
+  --run-ignored only --no-capture \
+  -E 'test(=tests::drift_same_instrument_track_switch_end_to_end_perf)'
+```
+
 ## 5. Fix the unnecessary work at its owner
 
 Optimize the earliest architectural cause, not the slow fixture. Typical fixes
@@ -462,6 +498,48 @@ the slowest effect bodies the reactive cycle actually re-ran (from
 | side effects (layout refresh) | 38.1 ms | 38.1 ms |
 | frame construction | 1.3 ms | 1.3 ms |
 | retained primitive refresh | 2.6 ms | 2.8 ms |
+
+### eseq-md1n.2: destination-only track publication
+
+The track-switch publisher now updates only surfaces whose inputs depend on
+its destination track. Project topology, track names, pattern topology, mixer,
+meter, modulator, and accumulator snapshots retain their existing publication.
+The selecting native's already-pending structural fx revision owns the effects,
+MIDI effects, instrument panel, step p-lock flags, and bus effects, instead of
+rebuilding them once in the track branch and again in the fx-epoch branch.
+
+Instrument preset banks are cached by resolved path, with no freshness check on
+a warm hit: a hit is a hash lookup plus an `Arc` clone, never a `stat`. Cache
+correctness comes from explicit invalidation instead — preset saves, instrument
+source saves, instrument moves, and the patch-fork bank materialization all drop
+the affected entry, and a bank that is missing at read time is not cached at all
+so one that appears later is still picked up. Edits made to a bank by another
+process, after this process has read it, are not observed until something
+invalidates it. The sidebar's names-only query therefore clones just the names
+out of the cached bank instead of reading and parsing Drift's 132 KB JSON bank
+on every switch, and read-only callers take the shared `Arc`
+(`load_instrument_presets_shared`) rather than deep-cloning the bank.
+
+Same-machine before/after (Apple M1 Max, 2026-08-26, medians at 832f073a vs
+this change): `track_switch_ms` fell from **4.20/4.08/3.19/3.09 ms** to
+**1.72/1.75/1.47/1.45 ms** (2.1-2.45x) across drift-a-to-b / drift-b-to-a /
+synthid-a-to-b / synthid-b-to-a. `epoch_sync_ms` stayed flat
+(**1.57/1.52/1.21/1.18 -> 1.65/1.70/1.53/1.48 ms**): on this host it was never
+inflated — the duplicate panel build this change removes was accounted in
+`track_switch_ms`, and the fx-epoch branch's remaining cost is the single
+necessary destination-panel build. Combined publication cost per switch:
+5.77 -> 3.37 ms. The always-run smoke probe and the release probe both kept the
+destination owner, highlight, binding-identity, panel-identity, and
+parameter-isolation assertions green. Linux before/after remains to be measured
+on that machine; these host numbers are not substituted into the Linux
+total-latency table above.
+
+Review hardening (eseq-md1n.2): a track switch that defers panel publication
+now bumps `fx_epoch` when no structural revision is pending — covering a switch
+with an empty selection while `*fx*` is hidden (the panel catches up
+structurally on the first frame `*fx*` is shown again) and a switch frame where
+only `fx_value_epoch` is pending (a value patch cannot carry the new owner's
+panel structure).
 
 Work counts are unchanged and are the point: one track switch re-runs 5
 buffer roots and dirties 10 reactive fields, and `subtree_reruns` stays 0.

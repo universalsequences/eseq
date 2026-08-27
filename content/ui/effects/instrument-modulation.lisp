@@ -37,7 +37,7 @@
            :padding 0.25
         (h-stack :width :fill :gap 0.45 :align :center
           (if source-p
-            (dropdown :value (get source-p :text-value)
+            (dropdown :value (pc/fx-param-text-value-for false source-p)
               :options (get source-p :options)
               :on-change (lambda (v) (pc/fx-set-instrument-option source-p v))
               :width 4.8 :height 1.15 :font-size 10)
@@ -74,7 +74,7 @@
             :instrument-control-bg)
           :color (if (= eseq.effects.state/instrument-selected-mod-slot slot) :white :dim)
           :on-click (lambda (info) (set! eseq.effects.state/instrument-selected-mod-slot slot)))
-        (dropdown :value (if source-p (get source-p :text-value) "off")
+        (dropdown :value (if source-p (pc/fx-param-text-value-for false source-p) "off")
           :options (if source-p (get source-p :options) '())
           :on-change (lambda (v) (if source-p (pc/fx-set-instrument-option source-p v) false))
           :width 4.8 :height 1.1 :font-size 8.5)))))
@@ -122,7 +122,7 @@
 (def source-dropdown (p title width)
   (v-stack :width width :height 1.72 :gap 0.10 :align :start
     (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
-    (dropdown :value (if p (get p :text-value) "")
+    (dropdown :value (if p (pc/fx-param-text-value-for false p) "")
       :options (if p (get p :options) '())
       :on-change (lambda (v) (if p (pc/fx-set-instrument-option p v) false))
       :width width :height 0.88 :font-size 8.5)))
@@ -222,7 +222,7 @@
 
 (def source-type (section)
   (let ((source-p (get section :source-param)))
-    (if source-p (get source-p :text-value) "off")))
+    (if source-p (pc/fx-param-text-value-for false source-p) "off")))
 
 (def selected-mod-source-editor (inst)
   (let ((slot (pc/instrument-mod-selected-slot)))

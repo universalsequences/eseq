@@ -45,10 +45,10 @@
     /// VM profiler) and a quieter CI host would both let this become a real
     /// gate.
     const DRIFT_SWITCH_CEILINGS_MS: &[(&str, f64)] = &[
-        ("drift-a-to-b", 260.0),
-        ("drift-b-to-a", 275.0),
-        ("synthid-a-to-b", 185.0),
-        ("synthid-b-to-a", 130.0),
+        ("drift-a-to-b", 245.0),
+        ("drift-b-to-a", 260.0),
+        ("synthid-a-to-b", 170.0),
+        ("synthid-b-to-a", 115.0),
     ];
 
     fn perf_probe_project_fixture(name: &str) -> PathBuf {
@@ -4687,6 +4687,7 @@
                                         selection: &neural_selection,
                                         expanded_step_projection: &expanded_step_projection,
                                         track: TRACK,
+                                        current_track_idx: TRACK,
                                         param_idx,
                                         display_step,
                                         sync_plock_list: plock && !plock_row_existed,
@@ -9540,40 +9541,10 @@
                     reset_sampler_waveform_view(editor);
                     let revision = build_revision(&state, app);
                     let rt = editor.runtime_mut();
-                    sync_shared_track_collapsed(&track_collapsed, app);
-                    sync_track_name_state(rt, &mut track_names, app);
-                    sync_pattern_state(rt, &state);
                     set_current_track_reactive(rt, app.tracks.len(), ct);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                     sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
                     sync_step_param_lists(rt, &state, ct);
-                    sync_track_mixer_state(rt, app, &state);
-                    sync_bus_mixer_state(rt, app);
-                    sync_track_peak_fields(rt, &cached_track_peak_levels);
-                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
-                    sync_modulator_phase_fields(rt, &cached_modulator_phases);
-                    sync_modulator_level_fields(rt, &cached_modulator_levels);
-                    rt.set_reactive(
-                        "SEQ",
-                        "effects",
-                        build_effects_value(
-                            &state,
-                            ct,
-                            &app.graph.effect_descriptors,
-                            &selected_steps,
-                        ),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "midi-effects",
-                        build_midi_effects_value(&state, ct, &selected_steps),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "instrument-panel",
-                        build_instrument_panel_value(app, ct, &selected_steps),
-                    );
-                    *accumulator_names.lock().unwrap() = build_accumulator_names(app);
                     if super::reactive_tick::claim_param_sync_revision(
                         &mut frame.track_param_sync_revision,
                         &revision,
@@ -9600,11 +9571,6 @@
                             Some(&neural),
                         );
                     }
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-                    );
                     sync_sidebar_browser(rt, app, ct);
                     frame.prev_current_track = ct;
                     frame.prev_pattern_epoch =
@@ -10024,17 +9990,15 @@
                 )
             };
 
-            // Which tracks the *fx* tile's instrument controls are actually
-            // bound to. Every custom-instrument control binds the SEQ float
-            // field `track-<track>-instrument-param-<idx>-<name>`
-            // (state_values::shared::instrument_param_value_field), so the
-            // set of track indices in the rendered tile is the panel's real
-            // identity: a stale panel keeps binding the previous track.
-            let fx_instrument_binding_tracks =
-                |editor: &mut Editor| -> std::collections::BTreeSet<usize> {
-                    fn collect_binding_tracks(
+            // Custom-instrument controls must bind only the current-fx-relative
+            // field family. Track-addressed bindings would make every control
+            // subtree's captured parameter map differ after a track switch.
+            let fx_instrument_bindings =
+                |editor: &mut Editor| -> (std::collections::BTreeSet<usize>, usize) {
+                    fn collect_bindings(
                         node: &eseqlisp::layout::LayoutNode,
-                        out: &mut std::collections::BTreeSet<usize>,
+                        tracks: &mut std::collections::BTreeSet<usize>,
+                        relative: &mut usize,
                     ) {
                         for value in node.props.values() {
                             let Value::ReactiveRef {
@@ -10046,21 +10010,24 @@
                             if namespace != "SEQ" {
                                 continue;
                             }
+                            if field.starts_with("fx-instrument-param-") {
+                                *relative += 1;
+                                continue;
+                            }
                             let Some(rest) = field.strip_prefix("track-") else {
                                 continue;
                             };
                             let Some((track, tail)) = rest.split_once('-') else {
                                 continue;
                             };
-                            if !tail.starts_with("instrument-param-") {
-                                continue;
-                            }
-                            if let Ok(track) = track.parse::<usize>() {
-                                out.insert(track);
+                            if tail.starts_with("instrument-param-") {
+                                if let Ok(track) = track.parse::<usize>() {
+                                    tracks.insert(track);
+                                }
                             }
                         }
                         for child in &node.children {
-                            collect_binding_tracks(child, out);
+                            collect_bindings(child, tracks, relative);
                         }
                     }
                     let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
@@ -10075,8 +10042,9 @@
                         .expect("visible fx tile");
                     let layout = tile.frame.widget_layout.as_ref().expect("fx tile layout");
                     let mut tracks = std::collections::BTreeSet::new();
-                    collect_binding_tracks(layout, &mut tracks);
-                    tracks
+                    let mut relative = 0;
+                    collect_bindings(layout, &mut tracks, &mut relative);
+                    (tracks, relative)
                 };
 
             // The instrument name the *fx* tile displays, read off the
@@ -10446,18 +10414,18 @@
                             }
                         }
                         if drift_switch {
-                            // Panel identity: after the switch the *fx*
-                            // tile's instrument controls must bind the
-                            // destination track and nothing else. This is
-                            // checked on EVERY sample, not just iteration 0
-                            // — a one-frame-late panel is exactly the
-                            // failure a faster switch could introduce.
-                            let track = expect_track.expect("drift transitions select a track");
-                            let bound = fx_instrument_binding_tracks(editor);
-                            assert_eq!(
-                                bound,
-                                std::collections::BTreeSet::from([track]),
-                                "{label} click {iteration}: the fx tile must bind only track {track}'s instrument params"
+                            // This is checked on every sample: a stale cached
+                            // tree is safe only because its bindings are
+                            // current-track-relative rather than owner-specific.
+                            let _track = expect_track.expect("drift transitions select a track");
+                            let (track_bound, relative_count) = fx_instrument_bindings(editor);
+                            assert!(
+                                track_bound.is_empty(),
+                                "{label} click {iteration}: fx controls retained track-addressed bindings {track_bound:?}"
+                            );
+                            assert!(
+                                relative_count > 0,
+                                "{label} click {iteration}: fx controls must bind current-track-relative instrument fields"
                             );
                         }
                         if iteration == 0 {

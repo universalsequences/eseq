@@ -956,6 +956,15 @@ fn hot_reload_effect_buffer_keeps_reactive_dependencies_after_body_reload() {
     );
     editor.process_lisp_reload_report(report);
 
+    // Hidden named buffers defer reactive reruns (eseq-md1n.4); present the
+    // target in a second tile so the reload keeps its live-update contract.
+    let hot_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*hot-reactive*")
+        .expect("hot-reactive buffer");
+    editor.split_active_tile(SplitDir::Vertical, hot_idx);
+
     let outcome = editor
         .runtime_mut()
         .set_reactive("APP", "count", Value::Number(2.0));
@@ -1046,6 +1055,15 @@ fn hot_reload_effect_buffer_keeps_subtree_reactive_dependencies_after_body_reloa
         report.diagnostics
     );
     editor.process_lisp_reload_report(report);
+
+    // Hidden named buffers defer reactive reruns (eseq-md1n.4); present the
+    // target in a second tile so the reload keeps its live-update contract.
+    let hot_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*hot-subtree-reactive*")
+        .expect("hot-subtree-reactive buffer");
+    editor.split_active_tile(SplitDir::Vertical, hot_idx);
 
     let outcome = editor
         .runtime_mut()
@@ -9087,6 +9105,226 @@ fn unpresented_tiled_frame_requeues_inactive_tile_widget_dirtiness() {
 }
 
 #[test]
+fn hidden_effect_buffer_defers_rerender_until_the_target_becomes_visible() {
+    let mut runtime = Runtime::new();
+    runtime.register_reactive("APP", vec![("count", Value::Number(1.0))], true);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*controls*"
+              (label (fmt "count:{}" APP.count)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let controls_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*controls*")
+        .expect("effect-buffer should create its target")
+        .id;
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "count", Value::Number(7.0));
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let hidden_tree = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.id == controls_id)
+        .and_then(|buffer| buffer.widget_tree.as_ref())
+        .expect("hidden target should retain its last committed tree");
+    let hidden_rendered = crate::vm::format_lisp_value(hidden_tree);
+    assert!(
+        hidden_rendered.contains("count:1"),
+        "hidden effect must not rerender eagerly: {hidden_rendered}"
+    );
+
+    editor.set_active_buffer(controls_id);
+    // This is the reactive phase of the same frame that presents the buffer.
+    // It must resume deferred work even though no new reactive field changed.
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let visible_tree = editor
+        .runtime
+        .current_widget_tree()
+        .expect("newly visible target should have a current tree");
+    let visible_rendered = crate::vm::format_lisp_value(&visible_tree);
+    assert!(
+        visible_rendered.contains("count:7"),
+        "newly visible target must be current in its first frame: {visible_rendered}"
+    );
+}
+
+#[test]
+fn selecting_a_tile_tab_resumes_the_revealed_buffers_deferred_effect() {
+    let mut runtime = Runtime::new();
+    runtime.register_reactive("APP", vec![("count", Value::Number(1.0))], true);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*tab-a*"
+              (label (fmt "a:{}" APP.count)))
+            (effect-buffer "*tab-b*"
+              (label (fmt "b:{}" APP.count)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let buffer_id = |editor: &Editor, name: &str| {
+        editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == name)
+            .unwrap_or_else(|| panic!("{name} should exist"))
+            .id
+    };
+    let buffer_idx = |editor: &Editor, name: &str| {
+        editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == name)
+            .unwrap_or_else(|| panic!("{name} should exist"))
+    };
+    let tab_a_id = buffer_id(&editor, "*tab-a*");
+    let tab_b_idx = buffer_idx(&editor, "*tab-b*");
+
+    editor.set_active_buffer(tab_a_id);
+    editor
+        .set_tabs_in_tile_showing(
+            "*tab-a*",
+            vec![
+                crate::runtime::LayoutTabSpec {
+                    label: "A".to_string(),
+                    buffer_name: "*tab-a*".to_string(),
+                    on_close: None,
+                },
+                crate::runtime::LayoutTabSpec {
+                    label: "B".to_string(),
+                    buffer_name: "*tab-b*".to_string(),
+                    on_close: None,
+                },
+            ],
+        )
+        .expect("tabs should install");
+
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "count", Value::Number(7.0));
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let hidden_rendered = crate::vm::format_lisp_value(
+        editor.buffers[tab_b_idx]
+            .widget_tree
+            .as_ref()
+            .expect("hidden tab target keeps its committed tree"),
+    );
+    assert!(
+        hidden_rendered.contains("b:1"),
+        "hidden tab target must defer while it is not presented: {hidden_rendered}"
+    );
+
+    // Clicking the tab presents *tab-b*; no unrelated reactive change follows,
+    // so the tab click itself has to resume the deferred effect.
+    let tile_id = editor.active_tile;
+    assert!(editor.select_tile_tab(tile_id, 1, 0));
+
+    let revealed_rendered = crate::vm::format_lisp_value(
+        editor.buffers[tab_b_idx]
+            .widget_tree
+            .as_ref()
+            .expect("revealed tab target should have a tree"),
+    );
+    assert!(
+        revealed_rendered.contains("b:7"),
+        "tab selection must resume deferred work for the revealed buffer: {revealed_rendered}"
+    );
+}
+
+#[test]
+fn idle_reactive_cycles_leave_hidden_deferred_effects_for_the_presentation_seam() {
+    let mut runtime = Runtime::new();
+    runtime.register_reactive("APP", vec![("count", Value::Number(1.0))], true);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*controls*"
+              (label (fmt "count:{}" APP.count)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let controls_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*controls*")
+        .expect("effect-buffer should create its target");
+
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "count", Value::Number(7.0));
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    // The deferred effect stays dirty in the DAG. Idle cycles must treat that
+    // as no work at all rather than re-sorting the dirty set every frame.
+    for _ in 0..3 {
+        assert!(
+            !editor.runtime.has_resumable_hidden_effect_work(),
+            "a hidden deferred effect is not resumable work"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+    }
+    let hidden_rendered = crate::vm::format_lisp_value(
+        editor.buffers[controls_idx]
+            .widget_tree
+            .as_ref()
+            .expect("hidden target keeps its committed tree"),
+    );
+    assert!(
+        hidden_rendered.contains("count:1"),
+        "idle cycles must not rerender a hidden target: {hidden_rendered}"
+    );
+
+    // Presenting the buffer makes the same dirty node resumable, and the
+    // resume seam still runs it.
+    editor.split_active_tile(SplitDir::Vertical, controls_idx);
+    let visible_rendered = crate::vm::format_lisp_value(
+        editor.buffers[controls_idx]
+            .widget_tree
+            .as_ref()
+            .expect("presented target should have a tree"),
+    );
+    assert!(
+        visible_rendered.contains("count:7"),
+        "presentation must resume the deferred effect: {visible_rendered}"
+    );
+    assert!(
+        !editor.runtime.has_resumable_hidden_effect_work(),
+        "resumed work should be drained"
+    );
+}
+
+#[test]
 fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -9234,6 +9472,9 @@ fn named_effect_buffer_nested_subtree_updates_when_inactive() {
         .iter()
         .position(|buffer| buffer.name == "*controls*")
         .unwrap();
+    // Hidden named buffers defer reactive reruns (eseq-md1n.4); "inactive"
+    // here means presented in a non-active tile, so split one off for it.
+    editor.split_active_tile(SplitDir::Vertical, controls_idx);
     let initial_tree = editor.buffers[controls_idx]
         .widget_tree
         .clone()
@@ -9393,12 +9634,15 @@ fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
         .unwrap();
     editor.refresh_runtime_side_effects();
 
-    let controls = editor
+    let controls_idx = editor
         .buffers
         .iter()
-        .find(|buffer| buffer.name == "*controls*")
+        .position(|buffer| buffer.name == "*controls*")
         .unwrap();
-    let committed_root_id = controls
+    // Hidden named buffers defer reactive reruns (eseq-md1n.4); present the
+    // target in a second tile so the rerun emits its subtree replacement.
+    editor.split_active_tile(SplitDir::Vertical, controls_idx);
+    let committed_root_id = editor.buffers[controls_idx]
         .committed_ui_snapshot
         .as_ref()
         .and_then(|snapshot| {

@@ -2511,6 +2511,15 @@
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("browser lisp status after refresh: {status}");
         }
+        // Hidden named buffers defer reactive reruns (eseq-md1n.4); present
+        // the browser as production does so tab switches rerender live.
+        let samples_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer")
+            .id;
+        editor.set_active_buffer(samples_id);
         editor
     }
 
@@ -3778,6 +3787,15 @@
     #[test]
     fn metal_seq_browser_explicit_refresh_updates_inactive_samples_editor_panel() {
         let mut editor = browser_editor_on_instrument_tab();
+        // The shared helper presents *samples*; this test specifically covers
+        // the explicit refresh of an inactive browser, so switch away again.
+        let other_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name != "*samples*")
+            .expect("a non-browser buffer")
+            .id;
+        editor.set_active_buffer(other_id);
         let browser_idx = editor
             .buffers
             .iter()
@@ -7731,7 +7749,7 @@
     #[test]
     fn instrument_keys_tab_reads_and_writes_key_lock_values() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let mut cutoff = test_param_map("cutoff", 0, 0.5, 0.0, 1.0);
+        let cutoff = test_param_map("cutoff", 0, 0.5, 0.0, 1.0);
         let mut key_lock = std::collections::HashMap::new();
         key_lock.insert(
             "note".to_string(),
@@ -7741,14 +7759,16 @@
             "value".to_string(),
             Rc::new(RefCell::new(Value::Number(0.8))),
         );
-        cutoff.insert(
-            "key-locks".to_string(),
-            Rc::new(RefCell::new(test_list(vec![Value::Map(key_lock)]))),
-        );
         let mut inst = test_instrument_map();
         inst.insert(
             "synth".to_string(),
             Rc::new(RefCell::new(test_list(vec![Value::Map(cutoff)]))),
+        );
+        inst.insert(
+            "key-locks".to_string(),
+            Rc::new(RefCell::new(test_list(vec![test_list(vec![Value::Map(
+                key_lock,
+            )])]))),
         );
         inst.insert(
             "key-lock-note-variants".to_string(),
@@ -8115,6 +8135,115 @@
                 assert_eq!(*notes[1].borrow(), Value::Number(72.0));
             }
             other => panic!("expected stamp-key-lock-variant host command, got {other:?}"),
+        }
+    }
+
+    /// eseq-md1n.1: bound enum params carry `:value-field` and no longer
+    /// carry `:text-value`, so the dropdown label helper must dereference
+    /// the reactive binding (`nth` treats a raw binding index as nil), and
+    /// must keep reading the param's own field while the mods editor is
+    /// open — the generic value path returns the mod depth there.
+    #[test]
+    fn fx_param_text_value_dereferences_bound_fields() {
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+                ("track-plocks", test_list(vec![])),
+                ("track-plock-variants", test_list(vec![])),
+                ("fx-instrument-param-0-mode", Value::Number(1.0)),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.seq-core-state/cool-off-follow () false)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate eseq.seq-core-state/selected-bus -1)
+                "#,
+            )
+            .expect("install fx lisp test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+
+        let bound_param = r#"(dict :name "mode" :idx 0
+                   :options (list "lowpass" "highpass" "bandpass")
+                   :value-field "fx-instrument-param-0-mode")"#;
+        let label = editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(eseq.effects.param-controls/fx-param-text-value-for false {bound_param})"
+            ))
+            .expect("read bound enum label");
+        assert_eq!(label, Some(Value::String("highpass".to_string())));
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.effects.state/instrument-mods-open true)")
+            .expect("open the mods editor");
+        let modulatable_param = r#"(dict :name "mode" :idx 0 :modulatable true
+                   :options (list "lowpass" "highpass" "bandpass")
+                   :mod-targets (list (dict :depth-idx 1 :depth 2 :source-slot 1))
+                   :value-field "fx-instrument-param-0-mode")"#;
+        let label = editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(eseq.effects.param-controls/fx-param-text-value-for false {modulatable_param})"
+            ))
+            .expect("read bound enum label with mods open");
+        assert_eq!(
+            label,
+            Some(Value::String("highpass".to_string())),
+            "the mods-open depth must not leak into the dropdown label"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.effects.state/instrument-mods-open false)")
+            .expect("close the mods editor");
+
+        // A stored value can be far outside the options list (a synced Delay
+        // time keeps milliseconds while its options list holds divisions).
+        // `nth` past the end returns nil and the dropdown renders "nil", so the
+        // index must be clamped like the old Rust builder clamped it.
+        for (stored, expected) in [(250.0, "bandpass"), (-4.0, "lowpass")] {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "fx-instrument-param-0-mode",
+                Value::Number(stored),
+            );
+            let label = editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(eseq.effects.param-controls/fx-param-text-value-for false {bound_param})"
+                ))
+                .expect("read out-of-range enum label");
+            assert_eq!(
+                label,
+                Some(Value::String(expected.to_string())),
+                "stored value {stored} must clamp into the options list"
+            );
         }
     }
 
@@ -9918,56 +10047,44 @@
     }
 
     #[test]
-    fn instrument_panel_restores_value_field_after_selection_clears() {
+    fn instrument_panel_uses_track_invariant_bound_value_field() {
         let desc = sequencer::effects::EffectDescriptor::builtin_filter();
         let cutoff_idx = desc
             .params
             .iter()
             .position(|param| param.name == "cutoff")
             .expect("filter descriptor should include cutoff");
-        let app = test_app_with_instrument_descriptor(desc.clone());
+        let mut app = test_app_with_instrument_descriptor(desc.clone());
+        app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Custom];
         app.state.pattern.instrument_slots[0]
             .defaults
             .set(cutoff_idx, 5000.0);
         app.state.pattern.instrument_slots[0].set_plock(3, cutoff_idx, 1200.0);
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let value_field =
-            instrument_param_value_field(0, cutoff_idx, &desc.params[cutoff_idx].name);
+            fx_instrument_param_value_field(cutoff_idx, &desc.params[cutoff_idx].name);
+        let mut runtime = Runtime::new();
 
         let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(
-            value_param_number(&default_panel, "cutoff"),
-            Some(5000.0),
-            "unselected instrument panel should show the default value"
-        );
+        assert_eq!(value_param_number(&default_panel, "cutoff"), None);
         assert!(
             value_param_has_value_field(&default_panel, "cutoff", &value_field),
-            "unselected instrument panel should bind cutoff to its default value field"
+            "custom instrument controls must use the current-fx-relative field"
         );
+        sync_fx_instrument_param_value_field(&mut runtime, &app, 0, cutoff_idx, None);
+        assert_eq!(reactive_number(&runtime, "SEQ", &value_field), Some(5000.0));
 
         selected_steps.lock().unwrap().insert(3);
         let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(
-            value_param_number(&selected_panel, "cutoff"),
-            Some(1200.0),
-            "selected instrument panel should show the selected step p-lock"
-        );
-        assert!(
-            value_param_has_value_field(&selected_panel, "cutoff", &value_field),
-            "selected p-lock panel should keep a reactive display value field"
-        );
+        assert_eq!(default_panel, selected_panel);
+        sync_fx_instrument_param_value_field(&mut runtime, &app, 0, cutoff_idx, Some(3));
+        assert_eq!(reactive_number(&runtime, "SEQ", &value_field), Some(1200.0));
 
         selected_steps.lock().unwrap().clear();
         let cleared_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        assert_eq!(
-            value_param_number(&cleared_panel, "cutoff"),
-            Some(5000.0),
-            "cleared selection should return the panel to default values"
-        );
-        assert!(
-            value_param_has_value_field(&cleared_panel, "cutoff", &value_field),
-            "cleared selection should restore default value binding"
-        );
+        assert_eq!(default_panel, cleared_panel);
+        sync_fx_instrument_param_value_field(&mut runtime, &app, 0, cutoff_idx, None);
+        assert_eq!(reactive_number(&runtime, "SEQ", &value_field), Some(5000.0));
     }
 
     #[test]
@@ -10041,7 +10158,7 @@
             .set_plock_cell(5, 0, 2, 0.95)
             .expect("tensor p-lock edit");
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let field = instrument_tensor_value_field(0, 0, "strike_mask");
+        let field = fx_instrument_tensor_value_field(0, "strike_mask");
 
         let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
         let tensor = tensor_map_owned(&default_panel, "strike_mask").expect("tensor panel map");
@@ -10054,22 +10171,14 @@
             tensor.get("value-field"),
             Some(&Value::String(field.clone()))
         );
-        assert_numbers_close(
-            number_list(tensor.get("value").expect("tensor value")),
-            &[0.1, 0.2, 0.3, 0.4],
-        );
+        assert!(!tensor.contains_key("value"));
 
         selected_steps.lock().unwrap().insert(5);
         let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
-        let selected_tensor =
-            tensor_map_owned(&selected_panel, "strike_mask").expect("selected tensor panel map");
-        assert_numbers_close(
-            number_list(selected_tensor.get("value").expect("selected tensor value")),
-            &[0.1, 0.2, 0.95, 0.4],
-        );
+        assert_eq!(default_panel, selected_panel);
 
         let mut runtime = Runtime::new();
-        sync_instrument_tensor_value_field(&mut runtime, &app, 0, 0, Some(5));
+        sync_fx_instrument_tensor_value_field(&mut runtime, &app, 0, 0, Some(5));
         let Value::Map(seq) = runtime.global_value("SEQ").expect("SEQ namespace") else {
             panic!("SEQ should be a map");
         };
@@ -10135,8 +10244,20 @@
     }
 
     fn test_app_with_instrument_descriptor(desc: sequencer::effects::EffectDescriptor) -> app::App {
-        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
-        state.pattern.instrument_slots[0].apply_descriptor(&desc, 0);
+        test_app_with_instrument_descriptor_on_tracks(desc, 1)
+    }
+
+    fn test_app_with_instrument_descriptor_on_tracks(
+        desc: sequencer::effects::EffectDescriptor,
+        track_count: usize,
+    ) -> app::App {
+        let state = Arc::new(SequencerState::new(
+            track_count,
+            (0..track_count).map(|_| Vec::new()).collect(),
+        ));
+        for track in 0..track_count {
+            state.pattern.instrument_slots[track].apply_descriptor(&desc, 0);
+        }
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = app::App::new(
             state,
@@ -10153,11 +10274,160 @@
             Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
             keyboard_tx,
         );
-        app.tracks = vec!["Track 1".to_string()];
+        app.tracks = (0..track_count)
+            .map(|track| format!("Track {}", track + 1))
+            .collect();
         app.track_registry =
-            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-        app.graph.instrument_descriptors = vec![desc];
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(track_count).unwrap();
+        app.graph.instrument_descriptors = vec![desc; track_count];
         app
+    }
+
+    /// A parameter batch names its own track (the host command reads it off
+    /// the payload), which need not be the track the *fx* panel is showing.
+    /// The current-track-relative `fx-instrument-param-*` fields belong to the
+    /// visible panel, so a batch for another track must leave them alone —
+    /// otherwise the visible knobs snap to the other track's values. Mirrors
+    /// the `track == current_track_idx` guard in `apply_ui_invalidations`.
+    #[test]
+    fn instrument_param_batch_display_skips_fx_fields_for_a_non_current_track() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let cutoff_name = desc.params[cutoff_idx].name.clone();
+        let app = test_app_with_instrument_descriptor_on_tracks(desc, 2);
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(cutoff_idx, 5000.0);
+        app.state.pattern.instrument_slots[1]
+            .defaults
+            .set(cutoff_idx, 1234.0);
+        let state = app.state.clone();
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let selection = std::collections::BTreeSet::new();
+        let fx_field = fx_instrument_param_value_field(cutoff_idx, &cutoff_name);
+        let track_1_field = instrument_param_value_field(1, cutoff_idx, &cutoff_name);
+        let mut editor =
+            eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+
+        reactive_sync::sync_instrument_param_batch_display(
+            &mut editor,
+            &app,
+            &state,
+            &selected_steps,
+            &selection,
+            1,
+            0,
+            &[cutoff_idx],
+            None,
+            false,
+        );
+        assert_eq!(
+            reactive_number(editor.runtime(), "SEQ", &track_1_field),
+            Some(1234.0),
+            "the track-addressed field always publishes"
+        );
+        assert_eq!(
+            reactive_number(editor.runtime(), "SEQ", &fx_field),
+            None,
+            "track 1's value must not reach the panel showing track 0"
+        );
+
+        reactive_sync::sync_instrument_param_batch_display(
+            &mut editor,
+            &app,
+            &state,
+            &selected_steps,
+            &selection,
+            1,
+            1,
+            &[cutoff_idx],
+            None,
+            false,
+        );
+        assert_eq!(
+            reactive_number(editor.runtime(), "SEQ", &fx_field),
+            Some(1234.0),
+            "the panel showing track 1 does get the fx-relative field"
+        );
+    }
+
+    fn reactive_field(runtime: &Runtime, namespace: &str, field: &str) -> Option<Value> {
+        let Some(Value::Map(map)) = runtime.global_value(namespace) else {
+            return None;
+        };
+        map.get(field).map(|value| value.borrow().clone())
+    }
+
+    /// Buffers other than `*fx*` read a slice of the fx panel publication:
+    /// `*samples*` and `*macro-mappings*` read `SEQ.instrument-panel`,
+    /// `*metal*` reads `SEQ.step-has-plocks`. The track-switch path publishes
+    /// that slice even while `*fx*` is hidden, so it must be exactly this
+    /// helper — and the full fx sync must still cover the same two fields.
+    #[test]
+    fn shared_panel_state_publishes_only_what_non_fx_buffers_read() {
+        let app = test_app_with_instrument_descriptor(
+            sequencer::effects::EffectDescriptor::builtin_filter(),
+        );
+        app.state.pattern.track_params[0].set_num_steps(16);
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], true);
+
+        super::super::reactive_tick::sync_shared_panel_state(
+            &mut runtime,
+            &app,
+            &app.state,
+            Some(0),
+            &selected_steps,
+            true,
+        );
+
+        let panel = reactive_field(&runtime, "SEQ", "instrument-panel")
+            .expect("the sidebars' instrument panel must be published while *fx* is hidden");
+        assert!(
+            matches!(&panel, Value::List(items) if !items.is_empty()),
+            "instrument-panel should carry the track's instrument: {panel:?}"
+        );
+        let plocks = reactive_field(&runtime, "SEQ", "step-has-plocks")
+            .expect("the step grid's p-lock flags must be published while *fx* is hidden");
+        assert!(
+            matches!(&plocks, Value::List(items) if items.len() >= 16),
+            "step-has-plocks should cover the track's steps: {plocks:?}"
+        );
+        for fx_only in ["effects", "midi-effects", "bus-effects"] {
+            assert!(
+                reactive_field(&runtime, "SEQ", fx_only).is_none(),
+                "{fx_only} is read only by *fx*, so the shared slice must skip it"
+            );
+        }
+
+        // Parity: the full sync is still a superset of the shared slice.
+        let mut fx_runtime = Runtime::new();
+        fx_runtime.register_reactive("SEQ", vec![], true);
+        super::super::reactive_tick::sync_fx_panel_state(
+            &mut fx_runtime,
+            &app,
+            &app.state,
+            Some(0),
+            &selected_steps,
+            true,
+        );
+        for field in [
+            "instrument-panel",
+            "step-has-plocks",
+            "effects",
+            "midi-effects",
+            "bus-effects",
+        ] {
+            assert!(
+                reactive_field(&fx_runtime, "SEQ", field).is_some(),
+                "the fx sync must still publish {field}"
+            );
+        }
     }
 
     #[test]
@@ -14781,6 +15051,15 @@
         let accent = eseqlisp::theme::ACCENT();
         assert!((accent.r - 0.95).abs() < 0.001 && (accent.g - 0.25).abs() < 0.001);
 
+        // Hidden named buffers defer reactive reruns (eseq-md1n.4); present
+        // the patch mixer so the override's rerender lands in its tree.
+        let patch_mixer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*patch-mixer*")
+            .expect("patch mixer buffer")
+            .id;
+        editor.set_active_buffer(patch_mixer_id);
         let payoff_layout = |editor: &eseqlisp::Editor| {
             let tree = editor
                 .buffers
@@ -34068,6 +34347,10 @@
             tree,
             "Drop Audio or MIDI Effect Here"
         ));
+        // Hidden named buffers defer reactive reruns (eseq-md1n.4); present
+        // the fx panel as production does so the owner switch rerenders live.
+        let fx_id = fx.id;
+        editor.set_active_buffer(fx_id);
         editor
             .runtime_mut()
             .eval_str("(set! eseq.seq-core-state/selected-bus 1)")

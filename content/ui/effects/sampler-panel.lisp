@@ -219,7 +219,7 @@
   (subtree :key key
     (v-stack :align :center :gap 0.5
       (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
-      (dropdown :value (get p :text-value)
+      (dropdown :value (pc/fx-param-text-value-for false p)
         :options (get p :options)
 
         :bg-color '(rgba 0.1 0.1 0.1 0.3) ;:instrument-control-bg
@@ -285,7 +285,7 @@
 
 (def sampler-slice-active? (params)
   (let ((mode (sampler-slice-mode-param params)))
-    (and mode (not (= (get mode :text-value) "off")))))
+    (and mode (not (= (pc/fx-param-text-value-for false mode) "off")))))
 
 (def sampler-mode-cell (mode text label active)
   (button text
@@ -388,12 +388,14 @@
           :width 2.45 :height 1.22 :padding 0 :font-size 8
           :background-color :mixer-strip-bg :color :dim
           :border-color :transparent
-          :on-click |x y r| (pc/fx-set-instrument-value p (min 400 (* (get p :value) 2))))
+          :on-click |x y r| (pc/fx-set-instrument-value p
+                              (min 400 (* (reactive-value (pc/instrument-param-base-value p)) 2))))
         (button "2x"
           :width 2.45 :height 1.22 :padding 0 :font-size 8
           :border-color :transparent
           :background-color :mixer-strip-bg :color :dim
-          :on-click |x y r| (pc/fx-set-instrument-value p (max 20 (/ (get p :value) 2))))))))
+          :on-click |x y r| (pc/fx-set-instrument-value p
+                              (max 20 (/ (reactive-value (pc/instrument-param-base-value p)) 2))))))))
 
 (def sampler-param-pickers (params inst)
   (h-stack :debug-name "sampler-small-param-row" :gap 0.85 :padding 0.55 :align :center

@@ -1307,6 +1307,10 @@ pub(super) struct InstrumentParamDisplaySync<'a> {
     pub(super) selection: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     pub(super) expanded_step_projection: &'a Arc<ExpandedStepProjectionRegistry>,
     pub(super) track: usize,
+    /// The track the *fx* panel is showing. `track` may name another one, and
+    /// the current-track-relative `fx-instrument-param-*` fields must only be
+    /// published when the two match (as in `apply_ui_invalidations`).
+    pub(super) current_track_idx: usize,
     pub(super) param_idx: usize,
     pub(super) display_step: Option<usize>,
     pub(super) sync_plock_list: bool,
@@ -1371,14 +1375,25 @@ pub(super) fn sync_instrument_param_authoring_display(
             sync.selected_steps,
         );
     }
-    ui_dirty |= sync_instrument_param_value_field_with_neural_selection(
-        editor.runtime_mut(),
-        sync.app,
-        sync.track,
-        sync.param_idx,
-        sync.display_step,
-        Some(sync.selection),
-    );
+    ui_dirty |= if sync.track == sync.current_track_idx {
+        sync_fx_instrument_param_value_field_with_neural_selection(
+            editor.runtime_mut(),
+            sync.app,
+            sync.track,
+            sync.param_idx,
+            sync.display_step,
+            Some(sync.selection),
+        )
+    } else {
+        sync_instrument_param_value_field_with_neural_selection(
+            editor.runtime_mut(),
+            sync.app,
+            sync.track,
+            sync.param_idx,
+            sync.display_step,
+            Some(sync.selection),
+        )
+    };
     if sync.sync_sampler_times && (sync.param_idx == 2 || sync.param_idx == 3) {
         ui_dirty |= sync_sampler_selection_time_fields(
             editor.runtime_mut(),
@@ -1434,6 +1449,7 @@ pub(super) fn sync_instrument_param_batch_display(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     track: usize,
+    current_track_idx: usize,
     param_indices: &[usize],
     display_step: Option<usize>,
     plocks_changed: bool,
@@ -1448,15 +1464,29 @@ pub(super) fn sync_instrument_param_batch_display(
             selected_steps,
         );
     }
+    // A batch can name any track; only the current one owns the visible *fx*
+    // panel's current-track-relative fields (cf. `apply_ui_invalidations`).
+    let publish_fx_relative = track == current_track_idx;
     for &param_idx in param_indices {
-        ui_dirty |= sync_instrument_param_value_field_with_neural_selection(
-            editor.runtime_mut(),
-            app,
-            track,
-            param_idx,
-            display_step,
-            Some(selection),
-        );
+        ui_dirty |= if publish_fx_relative {
+            sync_fx_instrument_param_value_field_with_neural_selection(
+                editor.runtime_mut(),
+                app,
+                track,
+                param_idx,
+                display_step,
+                Some(selection),
+            )
+        } else {
+            sync_instrument_param_value_field_with_neural_selection(
+                editor.runtime_mut(),
+                app,
+                track,
+                param_idx,
+                display_step,
+                Some(selection),
+            )
+        };
     }
     if param_indices.iter().any(|param_idx| *param_idx == 2 || *param_idx == 3) {
         ui_dirty |= sync_sampler_selection_time_fields(
@@ -2153,12 +2183,22 @@ pub(super) fn apply_ui_invalidations(
                     displayed_plock_step(state, track, selected_plock_step(selected_steps));
                 match change {
                     InstrumentInvalidation::Param { param } => {
-                        needs_reactive_cycle |=
-                            sync_instrument_param_value_field(rt, app, track, param, display_step);
+                        needs_reactive_cycle |= if track == current_track_idx {
+                            sync_fx_instrument_param_value_field(
+                                rt, app, track, param, display_step,
+                            )
+                        } else {
+                            sync_instrument_param_value_field(rt, app, track, param, display_step)
+                        };
                     }
                     InstrumentInvalidation::Plock { param } => {
-                        needs_reactive_cycle |=
-                            sync_instrument_param_value_field(rt, app, track, param, display_step);
+                        needs_reactive_cycle |= if track == current_track_idx {
+                            sync_fx_instrument_param_value_field(
+                                rt, app, track, param, display_step,
+                            )
+                        } else {
+                            sync_instrument_param_value_field(rt, app, track, param, display_step)
+                        };
                         if track == current_track_idx {
                             needs_reactive_cycle |= sync_instrument_plock_presence_fields(
                                 rt,
@@ -2170,8 +2210,11 @@ pub(super) fn apply_ui_invalidations(
                         }
                     }
                     InstrumentInvalidation::BaseNote => {
-                        needs_reactive_cycle |=
-                            sync_instrument_base_note_value_field(rt, app, track);
+                        needs_reactive_cycle |= if track == current_track_idx {
+                            sync_fx_instrument_base_note_value_field(rt, app, track)
+                        } else {
+                            sync_instrument_base_note_value_field(rt, app, track)
+                        };
                     }
                     InstrumentInvalidation::SamplerSelectionTime => {
                         needs_reactive_cycle |=

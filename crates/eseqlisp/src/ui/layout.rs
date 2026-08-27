@@ -1183,6 +1183,337 @@ pub fn reuse_layout_node(
     reuse_layout_node_impl(existing, tree, dirty_widget_ids, &mut path).ok()
 }
 
+struct ReconcileCtx<'a, 'b> {
+    engine: &'a LayoutEngine<'b>,
+    next_widget_id: u64,
+    rebuilds: usize,
+}
+
+/// Reconciling variant of [`reuse_layout_node`]: reuses every unchanged
+/// descendant, and rebuilds a changed descendant in place — with the layout
+/// engine, at the rect the old descendant occupied — when the rebuilt content
+/// measures to exactly that size, so no geometry outside the rebuilt subtree
+/// can shift. A change whose new content wants a different size escalates the
+/// rebuild to its parent node; one that escalates past the root returns Err
+/// and the caller falls back to a full relayout, exactly as a plain reuse
+/// miss does today. Rebuilt subtrees reuse stable widget ids and mark both
+/// the old and new subtree widgets dirty, mirroring
+/// `layout_replacement_subtree`.
+///
+/// Returns the reconciled layout plus how many subtrees were rebuilt in
+/// place (0 means the call degenerated to a pure reuse).
+pub fn reconcile_layout_node(
+    existing: &LayoutNode,
+    tree: &Value,
+    engine: &LayoutEngine<'_>,
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Result<(LayoutNode, usize), String> {
+    let _layout_geometry = LayoutPassGeometryGuard::install(
+        engine.effective_frame_viewport(),
+        engine.content_scroll,
+        engine.cell_w,
+        engine.cell_h,
+    );
+    let mut ctx = ReconcileCtx {
+        engine,
+        next_widget_id: max_layout_widget_id(existing).wrapping_add(1),
+        rebuilds: 0,
+    };
+    let mut path = Vec::new();
+    let node = reconcile_node(
+        &mut ctx,
+        existing,
+        tree,
+        DEFAULT_FONT_SIZE,
+        LayoutCtx::default(),
+        dirty_widget_ids,
+        &mut path,
+    )?;
+    Ok((node, ctx.rebuilds))
+}
+
+fn reconcile_node(
+    ctx: &mut ReconcileCtx<'_, '_>,
+    existing: &LayoutNode,
+    tree: &Value,
+    inherited_font_size: f32,
+    layout_ctx: LayoutCtx,
+    dirty_widget_ids: &mut Vec<u64>,
+    path: &mut Vec<String>,
+) -> Result<LayoutNode, String> {
+    // A failure below — this node's own reuse checks, or a child whose change
+    // needs different space — escalates to rebuilding THIS node in place;
+    // only when that rebuild is refused too does the failure travel further
+    // up. Speculative dirty ids from the reuse attempt are dropped on
+    // escalation (the rebuild collects its own old+new id sets).
+    let mut reuse_dirty = Vec::new();
+    match try_reconcile_reuse(
+        ctx,
+        existing,
+        tree,
+        inherited_font_size,
+        layout_ctx,
+        &mut reuse_dirty,
+        path,
+    ) {
+        Ok(node) => {
+            dirty_widget_ids.append(&mut reuse_dirty);
+            Ok(node)
+        }
+        Err(reuse_reason) => rebuild_layout_node_at_rect(
+            ctx,
+            existing,
+            tree,
+            inherited_font_size,
+            layout_ctx,
+            dirty_widget_ids,
+        )
+        .map_err(|rebuild_reason| format!("{reuse_reason}; in-place:{rebuild_reason}")),
+    }
+}
+
+/// The reuse half of [`reconcile_node`]: the same identity / size-prop /
+/// child-shape checks as [`reuse_layout_node_impl`], except that children are
+/// reconciled (so a changed child can rebuild itself in place) instead of
+/// failing the whole subtree.
+fn try_reconcile_reuse(
+    ctx: &mut ReconcileCtx<'_, '_>,
+    existing: &LayoutNode,
+    tree: &Value,
+    inherited_font_size: f32,
+    layout_ctx: LayoutCtx,
+    dirty_widget_ids: &mut Vec<u64>,
+    path: &mut Vec<String>,
+) -> Result<LayoutNode, String> {
+    let mut new_props = reconcile_check_node(existing, tree, dirty_widget_ids)
+        .map_err(|reason| format_reconcile_reason(reason, path))?;
+    let widget_type = existing.widget_type.clone();
+    // Tree widgets manage internal expand/collapse state that changes their
+    // height without changing props; never blind-reuse one (the rebuild path
+    // re-measures it, which is also what a full relayout would do).
+    if widget_type == "tree" {
+        return Err(format_reconcile_reason("tree-widget".to_string(), path));
+    }
+    // Children are paired through their cells: no per-child Value clone on
+    // the (dominant) unchanged path.
+    let child_cells = effective_widget_child_cells(tree);
+    if child_cells.len() != existing.children.len() {
+        return Err(format_reconcile_reason(
+            format!(
+                "children-len:{}:{}->{}",
+                widget_type,
+                existing.children.len(),
+                child_cells.len()
+            ),
+            path,
+        ));
+    }
+
+    let font_size = get_prop_num(tree, "font-size")
+        .map(f64_to_f32)
+        .unwrap_or(inherited_font_size);
+    // Scroll containers are the only widgets that hand their child a non-pass-
+    // through LayoutCtx (see widget_render::scroll::layout_children); mirror
+    // it so an in-place rebuild below a scroll sees the ctx a fresh layout
+    // pass would give it.
+    let child_layout_ctx = if widget_type == "scroll" {
+        let state = widget_render::scroll::get_scroll_state(
+            widget_render::scroll::scroll_state_key(existing),
+        );
+        LayoutCtx::with_scroll(state.offset_y, existing.rect.height)
+    } else {
+        layout_ctx
+    };
+
+    let children = existing
+        .children
+        .iter()
+        .zip(child_cells.iter())
+        .enumerate()
+        .map(|(idx, (child_layout, child_cell))| {
+            path.push(format!("{widget_type}[{idx}]"));
+            let child_tree = child_cell.borrow();
+            let result = reconcile_node(
+                ctx,
+                child_layout,
+                &child_tree,
+                font_size,
+                child_layout_ctx,
+                dirty_widget_ids,
+                path,
+            );
+            path.pop();
+            result
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
+    if widget_type == "scroll" {
+        // build_layout_node refreshes _content_height from the laid-out child;
+        // keep it current when the child was rebuilt in place.
+        if let Some(child) = children.first() {
+            new_props.insert(
+                "_content_height".to_string(),
+                Value::Number(child.rect.height as f64),
+            );
+        }
+    }
+    Ok(with_cached_animation(LayoutNode {
+        widget_id: existing.widget_id,
+        stable_widget_id: existing.stable_widget_id,
+        subtree_root_id: existing.subtree_root_id,
+        parent_subtree_root_id: existing.parent_subtree_root_id,
+        stable_key: existing.stable_key.clone(),
+        widget_type,
+        rect: existing.rect,
+        props: new_props,
+        children,
+        focusable,
+        animation: LayoutAnimationHints::default(),
+    }))
+}
+
+/// The effective child cells of a widget-tree node (tabs show only the
+/// selected child), without cloning the child values.
+fn effective_widget_child_cells(tree: &Value) -> Vec<std::rc::Rc<std::cell::RefCell<Value>>> {
+    let Value::Map(map) = tree else {
+        return Vec::new();
+    };
+    let cells = match map.get("children").map(|value| value.borrow()) {
+        Some(children) => match &*children {
+            Value::List(cells) => cells.clone(),
+            _ => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+    if get_widget_type(tree).as_deref() == Some("tabs") {
+        let selected = (get_prop_num(tree, "value").map(f64_to_f32).unwrap_or(0.0) as usize)
+            .min(cells.len().saturating_sub(1));
+        cells.get(selected).cloned().into_iter().collect()
+    } else {
+        cells
+    }
+}
+
+/// The node-local half of [`plan_layout_reuse_node`] — identity and
+/// size-prop checks plus props-dirty marking — without materializing the
+/// child values; the reconcile walk pairs children through their cells.
+fn reconcile_check_node(
+    existing: &LayoutNode,
+    tree: &Value,
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Result<HashMap<String, Value>, String> {
+    let widget_type = get_widget_type(tree).ok_or_else(|| "not-widget".to_string())?;
+    if widget_type != existing.widget_type {
+        return Err(format!(
+            "widget-type:{}->{}",
+            existing.widget_type, widget_type
+        ));
+    }
+    let new_stable_widget_id = get_stable_widget_id(tree);
+    let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
+    let new_parent_subtree_root_id = get_prop_u64(tree, "__parent-subtree-root-id");
+    let new_stable_key = get_stable_widget_key(tree);
+    let is_explicit_subtree_root =
+        existing.subtree_root_id.is_some() && existing.subtree_root_id == new_subtree_root_id;
+    let identity_mismatch = if is_explicit_subtree_root {
+        existing.subtree_root_id != new_subtree_root_id || existing.stable_key != new_stable_key
+    } else {
+        existing.stable_widget_id != new_stable_widget_id
+            || existing.subtree_root_id != new_subtree_root_id
+            || existing.parent_subtree_root_id != new_parent_subtree_root_id
+            || existing.stable_key != new_stable_key
+    };
+    if identity_mismatch {
+        return Err(format!("stable-identity:{widget_type}"));
+    }
+
+    let mut new_props = collect_props(tree);
+    preserve_layout_internal_props(&existing.props, &mut new_props);
+    if !size_affecting_props_equal(&widget_type, &existing.props, &new_props) {
+        return Err(format!("size-props:{widget_type}"));
+    }
+    if existing.props != new_props {
+        dirty_widget_ids.push(existing.widget_id);
+    }
+    Ok(new_props)
+}
+
+fn format_reconcile_reason(reason: String, path: &[String]) -> String {
+    if path.is_empty() {
+        reason
+    } else {
+        format!("{reason}@{}", path.join(">"))
+    }
+}
+
+/// Rebuild one changed subtree with the layout engine at the exact rect its
+/// predecessor occupied. Sound only when the parent would assign the same
+/// rect, which is guarded by measuring the new content first: any size
+/// difference refuses the in-place rebuild so the caller escalates.
+fn rebuild_layout_node_at_rect(
+    ctx: &mut ReconcileCtx<'_, '_>,
+    existing: &LayoutNode,
+    tree: &Value,
+    inherited_font_size: f32,
+    layout_ctx: LayoutCtx,
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Result<LayoutNode, String> {
+    const SIZE_EPSILON: f32 = 0.01;
+    let rect = existing.rect;
+    let measured = ctx
+        .engine
+        .measure_layout_child(
+            tree,
+            Constraints {
+                min_width: 0.0,
+                max_width: rect.width,
+                min_height: 0.0,
+                max_height: f32::INFINITY,
+                aspect: 1.0,
+            },
+            inherited_font_size,
+        )
+        .ok_or_else(|| "measure-failed".to_string())?;
+    if (measured.width - rect.width).abs() > SIZE_EPSILON
+        || (measured.height - rect.height).abs() > SIZE_EPSILON
+    {
+        return Err(format!(
+            "size-changed:{:.2}x{:.2}->{:.2}x{:.2}",
+            rect.width, rect.height, measured.width, measured.height
+        ));
+    }
+    let mut built = ctx
+        .engine
+        .build_layout_node(tree, rect, inherited_font_size, layout_ctx);
+    if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {
+        let mut ids = Vec::new();
+        collect_layout_widget_ids(&built, &mut ids);
+        eprintln!(
+            "[ui-trace][reconcile-rebuild] type={} rect={:.1}x{:.1} nodes={}",
+            built.widget_type,
+            rect.width,
+            rect.height,
+            ids.len(),
+        );
+    }
+    preserve_layout_internal_props(&existing.props, &mut built.props);
+    collect_layout_widget_ids(existing, dirty_widget_ids);
+    let mut reusable_widget_ids = HashMap::new();
+    collect_stable_widget_ids(existing, &mut reusable_widget_ids);
+    let mut used_widget_ids = HashSet::new();
+    assign_replacement_widget_ids(
+        &mut built,
+        existing.widget_id,
+        &reusable_widget_ids,
+        &mut used_widget_ids,
+        &mut ctx.next_widget_id,
+    );
+    collect_layout_widget_ids(&built, dirty_widget_ids);
+    ctx.rebuilds += 1;
+    Ok(built)
+}
+
 pub fn reuse_layout_node_for_subtree(
     existing: &LayoutNode,
     tree: &Value,
@@ -1984,13 +2315,15 @@ pub(crate) fn shrink_constraints_xy(
 }
 
 fn collect_props(v: &Value) -> HashMap<String, Value> {
-    let Some(map) = get_map(v) else {
+    // Single pass over the map cells: the previous `get_map` detour
+    // materialized every prop (key clone + value clone) a second time just
+    // to filter two keys out, which showed up in layout-walk profiles.
+    let Value::Map(map) = v else {
         return HashMap::new();
     };
-
     map.iter()
         .filter(|(key, _)| key.as_str() != "type" && key.as_str() != "children")
-        .map(|(key, value)| (key.clone(), value.clone()))
+        .map(|(key, value)| (key.clone(), value.borrow().clone()))
         .collect()
 }
 

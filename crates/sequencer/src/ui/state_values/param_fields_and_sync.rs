@@ -1,21 +1,27 @@
 use super::*;
 
-pub(crate) fn sync_instrument_param_value_field(
-    rt: &mut Runtime,
+fn instrument_param_display_value(
     app: &app::App,
     track: usize,
     param_idx: usize,
     display_step: Option<usize>,
-) -> bool {
-    if let Some((name, value)) = app
-        .graph
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    >,
+) -> Option<(String, f32)> {
+    app.graph
         .instrument_descriptors
         .get(track)
         .and_then(|desc| desc.params.get(param_idx))
         .and_then(|pdesc| {
             app.state.pattern.instrument_slots.get(track).map(|slot| {
-                let stored = display_step
-                    .and_then(|step| slot.plocks.get(step, param_idx))
+                let neural_value = selected_neural_neurons.and_then(|selection| {
+                    sequencer::lisp_host::selected_neural_instrument_plock_value(
+                        &app.state, selection, track, param_idx,
+                    )
+                });
+                let stored = neural_value
+                    .or_else(|| display_step.and_then(|step| slot.plocks.get(step, param_idx)))
                     .or_else(|| app.effective_instrument_param_value(track, param_idx))
                     .unwrap_or_else(|| {
                         slot_param_stored_value(slot, pdesc, param_idx, display_step)
@@ -23,24 +29,73 @@ pub(crate) fn sync_instrument_param_value_field(
                 (pdesc.name.clone(), pdesc.stored_to_user(stored))
             })
         })
-    {
-        return reactive_set_needs_ui(rt.set_reactive(
-            "SEQ",
-            &instrument_param_value_field(track, param_idx, &name),
-            Value::Number(value as f64),
-        ));
-    }
-    false
 }
 
-pub(crate) fn sync_instrument_tensor_value_field(
+fn sync_instrument_param_value_fields(
+    rt: &mut Runtime,
+    app: &app::App,
+    track: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    >,
+    publish_fx_relative: bool,
+) -> bool {
+    let Some((name, value)) = instrument_param_display_value(
+        app,
+        track,
+        param_idx,
+        display_step,
+        selected_neural_neurons,
+    ) else {
+        return false;
+    };
+    let value = Value::Number(value as f64);
+    let mut needs_ui = reactive_set_needs_ui(rt.set_reactive(
+        "SEQ",
+        &instrument_param_value_field(track, param_idx, &name),
+        value.clone(),
+    ));
+    if publish_fx_relative {
+        needs_ui |= reactive_set_needs_ui(rt.set_reactive(
+            "SEQ",
+            &fx_instrument_param_value_field(param_idx, &name),
+            value,
+        ));
+    }
+    needs_ui
+}
+
+pub(crate) fn sync_instrument_param_value_field(
+    rt: &mut Runtime,
+    app: &app::App,
+    track: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+) -> bool {
+    sync_instrument_param_value_fields(rt, app, track, param_idx, display_step, None, false)
+}
+
+pub(crate) fn sync_fx_instrument_param_value_field(
+    rt: &mut Runtime,
+    app: &app::App,
+    track: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+) -> bool {
+    sync_instrument_param_value_fields(rt, app, track, param_idx, display_step, None, true)
+}
+
+fn sync_instrument_tensor_value_fields(
     rt: &mut Runtime,
     app: &app::App,
     track: usize,
     tensor_idx: usize,
     display_step: Option<usize>,
+    publish_fx_relative: bool,
 ) -> bool {
-    if let Some((name, values)) = app
+    let Some((name, values)) = app
         .graph
         .instrument_descriptors
         .get(track)
@@ -54,18 +109,48 @@ pub(crate) fn sync_instrument_tensor_value_field(
                 (tdesc.name.clone(), values)
             })
         })
-    {
-        let list = values
-            .into_iter()
-            .map(|value| Rc::new(RefCell::new(Value::Number(value as f64))))
-            .collect();
-        return reactive_set_needs_ui(rt.set_reactive(
+    else {
+        return false;
+    };
+    let list = || Value::List(
+        values
+            .iter()
+            .map(|value| Rc::new(RefCell::new(Value::Number(*value as f64))))
+            .collect()
+    );
+    let mut needs_ui = reactive_set_needs_ui(rt.set_reactive(
+        "SEQ",
+        &instrument_tensor_value_field(track, tensor_idx, &name),
+        list(),
+    ));
+    if publish_fx_relative {
+        needs_ui |= reactive_set_needs_ui(rt.set_reactive(
             "SEQ",
-            &instrument_tensor_value_field(track, tensor_idx, &name),
-            Value::List(list),
+            &fx_instrument_tensor_value_field(tensor_idx, &name),
+            list(),
         ));
     }
-    false
+    needs_ui
+}
+
+pub(crate) fn sync_instrument_tensor_value_field(
+    rt: &mut Runtime,
+    app: &app::App,
+    track: usize,
+    tensor_idx: usize,
+    display_step: Option<usize>,
+) -> bool {
+    sync_instrument_tensor_value_fields(rt, app, track, tensor_idx, display_step, false)
+}
+
+pub(crate) fn sync_fx_instrument_tensor_value_field(
+    rt: &mut Runtime,
+    app: &app::App,
+    track: usize,
+    tensor_idx: usize,
+    display_step: Option<usize>,
+) -> bool {
+    sync_instrument_tensor_value_fields(rt, app, track, tensor_idx, display_step, true)
 }
 
 pub(crate) fn sync_rack_macro_value_fields(
@@ -580,35 +665,36 @@ pub(crate) fn sync_instrument_param_value_field_with_neural_selection(
         &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     >,
 ) -> bool {
-    if let Some((name, value)) = app
-        .graph
-        .instrument_descriptors
-        .get(track)
-        .and_then(|desc| desc.params.get(param_idx))
-        .and_then(|pdesc| {
-            app.state.pattern.instrument_slots.get(track).map(|slot| {
-                let neural_value = selected_neural_neurons.and_then(|selection| {
-                    sequencer::lisp_host::selected_neural_instrument_plock_value(
-                        &app.state, selection, track, param_idx,
-                    )
-                });
-                let stored = neural_value
-                    .or_else(|| display_step.and_then(|step| slot.plocks.get(step, param_idx)))
-                    .or_else(|| app.effective_instrument_param_value(track, param_idx))
-                    .unwrap_or_else(|| {
-                        slot_param_stored_value(slot, pdesc, param_idx, display_step)
-                    });
-                (pdesc.name.clone(), pdesc.stored_to_user(stored))
-            })
-        })
-    {
-        return reactive_set_needs_ui(rt.set_reactive(
-            "SEQ",
-            &instrument_param_value_field(track, param_idx, &name),
-            Value::Number(value as f64),
-        ));
-    }
-    false
+    sync_instrument_param_value_fields(
+        rt,
+        app,
+        track,
+        param_idx,
+        display_step,
+        selected_neural_neurons,
+        false,
+    )
+}
+
+pub(crate) fn sync_fx_instrument_param_value_field_with_neural_selection(
+    rt: &mut Runtime,
+    app: &app::App,
+    track: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    >,
+) -> bool {
+    sync_instrument_param_value_fields(
+        rt,
+        app,
+        track,
+        param_idx,
+        display_step,
+        selected_neural_neurons,
+        true,
+    )
 }
 
 pub(crate) fn sync_sampler_selection_time_fields(
@@ -650,22 +736,47 @@ pub(crate) fn sync_sampler_selection_time_fields(
     needs_ui
 }
 
+fn sync_instrument_base_note_value_fields(
+    rt: &mut Runtime,
+    app: &app::App,
+    track: usize,
+    publish_fx_relative: bool,
+) -> bool {
+    if track >= app.tracks.len() {
+        return false;
+    }
+    let value = Value::Number(f32::from_bits(
+        app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
+    ) as f64);
+    let mut needs_ui = reactive_set_needs_ui(rt.set_reactive(
+        "SEQ",
+        &instrument_base_note_value_field(track),
+        value.clone(),
+    ));
+    if publish_fx_relative {
+        needs_ui |= reactive_set_needs_ui(rt.set_reactive(
+            "SEQ",
+            fx_instrument_base_note_value_field(),
+            value,
+        ));
+    }
+    needs_ui
+}
+
 pub(crate) fn sync_instrument_base_note_value_field(
     rt: &mut Runtime,
     app: &app::App,
     track: usize,
 ) -> bool {
-    if track < app.tracks.len() {
-        let value = f32::from_bits(
-            app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
-        );
-        return reactive_set_needs_ui(rt.set_reactive(
-            "SEQ",
-            &instrument_base_note_value_field(track),
-            Value::Number(value as f64),
-        ));
-    }
-    false
+    sync_instrument_base_note_value_fields(rt, app, track, false)
+}
+
+pub(crate) fn sync_fx_instrument_base_note_value_field(
+    rt: &mut Runtime,
+    app: &app::App,
+    track: usize,
+) -> bool {
+    sync_instrument_base_note_value_fields(rt, app, track, true)
 }
 
 pub(crate) fn sync_track_effect_param_value_field(
@@ -848,12 +959,12 @@ pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
         let display_step = displayed_plock_step(state, track, selected_step);
         needs_ui |= sync_rack_macro_value_fields(rt, app, track, display_step);
         needs_ui |= sync_rack_panel_param_value_fields(rt, app, track, display_step);
-        needs_ui |= sync_instrument_base_note_value_field(rt, app, track);
+        needs_ui |= sync_fx_instrument_base_note_value_field(rt, app, track);
         needs_ui |= sync_sampler_selection_time_fields(rt, app, track, display_step);
         if let Some(desc) = app.graph.instrument_descriptors.get(track) {
             for (param_idx, pdesc) in desc.params.iter().enumerate() {
                 if param_supports_value_binding(pdesc) {
-                    needs_ui |= sync_instrument_param_value_field_with_neural_selection(
+                    needs_ui |= sync_fx_instrument_param_value_field_with_neural_selection(
                         rt,
                         app,
                         track,
@@ -864,8 +975,13 @@ pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
                 }
             }
             for tensor_idx in 0..desc.tensor_params.len() {
-                needs_ui |=
-                    sync_instrument_tensor_value_field(rt, app, track, tensor_idx, display_step);
+                needs_ui |= sync_fx_instrument_tensor_value_field(
+                    rt,
+                    app,
+                    track,
+                    tensor_idx,
+                    display_step,
+                );
             }
         }
         if let Some(slots) = app.graph.effect_descriptors.get(track) {

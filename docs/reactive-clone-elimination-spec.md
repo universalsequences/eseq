@@ -337,6 +337,17 @@ dev runs and the UI-script test suite.
 `debug_assert_cell_not_frozen` first, or it silently bypasses the
 invariant. Reviewers should enforce this on every new cell-write path.
 
+### 3.5 Pre-annotation subtree cache sealing (2026-08-27 follow-up)
+
+Identity-preserving stable-id annotation adds a narrower, release-build
+invariant. `SubtreeRenderCache` values are pre-annotation Lisp graphs, and the
+annotation memo is valid only while those cells remain unchanged. Such inputs
+are sealed in a separate weak-cell registry when cached. The same mutation
+helper checks this registry in every build (and fails loudly on violation),
+while ordinary committed-tree freezing remains debug-only and zero-cost in
+release. This avoids paying a production freeze walk for every posted tree and
+makes pointer-keyed annotation reuse sound rather than probabilistic.
+
 ## 4. Phasing
 
 - **P0**: W2 audit (3.3). Output decides P2 scope. Also wire the release
