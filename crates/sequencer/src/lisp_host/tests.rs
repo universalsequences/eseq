@@ -8787,6 +8787,66 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_control_route_targets_cycle_with_cyc() {
+        // Targets are per-cycle argument data: (mute (cyc 1 2)) and
+        // (group (cyc "Drums" "Synths")) rotate the destination each cycle.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "gate3" :16
+                 . .
+                 -> (mute (cyc 1 2))
+                 -> (solo (group (cyc "Drums" "Synths"))))"#,
+        )
+        .expect("jak with cyc control targets");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        generators.process_block_with_controls(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+            &mut controls,
+        );
+
+        // two 2-unit cycles over 4 boundaries: cycle 0 targets track 1 /
+        // "Drums", cycle 1 targets track 2 / "Synths"
+        let mutes: Vec<&crate::generator::MixerControlEmission> = controls
+            .iter()
+            .filter(|c| c.control.op == crate::mixer_control::MixerControlOp::Mute)
+            .collect();
+        let solos: Vec<&crate::generator::MixerControlEmission> = controls
+            .iter()
+            .filter(|c| c.control.op == crate::mixer_control::MixerControlOp::Solo)
+            .collect();
+        assert_eq!(mutes.len(), 4);
+        assert_eq!(solos.len(), 4);
+        let mute_tracks: Vec<crate::mixer_control::MixerControlTarget> =
+            mutes.iter().map(|c| c.control.target.clone()).collect();
+        use crate::mixer_control::MixerControlTarget as Target;
+        assert_eq!(
+            mute_tracks,
+            vec![Target::Track(1), Target::Track(1), Target::Track(2), Target::Track(2)]
+        );
+        let solo_groups: Vec<crate::mixer_control::MixerControlTarget> =
+            solos.iter().map(|c| c.control.target.clone()).collect();
+        assert_eq!(
+            solo_groups,
+            vec![
+                Target::Group("Drums".to_string()),
+                Target::Group("Drums".to_string()),
+                Target::Group("Synths".to_string()),
+                Target::Group("Synths".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn jaki_seq_emit_control_validates_argument_shape() {
         // Native errors follow the seq-emit contract: report a status and
         // return false with nothing emitted. The tick encodes each call's

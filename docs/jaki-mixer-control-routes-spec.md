@@ -24,7 +24,10 @@ list headed by `mute` or `solo` instead of a bare track number:
 
 - **Targets.** A number targets a track by index (matching note routes). A
   `(group "name")` form targets a track group by name; the group's mute/solo
-  is its backing bus, exactly like the mixer header buttons.
+  is its backing bus, exactly like the mixer header buttons. Targets are
+  per-cycle argument data like every other route argument: `(mute (cyc 1 2))`
+  and `(solo (group (cyc "Drums" "Synths")))` rotate the destination each
+  cycle, resolved via `resolve-arg` against the tick's located cycle.
 - **Events are gate windows.** An evaluated event at offset `t` with gate `g`
   contributes the window `[t, t+g)`. Windows in one cycle are unioned
   (overlaps and adjacency merge), so dense patterns hold rather than flicker.

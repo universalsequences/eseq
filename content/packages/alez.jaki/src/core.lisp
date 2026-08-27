@@ -871,7 +871,9 @@
 ;; A route whose destination is (mute T) or (solo T) — T a track number or
 ;; (group "name") — is a CONTROL route: events become timed mute/solo holds
 ;; instead of notes, and the route word `inv` complements the windows
-;; (docs/jaki-mixer-control-routes-spec.md).
+;; (docs/jaki-mixer-control-routes-spec.md). Targets are per-cycle argument
+;; data like every other route arg: (mute (cyc 1 2)) and
+;; (solo (group (cyc "Drums" "Synths"))) rotate the destination per cycle.
 ;; Multi-voice: when the first body element is a list containing a top-level
 ;; `->`, every element is one voice line with its own pattern and routes.
 
@@ -953,13 +955,21 @@
 (def control-route-head? (x)
   (let ((h (raw-head x))) (or (= h 'mute) (= h 'solo))))
 
-;; (mute 3) / (solo (group "Drums")) → (dict :op :kind :track|:name)
+;; (mute 3) / (solo (group "Drums")) → (dict :op :kind :track-raw|:name-raw).
+;; Targets stay RAW per-cycle argument data — a number/string, (cyc …), or an
+;; expression — resolved by resolve-arg once the tick's cycle is located, so
+;; (mute (cyc 1 2)) and (group (cyc "Drums" "Synths")) rotate per cycle.
 (def parse-control-target (form)
   (let ((op (if (= (raw-head form) 'mute) "mute" "solo"))
         (tgt (nth form 1)))
     (if (= (raw-head tgt) 'group)
-        (dict :op op :kind :group :name (nth tgt 1))
-        (dict :op op :kind :track :track tgt))))
+        (dict :op op :kind :group :name-raw (nth tgt 1))
+        (dict :op op :kind :track :track-raw tgt))))
+
+(def resolve-control-spec (spec c)
+  (if (= (get spec :kind) :group)
+      (merge spec :name (resolve-arg (get spec :name-raw) c))
+      (merge spec :track (round-int (resolve-arg (get spec :track-raw) c)))))
 
 ;; sorted [start end) rational intervals → union-merged intervals
 (def merge-windows (ivs)
@@ -1036,7 +1046,7 @@
                     (if (get r :inv)
                         (invert-windows wins0 (get res :len))
                         wins0)
-                    (- tick cstart) spec)))))))))
+                    (- tick cstart) (resolve-control-spec spec c))))))))))
 
 (def run-seg (p seg)
   (if (control-route-head? (first seg))
