@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
 use super::{resolve_named_color, styled_cell, CellBuffer, WidgetDefinition};
-#[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive, MetalTrianglePrimitive,
+    GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive, GpuTrianglePrimitive,
     WidgetViewport,
 };
 use crate::backend::Color;
@@ -329,9 +328,8 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     }
 }
 
-#[cfg(target_os = "macos")]
 fn push_polyline(
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
     points: &[[f32; 2]],
     color: Color,
     viewport: WidgetViewport,
@@ -353,7 +351,7 @@ fn push_polyline(
             [1.0, 0.0]
         }
     };
-    let half_width_px = 0.9;
+    let half_width_px = super::ui_design_px(0.9);
     let mut left = Vec::with_capacity(points.len());
     let mut right = Vec::with_capacity(points.len());
     for index in 0..points_px.len() {
@@ -394,11 +392,11 @@ fn push_polyline(
         ]);
     }
     for index in 1..points.len() {
-        primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+        primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
             points: [left[index - 1], left[index], right[index]],
             color,
         }));
-        primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+        primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
             points: [left[index - 1], right[index], right[index - 1]],
             color,
         }));
@@ -442,13 +440,12 @@ impl WidgetDefinition for LineGraphWidget {
         tui_render(props, rect, buf);
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let series = normalized_series(&node.props);
         let values = &series.values;
         let background = background_color(&node.props);
@@ -465,7 +462,7 @@ impl WidgetDefinition for LineGraphWidget {
         );
         let mut primitives = Vec::new();
         if background.a > 0.0 {
-            primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: node.rect,
                 color: background,
             }));
@@ -495,7 +492,7 @@ impl WidgetDefinition for LineGraphWidget {
             .clamp(0.0, 12.0) as usize;
         for index in 1..=grid_lines {
             let fraction = index as f32 / (grid_lines + 1) as f32;
-            primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: Rect {
                     row: plot_top + plot_height * fraction,
                     col: plot_left,
@@ -512,8 +509,8 @@ impl WidgetDefinition for LineGraphWidget {
                 (node.rect.row + 0.02, top_label),
                 (node.rect.row + node.rect.height - 0.72, bottom_label),
             ] {
-                primitives.push(MetalPrimitive::ProportionalText(
-                    MetalProportionalTextPrimitive {
+                primitives.push(GpuPrimitive::ProportionalText(
+                    GpuProportionalTextPrimitive {
                         row,
                         col: node.rect.col + horizontal_padding,
                         align_width: axis_gutter - 0.25,
@@ -542,16 +539,16 @@ impl WidgetDefinition for LineGraphWidget {
         };
 
         let mut current_path = Vec::new();
-        let flush_path = |path: &mut Vec<[f32; 2]>, primitives: &mut Vec<MetalPrimitive>| {
+        let flush_path = |path: &mut Vec<[f32; 2]>, primitives: &mut Vec<GpuPrimitive>| {
             if area_enabled(&node.props) && path.len() >= 2 {
                 for index in 1..path.len() {
                     let previous = path[index - 1];
                     let current = path[index];
-                    primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+                    primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
                         points: [previous, current, [current[0], plot_bottom]],
                         color: area,
                     }));
-                    primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+                    primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
                         points: [
                             previous,
                             [current[0], plot_bottom],
@@ -582,7 +579,7 @@ impl WidgetDefinition for LineGraphWidget {
             let point = point_for(index, value);
             let marker_width = (3.0 / viewport.cell_w.max(1.0)).max(0.08);
             let marker_height = (3.0 / viewport.cell_h.max(1.0)).max(0.04);
-            primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: Rect {
                     row: point[1] - marker_height * 0.5,
                     col: point[0] - marker_width * 0.5,
@@ -703,7 +700,6 @@ mod tests {
         assert_eq!(x_domain_points(&props, 3), 10);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn metal_primitives_form_a_filled_connected_trace() {
         let node = LayoutNode {
@@ -729,7 +725,7 @@ mod tests {
             focusable: false,
             animation: Default::default(),
         };
-        let primitives = LINEGRAPH_WIDGET.build_metal_primitives(
+        let primitives = LINEGRAPH_WIDGET.build_primitives(
             "linegraph",
             &node,
             WidgetViewport {
@@ -748,7 +744,7 @@ mod tests {
         );
         let triangles = primitives
             .iter()
-            .filter(|primitive| matches!(primitive, MetalPrimitive::Triangle(_)))
+            .filter(|primitive| matches!(primitive, GpuPrimitive::Triangle(_)))
             .count();
         assert_eq!(
             triangles, 8,
@@ -758,7 +754,7 @@ mod tests {
             .iter()
             .rev()
             .find_map(|primitive| match primitive {
-                MetalPrimitive::Rect(rect) if rect.rect.width < 1.0 && rect.rect.height < 1.0 => {
+                GpuPrimitive::Rect(rect) if rect.rect.width < 1.0 && rect.rect.height < 1.0 => {
                     Some(rect)
                 }
                 _ => None,
@@ -771,7 +767,7 @@ mod tests {
         );
         let labels = primitives
             .iter()
-            .filter(|primitive| matches!(primitive, MetalPrimitive::ProportionalText(_)))
+            .filter(|primitive| matches!(primitive, GpuPrimitive::ProportionalText(_)))
             .count();
         assert_eq!(labels, 2, "top and bottom y-axis labels");
     }

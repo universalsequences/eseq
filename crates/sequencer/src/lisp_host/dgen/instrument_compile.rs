@@ -645,6 +645,23 @@ pub fn render_loaded_effect_for_test(
     lib: &LoadedDGenLib,
     options: &EffectRenderOptions,
 ) -> Result<EffectRenderReport, String> {
+    render_loaded_effect_for_test_with_host_services(
+        manifest,
+        lib,
+        options,
+        dgen_host_services_v1(),
+    )
+}
+
+pub(in crate::lisp_host) fn render_loaded_effect_for_test_with_host_services(
+    manifest: &DGenManifest,
+    lib: &LoadedDGenLib,
+    options: &EffectRenderOptions,
+    host_services: *const DGenHostServicesV1,
+) -> Result<EffectRenderReport, String> {
+    if host_services.is_null() {
+        return Err("DGen host-services table must not be NULL".to_string());
+    }
     if options.block_size == 0 {
         return Err("block_size must be greater than zero".to_string());
     }
@@ -822,7 +839,7 @@ pub fn render_loaded_effect_for_test(
                 block as u32,
                 memory.as_mut_ptr() as *mut c_void,
                 &context,
-                dgen_host_services_v1(),
+                host_services,
             );
         }
         for frame in 0..block {

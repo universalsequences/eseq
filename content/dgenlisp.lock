@@ -1,0 +1,23 @@
+# Published DGenLisp distributions. Each target stanza is independent so a
+# platform may remain pinned while another advances. Fetching is explicit:
+# scripts/fetch_dgenlisp.sh downloads the pinned url, hard-fails unless the
+# download's sha256 matches the pin, and installs the compiler under
+# crates/sequencer/tools/ (gitignored) at DGenLisp-<target>.
+
+target linux-x86_64
+version dgenlisp-v0.1.2
+url https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.2/DGenLisp-linux-x86_64.tar.gz
+sha256 8279d4e4c461a628dd943741670cbd78faddb825cf17d4902b3916b06798b372
+format tar.gz
+executable_path dgenlisp-linux-x86_64/DGenLisp
+upstream_commit ab969edfcdb31b94307bb92755e1778413a4c500
+glibc_floor 2.35
+container_image swift:6.3.3-jammy
+
+target macos-arm64
+version dgenlisp-v0.1.0
+url https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.0/DGenLisp-macos-arm64
+sha256 f58b2abccd50234758365443644518a95632f2b2f0e6095b98fcd5c304b4ab63
+format executable
+executable_path DGenLisp-macos-arm64
+upstream_commit 68c6fba23aaf8bc9f4b18b9e09f8379f312f5022

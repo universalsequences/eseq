@@ -380,6 +380,61 @@
         )
     }
 
+    #[test]
+    fn an_unresolved_sample_path_keeps_slice_edits_instead_of_wiping_them() {
+        let graph = TestLiveGraph::new("unresolved-sample-path-keeps-slice-edits");
+        let mut app = test_app(&graph);
+        app.sampler_paths = vec![None];
+        let authored = crate::analysis::sample_path_hash("/samples/kick.wav")
+            .expect("path hash for an ordinary sample");
+        let edits = crate::analysis::SamplerSliceEdits {
+            sample_hash: authored.clone(),
+            user_added: vec![4410],
+            ..Default::default()
+        };
+        *app.state.pattern.instrument_slots[0]
+            .sampler_slice_edits
+            .write()
+            .unwrap() = Some(edits.clone());
+
+        // Neither registry knows this buffer yet — the ordinary situation part
+        // way through a load. Unknown is not "a different sample": this wipe
+        // bypasses undo and is persisted by the next save, so guessing here
+        // destroys the markers with no way back.
+        app.sync_sampler_path_from_sample(0, 4_242, "not-registered-yet");
+        assert_eq!(
+            *app.state.pattern.instrument_slots[0]
+                .sampler_slice_edits
+                .read()
+                .unwrap(),
+            Some(edits.clone()),
+            "an unresolved path must not discard the edits"
+        );
+
+        // Resolving to the sample they were authored against also keeps them.
+        app.register_loaded_sample_path("kick", 4_242, PathBuf::from("/samples/kick.wav"));
+        app.sync_sampler_path_from_sample(0, 4_242, "kick");
+        assert_eq!(
+            *app.state.pattern.instrument_slots[0]
+                .sampler_slice_edits
+                .read()
+                .unwrap(),
+            Some(edits),
+        );
+
+        // A positive mismatch still discards, which is the rule this guards.
+        app.register_loaded_sample_path("snare", 4_243, PathBuf::from("/samples/snare.wav"));
+        app.sync_sampler_path_from_sample(0, 4_243, "snare");
+        assert!(
+            app.state.pattern.instrument_slots[0]
+                .sampler_slice_edits
+                .read()
+                .unwrap()
+                .is_none(),
+            "loading a different sample still discards the edits"
+        );
+    }
+
     fn test_instrument_manifest() -> DGenManifest {
         DGenManifest {
             dylib_path: PathBuf::new(),
@@ -708,6 +763,109 @@
         assert!(
             meter_at_silence[crate::effects::peak_meter::STATE_PEAK_L] < 0.001,
             "a -inf track fader must silence its bus sends; meter={meter_at_silence:?}"
+        );
+    }
+
+    #[test]
+    fn track_gain_mutes_silence_post_fader_sends_and_restore_sustaining_audio() {
+        let graph = TestLiveGraph::new("track-gain-mute-send-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add source track");
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add solo control track");
+        app.graph_controller()
+            .ensure_bus_graph_node(BusId::DEFAULT_A, "Bus A");
+
+        let track_nodes = app.graph.track_node_ids[0].clone();
+        let source_l = graph.add_constant_source("gain_mute_source_l");
+        let source_r = graph.add_constant_source("gain_mute_source_r");
+        unsafe {
+            crate::audiograph::graph_connect(graph.ptr.0, source_l, 0, track_nodes.voice_sum_id, 0);
+            crate::audiograph::graph_connect(graph.ptr.0, source_r, 0, track_nodes.voice_sum_r_id, 0);
+        }
+        app.state.pattern.track_params[0].set_output(TrackOutput::None);
+        app.graph_controller().apply_track_output_routing(0);
+        app.state.pattern.track_params[0].set_sends(vec![TrackSendSnapshot {
+            destination: BusId::DEFAULT_A,
+            amount: 1.0,
+        }]);
+        app.graph_controller().apply_track_bus_sends(0);
+
+        let bus_meter_id = app
+            .graph
+            .bus_node_ids
+            .iter()
+            .find(|nodes| nodes.id == BusId::DEFAULT_A)
+            .expect("Bus A graph nodes")
+            .meter_id;
+        let bus_peak = || {
+            graph
+                .read_node_state::<{ crate::effects::peak_meter::PEAK_METER_STATE_SIZE }>(
+                    bus_meter_id,
+                )
+                .expect("watched bus meter")[crate::effects::peak_meter::STATE_PEAK_L]
+        };
+        let track_peak = || {
+            graph
+                .read_panner_state(track_nodes.delay_id)
+                .expect("watched post-mute track meter")
+                [crate::effects::stereo_panner::STATE_PEAK_L]
+        };
+        let process_blocks = |count| {
+            for _ in 0..count {
+                graph.process_block();
+            }
+        };
+
+        process_blocks(4);
+        assert!(bus_peak() > 0.1, "the sustaining source should reach its send");
+        assert!(track_peak() > 0.1, "the active track meter should show signal");
+
+        app.state.pattern.track_params[0].set_mute(true);
+        app.push_track_mute(0);
+        process_blocks(120);
+        assert!(
+            bus_peak() < 0.001,
+            "track mute must silence the post-fader send; peak={}",
+            bus_peak(),
+        );
+        assert!(
+            track_peak() < 0.001,
+            "the post-mute track meter must read silent; peak={}",
+            track_peak(),
+        );
+
+        app.state.pattern.track_params[0].set_mute(false);
+        app.push_track_mute(0);
+        process_blocks(4);
+        assert!(
+            bus_peak() > 0.1,
+            "unmuting must reveal the already-sustaining source without a new trigger"
+        );
+
+        app.state.pattern.track_params[1].set_solo(true);
+        app.push_track_solo_mutes();
+        process_blocks(120);
+        assert!(
+            bus_peak() < 0.001,
+            "muted-by-solo must silence the post-fader send; peak={}",
+            bus_peak(),
+        );
+        assert!(
+            track_peak() < 0.001,
+            "the solo-muted track meter must read silent; peak={}",
+            track_peak(),
+        );
+
+        app.state.pattern.track_params[1].set_solo(false);
+        app.push_track_solo_mutes();
+        process_blocks(4);
+        assert!(
+            bus_peak() > 0.1,
+            "clearing solo must reveal the already-sustaining source without a new trigger"
         );
     }
 
@@ -1185,6 +1343,68 @@
             fallback_count, 1,
             "the unresolvable lane should be reported as a fallback sample"
         );
+        graph.process_block();
+    }
+
+    #[test]
+    fn pattern_slice_edits_are_validated_against_the_patterns_own_sample() {
+        let graph = TestLiveGraph::new("pattern-slice-edit-sample-identity-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let bound_path = std::env::temp_dir().join(format!(
+            "eseq-slice-identity-bound-{}-{nonce}.wav",
+            std::process::id()
+        ));
+        let other_path = std::env::temp_dir().join(format!(
+            "eseq-slice-identity-other-{}-{nonce}.wav",
+            std::process::id()
+        ));
+        write_test_wav(&bound_path);
+        write_test_wav(&other_path);
+        let _bound_cleanup = TestProjectFile(bound_path.clone());
+        let _other_cleanup = TestProjectFile(other_path.clone());
+        app.graph_controller()
+            .add_track(&bound_path)
+            .expect("add sampler track");
+
+        let project = app
+            .capture_project("__test-pattern-slice-identity")
+            .expect("project should capture");
+        let mut pattern = project.patterns[0].clone();
+
+        // A second scene on the same track holds a *different* sample, with
+        // markers authored against it. Validating those against whatever is
+        // bound to the live track right now — still the first sample — drops
+        // them wholesale.
+        let other_hash = crate::analysis::sample_path_hash(&other_path.to_string_lossy())
+            .expect("path hash for the pattern's own sample");
+        pattern.sample_paths[0] = Some(other_path.to_string_lossy().into_owned());
+        pattern.instrument_slots[0].sampler_slice_edits =
+            Some(crate::analysis::SamplerSliceEdits {
+                sample_hash: other_hash.clone(),
+                user_added: vec![4410],
+                ..Default::default()
+            });
+        assert_ne!(
+            app.sampler_path_for_track(0),
+            Some(other_path.clone()),
+            "the live track must still be bound to the other sample for this to mean anything"
+        );
+
+        let mut sample_assets = std::collections::HashMap::new();
+        let (snapshot, _, _) = app
+            .project_pattern_into_snapshot(pattern, &mut sample_assets)
+            .expect("pattern should convert");
+
+        let edits = snapshot.instrument_slots[0]
+            .sampler_slice_edits
+            .clone()
+            .expect("edits authored against the pattern's own sample must survive");
+        assert_eq!(edits.sample_hash, other_hash);
+        assert_eq!(edits.user_added, vec![4410]);
         graph.process_block();
     }
 
@@ -2933,6 +3153,82 @@
             .editor
             .effect_chain_leases
             .contains_host(FxChainLocator::RackSlot { track: 0, slot: 0 }));
+        graph.process_block();
+    }
+
+    /// eseq-u2h: effect-authoring previews compile out of a draft temp dir
+    /// under a name the effects library has never seen. The recorded apply
+    /// used to re-read the source from the library by name and surfaced a
+    /// bare "No such file or directory (os error 2)" in the patch editor;
+    /// the session now hands the compiled source over explicitly.
+    #[test]
+    fn draft_effect_recorded_apply_never_reads_the_effects_library() {
+        let graph = TestLiveGraph::new("draft-effect-recorded-apply-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("track for the draft effect");
+        let draft_name = "eseq-u2h-test-draft/";
+        assert!(
+            !crate::lisp_host::effect_source_path(draft_name).exists(),
+            "the draft name must not resolve to an effects-library file"
+        );
+        let source = crate::lisp_host::EFFECT_TEMPLATE;
+        let sample_rate = app.graph.sample_rate;
+        let compile = |app: &App| {
+            app.editor
+                .dylib_cache
+                .acquire(
+                    crate::lisp_host::DGenCompileKind::Effect,
+                    crate::lisp_host::DGenSourceOrigin::Draft,
+                    source,
+                    sample_rate,
+                    None,
+                )
+                .expect("draft effect template should compile")
+        };
+        let slot = app.next_free_custom_slot().expect("free custom slot");
+
+        // Seed the slot the way enter-new-effect-editor does: sync apply plus
+        // explicit draft-source retention (no library file exists to fall
+        // back on).
+        let seeded = compile(&app);
+        app.apply_compiled_effect_to_slot_sync(seeded, draft_name, slot, 0)
+            .expect("draft effect should seed its slot");
+        app.retain_compiled_effect_source_for_track_slot(
+            0,
+            slot,
+            draft_name,
+            source,
+            None,
+            crate::lisp_host::DGenSourceOrigin::Draft,
+        )
+        .expect("draft source retention should not require a library file");
+
+        // The preview writeback: a recorded apply carrying the compiled
+        // source must succeed even though the name has no on-disk source.
+        let previewed = compile(&app);
+        app.apply_compiled_effect_to_slot_recorded_with_source(
+            previewed,
+            draft_name,
+            slot,
+            0,
+            source,
+            None,
+            crate::lisp_host::DGenSourceOrigin::Draft,
+        )
+        .expect("recorded draft apply must not read the effects library");
+
+        // The legacy name-based path still fails for a library-less draft
+        // name, but now says which path it expected instead of a bare
+        // os-error string.
+        let error = app
+            .retained_effect_source_for_name(draft_name)
+            .expect_err("a library-less name cannot be retained by name");
+        assert!(
+            error.contains("Failed to read effect source"),
+            "missing-source diagnostics should carry context: {error}"
+        );
         graph.process_block();
     }
 

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use super::live_audio::{LiveAudioSourceSelector, source_from_props};
 use super::{
-    CellBuffer, MetalPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
+    CellBuffer, GpuPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
     resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -230,22 +230,24 @@ impl WidgetDefinition for RoarShaperWidget {
         }
     }
 
-    fn metal_shader_uses_time(&self) -> bool {
+    fn shader_uses_time(&self) -> bool {
         false
     }
 
-    #[cfg(target_os = "macos")]
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(ROAR_SHAPER_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        ROAR_SHAPER_SHADER.source(backend)
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let request = request_from_props(&node.props);
         let frame = crate::live_audio::band_meter_frame(&request.data_key);
         let display = display_from_props(&node.props, frame);
@@ -272,7 +274,7 @@ impl WidgetDefinition for RoarShaperWidget {
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;
-        vec![MetalPrimitive::WidgetInstance {
+        vec![GpuPrimitive::WidgetInstance {
             widget_type: widget_type.to_string(),
             instance: WidgetInstance {
                 ndc_min,
@@ -303,8 +305,7 @@ impl WidgetDefinition for RoarShaperWidget {
 
 // Dual-maintained with `sequencer::effects::roar::shaper_transfer` and the Rust
 // mirror above.
-#[cfg(target_os = "macos")]
-const ROAR_SHAPER_SHADER: &str = r#"
+const ROAR_SHAPER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float roarShaperCurve(int shaper, float a, float x)
 {
     if (shaper == 1) { return clamp(x, -1.0, 1.0); }
@@ -384,7 +385,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     col.rgb = mix(col.rgb, in.color_a.rgb, line * 0.95);
     return col;
 }
-"#;
+"#, super::wgsl::ROAR_SHAPER_SHADER);
 
 #[cfg(test)]
 mod tests {

@@ -4,7 +4,7 @@ use std::{cell::RefCell, rc::Rc};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetCursor, WidgetDefinition,
+    CellBuffer, EventOutput, GpuPrimitive, MouseEventOutcome, WidgetCursor, WidgetDefinition,
     WidgetEvent, WidgetInstance, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -36,13 +36,15 @@ fn set_live_band(widget_id: u64, state: LiveBandState) {
     LIVE_BANDS.with(|states| {
         states.borrow_mut().insert(widget_id, state);
     });
-    super::bump_widget_state_generation();
+    // Own-widget-only drag state (eseq-eeng): see
+    // `bump_widget_state_revision`.
+    super::bump_widget_state_revision(widget_id);
 }
 
 fn clear_live_band(widget_id: u64) {
     let removed = LIVE_BANDS.with(|states| states.borrow_mut().remove(&widget_id).is_some());
     if removed {
-        super::bump_widget_state_generation();
+        super::bump_widget_state_revision(widget_id);
     }
 }
 
@@ -181,13 +183,12 @@ fn handle_insets(pixel_aspect: f32) -> (f32, f32) {
     )
 }
 
-#[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.0;
     }
     let px_h = (rect.height * viewport.cell_h).max(1.0);
-    ((radius_px * 2.0) / px_h).clamp(0.0, 0.5)
+    ((super::ui_design_px(radius_px) * 2.0) / px_h).clamp(0.0, 0.5)
 }
 
 fn freq_to_t(freq: f32, min: f32, max: f32) -> f32 {
@@ -508,18 +509,20 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(RESPONSE_CURVE_EDITOR_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        RESPONSE_CURVE_EDITOR_SHADER.source(backend)
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let live = live_band(node.widget_id);
         let bands: Vec<ResponseBand> = prop_bands(&node.props)
             .into_iter()
@@ -577,7 +580,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
             if !band.enabled {
                 continue;
             }
-            primitives.push(MetalPrimitive::WidgetInstance {
+            primitives.push(GpuPrimitive::WidgetInstance {
                 widget_type: widget_type.to_string(),
                 instance: WidgetInstance {
                     ndc_min,
@@ -606,7 +609,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
         }
 
         if primitives.is_empty() {
-            primitives.push(MetalPrimitive::WidgetInstance {
+            primitives.push(GpuPrimitive::WidgetInstance {
                 widget_type: widget_type.to_string(),
                 instance: WidgetInstance {
                     ndc_min,
@@ -633,8 +636,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
     }
 }
 
-#[cfg(target_os = "macos")]
-const RESPONSE_CURVE_EDITOR_SHADER: &str = r#"
+const RESPONSE_CURVE_EDITOR_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float rce_sdSegment(float2 p, float2 a, float2 b) {
     float2 pa = p - a;
     float2 ba = b - a;
@@ -792,7 +794,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     col.a = max(col.a * clipMask, handleOuter);
     return col;
 }
-"#;
+"#, super::wgsl::RESPONSE_CURVE_EDITOR_SHADER);
 
 #[cfg(test)]
 mod tests {

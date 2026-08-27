@@ -5,6 +5,25 @@ fn ctrl_char_keys_are_normalized_to_lowercase() {
 }
 
 #[test]
+fn key_names_distinguish_shifted_control_and_super_shortcuts() {
+    assert_eq!(
+        key_str(KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )),
+        "C-S-c"
+    );
+    assert_eq!(
+        key_str(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SUPER)),
+        "s-c"
+    );
+    assert_eq!(
+        key_str(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)),
+        "S-UP"
+    );
+}
+
+#[test]
 fn ctrl_c_ctrl_c_binding_enqueues_host_command() {
     let init = r#"
             (def compile-current ()
@@ -2286,43 +2305,89 @@ fn alt_w_copies_region_and_ctrl_y_yanks_it() {
 }
 
 #[test]
-fn cmd_c_copies_region_to_system_clipboard_in_text_only_mode() {
-    let runtime = Runtime::new();
-    let mut editor = Editor::new(runtime, EditorConfig::default());
-    editor.set_test_clipboard("");
-    editor.open_scratch_buffer("*test*", "abc def");
-    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
-    editor.active_buffer_mut().cursor = (0, 0);
+fn platform_copy_shortcuts_copy_region_to_system_clipboard() {
+    for modifiers in crate::ui::platform::primary_clipboard_key_modifiers() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_test_clipboard("");
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().cursor = (0, 0);
 
-    editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('c'), modifiers));
 
-    assert_eq!(editor.test_clipboard(), Some("abc"));
-    assert_eq!(editor.active_buffer().text(), "abc def");
-    assert_eq!(editor.active_region_range(), Some(((0, 0), (0, 3))));
+        assert_eq!(editor.test_clipboard(), Some("abc"), "modifiers: {modifiers:?}");
+        assert_eq!(editor.active_buffer().text(), "abc def");
+        assert_eq!(editor.active_region_range(), Some(((0, 0), (0, 3))));
+    }
 }
 
 #[test]
-fn cmd_v_pastes_system_clipboard_and_replaces_region_in_text_only_mode() {
-    let runtime = Runtime::new();
-    let mut editor = Editor::new(runtime, EditorConfig::default());
-    editor.set_test_clipboard("XYZ");
-    editor.open_scratch_buffer("*test*", "abc def");
-    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
-    editor.active_buffer_mut().cursor = (0, 0);
+fn platform_paste_shortcuts_replace_region_from_system_clipboard() {
+    for modifiers in crate::ui::platform::primary_clipboard_key_modifiers() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_test_clipboard("XYZ");
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().cursor = (0, 0);
 
-    editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER));
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('v'), modifiers));
 
-    assert_eq!(editor.active_buffer().text(), "XYZ def");
-    assert_eq!(editor.active_buffer().cursor, (0, 3));
-    assert!(editor.active_region_range().is_none());
+        assert_eq!(editor.active_buffer().text(), "XYZ def", "modifiers: {modifiers:?}");
+        assert_eq!(editor.active_buffer().cursor, (0, 3));
+        assert!(editor.active_region_range().is_none());
+    }
+}
+
+#[test]
+fn platform_copy_shortcuts_copy_region_in_text_only_mode() {
+    for modifiers in crate::ui::platform::primary_clipboard_key_modifiers() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_test_clipboard("");
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+        editor.active_buffer_mut().cursor = (0, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('c'), modifiers));
+
+        assert_eq!(editor.test_clipboard(), Some("abc"), "modifiers: {modifiers:?}");
+        assert_eq!(editor.active_buffer().text(), "abc def");
+        assert_eq!(editor.active_region_range(), Some(((0, 0), (0, 3))));
+    }
+}
+
+#[test]
+fn platform_paste_shortcuts_replace_region_in_text_only_mode() {
+    for modifiers in crate::ui::platform::primary_clipboard_key_modifiers() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_test_clipboard("XYZ");
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+        editor.active_buffer_mut().cursor = (0, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('v'), modifiers));
+
+        assert_eq!(editor.active_buffer().text(), "XYZ def", "modifiers: {modifiers:?}");
+        assert_eq!(editor.active_buffer().cursor, (0, 3));
+        assert!(editor.active_region_range().is_none());
+    }
 }
 
 #[test]
@@ -2821,6 +2886,85 @@ fn tab_accepts_completion_from_runtime_symbols() {
     editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
     assert_eq!(editor.active_buffer().text(), "(seq-step");
+}
+
+#[test]
+fn import_completion_discovers_all_configured_roots_and_accepts_dotted_names() {
+    let dir = hot_reload_temp_dir("eseqlisp-import-completion");
+    let user = dir.join("user");
+    let package = dir.join("package");
+    let factory = dir.join("factory");
+    std::fs::create_dir_all(user.join("local")).unwrap();
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::create_dir_all(factory.join("ui")).unwrap();
+    std::fs::write(
+        user.join("local/tools.lisp"),
+        "(module local.tools)\n(export tool)\n(def tool 1)",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("core.lisp"),
+        "(module alez.jaki.core)\n(export core)\n(def core 1)",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("surface.lisp"),
+        "(module alez.jaki.surface)\n(export surface)\n(def surface 1)",
+    )
+    .unwrap();
+    std::fs::write(
+        factory.join("ui/mixer.lisp"),
+        "(module eseq.mixer)\n(export mixer)\n(def mixer 1)",
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new();
+    runtime.set_scoped_module_load_path(vec![
+        crate::ModuleLoadRoot { path: user, module_prefix: None },
+        crate::ModuleLoadRoot {
+            path: package.clone(),
+            module_prefix: Some("alez.jaki".to_string()),
+        },
+        crate::ModuleLoadRoot { path: factory, module_prefix: None },
+    ]);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "(import");
+    editor.active_buffer_mut().cursor = (0, "(import".len());
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    let labels = editor
+        .completion_state()
+        .expect("empty import completion")
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&"alez.jaki"));
+    assert!(labels.contains(&"alez.jaki.core"));
+    assert!(labels.contains(&"alez.jaki.surface"));
+    assert!(labels.contains(&"local.tools"));
+    assert!(labels.contains(&"eseq.mixer"));
+
+    // The filesystem walk is cached: changing the root does not alter the
+    // popup on each subsequent keystroke.
+    std::fs::remove_file(package.join("core.lisp")).unwrap();
+    editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(
+        editor
+            .completion_state()
+            .expect("cached package completion")
+            .items
+            .iter()
+            .any(|item| item.label == "alez.jaki.core")
+    );
+
+    editor.open_scratch_buffer("*accept*", "(import alez.jaki.c");
+    editor.active_buffer_mut().cursor = (0, "(import alez.jaki.c".len());
+    editor.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), "(import alez.jaki.core");
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -4515,6 +4659,7 @@ fn cmd_y_toggles_visible_patcher_selected_cable_without_widget_focus() {
 
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
     editor.set_layout_viewport(40, 12);
     editor
         .runtime
@@ -4544,7 +4689,10 @@ fn cmd_y_toggles_visible_patcher_selected_cable_without_widget_focus() {
             .expect("selected cable should have segmentation state");
     editor.clear_focused_widget();
 
-    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SUPER));
+    editor.handle_key(KeyEvent::new(
+        KeyCode::Char('y'),
+        crate::ui::platform::primary_shortcut_modifier(),
+    ));
 
     let after =
         crate::widget_render::patcher::selected_patcher_cable_is_segmented_for_test(&patcher)
@@ -4559,6 +4707,7 @@ fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
 
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
     editor.set_layout_viewport(40, 12);
     editor
         .runtime
@@ -4587,7 +4736,10 @@ fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
         0
     );
 
-    editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::SUPER));
+    editor.handle_key(KeyEvent::new(
+        KeyCode::Char('k'),
+        crate::ui::platform::primary_shortcut_modifier(),
+    ));
 
     assert_eq!(
         crate::widget_render::patcher::patcher_agentic_bubble_count(&patcher),
@@ -4600,6 +4752,48 @@ fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
             .expect("cmd+k should focus the patcher it opened a bubble on")
             .widget_type,
         "patcher"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn linux_control_k_and_y_stay_with_text_editor_when_a_patcher_is_visible() {
+    let path = temp_file_path("patcher-visible-linux-control-k");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"(effect (patcher :height 10 :path "{}"))"#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+    let patcher = first_patcher_layout_node(
+        editor.runtime.current_layout.as_ref().expect("patcher layout"),
+    )
+    .expect("patcher node");
+    crate::widget_render::patcher::select_first_patcher_cable_for_test(&patcher)
+        .expect("selected cable");
+    let initially_segmented =
+        crate::widget_render::patcher::selected_patcher_cable_is_segmented_for_test(&patcher)
+            .expect("selected cable state");
+    editor.clear_focused_widget();
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+
+    assert_eq!(
+        crate::widget_render::patcher::patcher_agentic_bubble_count(&patcher),
+        0,
+        "Ctrl+K must retain its text-editor kill-line meaning on Linux",
+    );
+    assert_eq!(
+        crate::widget_render::patcher::selected_patcher_cable_is_segmented_for_test(&patcher),
+        Some(initially_segmented),
+        "Ctrl+Y must retain its text-editor yank meaning on Linux",
     );
 }
 
@@ -5438,6 +5632,42 @@ fn tiled_mouse_hit_testing_uses_fractional_tile_origin() {
 }
 
 #[test]
+fn scale_factor_cell_update_relayouts_proportional_label_height() {
+    struct ScaleTextMeasurer(std::sync::Arc<std::sync::atomic::AtomicU32>);
+    impl crate::layout::TextMeasurer for ScaleTextMeasurer {
+        fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+            text.chars().count() as f32 * 5.0
+        }
+
+        fn line_height_px(&self, _font_size: f32) -> f32 {
+            f32::from_bits(self.0.load(std::sync::atomic::Ordering::Relaxed))
+        }
+    }
+
+    let line_height_bits = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(8.0f32.to_bits()));
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_text_measurer(
+        Box::new(ScaleTextMeasurer(std::sync::Arc::clone(&line_height_bits))),
+        10.0,
+        20.0,
+    );
+    editor
+        .runtime
+        .eval_str(r#"(effect (label "scaled" :font-size 8))"#)
+        .unwrap();
+    let before = editor.widget_layout().expect("initial label layout");
+    assert!((before.rect.height - 0.4).abs() < 0.0001, "{:?}", before.rect);
+
+    // Wayland reports its real scale after the surface maps. The proportional
+    // measurer updates through its shared scale, and the editor must update the
+    // physical cell metrics and relayout in the same frame.
+    line_height_bits.store(12.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    editor.set_layout_cell_dimensions(15.0, 30.0);
+    let after = editor.widget_layout().expect("scaled label layout");
+    assert!((after.rect.height - 0.4).abs() < 0.0001, "{:?}", after.rect);
+}
+
+#[test]
 fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -6182,6 +6412,171 @@ fn editable_widget_buffers_do_not_auto_focus_widgets() {
     assert_eq!(editor.focused_widget_id(), None);
 }
 
+/// A focused number picker owns digits from the *first* keypress, so digit-keyed
+/// global shortcuts (roll rates) must not consume the key that starts the edit.
+#[test]
+fn focused_numeric_widgets_capture_digits_before_the_edit_starts() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor.refresh_runtime_side_effects();
+    let tree = editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+                (v-stack
+                  (button "Go" :key "num-button" :width 8 :height 1.4)
+                  (number-picker
+                    :key "num-picker"
+                    :value 12 :min 0 :max 99 :decimals 0
+                    :width 8 :height 1.4))
+                "#,
+        )
+        .expect("build widget tree")
+        .expect("widget tree");
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(tree.clone()), None);
+    editor.runtime_mut().set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(40, 10);
+    let _ = editor.widget_layout().expect("layout");
+
+    assert!(!editor.focused_widget_captures_numeric_input());
+
+    assert!(editor.focus_widget_by_stable_key("num-button", Some("button")));
+    assert!(
+        !editor.focused_widget_captures_numeric_input(),
+        "a button does not take numeric input"
+    );
+
+    assert!(editor.focus_widget_by_stable_key("num-picker", Some("number-picker")));
+    let picker_id = editor.focused_widget_id().expect("picker focus");
+    assert!(
+        !crate::widget_render::number_picker::number_picker_edit_state(picker_id).editing,
+        "the picker starts idle — the guard must not depend on it already editing"
+    );
+    assert!(
+        editor.focused_widget_captures_numeric_input(),
+        "a focused, idle number picker still owns the first digit"
+    );
+}
+
+/// A focused button must not swallow Backspace: destructive global shortcuts
+/// (select-all then Backspace over a step selection) defer to a focused widget
+/// only when that widget genuinely handles the key.
+#[test]
+fn focused_widget_consumes_key_only_for_real_key_handlers() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor.refresh_runtime_side_effects();
+    let tree = editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+                (v-stack
+                  (button "Go" :key "focus-button" :width 8 :height 1.4)
+                  (text-input :key "focus-text" :value "" :width 12 :height 1.4)
+                  (number-picker
+                    :key "focus-picker"
+                    :value 12 :min 0 :max 99 :decimals 0
+                    :width 8 :height 1.4))
+                "#,
+        )
+        .expect("build widget tree")
+        .expect("widget tree");
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(tree.clone()), None);
+    editor.runtime_mut().set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(40, 10);
+    let _ = editor.widget_layout().expect("layout");
+
+    assert!(editor.focus_widget_by_stable_key("focus-button", Some("button")));
+    assert!(
+        !editor.focused_widget_consumes_key(KeyCode::Backspace, KeyModifiers::NONE),
+        "a focused button must let Backspace through to the global shortcut"
+    );
+    assert!(
+        editor.focused_widget_consumes_key(KeyCode::Enter, KeyModifiers::NONE),
+        "a button does handle Enter"
+    );
+
+    assert!(editor.focus_widget_by_stable_key("focus-text", Some("text-input")));
+    assert!(
+        editor.focused_widget_consumes_key(KeyCode::Backspace, KeyModifiers::NONE),
+        "a text input owns Backspace"
+    );
+
+    assert!(editor.focus_widget_by_stable_key("focus-picker", Some("number-picker")));
+    assert!(
+        !editor.focused_widget_consumes_key(KeyCode::Backspace, KeyModifiers::NONE),
+        "an idle number picker does not own Backspace"
+    );
+    editor.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+    assert!(
+        editor.focused_widget_consumes_key(KeyCode::Backspace, KeyModifiers::NONE),
+        "a number picker mid-edit does own Backspace"
+    );
+}
+
+#[test]
+fn probing_focused_text_input_for_backspace_does_not_move_its_caret() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str("(def name (state \"alec\"))")
+        .expect("define text state");
+    let tree = editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (text-input
+              :key "rename-input"
+              :width 20
+              :value "alec"
+              :on-change |value| (set! name value))
+            "#,
+        )
+        .expect("build text input")
+        .expect("text input tree");
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(tree.clone()), None);
+    editor.runtime_mut().set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    let layout = editor.widget_layout().expect("text input layout");
+    let input = super::find_layout_node_by_stable_key(layout.as_ref(), "rename-input")
+        .expect("rename input")
+        .clone();
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            (input.rect.col + input.rect.width - 1.0) as u16,
+            input.rect.row as u16,
+        ),
+        0,
+        0,
+        30,
+        8,
+        input.rect.col + input.rect.width - 1.0,
+        input.rect.row + 0.5,
+    );
+
+    assert!(editor.focused_widget_consumes_key(
+        KeyCode::Backspace,
+        KeyModifiers::NONE,
+    ));
+    editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+    assert_eq!(
+        editor.runtime_mut().eval_str("name"),
+        Ok(Some(Value::String("ale".to_string()))),
+        "the consumption probe must not move the caret before dispatch"
+    );
+}
+
 #[test]
 fn focused_number_picker_escape_cancels_edit_and_runs_global_escape_binding() {
     let init = r#"
@@ -6539,7 +6934,6 @@ fn widget_tree_survives_buffer_switch() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
     fn find_widget<'a>(
@@ -6634,7 +7028,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
         .filter(|primitive| {
             matches!(
                 primitive,
-                crate::widget_render::MetalPrimitive::WidgetInstance { widget_type, .. }
+                crate::widget_render::GpuPrimitive::WidgetInstance { widget_type, .. }
                     if widget_type == "knob-number"
             )
         })
@@ -6642,7 +7036,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
     let range_uniforms = primitives
         .iter()
         .filter_map(|primitive| match primitive {
-            crate::widget_render::MetalPrimitive::WidgetInstance {
+            crate::widget_render::GpuPrimitive::WidgetInstance {
                 widget_type,
                 instance,
                 ..
@@ -6653,7 +7047,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
     let text = primitives
         .iter()
         .filter_map(|primitive| match primitive {
-            crate::widget_render::MetalPrimitive::ProportionalText(text) => {
+            crate::widget_render::GpuPrimitive::ProportionalText(text) => {
                 Some(text.text.as_str())
             }
             _ => None,
@@ -8044,7 +8438,6 @@ fn clicking_folder_tab_switches_buffer_without_dispatching_underlying_widget() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn dropdown_overlay_captures_move_and_mouse_up_without_selecting_the_tile_below() {
     fn find_widget<'a>(
@@ -8136,7 +8529,7 @@ fn dropdown_overlay_captures_move_and_mouse_up_without_selecting_the_tile_below(
     }
 
     assert_eq!(editor.active_tile, transport_tile);
-    let _ = crate::widget_render::collect_metal_primitives(
+    let _ = crate::widget_render::collect_gpu_primitives(
         &transport_layout,
         crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -9894,6 +10287,127 @@ fn widget_scroll_limit_cache_recomputes_after_layout_revision_changes() {
 }
 
 #[test]
+fn touchpad_scroll_over_plain_scroll_container_does_not_relayout() {
+    // eseq-pzp: a plain scroll container applies its offset at render time, so
+    // moving it changes no layout geometry. Scrolling one used to force a full
+    // LayoutEngine pass per raw event.
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(30, 8);
+    let children = (0..40)
+        .map(|i| {
+            format!(
+                r#"(box :key "item-{i}" :width :fill :height 2
+                     (label "item-{i}"))"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        r#"
+            (scroll :key "plain-scroll" :width :fill :height 8
+              (v-stack :key "plain-list" :width :fill :gap 0 :padding 0
+                {children}))
+            "#
+    );
+    let tree = editor
+        .runtime
+        .eval_str(&source)
+        .unwrap()
+        .expect("widget expression should return a tree");
+    editor.runtime.set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    let _ = crate::frame::build_render_frame(&mut editor, 30, 8);
+    let scroll_key = {
+        let layout = editor.widget_layout().expect("initial widget layout");
+        let scroll = find_widget_of_type(&layout, "scroll").expect("scroll node");
+        crate::widget_render::scroll::scroll_state_key(scroll)
+    };
+    let before = crate::widget_render::scroll::get_scroll_state(scroll_key).offset_y;
+    editor.runtime.drain_rendered_layouts();
+
+    for _ in 0..3 {
+        assert!(
+            editor.handle_touchpad_scroll(1, 1, 4.0, 4.0, 0.0, -140.0),
+            "touchpad scroll should be handled by the scroll widget"
+        );
+    }
+    assert!(
+        crate::widget_render::scroll::get_scroll_state(scroll_key).offset_y > before,
+        "scroll gesture should still move the container offset"
+    );
+    assert!(
+        editor.runtime.drain_rendered_layouts().is_empty(),
+        "scrolling a plain container must not relayout during the gesture"
+    );
+
+    let _ = crate::frame::build_render_frame(&mut editor, 30, 8);
+    assert!(
+        editor.runtime.drain_rendered_layouts().is_empty(),
+        "scrolling a plain container must not relayout on the next frame either"
+    );
+}
+
+#[test]
+fn tiled_touchpad_scroll_burst_relayouts_virtual_stack_once_per_frame() {
+    // eseq-pzp: tile routing set the layout viewport before every raw event,
+    // and that settled the deferred invalidation the previous event had just
+    // queued — one full relayout per scroll event instead of one per frame.
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(30, 8);
+    let children = (0..40)
+        .map(|i| {
+            format!(
+                r#"(box :key "item-{i}" :width :fill :height 2
+                     (label "item-{i}"))"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        r#"
+            (scroll :key "outer-scroll" :width :fill :height 8
+              (virtual-v-stack
+                :key "virtual-list"
+                :width :fill
+                :gap 0
+                :padding 0
+                :estimated-item-height 2
+                :overscan 0
+                {children}))
+            "#
+    );
+    let tree = editor
+        .runtime
+        .eval_str(&source)
+        .unwrap()
+        .expect("widget expression should return a tree");
+    editor.runtime.set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    let _ = crate::frame::build_tiled_render_frame_borderless(&mut editor, 30, 8);
+    editor.runtime.drain_rendered_layouts();
+
+    for _ in 0..4 {
+        assert!(
+            editor.handle_tiled_touchpad_scroll(4.0, 4.0, 0, 0.0, -140.0),
+            "tiled touchpad scroll should be handled by the scroll widget"
+        );
+    }
+    assert!(
+        editor.runtime.drain_rendered_layouts().is_empty(),
+        "a routed scroll burst must not relayout once per event"
+    );
+
+    let _ = crate::frame::build_tiled_render_frame_borderless(&mut editor, 30, 8);
+    assert_eq!(
+        editor.runtime.drain_rendered_layouts().len(),
+        1,
+        "the coalesced burst should rematerialize the virtual stack exactly once"
+    );
+}
+
+#[test]
 fn touchpad_scroll_rematerializes_virtual_stack_on_next_frame() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -11131,6 +11645,8 @@ fn sdf_scale_circle() {
     assert!((d - (-2.0)).abs() < 1e-10, "got {}", d);
 }
 
+/// `sdf->metal` compiles for the platform's render backend: MSL where the
+/// Metal backend runs, WGSL where the wgpu backend runs.
 #[test]
 fn sdf_to_metal_native() {
     let mut rt = Runtime::new();
@@ -11139,9 +11655,18 @@ fn sdf_to_metal_native() {
         .unwrap()
         .unwrap();
     if let Value::String(shader) = result {
-        assert!(shader.contains("fragment float4 widget_frag"));
-        assert!(shader.contains("length(float2(x, y))"));
-        assert!(shader.contains("discard_fragment"));
+        #[cfg(target_os = "macos")]
+        {
+            assert!(shader.contains("fragment float4 widget_frag"));
+            assert!(shader.contains("length(float2(x, y))"));
+            assert!(shader.contains("discard_fragment"));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(shader.contains("fn widget_frag"), "shader: {shader}");
+            assert!(shader.contains("length(vec2<f32>(x, y))"), "shader: {shader}");
+            assert!(shader.contains("discard"), "shader: {shader}");
+        }
     } else {
         panic!("expected String, got {:?}", result);
     }
@@ -12259,17 +12784,14 @@ fn inline_widget_dims_in_place_when_its_source_form_is_edited() {
 /// Clears the thread-local overlay stack when the test ends, pass or fail, so
 /// a mid-test assertion failure cannot leak overlay state into whichever test
 /// runs next on the same thread.
-#[cfg(target_os = "macos")]
 struct OverlayClearGuard;
 
-#[cfg(target_os = "macos")]
 impl Drop for OverlayClearGuard {
     fn drop(&mut self) {
         crate::widget_render::clear_overlay();
     }
 }
 
-#[cfg(target_os = "macos")]
 fn find_widget_of_type<'a>(
     node: &'a crate::layout::LayoutNode,
     widget_type: &str,
@@ -12285,7 +12807,6 @@ fn find_widget_of_type<'a>(
 /// Render the active tile's layout once so open overlays (modal panel,
 /// dropdown menus) register their entries on the overlay stack, exactly as a
 /// live frame draw would.
-#[cfg(target_os = "macos")]
 fn register_active_layout_overlays(editor: &mut Editor) {
     let layout = editor
         .runtime
@@ -12296,7 +12817,7 @@ fn register_active_layout_overlays(editor: &mut Editor) {
     // space, so the tile's live scroll has to reach the collector.
     let scroll_left = editor.widget_layout_scroll_left();
     let scroll_top = editor.total_scroll_top();
-    let _ = crate::widget_render::collect_metal_primitives(
+    let _ = crate::widget_render::collect_gpu_primitives(
         &layout,
         crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -12316,7 +12837,6 @@ fn register_active_layout_overlays(editor: &mut Editor) {
     );
 }
 
-#[cfg(target_os = "macos")]
 fn modal_two_tile_editor(panel_body: &str) -> Editor {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -12374,7 +12894,6 @@ fn modal_two_tile_editor(panel_body: &str) -> Editor {
     editor
 }
 
-#[cfg(target_os = "macos")]
 const MODAL_PANEL_BODY: &str = r#"
     (modal :is-open modal-open
            :on-close (lambda () (set! modal-open false))
@@ -12384,7 +12903,6 @@ const MODAL_PANEL_BODY: &str = r#"
           :on-click (lambda (event) (set! modal-clicked true)))))
 "#;
 
-#[cfg(target_os = "macos")]
 fn eval_bool(editor: &mut Editor, expr: &str) -> bool {
     match editor.runtime_mut().eval_str(expr).unwrap().unwrap() {
         Value::Bool(value) => value,
@@ -12392,7 +12910,6 @@ fn eval_bool(editor: &mut Editor, expr: &str) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn modal_click_inside_hits_a_modal_child_not_the_tile_below() {
     let _overlay_guard = OverlayClearGuard;
@@ -12445,7 +12962,6 @@ fn modal_click_inside_hits_a_modal_child_not_the_tile_below() {
 /// the next render refreshes the overlay entry. The stale id must not strand
 /// the modal — clicks inside and Escape fall back to the open modal node by
 /// type instead of consuming every event with no effect.
-#[cfg(target_os = "macos")]
 #[test]
 fn stale_overlay_widget_id_cannot_strand_the_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -12494,7 +13010,6 @@ fn stale_overlay_widget_id_cannot_strand_the_modal() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn modal_outside_click_fires_on_close_without_activating_underneath() {
     let _overlay_guard = OverlayClearGuard;
@@ -12535,7 +13050,6 @@ fn modal_outside_click_fires_on_close_without_activating_underneath() {
     );
 }
 
-#[cfg(target_os = "macos")]
 const SCROLLABLE_MODAL_PANEL_BODY: &str = r#"
     (modal :is-open modal-open
            :on-close (lambda () (set! modal-open false))
@@ -12554,7 +13068,6 @@ const SCROLLABLE_MODAL_PANEL_BODY: &str = r#"
 /// runtime.current_layout, so every subsequent pointer event was consumed
 /// with no effect and Escape could not close the modal (sound palette
 /// "completely stuck" bug). Scroll must route to the modal's own tile.
-#[cfg(target_os = "macos")]
 #[test]
 fn touchpad_scroll_over_modal_stays_in_the_modal_tile() {
     let _overlay_guard = OverlayClearGuard;
@@ -12606,7 +13119,6 @@ fn touchpad_scroll_over_modal_stays_in_the_modal_tile() {
 /// with a containment gate at every node — the open modal's own layout node
 /// is zero-size, so the recursion never entered its subtree and inspect
 /// selected the widgets BEHIND the panel.
-#[cfg(target_os = "macos")]
 #[test]
 fn inspect_mode_hits_modal_children_not_the_tile_below() {
     let _overlay_guard = OverlayClearGuard;
@@ -12646,7 +13158,6 @@ fn inspect_mode_hits_modal_children_not_the_tile_below() {
 
 /// Same as above but with the live sound-palette structure around the
 /// modal: subtree wrapper, fill box root, scroll + each-generated rows.
-#[cfg(target_os = "macos")]
 const PALETTE_LIKE_MODAL_PANEL_BODY: &str = r#"
   (v-stack :width :fill :gap 0.0
     (subtree :key "test-sound-palette"
@@ -12663,7 +13174,6 @@ const PALETTE_LIKE_MODAL_PANEL_BODY: &str = r#"
                     :on-click (lambda (event) (set! modal-clicked true)))))))))))
 "#;
 
-#[cfg(target_os = "macos")]
 #[test]
 fn inspect_mode_hits_palette_like_modal_children() {
     let _overlay_guard = OverlayClearGuard;
@@ -12705,7 +13215,6 @@ fn inspect_mode_hits_palette_like_modal_children() {
 /// step/arrangement buffer). Inspect must resolve the tile whose layout
 /// contains the modal instead of hit-testing the active tile's layout —
 /// which has no modal, so hits fell through to the widgets behind.
-#[cfg(target_os = "macos")]
 #[test]
 fn inspect_mode_resolves_a_modal_in_a_non_active_tile() {
     let _overlay_guard = OverlayClearGuard;
@@ -12765,7 +13274,7 @@ fn inspect_mode_resolves_a_modal_in_a_non_active_tile() {
 
     // Re-register the overlay entry from the panel tile's layout, as its
     // live frame collection does each draw.
-    let _ = crate::widget_render::collect_metal_primitives(
+    let _ = crate::widget_render::collect_gpu_primitives(
         &panel_layout,
         crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -12818,7 +13327,6 @@ fn inspect_mode_resolves_a_modal_in_a_non_active_tile() {
 /// another tile, the modal owner becomes inactive. Its cached layout must be
 /// rebuilt against the resized whole-frame viewport (not its own short tile),
 /// and Escape must dispatch `:on-close` through that owner tile.
-#[cfg(target_os = "macos")]
 #[test]
 fn inactive_modal_survives_frame_resize_and_escape_closes_it() {
     let _overlay_guard = OverlayClearGuard;
@@ -12849,7 +13357,7 @@ fn inactive_modal_survives_frame_resize_and_escape_closes_it() {
     assert!((prop("_frame_height") - 30.0).abs() < 0.01);
 
     // Register the resized inactive tile's overlay as the backend does.
-    let _ = crate::widget_render::collect_metal_primitives(
+    let _ = crate::widget_render::collect_gpu_primitives(
         &panel_layout,
         crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -12889,7 +13397,6 @@ fn inactive_modal_survives_frame_resize_and_escape_closes_it() {
 /// A modal remains the exclusive keyboard context when source inspection has
 /// made its owner tile inactive. Focused modal controls still receive keys,
 /// but an unhandled key must not fall through to a global editor binding.
-#[cfg(target_os = "macos")]
 #[test]
 fn inactive_modal_routes_focused_keys_and_blocks_global_bindings() {
     let _overlay_guard = OverlayClearGuard;
@@ -12950,7 +13457,6 @@ fn inactive_modal_routes_focused_keys_and_blocks_global_bindings() {
     assert_eq!(editor.active_tile, source_tile);
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn inactive_modal_close_button_still_dispatches_after_resize() {
     let _overlay_guard = OverlayClearGuard;
@@ -12980,7 +13486,7 @@ fn inactive_modal_close_button_still_dispatches_after_resize() {
     let button = find_widget_of_type(&panel_layout, "button")
         .expect("close button")
         .clone();
-    let _ = crate::widget_render::collect_metal_primitives(
+    let _ = crate::widget_render::collect_gpu_primitives(
         &panel_layout,
         crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -13024,7 +13530,6 @@ fn inactive_modal_close_button_still_dispatches_after_resize() {
     );
 }
 
-#[cfg(target_os = "macos")]
 const MODAL_WITH_DROPDOWN_BODY: &str = r#"
     (modal :is-open modal-open
            :on-close (lambda () (set! modal-open false))
@@ -13036,7 +13541,6 @@ const MODAL_WITH_DROPDOWN_BODY: &str = r#"
           :value "plate")))
 "#;
 
-#[cfg(target_os = "macos")]
 fn open_dropdown_inside_modal(editor: &mut Editor) {
     register_active_layout_overlays(editor);
     let layout = editor.runtime.current_layout.clone().expect("panel layout");
@@ -13066,7 +13570,6 @@ fn open_dropdown_inside_modal(editor: &mut Editor) {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn outside_click_closes_dropdown_inside_modal_but_keeps_the_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -13101,7 +13604,6 @@ fn outside_click_closes_dropdown_inside_modal_but_keeps_the_modal() {
     assert!(!eval_bool(&mut editor, "modal-open"));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn escape_closes_the_dropdown_first_then_the_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -13129,7 +13631,6 @@ fn escape_closes_the_dropdown_first_then_the_modal() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn modal_traps_focus_while_open_and_restores_it_after_close() {
     let _overlay_guard = OverlayClearGuard;
@@ -13218,7 +13719,6 @@ fn modal_traps_focus_while_open_and_restores_it_after_close() {
 /// Inspect mode outranks the modal keyboard boundary: the toggle chord and
 /// the Esc that exits inspect must work while a modal is open, without
 /// disturbing the modal itself.
-#[cfg(target_os = "macos")]
 #[test]
 fn inspect_toggle_and_escape_outrank_an_open_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -13261,7 +13761,6 @@ fn inspect_toggle_and_escape_outrank_an_open_modal() {
 /// An active prompt outranks the modal keyboard boundary: if a save prompt is
 /// on screen while a modal is open, keystrokes must reach the prompt (its
 /// filename input / y-n answers), not be swallowed by the modal.
-#[cfg(target_os = "macos")]
 #[test]
 fn save_prompt_keys_outrank_an_open_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -13658,7 +14157,6 @@ fn mx_command_defined_in_a_declared_module_requires_its_qualified_name() {
 /// module-local fn writing module defstates. Covers the full pointer
 /// pipeline (overlay hit-test → Custom event → closure) with qualified
 /// widget keys and state bindings.
-#[cfg(target_os = "macos")]
 #[test]
 fn module_dropdown_row_click_applies_selection_and_closes_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -13760,7 +14258,6 @@ fn module_dropdown_row_click_applies_selection_and_closes_modal() {
 
 /// Load the REAL ui/choose-model.lisp (agent natives stubbed) and click a
 /// dropdown row — reproduces the in-app ArityMismatch report if present.
-#[cfg(target_os = "macos")]
 #[test]
 fn real_choose_model_dropdown_row_click_selects() {
     let _overlay_guard = OverlayClearGuard;
@@ -13868,7 +14365,6 @@ fn real_choose_model_dropdown_row_click_selects() {
 
 /// Differential probe: identical to module_dropdown_row_click test but the
 /// module fn is named `select` (a builtin widget name).
-#[cfg(target_os = "macos")]
 #[test]
 fn module_fn_named_select_compiles_with_correct_arity() {
     let runtime = Runtime::new();
@@ -13906,7 +14402,6 @@ fn module_fn_named_select_compiles_with_correct_arity() {
 
 // ── Context menu: right-click plumbing + anchored overlay (eseq-dkn) ────────
 
-#[cfg(target_os = "macos")]
 const CONTEXT_MENU_PROGRAM: &str = r#"
     (def menu-open (state false))
     (def menu-col (state 0))
@@ -13944,7 +14439,6 @@ const CONTEXT_MENU_PROGRAM: &str = r#"
 
 /// Same shape, but with a panel far wider and taller than its tile so the
 /// tile can be panned/scrolled underneath the right-click.
-#[cfg(target_os = "macos")]
 const SCROLLED_CONTEXT_MENU_PROGRAM: &str = r#"
     (def menu-open (state false))
     (def menu-col (state 0))
@@ -13978,12 +14472,10 @@ const SCROLLED_CONTEXT_MENU_PROGRAM: &str = r#"
         0.5 (list :buf "*sequencer*" :hide-status true)))
 "#;
 
-#[cfg(target_os = "macos")]
 fn context_menu_two_tile_editor() -> Editor {
     context_menu_two_tile_editor_for(CONTEXT_MENU_PROGRAM)
 }
 
-#[cfg(target_os = "macos")]
 fn context_menu_two_tile_editor_for(program: &str) -> Editor {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -14023,7 +14515,6 @@ fn context_menu_two_tile_editor_for(program: &str) -> Editor {
 
 /// Right-click at the given point, then rebuild the frame and register the
 /// resulting overlay entries, as a live render would.
-#[cfg(target_os = "macos")]
 fn right_click_at(editor: &mut Editor, col: f32, row: f32) {
     for kind in [
         MouseEventKind::Down(MouseButton::Right),
@@ -14035,7 +14526,6 @@ fn right_click_at(editor: &mut Editor, col: f32, row: f32) {
     register_active_layout_overlays(editor);
 }
 
-#[cfg(target_os = "macos")]
 fn eval_string(editor: &mut Editor, expr: &str) -> String {
     match editor.runtime_mut().eval_str(expr).unwrap().unwrap() {
         Value::String(value) => value,
@@ -14043,7 +14533,6 @@ fn eval_string(editor: &mut Editor, expr: &str) -> String {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn find_menu_item<'a>(
     node: &'a crate::layout::LayoutNode,
     text: &str,
@@ -14058,7 +14547,6 @@ fn find_menu_item<'a>(
         .find_map(|child| find_menu_item(child, text))
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn right_click_opens_the_context_menu_at_the_pointer() {
     let _overlay_guard = OverlayClearGuard;
@@ -14082,7 +14570,6 @@ fn right_click_opens_the_context_menu_at_the_pointer() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_flips_and_clamps_near_the_screen_edge() {
     let _overlay_guard = OverlayClearGuard;
@@ -14103,7 +14590,6 @@ fn context_menu_flips_and_clamps_near_the_screen_edge() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_anchors_at_the_pointer_when_the_tile_is_scrolled() {
     // eseq-05t: :col/:row reach the handler in tile CONTENT space (scroll
@@ -14141,7 +14627,6 @@ fn context_menu_anchors_at_the_pointer_when_the_tile_is_scrolled() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_item_hover_schedules_redraw_on_pointer_change() {
     let _overlay_guard = OverlayClearGuard;
@@ -14173,7 +14658,6 @@ fn context_menu_item_hover_schedules_redraw_on_pointer_change() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_item_click_fires_exactly_its_handler_and_closes() {
     let _overlay_guard = OverlayClearGuard;
@@ -14208,7 +14692,6 @@ fn context_menu_item_click_fires_exactly_its_handler_and_closes() {
     assert!(!eval_bool(&mut editor, "underlay-clicked"));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_disabled_item_click_neither_fires_nor_closes() {
     let _overlay_guard = OverlayClearGuard;
@@ -14238,7 +14721,6 @@ fn context_menu_disabled_item_click_neither_fires_nor_closes() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_outside_click_closes_without_firing_items() {
     let _overlay_guard = OverlayClearGuard;
@@ -14265,7 +14747,6 @@ fn context_menu_outside_click_closes_without_firing_items() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn context_menu_escape_closes_without_firing_items() {
     let _overlay_guard = OverlayClearGuard;
@@ -14287,7 +14768,6 @@ fn context_menu_escape_closes_without_firing_items() {
 
 /// A modal whose body can open a context menu inside itself — the nested
 /// modal-family stack Escape has to unwind one panel at a time.
-#[cfg(target_os = "macos")]
 const MODAL_WITH_CONTEXT_MENU_PROGRAM: &str = r#"
     (def modal-open (state true))
     (def menu-open (state false))
@@ -14321,7 +14801,6 @@ const MODAL_WITH_CONTEXT_MENU_PROGRAM: &str = r#"
         0.5 (list :buf "*sequencer*" :hide-status true)))
 "#;
 
-#[cfg(target_os = "macos")]
 #[test]
 fn escape_closes_the_context_menu_first_then_the_modal() {
     let _overlay_guard = OverlayClearGuard;
@@ -14367,3 +14846,57 @@ fn escape_closes_the_context_menu_first_then_the_modal() {
     );
 }
 
+
+#[test]
+fn routed_input_does_not_relayout_at_a_non_reference_window_scale() {
+    // eseq-pzp, the dominant cost. `border_width_px` is authored in the 2x
+    // design-pixel space. Input routing insets the tile's layout viewport by
+    // `ui_design_px(border_width_px)` (`metal_tile_content_viewport`), matching
+    // what both backends draw and what `tile_content_border_insets` maps
+    // pointer coordinates through; the frame builder used the raw value. At the
+    // 2.0 reference scale `ui_px_scale()` is 1.0 and the two agree, which is why
+    // only the wgpu shell — the one backend that reports a real scale factor —
+    // ever saw it. At any other scale each routed event laid the tree out for
+    // one viewport and the next frame laid it out again for the other: two full
+    // relayouts per frame, on any buffer, with no scroll widget involved.
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(r#"(effect (box :width :fill :height :fill))"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.active_leaf_mut().show_border = true;
+    editor.active_leaf_mut().border_width_px = 2.0;
+    editor.set_layout_cell_dimensions(10.0, 20.0);
+
+    crate::widget_render::set_ui_scale_factor(1.0);
+    let _ = crate::frame::build_tiled_render_frame_borderless(&mut editor, 40, 12);
+    let frame_viewport = (
+        editor.runtime.layout_cols_exact(),
+        editor.runtime.layout_rows_exact(),
+    );
+    editor.runtime.drain_rendered_layouts();
+
+    let _ = editor.handle_tiled_touchpad_scroll(6.0, 6.0, 0, 0.0, -40.0);
+    let routed_viewport = (
+        editor.runtime.layout_cols_exact(),
+        editor.runtime.layout_rows_exact(),
+    );
+    let routed_relayouts = editor.runtime.drain_rendered_layouts().len();
+
+    let _ = crate::frame::build_tiled_render_frame_borderless(&mut editor, 40, 12);
+    let frame_relayouts = editor.runtime.drain_rendered_layouts().len();
+    crate::widget_render::set_ui_scale_factor(crate::widget_render::UI_DESIGN_REFERENCE_SCALE);
+
+    assert_eq!(
+        routed_viewport, frame_viewport,
+        "input routing and the frame builder must derive the same tile layout viewport"
+    );
+    assert_eq!(
+        (routed_relayouts, frame_relayouts),
+        (0, 0),
+        "a routed event on an unchanged tree must not relayout, at any window scale"
+    );
+}

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyModifiers, MouseEventKind};
 
 use crate::layout::LayoutNode;
+use crate::ui::platform::has_primary_shortcut_modifier;
 use crate::widget_render::trigger_alignment_haptic;
 
 use super::alignment::{align_dragged_primary_position, clear_alignment};
@@ -571,7 +572,7 @@ pub(super) fn handle_patcher_pointer_drag(
                 .map(|primary_start| {
                     let raw_primary_position =
                         (primary_start.0 + delta.0, primary_start.1 + delta.1);
-                    if modifiers.contains(KeyModifiers::SUPER) {
+                    if has_primary_shortcut_modifier(modifiers) {
                         clear_alignment(&mut alignment);
                         (0.0, 0.0)
                     } else {

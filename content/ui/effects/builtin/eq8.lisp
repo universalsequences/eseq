@@ -140,25 +140,35 @@
   (let ((band-map (band-data fx params band))
       (enabled-p (param params band "enabled"))
       (selected (= (selected-band-for fx) band)))
-    (h-stack :gap 0.08 :align :center
-      (button (str (+ band 1))
-        :width 1.65 :height 1.05 :padding 0 :font-size 8.8
-        :background-color (if selected (rgba 1.0 0.74 0.22 1.0) :mixer-control-bg)
-        :border-color :transparent
-        :color (if selected :black (if (get band-map :enabled) :fg :dim))
-        :on-click |x y r| (select-band fx band))
-      (button (if (get band-map :enabled) "on" "off")
-        :border-color :transparent
-        :width 2.35 :height 1.05 :padding 0 :font-size 8.0
-        :background-color (if (get band-map :enabled) (rgba 0.92 0.35 0.12 1.0) :mixer-control-bg)
-        :color (if (get band-map :enabled) :white :dim)
-        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx enabled-p) 1 0)
-        :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
-        :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
-        :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-        :on-click |x y r| (do
-          (select-band fx band)
-          (eseq.effects.param-controls/fx-toggle-effect-value fx enabled-p))))))
+    (h-stack :gap 1.58 :align :center
+      (box 
+        :selected selected
+        :selected-background-color :mixer-strip-selected-bg
+        :width 5 :padding 0.2 :background-color :mixer-control-bg
+        (h-stack :gap 0.18
+          (button (str (+ band 1))
+            :width 1.05 :height 0.55 :padding 0 :font-size 6.8
+            :background-color (if selected (rgba 1.0 0.74 0.22 1.0) :mixer-control-bg)
+            :border-color :transparent
+            :corner-radius 0
+            :color (if selected :black (if (get band-map :enabled) :fg :dim))
+            :on-click |x y r| (select-band fx band))
+          (button (if (get band-map :enabled) "on" "off")
+            :border-color :transparent
+            :corner-radius 6
+            :width 2.15 :height 0.85 :padding 0 :font-size 8.0
+            :background-color :transparent
+            :active-color :yellow
+            :color :dim
+            :active (get band-map :enabled)
+            :plock-active (if (eseq.effects.param-controls/param-plock-active? fx enabled-p) 1 0)
+            :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+            :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+            :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+            :on-click |x y r| (do
+              (select-band fx band)
+              (eseq.effects.param-controls/fx-toggle-effect-value fx enabled-p))))))
+    ))
 
 (def selected-knob (fx label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "eq8-param-" (get p :idx) "-mod-wrapper")
@@ -173,6 +183,7 @@
         :mod-range-2-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 2)
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
+        :track-color :mixer-strip-bg
         :font-size 8.8 :label-font-size 8.6
         :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
         :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -180,7 +191,7 @@
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
         :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
         :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-        :width 4.45 :height 3.48 :knob-size 1.65
+        :width 4.45 :height 3.48 :knob-size 2.65
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 (def selected-knobs (fx params)
@@ -188,7 +199,7 @@
     (let ((freq-p (param params band "freq"))
           (q-p (param params band "q")))
       (box :width 4.9 :height 7.05 :padding 0.22
-        :background-color :fx-inner-panel-bg :corner-radius 7
+        :background-color :mixer-control-bg :corner-radius 12
         (v-stack :gap 0.22 :align :center
           (selected-knob fx "freq" freq-p 0)
           (selected-knob fx "q" q-p 2))))))
@@ -196,16 +207,19 @@
 (def selected-controls (fx params)
   (let ((band (selected-band-for fx)))
     (let ((type-p (param params band "type"))
-          (freq-p (param params band "freq"))
-          (gain-p (param params band "gain"))
-          (q-p (param params band "q")))
+        (freq-p (param params band "freq"))
+        (gain-p (param params band "gain"))
+        (q-p (param params band "q")))
       (box :width 43.2 :height 1.65 :padding 0.24
-        :background-color :fx-inner-panel-bg :corner-radius 7
-        (h-stack :gap 0.44 :align :center
-          (label (str "B" (+ band 1)) :font-size 9.5 :width 2.0 :color :dim :bg :transparent)
+        :corner-radius 7
+        (h-stack :gap 0.44 :align :baseline
           (dropdown :value (get type-p :text-value)
             :options (get type-p :options)
             :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx type-p v))
+            :bg-color :mixer-strip-bg
+            :border-color :buffer-bg
+            :badge-color :yellow
+            :chevron-color :black
             :plock-active (if (eseq.effects.param-controls/param-plock-active? fx type-p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -219,11 +233,12 @@
   (let ((params (get fx :params)))
     (if (= (len params) 41)
       (v-stack :gap 0.020
+        :padding 0.1
         (h-stack :gap 0.25 :align :start
           (selected-knobs fx params)
-          (box :width 38.05 :height 7.05
+          (box :width 38.05 :height 6.85
             (eq8-editor
-              :width 38.05 :height 7.05
+              :width 38.05 :height 6.85
               :bands (bands fx params)
               :selected-band (selected-band-for fx)
               :source (eq8-source fx)
@@ -234,22 +249,27 @@
               :min-db -96
               :max-db 0
               :smoothing 0.65
-              :background-color (rgba 0.045 0.048 0.052 1.0)
+              :background-color :mixer-control-bg
               :curve-color (rgba 1.0 0.54 0.14 1.0)
               :selected-color (rgba 1.0 0.78 0.18 1.0)
               :spectrum-color (rgba 0.08 0.52 0.54 0.30)
               :spectrum-peak-color (rgba 0.40 0.92 0.86 0.74)
               :on-action |event| (handle-action fx params event))))
-        (box :width 43.2 :heighl 1.02 :padding 0.22
-          :background-color :fx-inner-panel-bg :corner-radius 7
-          (h-stack :gap 0.18 :align :center
-            (band-button fx params 0)
-            (band-button fx params 1)
-            (band-button fx params 2)
-            (band-button fx params 3)
-            (band-button fx params 4)
-            (band-button fx params 5)
-            (band-button fx params 6)
-            (band-button fx params 7)))
-        (selected-controls fx params))
-      (eseq.effects.param-grid/fx-param-grid params fx))))
+        (box :background-color :mixer-control-bg
+          :corner-radius 12
+          :padding 0.2
+          (v-stack
+            (box :width 43.2 :height 1.02 :padding 0.22
+              :corner-radius 7
+              (h-stack  :align :center :gap 0.4
+                (band-button fx params 0)
+                (band-button fx params 1)
+                (band-button fx params 2)
+                (band-button fx params 3)
+                (band-button fx params 4)
+                (band-button fx params 5)
+                (band-button fx params 6)
+                (band-button fx params 7)))
+            (selected-controls fx params))))
+      (eseq.effects.param-grid/fx-param-grid params fx))
+    ))

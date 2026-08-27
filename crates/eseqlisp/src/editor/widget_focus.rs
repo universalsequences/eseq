@@ -1,10 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::layout::LayoutNode;
+use crate::ui::platform::{
+    has_primary_shortcut_modifier, ShortcutPlatform, CURRENT_SHORTCUT_PLATFORM,
+};
 use crate::vm::Value;
 use crate::widget_render::{WidgetEvent, WidgetKeyEvent, handle_event, map_key_event};
 
-use super::{Editor, key_str};
+use super::{Editor, ViewMode, key_str};
 
 impl Editor {
     pub(super) fn set_focused_widget(&mut self, node: LayoutNode) {
@@ -492,7 +495,7 @@ impl Editor {
 
     pub(super) fn handle_visible_patcher_selected_cable_shortcut(&mut self, key: KeyEvent) -> bool {
         if !matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
-            || !key.modifiers.contains(KeyModifiers::SUPER)
+            || !has_primary_shortcut_modifier(key.modifiers)
         {
             return false;
         }
@@ -501,8 +504,11 @@ impl Editor {
             self.active_buffer().name,
             self.active_leaf().focused_widget_id
         );
-        if self.focused_widget_captures_text_input() {
-            eprintln!("[patcher cmd-y] ignored: focused widget is capturing text input");
+        if self.focused_widget_captures_text_input()
+            || (CURRENT_SHORTCUT_PLATFORM != ShortcutPlatform::MacOS
+                && self.active_buffer().view_mode == ViewMode::TextOnly)
+        {
+            eprintln!("[patcher cmd-y] ignored: active context is capturing text input");
             return false;
         }
         let Some(layout) = self.runtime.current_layout.clone() else {
@@ -556,12 +562,16 @@ impl Editor {
     /// clicking the canvas to focus it.
     pub(super) fn handle_visible_patcher_agentic_shortcut(&mut self, key: KeyEvent) -> bool {
         if !matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K'))
-            || !key.modifiers.contains(KeyModifiers::SUPER)
+            || !has_primary_shortcut_modifier(key.modifiers)
         {
             return false;
         }
-        // A focused text field keeps Cmd+K for itself.
-        if self.focused_widget_captures_text_input() {
+        // Text editing keeps Ctrl+K (kill line) on Linux. A focused widget
+        // keeps the platform-primary chord for itself on every platform.
+        if self.focused_widget_captures_text_input()
+            || (CURRENT_SHORTCUT_PLATFORM != ShortcutPlatform::MacOS
+                && self.active_buffer().view_mode == ViewMode::TextOnly)
+        {
             return false;
         }
         let Some(layout) = self.runtime.current_layout.clone() else {
@@ -633,6 +643,64 @@ impl Editor {
             self.mark_needs_redraw();
         }
         true
+    }
+
+    /// Whether the focused widget takes numeric text input — digits, `.`, `-`.
+    ///
+    /// Number pickers and knob-numbers start an edit on the *first* digit, so a
+    /// digit-keyed global shortcut (roll rates at the live-keyboard seam) must
+    /// not consume the key out from under a focused one. Checking "is it
+    /// already editing" is too late: that first digit is exactly the key that
+    /// would begin the edit.
+    ///
+    /// Deliberately declarative rather than asking the widget through
+    /// `map_key_event`: widget key handlers mutate edit state, so they must
+    /// never be run from a predicate.
+    pub fn focused_widget_captures_numeric_input(&self) -> bool {
+        self.focused_widget_node().is_some_and(|node| {
+            node_captures_text_input(&node)
+                || matches!(
+                    node.widget_type.as_str(),
+                    "number-picker"
+                        | "number-picker-tri"
+                        | "knob-number"
+                        | "knob-number-mod-range"
+                )
+        })
+    }
+
+    /// Whether the focused widget would consume this key itself.
+    ///
+    /// Text entry is identified declaratively: probing its key handler would
+    /// apply the edit to persistent cursor state before the real dispatch.
+    /// Other widget key handlers may also mutate interaction state, so callers
+    /// must still restrict this probe to keys whose non-text handlers are
+    /// known to be no-ops when idle. Backspace/Delete meet that requirement
+    /// for the number picker and knob-number. Do not call this with digits or
+    /// Enter; use `focused_widget_captures_numeric_input` for numeric input.
+    ///
+    /// Destructive global shortcuts (Backspace/Delete over a step selection)
+    /// must defer to a focused widget only when that widget genuinely handles
+    /// the key — a text input, a number-picker or knob mid-edit, a lane with
+    /// its own selection. Gating on "something is focused" instead meant that
+    /// clicking any button silently disarmed Cmd+A followed by Backspace,
+    /// because a button consumes only Enter and Space.
+    pub fn focused_widget_consumes_key(
+        &self,
+        code: crossterm::event::KeyCode,
+        modifiers: KeyModifiers,
+    ) -> bool {
+        self.focused_widget_node().is_some_and(|node| {
+            node_captures_text_input(&node)
+                || crate::widget_render::map_key_event(
+                    &node,
+                    WidgetKeyEvent {
+                        code,
+                        modifiers,
+                    },
+                )
+                .is_some()
+        })
     }
 
     fn focused_widget_captures_text_input(&self) -> bool {

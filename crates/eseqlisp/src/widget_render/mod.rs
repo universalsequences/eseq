@@ -7,7 +7,6 @@ pub mod context_menu;
 pub mod dropdown;
 pub mod eq8_editor;
 pub mod event_view;
-#[cfg(target_os = "macos")]
 pub mod focus_decoration;
 pub mod gate_led;
 pub mod grid;
@@ -51,9 +50,9 @@ pub mod vslider;
 pub mod vstack;
 pub mod waveform;
 pub mod wavetable_viewer;
+pub(crate) mod wgsl;
 pub mod wrap;
 
-#[cfg(target_os = "macos")]
 pub use focus_decoration::{FocusCornerStyle, FocusDecoration};
 
 use std::cell::RefCell;
@@ -68,15 +67,82 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 use crate::backend::{Cell, CellStyle, Color};
 use crate::layout::{
     Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, TextMeasurer, get_map,
+    get_widget_type,
 };
 use crate::theme;
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
-use objc2_app_kit::{
-    NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
-    NSHapticFeedbackPerformer,
-};
+#[derive(Clone, Copy)]
+enum PointerModifierPlatform {
+    MacOS,
+    Other,
+}
+
+fn additive_selection_modifier_for_platform(
+    modifiers: KeyModifiers,
+    platform: PointerModifierPlatform,
+) -> bool {
+    let modifier = match platform {
+        PointerModifierPlatform::MacOS => KeyModifiers::SUPER,
+        PointerModifierPlatform::Other => KeyModifiers::ALT,
+    };
+    modifiers.contains(modifier)
+}
+
+/// Modifier fields shared by pointer callback event maps.
+///
+/// `additive-selection` is semantic rather than a raw key identity: Command on
+/// macOS preserves the platform's existing selection gesture, while Alt keeps
+/// the same role available to applications on Linux desktops that reserve
+/// Super for the window manager.
+pub(crate) fn pointer_modifier_info(
+    modifiers: KeyModifiers,
+) -> HashMap<String, Rc<RefCell<Value>>> {
+    let platform = if cfg!(target_os = "macos") {
+        PointerModifierPlatform::MacOS
+    } else {
+        PointerModifierPlatform::Other
+    };
+    let super_pressed = modifiers.contains(KeyModifiers::SUPER);
+    HashMap::from([
+        (
+            "shift".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                modifiers.contains(KeyModifiers::SHIFT),
+            ))),
+        ),
+        (
+            "ctrl".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                modifiers.contains(KeyModifiers::CONTROL),
+            ))),
+        ),
+        (
+            "alt".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                modifiers.contains(KeyModifiers::ALT),
+            ))),
+        ),
+        (
+            "super".to_string(),
+            Rc::new(RefCell::new(Value::Bool(super_pressed))),
+        ),
+        (
+            "cmd".to_string(),
+            Rc::new(RefCell::new(Value::Bool(super_pressed))),
+        ),
+        (
+            "meta".to_string(),
+            Rc::new(RefCell::new(Value::Bool(super_pressed))),
+        ),
+        (
+            "additive-selection".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                additive_selection_modifier_for_platform(modifiers, platform),
+            ))),
+        ),
+    ])
+}
 
 // ── Widget state generation counter ─────────────────────────────────────────
 // Bumped whenever a widget's internal state changes (scroll offset, tree
@@ -86,6 +152,7 @@ static WIDGET_STATE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static POINTER_HOVER_WIDGET_ID: RefCell<Option<u64>> = const { RefCell::new(None) };
+    static WIDGET_STATE_REVISIONS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
     /// Text measurer available to render-pass code. Widget metrics that are
     /// normally cached as a side effect of measure() (e.g. text-input
     /// per-character widths) can be recomputed on a cache miss instead of
@@ -98,8 +165,46 @@ pub fn bump_widget_state_generation() {
     WIDGET_STATE_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Global widget-state change stamp: advances on every shared-state bump AND
+/// on every per-widget revision bump. Redraw-scheduling diffs and tile-scene
+/// fingerprints observe this, so any widget-state mutation still schedules a
+/// repaint and invalidates whole-tile scene caches.
 pub fn widget_state_generation() -> u64 {
+    WIDGET_STATE_GENERATION
+        .load(Ordering::Relaxed)
+        .wrapping_add(WIDGET_STATE_TOTAL_REVISION.load(Ordering::Relaxed))
+}
+
+/// Shared-state-only generation, used by the per-widget primitive cache key
+/// together with the widget's own revision.
+fn widget_state_shared_generation() -> u64 {
     WIDGET_STATE_GENERATION.load(Ordering::Relaxed)
+}
+
+// Per-widget state revisions: for interaction state that only affects the
+// owning widget's own primitives (a drag envelope, an edit caret, a hovered
+// handle), bumping the shared generation invalidates every cacheable
+// widget's primitives on every pointer event of a gesture — the dominant
+// per-frame cost of continuous drags on the always-dynamic wgpu path
+// (eseq-eeng). Such state bumps its widget's own revision instead; the
+// per-widget primitive cache key hashes that revision plus the shared
+// generation, while `widget_state_generation()` above still moves so
+// whole-tile observers notice. State that other widgets can observe
+// (pointer hover with `inherited_hover`, overlays, drop targets, shared
+// data stores) must keep using `bump_widget_state_generation`.
+static WIDGET_STATE_TOTAL_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub fn bump_widget_state_revision(widget_id: u64) {
+    WIDGET_STATE_REVISIONS.with(|revisions| {
+        *revisions.borrow_mut().entry(widget_id).or_insert(0) += 1;
+    });
+    WIDGET_STATE_TOTAL_REVISION.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn widget_state_revision(widget_id: u64) -> u64 {
+    WIDGET_STATE_REVISIONS.with(|revisions| {
+        revisions.borrow().get(&widget_id).copied().unwrap_or(0)
+    })
 }
 
 pub fn set_render_text_measurer(measurer: Rc<dyn TextMeasurer>) {
@@ -191,29 +296,13 @@ pub fn mapped_haptic_value(props: &HashMap<String, Value>, normalized: f32, fall
     }
 }
 
-#[cfg(target_os = "macos")]
 pub fn trigger_level_change_haptic() {
-    let performer = NSHapticFeedbackManager::defaultPerformer();
-    performer.performFeedbackPattern_performanceTime(
-        NSHapticFeedbackPattern::LevelChange,
-        NSHapticFeedbackPerformanceTime::Now,
-    );
+    crate::ui::platform::trigger_level_change_haptic();
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn trigger_level_change_haptic() {}
-
-#[cfg(target_os = "macos")]
 pub fn trigger_alignment_haptic() {
-    let performer = NSHapticFeedbackManager::defaultPerformer();
-    performer.performFeedbackPattern_performanceTime(
-        NSHapticFeedbackPattern::Alignment,
-        NSHapticFeedbackPerformanceTime::Now,
-    );
+    crate::ui::platform::trigger_alignment_haptic();
 }
-
-#[cfg(not(target_os = "macos"))]
-pub fn trigger_alignment_haptic() {}
 
 // ── Overlay system ───────────────────────────────────────────────────────────
 // Overlays form a small kind-tagged stack (expected depth ≤ 2: a modal with a
@@ -239,10 +328,8 @@ thread_local! {
     static OVERLAY_STACK: RefCell<Vec<OverlayEntry>> = const { RefCell::new(Vec::new()) };
     static HAPTIC_BUCKETS: RefCell<HashMap<u64, i64>> = RefCell::new(HashMap::new());
     static DROP_HOVER_TARGET: RefCell<Option<u64>> = const { RefCell::new(None) };
-    #[cfg(target_os = "macos")]
-    static OVERLAY_PRIMITIVES: RefCell<Vec<MetalPrimitive>> = RefCell::new(Vec::new());
-    #[cfg(target_os = "macos")]
-    static WIDGET_PRIMITIVE_CACHE: RefCell<HashMap<u64, Vec<MetalPrimitive>>> = RefCell::new(HashMap::new());
+    static OVERLAY_PRIMITIVES: RefCell<Vec<GpuPrimitive>> = RefCell::new(Vec::new());
+    static WIDGET_PRIMITIVE_CACHE: RefCell<HashMap<u64, Vec<GpuPrimitive>>> = RefCell::new(HashMap::new());
 }
 
 /// Register (or refresh) an overlay entry. Replaces the existing entry of the
@@ -278,7 +365,6 @@ pub fn remove_overlay(widget_id: u64) {
         before != stack.len()
     });
     if removed {
-        #[cfg(target_os = "macos")]
         if !any_overlay_active() {
             OVERLAY_PRIMITIVES.with(|o| o.borrow_mut().clear());
         }
@@ -290,7 +376,6 @@ pub fn remove_overlay(widget_id: u64) {
 /// wholesale (buffer/tree switches, hot reload, tests).
 pub fn clear_overlay() {
     OVERLAY_STACK.with(|stack| stack.borrow_mut().clear());
-    #[cfg(target_os = "macos")]
     OVERLAY_PRIMITIVES.with(|o| o.borrow_mut().clear());
     bump_widget_state_generation();
 }
@@ -354,13 +439,11 @@ pub fn drop_target_hovered(widget_id: u64) -> bool {
     active_drop_hover_target() == Some(widget_id)
 }
 
-#[cfg(target_os = "macos")]
-pub fn push_overlay_primitive(prim: MetalPrimitive) {
+pub fn push_overlay_primitive(prim: GpuPrimitive) {
     OVERLAY_PRIMITIVES.with(|o| o.borrow_mut().push(prim));
 }
 
-#[cfg(target_os = "macos")]
-fn drain_overlay_primitives() -> Vec<MetalPrimitive> {
+fn drain_overlay_primitives() -> Vec<GpuPrimitive> {
     OVERLAY_PRIMITIVES.with(|o| std::mem::take(&mut *o.borrow_mut()))
 }
 
@@ -368,13 +451,11 @@ fn drain_overlay_primitives() -> Vec<MetalPrimitive> {
 /// `split_off_overlay_primitives` to capture primitives that nested widgets
 /// (e.g. a dropdown inside a modal) push during a subtree recursion, so the
 /// enclosing overlay can re-order them on top of its own content.
-#[cfg(target_os = "macos")]
 fn overlay_primitives_mark() -> usize {
     OVERLAY_PRIMITIVES.with(|o| o.borrow().len())
 }
 
-#[cfg(target_os = "macos")]
-fn split_off_overlay_primitives(mark: usize) -> Vec<MetalPrimitive> {
+fn split_off_overlay_primitives(mark: usize) -> Vec<GpuPrimitive> {
     OVERLAY_PRIMITIVES.with(|o| {
         let mut prims = o.borrow_mut();
         if mark >= prims.len() {
@@ -532,9 +613,9 @@ pub enum WidgetCursor {
     DragNotAllowed,
 }
 
-#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
+#[cfg_attr(feature = "wgpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct WidgetInstance {
     pub ndc_min: [f32; 2],
     pub ndc_max: [f32; 2],
@@ -553,7 +634,47 @@ pub struct WidgetInstance {
     pub pixel_aspect: f32,
 }
 
-#[cfg(target_os = "macos")]
+/// Raw-pixel UI constants (tile corner radii, the ADSR editor's handle boxes,
+/// autocomplete panel radii, …) were authored against macOS's 2x Retina
+/// backing store, so a window at scale factor 2.0 renders them 1:1. Any other
+/// scale factor multiplies those design pixels by `ui_px_scale()` to keep the
+/// same on-screen proportions relative to the cell grid.
+pub const UI_DESIGN_REFERENCE_SCALE: f32 = 2.0;
+
+/// Extra design-pixel margin around a patch cable's raster bounds. Shared by
+/// both GPU backends so cable thickness and antialiasing have identical room.
+pub(crate) const PATCH_CABLE_DRAW_PADDING_PX: f32 = 16.0;
+
+// Bits of 2.0f32: the macOS reference, so backends that never report a scale
+// (tests, capture harnesses, the Metal path today) render unchanged.
+static UI_WINDOW_SCALE_FACTOR_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x4000_0000);
+
+/// Record the window's scale factor. Called by the active backend at window
+/// setup and again whenever the compositor reports a new factor.
+pub fn set_ui_scale_factor(scale_factor: f32) {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        UI_WINDOW_SCALE_FACTOR_BITS.store(
+            scale_factor.to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+/// Multiplier converting design pixels (authored at the 2x reference scale)
+/// into framebuffer pixels for the current window.
+pub fn ui_px_scale() -> f32 {
+    f32::from_bits(UI_WINDOW_SCALE_FACTOR_BITS.load(std::sync::atomic::Ordering::Relaxed))
+        / UI_DESIGN_REFERENCE_SCALE
+}
+
+/// Convert a raw UI value authored in the macOS 2x design-pixel space into
+/// framebuffer pixels. Geometry derived from framebuffer dimensions or font
+/// metrics, and deliberate one-device-pixel hairlines, must not use this.
+pub fn ui_design_px(design_px: f32) -> f32 {
+    design_px * ui_px_scale()
+}
+
 #[derive(Clone, Copy)]
 pub struct WidgetViewport {
     pub cell_w: f32,
@@ -580,16 +701,14 @@ pub struct WidgetViewport {
     pub inherited_hover: bool,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub struct MetalRectPrimitive {
+pub struct GpuRectPrimitive {
     pub rect: Rect,
     pub color: Color,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
-pub struct MetalQuadPrimitive {
+pub struct GpuQuadPrimitive {
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -597,16 +716,14 @@ pub struct MetalQuadPrimitive {
     pub color: Color,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
-pub struct MetalTrianglePrimitive {
+pub struct GpuTrianglePrimitive {
     pub points: [[f32; 2]; 3],
     pub color: Color,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub struct MetalGlyphRunPrimitive {
+pub struct GpuGlyphRunPrimitive {
     pub row: f32,
     pub col: i32,
     pub text: String,
@@ -614,9 +731,8 @@ pub struct MetalGlyphRunPrimitive {
     pub bg: Color,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub struct MetalProportionalTextPrimitive {
+pub struct GpuProportionalTextPrimitive {
     /// Position in cell-space (fractional allowed).
     pub row: f32,
     pub col: f32,
@@ -634,9 +750,8 @@ pub struct MetalProportionalTextPrimitive {
     pub bg: Color,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub struct MetalWaveformPrimitive {
+pub struct GpuWaveformPrimitive {
     pub rect: Rect,
     pub sample_key: String,
     pub sample_start: f32,
@@ -658,9 +773,8 @@ pub struct MetalWaveformPrimitive {
     pub selection_color: Color,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub struct MetalWavetablePrimitive {
+pub struct GpuWavetablePrimitive {
     pub rect: Rect,
     /// Cache key for the GPU buffer (the bank file path).
     pub bank_key: String,
@@ -680,9 +794,8 @@ pub struct MetalWavetablePrimitive {
     pub bg_color: Color,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub struct MetalLiveSpectrogramPrimitive {
+pub struct GpuLiveSpectrogramPrimitive {
     pub rect: Rect,
     pub data_key: String,
     pub mode: u32,
@@ -697,9 +810,8 @@ pub struct MetalLiveSpectrogramPrimitive {
     pub background_color: Color,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub struct MetalImagePrimitive {
+pub struct GpuImagePrimitive {
     pub widget_id: u64,
     pub rect: Rect,
     pub src: String,
@@ -718,9 +830,8 @@ pub enum ImageFit {
     Stretch,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub struct MetalPatchCablePrimitive {
+pub struct GpuPatchCablePrimitive {
     pub start: [f32; 2],
     pub control1: [f32; 2],
     pub control2: [f32; 2],
@@ -732,46 +843,43 @@ pub struct MetalPatchCablePrimitive {
     pub corner_radius_cells: f32,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub struct MetalCirclePrimitive {
+pub struct GpuCirclePrimitive {
     pub center: [f32; 2],
     pub radius_px: f32,
     pub color: Color,
-    pub visible_half: MetalCircleVisibleHalf,
+    pub visible_half: GpuCircleVisibleHalf,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MetalCircleVisibleHalf {
+pub enum GpuCircleVisibleHalf {
     Full,
     Top,
     Bottom,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub enum MetalPrimitive {
+pub enum GpuPrimitive {
     ZLayer {
         z_index: i32,
-        primitive: Box<MetalPrimitive>,
+        primitive: Box<GpuPrimitive>,
     },
-    Rect(MetalRectPrimitive),
+    Rect(GpuRectPrimitive),
     /// Rectangles that must render above foreground widget instances but below
     /// proportional text. This is for widget-local editing overlays such as
     /// text selections and cursors on widgets whose chassis intentionally masks
     /// cables or other canvas geometry.
-    ForegroundRect(MetalRectPrimitive),
-    Quad(MetalQuadPrimitive),
-    Triangle(MetalTrianglePrimitive),
-    GlyphRun(MetalGlyphRunPrimitive),
-    ProportionalText(MetalProportionalTextPrimitive),
-    PatchCable(MetalPatchCablePrimitive),
-    Circle(MetalCirclePrimitive),
-    Waveform(MetalWaveformPrimitive),
-    Wavetable(MetalWavetablePrimitive),
-    LiveSpectrogram(MetalLiveSpectrogramPrimitive),
-    Image(MetalImagePrimitive),
+    ForegroundRect(GpuRectPrimitive),
+    Quad(GpuQuadPrimitive),
+    Triangle(GpuTrianglePrimitive),
+    GlyphRun(GpuGlyphRunPrimitive),
+    ProportionalText(GpuProportionalTextPrimitive),
+    PatchCable(GpuPatchCablePrimitive),
+    Circle(GpuCirclePrimitive),
+    Waveform(GpuWaveformPrimitive),
+    Wavetable(GpuWavetablePrimitive),
+    LiveSpectrogram(GpuLiveSpectrogramPrimitive),
+    Image(GpuImagePrimitive),
     WidgetInstance {
         widget_type: String,
         instance: WidgetInstance,
@@ -783,68 +891,60 @@ pub enum MetalPrimitive {
     PopClipRect,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
-pub struct MetalPrimitiveRun {
+pub struct GpuPrimitiveRun {
     pub widget_id: u64,
     pub ordinal: u16,
     pub widget_type: String,
     pub ancestor_widget_ids: Vec<u64>,
-    pub primitives: Vec<MetalPrimitive>,
+    pub primitives: Vec<GpuPrimitive>,
     pub reused_from_previous: bool,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct MetalPrimitiveRunKey {
+pub struct GpuPrimitiveRunKey {
     pub widget_id: u64,
     pub ordinal: u16,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Default)]
-pub struct MetalPrimitiveRunIndex {
-    by_key: HashMap<MetalPrimitiveRunKey, usize>,
+pub struct GpuPrimitiveRunIndex {
+    by_key: HashMap<GpuPrimitiveRunKey, usize>,
     ancestor_widget_ids: HashMap<u64, Vec<u64>>,
     subtree_run_indices: HashMap<u64, Vec<usize>>,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RetainedMetalPrimitiveRunStats {
+pub struct RetainedGpuPrimitiveRunStats {
     pub reused_runs: usize,
     pub rebuilt_runs: usize,
     pub missing_previous_runs: usize,
     pub invalid_previous_runs: usize,
 }
 
-#[cfg(target_os = "macos")]
-pub fn z_layer(z_index: i32, primitive: MetalPrimitive) -> MetalPrimitive {
-    MetalPrimitive::ZLayer {
+pub fn z_layer(z_index: i32, primitive: GpuPrimitive) -> GpuPrimitive {
+    GpuPrimitive::ZLayer {
         z_index,
         primitive: Box::new(primitive),
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn effective_z_index(primitive: &MetalPrimitive) -> i32 {
+pub fn effective_z_index(primitive: &GpuPrimitive) -> i32 {
     match primitive {
-        MetalPrimitive::ZLayer { z_index, .. } => *z_index,
+        GpuPrimitive::ZLayer { z_index, .. } => *z_index,
         _ => 0,
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn innermost_primitive(primitive: &MetalPrimitive) -> &MetalPrimitive {
+pub fn innermost_primitive(primitive: &GpuPrimitive) -> &GpuPrimitive {
     match primitive {
-        MetalPrimitive::ZLayer { primitive, .. } => innermost_primitive(primitive),
+        GpuPrimitive::ZLayer { primitive, .. } => innermost_primitive(primitive),
         primitive => primitive,
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn metal_widget_instance(widget_type: &str, instance: WidgetInstance) -> Vec<MetalPrimitive> {
-    vec![MetalPrimitive::WidgetInstance {
+pub fn gpu_widget_instance(widget_type: &str, instance: WidgetInstance) -> Vec<GpuPrimitive> {
+    vec![GpuPrimitive::WidgetInstance {
         widget_type: widget_type.to_string(),
         instance,
         is_background: false,
@@ -888,6 +988,44 @@ impl CellBuffer {
     }
 }
 
+/// Shader language requested by a graphics backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShaderBackend {
+    Msl,
+    Wgsl,
+}
+
+/// Backend-tagged source bodies for one shader stage.
+///
+/// A stage may support either backend independently while shader ports are in
+/// progress, or carry both bodies once the port is complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShaderSources {
+    msl: Option<&'static str>,
+    wgsl: Option<&'static str>,
+}
+
+impl ShaderSources {
+    pub const fn new(msl: Option<&'static str>, wgsl: Option<&'static str>) -> Self {
+        Self { msl, wgsl }
+    }
+
+    pub const fn msl(source: &'static str) -> Self {
+        Self::new(Some(source), None)
+    }
+
+    pub const fn both(msl: &'static str, wgsl: &'static str) -> Self {
+        Self::new(Some(msl), Some(wgsl))
+    }
+
+    pub const fn source(self, backend: ShaderBackend) -> Option<&'static str> {
+        match backend {
+            ShaderBackend::Msl => self.msl,
+            ShaderBackend::Wgsl => self.wgsl,
+        }
+    }
+}
+
 pub trait WidgetDefinition: Sync {
     fn names(&self) -> &'static [&'static str];
     fn is_container(&self) -> bool {
@@ -913,12 +1051,18 @@ pub trait WidgetDefinition: Sync {
         ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size>;
+    /// Baseline offset from the widget's top edge, in layout rows. Text-bearing
+    /// widgets override this with the baseline they actually render.
+    fn baseline_offset(&self, _node: &Value, _size: Size, _ctx: &MeasureCtx<'_>) -> Option<f32> {
+        None
+    }
     fn layout_children(
         &self,
         node: &Value,
         area: Rect,
         children: &[Value],
         aspect: f32,
+        measure_ctx: &MeasureCtx<'_>,
         layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
@@ -928,6 +1072,7 @@ pub trait WidgetDefinition: Sync {
             area,
             children,
             aspect,
+            measure_ctx,
             layout_ctx,
             measure_child,
             build_child,
@@ -1024,32 +1169,36 @@ pub trait WidgetDefinition: Sync {
     fn animation_frame_policy(&self) -> AnimationFramePolicy {
         AnimationFramePolicy::Never
     }
-    /// Whether this widget's Metal shader reads `WidgetInstance::itime`.
+    /// Whether this widget's fragment shader reads `WidgetInstance::itime`.
     /// Time-dependent instances must include `itime` in primitive cache keys.
-    fn metal_shader_uses_time(&self) -> bool {
+    fn shader_uses_time(&self) -> bool {
         false
     }
-    #[cfg(target_os = "macos")]
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        _backend: ShaderBackend,
+    ) -> Option<&'static str> {
         None
     }
-    #[cfg(target_os = "macos")]
-    fn metal_vertex_shader(&self, _widget_type: &str) -> Option<&'static str> {
+    fn vertex_shader(
+        &self,
+        _widget_type: &str,
+        _backend: ShaderBackend,
+    ) -> Option<&'static str> {
         None
     }
     /// Optional framework-rendered focus decoration. The decoration is added
     /// after this widget's own primitives and is bounded by its measured rect.
-    #[cfg(target_os = "macos")]
-    fn metal_focus_decoration(&self, _node: &LayoutNode) -> FocusDecoration {
+    fn focus_decoration(&self, _node: &LayoutNode) -> FocusDecoration {
         FocusDecoration::None
     }
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         _node: &LayoutNode,
         _viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         Vec::new()
     }
 }
@@ -1128,6 +1277,37 @@ pub fn is_layout_widget_type(widget_type: &str) -> bool {
     widget_definition(widget_type)
         .map(WidgetDefinition::is_container)
         .unwrap_or(false)
+}
+
+pub fn widget_baseline_offset(node: &Value, size: Size, ctx: &MeasureCtx<'_>) -> f32 {
+    get_widget_type(node)
+        .and_then(|widget_type| widget_definition(&widget_type))
+        .and_then(|definition| definition.baseline_offset(node, size, ctx))
+        // Baseline alignment for non-text widgets follows the documented flex
+        // behavior: their bottom edge sits on the row baseline.
+        .unwrap_or(size.height)
+        // Proportional glyphs render in a full monospace cell even when their
+        // measured line-height box is shorter, so a real text baseline may
+        // legitimately sit below the widget's measured bottom edge.
+        .max(0.0)
+}
+
+/// Baseline used by `GpuProportionalTextPrimitive`: its cap band is centered
+/// inside one monospace layout cell. Must stay in step with the renderers'
+/// `centered_text_baseline_px`, or baseline-aligned rows drift apart from the
+/// glyphs they are aligning to. `row_offset` is the primitive's row within its
+/// widget.
+pub fn proportional_text_baseline_offset(
+    font_size: f32,
+    row_offset: f32,
+    ctx: &MeasureCtx<'_>,
+) -> f32 {
+    let cell_h = ctx.cell_h.max(1.0);
+    let cap_height = ctx
+        .text_measurer
+        .map(|measurer| measurer.cap_height_px(font_size))
+        .unwrap_or(cell_h * 0.7);
+    row_offset + crate::ui::glyph_atlas::centered_text_baseline_px(cell_h, cap_height, 1.0) / cell_h
 }
 
 /// Widgets that render as frame-anchored overlay panels (subtree diverted to
@@ -1293,7 +1473,6 @@ fn node_uses_animated_sdf_material(node: &LayoutNode) -> bool {
         })
 }
 
-#[cfg(target_os = "macos")]
 fn cacheable_widget_primitives(widget_type: &str) -> bool {
     matches!(
         widget_type,
@@ -1311,7 +1490,6 @@ fn cacheable_widget_primitives(widget_type: &str) -> bool {
     )
 }
 
-#[cfg(target_os = "macos")]
 fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
     std::mem::discriminant(value).hash(hasher);
     match value {
@@ -1355,7 +1533,6 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Option<u64> {
     if any_overlay_active() || !cacheable_widget_primitives(&node.widget_type) {
         return None;
@@ -1371,7 +1548,8 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     node.rect.col.to_bits().hash(&mut hasher);
     node.rect.width.to_bits().hash(&mut hasher);
     node.rect.height.to_bits().hash(&mut hasher);
-    widget_state_generation().hash(&mut hasher);
+    widget_state_shared_generation().hash(&mut hasher);
+    widget_state_revision(node.widget_id).hash(&mut hasher);
     theme::generation().hash(&mut hasher);
     viewport.cell_w.to_bits().hash(&mut hasher);
     viewport.cell_h.to_bits().hash(&mut hasher);
@@ -1386,12 +1564,10 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     Some(hasher.finish())
 }
 
-#[cfg(target_os = "macos")]
 fn props_contain_reactive_ref(props: &HashMap<String, Value>) -> bool {
     props.values().any(value_contains_reactive_ref)
 }
 
-#[cfg(target_os = "macos")]
 fn value_contains_reactive_ref(value: &Value) -> bool {
     match value {
         Value::ReactiveRef { .. } => true,
@@ -1405,7 +1581,6 @@ fn value_contains_reactive_ref(value: &Value) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
     let mut keys = props
         .keys()
@@ -1421,7 +1596,6 @@ fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn is_internal_source_prop(key: &str) -> bool {
     matches!(
         key,
@@ -1434,27 +1608,33 @@ fn is_internal_source_prop(key: &str) -> bool {
     )
 }
 
-#[cfg(target_os = "macos")]
-pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
+pub fn widget_shader_sources(
+    backend: ShaderBackend,
+) -> Vec<(&'static str, Option<&'static str>, &'static str)> {
     let mut shaders = Vec::new();
-    shaders.push(("tile-chrome", None, TILE_CHROME_SHADER));
-    shaders.push(("tile-tab", None, TILE_TAB_SHADER));
-    shaders.push(("patcher-node", None, PATCHER_NODE_SHADER));
-    shaders.push(("patcher-panel", None, PATCHER_PANEL_SHADER));
-    shaders.push(("patcher-port", None, PATCHER_PORT_SHADER));
-    shaders.push(("patcher-back-chevron", None, PATCHER_BACK_CHEVRON_SHADER));
+    for (name, sources) in [
+        ("tile-chrome", TILE_CHROME_SHADER),
+        ("tile-tab", TILE_TAB_SHADER),
+        ("patcher-node", PATCHER_NODE_SHADER),
+        ("patcher-panel", PATCHER_PANEL_SHADER),
+        ("patcher-port", PATCHER_PORT_SHADER),
+        ("patcher-back-chevron", PATCHER_BACK_CHEVRON_SHADER),
+    ] {
+        if let Some(fragment_shader) = sources.source(backend) {
+            shaders.push((name, None, fragment_shader));
+        }
+    }
     for definition in WIDGET_DEFINITIONS {
         for &name in definition.names() {
-            if let Some(fragment_shader) = definition.metal_fragment_shader(name) {
-                shaders.push((name, definition.metal_vertex_shader(name), fragment_shader));
+            if let Some(fragment_shader) = definition.fragment_shader(name, backend) {
+                shaders.push((name, definition.vertex_shader(name, backend), fragment_shader));
             }
         }
     }
     shaders
 }
 
-#[cfg(target_os = "macos")]
-pub const TILE_CHROME_SHADER: &str = r#"
+pub const TILE_CHROME_SHADER: ShaderSources = ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float aspect = max(in.aspect, 0.0001);
@@ -1489,10 +1669,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#;
+"#, wgsl::TILE_CHROME_SHADER);
 
-#[cfg(target_os = "macos")]
-pub const TILE_TAB_SHADER: &str = r#"
+pub const TILE_TAB_SHADER: ShaderSources = ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 p = float2((in.uv.x - 0.5) * 2.0 * in.aspect, (in.uv.y - 0.5) * 2.0);
@@ -1528,13 +1707,29 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#;
+"#, wgsl::TILE_TAB_SHADER);
 
-#[cfg(target_os = "macos")]
+/// A widget's primitives can only depend on its OWN focus state (the focus
+/// decoration plus own-focus styling — every build-time consumer compares
+/// `focused_widget_id` to its own id) and on `focused_branch`, which the
+/// tree walk already narrows per node. Narrowing the global focused-widget
+/// id to the node before keying and building means a focus change
+/// invalidates only the widgets whose focus actually flipped instead of
+/// every cacheable widget in the tile (eseq-eeng: the cold-focus stall).
+fn narrow_viewport_focus_to(node: &LayoutNode, viewport: WidgetViewport) -> WidgetViewport {
+    WidgetViewport {
+        focused_widget_id: viewport
+            .focused_widget_id
+            .filter(|id| *id == node.widget_id),
+        ..viewport
+    }
+}
+
 pub fn widget_primitives_for_node(
     node: &LayoutNode,
     viewport: WidgetViewport,
-) -> Vec<MetalPrimitive> {
+) -> Vec<GpuPrimitive> {
+    let viewport = narrow_viewport_focus_to(node, viewport);
     let cache_key = widget_primitive_cache_key(node, viewport);
     if let Some(cache_key) = cache_key
         && let Some(cached) =
@@ -1544,12 +1739,12 @@ pub fn widget_primitives_for_node(
     }
 
     if let Some(definition) = widget_definition(&node.widget_type) {
-        let mut primitives = definition.build_metal_primitives(&node.widget_type, node, viewport);
+        let mut primitives = definition.build_primitives(&node.widget_type, node, viewport);
         if node.focusable && viewport.focused_widget_id == Some(node.widget_id) {
             primitives.extend(
                 definition
-                    .metal_focus_decoration(node)
-                    .metal_primitives(node.rect, viewport),
+                    .focus_decoration(node)
+                    .primitives(node.rect, viewport),
             );
         }
         if let Some(cache_key) = cache_key {
@@ -1563,35 +1758,32 @@ pub fn widget_primitives_for_node(
         }
         primitives
     } else if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
-        sdf_widget::sdf_widget_metal_primitives(&node.widget_type, node, viewport)
+        sdf_widget::sdf_widget_primitives(&node.widget_type, node, viewport)
     } else {
         Vec::new()
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn collect_metal_primitives(
+pub fn collect_gpu_primitives(
     node: &LayoutNode,
     viewport: WidgetViewport,
     scroll_top: f32,
     max_rows: u16,
-) -> (Vec<MetalPrimitive>, Vec<MetalPrimitive>) {
+) -> (Vec<GpuPrimitive>, Vec<GpuPrimitive>) {
     let mut primitives = Vec::new();
-    collect_metal_primitives_recursive(node, viewport, scroll_top, max_rows, &mut primitives);
+    collect_gpu_primitives_recursive(node, viewport, scroll_top, max_rows, &mut primitives);
     // Overlay content (dropdown menus, etc.) returned separately so the
     // renderer can draw it in its own pass on top of everything.
     let overlay = drain_overlay_primitives();
     (primitives, overlay)
 }
 
-#[cfg(target_os = "macos")]
 /// Vertical band (top, bottom in layout rows, in the coordinate space of the
 /// nodes being visited) that can be visible inside the innermost enclosing
 /// scroll clip. `None` means unclipped. Nodes fully outside the band are
 /// culled: everything they would emit is discarded by the scroll clip anyway.
 type ScrollCullBand = Option<(f32, f32)>;
 
-#[cfg(target_os = "macos")]
 fn scroll_cull_band_excludes(node: &LayoutNode, band: ScrollCullBand) -> bool {
     let Some((top, bottom)) = band else {
         return false;
@@ -1606,7 +1798,6 @@ fn scroll_cull_band_excludes(node: &LayoutNode, band: ScrollCullBand) -> bool {
     !subtree_contains_modal(node)
 }
 
-#[cfg(target_os = "macos")]
 fn subtree_contains_modal(node: &LayoutNode) -> bool {
     is_overlay_panel_widget(&node.widget_type) || node.children.iter().any(subtree_contains_modal)
 }
@@ -1615,7 +1806,6 @@ fn subtree_contains_modal(node: &LayoutNode) -> bool {
 /// incoming band with the scroll clip rect, translated into content
 /// coordinates (children are laid out unshifted; the offset is applied to
 /// their primitives after collection).
-#[cfg(target_os = "macos")]
 fn scroll_child_cull_band(
     node: &LayoutNode,
     offset_y: f32,
@@ -1627,15 +1817,15 @@ fn scroll_child_cull_band(
     Some((top, bottom))
 }
 
-pub fn collect_metal_primitive_runs(
+pub fn collect_gpu_primitive_runs(
     node: &LayoutNode,
     viewport: WidgetViewport,
     scroll_top: f32,
     max_rows: u16,
-) -> (Vec<MetalPrimitiveRun>, Vec<MetalPrimitive>) {
+) -> (Vec<GpuPrimitiveRun>, Vec<GpuPrimitive>) {
     let mut runs = Vec::new();
     let mut run_ordinals = HashMap::new();
-    collect_metal_primitive_runs_recursive(
+    collect_gpu_primitive_runs_recursive(
         node,
         viewport,
         scroll_top,
@@ -1649,24 +1839,23 @@ pub fn collect_metal_primitive_runs(
     (runs, overlay)
 }
 
-#[cfg(target_os = "macos")]
-pub fn collect_metal_primitive_runs_retained(
+pub fn collect_gpu_primitive_runs_retained(
     node: &LayoutNode,
     viewport: WidgetViewport,
     scroll_top: f32,
     max_rows: u16,
-    previous_runs: &[MetalPrimitiveRun],
+    previous_runs: &[GpuPrimitiveRun],
     dirty_widget_ids: &[u64],
 ) -> (
-    Vec<MetalPrimitiveRun>,
-    Vec<MetalPrimitive>,
-    RetainedMetalPrimitiveRunStats,
+    Vec<GpuPrimitiveRun>,
+    Vec<GpuPrimitive>,
+    RetainedGpuPrimitiveRunStats,
 ) {
-    let previous_by_key: HashMap<MetalPrimitiveRunKey, &MetalPrimitiveRun> = previous_runs
+    let previous_by_key: HashMap<GpuPrimitiveRunKey, &GpuPrimitiveRun> = previous_runs
         .iter()
         .map(|run| {
             (
-                MetalPrimitiveRunKey {
+                GpuPrimitiveRunKey {
                     widget_id: run.widget_id,
                     ordinal: run.ordinal,
                 },
@@ -1675,10 +1864,10 @@ pub fn collect_metal_primitive_runs_retained(
         })
         .collect();
     let dirty_widget_ids: HashSet<u64> = dirty_widget_ids.iter().copied().collect();
-    let mut stats = RetainedMetalPrimitiveRunStats::default();
+    let mut stats = RetainedGpuPrimitiveRunStats::default();
     let mut runs = Vec::new();
     let mut run_ordinals = HashMap::new();
-    collect_metal_primitive_runs_retained_recursive(
+    collect_gpu_primitive_runs_retained_recursive(
         node,
         viewport,
         scroll_top,
@@ -1696,19 +1885,17 @@ pub fn collect_metal_primitive_runs_retained(
     (runs, overlay, stats)
 }
 
-#[cfg(target_os = "macos")]
-pub fn flatten_metal_primitive_runs(runs: &[MetalPrimitiveRun]) -> Vec<MetalPrimitive> {
+pub fn flatten_gpu_primitive_runs(runs: &[GpuPrimitiveRun]) -> Vec<GpuPrimitive> {
     runs.iter()
         .flat_map(|run| run.primitives.iter().cloned())
         .collect()
 }
 
-#[cfg(target_os = "macos")]
-pub fn build_metal_primitive_run_index(runs: &[MetalPrimitiveRun]) -> MetalPrimitiveRunIndex {
-    let mut result = MetalPrimitiveRunIndex::default();
+pub fn build_gpu_primitive_run_index(runs: &[GpuPrimitiveRun]) -> GpuPrimitiveRunIndex {
+    let mut result = GpuPrimitiveRunIndex::default();
     for (index, run) in runs.iter().enumerate() {
         result.by_key.insert(
-            MetalPrimitiveRunKey {
+            GpuPrimitiveRunKey {
                 widget_id: run.widget_id,
                 ordinal: run.ordinal,
             },
@@ -1739,17 +1926,16 @@ pub fn build_metal_primitive_run_index(runs: &[MetalPrimitiveRun]) -> MetalPrimi
     result
 }
 
-#[cfg(target_os = "macos")]
-pub fn refresh_metal_primitive_runs_retained_in_place(
+pub fn refresh_gpu_primitive_runs_retained_in_place(
     node: &LayoutNode,
     viewport: WidgetViewport,
     scroll_top: f32,
     max_rows: u16,
-    runs: &mut [MetalPrimitiveRun],
-    run_indices: &MetalPrimitiveRunIndex,
+    runs: &mut [GpuPrimitiveRun],
+    run_indices: &GpuPrimitiveRunIndex,
     dirty_widget_ids: &[u64],
-) -> (Vec<MetalPrimitive>, RetainedMetalPrimitiveRunStats) {
-    let mut stats = RetainedMetalPrimitiveRunStats::default();
+) -> (Vec<GpuPrimitive>, RetainedGpuPrimitiveRunStats) {
+    let mut stats = RetainedGpuPrimitiveRunStats::default();
     let mut run_ordinals = HashMap::new();
     let mut rebuilt_indices = Vec::new();
     let mut visited_indices = Vec::new();
@@ -1779,7 +1965,7 @@ pub fn refresh_metal_primitive_runs_retained_in_place(
     for run in runs.iter_mut() {
         run.reused_from_previous = true;
     }
-    refresh_metal_primitive_runs_retained_in_place_recursive(
+    refresh_gpu_primitive_runs_retained_in_place_recursive(
         node,
         viewport,
         scroll_top,
@@ -1812,13 +1998,12 @@ pub fn refresh_metal_primitive_runs_retained_in_place(
     (overlay, stats)
 }
 
-#[cfg(target_os = "macos")]
 fn next_primitive_run_key(
     run_ordinals: &mut HashMap<u64, u16>,
     widget_id: u64,
-) -> MetalPrimitiveRunKey {
+) -> GpuPrimitiveRunKey {
     let ordinal = run_ordinals.entry(widget_id).or_insert(0);
-    let key = MetalPrimitiveRunKey {
+    let key = GpuPrimitiveRunKey {
         widget_id,
         ordinal: *ordinal,
     };
@@ -1826,20 +2011,19 @@ fn next_primitive_run_key(
     key
 }
 
-#[cfg(target_os = "macos")]
 fn push_primitive_run(
-    runs: &mut Vec<MetalPrimitiveRun>,
+    runs: &mut Vec<GpuPrimitiveRun>,
     run_ordinals: &mut HashMap<u64, u16>,
     widget_id: u64,
     widget_type: &str,
     ancestor_widget_ids: &[u64],
-    primitives: Vec<MetalPrimitive>,
+    primitives: Vec<GpuPrimitive>,
 ) {
     let key = next_primitive_run_key(run_ordinals, widget_id);
     if primitives.is_empty() {
         return;
     }
-    runs.push(MetalPrimitiveRun {
+    runs.push(GpuPrimitiveRun {
         widget_id,
         ordinal: key.ordinal,
         widget_type: widget_type.to_string(),
@@ -1849,17 +2033,16 @@ fn push_primitive_run(
     });
 }
 
-#[cfg(target_os = "macos")]
 fn push_retained_primitive_run(
-    runs: &mut Vec<MetalPrimitiveRun>,
+    runs: &mut Vec<GpuPrimitiveRun>,
     run_ordinals: &mut HashMap<u64, u16>,
-    previous_by_key: &HashMap<MetalPrimitiveRunKey, &MetalPrimitiveRun>,
-    stats: &mut RetainedMetalPrimitiveRunStats,
+    previous_by_key: &HashMap<GpuPrimitiveRunKey, &GpuPrimitiveRun>,
+    stats: &mut RetainedGpuPrimitiveRunStats,
     dirty_ancestor: bool,
     widget_id: u64,
     widget_type: &str,
     ancestor_widget_ids: &[u64],
-    build_primitives: impl FnOnce() -> Vec<MetalPrimitive>,
+    build_primitives: impl FnOnce() -> Vec<GpuPrimitive>,
 ) {
     let key = next_primitive_run_key(run_ordinals, widget_id);
     if !dirty_ancestor {
@@ -1884,7 +2067,7 @@ fn push_retained_primitive_run(
         return;
     }
     stats.rebuilt_runs += 1;
-    runs.push(MetalPrimitiveRun {
+    runs.push(GpuPrimitiveRun {
         widget_id,
         ordinal: key.ordinal,
         widget_type: widget_type.to_string(),
@@ -1894,20 +2077,19 @@ fn push_retained_primitive_run(
     });
 }
 
-#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn refresh_retained_primitive_run_in_place(
-    runs: &mut [MetalPrimitiveRun],
-    run_indices: &MetalPrimitiveRunIndex,
+    runs: &mut [GpuPrimitiveRun],
+    run_indices: &GpuPrimitiveRunIndex,
     run_ordinals: &mut HashMap<u64, u16>,
     rebuilt_indices: &mut Vec<usize>,
     visited_indices: &mut Vec<usize>,
-    stats: &mut RetainedMetalPrimitiveRunStats,
+    stats: &mut RetainedGpuPrimitiveRunStats,
     dirty_ancestor: bool,
     widget_id: u64,
     widget_type: &str,
     ancestor_widget_ids: &[u64],
-    build_primitives: impl FnOnce() -> Vec<MetalPrimitive>,
+    build_primitives: impl FnOnce() -> Vec<GpuPrimitive>,
 ) {
     let key = next_primitive_run_key(run_ordinals, widget_id);
     let Some(index) = run_indices.by_key.get(&key).copied() else {
@@ -1941,13 +2123,12 @@ fn refresh_retained_primitive_run_in_place(
     rebuilt_indices.push(index);
 }
 
-#[cfg(target_os = "macos")]
 fn suppresses_default_focus(node: &LayoutNode) -> bool {
     widget_definition(&node.widget_type)
         .map(|definition| {
             definition.renders_own_focus()
                 || !matches!(
-                    definition.metal_focus_decoration(node),
+                    definition.focus_decoration(node),
                     FocusDecoration::None
                 )
         })
@@ -1964,7 +2145,6 @@ fn suppresses_default_focus(node: &LayoutNode) -> bool {
 /// Shared by all three collectors: the modal subtree is never retained as
 /// runs — overlay content is excluded from scene caching, and caches are
 /// bypassed while any overlay is active.
-#[cfg(target_os = "macos")]
 fn collect_modal_overlay(
     node: &LayoutNode,
     viewport: WidgetViewport,
@@ -1996,7 +2176,7 @@ fn collect_modal_overlay(
     let mark = overlay_primitives_mark();
     let mut subtree = Vec::new();
     for child in &node.children {
-        collect_metal_primitives_recursive(child, viewport, scroll_top, max_rows, &mut subtree);
+        collect_gpu_primitives_recursive(child, viewport, scroll_top, max_rows, &mut subtree);
     }
     let nested_overlay = split_off_overlay_primitives(mark);
 
@@ -2006,16 +2186,16 @@ fn collect_modal_overlay(
         // click outside the panel dismisses via the same modal-family
         // intercepts.
         context_menu::emit_menu_chrome(&node.props, screen_modal, viewport);
-        push_overlay_primitive(MetalPrimitive::PushClipRect(screen_modal));
+        push_overlay_primitive(GpuPrimitive::PushClipRect(screen_modal));
     } else {
         // The scrim gets its own clip segment: overlay drawing batches primitive
         // classes within a segment, so an unsegmented scrim rect would paint over
         // the panel background instance.
-        push_overlay_primitive(MetalPrimitive::PushClipRect(screen_frame));
+        push_overlay_primitive(GpuPrimitive::PushClipRect(screen_frame));
         modal::emit_modal_scrim(&node.props, screen_frame, viewport);
-        push_overlay_primitive(MetalPrimitive::PopClipRect);
+        push_overlay_primitive(GpuPrimitive::PopClipRect);
         modal::emit_modal_panel_chrome(&node.props, screen_modal, viewport);
-        push_overlay_primitive(MetalPrimitive::PushClipRect(screen_modal));
+        push_overlay_primitive(GpuPrimitive::PushClipRect(screen_modal));
         modal::emit_modal_title(&node.props, screen_modal, viewport);
     }
     for mut prim in subtree {
@@ -2023,7 +2203,7 @@ fn collect_modal_overlay(
         offset_primitive_y_mut(&mut prim, dy, viewport);
         push_overlay_primitive(prim);
     }
-    push_overlay_primitive(MetalPrimitive::PopClipRect);
+    push_overlay_primitive(GpuPrimitive::PopClipRect);
     for prim in nested_overlay {
         push_overlay_primitive(prim);
     }
@@ -2035,13 +2215,12 @@ fn collect_modal_overlay(
     });
 }
 
-#[cfg(target_os = "macos")]
-fn collect_metal_primitives_recursive(
+fn collect_gpu_primitives_recursive(
     node: &LayoutNode,
     viewport: WidgetViewport,
     _scroll_top: f32,
     _max_rows: u16,
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
 ) {
     let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
     let focused_branch = viewport.focused_branch || node_is_focused;
@@ -2051,7 +2230,7 @@ fn collect_metal_primitives_recursive(
     // Skip for widgets that render or opt into their own focus styling.
     let suppresses_default_focus = suppresses_default_focus(node);
     if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus {
-        primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+        primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
             rect: node.rect,
             color: crate::theme::WIDGET_FOCUS_BG(),
         }));
@@ -2075,11 +2254,11 @@ fn collect_metal_primitives_recursive(
         let state = scroll::sync_node_state(node);
         let offset_y = state.offset_y;
 
-        primitives.push(MetalPrimitive::PushClipRect(node.rect));
+        primitives.push(GpuPrimitive::PushClipRect(node.rect));
 
         for child in &node.children {
             let start = primitives.len();
-            collect_metal_primitives_recursive(
+            collect_gpu_primitives_recursive(
                 child,
                 node_viewport,
                 _scroll_top,
@@ -2092,7 +2271,7 @@ fn collect_metal_primitives_recursive(
             }
         }
 
-        primitives.push(MetalPrimitive::PopClipRect);
+        primitives.push(GpuPrimitive::PopClipRect);
 
         // Scrollbar rendered AFTER children so it draws on top
         primitives.extend(widget_primitives_for_node(node, node_viewport));
@@ -2107,9 +2286,9 @@ fn collect_metal_primitives_recursive(
             ..node_viewport
         };
         primitives.extend(widget_primitives_for_node(node, node_viewport));
-        primitives.push(MetalPrimitive::PushClipRect(node.rect));
+        primitives.push(GpuPrimitive::PushClipRect(node.rect));
         for child in &node.children {
-            collect_metal_primitives_recursive(
+            collect_gpu_primitives_recursive(
                 child,
                 child_viewport,
                 _scroll_top,
@@ -2117,14 +2296,14 @@ fn collect_metal_primitives_recursive(
                 primitives,
             );
         }
-        primitives.push(MetalPrimitive::PopClipRect);
+        primitives.push(GpuPrimitive::PopClipRect);
         return;
     }
 
     primitives.extend(widget_primitives_for_node(node, node_viewport));
 
     for child in &node.children {
-        collect_metal_primitives_recursive(
+        collect_gpu_primitives_recursive(
             child,
             node_viewport,
             _scroll_top,
@@ -2134,9 +2313,8 @@ fn collect_metal_primitives_recursive(
     }
 }
 
-#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
-fn collect_metal_primitive_runs_recursive(
+fn collect_gpu_primitive_runs_recursive(
     node: &LayoutNode,
     viewport: WidgetViewport,
     _scroll_top: f32,
@@ -2144,7 +2322,7 @@ fn collect_metal_primitive_runs_recursive(
     ancestor_widget_ids: &[u64],
     cull_band: ScrollCullBand,
     run_ordinals: &mut HashMap<u64, u16>,
-    runs: &mut Vec<MetalPrimitiveRun>,
+    runs: &mut Vec<GpuPrimitiveRun>,
 ) {
     if scroll_cull_band_excludes(node, cull_band) {
         return;
@@ -2172,12 +2350,12 @@ fn collect_metal_primitive_runs_recursive(
         let mut own = Vec::new();
         if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus
         {
-            own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            own.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: node.rect,
                 color: crate::theme::WIDGET_FOCUS_BG(),
             }));
         }
-        own.push(MetalPrimitive::PushClipRect(node.rect));
+        own.push(GpuPrimitive::PushClipRect(node.rect));
         push_primitive_run(
             runs,
             run_ordinals,
@@ -2192,7 +2370,7 @@ fn collect_metal_primitive_runs_recursive(
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
             let start = runs.len();
-            collect_metal_primitive_runs_recursive(
+            collect_gpu_primitive_runs_recursive(
                 child,
                 node_viewport,
                 _scroll_top,
@@ -2211,7 +2389,7 @@ fn collect_metal_primitive_runs_recursive(
             }
         }
 
-        let mut tail = vec![MetalPrimitive::PopClipRect];
+        let mut tail = vec![GpuPrimitive::PopClipRect];
         tail.extend(widget_primitives_for_node(node, node_viewport));
         push_primitive_run(
             runs,
@@ -2234,13 +2412,13 @@ fn collect_metal_primitive_runs_recursive(
         let mut own = Vec::new();
         if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus
         {
-            own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            own.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: node.rect,
                 color: crate::theme::WIDGET_FOCUS_BG(),
             }));
         }
         own.extend(widget_primitives_for_node(node, node_viewport));
-        own.push(MetalPrimitive::PushClipRect(node.rect));
+        own.push(GpuPrimitive::PushClipRect(node.rect));
         push_primitive_run(
             runs,
             run_ordinals,
@@ -2253,7 +2431,7 @@ fn collect_metal_primitive_runs_recursive(
         let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
-            collect_metal_primitive_runs_recursive(
+            collect_gpu_primitive_runs_recursive(
                 child,
                 child_viewport,
                 _scroll_top,
@@ -2271,14 +2449,14 @@ fn collect_metal_primitive_runs_recursive(
             node.widget_id,
             &node.widget_type,
             ancestor_widget_ids,
-            vec![MetalPrimitive::PopClipRect],
+            vec![GpuPrimitive::PopClipRect],
         );
         return;
     }
 
     let mut own = Vec::new();
     if node_is_focused && is_layout_widget_type(&node.widget_type) && !suppresses_default_focus {
-        own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+        own.push(GpuPrimitive::Rect(GpuRectPrimitive {
             rect: node.rect,
             color: crate::theme::WIDGET_FOCUS_BG(),
         }));
@@ -2296,7 +2474,7 @@ fn collect_metal_primitive_runs_recursive(
     let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
     child_ancestor_widget_ids.push(node.widget_id);
     for child in &node.children {
-        collect_metal_primitive_runs_recursive(
+        collect_gpu_primitive_runs_recursive(
             child,
             node_viewport,
             _scroll_top,
@@ -2309,9 +2487,8 @@ fn collect_metal_primitive_runs_recursive(
     }
 }
 
-#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
-fn collect_metal_primitive_runs_retained_recursive(
+fn collect_gpu_primitive_runs_retained_recursive(
     node: &LayoutNode,
     viewport: WidgetViewport,
     _scroll_top: f32,
@@ -2319,11 +2496,11 @@ fn collect_metal_primitive_runs_retained_recursive(
     ancestor_widget_ids: &[u64],
     cull_band: ScrollCullBand,
     dirty_ancestor: bool,
-    previous_by_key: &HashMap<MetalPrimitiveRunKey, &MetalPrimitiveRun>,
+    previous_by_key: &HashMap<GpuPrimitiveRunKey, &GpuPrimitiveRun>,
     dirty_widget_ids: &HashSet<u64>,
     run_ordinals: &mut HashMap<u64, u16>,
-    stats: &mut RetainedMetalPrimitiveRunStats,
-    runs: &mut Vec<MetalPrimitiveRun>,
+    stats: &mut RetainedGpuPrimitiveRunStats,
+    runs: &mut Vec<GpuPrimitiveRun>,
 ) {
     if scroll_cull_band_excludes(node, cull_band) {
         return;
@@ -2366,12 +2543,12 @@ fn collect_metal_primitive_runs_retained_recursive(
                     && is_layout_widget_type(&node.widget_type)
                     && !suppresses_default_focus
                 {
-                    own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                    own.push(GpuPrimitive::Rect(GpuRectPrimitive {
                         rect: node.rect,
                         color: crate::theme::WIDGET_FOCUS_BG(),
                     }));
                 }
-                own.push(MetalPrimitive::PushClipRect(node.rect));
+                own.push(GpuPrimitive::PushClipRect(node.rect));
                 own
             },
         );
@@ -2381,7 +2558,7 @@ fn collect_metal_primitive_runs_retained_recursive(
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
             let start = runs.len();
-            collect_metal_primitive_runs_retained_recursive(
+            collect_gpu_primitive_runs_retained_recursive(
                 child,
                 node_viewport,
                 _scroll_top,
@@ -2414,7 +2591,7 @@ fn collect_metal_primitive_runs_retained_recursive(
             &node.widget_type,
             ancestor_widget_ids,
             || {
-                let mut tail = vec![MetalPrimitive::PopClipRect];
+                let mut tail = vec![GpuPrimitive::PopClipRect];
                 tail.extend(widget_primitives_for_node(node, node_viewport));
                 tail
             },
@@ -2445,13 +2622,13 @@ fn collect_metal_primitive_runs_retained_recursive(
                     && is_layout_widget_type(&node.widget_type)
                     && !suppresses_default_focus
                 {
-                    own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                    own.push(GpuPrimitive::Rect(GpuRectPrimitive {
                         rect: node.rect,
                         color: crate::theme::WIDGET_FOCUS_BG(),
                     }));
                 }
                 own.extend(widget_primitives_for_node(node, node_viewport));
-                own.push(MetalPrimitive::PushClipRect(node.rect));
+                own.push(GpuPrimitive::PushClipRect(node.rect));
                 own
             },
         );
@@ -2459,7 +2636,7 @@ fn collect_metal_primitive_runs_retained_recursive(
         let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
-            collect_metal_primitive_runs_retained_recursive(
+            collect_gpu_primitive_runs_retained_recursive(
                 child,
                 child_viewport,
                 _scroll_top,
@@ -2484,7 +2661,7 @@ fn collect_metal_primitive_runs_retained_recursive(
             node.widget_id,
             &node.widget_type,
             ancestor_widget_ids,
-            || vec![MetalPrimitive::PopClipRect],
+            || vec![GpuPrimitive::PopClipRect],
         );
         return;
     }
@@ -2504,7 +2681,7 @@ fn collect_metal_primitive_runs_retained_recursive(
                 && is_layout_widget_type(&node.widget_type)
                 && !suppresses_default_focus
             {
-                own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                own.push(GpuPrimitive::Rect(GpuRectPrimitive {
                     rect: node.rect,
                     color: crate::theme::WIDGET_FOCUS_BG(),
                 }));
@@ -2517,7 +2694,7 @@ fn collect_metal_primitive_runs_retained_recursive(
     let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
     child_ancestor_widget_ids.push(node.widget_id);
     for child in &node.children {
-        collect_metal_primitive_runs_retained_recursive(
+        collect_gpu_primitive_runs_retained_recursive(
             child,
             node_viewport,
             _scroll_top,
@@ -2534,9 +2711,8 @@ fn collect_metal_primitive_runs_retained_recursive(
     }
 }
 
-#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
-fn refresh_metal_primitive_runs_retained_in_place_recursive(
+fn refresh_gpu_primitive_runs_retained_in_place_recursive(
     node: &LayoutNode,
     viewport: WidgetViewport,
     _scroll_top: f32,
@@ -2544,14 +2720,14 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
     ancestor_widget_ids: &[u64],
     cull_band: ScrollCullBand,
     dirty_ancestor: bool,
-    runs: &mut [MetalPrimitiveRun],
-    run_indices: &MetalPrimitiveRunIndex,
+    runs: &mut [GpuPrimitiveRun],
+    run_indices: &GpuPrimitiveRunIndex,
     dirty_widget_ids: &HashSet<u64>,
     relevant_widget_ids: Option<&HashSet<u64>>,
     run_ordinals: &mut HashMap<u64, u16>,
     rebuilt_indices: &mut Vec<usize>,
     visited_indices: &mut Vec<usize>,
-    stats: &mut RetainedMetalPrimitiveRunStats,
+    stats: &mut RetainedGpuPrimitiveRunStats,
 ) {
     if scroll_cull_band_excludes(node, cull_band) {
         return;
@@ -2594,12 +2770,12 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
                     && is_layout_widget_type(&node.widget_type)
                     && !suppresses_default_focus
                 {
-                    own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                    own.push(GpuPrimitive::Rect(GpuRectPrimitive {
                         rect: node.rect,
                         color: crate::theme::WIDGET_FOCUS_BG(),
                     }));
                 }
-                own.push(MetalPrimitive::PushClipRect(node.rect));
+                own.push(GpuPrimitive::PushClipRect(node.rect));
                 own
             },
         );
@@ -2609,7 +2785,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
             let rebuilt_start = rebuilt_indices.len();
-            refresh_metal_primitive_runs_retained_in_place_recursive(
+            refresh_gpu_primitive_runs_retained_in_place_recursive(
                 child,
                 node_viewport,
                 _scroll_top,
@@ -2647,7 +2823,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             &node.widget_type,
             ancestor_widget_ids,
             || {
-                let mut tail = vec![MetalPrimitive::PopClipRect];
+                let mut tail = vec![GpuPrimitive::PopClipRect];
                 tail.extend(widget_primitives_for_node(node, node_viewport));
                 tail
             },
@@ -2680,13 +2856,13 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
                     && is_layout_widget_type(&node.widget_type)
                     && !suppresses_default_focus
                 {
-                    own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                    own.push(GpuPrimitive::Rect(GpuRectPrimitive {
                         rect: node.rect,
                         color: crate::theme::WIDGET_FOCUS_BG(),
                     }));
                 }
                 own.extend(widget_primitives_for_node(node, node_viewport));
-                own.push(MetalPrimitive::PushClipRect(node.rect));
+                own.push(GpuPrimitive::PushClipRect(node.rect));
                 own
             },
         );
@@ -2694,7 +2870,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
         let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
-            refresh_metal_primitive_runs_retained_in_place_recursive(
+            refresh_gpu_primitive_runs_retained_in_place_recursive(
                 child,
                 child_viewport,
                 _scroll_top,
@@ -2724,7 +2900,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             node.widget_id,
             &node.widget_type,
             ancestor_widget_ids,
-            || vec![MetalPrimitive::PopClipRect],
+            || vec![GpuPrimitive::PopClipRect],
         );
         return;
     }
@@ -2746,7 +2922,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
                 && is_layout_widget_type(&node.widget_type)
                 && !suppresses_default_focus
             {
-                own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                own.push(GpuPrimitive::Rect(GpuRectPrimitive {
                     rect: node.rect,
                     color: crate::theme::WIDGET_FOCUS_BG(),
                 }));
@@ -2759,7 +2935,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
     let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
     child_ancestor_widget_ids.push(node.widget_id);
     for child in &node.children {
-        refresh_metal_primitive_runs_retained_in_place_recursive(
+        refresh_gpu_primitive_runs_retained_in_place_recursive(
             child,
             node_viewport,
             _scroll_top,
@@ -2780,75 +2956,73 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
 }
 
 /// Shift a metal primitive horizontally by `dx` cells (in-place).
-#[cfg(target_os = "macos")]
-fn offset_primitive_x_mut(prim: &mut MetalPrimitive, dx: f32, viewport: WidgetViewport) {
+fn offset_primitive_x_mut(prim: &mut GpuPrimitive, dx: f32, viewport: WidgetViewport) {
     match prim {
-        MetalPrimitive::ZLayer { primitive, .. } => offset_primitive_x_mut(primitive, dx, viewport),
-        MetalPrimitive::Rect(r) => r.rect.col += dx,
-        MetalPrimitive::ForegroundRect(r) => r.rect.col += dx,
-        MetalPrimitive::Quad(q) => q.x += dx,
-        MetalPrimitive::Triangle(t) => {
+        GpuPrimitive::ZLayer { primitive, .. } => offset_primitive_x_mut(primitive, dx, viewport),
+        GpuPrimitive::Rect(r) => r.rect.col += dx,
+        GpuPrimitive::ForegroundRect(r) => r.rect.col += dx,
+        GpuPrimitive::Quad(q) => q.x += dx,
+        GpuPrimitive::Triangle(t) => {
             for point in &mut t.points {
                 point[0] += dx;
             }
         }
-        MetalPrimitive::GlyphRun(g) => g.col += dx.round() as i32,
-        MetalPrimitive::ProportionalText(t) => t.col += dx,
-        MetalPrimitive::PatchCable(c) => {
+        GpuPrimitive::GlyphRun(g) => g.col += dx.round() as i32,
+        GpuPrimitive::ProportionalText(t) => t.col += dx,
+        GpuPrimitive::PatchCable(c) => {
             c.start[0] += dx;
             c.control1[0] += dx;
             c.control2[0] += dx;
             c.end[0] += dx;
         }
-        MetalPrimitive::Circle(c) => c.center[0] += dx,
-        MetalPrimitive::Waveform(w) => w.rect.col += dx,
-        MetalPrimitive::Wavetable(w) => w.rect.col += dx,
-        MetalPrimitive::LiveSpectrogram(s) => s.rect.col += dx,
-        MetalPrimitive::Image(i) => i.rect.col += dx,
-        MetalPrimitive::WidgetInstance { instance, .. } => {
+        GpuPrimitive::Circle(c) => c.center[0] += dx,
+        GpuPrimitive::Waveform(w) => w.rect.col += dx,
+        GpuPrimitive::Wavetable(w) => w.rect.col += dx,
+        GpuPrimitive::LiveSpectrogram(s) => s.rect.col += dx,
+        GpuPrimitive::Image(i) => i.rect.col += dx,
+        GpuPrimitive::WidgetInstance { instance, .. } => {
             let ndc_dx = (dx * viewport.cell_w / viewport.vp_w) * 2.0;
             instance.ndc_min[0] += ndc_dx;
             instance.ndc_max[0] += ndc_dx;
         }
-        MetalPrimitive::PushClipRect(r) => r.col += dx,
-        MetalPrimitive::PopClipRect => {}
+        GpuPrimitive::PushClipRect(r) => r.col += dx,
+        GpuPrimitive::PopClipRect => {}
     }
 }
 
 /// Shift a metal primitive vertically by `dy` cells (in-place).
-#[cfg(target_os = "macos")]
-fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetViewport) {
+fn offset_primitive_y_mut(prim: &mut GpuPrimitive, dy: f32, viewport: WidgetViewport) {
     match prim {
-        MetalPrimitive::ZLayer { primitive, .. } => offset_primitive_y_mut(primitive, dy, viewport),
-        MetalPrimitive::Rect(r) => r.rect.row += dy,
-        MetalPrimitive::ForegroundRect(r) => r.rect.row += dy,
-        MetalPrimitive::Quad(q) => q.y += dy,
-        MetalPrimitive::Triangle(t) => {
+        GpuPrimitive::ZLayer { primitive, .. } => offset_primitive_y_mut(primitive, dy, viewport),
+        GpuPrimitive::Rect(r) => r.rect.row += dy,
+        GpuPrimitive::ForegroundRect(r) => r.rect.row += dy,
+        GpuPrimitive::Quad(q) => q.y += dy,
+        GpuPrimitive::Triangle(t) => {
             for point in &mut t.points {
                 point[1] += dy;
             }
         }
-        MetalPrimitive::GlyphRun(g) => g.row += dy,
-        MetalPrimitive::ProportionalText(t) => t.row += dy,
-        MetalPrimitive::PatchCable(c) => {
+        GpuPrimitive::GlyphRun(g) => g.row += dy,
+        GpuPrimitive::ProportionalText(t) => t.row += dy,
+        GpuPrimitive::PatchCable(c) => {
             c.start[1] += dy;
             c.control1[1] += dy;
             c.control2[1] += dy;
             c.end[1] += dy;
             c.segment_row += dy;
         }
-        MetalPrimitive::Circle(c) => c.center[1] += dy,
-        MetalPrimitive::Waveform(w) => w.rect.row += dy,
-        MetalPrimitive::Wavetable(w) => w.rect.row += dy,
-        MetalPrimitive::LiveSpectrogram(s) => s.rect.row += dy,
-        MetalPrimitive::Image(i) => i.rect.row += dy,
-        MetalPrimitive::WidgetInstance { instance, .. } => {
+        GpuPrimitive::Circle(c) => c.center[1] += dy,
+        GpuPrimitive::Waveform(w) => w.rect.row += dy,
+        GpuPrimitive::Wavetable(w) => w.rect.row += dy,
+        GpuPrimitive::LiveSpectrogram(s) => s.rect.row += dy,
+        GpuPrimitive::Image(i) => i.rect.row += dy,
+        GpuPrimitive::WidgetInstance { instance, .. } => {
             let ndc_dy = -(dy * viewport.cell_h / viewport.vp_h) * 2.0;
             instance.ndc_min[1] += ndc_dy;
             instance.ndc_max[1] += ndc_dy;
         }
-        MetalPrimitive::PushClipRect(r) => r.row += dy,
-        MetalPrimitive::PopClipRect => {}
+        GpuPrimitive::PushClipRect(r) => r.row += dy,
+        GpuPrimitive::PopClipRect => {}
     }
 }
 
@@ -3013,6 +3187,112 @@ mod tests {
     }
 
     #[test]
+    fn additive_selection_modifier_preserves_macos_command_and_uses_alt_elsewhere() {
+        assert!(additive_selection_modifier_for_platform(
+            KeyModifiers::SUPER,
+            PointerModifierPlatform::MacOS,
+        ));
+        assert!(!additive_selection_modifier_for_platform(
+            KeyModifiers::ALT,
+            PointerModifierPlatform::MacOS,
+        ));
+        assert!(additive_selection_modifier_for_platform(
+            KeyModifiers::ALT,
+            PointerModifierPlatform::Other,
+        ));
+        assert!(!additive_selection_modifier_for_platform(
+            KeyModifiers::SUPER,
+            PointerModifierPlatform::Other,
+        ));
+    }
+
+    #[test]
+    fn shader_sources_select_the_requested_backend() {
+        let sources = ShaderSources::new(Some("msl source"), Some("wgsl source"));
+
+        assert_eq!(sources.source(ShaderBackend::Msl), Some("msl source"));
+        assert_eq!(sources.source(ShaderBackend::Wgsl), Some("wgsl source"));
+    }
+
+    /// Every widget can be asked for either backend's source without panicking
+    /// or falling back to the other language. Definitions without a custom
+    /// shader legitimately answer `None`; the validation below proves that
+    /// every MSL body has a corresponding WGSL body.
+    #[test]
+    fn every_widget_answers_both_backends() {
+        for definition in WIDGET_DEFINITIONS {
+            for &name in definition.names() {
+                for backend in [ShaderBackend::Msl, ShaderBackend::Wgsl] {
+                    if let Some(fragment) = definition.fragment_shader(name, backend) {
+                        assert!(
+                            !fragment.is_empty(),
+                            "{name} returned an empty {backend:?} fragment shader"
+                        );
+                    }
+                    if let Some(vertex) = definition.vertex_shader(name, backend) {
+                        assert!(
+                            !vertex.is_empty(),
+                            "{name} returned an empty {backend:?} vertex shader"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every hand-written widget shader has a validated source body for both
+    /// graphics backends. Parsing the fully assembled module catches accidental
+    /// dependencies on MSL syntax as well as WGSL interface mismatches.
+    #[test]
+    fn every_widget_wgsl_shader_is_valid() {
+        let msl = widget_shader_sources(ShaderBackend::Msl);
+        let wgsl = widget_shader_sources(ShaderBackend::Wgsl);
+        assert_eq!(wgsl.len(), msl.len(), "some MSL widget shaders lack WGSL ports");
+
+        for (name, vertex, fragment) in wgsl {
+            let source = crate::ui::wgsl_shaders::widget_shader_module(vertex, fragment);
+            let module = naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|error| panic!("{name} WGSL parse failed: {error}\n\n{source}"));
+            let mut validator = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            );
+            validator
+                .validate(&module)
+                .unwrap_or_else(|error| panic!("{name} WGSL validation failed: {error:#?}\n\n{source}"));
+        }
+    }
+
+    /// The MSL enumeration must stay non-empty and must never leak a body that
+    /// was registered for the other backend.
+    #[test]
+    fn widget_shader_sources_are_scoped_to_the_requested_backend() {
+        let msl = widget_shader_sources(ShaderBackend::Msl);
+        assert!(!msl.is_empty(), "MSL enumeration lost every widget shader");
+
+        for (name, vertex, fragment) in &msl {
+            assert!(
+                fragment.contains("fragment") || fragment.contains("float4"),
+                "{name} MSL fragment shader does not look like MSL"
+            );
+            assert!(
+                !fragment.contains("@fragment"),
+                "{name} MSL slot is serving WGSL"
+            );
+            if let Some(vertex) = vertex {
+                assert!(!vertex.is_empty(), "{name} has an empty MSL vertex shader");
+            }
+        }
+
+        for (name, _, fragment) in widget_shader_sources(ShaderBackend::Wgsl) {
+            assert!(
+                !fragment.contains("[[stage_in]]"),
+                "{name} WGSL slot is serving MSL"
+            );
+        }
+    }
+
+    #[test]
     fn integer_haptic_only_fires_once_for_stale_previous_bucket() {
         clear_haptic_buckets();
         assert!(should_trigger_integer_haptic(10, 1.0, 2.1, 0.0, 10.0));
@@ -3044,8 +3324,7 @@ mod tests {
         assert!((mapped_haptic_value(&props, 1.0, 0.0) - 32.0).abs() < 0.0001);
     }
 
-    #[cfg(target_os = "macos")]
-    fn primitive_token(primitive: &MetalPrimitive) -> String {
+    fn primitive_token(primitive: &GpuPrimitive) -> String {
         fn color_token(color: Color) -> String {
             format!(
                 "{:08x}:{:08x}:{:08x}:{:08x}",
@@ -3075,20 +3354,20 @@ mod tests {
         }
 
         match primitive {
-            MetalPrimitive::ZLayer { z_index, primitive } => {
+            GpuPrimitive::ZLayer { z_index, primitive } => {
                 format!("z:{z_index}:{}", primitive_token(primitive))
             }
-            MetalPrimitive::Rect(rect) => {
+            GpuPrimitive::Rect(rect) => {
                 format!("rect:{}:{}", rect_token(rect.rect), color_token(rect.color))
             }
-            MetalPrimitive::ForegroundRect(rect) => {
+            GpuPrimitive::ForegroundRect(rect) => {
                 format!(
                     "fg-rect:{}:{}",
                     rect_token(rect.rect),
                     color_token(rect.color)
                 )
             }
-            MetalPrimitive::Quad(quad) => format!(
+            GpuPrimitive::Quad(quad) => format!(
                 "quad:{:08x}:{:08x}:{:08x}:{:08x}:{}",
                 quad.x.to_bits(),
                 quad.y.to_bits(),
@@ -3096,7 +3375,7 @@ mod tests {
                 quad.height.to_bits(),
                 color_token(quad.color)
             ),
-            MetalPrimitive::Triangle(triangle) => format!(
+            GpuPrimitive::Triangle(triangle) => format!(
                 "tri:{}:{}",
                 triangle
                     .points
@@ -3107,7 +3386,7 @@ mod tests {
                     .join(":"),
                 color_token(triangle.color)
             ),
-            MetalPrimitive::GlyphRun(run) => format!(
+            GpuPrimitive::GlyphRun(run) => format!(
                 "glyph:{:08x}:{}:{}:{}:{}",
                 run.row.to_bits(),
                 run.col,
@@ -3115,7 +3394,7 @@ mod tests {
                 color_token(run.fg),
                 color_token(run.bg)
             ),
-            MetalPrimitive::ProportionalText(run) => format!(
+            GpuPrimitive::ProportionalText(run) => format!(
                 "prop:{:08x}:{:08x}:{:08x}:{:08x}:{}:{:08x}:{:08x}:{}:{}",
                 run.row.to_bits(),
                 run.col.to_bits(),
@@ -3127,7 +3406,7 @@ mod tests {
                 color_token(run.fg),
                 color_token(run.bg)
             ),
-            MetalPrimitive::PatchCable(cable) => format!(
+            GpuPrimitive::PatchCable(cable) => format!(
                 "cable:{}:{}:{}:{}:{:08x}:{}:{}:{:08x}:{:08x}",
                 f32s(cable.start),
                 f32s(cable.control1),
@@ -3139,21 +3418,21 @@ mod tests {
                 cable.segment_row.to_bits(),
                 cable.corner_radius_cells.to_bits()
             ),
-            MetalPrimitive::Circle(circle) => format!(
+            GpuPrimitive::Circle(circle) => format!(
                 "circle:{}:{:08x}:{}:{:?}",
                 f32s(circle.center),
                 circle.radius_px.to_bits(),
                 color_token(circle.color),
                 circle.visible_half
             ),
-            MetalPrimitive::Waveform(waveform) => {
+            GpuPrimitive::Waveform(waveform) => {
                 format!(
                     "waveform:{}:{}",
                     rect_token(waveform.rect),
                     waveform.sample_key
                 )
             }
-            MetalPrimitive::Wavetable(wavetable) => {
+            GpuPrimitive::Wavetable(wavetable) => {
                 format!(
                     "wavetable:{}:{}:{}:{}:{:08x}:{:08x}:{:08x}:{}:{}:{}",
                     rect_token(wavetable.rect),
@@ -3168,7 +3447,7 @@ mod tests {
                     color_token(wavetable.bg_color)
                 )
             }
-            MetalPrimitive::LiveSpectrogram(spectrogram) => {
+            GpuPrimitive::LiveSpectrogram(spectrogram) => {
                 format!(
                     "live-spectrogram:{}:{}:{}:{}:{:.3}:{:.3}:{}:{}:{}:{}:{}:{}",
                     rect_token(spectrogram.rect),
@@ -3185,7 +3464,7 @@ mod tests {
                     color_token(spectrogram.background_color)
                 )
             }
-            MetalPrimitive::Image(image) => {
+            GpuPrimitive::Image(image) => {
                 format!(
                     "image:{}:{}:{}",
                     image.widget_id,
@@ -3193,7 +3472,7 @@ mod tests {
                     image.src
                 )
             }
-            MetalPrimitive::WidgetInstance {
+            GpuPrimitive::WidgetInstance {
                 widget_type,
                 instance,
                 is_background,
@@ -3214,17 +3493,15 @@ mod tests {
                 instance.corner_radius.to_bits(),
                 instance.pixel_aspect.to_bits()
             ),
-            MetalPrimitive::PushClipRect(rect) => format!("push:{}", rect_token(*rect)),
-            MetalPrimitive::PopClipRect => "pop".to_string(),
+            GpuPrimitive::PushClipRect(rect) => format!("push:{}", rect_token(*rect)),
+            GpuPrimitive::PopClipRect => "pop".to_string(),
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn primitive_tokens(primitives: &[MetalPrimitive]) -> Vec<String> {
+    fn primitive_tokens(primitives: &[GpuPrimitive]) -> Vec<String> {
         primitives.iter().map(primitive_token).collect()
     }
 
-    #[cfg(target_os = "macos")]
     fn test_viewport() -> WidgetViewport {
         WidgetViewport {
             cell_w: 10.0,
@@ -3241,7 +3518,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn test_node(
         widget_id: u64,
         widget_type: &str,
@@ -3264,18 +3540,105 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn assert_tagged_collection_matches_flat_collection(
         layout: &LayoutNode,
         viewport: WidgetViewport,
     ) {
-        let (flat, _) = collect_metal_primitives(layout, viewport, 0.0, 24);
-        let (runs, _) = collect_metal_primitive_runs(layout, viewport, 0.0, 24);
-        let flattened = flatten_metal_primitive_runs(&runs);
+        let (flat, _) = collect_gpu_primitives(layout, viewport, 0.0, 24);
+        let (runs, _) = collect_gpu_primitive_runs(layout, viewport, 0.0, 24);
+        let flattened = flatten_gpu_primitive_runs(&runs);
         assert_eq!(primitive_tokens(&flattened), primitive_tokens(&flat));
     }
 
-    #[cfg(target_os = "macos")]
+    /// eseq-eeng: focusing one widget must not perturb the primitive cache
+    /// key of every other widget in the tile — only the widget whose own
+    /// focus flipped may miss. The key is computed exactly the way
+    /// `widget_primitives_for_node` computes it (focus narrowed per node).
+    #[test]
+    fn unrelated_focus_change_keeps_a_cacheable_primitive_key_stable() {
+        let rect = Rect {
+            row: 1.0,
+            col: 1.0,
+            width: 4.0,
+            height: 2.0,
+        };
+        let label = test_node(
+            7,
+            "label",
+            rect,
+            HashMap::from([("text".to_string(), Value::String("vol".to_string()))]),
+            Vec::new(),
+        );
+        let key = |focused_widget_id: Option<u64>| {
+            let viewport = WidgetViewport {
+                focused_widget_id,
+                ..test_viewport()
+            };
+            widget_primitive_cache_key(&label, narrow_viewport_focus_to(&label, viewport))
+                .expect("a plain label is cacheable")
+        };
+        assert_eq!(
+            key(None),
+            key(Some(999)),
+            "focusing an unrelated widget must not invalidate this widget's primitives"
+        );
+        assert_ne!(
+            key(None),
+            key(Some(7)),
+            "the widget's own focus state must stay part of its key"
+        );
+    }
+
+    /// eseq-eeng: widget-local interaction state (drag envelopes, edit
+    /// carets) bumps a per-widget revision, so a continuous drag rebuilds
+    /// only the dragged widget's primitives — while the global change stamp
+    /// still advances so redraw scheduling and tile-scene fingerprints see
+    /// the change.
+    #[test]
+    fn per_widget_state_revision_invalidates_only_the_owning_widget() {
+        let rect = Rect {
+            row: 1.0,
+            col: 1.0,
+            width: 4.0,
+            height: 2.0,
+        };
+        let node = |widget_id: u64| {
+            test_node(
+                widget_id,
+                "label",
+                rect,
+                HashMap::from([("text".to_string(), Value::String("vol".to_string()))]),
+                Vec::new(),
+            )
+        };
+        let dragged = node(9101);
+        let bystander = node(9102);
+        let viewport = test_viewport();
+        let dragged_key_before =
+            widget_primitive_cache_key(&dragged, viewport).expect("cacheable");
+        let bystander_key_before =
+            widget_primitive_cache_key(&bystander, viewport).expect("cacheable");
+        let stamp_before = widget_state_generation();
+
+        bump_widget_state_revision(dragged.widget_id);
+
+        assert_ne!(
+            widget_primitive_cache_key(&dragged, viewport).expect("cacheable"),
+            dragged_key_before,
+            "the owning widget's key must change with its revision"
+        );
+        assert_eq!(
+            widget_primitive_cache_key(&bystander, viewport).expect("cacheable"),
+            bystander_key_before,
+            "another widget's key must survive an unrelated revision bump"
+        );
+        assert_ne!(
+            widget_state_generation(),
+            stamp_before,
+            "the global change stamp must advance so a repaint is scheduled"
+        );
+    }
+
     #[test]
     fn knob_number_focus_corners_are_added_by_the_shared_primitive_pipeline() {
         let rect = Rect {
@@ -3302,7 +3665,7 @@ mod tests {
         assert_eq!(
             unfocused
                 .iter()
-                .filter(|primitive| matches!(primitive, MetalPrimitive::ForegroundRect(_)))
+                .filter(|primitive| matches!(primitive, GpuPrimitive::ForegroundRect(_)))
                 .count(),
             0
         );
@@ -3317,7 +3680,7 @@ mod tests {
         let corner_rects: Vec<Rect> = focused
             .iter()
             .filter_map(|primitive| match primitive {
-                MetalPrimitive::ForegroundRect(corner) => Some(corner.rect),
+                GpuPrimitive::ForegroundRect(corner) => Some(corner.rect),
                 _ => None,
             })
             .collect();
@@ -3330,7 +3693,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn tagged_metal_collection_matches_flat_collection_for_simple_widgets() {
         let label = test_node(
@@ -3376,7 +3738,6 @@ mod tests {
         assert_tagged_collection_matches_flat_collection(&root, test_viewport());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn tagged_metal_collection_records_ancestor_widget_ids() {
         let label = test_node(
@@ -3416,7 +3777,7 @@ mod tests {
             vec![child_box],
         );
 
-        let (runs, _) = collect_metal_primitive_runs(&root, test_viewport(), 0.0, 24);
+        let (runs, _) = collect_gpu_primitive_runs(&root, test_viewport(), 0.0, 24);
         let label_run = runs
             .iter()
             .find(|run| run.widget_id == 3)
@@ -3424,7 +3785,6 @@ mod tests {
         assert_eq!(label_run.ancestor_widget_ids, vec![1, 2]);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn tagged_metal_collection_matches_flat_collection_for_clipped_box() {
         let label = test_node(
@@ -3455,7 +3815,6 @@ mod tests {
         assert_tagged_collection_matches_flat_collection(&root, test_viewport());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn tagged_metal_collection_matches_flat_collection_for_scroll() {
         let label = test_node(
@@ -3486,7 +3845,6 @@ mod tests {
         assert_tagged_collection_matches_flat_collection(&root, test_viewport());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn retained_metal_collection_reuses_clean_runs_and_rebuilds_dirty_runs() {
         let make_layout = |label_text: &str| {
@@ -3530,20 +3888,19 @@ mod tests {
         let viewport = test_viewport();
         let before = make_layout("1");
         let after = make_layout("17");
-        let (previous_runs, _) = collect_metal_primitive_runs(&before, viewport, 0.0, 24);
+        let (previous_runs, _) = collect_gpu_primitive_runs(&before, viewport, 0.0, 24);
         let (retained_runs, _, stats) =
-            collect_metal_primitive_runs_retained(&after, viewport, 0.0, 24, &previous_runs, &[2]);
-        let (full_runs, _) = collect_metal_primitive_runs(&after, viewport, 0.0, 24);
+            collect_gpu_primitive_runs_retained(&after, viewport, 0.0, 24, &previous_runs, &[2]);
+        let (full_runs, _) = collect_gpu_primitive_runs(&after, viewport, 0.0, 24);
 
         assert!(stats.reused_runs > 0);
         assert!(stats.rebuilt_runs > 0);
         assert_eq!(
-            primitive_tokens(&flatten_metal_primitive_runs(&retained_runs)),
-            primitive_tokens(&flatten_metal_primitive_runs(&full_runs))
+            primitive_tokens(&flatten_gpu_primitive_runs(&retained_runs)),
+            primitive_tokens(&flatten_gpu_primitive_runs(&full_runs))
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn retained_metal_collection_rebuilds_descendants_for_dirty_ancestor() {
         let label = test_node(
@@ -3571,20 +3928,19 @@ mod tests {
             vec![label],
         );
         let viewport = test_viewport();
-        let (previous_runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+        let (previous_runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
         let (retained_runs, _, stats) =
-            collect_metal_primitive_runs_retained(&root, viewport, 0.0, 24, &previous_runs, &[1]);
-        let (full_runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+            collect_gpu_primitive_runs_retained(&root, viewport, 0.0, 24, &previous_runs, &[1]);
+        let (full_runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
 
         assert_eq!(stats.reused_runs, 0);
         assert!(stats.rebuilt_runs >= 2);
         assert_eq!(
-            primitive_tokens(&flatten_metal_primitive_runs(&retained_runs)),
-            primitive_tokens(&flatten_metal_primitive_runs(&full_runs))
+            primitive_tokens(&flatten_gpu_primitive_runs(&retained_runs)),
+            primitive_tokens(&flatten_gpu_primitive_runs(&full_runs))
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn retained_metal_collection_reuses_clean_scrolled_runs_without_double_offset() {
         let label = test_node(
@@ -3624,20 +3980,19 @@ mod tests {
             vec![label, button],
         );
         let viewport = test_viewport();
-        let (previous_runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+        let (previous_runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
         let (retained_runs, _, stats) =
-            collect_metal_primitive_runs_retained(&root, viewport, 0.0, 24, &previous_runs, &[3]);
-        let (full_runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+            collect_gpu_primitive_runs_retained(&root, viewport, 0.0, 24, &previous_runs, &[3]);
+        let (full_runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
 
         assert!(stats.reused_runs > 0);
         assert!(stats.rebuilt_runs > 0);
         assert_eq!(
-            primitive_tokens(&flatten_metal_primitive_runs(&retained_runs)),
-            primitive_tokens(&flatten_metal_primitive_runs(&full_runs))
+            primitive_tokens(&flatten_gpu_primitive_runs(&retained_runs)),
+            primitive_tokens(&flatten_gpu_primitive_runs(&full_runs))
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn scrolled_collection_culls_fully_offscreen_children() {
         let visible = test_node(
@@ -3678,7 +4033,7 @@ mod tests {
         );
         let viewport = test_viewport();
 
-        let (runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+        let (runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
         assert!(runs.iter().any(|run| run.widget_id == 2));
         assert!(!runs.iter().any(|run| run.widget_id == 3));
 
@@ -3692,12 +4047,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+        let (runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
         assert!(!runs.iter().any(|run| run.widget_id == 2));
         assert!(runs.iter().any(|run| run.widget_id == 3));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn retained_metal_collection_refreshes_cached_runs_in_place() {
         let make_layout = |label_text: &str| {
@@ -3741,9 +4095,9 @@ mod tests {
         let viewport = test_viewport();
         let before = make_layout("1");
         let after = make_layout("17");
-        let (mut cached_runs, _) = collect_metal_primitive_runs(&before, viewport, 0.0, 24);
-        let run_indices = build_metal_primitive_run_index(&cached_runs);
-        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+        let (mut cached_runs, _) = collect_gpu_primitive_runs(&before, viewport, 0.0, 24);
+        let run_indices = build_gpu_primitive_run_index(&cached_runs);
+        let (_overlay, stats) = refresh_gpu_primitive_runs_retained_in_place(
             &after,
             viewport,
             0.0,
@@ -3752,19 +4106,18 @@ mod tests {
             &run_indices,
             &[2],
         );
-        let (full_runs, _) = collect_metal_primitive_runs(&after, viewport, 0.0, 24);
+        let (full_runs, _) = collect_gpu_primitive_runs(&after, viewport, 0.0, 24);
 
         assert!(stats.reused_runs > 0);
         assert!(stats.rebuilt_runs > 0);
         assert_eq!(stats.missing_previous_runs, 0);
         assert_eq!(stats.invalid_previous_runs, 0);
         assert_eq!(
-            primitive_tokens(&flatten_metal_primitive_runs(&cached_runs)),
-            primitive_tokens(&flatten_metal_primitive_runs(&full_runs))
+            primitive_tokens(&flatten_gpu_primitive_runs(&cached_runs)),
+            primitive_tokens(&flatten_gpu_primitive_runs(&full_runs))
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn retained_metal_in_place_refresh_reports_removed_previous_runs() {
         let make_layout = |include_button: bool| {
@@ -3812,9 +4165,9 @@ mod tests {
         let viewport = test_viewport();
         let before = make_layout(true);
         let after = make_layout(false);
-        let (mut cached_runs, _) = collect_metal_primitive_runs(&before, viewport, 0.0, 24);
-        let run_indices = build_metal_primitive_run_index(&cached_runs);
-        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+        let (mut cached_runs, _) = collect_gpu_primitive_runs(&before, viewport, 0.0, 24);
+        let run_indices = build_gpu_primitive_run_index(&cached_runs);
+        let (_overlay, stats) = refresh_gpu_primitive_runs_retained_in_place(
             &after,
             viewport,
             0.0,
@@ -3830,7 +4183,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn retained_metal_collection_refreshes_scrolled_cached_runs_without_double_offset() {
         let label = test_node(
@@ -3870,9 +4222,9 @@ mod tests {
             vec![label, button],
         );
         let viewport = test_viewport();
-        let (mut cached_runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
-        let run_indices = build_metal_primitive_run_index(&cached_runs);
-        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+        let (mut cached_runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
+        let run_indices = build_gpu_primitive_run_index(&cached_runs);
+        let (_overlay, stats) = refresh_gpu_primitive_runs_retained_in_place(
             &root,
             viewport,
             0.0,
@@ -3881,17 +4233,16 @@ mod tests {
             &run_indices,
             &[3],
         );
-        let (full_runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+        let (full_runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
 
         assert!(stats.reused_runs > 0);
         assert!(stats.rebuilt_runs > 0);
         assert_eq!(
-            primitive_tokens(&flatten_metal_primitive_runs(&cached_runs)),
-            primitive_tokens(&flatten_metal_primitive_runs(&full_runs))
+            primitive_tokens(&flatten_gpu_primitive_runs(&cached_runs)),
+            primitive_tokens(&flatten_gpu_primitive_runs(&full_runs))
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn animated_subtree_refresh_reuses_static_sibling_runs() {
         sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
@@ -3947,9 +4298,9 @@ mod tests {
         assert_eq!(active, vec![2]);
 
         let viewport = test_viewport();
-        let (mut runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
-        let run_index = build_metal_primitive_run_index(&runs);
-        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+        let (mut runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
+        let run_index = build_gpu_primitive_run_index(&runs);
+        let (_overlay, stats) = refresh_gpu_primitive_runs_retained_in_place(
             &root, viewport, 0.0, 24, &mut runs, &run_index, &active,
         );
         assert!(stats.rebuilt_runs > 0);
@@ -4082,8 +4433,7 @@ mod tests {
 /// Shared rounded-rect SDF shader used by tree-row, text-input, number-picker, dropdown.
 /// When `corner_radius > 0`, uses that as the radius (in normalized space).
 /// Otherwise defaults to 0.75 (pill-like for small widgets).
-#[cfg(target_os = "macos")]
-pub const ROUNDED_RECT_SHADER: &str = r#"
+pub const ROUNDED_RECT_SHADER: ShaderSources = ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -4104,7 +4454,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#;
+"#, wgsl::ROUNDED_RECT_SHADER);
 
 /// Flat panel chrome: solid fill, crisp uniform border, rounded corners.
 ///
@@ -4112,8 +4462,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 /// width in device pixels, `corner_radius` = normalized radius (see
 /// `normalized_corner_radius`). Deliberately unlit — no gradient, no specular —
 /// so completion menus and tooltips read as flat surfaces instead of nodes.
-#[cfg(target_os = "macos")]
-pub const PATCHER_PANEL_SHADER: &str = r#"
+pub const PATCHER_PANEL_SHADER: ShaderSources = ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float aspect = max(in.aspect, 0.001);
@@ -4139,10 +4488,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float alpha = mix(in.color_b.a, in.color_a.a, borderMask);
     return float4(color, alpha * outerAlpha);
 }
-"#;
+"#, wgsl::PATCHER_PANEL_SHADER);
 
-#[cfg(target_os = "macos")]
-pub const PATCHER_PORT_SHADER: &str = r#"
+pub const PATCHER_PORT_SHADER: ShaderSources = ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 p = (in.uv - float2(0.5)) * 2.0;
@@ -4163,10 +4511,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float4 col = mix(in.color_a, in.color_b, innerMask);
     return float4(col.rgb, col.a * outerMask);
 }
-"#;
+"#, wgsl::PATCHER_PORT_SHADER);
 
-#[cfg(target_os = "macos")]
-pub const PATCHER_BACK_CHEVRON_SHADER: &str = r#"
+pub const PATCHER_BACK_CHEVRON_SHADER: ShaderSources = ShaderSources::both(r#"
 float patcher_chevron_segment_distance(float2 p, float2 a, float2 b)
 {
     float2 pa = p - a;
@@ -4197,10 +4544,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return float4(in.color_a.rgb, in.color_a.a * mask);
 }
-"#;
+"#, wgsl::PATCHER_BACK_CHEVRON_SHADER);
 
-#[cfg(target_os = "macos")]
-pub const PATCHER_NODE_SHADER: &str = r#"
+pub const PATCHER_NODE_SHADER: ShaderSources = ShaderSources::both(r#"
 float patcher_node_smooth_rounded_rect(float2 pos, float2 size, float radius, float smin, float smax)
 {
     return smoothstep(smin, smax, sdf_rounded_rect(pos, size, radius));
@@ -4277,9 +4623,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 color = mix(litBg, litBorder, borderMask);
     return float4(color, outerAlpha * max(in.color_a.a, in.color_b.a));
 }
-"#;
+"#, wgsl::PATCHER_NODE_SHADER);
 
-#[cfg(target_os = "macos")]
 pub fn ndc_bounds(rect: Rect, viewport: WidgetViewport) -> ([f32; 2], [f32; 2]) {
     let ndc_x = |px: f32| px / viewport.vp_w * 2.0 - 1.0;
     let ndc_y = |px: f32| 1.0 - px / viewport.vp_h * 2.0;

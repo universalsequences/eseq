@@ -911,6 +911,6 @@ func bindOSWorkgroupFromAudioUnit(engine: AVAudioEngine) {
 2) Optional (recommended): enable real-time time-constraint scheduling before starting workers:
 
 ```swift
-engine_enable_rt_time_constraint(1)
+engine_enable_rt_scheduling(1)
 engine_start_workers(2) // tune 2–3 based on graph width
 ```

@@ -33,11 +33,15 @@
 (defstate sampler-view-duration 0)
 (defstate sampler-cursor-time 0.0)
 (defstate sampler-active-marker "none")
+;; -1 means "no explicit pick": the waveform then highlights whichever slice the
+;; playhead is inside, which is what you want while a pattern is running.
+(defstate sampler-selected-slice -1)
 
 (def sampler-reset-view ()
   (set! sampler-view-start 0.0)
   (set! sampler-view-duration 0)
   (set! sampler-cursor-time 0.0)
+  (set! sampler-selected-slice -1)
   (set! sampler-active-marker "none"))
 
 (def sampler-set-start-end (inst start-seconds end-seconds duration)
@@ -93,8 +97,44 @@
             (next-duration (sampler-clamp-duration (/ cur-duration event.factor) duration)))
         (set! sampler-view-duration next-duration)
         (set! sampler-view-start (sampler-clamp-start (- event.anchor-time (* anchor-ratio next-duration)) duration))))
+    :select-slice
+    (do
+      (set! sampler-selected-slice event.index)
+      (set! sampler-cursor-time event.time))
+    :add-slice
+    (sampler-edit-slice inst :add event)
+    :move-slice
+    (do
+      (set! sampler-selected-slice event.index)
+      (sampler-edit-slice inst :move event))
+    :delete-slice
+    (sampler-edit-slice inst :delete event)
+    :end-slice-drag
+    (sampler-finish-slice-edit inst)
     _
     nil))
+
+(def sampler-edit-slice (inst operation event)
+  (host-command "edit-sampler-slice"
+    (dict :track (if (pc/instrument-rack-target? inst) (get inst :rack-track) (get inst :track))
+          :rack-slot (if (pc/instrument-rack-target? inst) (get inst :rack-slot) -1)
+          :operation operation
+          ;; 0 is falsey here, so a plain `(if (get event :index) ...)` would
+          ;; send -1 for slice 0 and the host would drop the edit.
+          :index (if (= (get event :index) nil) -1 (get event :index))
+          :time (get event :time)
+          :gesture "sampler-slice"
+          :label "Edit sampler slice")))
+
+(def sampler-finish-slice-edit (inst)
+  (host-command "edit-sampler-slice"
+    (dict :track (if (pc/instrument-rack-target? inst) (get inst :rack-track) (get inst :track))
+          :rack-slot (if (pc/instrument-rack-target? inst) (get inst :rack-slot) -1)
+          :operation :commit
+          :index -1
+          :time 0
+          :gesture "sampler-slice"
+          :label "Edit sampler slice")))
 
 (def sampler-panel-drop-types (inst)
   (list "sample" "instrument" "sound"))
@@ -162,12 +202,13 @@
 
 (def sampler-param-button (p key)
   (subtree :key key
-    (v-stack :align :center :gap 0.2
+    (v-stack :align :center :gap 0.5
       (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
       (button (if (pc/fx-param-on? p) "ON" "OFF")
         :width 3.2 :height 1.5 :padding 0 :font-size 10
         :background-color (if (pc/fx-param-on? p) (rgba 0.95 0.48 0.18 1.0) (rgba 0.1 0.1 0.1 0.5))
         :color (if (pc/fx-param-on? p) :black :dim)
+        :border-color :transparent
         :plock-active (if (pc/param-plock-active? false p) 1 0)
         :plock-color-r (pc/param-plock-color-r)
         :plock-color-g (pc/param-plock-color-g)
@@ -195,11 +236,12 @@
         :width 5.8 :height 1.0 :font-size 9))))
 
 (def sampler-gate-button ()
-  (v-stack :align :center :gap 0.2
+  (v-stack :align :center :gap 0.5
     (label "gate" :font-size 10 :color :dim :bg :transparent)
     (button (if SEQ.tp-gate "ON" "OFF")
       :width 3.2 :height 1.5 :padding 0 :font-size 10
       :background-color (if SEQ.tp-gate (rgba 0.95 0.48 0.18 1.0) (rgba 0.1 0.1 0.1 0.5))
+      :border-color :transparent
       :color (if SEQ.tp-gate :black :dim)
       :on-click |x y r| (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :gate (if SEQ.tp-gate 0 1))))))
 
@@ -234,32 +276,80 @@
     "base"
     (get p :name)))
 
+;; Slice mode replaces the old `slice` dropdown: the Classic/Slice switch left
+;; of the waveform is the only way to reach it. The mode is a two-value enum
+;; (off / transient); markers are fine-tuned by dragging, not by a detector
+;; picker.
+(def sampler-slice-mode-param (params)
+  (sampler-param-by-name params "slice"))
+
+(def sampler-slice-active? (params)
+  (let ((mode (sampler-slice-mode-param params)))
+    (and mode (not (= (get mode :text-value) "off")))))
+
+(def sampler-mode-cell (mode text label active)
+  (button text
+    :width 5.2 :height 2.45 :padding 0 :font-size 9
+    :background-color :transparent
+    :active active
+    :active-color :yellow
+    :border-color :transparent
+    :color :dim
+    :plock-active (if (pc/param-plock-active? false mode) 1 0)
+    :plock-color-r (pc/param-plock-color-r)
+    :plock-color-g (pc/param-plock-color-g)
+    :plock-color-b (pc/param-plock-color-b)
+    :on-click |x y r| (if active nil (pc/fx-set-instrument-option mode label))))
+
+(def sampler-mode-switch (params)
+  (let ((mode (sampler-slice-mode-param params)))
+    (if mode
+      (subtree :key "sampler-mode-switch"
+        (v-stack :debug-name "sampler-mode-switch" :gap 0.18 :align :center :padding 0.2
+          (sampler-mode-cell mode "classic" "off" (not (sampler-slice-active? params)))
+          (sampler-mode-cell mode "slice" "transient" (sampler-slice-active? params))))
+      (box :width 0.01 :height 0.01))))
+
 (def sampler-small-params (params)
-  (filter |p|
-    (let ((name (get p :name)))
-      (or (sampler-base-note-param? p)
-          (= name "attack")
-          (= name "release")
-          (= name "start")
-          (= name "end")))
-    params))
+  ;; start/end are dead in slice mode: `resolve_slice` (audio/params.rs)
+  ;; overwrites both on every trigger unless the step carries an explicit
+  ;; start/end p-lock, and slices are detected across the whole sample rather
+  ;; than inside that window. Showing editable fields that change nothing you
+  ;; hear is worse than showing none, so they go with `loop`/`xfade`.
+  (let ((sliced (sampler-slice-active? params)))
+    (filter |p|
+      (let ((name (get p :name)))
+        (or (sampler-base-note-param? p)
+            (= name "attack")
+            (= name "release")
+            (and (not sliced) (= name "start"))
+            (and (not sliced) (= name "end"))))
+      params)))
 
 (def sampler-main-params (params)
+  (let ((sliced (sampler-slice-active? params)))
   (filter |p|
     (let ((name (get p :name)))
       (and (not (= name "enabled"))
+        ;; Loop/xfade shape one continuous playback window; in slice mode every
+        ;; trigger is a bounded region picked by note, so they have no meaning.
+        (not (and sliced (= name "loop")))
+        (not (and sliced (= name "xfade")))
         (not (= name "warp"))
         (not (= name "mode"))
         (not (= name "bpm"))
         (not (= name "preserve"))
         (not (= name "fill"))
+        (not (= name "slice"))
+        (not (= name "sens"))
+        (not (= name "slice base"))
         (not (sampler-base-note-param? p))
         (not (= name "attack"))
         (not (= name "release"))
         (not (= name "start"))
         (not (= name "end"))
         (not (= name "decay"))))
-    params))
+    params)))
 
 (def sampler-bpm-control (p)
   (h-stack :gap 0.65 :align :start
@@ -295,12 +385,14 @@
       (box :height 0.02)
       (v-stack :gap 0.2
         (button "1/2"
-          :width 2.25 :height 1.02 :padding 0 :font-size 8
-          :background-color :mixer-control-bg :color :dim
+          :width 2.45 :height 1.22 :padding 0 :font-size 8
+          :background-color :mixer-strip-bg :color :dim
+          :border-color :transparent
           :on-click |x y r| (pc/fx-set-instrument-value p (min 400 (* (get p :value) 2))))
         (button "2x"
-          :width 2.25 :height 1.02 :padding 0 :font-size 8
-          :background-color :mixer-control-bg :color :dim
+          :width 2.45 :height 1.22 :padding 0 :font-size 8
+          :border-color :transparent
+          :background-color :mixer-strip-bg :color :dim
           :on-click |x y r| (pc/fx-set-instrument-value p (max 20 (/ (get p :value) 2))))))))
 
 (def sampler-param-pickers (params inst)
@@ -308,11 +400,20 @@
     (each (sampler-small-params params) |p pi|
       (sampler-param-control-number-picker p))))
 
+(def sampler-slice-controls (params)
+  (if (sampler-slice-active? params)
+    (h-stack :debug-name "sampler-slice-enabled-params" :gap 0.85 :align :start
+      (sampler-param-control (sampler-param-by-name params "sens"))
+      (sampler-param-control (sampler-param-by-name params "slice base")))
+    (box :width 0.01 :height 0.01)))
+
 (def sampler-param-knobs (params inst)
-  (h-stack :debug-name "sampler-main-param-row" :gap 0.85 :padding 0.15 :align :start
+  (h-stack :debug-name "sampler-main-param-row" :gap 0.85 :padding 0.13 :align :start
+    (box :width 0.1)
     (sampler-gate-button)
     (each (sampler-main-params params) |p pi|
       (sampler-param-control p))
+    (sampler-slice-controls params)
     (sampler-param-control (sampler-param-by-name params "warp"))
     (sampler-param-control (sampler-param-by-name params "mode"))
     (sampler-param-control (sampler-param-by-name params "preserve"))
@@ -320,25 +421,47 @@
     (sampler-param-control (sampler-param-by-name params "decay"))
     (sampler-bpm-control (sampler-param-by-name params "bpm"))))
 
+(def sampler-visible-slices (inst)
+  (if (sampler-slice-active? (get inst :synth))
+    (get inst :slices)
+    (list)))
+
+;; Parallel to :slices — 1 where sensitivity keeps the marker as a real slice
+;; boundary, 0 where it is deactivated (drawn dim, played through).
+(def sampler-visible-slice-active (inst)
+  (if (sampler-slice-active? (get inst :synth))
+    (get inst :slice-active)
+    (list)))
+
+;; No start/end control in slice mode means no start/end overlay either: the
+;; markers and selection shading are just the graphical form of the same
+;; discarded value.
 (def sampler-selection-start-prop (inst)
-  (if (get inst :start-time-field)
-    (bind-seq (get inst :start-time-field))
-    (get inst :start-time)))
+  (if (sampler-slice-active? (get inst :synth))
+    nil
+    (if (get inst :start-time-field)
+      (bind-seq (get inst :start-time-field))
+      (get inst :start-time))))
 
 (def sampler-selection-end-prop (inst)
-  (if (get inst :end-time-field)
-    (bind-seq (get inst :end-time-field))
-    (get inst :end-time)))
+  (if (sampler-slice-active? (get inst :synth))
+    nil
+    (if (get inst :end-time-field)
+      (bind-seq (get inst :end-time-field))
+      (get inst :end-time))))
 
 (def sampler-panel-content (inst)
   (let ((body
         (v-stack
           (box :background-color :instrument-control-bg :corner-radius 10
             (v-stack :gap 0.0
-              (box :height 0.3)
+              (box :height 0.01)
+              (h-stack :debug-name "sampler-waveform-row" :gap 0.35 :align :start
+                (sampler-mode-switch (get inst :synth))
+                (v-stack :gap 0.0
               (if (get inst :buffer)
                 (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                  (box :width 81 :height 4.4
+                  (box :width 77.0 :height 5.2 :padding 0.2
                     (waveform
                       :height 3.6
                       :header-height 0.3
@@ -349,7 +472,11 @@
                       :grid-minor-color :black
                       :bg :instrument-control-bg
                       :focusable true
-                      :marker-selection true
+                      ;; Slice mode turns the body into a slice picker: no
+                      ;; range drag, and no start/end handles to grab.
+                      :slice-select (sampler-slice-active? (get inst :synth))
+                      :marker-selection (not (sampler-slice-active? (get inst :synth)))
+                      :active-slice sampler-selected-slice
                       :active-marker sampler-active-marker
                       :marker-color :dim
                       :active-marker-color :widget-knob-filled
@@ -360,13 +487,15 @@
                       :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
                       :cursor-time sampler-cursor-time
                       :playhead-time (bind-seq "sampler-playhead")
+                      :slices (sampler-visible-slices inst)
+                      :slice-active (sampler-visible-slice-active inst)
                       :selection-start (sampler-selection-start-prop inst)
                       :selection-end (sampler-selection-end-prop inst)
                       :time-ruler (dict :mode :seconds)
                       :on-action |event| (handle-sampler-waveform-action inst event (get inst :duration)))))
-                (box :width 70 :height 4.2 :h-align :center :v-align :center
+                (box :width 75 :height 4.2 :h-align :center :v-align :center
                   (label "No sample" :font-size 12 :color :dim :bg :transparent)))
-              (sampler-param-pickers (get inst :synth) inst)))
+              (sampler-param-pickers (get inst :synth) inst)))))
           (sampler-param-knobs (get inst :synth) inst))))
     (if st/instrument-mods-open
       (h-stack :debug-name "sampler-mods-inline-body" :height :fill :gap 0.45 :align :stretch
@@ -390,7 +519,7 @@
         (h-stack :gap 0.5 :align :center :width :fill
           (pf/fx-panel-header-leading-spacer)
           (ep/enabled-toggle (ep/enabled-param (get inst :synth)) false "sampler-enabled")
-          (label "Sampler" :font-size 11 :color :white :bg :transparent)
+          (label "Sampler" :v-align :center :font-size 11 :color :white :bg :transparent)
           (ep/instrument-synth-button)
           (ep/instrument-mods-toggle-button)
           (box :flex 1 :height 0.15)

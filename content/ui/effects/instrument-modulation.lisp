@@ -21,7 +21,7 @@
       name)))
 
 (def mod-source-param (params base)
-  (nth (filter |p| (= (get p :name) (str base " src")) params) 0))
+  (find-by-key params :name (str base " src")))
 
 (def mod-amount-params (params)
   (filter |p| (string-ends-with? (get p :name) " amt") params))
@@ -100,7 +100,7 @@
        0))
 
 (def source-param (section name)
-  (nth (filter |p| (= (get p :name) name) (get section :params)) 0))
+  (find-by-key (get section :params) :name name))
 
 (def source-param-value (p fallback)
   (if p (pc/fx-param-value p) fallback))

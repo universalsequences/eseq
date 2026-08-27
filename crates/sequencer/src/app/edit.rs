@@ -711,6 +711,43 @@ impl App {
         result: crate::lisp_host::CompileResult,
     ) -> Result<(), String> {
         let source = self.retained_effect_source_for_name(name)?;
+        self.apply_compiled_bus_effect_to_slot_recorded_with_retained(
+            bus_idx, slot, name, result, source,
+        )
+    }
+
+    /// Bus twin of [`Self::apply_compiled_effect_to_slot_recorded_with_source`]
+    /// (eseq-u2h): edit sessions retain the source they compiled rather than
+    /// re-reading the effects library by name.
+    pub fn apply_compiled_bus_effect_to_slot_recorded_with_source(
+        &mut self,
+        bus_idx: usize,
+        slot: usize,
+        name: &str,
+        result: crate::lisp_host::CompileResult,
+        source: &str,
+        asset_base: Option<std::path::PathBuf>,
+        origin: crate::lisp_host::DGenSourceOrigin,
+    ) -> Result<(), String> {
+        let source = RetainedEffectSource::Compiled {
+            name: name.to_string(),
+            source: source.to_string(),
+            asset_base,
+            origin,
+        };
+        self.apply_compiled_bus_effect_to_slot_recorded_with_retained(
+            bus_idx, slot, name, result, source,
+        )
+    }
+
+    fn apply_compiled_bus_effect_to_slot_recorded_with_retained(
+        &mut self,
+        bus_idx: usize,
+        slot: usize,
+        name: &str,
+        result: crate::lisp_host::CompileResult,
+        source: RetainedEffectSource,
+    ) -> Result<(), String> {
         let bus_id = self.buses.get(bus_idx)
             .map(|bus| bus.id)
             .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
@@ -1327,6 +1364,42 @@ impl App {
         track: usize,
     ) -> Result<(), String> {
         let source = self.retained_effect_source_for_name(name)?;
+        self.apply_compiled_effect_to_slot_recorded_with_retained(result, name, slot, track, source)
+    }
+
+    /// Edit-session variant of [`Self::apply_compiled_effect_to_slot_recorded`]:
+    /// retains the exact source that was compiled instead of re-reading the
+    /// effects library by name. Draft sessions (new-effect / fork drafts)
+    /// compile out of a temp directory under a name the library does not hold,
+    /// so the name-based lookup fails with a bare missing-file error
+    /// (eseq-u2h).
+    pub fn apply_compiled_effect_to_slot_recorded_with_source(
+        &mut self,
+        result: crate::lisp_host::CompileResult,
+        name: &str,
+        slot: usize,
+        track: usize,
+        source: &str,
+        asset_base: Option<std::path::PathBuf>,
+        origin: crate::lisp_host::DGenSourceOrigin,
+    ) -> Result<(), String> {
+        let source = RetainedEffectSource::Compiled {
+            name: name.to_string(),
+            source: source.to_string(),
+            asset_base,
+            origin,
+        };
+        self.apply_compiled_effect_to_slot_recorded_with_retained(result, name, slot, track, source)
+    }
+
+    fn apply_compiled_effect_to_slot_recorded_with_retained(
+        &mut self,
+        result: crate::lisp_host::CompileResult,
+        name: &str,
+        slot: usize,
+        track: usize,
+        source: RetainedEffectSource,
+    ) -> Result<(), String> {
         self.apply_recorded_track_effect_chain_mutation(
             track,
             "Replace audio effect",
@@ -4580,6 +4653,7 @@ fn encode_effect_slot_values(bytes: &mut WitnessBytes, snapshot: &EffectSlotSnap
         transport_phase_param_idx: _,
         ir,
         table,
+        sampler_slice_edits,
     } = snapshot;
     bytes.usize(*num_params as usize);
     bytes.f32_slice(defaults);
@@ -4619,6 +4693,24 @@ fn encode_effect_slot_values(bytes: &mut WitnessBytes, snapshot: &EffectSlotSnap
     if let Some(table) = table {
         bytes.usize(table.len());
         bytes.0.extend_from_slice(table.as_bytes());
+    }
+    bytes.bool(sampler_slice_edits.is_some());
+    if let Some(edits) = sampler_slice_edits {
+        bytes.usize(edits.sample_hash.len());
+        bytes.0.extend_from_slice(edits.sample_hash.as_bytes());
+        bytes.usize(edits.user_added.len());
+        for frame in &edits.user_added {
+            bytes.usize(*frame as usize);
+        }
+        bytes.usize(edits.user_deleted.len());
+        for frame in &edits.user_deleted {
+            bytes.usize(*frame as usize);
+        }
+        bytes.usize(edits.user_moved.len());
+        for item in &edits.user_moved {
+            bytes.usize(item.from as usize);
+            bytes.usize(item.to as usize);
+        }
     }
 }
 
@@ -6601,6 +6693,137 @@ pub fn apply_coalesced_device_value_batch(
         &format!("batch:{gesture}:{parameter_targets:?}"),
         label,
     )
+}
+
+pub fn finish_sampler_slice_gesture(
+    app: &mut App,
+    track: usize,
+    rack_slot: Option<usize>,
+    gesture: &str,
+) {
+    let Some(track_id) = app.track_registry.id_at(track) else {
+        return;
+    };
+    let pattern = match app.bound_read_pattern(track) {
+        Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
+        _ => {
+            let Some(pattern) = rule_three_device_target(app, track) else {
+                return;
+            };
+            pattern
+        }
+    };
+    let id = rack_slot.map_or(DeviceId::TrackInstrument(track_id), |slot| {
+        DeviceId::RackInstrument(app.device_registry.rack_slot(track_id, slot))
+    });
+    let key = MergeKey::new(format!(
+        "{gesture}:{}:{}",
+        device_id_merge_component(id),
+        pattern.0,
+    ));
+    if app.history.active_gesture().map(|active| &active.merge_key) == Some(&key) {
+        finish_active_gesture(app);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SamplerSliceMutation {
+    Applied,
+    Revert,
+    NoOp,
+}
+
+pub fn apply_coalesced_sampler_slice_mutation(
+    app: &mut App,
+    track: usize,
+    rack_slot: Option<usize>,
+    gesture: &str,
+    label: &str,
+    mutate: impl FnOnce(
+        &mut Option<crate::analysis::SamplerSliceEdits>,
+    ) -> SamplerSliceMutation,
+) -> Result<EditOutcome, EditError> {
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let pattern = match app.bound_read_pattern(track) {
+        Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
+        _ => rule_three_device_target(app, track).ok_or(EditError::MissingTrackPattern)?,
+    };
+    let id = rack_slot.map_or(DeviceId::TrackInstrument(track_id), |slot| {
+        DeviceId::RackInstrument(app.device_registry.rack_slot(track_id, slot))
+    });
+    let target = ResolvedDeviceTarget {
+        id,
+        track,
+        pattern,
+        slot_idx: rack_slot,
+    };
+    let current_before = capture_device_value_snapshot(app, target)?;
+    let key = MergeKey::new(format!(
+        "{gesture}:{}:{}",
+        device_id_merge_component(id),
+        pattern.0,
+    ));
+    if app.history.active_gesture().map(|active| &active.merge_key) != Some(&key) {
+        finish_active_gesture(app);
+    }
+    let entry_before = app
+        .history
+        .active_gesture_patch(&key)
+        .and_then(|patch| match patch {
+            EditPatch::DeviceValues(patch) if patch.target == id && patch.pattern == pattern => {
+                Some(patch.before.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| current_before.clone());
+    // Pointer updates carry an absolute destination for the marker index from
+    // gesture start. Reapply each update to the gesture's original snapshot,
+    // rather than moving whichever marker currently occupies that sorted
+    // index after an earlier update crossed a neighbour.
+    let mut after = entry_before.clone();
+    let edits = match &mut after {
+        DeviceValueSnapshot::Instrument(snapshot) => &mut snapshot.slot.sampler_slice_edits,
+        DeviceValueSnapshot::RackSlot(snapshot) => {
+            &mut snapshot.instrument_slot.sampler_slice_edits
+        }
+        _ => return Err(EditError::UnsupportedCommand),
+    };
+    match mutate(edits) {
+        SamplerSliceMutation::Applied => {}
+        SamplerSliceMutation::Revert => {
+            if !current_before.bit_exact_eq(&after) {
+                restore_device_value_snapshot(app, target, &after)?;
+                app.state.publish_scheduler_snapshot();
+            }
+            app.history.discard_active_gesture_entry(&key);
+            return Ok(EditOutcome::NoOp);
+        }
+        SamplerSliceMutation::NoOp => return Ok(EditOutcome::NoOp),
+    }
+    restore_device_value_snapshot(app, target, &after)?;
+    invalidate_song_rows_for_edit(app, track, pattern);
+    app.state.publish_scheduler_snapshot();
+    let patch = DeviceValuesPatch {
+        target: id,
+        pattern,
+        before: entry_before,
+        after,
+    };
+    let retained_bytes = patch.retained_bytes();
+    ensure_coalescing_gesture(app, &key);
+    let history_move = app
+        .history
+        .stage_active_gesture(
+            label,
+            &key,
+            EditPatch::DeviceValues(patch),
+            retained_bytes,
+        )
+        .ok_or(EditError::UnsupportedCommand)?;
+    Ok(EditOutcome::Applied(history_move))
 }
 
 pub fn apply_recorded_instrument_values_mutation(
@@ -10536,6 +10759,21 @@ mod tests {
             let data = scenes.track_pools[0].get(pattern).unwrap();
             assert_eq!(data.instrument_slot.num_params, live_num_params);
             assert_eq!(data.instrument_slot.defaults.get(2).copied(), Some(0.25));
+            assert_eq!(
+                data.instrument_slot
+                    .defaults
+                    .get(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE)
+                    .copied(),
+                Some(0.0),
+                "descriptor growth must seed old projects with slice mode off",
+            );
+            assert_eq!(
+                data.instrument_slot
+                    .defaults
+                    .get(crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY)
+                    .copied(),
+                Some(0.5),
+            );
         });
     }
 

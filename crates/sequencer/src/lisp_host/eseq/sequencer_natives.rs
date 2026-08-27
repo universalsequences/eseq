@@ -37,6 +37,13 @@ pub const SEQ_EMIT_KEYWORDS: &[&str] = &[
     ":track", ":at", ":vel", ":velocity", ":note", ":transpose", ":trn", ":dur",
     ":duration", ":speed", ":spd", ":pan", ":chop", ":chp", ":chord", ":quantize", ":q",
 ];
+pub const SEQ_EMIT_CONTROL_SIGNATURE: &str =
+    "(seq-emit-control :op \"mute\"|\"solo\" :track idx | :group \"name\" :at offset-beats :dur beats)";
+pub const SEQ_EMIT_CONTROL_DOCS: &str =
+    "Emit a timed mixer-control hold from a generator :tick: the target track or group is \
+     muted/soloed from :at for :dur beats. Targets are validated when the hold is applied; \
+     an unknown track or group reports a host error and applies nothing.";
+pub const SEQ_EMIT_CONTROL_KEYWORDS: &[&str] = &[":op", ":track", ":group", ":at", ":dur"];
 
 /// Install the `defscene` lowering targets (`__defscene-register`,
 /// `__defscene-resolve`, `__defscene-set`) that `compiler.rs` emits for a
@@ -829,6 +836,25 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
             };
             let event = build_seq_emit_event(&args, ctx)?;
             ctx.emitted.push(event);
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let generator_tick_for_control = Arc::clone(&generator_tick);
+    runtime.register_native_with_docs_and_keywords(
+        "seq-emit-control",
+        SEQ_EMIT_CONTROL_SIGNATURE,
+        SEQ_EMIT_CONTROL_DOCS,
+        SEQ_EMIT_CONTROL_KEYWORDS.iter().copied(),
+        move |args, _ctx| {
+            let mut guard = generator_tick_for_control
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("seq-emit-control called outside a generator tick".to_string());
+            };
+            let control = build_seq_emit_control(&args)?;
+            ctx.controls.push(control);
             Ok(EValue::Bool(true))
         },
     );
@@ -3022,6 +3048,109 @@ pub(in crate::lisp_host) fn gen_splitmix64(mut value: u64) -> u64 {
     value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     value ^ (value >> 31)
+}
+
+/// Parse `seq-emit-control` args into an [`EmittedMixerControl`]. Shape-level
+/// validation only: op and exactly one target are required here; target
+/// *existence* is checked app-side at apply time so unknown targets fail with
+/// a visible host error instead of silently erroring the whole tick
+/// (docs/jaki-mixer-control-routes-spec.md §4).
+pub(in crate::lisp_host) fn build_seq_emit_control(
+    args: &[EValue],
+) -> Result<crate::mixer_control::EmittedMixerControl, String> {
+    use crate::mixer_control::{EmittedMixerControl, MixerControlOp, MixerControlTarget};
+    let mut op: Option<MixerControlOp> = None;
+    let mut target: Option<MixerControlTarget> = None;
+    let mut offset_beats: f32 = 0.0;
+    let mut duration_beats: Option<f32> = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = match &args[idx] {
+            EValue::Keyword(k) | EValue::String(k) | EValue::Symbol(k) => {
+                k.trim_start_matches(':').to_ascii_lowercase()
+            }
+            _ => return Err("seq-emit-control expects keyword/value pairs".to_string()),
+        };
+        idx += 1;
+        let Some(value) = args.get(idx) else {
+            return Err(format!("seq-emit-control missing value for :{key}"));
+        };
+        match key.as_str() {
+            "op" => {
+                let name = match value {
+                    EValue::Keyword(k) | EValue::String(k) | EValue::Symbol(k) => {
+                        k.trim_start_matches(':').to_ascii_lowercase()
+                    }
+                    _ => {
+                        return Err(
+                            "seq-emit-control :op expects \"mute\" or \"solo\"".to_string()
+                        )
+                    }
+                };
+                op = Some(match name.as_str() {
+                    "mute" => MixerControlOp::Mute,
+                    "solo" => MixerControlOp::Solo,
+                    other => {
+                        return Err(format!(
+                            "seq-emit-control :op expects \"mute\" or \"solo\", got \"{other}\""
+                        ))
+                    }
+                });
+            }
+            "track" => {
+                if target.is_some() {
+                    return Err(
+                        "seq-emit-control expects exactly one of :track or :group".to_string()
+                    );
+                }
+                let track = acc_emit_number(value, "track")?;
+                if track < 0.0 {
+                    return Err("seq-emit-control :track must be >= 0".to_string());
+                }
+                target = Some(MixerControlTarget::Track(track as usize));
+            }
+            "group" => {
+                if target.is_some() {
+                    return Err(
+                        "seq-emit-control expects exactly one of :track or :group".to_string()
+                    );
+                }
+                let name = match value {
+                    EValue::String(name) | EValue::Symbol(name) => name.clone(),
+                    _ => {
+                        return Err("seq-emit-control :group expects a group name".to_string())
+                    }
+                };
+                target = Some(MixerControlTarget::Group(name));
+            }
+            "at" => {
+                offset_beats = acc_emit_number(value, "at")?.max(0.0);
+            }
+            "dur" | "duration" => {
+                duration_beats = Some(acc_emit_number(value, "dur")?);
+            }
+            other => return Err(format!("seq-emit-control unknown key :{other}")),
+        }
+        idx += 1;
+    }
+    let Some(op) = op else {
+        return Err("seq-emit-control requires :op".to_string());
+    };
+    let Some(target) = target else {
+        return Err("seq-emit-control requires :track or :group".to_string());
+    };
+    let Some(duration_beats) = duration_beats else {
+        return Err("seq-emit-control requires :dur".to_string());
+    };
+    if duration_beats <= 0.0 {
+        return Err("seq-emit-control :dur must be > 0".to_string());
+    }
+    Ok(EmittedMixerControl {
+        op,
+        target,
+        offset_beats,
+        duration_beats,
+    })
 }
 
 pub(in crate::lisp_host) fn build_seq_emit_event(

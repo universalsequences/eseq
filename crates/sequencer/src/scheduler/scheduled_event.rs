@@ -6,6 +6,7 @@ use std::cell::UnsafeCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScheduledChordData {
@@ -24,11 +25,60 @@ pub fn resolved_chord_transpose(
     chord_transpose + (resolved_transpose - step_transpose)
 }
 
+#[derive(Clone)]
+pub struct LiveScheduledEffectValue(Arc<crate::sequencer::TrackSendBaseline>);
+
+impl LiveScheduledEffectValue {
+    pub(crate) fn new(baseline: Arc<crate::sequencer::TrackSendBaseline>) -> Self {
+        Self(baseline)
+    }
+
+    fn load(&self) -> f32 {
+        self.0.load()
+    }
+}
+
+impl std::fmt::Debug for LiveScheduledEffectValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_tuple("LiveScheduledEffectValue")
+            .field(&self.load())
+            .finish()
+    }
+}
+
+impl PartialEq for LiveScheduledEffectValue {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScheduledEffectParam {
     pub logical_id: u64,
     pub idx: u64,
     pub value: f32,
+    /// Present for an unlocked bus-send restoration. The copied `value` is
+    /// useful for diagnostics, while dispatch loads this cell so a mixer edit
+    /// made after scheduling wins over stale lookahead.
+    pub live_value: Option<LiveScheduledEffectValue>,
+}
+
+impl ScheduledEffectParam {
+    pub fn fixed(logical_id: u64, idx: u64, value: f32) -> Self {
+        Self {
+            logical_id,
+            idx,
+            value,
+            live_value: None,
+        }
+    }
+
+    pub fn current_value(&self) -> f32 {
+        self.live_value
+            .as_ref()
+            .map(LiveScheduledEffectValue::load)
+            .unwrap_or(self.value)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -72,6 +122,11 @@ pub struct ScheduledSamplerParams {
     pub sample_bpm: f32,
     pub playback_speed: f32,
     pub scrub: f32,
+    pub slice_mode: f32,
+    pub slice_sensitivity: f32,
+    pub slice_base: f32,
+    pub start_point_locked: bool,
+    pub end_point_locked: bool,
     pub warp_preserve: f32,
     pub warp_seg_loop_mode: f32,
     pub warp_seg_envelope: f32,
@@ -94,6 +149,11 @@ impl Default for ScheduledSamplerParams {
             sample_bpm: 120.0,
             playback_speed: 1.0,
             scrub: 0.0,
+            slice_mode: 0.0,
+            slice_sensitivity: 0.5,
+            slice_base: 0.0,
+            start_point_locked: false,
+            end_point_locked: false,
             warp_preserve: crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32,
             warp_seg_loop_mode: crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
             warp_seg_envelope: crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
@@ -206,7 +266,10 @@ impl Ord for TimedEvent {
 }
 
 pub struct ScheduledEventQueue<const CAPACITY: usize> {
-    slots: [UnsafeCell<MaybeUninit<ScheduledEvent>>; CAPACITY],
+    // The queue can hold large event payloads. Keeping its fixed-capacity
+    // storage inline made construction reserve tens of MiB on the caller's
+    // stack in debug builds before Arc could move it to the heap.
+    slots: Box<[UnsafeCell<MaybeUninit<ScheduledEvent>>]>,
     head: AtomicUsize,
     tail: AtomicUsize,
 }
@@ -215,8 +278,12 @@ unsafe impl<const CAPACITY: usize> Sync for ScheduledEventQueue<CAPACITY> {}
 
 impl<const CAPACITY: usize> ScheduledEventQueue<CAPACITY> {
     pub fn new() -> Self {
+        let slots = (0..CAPACITY)
+            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Self {
-            slots: std::array::from_fn(|_| UnsafeCell::new(MaybeUninit::uninit())),
+            slots,
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
         }
@@ -313,11 +380,7 @@ mod tests {
                         delays: [0.0; MAX_VOICES],
                         step_transpose: 0.0,
                     },
-                    effect_params: vec![ScheduledEffectParam {
-                        logical_id: 7,
-                        idx: 1,
-                        value: 0.5,
-                    }],
+                    effect_params: vec![ScheduledEffectParam::fixed(7, 1, 0.5)],
                     instrument_params: ScheduledInstrumentParams::from_iter([
                         ScheduledInstrumentParam {
                             target: ScheduledInstrumentParamTarget::Synth,
@@ -394,11 +457,7 @@ mod tests {
                         delays: [0.0; MAX_VOICES],
                         step_transpose: 0.0,
                     },
-                    effect_params: vec![ScheduledEffectParam {
-                        logical_id: 7,
-                        idx: 1,
-                        value: 0.5,
-                    }],
+                    effect_params: vec![ScheduledEffectParam::fixed(7, 1, 0.5)],
                     instrument_params: ScheduledInstrumentParams::from_iter([
                         ScheduledInstrumentParam {
                             target: ScheduledInstrumentParamTarget::Synth,

@@ -177,7 +177,8 @@
         "partitioned-convolve",
         "phase-vocoder",
         "spectrum-delay",
-        "spectrum-delay-mod"
+        "spectrum-delay-mod",
+        "svf-freq"
       ]
     },
     {
@@ -497,6 +498,14 @@
       "used_by": [
         "param"
       ]
+    },
+    {
+      "name": "@window",
+      "summary": "Attribute observed in evaluator source.",
+      "type": "unknown",
+      "used_by": [
+        "svf-freq"
+      ]
     }
   ],
   "constants": [
@@ -519,6 +528,11 @@
       "name": "e",
       "summary": "Euler's constant.",
       "value": "Euler's number"
+    },
+    {
+      "name": "samplerate",
+      "summary": "The host sample rate in Hz. Alias: sample-rate.",
+      "value": "host sample rate in Hz"
     },
     {
       "name": "true",
@@ -3185,6 +3199,44 @@
         "(in channel @name mod1 @modulator 1)"
       ],
       "summary": "Audio input channel."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": null,
+        "minimum": null
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "uncategorized",
+      "documentation": {
+        "port_docs": "not-yet-curated",
+        "source": "source-discovered"
+      },
+      "implementation": {
+        "function": "evalIota",
+        "source_file": "LispEvaluator.swift"
+      },
+      "input_count": {
+        "maximum": null,
+        "minimum": null
+      },
+      "inputs": [],
+      "name": "iota",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [],
+      "summary": "Operator implemented in DGenLisp evaluator."
     },
     {
       "aliases": [],
@@ -6708,6 +6760,61 @@
         "(svf input cutoff q mode)"
       ],
       "summary": "State-variable filter helper. Cutoff is Hz, q is resonance, mode is 0=LP, 1=BP, 2=HP, 3=notch, 4=peak, 5=allpass."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": null,
+        "minimum": null
+      },
+      "attribute_docs": [
+        {
+          "aliases": [
+            "@hopSize"
+          ],
+          "name": "@hop",
+          "summary": "Hop size for STFT and hop-rate operators.",
+          "type": "int"
+        },
+        {
+          "name": "@window",
+          "summary": "Attribute observed in evaluator source.",
+          "type": "unknown"
+        }
+      ],
+      "attributes": [
+        "@hop",
+        "@window"
+      ],
+      "category": "uncategorized",
+      "documentation": {
+        "port_docs": "not-yet-curated",
+        "source": "source-discovered"
+      },
+      "implementation": {
+        "function": "evalSVFFrequencySampled",
+        "source_file": "LispEvaluator.swift"
+      },
+      "input_count": {
+        "maximum": null,
+        "minimum": null
+      },
+      "inputs": [],
+      "name": "svf-freq",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [],
+      "summary": "Operator implemented in DGenLisp evaluator."
     },
     {
       "aliases": [],

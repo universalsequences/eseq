@@ -872,7 +872,7 @@ pub(in crate::audio) fn reset_audio_runtime_for_track_topology(
         pool.reset();
         crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
     }
-    data.active_keyboard_notes = [[None; MAX_VOICES]; MAX_TRACKS];
+    data.active_keyboard_notes.fill([None; MAX_VOICES]);
     data.pending_accum_reset = [true; MAX_TRACKS];
     data.scheduled_events.clear();
     clear_countdown_events(data);

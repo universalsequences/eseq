@@ -37,9 +37,12 @@ pub(crate) struct StepPrintState {
     /// reprints even without a boundary crossing, so the touch itself lands
     /// on the current step.
     touch_dirty: bool,
-    /// Printed values are in live pattern state but not yet in the scheduler
-    /// snapshot.
-    dirty_unpublished: bool,
+    /// Tracks (bitmask) whose printed values are in live pattern state but
+    /// not yet in the scheduler snapshot. Per-track so the flush can use
+    /// copy-on-write `publish_scheduler_track` publishes — a full snapshot
+    /// capture per printing frame starved the (normal-priority) scheduler
+    /// thread on weak machines and made the whole track's timing shaky.
+    dirty_unpublished_tracks: u64,
 }
 
 /// One frame's print result: which steps on which track took which params.
@@ -69,8 +72,8 @@ impl StepPrintState {
         self.touch_dirty = true;
     }
 
-    /// End the print latch. Deliberately keeps `dirty_unpublished`: written
-    /// steps still owe a snapshot publish even after the latch ends.
+    /// End the print latch. Deliberately keeps `dirty_unpublished_tracks`:
+    /// written steps still owe a snapshot publish even after the latch ends.
     pub(crate) fn disarm(&mut self) {
         self.track = 0;
         self.values.clear();
@@ -201,7 +204,7 @@ pub(crate) fn print_pass(
     if printed.is_empty() {
         return PrintedSteps::default();
     }
-    print.dirty_unpublished = true;
+    print.dirty_unpublished_tracks |= 1u64 << track.min(sequencer::sequencer::MAX_TRACKS - 1);
     PrintedSteps {
         track,
         steps: printed,
@@ -273,7 +276,7 @@ pub(crate) fn restore_cursor_display_fields(
 /// roll's own release publish carries the printed values along.
 pub(crate) fn tick_step_print(shared: &SharedHandles, rt: &mut Runtime) -> StepPrintTick {
     let mut print = shared.step_print.lock().unwrap();
-    if !print.armed() && !print.dirty_unpublished {
+    if !print.armed() && print.dirty_unpublished_tracks == 0 {
         return StepPrintTick::default();
     }
     let was_armed = print.armed();
@@ -293,13 +296,21 @@ pub(crate) fn tick_step_print(shared: &SharedHandles, rt: &mut Runtime) -> StepP
         .lock()
         .unwrap()
         .has_unpublished_writes();
-    let publish = print.dirty_unpublished && !roll_publish_pending;
-    if publish {
-        print.dirty_unpublished = false;
-    }
+    let publish_tracks = if roll_publish_pending {
+        0
+    } else {
+        std::mem::take(&mut print.dirty_unpublished_tracks)
+    };
     drop(print);
-    if publish {
-        shared.state.publish_scheduler_snapshot();
+    // Copy-on-write per-track publishes: only the printed track changed, and
+    // the latch is audible through the engine-side override anyway — the
+    // publish just has to land before the latch ends. A full snapshot capture
+    // here ran every printing frame and starved the scheduler thread.
+    let mut remaining = publish_tracks;
+    while remaining != 0 {
+        let track = remaining.trailing_zeros() as usize;
+        remaining &= remaining - 1;
+        shared.state.publish_scheduler_track(track);
     }
     for step in &printed.steps {
         for param in &printed.params {

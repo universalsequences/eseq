@@ -2,9 +2,9 @@
 CPAL output-device configuration selection.
 
 Picks a sample rate and channel count from the device's supported format
-ranges, preferring the device default and falling back to
-`FALLBACK_SAMPLE_RATE`/stereo. Pure logic over `OutputFormatRange`s so it is
-unit-testable without real audio hardware.
+ranges, preferring an independently discovered system-graph rate, then the
+device default, and finally `FALLBACK_SAMPLE_RATE`/stereo. Pure logic over
+`OutputFormatRange`s so it is unit-testable without real audio hardware.
 */
 
 #[allow(unused_imports)]
@@ -57,26 +57,34 @@ pub(super) fn select_output_config(
     default_channels: u16,
     ranges: impl IntoIterator<Item = OutputFormatRange>,
 ) -> Option<OutputDeviceConfig> {
+    select_output_config_with_preferred_rate(None, default_sample_rate, default_channels, ranges)
+}
+
+pub(super) fn select_output_config_with_preferred_rate(
+    preferred_sample_rate: Option<u32>,
+    default_sample_rate: u32,
+    default_channels: u16,
+    ranges: impl IntoIterator<Item = OutputFormatRange>,
+) -> Option<OutputDeviceConfig> {
     let ranges: Vec<OutputFormatRange> = ranges.into_iter().collect();
-    if let Some(channels) =
-        select_output_channels(default_sample_rate, default_channels, ranges.clone())
-    {
-        return Some(OutputDeviceConfig {
-            sample_rate: default_sample_rate,
-            channels,
-        });
-    }
+    let candidates = [preferred_sample_rate, Some(default_sample_rate), Some(FALLBACK_SAMPLE_RATE)];
+    let mut previous = None;
 
-    if default_sample_rate == FALLBACK_SAMPLE_RATE {
-        return None;
-    }
-
-    select_output_channels(FALLBACK_SAMPLE_RATE, default_channels, ranges).map(|channels| {
-        OutputDeviceConfig {
-            sample_rate: FALLBACK_SAMPLE_RATE,
-            channels,
+    for sample_rate in candidates.into_iter().flatten() {
+        if previous == Some(sample_rate) {
+            continue;
         }
-    })
+        previous = Some(sample_rate);
+        if let Some(channels) =
+            select_output_channels(sample_rate, default_channels, ranges.iter().copied())
+        {
+            return Some(OutputDeviceConfig {
+                sample_rate,
+                channels,
+            });
+        }
+    }
+    None
 }
 
 pub(super) fn env_flag(name: &str, default: bool) -> bool {

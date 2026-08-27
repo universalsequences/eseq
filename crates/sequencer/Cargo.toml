@@ -17,12 +17,27 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 backtrace = "0.3"
-object = { version = "0.37", default-features = false, features = ["read_core", "macho", "std"] }
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "macho", "std"] }
 libc = "0.2"
 eseqlisp = { path = "../eseqlisp" }
 arrayvec = "0.7"
 notify = "6"
 fs2 = "0.4"
+crossbeam-queue = "0.3.13"
+[target.'cfg(target_os = "linux")'.dependencies]
+# Pure-Rust system-bus client for the RealtimeKit fallback. This avoids a
+# libdbus development/runtime dependency in both source builds and packages.
+zbus = "5.12"
+# CPAL uses the ALSA backend on Linux. Resolve whether pcm.default is the
+# PipeWire plugin, then read PipeWire's actual graph clock instead of trusting
+# the virtual PCM's nominal default rate.
+alsa-sys = "0.3"
+pipewire = "0.10"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# The metal_seq app shell renders through eseqlisp's wgpu backend everywhere
+# the Metal backend does not exist.
+eseqlisp = { path = "../eseqlisp", features = ["wgpu"] }
 
 [lib]
 name = "sequencer"

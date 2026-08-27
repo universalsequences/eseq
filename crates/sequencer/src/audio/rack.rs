@@ -1,8 +1,8 @@
 /*!
 Rack-slot processing: routing, macros, choke groups, and rack note firing.
 
-Decides which slots of a rack track accept a trigger (routing, key ranges,
-mute/solo), applies rack macro curves at a step, collects and dispatches
+Routes triggers to rack slots, applies rack macro curves and per-slot gain
+mutes at a step, collects and dispatches
 slot note-offs and choke-group releases, and fires notes into rack slots —
 `fire_rack_slot_note`/`fire_rack_resolved` for sequenced triggers and
 `fire_live_keyboard_rack_note` for live keyboard input.
@@ -10,14 +10,6 @@ slot note-offs and choke-group releases, and fires notes into rack slots —
 
 #[allow(unused_imports)]
 use super::*;
-
-pub(super) fn rack_slot_accepts_trigger(slot: &RackSlotSnapshot, has_solo: bool) -> bool {
-    if has_solo {
-        slot.solo && !slot.mute
-    } else {
-        !slot.mute
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ResolvedRackSlotParams {
@@ -158,14 +150,6 @@ pub(super) fn apply_rack_macros_at_step(
     }
 }
 
-pub(super) fn rack_slot_accepts_resolved(params: ResolvedRackSlotParams, has_solo: bool) -> bool {
-    if has_solo {
-        params.solo && !params.mute
-    } else {
-        !params.mute
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RackSlotNoteOff {
     Custom { logical_id: u64 },
@@ -281,7 +265,7 @@ pub(super) fn collect_track_active_voice_releases(
     custom_engine_pools: &mut [CustomEnginePool],
     countdown_events: &mut Vec<CountdownEvent>,
     block_events: &mut Vec<BlockEvent>,
-    active_keyboard_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    active_keyboard_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]],
     track_idx: usize,
     release_sample: u64,
     note_offs: &mut Vec<RackSlotNoteOff>,
@@ -362,7 +346,7 @@ pub(super) fn collect_rack_choke_group_track_releases(
     custom_engine_pools: &mut [CustomEnginePool],
     countdown_events: &mut Vec<CountdownEvent>,
     block_events: &mut Vec<BlockEvent>,
-    active_keyboard_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    active_keyboard_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]],
     last_trigger: &[u64; MAX_TRACKS],
     triggering_track: usize,
     release_sample: u64,
@@ -557,14 +541,10 @@ pub(super) fn fire_live_keyboard_rack_note(
     } else {
         0.0
     };
-    let has_solo = rack.slots.iter().any(|slot| slot.solo);
     let mut active_voices = [ActiveKeyboardVoice::default(); MAX_RACK_SLOTS];
     let mut active_voice_count = 0;
 
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
-        if !rack_slot_accepts_trigger(slot, has_solo) {
-            continue;
-        }
         if let Some(choke_group) = slot.choke_group {
             release_rack_choke_group_voices(
                 data,
@@ -588,7 +568,22 @@ pub(super) fn fire_live_keyboard_rack_note(
                 if sampler_lid == 0 {
                     continue;
                 }
-                let sampler_params = resolve_rack_slot_sampler_defaults(&slot.instrument_slot);
+                let mut sampler_params = resolve_rack_slot_sampler_defaults(&slot.instrument_slot);
+                let mut trigger_transpose = transpose;
+                if resolve_slice(
+                    &data.state,
+                    pool_id,
+                    &mut sampler_params,
+                    &mut trigger_transpose,
+                ) == SliceTriggerVerdict::Ignore
+                {
+                    continue;
+                }
+                // `resolve_slice` consumes the note to pick the slice and zeroes the
+                // transpose, so adding the base-note offset unconditionally leaves
+                // classic mode untouched and makes `base` the pitch offset that every
+                // slice plays at.
+                trigger_transpose += slot.instrument_base_note_offset;
                 let attack_samples = sampler_params.attack_ms * data.sample_rate as f32 / 1000.0;
                 let release_samples = sampler_params.release_ms * data.sample_rate as f32 / 1000.0;
                 let loop_xfade_samples =
@@ -633,7 +628,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                             0,
                             gatepitch_seq,
                             custom_pitch_hz(
-                                transpose + slot.instrument_base_note_offset,
+                                trigger_transpose,
                                 0.0,
                             ),
                             trigger.velocity,
@@ -647,7 +642,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                         voice_lid,
                         0,
                         sampler_seq,
-                        transpose + slot.instrument_base_note_offset,
+                        trigger_transpose,
                         trigger.velocity,
                         sampler_params.playback_speed,
                         attack_samples,
@@ -850,7 +845,22 @@ pub(super) fn fire_rack_slot_note(
             if sampler_lid == 0 {
                 return;
             }
-            let sampler_params = sampler_params.unwrap_or_default();
+            let mut sampler_params = sampler_params.unwrap_or_default();
+            let mut trigger_transpose = transpose;
+            if resolve_slice(
+                &data.state,
+                pool_id,
+                &mut sampler_params,
+                &mut trigger_transpose,
+            ) == SliceTriggerVerdict::Ignore
+            {
+                return;
+            }
+            // `resolve_slice` consumes the note to pick the slice and zeroes the
+            // transpose, so adding the base-note offset unconditionally leaves
+            // classic mode untouched and makes `base` the pitch offset that every
+            // slice plays at.
+            trigger_transpose += slot_params.base_note_offset;
             let attack_samples = sampler_params.attack_ms * data.sample_rate as f32 / 1000.0;
             let release_samples = sampler_params.release_ms * data.sample_rate as f32 / 1000.0;
             let loop_xfade_samples =
@@ -894,7 +904,7 @@ pub(super) fn fire_rack_slot_note(
                         voice.gatepitch_id as u64,
                         frame_offset,
                         gatepitch_seq,
-                        custom_pitch_hz(transpose + slot_params.base_note_offset, 0.0),
+                        custom_pitch_hz(trigger_transpose, 0.0),
                         velocity,
                     );
                 }
@@ -913,7 +923,7 @@ pub(super) fn fire_rack_slot_note(
                     attack_samples,
                     release_samples,
                     gate_mode,
-                    transpose + slot_params.base_note_offset,
+                    trigger_transpose,
                     sampler_params.start_point,
                     sampler_params.end_point,
                     sampler_params.instrument_enabled,
@@ -1092,9 +1102,6 @@ pub(super) fn fire_rack_resolved(
             data.state.runtime.rack_slot_pan_lids[track_idx][slot_idx].load(Ordering::Acquire);
         unsafe {
             push_rack_slot_panner_params(data.lg.0, slot_pan_lid, slot_params, muted_by_solo);
-        }
-        if !rack_slot_accepts_resolved(slot_params, has_solo) {
-            continue;
         }
         unsafe {
             dispatch_snapshot_effect_params_at_step(data.lg.0, &slot.effect_slots, step);

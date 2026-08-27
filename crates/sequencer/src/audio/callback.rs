@@ -11,8 +11,58 @@ mix, metering, and CPU-load accounting.
 #[allow(unused_imports)]
 use super::*;
 
+/// Flush subnormal floats to zero for all math on the calling thread.
+///
+/// The intrinsics are deprecated because changing MXCSR behind the compiler is
+/// formally outside the default floating-point environment; setting FTZ/DAZ on
+/// dedicated DSP threads is nonetheless the standard audio-engine practice this
+/// codebase relies on, and nothing on these threads depends on subnormal
+/// precision (f32 subnormals sit below roughly -750 dBFS).
+#[allow(deprecated)]
+pub(super) fn enable_flush_denormals_to_zero() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+        const MXCSR_FLUSH_TO_ZERO: u32 = 1 << 15;
+        const MXCSR_DENORMALS_ARE_ZERO: u32 = 1 << 6;
+        _mm_setcsr(_mm_getcsr() | MXCSR_FLUSH_TO_ZERO | MXCSR_DENORMALS_ARE_ZERO);
+    }
+}
+
 pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
+    if !data.callback_thread_initialized {
+        data.callback_thread_initialized = true;
+        // FTZ/DAZ are per-thread MXCSR state and this thread executes graph
+        // nodes, so it needs the same subnormal-flush mode the audiograph
+        // workers set in worker_main (see flush_denormals_to_zero there for
+        // why silence is otherwise more expensive than sound on x86).
+        enable_flush_denormals_to_zero();
+        // cpal's ALSA backend spawns the callback thread with default
+        // scheduling and no spawn hook, so promote it here on first entry.
+        // The callback thread actively helps drain the graph; leaving it
+        // SCHED_OTHER while the workers run SCHED_FIFO inverts priorities in
+        // the audio path.
+        #[cfg(target_os = "linux")]
+        {
+            unsafe { promote_current_thread_rt() };
+            // Direct FIFO promotion is final immediately. An rtkit request is
+            // still pending here; its non-RT helper prints the achieved RR (or
+            // normal-priority) result after the D-Bus reply instead.
+            //
+            // Either way the printing happens on the helper thread: formatting
+            // the status allocates and `eprintln!` takes the process stderr
+            // lock, neither of which belongs on the callback thread. This is a
+            // single atomic store.
+            let status = unsafe { audiograph::rt_status() };
+            if status.callback_reported != 0 {
+                super::rtkit::request_status_print();
+            }
+        }
+    }
     let callback_start = Instant::now();
+    // Always the graph block size: `FixedOutputBlocks` in stream.rs absorbs the
+    // device's actual request, which on ALSA/PipeWire is neither fixed nor
+    // hop-compatible (eseq-linux.73).
     let nframes = output.len() / data.num_channels;
     data.current_callback_nframes = nframes;
     data.trace_callback_counter = data.trace_callback_counter.wrapping_add(1);
@@ -20,11 +70,20 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     // Reading live num_tracks/epochs independently can observe the middle of
     // an add-track publication and clear valid events before the scheduler can
     // possibly have produced replacements.
-    let scheduler_snapshot_version = data.state.scheduler_snapshot_version();
-    if scheduler_snapshot_version != data.scheduler_snapshot_version {
-        data.scheduler_snapshot = data.state.latest_scheduler_snapshot();
-        data.scheduler_snapshot_version = scheduler_snapshot_version;
-    }
+    //
+    // Both halves of this refresh are realtime-safe (bead eseq-sj01): the
+    // snapshot arrives through a bounded lock-free ring rather than
+    // `latest_scheduler_snapshot()`'s `std::sync::Mutex` (no priority
+    // inheritance, so a publish landing here could futex-wait the audio thread
+    // behind the UI thread), and the outgoing `Arc` is handed to the reclaimer
+    // instead of being dropped here. When this thread held the last reference,
+    // that drop freed the whole deep structure — per-step chord `Vec`s,
+    // per-step effect p-locks, `String`-bearing effect descriptors, order tens
+    // of thousands of frees — inside the block budget.
+    data.state.snapshot_handoff().refresh(
+        &mut data.scheduler_snapshot,
+        &mut data.scheduler_snapshot_version,
+    );
     let num_tracks = data.scheduler_snapshot.transport.num_tracks;
     let topology_epoch = data.scheduler_snapshot.transport.topology_epoch;
     if num_tracks != data.last_num_tracks || topology_epoch != data.last_topology_epoch {
@@ -130,9 +189,18 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             if let Some(active_note) =
                 take_active_keyboard_note(&mut data.active_keyboard_notes, kt.track, kt.transpose)
             {
-                release_active_keyboard_note(data, active_note, 0, block_end_sample);
+                if live_key_release_cuts_voice(&data.state, kt.track) {
+                    release_active_keyboard_note(data, active_note, 0, block_end_sample);
+                }
             }
         } else {
+            if transport_playing {
+                // Stamp the render-timeline beat this live note-on sounds at
+                // (bead eseq-2awi): live recording repositions the pressed
+                // note from this instead of its wall-clock press estimate.
+                data.state
+                    .push_live_trigger_stamp(kt.track, kt.transpose, data.transport_beats);
+            }
             // Note-on: allocate voice and trigger
             enforce_mute_group_for_winning_track(data, kt.track, block_start_sample, 0);
             release_rack_choke_group_track_voices(data, kt.track, block_start_sample, 0);
@@ -273,12 +341,6 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     }],
                 );
             } else {
-                let voice = data.voice_pools[kt.track]
-                    .allocate_voice_retriggering_same_note(resolved_transpose);
-                let voice_lid = voice.logical_id;
-                if voice_lid == 0 {
-                    continue;
-                }
                 let tp = &data.state.pattern.track_params[kt.track];
                 let Some(kb_inst_slot) = data
                     .scheduler_snapshot
@@ -290,13 +352,35 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 };
                 let kb_default =
                     |param_idx: usize| kb_inst_slot.defaults.get(param_idx).copied().unwrap_or(0.0);
+                let mut kb_sampler_params = resolve_rack_slot_sampler_defaults(kb_inst_slot);
+                let mut trigger_transpose = resolved_transpose;
+                if resolve_slice(
+                    &data.state,
+                    kt.track,
+                    &mut kb_sampler_params,
+                    &mut trigger_transpose,
+                ) == SliceTriggerVerdict::Ignore
+                {
+                    continue;
+                }
+                // `resolve_slice` consumes the note to pick the slice and zeroes the
+                // transpose, so adding the base-note offset unconditionally leaves
+                // classic mode untouched and makes `base` the pitch offset that every
+                // slice plays at.
+                trigger_transpose += base_note_offset;
+                let voice = data.voice_pools[kt.track]
+                    .allocate_voice_retriggering_same_note(resolved_transpose);
+                let voice_lid = voice.logical_id;
+                if voice_lid == 0 {
+                    continue;
+                }
                 let kb_instrument_params =
                     resolve_snapshot_instrument_defaults(&data.scheduler_snapshot, kt.track);
                 let attack_samples = kb_default(0) * data.sample_rate as f32 / 1000.0;
                 let release_samples = kb_default(1) * data.sample_rate as f32 / 1000.0;
                 let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
-                let kb_start = kb_default(2);
-                let kb_end = kb_default(3);
+                let kb_start = kb_sampler_params.start_point;
+                let kb_end = kb_sampler_params.end_point;
                 let kb_enabled = kb_default(4);
                 let kb_reverse = kb_default(5);
                 let kb_loop_mode = kb_default(6);
@@ -346,7 +430,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                             voice.gatepitch_id as u64,
                             0,
                             gatepitch_seq,
-                            custom_pitch_hz(resolved_transpose + base_note_offset, 0.0),
+                            custom_pitch_hz(trigger_transpose, 0.0),
                             kt.velocity,
                         );
                     }
@@ -358,7 +442,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         voice_lid,
                         0,
                         sampler_seq,
-                        resolved_transpose + base_note_offset,
+                        trigger_transpose,
                         kt.velocity,
                         kb_playback_speed,
                         attack_samples,

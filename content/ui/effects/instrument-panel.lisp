@@ -205,7 +205,6 @@
         (knob-number :debug-name (str "rack-macro-knob-" (get macro :id))
           :value (rack-macro-display-value macro) :min 0 :max 1 :decimals 2
           :width 4.8 :height 2.45 :knob-size 1.8 :font-size 8 :label-font-size 8
-          :track-color '(rgba 0.4, 0.4, 0.4, 1)
           :plock-active (rack-macro-plock-active macro)
           :plock-default (rack-macro-plock-default macro)
           :plock-color-r (pc/param-plock-color-r)
@@ -402,11 +401,12 @@
       :drop-hover-border-color :mixer-strip-selected-border
       :on-drop (lambda (event) (rack-slot-drop-fx slot event))
       :on-click |x y r| (rack-slot-select slot)
-      (h-stack :width :fill :height :fill :gap 0.15 :align :baseline
+      (h-stack :width :fill :height :fill :gap 0.15 :align :center
         (box :width 1)
         (label (str (+ (get slot :idx) 1))
           :font-size 10
           :color (if selected :white :gray)
+          :v-align :center
           :width 1.0
           :bg :transparent)
         (box :width 1)
@@ -425,7 +425,7 @@
               :active delete-target
               :active-color :white
               :bg :transparent)))
-
+        
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "T" :font-size 8.2 :color :dim :bg :transparent)
           (number-picker :value (rack-slot-display-value slot :base-note :base-note-field)

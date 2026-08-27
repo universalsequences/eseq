@@ -37,7 +37,7 @@
 ;; `(subtree :key …)`) — byte-identical keyspace, never qualified.
 
 (def midi-fx-ui-param (fx name)
-  (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
+  (find-by-key (get fx :params) :name name))
 
 (def midi-fx-ui-param-control (name)
   (let ((p (midi-fx-ui-param eseq.vanilla/midi-fx-ui-current-fx name)))
@@ -48,7 +48,7 @@
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
 (def audio-fx-ui-param (fx name)
-  (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
+  (find-by-key (get fx :params) :name name))
 
 (def audio-fx-ui-param-control (name)
   (let ((p (audio-fx-ui-param eseq.vanilla/audio-fx-ui-current-fx name)))

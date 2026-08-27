@@ -2160,6 +2160,12 @@ pub struct VM {
     tracking_stack: Vec<NodeId>,
     pub reactive_namespaces: HashSet<String>,
     pub writable_reactive_namespaces: HashSet<String>,
+    /// Self-validating name -> `global_names` index cache for reactive
+    /// namespace maps. `global_names` is a flat Vec that several paths take
+    /// and replace wholesale, so every entry is re-checked against the live
+    /// Vec before it is used and recomputed on a miss; a stale cache can only
+    /// cost one extra scan, never return a wrong slot.
+    reactive_namespace_indices: RefCell<HashMap<String, usize>>,
     pub(crate) reactive_float_slots: crate::reactive::ReactiveBindingStore,
     pending_reactive_sets: Vec<(String, String, Value)>,
     pub derived_bindings: HashMap<String, NodeId>,
@@ -2638,6 +2644,48 @@ pub fn register_core_natives(vm: &mut VM) {
             out.push(Rc::new(RefCell::new(mapped)));
         }
         Value::List(out)
+    });
+
+    // `(find-by-key list :key value)` -> the first entry in `list` whose `:key`
+    // field equals `value`, or Nil. Entries are resolved exactly as `get` does,
+    // so maps and keyword-value lists both work and a missing field reads as
+    // Nil (a nil needle therefore matches it). Equivalent to
+    // `(nth (filter |item| (= (get item :key) value) list) 0)` but without
+    // running a Lisp closure per element: `filter` clones every element into
+    // the callback, so scanning a 60-entry parameter list once per rendered
+    // control made panel renders quadratic in the parameter count.
+    vm.register_native("find-by-key", |args| {
+        let (Some(Value::List(items)), Some(Value::Keyword(key)), Some(needle)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Value::Nil;
+        };
+        let needle_is_nil = matches!(needle, Value::Nil);
+        for item in items {
+            let borrowed = item.borrow();
+            let matched = match &*borrowed {
+                Value::Map(map) => map
+                    .get(key)
+                    .map_or(needle_is_nil, |field| &*field.borrow() == needle),
+                Value::List(fields) => {
+                    let mut found = None;
+                    let mut i = 0;
+                    while i + 1 < fields.len() {
+                        if matches!(&*fields[i].borrow(), Value::Keyword(kk) if kk == key) {
+                            found = Some(&fields[i + 1]);
+                            break;
+                        }
+                        i += 2;
+                    }
+                    found.map_or(needle_is_nil, |field| &*field.borrow() == needle)
+                }
+                _ => needle_is_nil,
+            };
+            if matched {
+                return borrowed.clone();
+            }
+        }
+        Value::Nil
     });
 
     vm.register_native_with_vm("filter", |args, vm| {
@@ -3879,6 +3927,7 @@ impl VM {
             current_chunk: 0,
             globals: vec![None; 4096],
             global_names: vec![],
+            reactive_namespace_indices: RefCell::new(HashMap::new()),
             pending_widget_trees: Vec::new(),
             pending_inline_widgets: Vec::new(),
             registering_static_inline_widget: false,
@@ -4961,7 +5010,7 @@ impl VM {
         // by-name writes must never divert into a qualified slot. Mirrors
         // the compiler ladder's reactive_namespaces exemption.
         if self.reactive_namespaces.contains(name) {
-            return self.global_names.iter().position(|n| n == name);
+            return self.reactive_namespace_global_index(name);
         }
         let qualified = crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name);
         self.global_names
@@ -4972,6 +5021,24 @@ impl VM {
 
     pub fn has_global(&self, name: &str) -> bool {
         self.resolve_global_read_index(name).is_some()
+    }
+
+    /// `global_names` index of a reactive namespace map, memoised. Reactive
+    /// reads are the hottest lookup in the UI (every bound widget prop and
+    /// every `reactive-get`), and the flat `global_names` Vec grows with the
+    /// total amount of loaded Lisp, so the linear scan this replaces cost
+    /// more as more instrument/effect UIs were installed.
+    fn reactive_namespace_global_index(&self, name: &str) -> Option<usize> {
+        if let Some(idx) = self.reactive_namespace_indices.borrow().get(name).copied() {
+            if self.global_names.get(idx).is_some_and(|n| n == name) {
+                return Some(idx);
+            }
+        }
+        let idx = self.global_names.iter().position(|n| n == name)?;
+        self.reactive_namespace_indices
+            .borrow_mut()
+            .insert(name.to_string(), idx);
+        Some(idx)
     }
 
     /// Effective cell for a cached global index. The empty-registry branch is
@@ -6202,12 +6269,31 @@ impl VM {
         }
     }
 
+    /// Reads one field of a reactive namespace WITHOUT materialising the
+    /// namespace map. `global_value(namespace)` clones the map, so its cost
+    /// grows with the total number of fields in the namespace: `SEQV` holds
+    /// one entry per bound widget field in the whole UI (tens of thousands in
+    /// a real project), which made every `reactive-get` an O(total UI state)
+    /// operation. Custom instrument/effect panels call `reactive-get` several
+    /// times per control, so that clone dominated every panel render.
     fn current_reactive_value(&self, namespace: &str, field: &str) -> Value {
-        self.global_value(namespace)
-            .and_then(|value| match value {
-                Value::Map(map) => map.get(field).map(|value| value.borrow().clone()),
-                _ => None,
-            })
+        let Some(idx) = self.resolve_global_read_index(namespace) else {
+            return Value::Nil;
+        };
+        // An override dispatcher shadowing the slot is never a map, so it
+        // resolved to Nil before; keep that.
+        if self.override_dispatcher_for_index(idx).is_some() {
+            return Value::Nil;
+        }
+        let Some(Some(cell)) = self.globals.get(idx) else {
+            return Value::Nil;
+        };
+        let borrowed = cell.borrow();
+        let Value::Map(map) = &*borrowed else {
+            return Value::Nil;
+        };
+        map.get(field)
+            .map(|value| value.borrow().clone())
             .unwrap_or(Value::Nil)
     }
 
@@ -7348,8 +7434,7 @@ impl VM {
                     let namespace = self.chunks[self.current_chunk].strings[ns_idx].clone();
                     let field = self.chunks[self.current_chunk].strings[field_idx].clone();
                     self.record_reactive_read(&namespace, &field);
-                    let Some(global_idx) =
-                        self.global_names.iter().position(|name| name == &namespace)
+                    let Some(global_idx) = self.reactive_namespace_global_index(&namespace)
                     else {
                         return Err(VMError::UnknownVariable(namespace));
                     };
@@ -7377,8 +7462,7 @@ impl VM {
                         return Err(VMError::StackUnderflow);
                     };
                     self.record_reactive_read(&namespace, &field);
-                    let Some(global_idx) =
-                        self.global_names.iter().position(|name| name == &namespace)
+                    let Some(global_idx) = self.reactive_namespace_global_index(&namespace)
                     else {
                         return Err(VMError::UnknownVariable(namespace));
                     };
@@ -7423,8 +7507,7 @@ impl VM {
                     let namespace = self.chunks[self.current_chunk].strings[ns_idx].clone();
                     let field = self.chunks[self.current_chunk].strings[field_idx].clone();
                     self.record_reactive_read(&namespace, &field);
-                    let Some(global_idx) =
-                        self.global_names.iter().position(|name| name == &namespace)
+                    let Some(global_idx) = self.reactive_namespace_global_index(&namespace)
                     else {
                         return Err(VMError::UnknownVariable(namespace));
                     };
@@ -7714,6 +7797,89 @@ mod tests {
             Value::Nil
         });
         (vm, calls)
+    }
+
+    /// eseq-pgru: `find-by-key` replaced `(nth (filter ...) 0)` at eleven hot
+    /// UI call sites, so it must match that expression exactly — including
+    /// returning the FIRST match, skipping non-map entries, and answering nil
+    /// rather than erroring on a missing key or an empty list.
+    #[test]
+    fn find_by_key_matches_the_filter_then_nth_expression_it_replaced() {
+        let mut vm = module_test_vm();
+        let source = r#"
+(def rows ()
+  (list (dict :name "a" :idx 0)
+        "not-a-map"
+        (dict :name "b" :idx 1)
+        (dict :name "b" :idx 2)
+        (list :name "c" :idx 3)))
+"#;
+        vm.eval_module_source(temp_lisp_path("find-by-key"), source, 1)
+            .expect("module eval");
+        // First match wins, non-map entries are skipped.
+        assert_eq!(
+            vm.eval_str("(get (find-by-key (rows) :name \"b\") :idx)")
+                .expect("first match"),
+            Some(Value::Number(1.0))
+        );
+        // Numeric needles compare by value, and index 0 is a real match.
+        assert_eq!(
+            vm.eval_str("(get (find-by-key (rows) :idx 0) :name)")
+                .expect("numeric match"),
+            Some(Value::String("a".to_string()))
+        );
+        // Keyword-value lists resolve like `get` does, not just maps.
+        assert_eq!(
+            vm.eval_str("(get (find-by-key (rows) :name \"c\") :idx)")
+                .expect("plist match"),
+            Some(Value::Number(3.0))
+        );
+        // A nil needle matches an entry that lacks the field, as `(= (get item
+        // :absent) nil)` did.
+        assert_eq!(
+            vm.eval_str("(get (find-by-key (rows) :absent nil) :name)")
+                .expect("nil needle"),
+            Some(Value::String("a".to_string()))
+        );
+        for missing in [
+            "(find-by-key (rows) :name \"zz\")",
+            "(find-by-key (rows) :absent \"a\")",
+            "(find-by-key (list) :name \"a\")",
+            "(find-by-key \"not-a-list\" :name \"a\")",
+        ] {
+            assert_eq!(
+                vm.eval_str(missing).unwrap_or_else(|e| panic!("{missing}: {e:?}")),
+                Some(Value::Nil),
+                "{missing} must answer nil"
+            );
+        }
+    }
+
+    /// eseq-pgru: reading one reactive field must not materialise the whole
+    /// namespace map (`SEQV` holds one entry per bound widget field in the
+    /// UI). This pins the observable behaviour of the borrowing read.
+    #[test]
+    fn reactive_get_reads_one_field_without_the_namespace_map() {
+        let mut vm = module_test_vm();
+        vm.reactive_namespaces.insert("PROBE".to_string());
+        let mut fields = HashMap::new();
+        fields.insert("a".to_string(), Rc::new(RefCell::new(Value::Number(1.0))));
+        fields.insert("b".to_string(), Rc::new(RefCell::new(Value::Number(2.0))));
+        vm.set_global_value("PROBE", Value::Map(fields));
+        assert_eq!(
+            vm.eval_str("(reactive-get \"PROBE\" \"b\")").expect("field b"),
+            Some(Value::Number(2.0))
+        );
+        assert_eq!(
+            vm.eval_str("(reactive-get \"PROBE\" \"missing\")")
+                .expect("missing field"),
+            Some(Value::Nil)
+        );
+        assert_eq!(
+            vm.eval_str("(reactive-get \"ABSENT\" \"a\")")
+                .expect("missing namespace"),
+            Some(Value::Nil)
+        );
     }
 
     #[test]

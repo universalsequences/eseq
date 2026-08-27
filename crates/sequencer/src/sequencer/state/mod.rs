@@ -80,6 +80,8 @@ mod core;
 pub use core::*;
 mod variant_lock_helpers;
 use variant_lock_helpers::*;
+mod snapshot_handoff;
+pub use snapshot_handoff::*;
 mod sequencer_state;
 
 #[cfg(test)]

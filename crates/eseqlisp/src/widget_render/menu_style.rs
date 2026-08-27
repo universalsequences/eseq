@@ -16,14 +16,10 @@ pub(crate) const HIGHLIGHT_INSET_H: f32 = 0.15;
 pub(crate) const CORNER_RADIUS_PX: f32 = 10.0;
 pub(crate) const APPROX_CHAR_WIDTH: f32 = 0.55;
 
-#[cfg(target_os = "macos")]
-use super::{MetalPrimitive, WidgetInstance, WidgetViewport, ndc_bounds};
-#[cfg(target_os = "macos")]
+use super::{GpuPrimitive, WidgetInstance, WidgetViewport, ndc_bounds};
 use crate::backend::Color;
-#[cfg(target_os = "macos")]
 use crate::layout::Rect;
 
-#[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     // The shared shader's radius is normalized to half the primitive height.
     // A tiny positive value opts out of its historical pill default for rows
@@ -32,10 +28,9 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
         return 0.001;
     }
     let px_h = (rect.height * viewport.cell_h).max(1.0);
-    ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
+    ((super::ui_design_px(radius_px) * 2.0) / px_h).clamp(0.001, 0.5)
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn emit_rounded_rect_overlay(
     rect: Rect,
     color: Color,
@@ -45,7 +40,7 @@ pub(crate) fn emit_rounded_rect_overlay(
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    super::push_overlay_primitive(MetalPrimitive::WidgetInstance {
+    super::push_overlay_primitive(GpuPrimitive::WidgetInstance {
         widget_type: "dropdown".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -68,14 +63,14 @@ pub(crate) fn emit_rounded_rect_overlay(
     });
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn emit_panel_chrome(
     panel_rect: Rect,
     background: Color,
     border: Color,
     viewport: WidgetViewport,
 ) {
-    let border_px = 1.0;
+    let border_design_px = 1.0;
+    let border_px = super::ui_design_px(border_design_px);
     let border_row = border_px / viewport.cell_h.max(1.0);
     let border_col = border_px / viewport.cell_w.max(1.0);
     let border_rect = Rect {
@@ -87,7 +82,7 @@ pub(crate) fn emit_panel_chrome(
     emit_rounded_rect_overlay(
         border_rect,
         border,
-        CORNER_RADIUS_PX + border_px,
+        CORNER_RADIUS_PX + border_design_px,
         viewport,
     );
     emit_rounded_rect_overlay(panel_rect, background, CORNER_RADIUS_PX, viewport);
@@ -101,7 +96,6 @@ pub(crate) fn row_highlight_rect(row_rect: crate::layout::Rect) -> crate::layout
     }
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn emit_row_highlight(
     row_rect: Rect,
     color: Color,

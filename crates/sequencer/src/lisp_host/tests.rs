@@ -4527,6 +4527,48 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
     }
 
+    const DGEN_ABI_SECTION_START: &str = "typedef void *DGenFFTSetupV1;";
+    const DGEN_ABI_SECTION_END: &str =
+        "DGEN_EXPORT void dgen_set_param_value_v1(int32_t cell_id, float value);";
+
+    fn dgen_abi_section(header: &str) -> Result<&str, &'static str> {
+        let start = header
+            .find(DGEN_ABI_SECTION_START)
+            .ok_or("ABI section start marker is missing")?;
+        let end = header[start..]
+            .find(DGEN_ABI_SECTION_END)
+            .map(|offset| start + offset + DGEN_ABI_SECTION_END.len())
+            .ok_or("ABI section end marker is missing after its start marker")?;
+        Ok(&header[start..end])
+    }
+
+    #[test]
+    fn dgen_abi_section_hash_ignores_target_specific_intrinsics() {
+        use sha2::{Digest, Sha256};
+
+        let abi = format!(
+            "{DGEN_ABI_SECTION_START}\ntypedef struct {{ uint32_t size; }} DGenExampleV1;\n\
+             {DGEN_ABI_SECTION_END}"
+        );
+        let mac_header = format!("#include <arm_neon.h>\n{abi}\n#define DGEN_BARRIER()\n");
+        let linux_header = format!(
+            "#include \"dgen_simd_compat.h\"\n{abi}\n#define DGEN_BARRIER() asm volatile(\"\")\n"
+        );
+
+        let mac_section = dgen_abi_section(&mac_header).expect("mac ABI section");
+        let linux_section = dgen_abi_section(&linux_header).expect("Linux ABI section");
+        assert_eq!(Sha256::digest(mac_section), Sha256::digest(linux_section));
+
+        let changed_abi_header = linux_header.replace("uint32_t size", "uint64_t size");
+        let changed_section =
+            dgen_abi_section(&changed_abi_header).expect("changed ABI section");
+        assert_ne!(
+            Sha256::digest(linux_section),
+            Sha256::digest(changed_section),
+            "changes inside the vendored ABI must still be detected"
+        );
+    }
+
     #[test]
     fn vendored_dgen_abi_header_matches_staged_toolchain_header() {
         use sha2::{Digest, Sha256};
@@ -4544,19 +4586,32 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let staged_path = crate::app_paths::app_paths()
             .dgen_toolchain_root()
             .join("include/dgen_runtime.h");
-        let staged = std::fs::read(&staged_path).unwrap_or_else(|e| {
+        let staged = std::fs::read_to_string(&staged_path).unwrap_or_else(|e| {
             panic!(
                 "read staged toolchain header {}: {e} (run rebuild_dgenlisp_tool.sh \
                  to stage the vendored toolchain)",
                 staged_path.display()
             )
         });
-        let staged_sha = format!("{:x}", Sha256::digest(&staged));
+
+        // Hash only the ABI section dgen_abi_v1.h actually vendors, not the
+        // whole upstream header: its math/intrinsics section is per-target
+        // (arm_neon.h on the mac stage, dgen_simd_compat.h on the Linux one)
+        // and one whole-file hash cannot satisfy both pins.
+        let staged_section = dgen_abi_section(&staged).unwrap_or_else(|error| {
+            panic!(
+                "staged header {} cannot identify its vendored ABI section: \
+                 {error}; re-vendor audiograph/dgen_abi_v1.h and update its \
+                 section markers and Source-sha256 comment",
+                staged_path.display()
+            )
+        });
+        let staged_sha = format!("{:x}", Sha256::digest(staged_section.as_bytes()));
         assert_eq!(
             staged_sha, recorded_sha,
-            "staged include/dgen_runtime.h drifted from the recorded hash — \
-             re-vendor audiograph/dgen_abi_v1.h from the staged header's ABI \
-             section and update its Source-sha256 comment"
+            "the staged include/dgen_runtime.h ABI section drifted from the \
+             recorded hash — re-vendor audiograph/dgen_abi_v1.h from the staged \
+             header's ABI section and update its Source-sha256 comment"
         );
     }
 
@@ -7095,11 +7150,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     42,
                 )],
                 EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
-                vec![ScheduledEffectParam {
-                    logical_id: 42,
-                    idx: 2,
-                    value: effect_initial,
-                }],
+                vec![ScheduledEffectParam::fixed(42, 2, effect_initial)],
                 vec![ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: 0,
@@ -7175,11 +7226,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 16,
                 vec![EffectSlotSnapshot::new_default(&effect_desc, 42)],
                 EffectSlotSnapshot::new_default(&instrument_desc, 7),
-                vec![ScheduledEffectParam {
-                    logical_id: 42,
-                    idx: 2,
-                    value: effect_initial,
-                }],
+                vec![ScheduledEffectParam::fixed(42, 2, effect_initial)],
                 vec![ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: 0,
@@ -9029,6 +9076,308 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .map(|e| e.event.resolved.velocity as f64)
             .collect();
         assert_close(&base_vels, &[0.8, 0.68, 0.8, 0.72, 0.92]);
+    }
+
+    #[test]
+    fn jaki_control_route_emits_track_mute_holds_beside_notes() {
+        // -> (mute 3) turns each event's gate into a timed mute hold on
+        // track 3 while -> 0 keeps emitting notes — the two never conflate
+        // (docs/jaki-mixer-control-routes-spec.md).
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "gate" :16
+                 . . - .
+                 -> 0
+                 -> (mute 3))"#,
+        )
+        .expect("jak with control route");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        generators.process_block_with_controls(
+            0.0,
+            1.25,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+            &mut controls,
+        );
+
+        // one 5-unit cycle of notes on track 0, untouched by the control route
+        assert_eq!(out.len(), 5);
+        assert!(out.iter().all(|e| e.event.track == Some(0)));
+
+        // five gate windows (each 4/5 unit = 0.2 beats = 9600 samples), one
+        // hold per event, all on the mute op for track 3
+        assert_eq!(controls.len(), 5);
+        for control in &controls {
+            assert_eq!(control.control.op, crate::mixer_control::MixerControlOp::Mute);
+            assert_eq!(
+                control.control.target,
+                crate::mixer_control::MixerControlTarget::Track(3)
+            );
+            assert_eq!(control.release_sample, control.engage_sample + 9_600);
+        }
+        let engages: Vec<u64> = controls.iter().map(|c| c.engage_sample).collect();
+        assert_eq!(engages, vec![12_000, 24_000, 36_000, 48_000, 60_000]);
+    }
+
+    #[test]
+    fn jaki_control_route_group_solo_inv_emits_gap_windows() {
+        // `inv` complements the union of gate windows within the cycle: the
+        // solo holds cover the 1/5-unit gaps between gates, targeting the
+        // group by name.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "gate2" :16
+                 . - .
+                 -> (solo (group "Drums")) inv)"#,
+        )
+        .expect("jak with inv control route");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        generators.process_block_with_controls(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+            &mut controls,
+        );
+
+        assert!(out.is_empty(), "a control-only jak emits no notes");
+        // 4-unit cycle, gates [k, k+4/5) for k=0..4 → complements
+        // [k+4/5, k+1): 0.05 beats = 2400 samples each, 0.2 beats past the
+        // owning boundary
+        assert_eq!(controls.len(), 4);
+        for control in &controls {
+            assert_eq!(control.control.op, crate::mixer_control::MixerControlOp::Solo);
+            assert_eq!(
+                control.control.target,
+                crate::mixer_control::MixerControlTarget::Group("Drums".to_string())
+            );
+            assert_eq!(control.release_sample, control.engage_sample + 2_400);
+        }
+        let engages: Vec<u64> = controls.iter().map(|c| c.engage_sample).collect();
+        assert_eq!(engages, vec![21_600, 33_600, 45_600, 57_600]);
+    }
+
+    #[test]
+    fn jaki_control_route_targets_cycle_with_cyc() {
+        // Targets are per-cycle argument data: (mute (cyc 1 2)) and
+        // (group (cyc "Drums" "Synths")) rotate the destination each cycle.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "gate3" :16
+                 . .
+                 -> (mute (cyc 1 2))
+                 -> (solo (group (cyc "Drums" "Synths"))))"#,
+        )
+        .expect("jak with cyc control targets");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        generators.process_block_with_controls(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+            &mut controls,
+        );
+
+        // two 2-unit cycles over 4 boundaries: cycle 0 targets track 1 /
+        // "Drums", cycle 1 targets track 2 / "Synths"
+        let mutes: Vec<&crate::generator::MixerControlEmission> = controls
+            .iter()
+            .filter(|c| c.control.op == crate::mixer_control::MixerControlOp::Mute)
+            .collect();
+        let solos: Vec<&crate::generator::MixerControlEmission> = controls
+            .iter()
+            .filter(|c| c.control.op == crate::mixer_control::MixerControlOp::Solo)
+            .collect();
+        assert_eq!(mutes.len(), 4);
+        assert_eq!(solos.len(), 4);
+        let mute_tracks: Vec<crate::mixer_control::MixerControlTarget> =
+            mutes.iter().map(|c| c.control.target.clone()).collect();
+        use crate::mixer_control::MixerControlTarget as Target;
+        assert_eq!(
+            mute_tracks,
+            vec![Target::Track(1), Target::Track(1), Target::Track(2), Target::Track(2)]
+        );
+        let solo_groups: Vec<crate::mixer_control::MixerControlTarget> =
+            solos.iter().map(|c| c.control.target.clone()).collect();
+        assert_eq!(
+            solo_groups,
+            vec![
+                Target::Group("Drums".to_string()),
+                Target::Group("Drums".to_string()),
+                Target::Group("Synths".to_string()),
+                Target::Group("Synths".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn jaki_gate_route_word_scales_note_and_control_durations() {
+        // (gate s) multiplies every event gate by s as a post op: note
+        // durations shrink, and control-route hold windows shrink with them.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "gate4" :16
+                 . .
+                 -> 0 (gate 0.5)
+                 -> 1 (dur 0.25)
+                 -> (mute 3) (gate 0.5))"#,
+        )
+        .expect("jak with gate route word");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        generators.process_block_with_controls(
+            0.0,
+            0.5,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+            &mut controls,
+        );
+
+        // base gate is 4/5 unit = 0.2 beats; (gate 0.5) halves it, the `dur`
+        // alias quarters it
+        let durs = |track: usize| -> Vec<f64> {
+            out.iter()
+                .filter(|e| e.event.track == Some(track))
+                .map(|e| e.event.resolved.duration as f64)
+                .collect()
+        };
+        assert_close(&durs(0), &[0.1, 0.1]);
+        assert_close(&durs(1), &[0.05, 0.05]);
+
+        // the mute holds shrink identically: 0.1 beats = 4800 samples
+        assert_eq!(controls.len(), 2);
+        for control in &controls {
+            assert_eq!(control.release_sample, control.engage_sample + 4_800);
+        }
+    }
+
+    #[test]
+    fn jaki_control_form_may_sit_anywhere_in_the_route() {
+        // `-> (shift 2) (mute 9) left` and `-> (mute 9) (shift 2) left` are
+        // the same route: the first (mute …)/(solo …) form is the target,
+        // everything else is route words, in either order.
+        let controls_for = |routes: &str| -> Vec<(u64, u64)> {
+            let mut rt = jaki_runtime();
+            rt.eval(&format!(
+                r#"(import alez.jaki.surface :refer (jak))
+                   (jak "gate5" :16
+                     . . - .
+                     {routes})"#
+            ))
+            .expect("jak with control route");
+            let mut generators = crate::generator::GeneratorRuntime::default();
+            generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+            let mut out = Vec::new();
+            let mut controls = Vec::new();
+            generators.process_block_with_controls(
+                0.0,
+                1.25,
+                0,
+                48_000.0,
+                |input| {
+                    rt.invoke_sequencer_tick(input.generator_index, input).expect("tick")
+                },
+                &mut out,
+                &mut controls,
+            );
+            assert!(
+                controls.iter().all(|c| c.control.target
+                    == crate::mixer_control::MixerControlTarget::Track(9)),
+                "{controls:?}"
+            );
+            controls
+                .iter()
+                .map(|c| (c.engage_sample, c.release_sample))
+                .collect()
+        };
+
+        let words_first = controls_for("-> (shift 2) (mute 9) left");
+        let target_first = controls_for("-> (mute 9) (shift 2) left");
+        assert!(!words_first.is_empty());
+        assert_eq!(words_first, target_first);
+    }
+
+    #[test]
+    fn jaki_seq_emit_control_validates_argument_shape() {
+        // Native errors follow the seq-emit contract: report a status and
+        // return false with nothing emitted. The tick encodes each call's
+        // return value into a note velocity so the test can read it back.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(__register-sequencer "jaki-control-shape"
+                 :resolution :16
+                 :tick (lambda ()
+                   (do
+                     (seq-emit :track 0 :at :now
+                       :vel (if (seq-emit-control :op "mute" :at 0 :dur 0.5) 0.9 0.1))
+                     (seq-emit :track 1 :at :now
+                       :vel (if (seq-emit-control :op "bogus" :track 1 :at 0 :dur 0.5) 0.9 0.1))
+                     (seq-emit :track 2 :at :now
+                       :vel (if (seq-emit-control :op "solo" :track 1 :group "Drums"
+                                                  :at 0 :dur 0.5)
+                                0.9 0.1))
+                     (seq-emit :track 3 :at :now
+                       :vel (if (seq-emit-control :op "mute" :track 2 :at 0 :dur 0.5)
+                                0.9 0.1)))))"#,
+        )
+        .expect("register sequencer");
+        let definition = rt.sequencer_defs().remove(0);
+        let result = rt
+            .invoke_sequencer_tick(
+                0,
+                crate::generator::GeneratorTickInput {
+                    id: definition.id,
+                    generator_index: 0,
+                    tick_index: 0,
+                    beat: 0.0,
+                    resolution_beats: 0.25,
+                    samples_per_quarter: 48_000.0,
+                    random_state: 1,
+                    state: Default::default(),
+                },
+            )
+            .expect("tick");
+        let vels: Vec<f32> = result.emitted.iter().map(|e| e.resolved.velocity).collect();
+        // missing target, unknown op, and both targets are all rejected;
+        // only the well-formed final call emits a control
+        assert_close(
+            &vels.iter().map(|v| *v as f64).collect::<Vec<_>>(),
+            &[0.1, 0.1, 0.1, 0.9],
+        );
+        assert_eq!(result.controls.len(), 1);
+        assert_eq!(result.controls[0].op, crate::mixer_control::MixerControlOp::Mute);
+        assert_eq!(
+            result.controls[0].target,
+            crate::mixer_control::MixerControlTarget::Track(2)
+        );
+        assert!((result.controls[0].duration_beats - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -14004,11 +14353,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     42,
                 )],
                 EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
-                vec![ScheduledEffectParam {
-                    logical_id: 42,
-                    idx: 1,
-                    value: 0.0,
-                }],
+                vec![ScheduledEffectParam::fixed(42, 1, 0.0)],
                 vec![ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: 0,
@@ -14640,6 +14985,200 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
         assert_eq!(first.peak, second.peak);
         assert_eq!(first.rms, second.rms);
+    }
+
+    /// Numeric end-to-end pin for the FFT backend generated spectral code runs
+    /// on (eseq-linux.40).
+    ///
+    /// `dgen_host_services_tests` pins each of the four host callbacks against
+    /// an f64 reference DFT, and
+    /// `spectral_effect_renders_finite_nonzero_audio_through_host_services`
+    /// proves a real generated `.so` renders finite, nonzero, repeatable audio.
+    /// Neither sees a scaling or bin-ordering error that only exists once
+    /// generated code *composes* those callbacks: one lazily created setup per
+    /// call site, hop-gated overlap-add, the partitioned complex MAC, and the
+    /// gain compensation codegen bakes in against vDSP's unscaled convention.
+    /// That composition is what changes when the backend does — vDSP on Apple,
+    /// rustfft elsewhere (eseq-linux.78) — and it fails as wrong gain or a
+    /// wrong spectrum, not as a crash. So this asserts the samples, against a
+    /// reference that is neither backend: a closed form evaluated in f64.
+    #[test]
+    fn spectral_partitioned_convolution_matches_closed_form() {
+        const N: usize = 16;
+        const HOP: usize = 8;
+        const GAIN: f64 = 0.5;
+        /// One IR tap per partition, each at its partition's first sample. That
+        /// is what collapses the STFT into the closed form below: every tap
+        /// shifts a frame by a whole hop, so the analysis and synthesis windows
+        /// stay aligned and factor out of the sum.
+        const PARTITION_WEIGHTS: [f64; 4] = [1.0, 0.35, 0.15, 0.05];
+        /// Algorithmic delay of the operator, measured from its own output and
+        /// pinned here: a backend swap that moved the whole result in time
+        /// would leave every individual sample's magnitude untouched.
+        const LATENCY: usize = N - 1;
+        const SAMPLE_RATE: u32 = 48_000;
+        /// A whole multiple of @hop, so every block boundary is a hop boundary
+        /// and the wet arm is never gated off (eseq-linux.73).
+        const BLOCK: usize = 128;
+        const FRAMES: usize = 4096;
+        /// The tolerance the dgen fixtures use. Measured on x86_64 Linux
+        /// 2026-08-26 (rustfft backend): worst error 5.2e-8, ~390x inside it.
+        /// The `misaligned` guard below keeps that from being vacuous — one
+        /// frame of slip costs 1.0e-2, five orders of magnitude more.
+        const TOLERANCE: f64 = 2.0e-5;
+
+        let source = r#"
+            (def dry_l (in 1 @name Left))
+            (def dry_r (in 2 @name Right))
+            (def impulse (tensor @shape [32] @data [
+              1 0 0 0 0 0 0 0
+              0.35 0 0 0 0 0 0 0
+              0.15 0 0 0 0 0 0 0
+              0.05 0 0 0 0 0 0 0]))
+            (out (partitioned-convolve dry_l impulse @N 16 @hop 8 @gain 0.5) 1 @name Left)
+            (out (partitioned-convolve dry_r impulse @N 16 @hop 8 @gain 0.5) 2 @name Right)
+        "#;
+
+        let options = super::EffectRenderOptions {
+            sample_rate: SAMPLE_RATE,
+            block_size: BLOCK,
+            frames: FRAMES,
+            param_overrides: Vec::new(),
+            param_events: Vec::new(),
+            input_tones: Vec::new(),
+            tensor_overrides: Vec::new(),
+            input_overrides: Vec::new(),
+        };
+
+        // Each generated image owns function-local, lazily initialized FFT
+        // setups. Compile distinct images so neither one can inherit a setup
+        // created by the other table during load-time prewarming.
+        let shipped = super::compile_and_load(source, SAMPLE_RATE)
+            .expect("spectral effect should compile against the shipped table");
+        let shipped_report = super::render_loaded_effect_for_test(
+            &shipped.manifest,
+            &shipped.lib,
+            &options,
+        )
+        .expect("spectral effect should render against the shipped table");
+
+        let portable_table = super::dgen_portable_host_services_v1();
+        let portable = super::compile_and_load_uncached_with_host_services(
+            source,
+            SAMPLE_RATE,
+            None,
+            portable_table,
+        )
+        .expect("spectral effect should compile against the portable table");
+        let portable_report = super::render_loaded_effect_for_test_with_host_services(
+            &portable.manifest,
+            &portable.lib,
+            &options,
+            portable_table,
+        )
+        .expect("spectral effect should render against the portable table");
+
+        let reports = [
+            ("shipped", shipped_report),
+            ("portable C", portable_report),
+        ];
+
+        // The probe signal `render_effect_source_for_test` feeds when no tones
+        // or overrides are set, recomputed in the same f32 arithmetic so the
+        // reference differs from the render only by the convolution. With no
+        // param events every block starts at its own frame index, so the
+        // harness's per-block `t` is just `frame / sample_rate`.
+        let probe = |frame: usize| -> (f32, f32) {
+            let t = frame as f32 / SAMPLE_RATE as f32;
+            let impulse = if frame == 0 { 0.45 } else { 0.0 };
+            let burst_env = (1.0 - (t * 4.0)).max(0.0);
+            let left = impulse
+                + 0.18
+                    * burst_env
+                    * ((2.0 * std::f32::consts::PI * 220.0 * t).sin()
+                        + 0.5 * (2.0 * std::f32::consts::PI * 997.0 * t).sin());
+            let right = 0.12
+                * burst_env
+                * ((2.0 * std::f32::consts::PI * 330.0 * t).sin()
+                    + 0.5 * (2.0 * std::f32::consts::PI * 1409.0 * t).sin());
+            (left, right)
+        };
+
+        // Overlap-add envelope: the operator windows each frame on both
+        // analysis and synthesis, and hann^2 at 50% overlap does *not* sum to
+        // unity, so the steady-state gain is periodic in `HOP` rather than
+        // flat. Building it from the window definition rather than from
+        // measured numbers is what makes this a reference and not a snapshot.
+        let hann = |t: usize| -> f64 {
+            0.5 * (1.0 - (2.0 * std::f64::consts::PI * t as f64 / N as f64).cos())
+        };
+        let envelope: Vec<f64> = (0..HOP)
+            .map(|phase| {
+                (phase..N)
+                    .step_by(HOP)
+                    .map(|t| hann(t) * hann(t))
+                    .sum::<f64>()
+            })
+            .collect();
+
+        // Each tap sits at the head of its own partition, so the windows factor
+        // out and the whole chain reduces to
+        //   y[n] = gain * envelope[n % hop] * sum_k w_k * x[n - k*hop - latency]
+        let reference = |frame: usize, channel: usize, latency: usize| -> f64 {
+            let mut acc = 0.0f64;
+            for (partition, weight) in PARTITION_WEIGHTS.iter().enumerate() {
+                // `first_steady` below keeps every tap in range; underflowing
+                // here would mean the skip is wrong, so let it panic rather
+                // than fold a NaN into a `max` that would quietly drop it.
+                let source_frame = frame - (partition * HOP + latency);
+                let (left, right) = probe(source_frame);
+                acc += weight * if channel == 0 { left } else { right } as f64;
+            }
+            GAIN * envelope[frame % HOP] * acc
+        };
+
+        // Worst absolute error over the steady region, skipping the ramp-in
+        // where the partition history is still filling.
+        let worst_error = |report: &super::EffectRenderReport, latency: usize| -> f64 {
+            let first_steady = (PARTITION_WEIGHTS.len() - 1) * HOP + latency + N;
+            let mut worst = 0.0f64;
+            for frame in first_steady..FRAMES {
+                for channel in 0..2 {
+                    let rendered = report.samples[frame * 2 + channel] as f64;
+                    worst = worst.max((rendered - reference(frame, channel, latency)).abs());
+                }
+            }
+            worst
+        };
+
+        for (backend, report) in &reports {
+            let error = worst_error(report, LATENCY);
+            assert!(
+                error <= TOLERANCE,
+                "{backend} partitioned convolution disagrees with its closed form by {error:e} \
+                 (tolerance {TOLERANCE:e}); peak={}, rms={}",
+                report.peak,
+                report.rms,
+            );
+
+            // The tolerance only means something if it is tight enough to
+            // reject a wrong alignment, which is how a bin-ordering error
+            // surfaces.
+            let misaligned = worst_error(report, LATENCY + 1)
+                .min(worst_error(report, LATENCY - 1));
+            assert!(
+                misaligned > TOLERANCE * 100.0,
+                "a one-frame {backend} misalignment must land far outside the tolerance, \
+                 got {misaligned:e}"
+            );
+
+            // And only on audio that is actually there.
+            assert!(
+                report.peak > 0.1,
+                "{backend} spectral output must carry the convolved probe, peak={}",
+                report.peak
+            );
+        }
     }
 
     #[test]

@@ -41,6 +41,7 @@ mod effects;
 mod fx_chain;
 mod graph;
 mod hooks;
+pub mod mixer_controls;
 mod params;
 mod projects;
 pub mod pending_capture;
@@ -907,6 +908,9 @@ pub struct App {
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
+    /// Engaged sequenced mute/solo holds keyed by resolved target
+    /// (docs/jaki-mixer-control-routes-spec.md §3); values are release samples.
+    pub(crate) mixer_control_holds: HashMap<mixer_controls::MixerControlHoldKey, u64>,
     pub sampler_paths: Vec<Option<PathBuf>>,
     pub rack_selected_slots: Vec<usize>,
     pub sample_path_registry: HashMap<String, PathBuf>,
@@ -2014,45 +2018,99 @@ impl App {
     }
 
     pub fn publish_sampler_analysis_runtime(&self, track: usize) {
-        use std::sync::atomic::Ordering;
-
         let Some(&buffer_id) = self.graph.track_buffer_ids.get(track) else {
             return;
         };
+        let edits = self
+            .state
+            .pattern
+            .instrument_slots
+            .get(track)
+            .and_then(|slot| slot.sampler_slice_edits.read().unwrap().clone());
+        let edits = self.sampler_slice_edits_for_track(track, edits.as_ref());
+        self.publish_sampler_analysis_pool_runtime(track, buffer_id, edits);
+    }
+
+    pub fn publish_sampler_analysis_pool_runtime(
+        &self,
+        pool: usize,
+        buffer_id: i32,
+        edits: Option<&crate::analysis::SamplerSliceEdits>,
+    ) {
+        use std::sync::atomic::Ordering;
+
         let runtime = &self.state.runtime;
-        runtime.sampler_analysis_buffer_ids[track].store(buffer_id as u32, Ordering::Release);
+        let Some(buffer_id_cell) = runtime.sampler_analysis_buffer_ids.get(pool) else {
+            return;
+        };
+        buffer_id_cell.store(buffer_id as u32, Ordering::Release);
         match self.sample_analysis.cache().get(buffer_id) {
             Some(entry) => match entry.as_ref() {
                 crate::analysis::AnalysisEntry::Pending => {
-                    runtime.sampler_analysis_status[track].store(1, Ordering::Release);
-                    runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Release);
-                    runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Release);
+                    runtime.sampler_analysis_status[pool].store(1, Ordering::Release);
+                    runtime.sampler_onset_ptr_lo[pool].store(0, Ordering::Release);
+                    runtime.sampler_onset_ptr_hi[pool].store(0, Ordering::Release);
                 }
                 crate::analysis::AnalysisEntry::Ready(result) => {
-                    runtime.sampler_analysis_bpm[track]
+                    runtime.sampler_analysis_bpm[pool]
                         .store(result.bpm.to_bits(), Ordering::Release);
-                    if let Some(slot) = self.state.pattern.instrument_slots.get(track) {
-                        if (slot.defaults.get(11) - 120.0).abs() < 0.001 && result.bpm > 0.0 {
-                            slot.defaults.set(11, result.bpm.clamp(20.0, 400.0));
+                    if pool < crate::sequencer::MAX_TRACKS {
+                        if let Some(slot) = self.state.pattern.instrument_slots.get(pool) {
+                            if (slot.defaults.get(11) - 120.0).abs() < 0.001 && result.bpm > 0.0 {
+                                slot.defaults.set(11, result.bpm.clamp(20.0, 400.0));
+                            }
                         }
                     }
-                    if let Some(table) = self.sample_analysis.cache().table(buffer_id) {
+                    if let Some(table) = self
+                        .sample_analysis
+                        .cache()
+                        .table_for_pool(pool, buffer_id, edits)
+                    {
                         let (lo, hi) = crate::analysis::pack_ptr(Arc::as_ptr(&table));
-                        runtime.sampler_onset_ptr_lo[track].store(lo.to_bits(), Ordering::Release);
-                        runtime.sampler_onset_ptr_hi[track].store(hi.to_bits(), Ordering::Release);
+                        runtime.sampler_onset_ptr_lo[pool].store(lo.to_bits(), Ordering::Release);
+                        runtime.sampler_onset_ptr_hi[pool].store(hi.to_bits(), Ordering::Release);
                     }
-                    runtime.sampler_analysis_status[track].store(2, Ordering::Release);
+                    runtime.sampler_analysis_status[pool].store(2, Ordering::Release);
                 }
                 crate::analysis::AnalysisEntry::Failed(_) => {
-                    runtime.sampler_analysis_status[track].store(3, Ordering::Release);
-                    runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Release);
-                    runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Release);
+                    runtime.sampler_analysis_status[pool].store(3, Ordering::Release);
+                    runtime.sampler_onset_ptr_lo[pool].store(0, Ordering::Release);
+                    runtime.sampler_onset_ptr_hi[pool].store(0, Ordering::Release);
                 }
             },
             None => {
-                runtime.sampler_analysis_status[track].store(0, Ordering::Release);
-                runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Release);
-                runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Release);
+                runtime.sampler_analysis_status[pool].store(0, Ordering::Release);
+                runtime.sampler_onset_ptr_lo[pool].store(0, Ordering::Release);
+                runtime.sampler_onset_ptr_hi[pool].store(0, Ordering::Release);
+            }
+        }
+    }
+
+    pub fn publish_all_sampler_analysis_runtime(&self) {
+        for track in 0..self.graph.track_buffer_ids.len() {
+            self.publish_sampler_analysis_runtime(track);
+        }
+        let snapshot = self.state.latest_scheduler_snapshot();
+        for (track_idx, track) in snapshot.tracks.iter().enumerate() {
+            let Some(rack) = track.rack_track.as_ref() else {
+                continue;
+            };
+            for (slot_idx, slot) in rack.slots.iter().enumerate() {
+                let (Some(pool), Some(sample)) = (
+                    crate::sequencer::rack_slot_pool_index(track_idx, slot_idx),
+                    slot.sample_id.as_ref(),
+                ) else {
+                    continue;
+                };
+                self.publish_sampler_analysis_pool_runtime(
+                    pool,
+                    sample.0,
+                    self.sampler_slice_edits_for_sample(
+                        slot.instrument_slot.sampler_slice_edits.as_ref(),
+                        sample.0,
+                        &sample.1,
+                    ),
+                );
             }
         }
     }
@@ -2301,6 +2359,7 @@ impl App {
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
             groups: Vec::new(),
+            mixer_control_holds: HashMap::new(),
             sampler_paths: Vec::new(),
             rack_selected_slots: Vec::new(),
             sample_path_registry: HashMap::new(),
@@ -3453,6 +3512,43 @@ impl App {
         }
     }
 
+    /// Manual slice overrides only apply to the sample they were authored
+    /// against. Sample swaps reach the sampler through several paths (project
+    /// load, scene switch, a browser drop on a live track), so consumers
+    /// resolve edits through these filters rather than trusting every writer
+    /// to have discarded them first.
+    pub fn sampler_slice_edits_for_track<'a>(
+        &self,
+        track: usize,
+        edits: Option<&'a crate::analysis::SamplerSliceEdits>,
+    ) -> Option<&'a crate::analysis::SamplerSliceEdits> {
+        let path = self.sampler_path_for_track(track);
+        crate::analysis::edits_for_sample(
+            edits,
+            path.as_ref().map(|path| path.to_string_lossy()).as_deref(),
+        )
+    }
+
+    pub fn sampler_slice_edits_for_sample<'a>(
+        &self,
+        edits: Option<&'a crate::analysis::SamplerSliceEdits>,
+        buffer_id: i32,
+        sample_name: &str,
+    ) -> Option<&'a crate::analysis::SamplerSliceEdits> {
+        let path = self.sample_path_for_buffer(buffer_id, sample_name);
+        crate::analysis::edits_for_sample(
+            edits,
+            path.as_ref().map(|path| path.to_string_lossy()).as_deref(),
+        )
+    }
+
+    pub fn sample_path_for_buffer(&self, buffer_id: i32, sample_name: &str) -> Option<PathBuf> {
+        self.sample_buffer_path_registry
+            .get(&buffer_id)
+            .cloned()
+            .or_else(|| self.sample_path_registry.get(sample_name).cloned())
+    }
+
     pub fn sampler_path_for_track(&self, track: usize) -> Option<PathBuf> {
         self.sampler_paths
             .get(track)
@@ -3482,10 +3578,26 @@ impl App {
         if track >= self.sampler_paths.len() {
             return;
         }
-        self.sampler_paths[track] = self
-            .sample_buffer_path_registry
-            .get(&buffer_id)
-            .cloned()
-            .or_else(|| self.sample_path_registry.get(sample_name).cloned());
+        self.sampler_paths[track] = self.sample_path_for_buffer(buffer_id, sample_name);
+        // An unresolved path is *unknown*, not *different*. Both registries are
+        // still being populated during a load, and this wipe bypasses undo and
+        // is persisted by the next save, so a transient miss here would destroy
+        // the user's markers with no way back. Only discard on a positive
+        // mismatch.
+        let Some(sample_hash) = self.sampler_paths[track]
+            .as_ref()
+            .and_then(|path| crate::analysis::sample_path_hash(&path.to_string_lossy()))
+        else {
+            return;
+        };
+        if let Some(slot) = self.state.pattern.instrument_slots.get(track) {
+            let mut edits = slot.sampler_slice_edits.write().unwrap();
+            if edits
+                .as_ref()
+                .is_some_and(|edits| edits.sample_hash != sample_hash)
+            {
+                *edits = None;
+            }
+        }
     }
 }

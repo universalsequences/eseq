@@ -99,7 +99,7 @@
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.7)
-      (material :color (if active (rgba 0.00 0.35 0.82 1.0) (rgba 0.18 0.18 0.20 1.0))
+      (material :color (if active :mixer-strip-selected-bg :mixer-strip-bg)
         :shadow (shadow :color (rgba 0 0 0 0.4) :blur 0.08 :offset (vec2 0 0.03))))))
 
 ;; Scene-strip variant: the targeted pill grows a rounded lobe out of the
@@ -128,7 +128,7 @@
           (sdf/smooth-union (+ 0.001 (* 1.242 amount)) base growth))))
     (sdf/layer
       (sdf/fill shape
-        (material :color (rgba 0.18 0.18 0.20 1.0)
+        (material :color :mixer-strip-bg
           :shadow (shadow :color (rgba 0 0 0 0.4) :blur 0.08 :offset (vec2 0 0.03)))))))
 
 (defwidget transport-led-bg
@@ -138,14 +138,7 @@
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.7)
       (material
-        :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
-          :light (vec3 -0.31 -0.4851 1.0) :shininess 51.0)
-        :color
-        (let ((base (rgba 0.003 0.003 0.004 1.0))
-              (lit (+ 0.02 (* 0.02 diffuse)))
-              (shine (* 0.10 specular)))
-          (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
-        :shadow (shadow :color (rgba 0 0 0 0.5) :blur 0.06 :offset (vec2 0 0.02))))))
+        :color :mixer-strip-bg))))
 
 (defwidget transport-master-meter
   :width 10.5 :height 0.34
@@ -330,18 +323,19 @@
   :shader
   (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
       (bg-col (if (= active 1)
-          (rgba 0.00 0.35 0.82 1.0)
-          (rgba 0.18 0.18 0.20 1.0))))
+          :mixer-strip-selected-bg
+          :mixer-strip-bg
+          )))
     (sdf/layer
       (sdf/fill
         (sdf/rounded-rect width height 0.4)
         (material :color bg-col))
-
+      
       (sdf/fill
         (sdf/translate 0.0 -0.60
           (sdf/rounded-rect 0.42 0.32 0.12))
         (material :color fg-col))
-            (sdf/fill
+      (sdf/fill
         (sdf/translate 0.22 -0.60
           (sdf/rounded-rect 0.14 0.26 0.1))
         (material :color bg-col))
@@ -355,27 +349,20 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+  (let ((fg-col :fg)
       (muted-col (rgba 0.25 0.25 0.20 1.0))
       (bg-col (if (= active 1)
-          :mixer-strip-selected-bg
+          :transparent
           :transparent
           ))
       (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
       (sdf/fill
-        (sdf/rounded-rect width height 0.4)
-        (material :color bg-col))
-      (sdf/fill
-        (sdf/translate -0.36 0.0
-          (sdf/rounded-rect 0.28 0.92 0.08))
+        (sdf/translate -0.38 0.0
+          (sdf/rounded-rect 0.10 0.55 0.08))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.18 0.0
-          (sdf/rounded-rect 0.56 0.92 0.08))
-        (material :color (rgba 0.11 0.11 0.13 1.0)))
-      (sdf/fill
-        (sdf/translate 0.18 0.24
+        (sdf/translate 0.18 0.34
           (sdf/rounded-rect 0.34 0.08 0.03))
         (material :color panel-col))
       (sdf/fill
@@ -383,7 +370,7 @@
           (sdf/rounded-rect 0.34 0.08 0.03))
         (material :color panel-col))
       (sdf/fill
-        (sdf/translate 0.18 -0.24
+        (sdf/translate 0.18 -0.34
           (sdf/rounded-rect 0.34 0.08 0.03))
         (material :color panel-col)))))
 
@@ -392,7 +379,7 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+  (let ((fg-col :fg)
       (muted-col (rgba 0.25 0.25 0.20 1.0))
       (bg-col (if (= active 1)
           :mixer-strip-selected-bg
@@ -401,16 +388,9 @@
       (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
       (sdf/fill
-        (sdf/rounded-rect width height 0.4)
-        (material :color bg-col))
-      (sdf/fill
         (sdf/translate 0.0 -0.34
-          (sdf/rounded-rect 0.56 0.28 0.08))
+          (sdf/rounded-rect 0.56 0.10 0.08))
         (material :color panel-col))
-      (sdf/fill
-        (sdf/translate 0.0 0.14
-          (sdf/rounded-rect 0.9 0.56 0.08))
-        (material :color (rgba 0.11 0.11 0.13 1.0)))
       (sdf/fill
         (sdf/translate -0.34 0.14
           (sdf/rounded-rect 0.08 0.34 0.03))
@@ -429,7 +409,7 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+  (let ((fg-col :fg)
       (muted-col (rgba 0.25 0.25 0.20 1.0))
       (bg-col (if (= active 1)
           :mixer-strip-selected-bg
@@ -438,16 +418,9 @@
       (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
       (sdf/fill
-        (sdf/rounded-rect width height 0.4)
-        (material :color bg-col))
-      (sdf/fill
         (sdf/translate 0.0 0.34
-          (sdf/rounded-rect 0.56 0.28 0.08))
+          (sdf/rounded-rect 0.56 0.10 0.08))
         (material :color panel-col))
-      (sdf/fill
-        (sdf/translate 0.0 -0.14
-          (sdf/rounded-rect 0.9 0.56 0.08))
-        (material :color (rgba 0.11 0.11 0.13 1.0)))
       (sdf/fill
         (sdf/translate -0.34 -0.14
           (sdf/rounded-rect 0.08 0.34 0.03))
@@ -466,9 +439,9 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+  (let ((fg-col :fg)
       (muted-col (rgba 0.25 0.25 0.27 1.0))
-      (bg-col (if (= active 1) :mixer-strip-selected-bg :transparent))
+      (bg-col :transparent)
       (line-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
       (sdf/fill
@@ -492,9 +465,9 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+  (let ((fg-col :fg)
       (muted-col (rgba 0.25 0.25 0.27 1.0))
-      (bg-col (if (= active 1) :mixer-strip-selected-bg :transparent))
+      (bg-col :transparent)
       (line-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
       (sdf/fill
@@ -732,6 +705,7 @@
         :style transport-icon-style
         :active (if eseq.seq-core-state/lower-panel-visible 1 0)))
     
+    (box :width 2)
     (subtree :key "transport-save-button"
       (save-icon
         :on-click |x y r| (eseq.browser/open-project-save)
@@ -739,7 +713,7 @@
         :active (if (eseq.browser/project-save-mode?) 1 0)))
     
     ;; Transport buttons in a shared rounded-rect container
-    (box :background "transport-btn-bg" :padding 0.015 :height 1.4
+    (box :background-color :mixer-strip-bg :corner-radius 72 :padding 0.015 :height 1.4
       (h-stack :gap 0.2 :align :center
         (subtree :key "transport-stop-button"
           (box :width 2.5
@@ -780,7 +754,7 @@
               :active (if SEQ.song-manual-latch 1 0))))))
     
     ;; Single continuous LED panel
-    (box :background "transport-led-bg" :height 1.4 :width 67
+    (box :background-color :mixer-strip-bg :corner-radius 64 :height 1.4 :width 69
       (h-stack
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
@@ -827,7 +801,7 @@
                 :options record-quantize-options
                 :on-change seq-set-record-quantize
                 :width 5.2 :height 1.15 :font-size 9))
-            (box :width 0.5)
+            (box :width 1.5)
             (subtree :key "transport-metronome-toggle"
               (box :debug-name "transport-metronome-toggle"
                 :width 3.4 :height 1.1
@@ -849,7 +823,7 @@
                   "pattern-pill-bg")
                 :on-click |x y r| (host-command "toggle-roll-mode")
                 (h-stack :align :baseline :gap 0.3
-            (box :width 0.2)
+                  (box :width 0.2)
                   (label "ROLL"
                     :font-size 9
                     :color (if SEQ.roll-mode :white :gray)
@@ -884,21 +858,21 @@
               (subtree :key "master-meter-r"
                 (transport-master-meter :level (bind-seq "master-peak-r"))))))
         (subtree :key "transport-cpu"
-          (h-stack :gap 0 :align :center :padding 0.3
-            (box :height 1.3
+          (h-stack :gap 0 :align :center :padding 0.4
+            (box :height 2.7
               (label "cpu"
-                :font-size 12 :width 2.5
-                :color '(rgba 0.30 0.30 0.32 1)
+                :font-size 12 :width 3.0
+                :color :gray
                 :bg :transparent))
             (number-label :value (bind-seq "cpu-load-pct")
               :decimals 0 :min-integer-digits 2 :suffix "%"
               :font-size 12 :width 2.0 :height 1
-              :color :gray
+              :color :dim
               :bg :transparent)))
         ;; The latency planner aligns every route to this delay. A latent FX
         ;; therefore delays the whole project, not only the track holding it.
         (subtree :key "transport-output-latency"
-          (h-stack :gap 0 :align :baseline :padding 0.4
+          (h-stack :gap 0 :align :baseline :padding 0.5
             (number-label :key "transport-output-latency-value"
               :value (bind-seq "output-latency-ms")
               :decimals 1 :min-integer-digits 2 :suffix "ms"
@@ -909,7 +883,8 @@
     ;; Pattern pills in their own subtree: current-pattern/num-patterns changes
     ;; (every scene switch) rerun just this bar, not the whole transport.
     (subtree :key "transport-pattern-pills"
-      (box :background "transport-scene-strip-bg"
+      (box :background "transport-scene-strip-bg" 
+        :corner-radius 64
         :key "transport-scene-strip"
         :debug-name "transport-scene-strip"
         :push scene-push-value

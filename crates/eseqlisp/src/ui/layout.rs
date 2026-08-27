@@ -49,7 +49,7 @@ impl LayoutCtx {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct LayoutNode {
     pub widget_id: u64,
     pub stable_widget_id: Option<u64>,
@@ -62,6 +62,25 @@ pub struct LayoutNode {
     pub children: Vec<LayoutNode>,
     pub focusable: bool,
     pub animation: LayoutAnimationHints,
+}
+
+impl Clone for LayoutNode {
+    fn clone(&self) -> Self {
+        crate::ui::drag_profile::note_layout_node_clone();
+        Self {
+            widget_id: self.widget_id,
+            stable_widget_id: self.stable_widget_id,
+            subtree_root_id: self.subtree_root_id,
+            parent_subtree_root_id: self.parent_subtree_root_id,
+            stable_key: self.stable_key.clone(),
+            widget_type: self.widget_type.clone(),
+            rect: self.rect,
+            props: self.props.clone(),
+            children: self.children.clone(),
+            focusable: self.focusable,
+            animation: self.animation,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -142,6 +161,12 @@ pub fn layout_root_matches_viewport(layout: &LayoutNode, cols: f32, rows: f32) -
 pub trait TextMeasurer {
     fn measure_text_px(&self, text: &str, font_size: f32) -> f32;
     fn line_height_px(&self, font_size: f32) -> f32;
+    /// Ink height of a capital above the baseline. Vertical centering aligns
+    /// this band, not the line box, so text reads as centered whatever the
+    /// font's ascent/descent split happens to be.
+    fn cap_height_px(&self, font_size: f32) -> f32 {
+        self.line_height_px(font_size) * 0.7
+    }
 }
 
 /// Context passed to `WidgetDefinition::measure()` for proportional text support.
@@ -594,6 +619,12 @@ impl<'a> LayoutEngine<'a> {
             .map(|(idx, child)| (child as *const Value as usize, idx))
             .collect::<HashMap<_, _>>();
 
+        let measure_ctx = MeasureCtx {
+            text_measurer: self.text_measurer,
+            cell_w: self.cell_w,
+            cell_h: self.cell_h,
+            inherited_font_size: font_size,
+        };
         let mut build_idx = 0usize;
         let mut visited_target_child = false;
         let mut failure = None::<String>;
@@ -602,6 +633,7 @@ impl<'a> LayoutEngine<'a> {
             rect,
             &children_values,
             self.aspect,
+            &measure_ctx,
             layout_ctx,
             &mut |child, child_constraints| {
                 let child_ptr = child as *const Value as usize;
@@ -890,6 +922,12 @@ impl<'a> LayoutEngine<'a> {
             .map(f64_to_f32)
             .unwrap_or(inherited_font_size);
 
+        let measure_ctx = MeasureCtx {
+            text_measurer: self.text_measurer,
+            cell_w: self.cell_w,
+            cell_h: self.cell_h,
+            inherited_font_size: font_size,
+        };
         widget_render::widget_definition(&widget_type)
             .map(|definition| {
                 definition.layout_children(
@@ -897,6 +935,7 @@ impl<'a> LayoutEngine<'a> {
                     area,
                     children,
                     self.aspect,
+                    &measure_ctx,
                     layout_ctx,
                     &mut |child, child_constraints| {
                         self.measure_layout_child(child, child_constraints, font_size)
@@ -2947,7 +2986,6 @@ mod tests {
         )
     }
 
-    #[cfg(target_os = "macos")]
     fn tree_row_selected_bg_count(layout: &LayoutNode) -> usize {
         let viewport = crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -2963,12 +3001,12 @@ mod tests {
             inherited_hover: false,
         };
         let (primitives, _) =
-            crate::widget_render::collect_metal_primitives(layout, viewport, 0.0, 24);
+            crate::widget_render::collect_gpu_primitives(layout, viewport, 0.0, 24);
         let selected_bg = crate::theme::WIDGET_FOCUS_BG();
         primitives
             .iter()
             .filter(|primitive| {
-                let crate::widget_render::MetalPrimitive::WidgetInstance {
+                let crate::widget_render::GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..
@@ -3259,7 +3297,6 @@ mod tests {
         assert_eq!(second_state.offset_y, 0.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn tree_without_external_selection_does_not_render_cursor_as_selected() {
         let engine = LayoutEngine::new(80, 24, 1.0);
@@ -3273,7 +3310,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn tree_external_selection_still_renders_selected_row() {
         let engine = LayoutEngine::new(80, 24, 1.0);

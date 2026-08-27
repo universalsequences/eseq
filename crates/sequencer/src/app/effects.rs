@@ -163,7 +163,12 @@ impl App {
 
     fn compile_saved_effect(&self, name: &str) -> Result<lisp_host::CompileResult, String> {
         let source_path = lisp_host::effect_source_path(name);
-        let source = std::fs::read_to_string(&source_path).map_err(|e| e.to_string())?;
+        let source = std::fs::read_to_string(&source_path).map_err(|e| {
+            format!(
+                "Failed to read effect source for '{name}' at {}: {e}",
+                source_path.display()
+            )
+        })?;
         self.editor.dylib_cache.acquire(
             lisp_host::DGenCompileKind::Effect,
             lisp_host::DGenSourceOrigin::Custom,
@@ -193,10 +198,42 @@ impl App {
         let source_path = lisp_host::effect_source_path(name);
         Ok(RetainedEffectSource::Compiled {
             name: name.to_string(),
-            source: std::fs::read_to_string(&source_path).map_err(|error| error.to_string())?,
+            source: std::fs::read_to_string(&source_path).map_err(|error| {
+                format!(
+                    "Failed to read effect source for '{name}' at {}: {error}",
+                    source_path.display()
+                )
+            })?,
             asset_base: source_path.parent().map(std::path::Path::to_path_buf),
             origin: lisp_host::DGenSourceOrigin::Custom,
         })
+    }
+
+    /// Retain a compiled effect source for a track slot without consulting the
+    /// effects library on disk. Draft edit sessions (new-effect / fork drafts)
+    /// live in a temp directory under a name the library does not know, so
+    /// name-based retention would fail with a spurious missing-file error
+    /// (eseq-u2h); the session hands over the exact source it compiled
+    /// instead.
+    pub fn retain_compiled_effect_source_for_track_slot(
+        &mut self,
+        track: usize,
+        slot: usize,
+        name: &str,
+        source: &str,
+        asset_base: Option<std::path::PathBuf>,
+        origin: lisp_host::DGenSourceOrigin,
+    ) -> Result<(), String> {
+        self.retain_effect_source(
+            FxChainLocator::Track(track),
+            slot,
+            RetainedEffectSource::Compiled {
+                name: name.to_string(),
+                source: source.to_string(),
+                asset_base,
+                origin,
+            },
+        )
     }
 
     pub(super) fn retain_effect_source(

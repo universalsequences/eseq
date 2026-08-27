@@ -1,5 +1,4 @@
 use crate::*;
-use eseqlisp::metal_backend::MetalBackend;
 
 type PendingPointerDrag = (crossterm::event::MouseEvent, (f32, f32));
 
@@ -81,7 +80,7 @@ fn flush_pending_pointer_drag(
 pub(crate) fn run_event_loop(
     mut app: app::App,
     mut editor: Editor,
-    mut backend: MetalBackend,
+    mut backend: AppBackend,
     mut track_names: Vec<String>,
     shared: SharedHandles,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -176,6 +175,9 @@ pub(crate) fn run_event_loop(
         prev_selected_neural_neurons: shared.selected_neural_neurons.lock().unwrap().clone(),
         prev_agent_generation_watermark: agent_generation_watermark(&app),
         prev_sampler_analysis_key: None,
+        // Force one complete track/rack publication on the first frame; an
+        // analysis may have completed between graph binding and loop startup.
+        prev_sampler_analysis_generation: u64::MAX,
         prev_auto_follow: true,
         prev_browser_preview_playing: false,
         prev_queued_transport_scene: None,
@@ -223,6 +225,45 @@ pub(crate) fn run_event_loop(
                 Err(error) => editor.handle_host_event(HostEvent::Error(format!(
                     "Quantized pattern launch failed: {error:?}"
                 ))),
+            }
+        }
+        // Sequenced mixer controls (jaki mute/solo routes): apply due holds
+        // and mirror the state flips into the mixer UI
+        // (docs/jaki-mixer-control-routes-spec.md §3).
+        {
+            let rendered = shared.state.audio_rendered_sample();
+            let outcome = app.drain_due_mixer_controls(rendered);
+            for applied in outcome.applied {
+                use sequencer::app::mixer_controls::MixerControlApplied;
+                match applied {
+                    MixerControlApplied::TrackMute { track } => {
+                        shared.ui_invalidations.push(UiInvalidation::TrackMixer {
+                            track,
+                            change: TrackMixerInvalidation::Mute,
+                        });
+                    }
+                    MixerControlApplied::TrackSolo { track } => {
+                        shared.ui_invalidations.push(UiInvalidation::TrackMixer {
+                            track,
+                            change: TrackMixerInvalidation::Solo,
+                        });
+                    }
+                    MixerControlApplied::BusMute { bus_index } => {
+                        shared.ui_invalidations.push(UiInvalidation::BusMixer {
+                            bus: bus_index,
+                            change: BusMixerInvalidation::Mute,
+                        });
+                    }
+                    MixerControlApplied::BusSolo { bus_index } => {
+                        shared.ui_invalidations.push(UiInvalidation::BusMixer {
+                            bus: bus_index,
+                            change: BusMixerInvalidation::Solo,
+                        });
+                    }
+                }
+            }
+            for error in outcome.errors {
+                editor.handle_host_event(HostEvent::Error(error));
             }
         }
         // Song playback notices (docs/song-mode-spec.md 10.2): mirror
@@ -443,6 +484,7 @@ pub(crate) fn run_event_loop(
         }
         let (cols, rows) = backend.viewport_size();
         let (cell_w, cell_h) = backend.cell_dimensions();
+        editor.set_layout_cell_dimensions(cell_w, cell_h);
         if let Some((text_cell_w, text_cell_h)) = backend.sync_text_zoom(editor.text_zoom()) {
             editor.set_text_cell_dimensions(cell_w, cell_h, text_cell_w, text_cell_h);
         }
@@ -495,11 +537,11 @@ pub(crate) fn run_event_loop(
             let render_elapsed = render_started.elapsed();
             ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
             match render_status {
-                eseqlisp::metal_backend::TiledRenderStatus::Presented => {
+                TiledRenderStatus::Presented => {
                     editor.clear_needs_redraw();
                     last_render_at = Instant::now();
                 }
-                eseqlisp::metal_backend::TiledRenderStatus::NotPresented => {
+                TiledRenderStatus::NotPresented => {
                     eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
                     last_render_at = Instant::now();
                 }
@@ -528,6 +570,7 @@ pub(crate) fn run_event_loop(
         if let Some(event) = backend.poll_backend_event(timeout) {
             let event_started = Instant::now();
             match event {
+                BackendEvent::Quit => editor.request_quit(),
                 BackendEvent::FileDrop(paths) => {
                     match SampleImportSession::from_drop(
                         paths,
@@ -957,7 +1000,7 @@ pub(crate) fn run_event_loop(
                             &shared.keyboard_octave,
                             &shared.held_notes,
                             &shared.roll_record,
-                            &shared.ui_epoch,
+                            &shared.ui_invalidations,
                             sequence_roll_binding,
                         )
                     } else {
@@ -971,20 +1014,14 @@ pub(crate) fn run_event_loop(
                         editor.mark_needs_redraw();
                     }
                     if recording_key_outcome.recorded() {
+                        // The recorded write bumped ui_epoch, and this same
+                        // iteration ends in the reactive tick, whose
+                        // epoch-driven resync republishes the step grid and
+                        // refreshes the sequencer layout. Repeating that sync
+                        // + relayout inline here doubled the cost of every
+                        // recorded release and made fast chord stabs starve
+                        // the next notes' key events on slow machines.
                         app.mark_recording_take_changed();
-                        let ct = shared.current_track.load(Ordering::Relaxed);
-                        let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "steps", build_steps_value(&shared.state, ct));
-                        sync_all_track_sequencer_state(
-                            rt,
-                            &shared.state,
-                            &app,
-                            ct,
-                            &shared.selected_steps,
-                        );
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
-                        editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
                         editor.mark_needs_redraw();
                     }
                     // Only pass Press events to the editor (Release is only for note-off)
@@ -1717,11 +1754,35 @@ pub(crate) fn run_event_loop(
             let session = pending.session;
             match completed_cancel_restore {
                 Ok(result) => {
+                    // The restore compiled the persisted source (fork restores
+                    // compile the fork origin's) with Custom origin; retain
+                    // that same source rather than re-reading it by name.
+                    let (restore_source, restore_asset_base) = match session.fork_restore.as_ref()
+                    {
+                        Some(restore) => (
+                            restore.persisted_source.clone(),
+                            restore.origin_path.parent().map(Path::to_path_buf),
+                        ),
+                        None => (
+                            match &session.mode {
+                                EffectEditMode::EditExisting { persisted_source } => {
+                                    persisted_source.clone()
+                                }
+                                EffectEditMode::CreateDraft { .. } => {
+                                    session.last_valid_source.clone()
+                                }
+                            },
+                            session.path.parent().map(Path::to_path_buf),
+                        ),
+                    };
                     match apply_compiled_effect_edit_session(
                         &mut app,
                         &session,
                         &session.name,
                         result,
+                        &restore_source,
+                        restore_asset_base,
+                        sequencer::lisp_host::DGenSourceOrigin::Custom,
                     ) {
                         Ok(()) => {
                             // See the instrument restore above: the forked
@@ -1972,7 +2033,13 @@ pub(crate) fn run_event_loop(
                                 Ok(result) => {
                                     let name = session.name.clone();
                                     match apply_compiled_effect_edit_session(
-                                        &mut app, session, &name, result,
+                                        &mut app,
+                                        session,
+                                        &name,
+                                        result,
+                                        &source,
+                                        session.path.parent().map(Path::to_path_buf),
+                                        sequencer::lisp_host::DGenSourceOrigin::Draft,
                                     ) {
                                         Ok(()) => {
                                             session.last_valid_source = source;

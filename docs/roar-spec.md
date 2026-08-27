@@ -267,7 +267,7 @@ Reuse the OTT node-state → widget path:
 2. `live_audio_analyzer.rs`: extend the band-meter request collection to
    recognize the roar widgets' `:source`, publish a frame keyed
    `roar-meter:<source-fragment>` on >0.05 dB movement.
-3. Widgets read the frame store in `build_metal_primitives`.
+3. Widgets read the frame store in `build_primitives`.
 
 ## 11. Implementation order
 

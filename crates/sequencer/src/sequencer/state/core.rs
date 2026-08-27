@@ -385,6 +385,16 @@ pub struct SequencerState {
     pub runtime: RuntimeBindingState,
     pub(super) scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     pub(super) scheduler_snapshot_version: AtomicU64,
+    /// Realtime-safe delivery of the published snapshot to the audio callback,
+    /// and of the outgoing snapshot back to a non-realtime thread that frees it
+    /// (bead eseq-sj01). The audio thread never touches `scheduler_snapshot`.
+    pub(super) snapshot_handoff: SchedulerSnapshotHandoff,
+    /// Depth of the active `publish coalescing` scopes. While non-zero,
+    /// `publish_scheduler_snapshot` records the intent in
+    /// `pending_coalesced_publish` instead of capturing, and the scope's exit
+    /// performs one capture for the whole transition (bead eseq-sj01).
+    pub(super) publish_coalesce_depth: AtomicU64,
+    pub(super) pending_coalesced_publish: AtomicBool,
     /// Command-thread macro values waiting to be folded into the next
     /// immutable scheduler snapshot. The scheduler never reads this lock.
     pub(super) live_macro_overrides: Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,
@@ -399,6 +409,12 @@ pub struct SequencerState {
     /// reactive tick and written back on note release
     /// (docs/rolling-core-spec.md 6).
     pub(super) roll_recorded_hits: Mutex<Vec<crate::sequencer::RollHitRecorded>>,
+    /// Audio-callback → control-thread live note-on stamps (bead eseq-2awi):
+    /// the render-timeline beat each live keyboard/pad trigger actually
+    /// sounded at, drained in the UI reactive tick and at note release to
+    /// reposition the recorded step (record-as-heard for unquantized live
+    /// recording). Realtime-safe SPSC ring — the callback never locks.
+    pub(super) live_trigger_stamps: crate::sequencer::LiveTriggerStampRing,
     pub(super) track_output_events: Mutex<Vec<TrackOutputEvent>>,
     pub(super) track_output_current_beat_bits: AtomicU64,
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,
@@ -451,6 +467,10 @@ pub struct SequencerState {
     pub(super) pending_accumulator_reset_all: AtomicBool,
     pub(super) pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
     pub(super) quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox,
+    /// Sequenced mixer-control holds (jaki mute/solo routes): the scheduler
+    /// lookahead pushes sample-stamped holds; the app thread drains due ones
+    /// each frame (docs/jaki-mixer-control-routes-spec.md).
+    pub(super) scheduled_mixer_controls: crate::mixer_control::MixerControlMailbox,
     /// Song playback command/notice channels plus render-rate position
     /// atomics (docs/song-mode-spec.md 10.2).
     pub(super) song_playback: SongPlaybackMailbox,

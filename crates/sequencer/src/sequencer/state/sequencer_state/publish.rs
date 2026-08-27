@@ -58,6 +58,18 @@ impl SequencerState {
         std::mem::take(&mut *self.roll_recorded_hits.lock().unwrap())
     }
 
+    /// Realtime-safe: called from the audio callback for every live note-on
+    /// it consumes while the transport plays (bead eseq-2awi).
+    pub fn push_live_trigger_stamp(&self, track: usize, transpose: f32, beat: f64) {
+        self.live_trigger_stamps.push(track, transpose, beat);
+    }
+
+    /// Control-thread consumer of the live note-on stamps; see
+    /// [`crate::sequencer::LiveTriggerStampRing`].
+    pub fn drain_live_trigger_stamps(&self, consume: impl FnMut(crate::sequencer::LiveTriggerStamp)) {
+        self.live_trigger_stamps.drain(consume);
+    }
+
     pub fn append_track_output_events(&self, events: impl IntoIterator<Item = TrackOutputEvent>) {
         let mut history = self.track_output_events.lock().unwrap();
         history.extend(events);
@@ -92,6 +104,12 @@ impl SequencerState {
     /// taking a lock on the realtime thread.
     pub fn set_audio_rendered_sample(&self, sample: u64) {
         self.audio_rendered_sample.store(sample, Ordering::Release);
+    }
+
+    /// The audio clock published above — the "now" that due-ness of sequenced
+    /// mixer controls is measured against on the app thread.
+    pub fn audio_rendered_sample(&self) -> u64 {
+        self.audio_rendered_sample.load(Ordering::Acquire)
     }
 
     /// Publish the scheduler's rendered-beat clock (the `rendered_beats`
@@ -213,8 +231,99 @@ impl SequencerState {
     }
 
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
+        if self.publish_coalesce_depth.load(Ordering::Acquire) > 0 {
+            // Inside a coalescing scope (see `coalesce_publishes`): record the
+            // intent and let the scope's exit pay for one capture. Every
+            // mutation this publish would have described is still in live
+            // state, so the deferred full capture supersedes it.
+            self.pending_coalesced_publish.store(true, Ordering::Release);
+            return self.latest_scheduler_snapshot();
+        }
         let snapshot = Arc::new(SequencerSnapshot::capture(self));
         self.publish_scheduler_snapshot_arc(snapshot)
+    }
+
+    /// Run `body` with scheduler-snapshot publications coalesced into a single
+    /// capture performed at the end (bead eseq-sj01).
+    ///
+    /// Transport transitions like `App::song_transport_stop` publish several
+    /// times in a row — `stop_playback`, then `resync_live_grid_to_current_scene`
+    /// after its epoch bumps — and every publication costs a whole-project deep
+    /// capture on the control thread plus a whole-project deep free once the
+    /// audio thread lets go. Only the last one describes the state the user
+    /// ends up in.
+    ///
+    /// The deferred publish runs after `body` returns, so it observes every
+    /// epoch bump the body performed. Scopes nest; only the outermost publishes.
+    pub fn coalesce_publishes<F, R>(&self, body: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        struct Scope<'a>(&'a SequencerState);
+        impl Drop for Scope<'_> {
+            fn drop(&mut self) {
+                if self.0.publish_coalesce_depth.fetch_sub(1, Ordering::AcqRel) == 1
+                    && self.0.pending_coalesced_publish.swap(false, Ordering::AcqRel)
+                {
+                    self.0.publish_scheduler_snapshot();
+                }
+            }
+        }
+        self.publish_coalesce_depth.fetch_add(1, Ordering::AcqRel);
+        let scope = Scope(self);
+        let result = body();
+        drop(scope);
+        result
+    }
+
+    /// Publish a transport-only change through a copy-on-write snapshot
+    /// (bead eseq-sj01).
+    ///
+    /// `start_playback`, `stop_playback` and `toggle_play` mutate transport
+    /// atomics only, so every track's captured payload is unchanged and its
+    /// existing `Arc` can be reused exactly the way `publish_scheduler_track`
+    /// reuses the tracks it did not edit. That removes one whole-project deep
+    /// capture from the control thread AND one whole-project deep free from the
+    /// audio thread per play/stop.
+    ///
+    /// Falls back to a full capture when the published track count disagrees
+    /// with `active_track_count()` — the same guard `publish_scheduler_track`
+    /// uses, since a stale track vector must not be republished as current.
+    pub fn publish_transport_only(&self) -> Arc<SequencerSnapshot> {
+        if self.publish_coalesce_depth.load(Ordering::Acquire) > 0 {
+            self.pending_coalesced_publish.store(true, Ordering::Release);
+            return self.latest_scheduler_snapshot();
+        }
+        let current = self.scheduler_snapshot.lock().unwrap().clone();
+        if current.tracks.len() != self.active_track_count() {
+            return self.publish_scheduler_snapshot();
+        }
+        let mut next = (*current).clone();
+        next.transport = self.capture_transport_snapshot();
+        self.publish_scheduler_snapshot_arc(Arc::new(next))
+    }
+
+    fn capture_transport_snapshot(&self) -> SequencerTransportSnapshot {
+        SequencerTransportSnapshot {
+            bpm: self.transport.bpm.load(Ordering::Relaxed),
+            playing: self.transport.playing.load(Ordering::Relaxed),
+            current_pattern: self.current_scene_index(),
+            pattern_epoch: self.transport.pattern_epoch.load(Ordering::Relaxed),
+            topology_epoch: self.transport.topology_epoch.load(Ordering::Relaxed),
+            num_tracks: self.active_track_count(),
+        }
+    }
+
+    /// Free every snapshot the audio thread retired. Non-realtime callers only;
+    /// returns how many were freed (bead eseq-sj01).
+    pub fn drain_retired_scheduler_snapshots(&self) -> usize {
+        self.snapshot_handoff.drain_retired()
+    }
+
+    /// Handoff rings between the publishers, the audio callback and the
+    /// reclaimer (bead eseq-sj01).
+    pub fn snapshot_handoff(&self) -> &SchedulerSnapshotHandoff {
+        &self.snapshot_handoff
     }
 
     /// Publish one complete track through a copy-on-write scheduler snapshot.
@@ -233,14 +342,7 @@ impl SequencerState {
             return self.publish_scheduler_snapshot();
         };
         next.tracks[track] = Arc::new(next_track);
-        next.transport = SequencerTransportSnapshot {
-            bpm: self.transport.bpm.load(Ordering::Relaxed),
-            playing: self.transport.playing.load(Ordering::Relaxed),
-            current_pattern: self.current_scene_index(),
-            pattern_epoch: self.transport.pattern_epoch.load(Ordering::Relaxed),
-            topology_epoch: self.transport.topology_epoch.load(Ordering::Relaxed),
-            num_tracks: self.active_track_count(),
-        };
+        next.transport = self.capture_transport_snapshot();
         self.publish_scheduler_snapshot_arc(Arc::new(next))
     }
 
@@ -262,12 +364,26 @@ impl SequencerState {
         &self,
         snapshot: Arc<SequencerSnapshot>,
     ) -> Arc<SequencerSnapshot> {
+        // Free whatever the audio thread retired since the last publish. This
+        // thread is already non-realtime and already about to allocate a
+        // capture, so it is the cheapest reliable reclamation point; the
+        // scheduler worker drains too, for the case where nothing publishes.
+        self.snapshot_handoff.drain_retired();
         {
             let mut published = self.scheduler_snapshot.lock().unwrap();
             *published = Arc::clone(&snapshot);
+            // Version bump and ring push happen under the same lock the store
+            // does, so concurrent publishers cannot interleave a lower version
+            // behind a higher one in the ring. Non-realtime readers still
+            // observe the counter after the store, exactly as before, and the
+            // audio thread reads only the ring — never this mutex.
+            let version = self
+                .scheduler_snapshot_version
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1);
+            self.snapshot_handoff
+                .publish(version, Arc::clone(&snapshot));
         }
-        self.scheduler_snapshot_version
-            .fetch_add(1, Ordering::AcqRel);
         snapshot
     }
 

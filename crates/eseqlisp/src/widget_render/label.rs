@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{
-    CellBuffer, MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive,
+    CellBuffer, GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive,
     WidgetDefinition, get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -350,17 +350,36 @@ impl WidgetDefinition for LabelWidget {
         })
     }
 
+    fn baseline_offset(&self, node: &Value, size: Size, ctx: &MeasureCtx<'_>) -> Option<f32> {
+        let font_size = get_prop_num(node, "font-size")
+            .map(f64_to_f32)
+            .unwrap_or(ctx.inherited_font_size);
+        let row_offset = match get_map(node).and_then(|props| props.get("v-align").cloned()) {
+            Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "center" => {
+                (size.height - 1.0) * 0.5
+            }
+            Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "end" => {
+                size.height - 1.0
+            }
+            _ => 0.0,
+        };
+        Some(super::proportional_text_baseline_offset(
+            font_size,
+            row_offset,
+            ctx,
+        ))
+    }
+
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         tui_render(props, rect, buf);
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &crate::layout::LayoutNode,
         viewport: super::WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let Some(Value::String(text)) = node.props.get("text") else {
             return Vec::new();
         };
@@ -384,7 +403,7 @@ impl WidgetDefinition for LabelWidget {
             .unwrap_or(DEFAULT_FONT_SIZE);
         let mut prims = Vec::new();
         if !bg_transparent {
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: node.rect,
                 color: bg,
             }));
@@ -400,8 +419,8 @@ impl WidgetDefinition for LabelWidget {
             if row >= node.rect.row + node.rect.height {
                 break;
             }
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row,
                     col: node.rect.col,
                     align_width: node.rect.width,

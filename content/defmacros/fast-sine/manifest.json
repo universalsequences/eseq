@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "fast-sine",
+  "params": [
+    "phase"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "sin(2π·phase) for phasor-domain phase 0..1; branchless degree-13 polynomial, no range reduction or libm call.",
+  "tags": [
+    "math",
+    "oscillator",
+    "utility"
+  ]
+}

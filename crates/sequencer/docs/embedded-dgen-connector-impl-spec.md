@@ -255,7 +255,15 @@ nonzero, finite, deterministic audio through the probe.
 
 - `audiograph/dgen_abi_v1.h` (vendored ABI, decision 6) and
   `audiograph/dgen_host_services.c` (port of dgen's `DGenHostSupport.c`);
-  `build.rs` compiles it and links `-framework Accelerate`.
+  `build.rs` compiles it and links `-framework Accelerate` **on Apple targets
+  only**. Off Apple the same four callbacks come from the portable
+  `audiograph/dgen_fft.c` (eseq-linux.9), which reproduces `vDSP_fft_zip`'s
+  unscaled both-directions convention and natural bin ordering and
+  `vDSP_zvma`'s non-conjugated product. The tests in
+  `lisp_host/dgen/dgen_host_services_tests.rs` pin whichever backend the
+  platform ships against a naive double-precision DFT, so running them on both
+  hosts is what makes the two backends comparable. The table layout is
+  untouched, so already-generated dylibs stay valid.
 - FFT setup creation allocates; the table's `fft_setup_create_fn` is called
   lazily from generated code inside the audio callback on first use. Match
   dgen's reference behavior for this milestone, but pre-warm where possible:

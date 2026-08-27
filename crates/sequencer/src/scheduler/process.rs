@@ -228,11 +228,11 @@ pub(super) fn process_scheduled_effect_param(
     value: f32,
 ) -> Option<ScheduledEffectParam> {
     let identity = process_slot_param_identity(slot, param_idx)?;
-    value.is_finite().then_some(ScheduledEffectParam {
-        logical_id: identity.logical_id,
-        idx: identity.node_param_idx as u64,
+    value.is_finite().then_some(ScheduledEffectParam::fixed(
+        identity.logical_id,
+        identity.node_param_idx as u64,
         value,
-    })
+    ))
 }
 
 pub(super) fn process_device_write_value(
@@ -1491,6 +1491,13 @@ pub(super) fn resolve_sampler_defaults(
         sample_bpm: value(11, 120.0),
         playback_speed: value(12, 1.0),
         scrub: value(13, 0.0),
+        slice_mode: value(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 0.0),
+        slice_sensitivity: value(
+            crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY, 0.5,
+        ),
+        slice_base: value(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0),
+        start_point_locked: false,
+        end_point_locked: false,
         warp_preserve: default_slot_node_param_value(
             slot,
             crate::instruments::sampler::PARAM_WARP_PRESERVE as u32,
@@ -1634,11 +1641,11 @@ pub(super) fn resolve_neuron_effect_override(
     if logical_id != override_param.param_id.logical_id {
         return None;
     }
-    Some(ScheduledEffectParam {
+    Some(ScheduledEffectParam::fixed(
         logical_id,
         idx,
-        value: override_param.value,
-    })
+        override_param.value,
+    ))
 }
 
 pub(super) fn apply_neuron_output_overrides(
@@ -1751,6 +1758,15 @@ pub(super) fn apply_sampler_descriptor_param_override(
         11 => params.sample_bpm = value,
         12 => params.playback_speed = value,
         13 => params.scrub = value,
+        idx if idx == crate::instruments::sampler::SLOT_PARAM_SLICE_MODE as u64 => {
+            params.slice_mode = value;
+        }
+        idx if idx == crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY as u64 => {
+            params.slice_sensitivity = value;
+        }
+        idx if idx == crate::instruments::sampler::SLOT_PARAM_SLICE_BASE as u64 => {
+            params.slice_base = value;
+        }
         _ => return false,
     }
     true

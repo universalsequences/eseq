@@ -4,10 +4,10 @@ Content-addressed cache of compiled DGenLisp dylibs.
 Compiling through the external dgenlisp tool is slow, so `DylibCacheManager`
 (see `global_cache_manager()`) keys each artifact by a fingerprint of the
 effective source, referenced assets, compile kind (`DGenCompileKind`), sample
-rate, the dgenlisp tool binary itself, and the staged toolchain identity
-(`VERSION.json` hash, vendored ABI header hash, target triple, minimum
-macOS). A cache hit hands out a `DylibLease`; a miss compiles into a fresh
-artifact directory and records `CacheMetadata`. Concurrent misses on the same
+rate, the dgenlisp tool binary itself, and the platform compile-policy
+identity (policy hash, vendored ABI header hash, target triple, and optional
+deployment target). A cache hit hands out a `DylibLease`; a miss compiles into
+a fresh artifact directory and records `CacheMetadata`. Concurrent misses on the same
 key are serialized by a per-key in-flight latch so exactly one compilation
 runs; different keys still compile concurrently. Includes a small lisp
 tokenizer used to discover `(asset ...)` references that must participate in
@@ -43,8 +43,12 @@ On-disk layout (impl spec, slice E6 / decision 7):
 Schema-1 leftovers (`dylibs/`, `staging/` directly under the cache root) are
 ignored and deleted opportunistically by the construction-time sweep, which
 also clears orphaned staging dirs and artifact dirs whose metadata fails to
-parse. Sibling dirs under the cache root (e.g. `ir-prep/`, owned by the
-convolution reverb) are never touched.
+parse. Because the cache root is shared between *processes* (each nextest
+test is its own process; a second app instance is possible too), in-flight
+staging dirs are protected by an advisory `flock` on a sibling
+`<artifact-id>.tmp.lock` file (see [`StagingLock`], eseq-linux.51): a sweep
+only deletes staging it can prove ownerless. Sibling dirs under the cache
+root (e.g. `ir-prep/`, owned by the convolution reverb) are never touched.
 
 Everything here runs on control threads only (edit sessions, agent tasks,
 effect setup); nothing is reachable from the audio process callback.
@@ -55,21 +59,27 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::dgen_manifest::DGEN_SHARED_LIBRARY_EXTENSION;
 use super::super::{
     compile_effective_dgen_source_to_dir, dgenlisp_tool_path, effective_dgen_source,
     load_dylib_prewarmed, parse_manifest_with_base, CompileResult,
 };
 
-const CACHE_SCHEMA_VERSION: u32 = 2;
-/// The only lowering the toolchain performs today (impl spec, decision 7).
-/// Part of the on-disk path tier and the cache key.
+const CACHE_SCHEMA_VERSION: u32 = 3;
+/// The native lowering selected by the bundled compiler. Part of the on-disk
+/// path tier and cache key so artifacts can never cross target boundaries.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const CACHE_TARGET_TRIPLE: &str = "arm64-apple-macos";
-/// Deployment floor the staged toolchain links against; key material so a
-/// floor bump invalidates artifacts.
-const CACHE_MINIMUM_MACOS: &str = "11.0";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const CACHE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
+#[cfg(target_os = "macos")]
+const CACHE_DEPLOYMENT_TARGET: Option<&str> = Some("11.0");
+#[cfg(target_os = "linux")]
+const CACHE_DEPLOYMENT_TARGET: Option<&str> = None;
 const INSTRUMENT_VOICES: u32 = 12;
 
 /// The vendored ABI header is a build input: `dgen_ffi.rs` mirrors it as
@@ -214,18 +224,16 @@ struct ToolFingerprint {
     sha256: Option<String>,
 }
 
-/// Identity of the staged toolchain + vendored ABI (impl spec, slice E6).
-/// `version_json_sha256` covers the staged distribution/policy/llvm identity
-/// (`VERSION.json`'s `dgen_compiler_version` is the stable, intentionally
-/// bumped `"abi-v1.1"` string, so this hash only churns on real toolchain
-/// changes); `abi_header_sha256` is the compiled-in vendored header (see
-/// [`ABI_HEADER_BYTES`]).
+/// Identity of the platform compile policy + vendored ABI (impl spec, slice
+/// E6). `policy_sha256` covers macOS's staged `VERSION.json`, or Linux's ELF
+/// symbol-policy files; `abi_header_sha256` is the compiled-in vendored header
+/// (see [`ABI_HEADER_BYTES`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ToolchainFingerprint {
-    version_json_sha256: String,
+    policy_sha256: String,
     abi_header_sha256: String,
     target_triple: String,
-    minimum_macos: String,
+    deployment_target: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -415,8 +423,14 @@ impl DylibCacheManager {
 
     /// Allocate a fresh artifact id and create its (empty) staging dir plus
     /// the key dir it will be committed into. Returns
-    /// `(artifact_id, staging_dir, artifact_dir)`.
-    fn allocate_artifact_dirs(&self, key: &str) -> Result<(String, PathBuf, PathBuf), String> {
+    /// `(artifact_id, staging_dir, staging_lock, artifact_dir)`; the caller
+    /// must keep the lock alive until the staging dir has been renamed into
+    /// place or removed, or another process's sweep may delete it mid-write
+    /// (eseq-linux.51).
+    fn allocate_artifact_dirs(
+        &self,
+        key: &str,
+    ) -> Result<(String, PathBuf, StagingLock, PathBuf), String> {
         let (cache_root, artifact_id) = {
             let mut inner = self
                 .inner
@@ -441,13 +455,16 @@ impl DylibCacheManager {
 
         let staging_dir = staging_parent.join(format!("{artifact_id}.tmp"));
         let artifact_dir = key_dir.join(&artifact_id);
+        // Lock before the staging dir exists: a sweeping process that can see
+        // the dir must always find its lock held.
+        let staging_lock = StagingLock::acquire(&staging_dir)?;
         if staging_dir.exists() {
             std::fs::remove_dir_all(&staging_dir)
                 .map_err(|e| format!("remove stale cache staging dir: {e}"))?;
         }
         std::fs::create_dir_all(&staging_dir)
             .map_err(|e| format!("create dylib cache staging artifact: {e}"))?;
-        Ok((artifact_id, staging_dir, artifact_dir))
+        Ok((artifact_id, staging_dir, staging_lock, artifact_dir))
     }
 
     /// eseq-599: materialize an independent copy of a live-leased artifact.
@@ -461,7 +478,7 @@ impl DylibCacheManager {
         request: &CacheRequest,
         template_dir: &Path,
     ) -> Result<CompileResult, String> {
-        let (_artifact_id, staging_dir, artifact_dir) =
+        let (_artifact_id, staging_dir, _staging_lock, artifact_dir) =
             self.allocate_artifact_dirs(&request.key)?;
         if let Err(error) = copy_artifact_files(template_dir, &staging_dir) {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -477,7 +494,7 @@ impl DylibCacheManager {
         request: &CacheRequest,
         asset_base: Option<&Path>,
     ) -> Result<CompileResult, String> {
-        let (artifact_id, staging_dir, artifact_dir) =
+        let (artifact_id, staging_dir, _staging_lock, artifact_dir) =
             self.allocate_artifact_dirs(&request.key)?;
 
         let dylib_name = format!(
@@ -505,7 +522,7 @@ impl DylibCacheManager {
         // is the only audit on the production path; failure publishes
         // nothing.
         if let Err(error) = crate::lisp_host::dgen::dgen_audit::audit_dylib(
-            &staging_dir.join(format!("{dylib_name}.dylib")),
+            &staging_dir.join(format!("{dylib_name}.{DGEN_SHARED_LIBRARY_EXTENSION}")),
         ) {
             let _ = std::fs::remove_dir_all(&staging_dir);
             return Err(error);
@@ -676,6 +693,101 @@ fn staging_root(cache_root: &Path) -> PathBuf {
     schema_tier_root(cache_root).join("staging")
 }
 
+/// Sibling lock file marking a staging dir as in-flight:
+/// `<staging_dir>.lock` next to `<artifact-id>.tmp`.
+fn staging_lock_path(staging_dir: &Path) -> PathBuf {
+    let mut name = staging_dir
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    name.push(".lock");
+    staging_dir.with_file_name(name)
+}
+
+/// Cross-process liveness marker for an in-flight staging dir (eseq-linux.51).
+///
+/// The construction-time sweep runs in every process sharing a cache root, so
+/// "is this staging dir orphaned?" needs an answer that survives across
+/// processes. An advisory exclusive `flock` on the sibling `.lock` file is
+/// that answer: the compiling process holds it from *before* the staging dir
+/// exists until *after* the dir is renamed into place (or cleaned up), and the
+/// OS releases it automatically if the holder dies, so a sweeper that can
+/// acquire the lock knows the dir has no live owner. `flock` handles from
+/// separate `open`s conflict even within one process, so this also covers a
+/// second manager instance sharing the root in-process.
+struct StagingLock {
+    lock_path: PathBuf,
+    _file: std::fs::File,
+}
+
+impl StagingLock {
+    /// Create and exclusively lock `<staging_dir>.lock`. Must be called
+    /// before the staging dir itself is created, so a concurrent sweeper can
+    /// never observe the dir without a held lock.
+    ///
+    /// A sweeper deletes an unlocked lock file while briefly holding its
+    /// lock, so create-then-lock can race it: our freshly created file may be
+    /// unlinked before we lock it, leaving us with a lock on an anonymous
+    /// inode no sweeper will ever check. After locking, verify the fd still
+    /// names the path and retry on mismatch (or on momentary contention).
+    fn acquire(staging_dir: &Path) -> Result<Self, String> {
+        let lock_path = staging_lock_path(staging_dir);
+        let contended_os_error = fs2::lock_contended_error().raw_os_error();
+        for _ in 0..64 {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&lock_path)
+                .map_err(|e| format!("create staging lock {}: {e}", lock_path.display()))?;
+            if let Err(error) = file.try_lock_exclusive() {
+                if error.raw_os_error() == contended_os_error {
+                    // A sweeper holds it for the instant it takes to unlink
+                    // an orphan; artifact ids are unique, so no other writer
+                    // can contend. Yield and retry.
+                    std::thread::yield_now();
+                    continue;
+                }
+                return Err(format!(
+                    "lock staging lock {}: {error}",
+                    lock_path.display()
+                ));
+            }
+            let locked_ino = file
+                .metadata()
+                .map_err(|e| format!("stat staging lock {}: {e}", lock_path.display()))?;
+            match std::fs::metadata(&lock_path) {
+                Ok(on_disk) if same_inode(&locked_ino, &on_disk) => {
+                    return Ok(Self {
+                        lock_path,
+                        _file: file,
+                    })
+                }
+                // Unlinked (or replaced) by a sweeper between create and
+                // lock: this lock protects nothing. Retry with a fresh file.
+                _ => continue,
+            }
+        }
+        Err(format!(
+            "staging lock {} kept being swept while being acquired",
+            lock_path.display()
+        ))
+    }
+}
+
+impl Drop for StagingLock {
+    fn drop(&mut self) {
+        // Unlink while still holding the lock, so no sweeper can acquire the
+        // path between release and removal; the fd close releases the lock.
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+fn same_inode(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
 fn build_request(
     kind: DGenCompileKind,
     origin: DGenSourceOrigin,
@@ -686,7 +798,11 @@ fn build_request(
     let effective_source = effective_dgen_source(kind, source, sample_rate)?;
     let effective_source_sha256 = sha256_hex(effective_source.as_bytes());
     let tool = fingerprint_tool(&dgenlisp_tool_path())?;
-    let toolchain = fingerprint_toolchain(&crate::app_paths::app_paths().dgen_toolchain_root())?;
+    // Validate before cache lookup as well as before compilation. Otherwise a
+    // cache entry produced by the old Linux system-compiler fallback could be
+    // loaded even though no hermetic stage exists on this machine.
+    let toolchain_root = crate::app_paths::app_paths().dgen_toolchain_root_checked()?;
+    let toolchain = fingerprint_toolchain(&toolchain_root)?;
     let assets = fingerprint_source_assets(&effective_source, asset_base)?;
     let voices = kind.voices();
     let key = cache_key(
@@ -758,24 +874,39 @@ fn cache_key(
     ))
 }
 
-/// A missing/unreadable `VERSION.json` is a hard error, never silently
-/// omitted key material — the toolchain preflight
-/// (`dgen_toolchain_root_checked`) should have failed long before this.
+/// Fingerprint every external compile-policy input not already covered by the
+/// DGenLisp executable hash. Every host includes the mandatory staged
+/// `VERSION.json`; Linux also includes the distribution's ELF audit policy.
 fn fingerprint_toolchain(toolchain_root: &Path) -> Result<ToolchainFingerprint, String> {
-    let version_json_path = toolchain_root.join("VERSION.json");
-    let version_json = std::fs::read(&version_json_path).map_err(|e| {
+    let version_path = toolchain_root.join("VERSION.json");
+    let version = std::fs::read(&version_path).map_err(|e| {
         format!(
             "read staged toolchain VERSION.json for cache fingerprint at {}: {e}. \
              Run ./rebuild_dgenlisp_tool.sh at the repo root to stage the toolchain \
              (or fix ESEQ_DGEN_TOOLCHAIN_ROOT if the override is active).",
-            version_json_path.display()
+            version_path.display()
         )
     })?;
+    #[cfg(target_os = "macos")]
+    let policy_bytes = version;
+    #[cfg(target_os = "linux")]
+    let policy_bytes = {
+        let abi_dir = crate::app_paths::app_paths().dgen_abi_dir();
+        let mut bytes = version;
+        for name in ["exports-v1-elf.txt", "libsystem-symbols-v1-elf.txt"] {
+            let path = abi_dir.join(name);
+            bytes.extend(std::fs::read(&path).map_err(|e| {
+                format!("read Linux DGen ABI policy {}: {e}", path.display())
+            })?);
+            bytes.push(0);
+        }
+        bytes
+    };
     Ok(ToolchainFingerprint {
-        version_json_sha256: sha256_hex(&version_json),
+        policy_sha256: sha256_hex(&policy_bytes),
         abi_header_sha256: abi_header_sha256().to_string(),
         target_triple: CACHE_TARGET_TRIPLE.to_string(),
-        minimum_macos: CACHE_MINIMUM_MACOS.to_string(),
+        deployment_target: CACHE_DEPLOYMENT_TARGET.map(str::to_string),
     })
 }
 
@@ -805,8 +936,45 @@ fn metadata_matches(artifact_dir: &Path, request: &CacheRequest) -> Result<bool,
     Ok(artifact_dir.join("manifest.json").is_file()
         && artifact_dir.join("source.lisp").is_file()
         && artifact_dir
-            .join(format!("{}.dylib", metadata.dylib_name))
+            .join(format!("{}.{}", metadata.dylib_name, DGEN_SHARED_LIBRARY_EXTENSION))
             .is_file())
+}
+
+/// Sweep-side view of a staging dir's sibling lock file (eseq-linux.51).
+enum OrphanLock {
+    /// The lock file does not exist: the dir's owner is gone (it unlinks the
+    /// lock only after the staging dir has been renamed away or removed), or
+    /// the dir predates the lock protocol. Safe to sweep; nothing to unlink.
+    NoLockFile,
+    /// The lock was acquired, so its owner died mid-compile. Dropping the
+    /// guard unlinks the lock file while the lock is still held.
+    Acquired(StagingLock),
+}
+
+/// Try to establish that a staging dir has no live owner. Returns `None`
+/// when the lock is held by a live process (or the lock file is unreadable)
+/// — in which case the dir must not be swept.
+fn try_acquire_orphan_lock(lock_path: &Path) -> Option<OrphanLock> {
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(OrphanLock::NoLockFile)
+        }
+        // Unreadable for any other reason: assume live (sweeping is best
+        // effort; deleting an in-flight compile is the one unsafe outcome).
+        Err(_) => return None,
+    };
+    if file.try_lock_exclusive().is_err() {
+        return None;
+    }
+    Some(OrphanLock::Acquired(StagingLock {
+        lock_path: lock_path.to_path_buf(),
+        _file: file,
+    }))
 }
 
 /// Construction-time cache hygiene (impl spec, slice E6). Deletes, best
@@ -815,16 +983,21 @@ fn metadata_matches(artifact_dir: &Path, request: &CacheRequest) -> Result<bool,
 /// - schema-1 leftovers: the old `dylibs/` + `staging/` dirs directly under
 ///   the cache root (only those two names — sibling dirs like `ir-prep/`
 ///   belong to other subsystems and are never touched);
-/// - orphaned staging dirs under the current schema tier. Nothing can be
-///   leased at manager construction, so all staging dirs are orphans —
-///   except ones created by *this* process (another live manager instance
-///   sharing the root may be mid-compile), which are identifiable by the
-///   `<pid>-…` artifact-id prefix and skipped;
+/// - orphaned staging dirs under the current schema tier. "Orphaned" is a
+///   *liveness* question, not a pid-identity one: the cache root is shared by
+///   other processes (nextest runs one process per test; a second manager
+///   instance in this process is possible too), any of which may be
+///   mid-compile right now, and pids say nothing about that (eseq-linux.51).
+///   A live compile holds an exclusive [`StagingLock`] on the dir's sibling
+///   `.lock` file for its whole lifetime, so a staging dir is an orphan
+///   exactly when that lock can be acquired (or its lock file is gone);
+/// - stale `.lock` files whose staging dir no longer exists and whose lock
+///   can be acquired (their holder is gone);
 /// - artifact dirs under the current tier whose `metadata.json` is missing
 ///   or fails to parse (quarantine-by-delete; they recompile from source).
 ///
 /// Live leased artifacts are safe by construction: leasing requires a
-/// parseable, matching `metadata.json`, and this-process staging is skipped.
+/// parseable, matching `metadata.json`, and in-flight staging is lock-held.
 fn sweep_cache_root(cache_root: &Path) {
     let mut swept_old_schema = 0usize;
     let mut swept_staging = 0usize;
@@ -838,20 +1011,32 @@ fn sweep_cache_root(cache_root: &Path) {
         }
     }
 
-    // Orphaned staging dirs in the current tier (skip this process's own).
-    let own_prefix = format!("{}-", process_id());
+    // Orphaned staging dirs and stale lock files in the current tier. A
+    // staging dir whose sibling lock is held belongs to a live compile in
+    // some process sharing this root — never touch it (eseq-linux.51).
     if let Ok(entries) = std::fs::read_dir(staging_root(cache_root)) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with(&own_prefix) {
-                continue;
-            }
-            if std::fs::remove_dir_all(&path).is_ok() {
-                swept_staging += 1;
+            if path.is_dir() {
+                // Missing lock file ⇒ no live owner (a live compile creates
+                // and locks it before the dir exists and unlinks it only
+                // after the dir is gone). Held lock ⇒ live; skip. Acquired
+                // lock ⇒ the owner died; sweep the dir while holding it, so
+                // the owner-side create-then-lock protocol cannot interleave.
+                let Some(_lock) = try_acquire_orphan_lock(&staging_lock_path(&path)) else {
+                    continue;
+                };
+                if std::fs::remove_dir_all(&path).is_ok() {
+                    swept_staging += 1;
+                }
+            } else if path.extension().is_some_and(|ext| ext == "lock")
+                && !path.with_extension("").exists()
+            {
+                // Lock file whose staging dir is gone: its holder died
+                // between creating the lock and the dir. If acquired, the
+                // guard's drop unlinks the file (while the lock is held); if
+                // held, the owner is live (mid-allocation) — leave it.
+                let _lock = try_acquire_orphan_lock(&path);
             }
         }
     }
@@ -1540,12 +1725,12 @@ mod tests {
         let toolchain_a = fingerprint_toolchain(&stage_a).expect("fingerprint a");
         let toolchain_b = fingerprint_toolchain(&stage_b).expect("fingerprint b");
         assert_ne!(
-            toolchain_a.version_json_sha256,
-            toolchain_b.version_json_sha256
+            toolchain_a.policy_sha256,
+            toolchain_b.policy_sha256
         );
 
         let tool = ToolFingerprint {
-            path: "/tools/DGenLisp".to_string(),
+            path: "/tools/DGenLisp-target-a".to_string(),
             exists: true,
             len: Some(1),
             modified_unix_ms: Some(1),
@@ -1565,10 +1750,13 @@ mod tests {
         };
         assert_ne!(key(&toolchain_a), key(&toolchain_b));
 
-        // Missing VERSION.json is a hard error, never omitted key material.
-        let err = fingerprint_toolchain(&root.join("missing-stage"))
-            .expect_err("missing VERSION.json must fail");
-        assert!(err.contains("VERSION.json"), "{err}");
+        #[cfg(target_os = "macos")]
+        {
+            // The staged macOS policy is incomplete without VERSION.json.
+            let err = fingerprint_toolchain(&root.join("missing-stage"))
+                .expect_err("missing VERSION.json must fail");
+            assert!(err.contains("VERSION.json"), "{err}");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1584,12 +1772,15 @@ mod tests {
             .expect("write VERSION.json");
         let toolchain = fingerprint_toolchain(&root).expect("fingerprint");
         assert_eq!(toolchain.abi_header_sha256.len(), 64);
-        assert_eq!(toolchain.version_json_sha256.len(), 64);
+        assert_eq!(toolchain.policy_sha256.len(), 64);
         assert_eq!(toolchain.target_triple, CACHE_TARGET_TRIPLE);
-        assert_eq!(toolchain.minimum_macos, CACHE_MINIMUM_MACOS);
+        assert_eq!(
+            toolchain.deployment_target,
+            CACHE_DEPLOYMENT_TARGET.map(str::to_string)
+        );
 
         let tool = ToolFingerprint {
-            path: "/tools/DGenLisp".to_string(),
+            path: "/tools/DGenLisp-target-a".to_string(),
             exists: true,
             len: Some(1),
             modified_unix_ms: Some(1),
@@ -1604,6 +1795,29 @@ mod tests {
             &toolchain,
             &[],
         );
+        let mut other_target_tool = tool.clone();
+        other_target_tool.path = "/tools/DGenLisp-target-b".to_string();
+        assert_ne!(
+            cache_key(
+                DGenCompileKind::Effect,
+                44_100,
+                None,
+                "source-sha",
+                &tool,
+                &toolchain,
+                &[],
+            ).unwrap(),
+            cache_key(
+                DGenCompileKind::Effect,
+                44_100,
+                None,
+                "source-sha",
+                &other_target_tool,
+                &toolchain,
+                &[],
+            ).unwrap(),
+            "target-specific compiler paths must not collide in the cache"
+        );
         assert_eq!(material["schemaVersion"], CACHE_SCHEMA_VERSION);
         let toolchain_value = &material["toolchain"];
         assert_eq!(
@@ -1615,12 +1829,12 @@ mod tests {
             serde_json::json!(CACHE_TARGET_TRIPLE)
         );
         assert_eq!(
-            toolchain_value["minimum_macos"],
-            serde_json::json!(CACHE_MINIMUM_MACOS)
+            toolchain_value["deployment_target"],
+            serde_json::json!(CACHE_DEPLOYMENT_TARGET)
         );
         assert_eq!(
-            toolchain_value["version_json_sha256"],
-            serde_json::json!(toolchain.version_json_sha256)
+            toolchain_value["policy_sha256"],
+            serde_json::json!(toolchain.policy_sha256)
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1696,17 +1910,17 @@ mod tests {
             voices: None,
             effective_source_sha256: "aa".to_string(),
             tool: ToolFingerprint {
-                path: "/tools/DGenLisp".to_string(),
+                path: "/tools/DGenLisp-target-a".to_string(),
                 exists: true,
                 len: Some(1),
                 modified_unix_ms: Some(1),
                 sha256: Some("aa".to_string()),
             },
             toolchain: ToolchainFingerprint {
-                version_json_sha256: "bb".to_string(),
+                policy_sha256: "bb".to_string(),
                 abi_header_sha256: "cc".to_string(),
                 target_triple: CACHE_TARGET_TRIPLE.to_string(),
-                minimum_macos: CACHE_MINIMUM_MACOS.to_string(),
+                deployment_target: CACHE_DEPLOYMENT_TARGET.map(str::to_string),
             },
             assets: Vec::new(),
             dylib_name: "dgen_effect_valid".to_string(),
@@ -1732,13 +1946,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// eseq-linux.51: the sweep must not delete another manager's in-flight
+    /// staging dir. Liveness is an advisory flock on the sibling `.lock`
+    /// file, so a held lock protects the dir even though the sweeping
+    /// "process" (here: this process, via an independent fd — flock treats
+    /// separate opens identically across and within processes) cannot match
+    /// it by pid. Once the lock is released the dir is an orphan and goes.
+    #[test]
+    fn startup_sweep_honors_staging_locks() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-staging-lock-test-{}-{}",
+            process_id(),
+            now_unix_ms()
+        ));
+        let staging = staging_root(&root);
+        std::fs::create_dir_all(&staging).expect("create staging root");
+
+        // In-flight: lock acquired before the dir exists, as in
+        // allocate_artifact_dirs.
+        let in_flight = staging.join("12345-1-0.tmp");
+        let lock = StagingLock::acquire(&in_flight).expect("acquire staging lock");
+        std::fs::create_dir_all(&in_flight).expect("create in-flight staging");
+
+        // Orphans: a dir whose lock file exists but is unheld (owner died),
+        // a dir with no lock file at all (pre-lock-protocol leftover), and a
+        // stale lock file whose dir is gone.
+        let dead = staging.join("23456-1-0.tmp");
+        std::fs::create_dir_all(&dead).expect("create dead staging");
+        drop(StagingLock::acquire(&dead).expect("create dead lock file, then release"));
+        // Recreate the lock file unheld: acquire's drop unlinks it.
+        std::fs::write(staging_lock_path(&dead), "").expect("recreate unheld lock");
+        let unlocked = staging.join("34567-1-0.tmp");
+        std::fs::create_dir_all(&unlocked).expect("create lockless staging");
+        let stale_lock = staging.join("45678-1-0.tmp.lock");
+        std::fs::write(&stale_lock, "").expect("create stale lock");
+
+        sweep_cache_root(&root);
+
+        assert!(in_flight.exists(), "lock-held staging dir survives sweep");
+        assert!(
+            staging_lock_path(&in_flight).exists(),
+            "held lock file survives sweep"
+        );
+        assert!(!dead.exists(), "unheld-lock staging dir swept");
+        assert!(
+            !staging_lock_path(&dead).exists(),
+            "unheld lock file swept with its dir"
+        );
+        assert!(!unlocked.exists(), "lockless staging dir swept");
+        assert!(!stale_lock.exists(), "stale lock file without a dir swept");
+
+        drop(lock);
+        assert!(
+            !staging_lock_path(&in_flight).exists(),
+            "released lock unlinks its file"
+        );
+        sweep_cache_root(&root);
+        assert!(!in_flight.exists(), "released staging dir is an orphan");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn staged_toolchain_present() -> bool {
-        let root = crate::app_paths::app_paths().dgen_toolchain_root();
-        if root.join("VERSION.json").is_file() {
-            return true;
+        #[cfg(target_os = "macos")]
+        {
+            let root = crate::app_paths::app_paths().dgen_toolchain_root();
+            if root.join("VERSION.json").is_file() {
+                return true;
+            }
+            eprintln!("skipping: staged toolchain not found at {root:?}");
+            false
         }
-        eprintln!("skipping: staged toolchain not found at {root:?}");
-        false
+        #[cfg(target_os = "linux")]
+        {
+            let paths = crate::app_paths::app_paths();
+            let present = paths.dgenlisp_tool().is_file()
+                && paths.dgen_abi_dir().join("exports-v1-elf.txt").is_file()
+                && paths
+                    .dgen_abi_dir()
+                    .join("libsystem-symbols-v1-elf.txt")
+                    .is_file();
+            if !present {
+                eprintln!("skipping: fetched Linux DGenLisp distribution is incomplete");
+            }
+            present
+        }
     }
 
     /// Slice E1 exit criterion (embedded-dgen-connector-impl-spec.md): with

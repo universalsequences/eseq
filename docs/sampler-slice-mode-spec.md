@@ -75,12 +75,11 @@ descriptor-length mismatch path must be verified (regression test exists:
 
 | param | type | default | meaning |
 |---|---|---|---|
-| `slice` | enum {off, transient, division} | off | slice mode + detection source |
+| `slice` | enum {off, transient} | off | slice mode |
 | `sens` | 0..1 | 0.5 | transient sensitivity: filters the aubio onset list by strength / min-spacing |
-| `div` | enum {1/4 … 1/32} | 1/16 | grid division when `slice = division` (uses analysis BPM + downbeat) |
 | `slice base` | note | C4 | note that fires slice 0 |
 
-`slice`, `sens`, `div` are p-lockable like any scalar but are expected to be
+`slice` and `sens` are p-lockable like any scalar but are expected to be
 patch-level in practice. Per-slice playback shaping (1-shot vs gate, choke) is
 out of scope for v1 — the existing global `gate`/`loop`/envelope params apply
 to every slice uniformly.
@@ -138,6 +137,15 @@ fn resolve_slice(params: &mut ScheduledSamplerParams, table: &SliceTable,
   sample hash at load time doesn't match, edits are dropped (§2.7).
 - `detected` is never serialized — recomputed from analysis on load, like
   warp's onsets.
+- **Sample identity is `analysis::sample_path_hash`, which must always return a
+  key.** It yields the content hash for `samples/<sha256>.wav` and a
+  domain-separated `path:<digest>` for anything else. It originally returned
+  `None` for non-content-addressed samples, and since all four consumers read
+  `None` as "these edits belong to another sample", manual slice editing was a
+  silent no-op for ordinary dragged-in samples — on write
+  (`ui/host_commands/sampler_slices.rs`), read (`edits_for_sample`), rebind
+  (`App::set_sampler_path_for_track`), and load
+  (`discard_slice_edits_for_other_sample`).
 
 ## 6. UI
 
@@ -156,13 +164,44 @@ Extends the existing waveform widget
    `handle-sampler-waveform-action`, issuing host commands with a
    `"sampler-slice"` gesture for undo coalescing (history-host-command
    pattern, no `ui_epoch` bump).
-3. Panel row: `slice` mode selector, `sens` knob (transient), `div` selector
-   (division), `slice base` — appearing in the existing param strip when
-   slice ≠ off. Start/end fields stay visible and reflect the *last fired*
-   slice.
-4. When slice mode is on, start/end drag handles remain functional (they now
-   edit the global sample window that slicing subdivides — v1: slices span
-   the full sample; window-clipping is a possible refinement).
+3. **Mode switch, not a dropdown** (revised 2026-08-22 after the first build
+   put too many controls in one strip). A two-cell vertical **classic / slice**
+   switch sits to the left of the waveform, Simpler-style. It is the only way
+   to reach slice mode: the `slice` dropdown is gone from the param strip.
+   - `classic` writes `slice = off`; `slice` writes `slice = transient`.
+     Detection source is not a user choice — transient is the starting point
+     and the user fine-tunes by dragging markers.
+   - **Beat-division slicing was removed** (2026-08-22). It was never reachable
+     once the switch replaced the dropdown, no saved project used it, and it
+     carried a whole parallel resolve path (`division_slice_bounds`, a grid
+     iterator, a `div` param, a downbeat dependency) for no user-visible
+     benefit. `slice` is now a two-value enum and `div` is gone from the
+     descriptor — it was the tail parameter, so no saved p-lock index moved.
+4. **Each mode shows only its own controls.**
+   - classic: no `sens` / `slice base`.
+   - slice: no `loop`, no `xfade` — a slice trigger is a bounded region picked
+     by note, so a continuous loop window has no meaning there.
+   - slice: no `start` / `end` either, and no start/end overlay on the
+     waveform. `resolve_slice` overwrites both on every trigger unless the step
+     carries an explicit start/end p-lock (and the live-keyboard path hardcodes
+     `start_point_locked: false`), and slices are detected across the whole
+     sample rather than inside that window — so in slice mode they were
+     editable controls that changed nothing you hear. With no selection, the
+     waveform draws fully active rather than fully greyed.
+   - `slice base` and `sens` (or `div`) render in the param strip only while
+     slice mode is on.
+5. **In slice mode the waveform body is a slice picker, not a range selector.**
+   A press selects the slice under the pointer (`:select-slice`, held in
+   `sampler-selected-slice`, which also drives `:active-slice` highlighting and
+   falls back to the playhead-derived slice when nothing is picked). Body
+   click-drag emits no `set-selection`, and the start/end handles are not
+   grabbable (`marker-selection` off) — start/end stay editable through their
+   number fields. This supersedes the earlier "start/end drag handles remain
+   functional" note.
+6. Slice markers are a full-height hairline topped by a downward-pointing
+   triangle flag, deliberately larger than the square start/end markers.
+   Dragging one moves that slice's start (`:move-slice`); shift-click adds
+   (`:add-slice`); alt-click deletes (`:delete-slice`).
 
 ## 7. Interactions with existing features
 
@@ -174,6 +213,10 @@ Extends the existing waveform widget
   the note before it is zeroed.
 - **Record / takes / arrangement**: nothing special — slices are patch data,
   sequences store plain notes.
+- **Track `gate`**: an ungated track is a one-shot on *both* the sequenced and
+  the live-keyboard paths. Key-up no longer cuts a live voice when `gate` is
+  off (`audio::state::live_key_release_cuts_voice`), so jamming slices sounds
+  the same as the recording of that jam. Gated tracks are unchanged.
 - **Rack member samplers**: slice mode works inside a rack pad's sampler;
   the pad note routes to the member track first, then the member's own
   keyboard transpose (if any) selects the slice.
@@ -188,8 +231,7 @@ Extends the existing waveform widget
    add/move/delete actions + undo; panel param row.
 3. **Manual edits + serialization** — user override layer, project
    round-trip keyed by sample hash, drop-on-sample-change.
-4. **Division slicing** — grid slices from analysis BPM/downbeat; `div`
-   param.
+4. ~~**Division slicing**~~ — built, then removed; see §6.3.
 
 ## 9. Out of scope / future
 

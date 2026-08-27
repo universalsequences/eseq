@@ -258,19 +258,22 @@ impl SequencerState {
                 rack_engine_ext_route_lids: (0..MAX_SAMPLER_POOLS)
                     .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
                     .collect(),
-                sampler_analysis_buffer_ids: (0..MAX_TRACKS)
+                sampler_analysis_buffer_ids: (0..MAX_SAMPLER_POOLS)
                     .map(|_| AtomicU32::new(u32::MAX))
                     .collect(),
-                sampler_analysis_bpm: (0..MAX_TRACKS)
+                sampler_analysis_bpm: (0..MAX_SAMPLER_POOLS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                     .collect(),
-                sampler_onset_ptr_lo: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
-                sampler_onset_ptr_hi: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
-                sampler_analysis_status: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                sampler_onset_ptr_lo: (0..MAX_SAMPLER_POOLS).map(|_| AtomicU32::new(0)).collect(),
+                sampler_onset_ptr_hi: (0..MAX_SAMPLER_POOLS).map(|_| AtomicU32::new(0)).collect(),
+                sampler_analysis_status: (0..MAX_SAMPLER_POOLS).map(|_| AtomicU32::new(0)).collect(),
                 rack_choke_keys: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
             },
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
             scheduler_snapshot_version: AtomicU64::new(0),
+            snapshot_handoff: SchedulerSnapshotHandoff::new(),
+            publish_coalesce_depth: AtomicU64::new(0),
+            pending_coalesced_publish: AtomicBool::new(false),
             live_macro_overrides: Mutex::new(HashMap::new()),
             rack_macro_runtime_values: Arc::new(RackMacroRuntimeValues::new()),
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
@@ -278,6 +281,7 @@ impl SequencerState {
             graph_control_commands: Mutex::new(Vec::new()),
             roll_commands: Mutex::new(Vec::new()),
             roll_recorded_hits: Mutex::new(Vec::new()),
+            live_trigger_stamps: crate::sequencer::LiveTriggerStampRing::default(),
             step_print_override: StepPrintOverride::default(),
             track_output_events: Mutex::new(Vec::new()),
             track_output_current_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
@@ -317,6 +321,7 @@ impl SequencerState {
             pending_accumulator_reset_all: AtomicBool::new(false),
             pending_accumulator_reset_tracks: std::array::from_fn(|_| AtomicBool::new(false)),
             quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox::default(),
+            scheduled_mixer_controls: crate::mixer_control::MixerControlMailbox::default(),
             song_playback: SongPlaybackMailbox::default(),
             song_manual_latch: AtomicU64::new(0),
             song_scene_latch: AtomicBool::new(false),
@@ -337,6 +342,10 @@ impl SequencerState {
 
     pub fn quantized_launches(&self) -> &crate::quantized_launch::QuantizedLaunchMailbox {
         &self.quantized_launches
+    }
+
+    pub fn scheduled_mixer_controls(&self) -> &crate::mixer_control::MixerControlMailbox {
+        &self.scheduled_mixer_controls
     }
 
     pub fn schedule_quantized_pattern_launch(

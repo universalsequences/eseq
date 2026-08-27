@@ -2,7 +2,7 @@
 
 A real-time audio graph engine in C11 with lock-free multi-threaded scheduling, live graph editing, and zero-allocation audio processing.
 
-- **Multi-threaded DAG scheduling** with Mach RT time-constraint promotion and OS Workgroup coordination
+- **Multi-threaded DAG scheduling** with Mach time constraints on macOS, SCHED_FIFO on Linux, and OS Workgroup coordination
 - **Live editing** — add, remove, and reconnect nodes while audio is playing
 - **Lock-free throughout** — MPMC work queue, SPSC parameter ring, batched edit queue
 - **Auto-summing** — multiple sources to one input transparently create hidden SUM nodes
@@ -24,7 +24,7 @@ int main() {
     initialize_engine(512, 48000);
     LiveGraph *lg = create_live_graph(16, 512, "demo", 2); // stereo
 
-    engine_enable_rt_time_constraint(1);
+    engine_enable_rt_scheduling(1);
     engine_start_workers(4);
 
     // Build a signal chain
@@ -53,9 +53,61 @@ All graph operations (`graph_connect`, `add_node`, `delete_node`, etc.) are queu
 void initialize_engine(int block_size, int sample_rate);
 void engine_start_workers(int n);
 void engine_stop_workers(void);
-void engine_enable_rt_time_constraint(int enable); // Mach RT scheduling (macOS)
-void engine_set_os_workgroup(void *oswg);           // OS Workgroup (macOS 10.16+)
+void engine_enable_rt_scheduling(int enable); // Mach RT (macOS), SCHED_FIFO (Linux)
+void engine_set_rt_priority(int priority);     // Linux SCHED_FIFO priority
+void engine_set_os_workgroup(void *oswg);      // OS Workgroup (macOS 10.16+)
 ```
+
+On Linux, eseq first requests `SCHED_FIFO`, which requires a nonzero
+`RLIMIT_RTPRIO`. If that request is denied, a non-audio helper asks the system
+RealtimeKit service for capped `SCHED_RR`; this is the zero-configuration path
+on stock PipeWire desktops. Before its first request, the helper deliberately
+sets the process's soft and hard `RLIMIT_RTTIME` to RealtimeKit's
+`RTTimeUSecMax` (or a pre-existing lower hard limit). Linux sends `SIGKILL` if
+an RT thread consumes that entire uninterrupted CPU budget. The audio callback
+and graph workers therefore make periodic, minimal blocking checkpoints while
+running under RealtimeKit's `SCHED_RR`; this resets the kernel accounting even
+when a callback is stalled waiting for graph work or heavy DSP keeps workers
+busy across consecutive blocks. Direct `SCHED_FIFO` threads do not take these
+checkpoints and retain their existing hot path. The limit still protects the
+host from a runaway realtime thread.
+
+For uncapped FIFO priorities, the repository ships
+[`packaging/eseq-realtime.conf`](packaging/eseq-realtime.conf), a PAM limits
+drop-in granting realtime-group members `rtprio 95` and unlimited locked memory.
+Provision a development or manually installed host with:
+
+```sh
+sudo groupadd --system --force realtime
+sudo install -Dm644 crates/sequencer/audiograph/packaging/eseq-realtime.conf \
+  /etc/security/limits.d/95-eseq-realtime.conf
+sudo usermod -aG realtime "$USER"
+```
+
+Log out completely and log back in after changing group membership; opening a
+new terminal inside the old login session is not sufficient. Verify the new
+session before launching eseq:
+
+```sh
+ulimit -r       # 95
+ulimit -l       # unlimited (some shells print "unlimited")
+```
+
+The drop-in is applied by `pam_limits` to login sessions. A service whose
+systemd unit overrides resource limits instead needs equivalent
+`LimitRTPRIO=95` and `LimitMEMLOCK=infinity` directives. Do not grant `CAP_SYS_NICE` to a development
+binary: file capabilities are lost whenever Cargo replaces the executable and
+grant broader scheduling authority than this group-scoped limit.
+
+At startup, eseq reports the policies and priorities actually observed on the
+worker and audio callback threads. With the drop-in, workers use `SCHED_FIFO`
+priority 20 and the callback uses priority 21. Without it, RealtimeKit normally
+grants `SCHED_RR` at its advertised cap: the helper reserves the top available
+step for the callback and keeps callback priority at least equal to worker
+priority when the cap has no headroom. If RealtimeKit or the system bus is also
+unavailable, threads remain `SCHED_OTHER` priority 0 and audio continues after
+a one-shot warning. Set `TINYSEQ_AUDIOGRAPH_RT_LOG=1` for per-thread promotion
+logs; `chrt -p <tid>` can independently inspect a thread from another shell.
 
 ### Graph Lifecycle
 

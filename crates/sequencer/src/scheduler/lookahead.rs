@@ -1252,7 +1252,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
                 let same_track_process_targets = target_track == trigger.track;
                 let mut effect_params = resolve_effect_params(snapshot, target_track, trigger.step);
-                effect_params.extend(resolve_track_send_params(snapshot, target_track, trigger.step));
+                effect_params.extend(resolve_track_send_params(
+                    snapshot,
+                    target_track,
+                    trigger.step,
+                ));
                 let mut instrument_params =
                     resolve_instrument_params(snapshot, target_track, trigger.step);
                 let midi_fx_params = if same_track_process_targets {
@@ -1535,6 +1539,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // NetworkTrigger here.
         if !generator_runtime.is_empty() {
             let mut generator_emissions = Vec::new();
+            let mut generator_control_emissions = Vec::new();
             if let Some(scratch) = scratch_runtime.as_mut() {
                 // Channel snapshot for chan-get: ticks in this chunk observe
                 // process-channel writes from earlier chunks (processes run
@@ -1547,7 +1552,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 // and cloning every name; failures are rare, so collect ids
                 // here and resolve names once, after the block.
                 let mut tick_failures: Vec<(u64, String)> = Vec::new();
-                generator_runtime.process_block(
+                generator_runtime.process_block_with_controls(
                     chunk_start_beats,
                     chunk_end_beats,
                     scheduled_until_sample,
@@ -1559,6 +1564,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         let fallback_state = input.state.clone();
                         let empty = crate::generator::GeneratorTickResult {
                             emitted: Vec::new(),
+                            controls: Vec::new(),
                             random_state,
                             state: fallback_state,
                         };
@@ -1579,6 +1585,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         }
                     },
                     &mut generator_emissions,
+                    &mut generator_control_emissions,
                 );
                 if !tick_failures.is_empty() {
                     let generator_names: std::collections::HashMap<u64, String> = scratch
@@ -1594,6 +1601,18 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         eprintln!("sequencer tick failed for {name} ({generator_id}): {error}");
                         state.report_generator_tick_error(generator_id, name, error);
                     }
+                }
+                // Mixer-control holds ride to the app thread through the
+                // mailbox; the frame drain applies due ones
+                // (docs/jaki-mixer-control-routes-spec.md).
+                for emission in generator_control_emissions.drain(..) {
+                    state.scheduled_mixer_controls().push(
+                        emission.engage_sample,
+                        emission.release_sample,
+                        emission.generator_index,
+                        emission.control.op,
+                        emission.control.target,
+                    );
                 }
             } else if debug_routing_enabled() {
                 eprintln!(

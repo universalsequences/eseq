@@ -81,7 +81,7 @@
       :fx-panel-border   '(0.26 0.26 0.27)
       :instrument-panel-bg '(0.21 0.21 0.22)
       :instrument-control-bg '(0.04 0.04 0.045)
-      :instrument-group-bg '(0.15 0.15 0.155)
+      :instrument-group-bg '(0.14 0.14 0.15)
       :instrument-group-selected-bg '(0.11 0.115 0.11)
       :mixer-strip-bg    '(0.16 0.16 0.17)
       :mixer-strip-selected-bg '(0.24 0.24 0.25)

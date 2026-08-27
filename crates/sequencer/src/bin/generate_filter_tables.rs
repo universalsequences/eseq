@@ -9,9 +9,9 @@
 //! generate_filter_tables [--out <dir>] [--probes <dir>] [--no-audio]
 //!
 //! `--out` defaults to the bundled factory directory
-//! (`content/filter-tables`). Same code, same output: the
-//! `bundled_factory_assets_match_their_recipes` test fails if the baked
-//! files drift from the recipes in code.
+//! (`content/filter-tables`). `bundled_factory_assets_match_their_recipes`
+//! verifies that the baked files match the recipes in code within the small
+//! documented tolerance required by cross-platform libm rounding.
 
 use std::path::PathBuf;
 

@@ -1,5 +1,4 @@
 use crate::*;
-use eseqlisp::metal_backend::MetalBackend;
 
 /// Values computed earlier in the loop iteration that the tick consumes.
 pub(crate) struct TickInputs {
@@ -121,7 +120,7 @@ fn sync_fx_param_bindings_delta(
 pub(crate) fn reactive_tick_and_render(
     mut app: &mut app::App,
     mut editor: &mut Editor,
-    backend: &mut MetalBackend,
+    backend: &mut AppBackend,
     ctx: &mut LoopCtx<'_>,
     inputs: TickInputs,
     last_render_at: &mut Instant,
@@ -153,6 +152,11 @@ pub(crate) fn reactive_tick_and_render(
     // effect chains this frame (installs, undo/redo, project load, scenes).
     // Change-detecting: writes to the graph only when the pad set differs.
     app.refresh_latency_compensation();
+
+    // Live note-on stamps (bead eseq-2awi): reposition held live-note targets
+    // onto the render-timeline beat the audio callback actually sounded them
+    // at, ahead of the release that writes them into the pattern.
+    apply_live_trigger_stamps(&ctx.shared.state, &ctx.shared.held_notes);
 
     // Rolled-hit recording (docs/rolling-core-spec.md 6): drain the
     // scheduler's per-hit feedback and flush released keys' batches into the
@@ -1488,6 +1492,11 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_transport_playhead = transport_playhead;
         }
         {
+            let analysis_generation = app.sample_analysis.cache().generation();
+            if analysis_generation != ctx.frame.prev_sampler_analysis_generation {
+                app.publish_all_sampler_analysis_runtime();
+                ctx.frame.prev_sampler_analysis_generation = analysis_generation;
+            }
             let ct = ctx.shared.current_track.load(Ordering::Relaxed);
             let analysis_key = if app.is_sampler_track(ct) {
                 let buffer_id = app.graph.track_buffer_ids.get(ct).copied().unwrap_or(-1);
@@ -1736,7 +1745,7 @@ pub(crate) fn reactive_tick_and_render(
                     .render_tiled(tiled_frame)
                     .map_err(|_| "render failed")?;
                 ui_loop_stats.note_frame(Duration::ZERO, render_started.elapsed());
-                if render_status == eseqlisp::metal_backend::TiledRenderStatus::Presented {
+                if render_status == TiledRenderStatus::Presented {
                     *last_render_at = Instant::now();
                     return Ok(TickFlow::Continue);
                 }
@@ -1760,7 +1769,7 @@ pub(crate) fn reactive_tick_and_render(
         let render_elapsed = render_started.elapsed();
         ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
         match render_status {
-            eseqlisp::metal_backend::TiledRenderStatus::Presented => {
+            TiledRenderStatus::Presented => {
                 editor.clear_needs_redraw();
                 if backend.agent_instrument_stub_animation_visible() {
                     stub_animation_cache.store(inputs.viewport_size, tiled_frame);
@@ -1769,7 +1778,7 @@ pub(crate) fn reactive_tick_and_render(
                 }
                 *last_render_at = Instant::now();
             }
-            eseqlisp::metal_backend::TiledRenderStatus::NotPresented => {
+            TiledRenderStatus::NotPresented => {
                 eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
                 *last_render_at = Instant::now();
             }

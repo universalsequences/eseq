@@ -34,12 +34,14 @@
 //! - conversion to linear magnitudes (`10^(dB/20)`) happens only when
 //!   baking, and the baked bank is what ships in the `.fltab` asset.
 //!
-//! Generation is fully deterministic: there is no wall-clock or ambient RNG
-//! input, and the one stochastic element ([`Element::Texture`]) derives all
-//! values from an LCG seeded by a `seed` stored in the recipe. The complete
-//! recipe is embedded in each asset's `recipe` metadata field, so an asset
-//! can always be re-baked bit-for-bit from its own header (guarded by
-//! `bundled_factory_assets_match_their_recipes`).
+//! Generation has no wall-clock or ambient RNG input, and the one stochastic
+//! element ([`Element::Texture`]) derives all values from an LCG seeded by a
+//! `seed` stored in the recipe. The complete recipe is embedded in each
+//! asset's `recipe` metadata field, so an asset can always be re-baked from
+//! its own header. Transcendental functions may round slightly differently
+//! between platforms; `bundled_factory_assets_match_their_recipes` guards a
+//! documented relative-error bound rather than requiring cross-platform bit
+//! identity.
 //!
 //! All content here is original: curves use conventional DSP shapes
 //! (slopes, resonant peaks, combs, formant-style peak sets) with
@@ -654,8 +656,9 @@ impl Element {
     }
 }
 
-/// Bake a recipe into the runtime magnitude bank. Deterministic: same recipe
-/// in, bit-identical table out.
+/// Bake a recipe into the runtime magnitude bank. Repeated bakes on one target
+/// are bit-identical; platform libm implementations may differ in their final
+/// few rounding bits for the transcendental operations used by recipes.
 pub fn bake(recipe: &Recipe) -> Result<MagnitudeTable, String> {
     if recipe.generator_version != GENERATOR_VERSION {
         return Err(format!(
@@ -2160,6 +2163,34 @@ mod tests {
         assert!(glide.passes_glide_bounds());
     }
 
+    /// Maximum relative error accepted when comparing a baked asset with a
+    /// fresh bake of its embedded recipe.
+    ///
+    /// Recipe evaluation chains f32 `log2`, trigonometric, exponential and
+    /// `powf` operations with accumulation and peak normalization. Those
+    /// operations are deterministic on one target, but Rust does not promise
+    /// bit-identical transcendental results across platform libm
+    /// implementations. A budget of 32 f32 epsilons covers the accumulated
+    /// final-bit rounding while remaining far below any meaningful change to
+    /// a linear-magnitude table.
+    const FACTORY_ASSET_MAX_RELATIVE_ERROR: f32 = 32.0 * f32::EPSILON;
+
+    fn assert_factory_asset_matches_bake(stem: &str, baked: &[f32], fresh: &[f32]) {
+        assert_eq!(baked.len(), fresh.len(), "{stem}: table length differs");
+        for (index, (&baked, &fresh)) in baked.iter().zip(fresh).enumerate() {
+            if baked == fresh {
+                continue;
+            }
+            let relative_error = (baked - fresh).abs() / baked.abs().max(fresh.abs());
+            assert!(
+                relative_error <= FACTORY_ASSET_MAX_RELATIVE_ERROR,
+                "{stem}: baked file has drifted from its recipe at magnitude {index}: \
+                 baked={baked}, fresh={fresh}, relative error={relative_error:e}, \
+                 tolerance={FACTORY_ASSET_MAX_RELATIVE_ERROR:e} — regenerate the factory assets"
+            );
+        }
+    }
+
     #[test]
     fn bundled_factory_assets_match_their_recipes() {
         let dir = bundled_asset_dir();
@@ -2182,11 +2213,10 @@ mod tests {
                 preset.stem
             );
             let rebaked = bake(&recipe).expect(preset.stem);
-            assert_eq!(
+            assert_factory_asset_matches_bake(
+                preset.stem,
                 asset.table.data.as_slice(),
                 rebaked.data.as_slice(),
-                "{}: baked file has drifted from its recipe — regenerate the factory assets",
-                preset.stem
             );
             // And the stem resolves through the normal asset lookup.
             assert_eq!(resolve_asset_path(preset.stem), Some(path));

@@ -111,6 +111,24 @@ impl SequencerState {
             .store(seconds.max(0.0).to_bits(), Ordering::Release);
     }
 
+    /// Render-frontier beat at `timestamp` plus one device block: where a
+    /// live trigger consumed by the NEXT audio callback will actually sound.
+    /// This is the record-as-heard fallback stamp for a press so short its
+    /// audio-thread stamp has not arrived by release (bead eseq-2awi): the
+    /// trigger is still in flight, so it sounds at the frontier — not at the
+    /// latency-subtracted press beat `record_beats_at_instant` yields.
+    pub fn record_frontier_beats_at_instant(&self, timestamp: Instant) -> Option<f64> {
+        let (anchor_beats, elapsed_secs) = self.transport.record_clock.sample(timestamp)?;
+        let bpm = self.transport.bpm.load(Ordering::Relaxed) as f64;
+        let block_secs = f32::from_bits(
+            self.transport
+                .record_latency_seconds
+                .load(Ordering::Relaxed),
+        )
+        .max(0.0) as f64;
+        Some(anchor_beats + (elapsed_secs + block_secs) * bpm / 60.0)
+    }
+
     pub fn record_beats_at_instant(&self, timestamp: Instant) -> Option<f64> {
         let (anchor_beats, elapsed_secs) = self.transport.record_clock.sample(timestamp)?;
         let bpm = self.transport.bpm.load(Ordering::Relaxed) as f64;
@@ -129,7 +147,10 @@ impl SequencerState {
         self.reset_playheads();
         self.transport.playing.store(true, Ordering::Relaxed);
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
-        self.publish_scheduler_snapshot();
+        // Transport atomics only: the published tracks are unchanged, so reuse
+        // their `Arc`s instead of deep-capturing (and later deep-freeing) the
+        // whole project. See `publish_transport_only` (bead eseq-sj01).
+        self.publish_transport_only();
     }
 
     pub fn stop_playback(&self) {
@@ -140,12 +161,12 @@ impl SequencerState {
         self.transport.record_clock.invalidate();
         self.reset_playheads();
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
-        self.publish_scheduler_snapshot();
+        self.publish_transport_only();
     }
 
     pub fn toggle_play(&self) -> bool {
         let playing = self.toggle_play_no_publish();
-        self.publish_scheduler_snapshot();
+        self.publish_transport_only();
         playing
     }
 

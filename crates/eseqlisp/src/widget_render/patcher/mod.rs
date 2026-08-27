@@ -29,6 +29,7 @@ use std::rc::Rc;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use crate::defmacro_library::{DefmacroLibrary, DefmacroPackage};
+use crate::ui::platform::has_primary_shortcut_modifier;
 
 pub use connect::{PatcherConnectOp, PatcherConnectReport};
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
@@ -1010,8 +1011,7 @@ use text::{
 
 use super::text_input::{TextEditOutcome, apply_text_entry_key};
 use super::{CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent};
-#[cfg(target_os = "macos")]
-use super::{MetalPrimitive, WidgetViewport};
+use super::{GpuPrimitive, WidgetViewport};
 use crate::layout::{
     Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_stable_widget_id,
 };
@@ -1188,7 +1188,7 @@ impl WidgetDefinition for PatcherWidget {
         {
             return handle_agentic_bubble_follow_up_key(node, key, state, bubble_id, key_event);
         }
-        if key_event.modifiers.contains(KeyModifiers::SUPER) {
+        if has_primary_shortcut_modifier(key_event.modifiers) {
             match key_event.code {
                 KeyCode::Enter => {
                     let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
@@ -1287,7 +1287,7 @@ impl WidgetDefinition for PatcherWidget {
                 }
                 KeyCode::Char('y') | KeyCode::Char('Y')
                     if state.selected_cable.is_some()
-                        && key_event.modifiers.contains(KeyModifiers::SUPER) =>
+                        && has_primary_shortcut_modifier(key_event.modifiers) =>
                 {
                     eprintln!(
                         "[patcher cmd-y] widget received selected_cable={:?} view_key={view_key}",
@@ -1348,7 +1348,7 @@ impl WidgetDefinition for PatcherWidget {
                 // A distinct binding rather than intent-detection on the prompt
                 // text: a modifier key is unambiguous.
                 KeyCode::Char('k') | KeyCode::Char('K')
-                    if key_event.modifiers.contains(KeyModifiers::SUPER)
+                    if has_primary_shortcut_modifier(key_event.modifiers)
                         && key_event.modifiers.contains(KeyModifiers::SHIFT) =>
                 {
                     let (instance_node_id, subject, position) =
@@ -1365,7 +1365,7 @@ impl WidgetDefinition for PatcherWidget {
                     Some(WidgetEvent::Custom(Value::Nil))
                 }
                 KeyCode::Char('k') | KeyCode::Char('K')
-                    if key_event.modifiers.contains(KeyModifiers::SUPER)
+                    if has_primary_shortcut_modifier(key_event.modifiers)
                         && !key_event.modifiers.contains(KeyModifiers::SHIFT) =>
                 {
                     open_agentic_bubble_for_context(node, key, &mut state)?;
@@ -1557,14 +1557,13 @@ impl WidgetDefinition for PatcherWidget {
         true
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
-        render::build_metal_primitives_for_patcher(node, viewport)
+    ) -> Vec<GpuPrimitive> {
+        render::build_primitives_for_patcher(node, viewport)
     }
 }
 

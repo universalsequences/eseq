@@ -16,19 +16,246 @@ use super::{
     instrument_sound_fingerprint, key_locked_live_instrument_params, mix_metronome,
     mute_group_winner_for_block_events, remap_route_after_track_delete,
     resolve_live_instrument_defaults,
-    resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
-    resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
-    select_output_channels, select_output_config, store_active_keyboard_note,
+    live_key_release_cuts_voice, resolve_live_keyboard_transpose,
+    resolve_snapshot_instrument_defaults,
+    resolve_slice, resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
+    select_output_channels, select_output_config, select_output_config_with_preferred_rate,
+    store_active_keyboard_note,
     swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
     ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
     BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
-    FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
-    HostTransportClockRuntime, MetronomeState, OutputDeviceConfig, OutputFormatRange,
-    RackSlotNoteOff, FALLBACK_SAMPLE_RATE,
+    FixedOutputBlocks, FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent,
+    GateOffTarget, HostTransportClockRuntime, MetronomeState, OutputBlockSizeObservation,
+    OutputBlockSizeVerifier, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
+    SliceTriggerVerdict, FALLBACK_SAMPLE_RATE,
 };
 use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
 use crate::sequencer::MAX_TRACKS;
 use crate::analysis::{pack_ptr, OnsetTableShared};
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires a default Linux audio output device"]
+fn linux_cpal_output_stream_starts_and_renders_callbacks() {
+    let engine = super::engine::init_engine().expect("Linux output stream should start");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let super::engine::Engine { _stream, lg_ptr, .. } = engine;
+    drop(_stream);
+    unsafe {
+        crate::audiograph::clear_os_workgroup();
+        crate::audiograph::engine_stop_workers();
+        crate::audiograph::destroy_live_graph(lg_ptr.0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn promote_current_thread_rt_promotes_above_workers_or_degrades_gracefully() {
+    super::rtkit::start(false);
+
+    fn current_policy_and_priority() -> (i32, i32) {
+        let mut param = libc::sched_param { sched_priority: 0 };
+        let mut policy: libc::c_int = 0;
+        let rc =
+            unsafe { libc::pthread_getschedparam(libc::pthread_self(), &mut policy, &mut param) };
+        assert_eq!(rc, 0, "pthread_getschedparam failed");
+        (policy, param.sched_priority)
+    }
+
+    // A dedicated thread stands in for the cpal callback thread so a
+    // successful promotion never leaves the test-runner thread at SCHED_FIFO.
+    std::thread::spawn(|| {
+        // With rt scheduling disabled the promotion must be a no-op.
+        unsafe {
+            crate::audiograph::set_rt_priority(20);
+            crate::audiograph::enable_rt_scheduling(false);
+            crate::audiograph::promote_current_thread_rt();
+        }
+        assert_eq!(current_policy_and_priority(), (libc::SCHED_OTHER, 0));
+
+        // Enabled, the callback thread requests base + 1. With an rtprio
+        // grant it lands on SCHED_FIFO above the workers; without one it logs
+        // the one-shot warning and continues at normal priority.
+        unsafe {
+            crate::audiograph::enable_rt_scheduling(true);
+            crate::audiograph::promote_current_thread_rt();
+            crate::audiograph::enable_rt_scheduling(false);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while unsafe { crate::audiograph::rt_status() }.callback_reported == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (policy, priority) = current_policy_and_priority();
+        if policy == libc::SCHED_FIFO {
+            assert_eq!(
+                priority, 21,
+                "callback thread must sit one step above the workers' base priority"
+            );
+        } else if policy == libc::SCHED_RR {
+            assert!(priority >= 1 && priority <= 21);
+        } else {
+            assert_eq!((policy, priority), (libc::SCHED_OTHER, 0));
+        }
+        let status = unsafe { crate::audiograph::rt_status() };
+        assert_eq!(status.callback_reported, 1);
+        assert_eq!(status.callback_policy, policy);
+        assert_eq!(status.callback_priority, priority);
+    })
+    .join()
+    .expect("promotion thread panicked");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn worker_startup_reports_achieved_policy() {
+    super::rtkit::start(false);
+    crate::audiograph::initialize_engine_for_test(128, 48_000);
+    unsafe {
+        crate::audiograph::set_rt_priority(20);
+        crate::audiograph::enable_rt_scheduling(true);
+        crate::audiograph::engine_start_workers(2);
+    }
+
+    let status = unsafe { crate::audiograph::rt_status() };
+    assert_eq!(status.worker_count, 2);
+    assert_eq!(status.workers_reported, 2);
+    if status.worker_policy == libc::SCHED_FIFO {
+        assert_eq!(status.worker_priority, 20);
+    } else if status.worker_policy == libc::SCHED_RR {
+        assert!(status.worker_priority >= 1 && status.worker_priority <= 20);
+    } else {
+        assert_eq!(status.worker_policy, libc::SCHED_OTHER);
+        assert_eq!(status.worker_priority, 0);
+    }
+    assert_eq!(status.callback_reported, 0);
+    assert_eq!(
+        status.callback_policy,
+        crate::audiograph::ENGINE_SCHED_POLICY_UNKNOWN
+    );
+
+    unsafe {
+        crate::audiograph::engine_stop_workers();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn scheduling_status_format_supports_fifo_and_rtkit_rr() {
+    let mut status = crate::audiograph::EngineRtStatus {
+        worker_count: 3,
+        workers_reported: 3,
+        worker_policy: libc::SCHED_FIFO,
+        worker_priority: 20,
+        callback_reported: 1,
+        callback_policy: libc::SCHED_FIFO,
+        callback_priority: 21,
+    };
+    assert_eq!(
+        crate::audiograph::format_rt_status(status),
+        "workers SCHED_FIFO priority 20, callback SCHED_FIFO priority 21"
+    );
+
+    status.worker_policy = libc::SCHED_RR;
+    status.worker_priority = 15;
+    status.callback_policy = libc::SCHED_RR;
+    status.callback_priority = 16;
+    assert_eq!(
+        crate::audiograph::format_rt_status(status),
+        "workers SCHED_RR priority 15, callback SCHED_RR priority 16"
+    );
+}
+
+#[test]
+fn output_block_size_verifier_confirms_match_and_reports_first_later_mismatch() {
+    let mut verifier = OutputBlockSizeVerifier::new(512);
+    assert_eq!(
+        verifier.observe(512),
+        Some(OutputBlockSizeObservation::Matched { frames: 512 })
+    );
+    assert_eq!(verifier.observe(512), None);
+    assert_eq!(
+        verifier.observe(256),
+        Some(OutputBlockSizeObservation::Mismatched {
+            requested: 512,
+            actual: 256,
+        })
+    );
+    assert_eq!(verifier.observe(1024), None);
+}
+
+// eseq-linux.73: CPAL/ALSA hands the callback whatever `avail_update` reports
+// (235 frames on the Linux workstation for a 512-frame request), and generated
+// DGenLisp spectral code only emits overlap-add output on hop-aligned block
+// boundaries — so a 235-frame graph block silences the wet arm of every
+// FFT-based effect. The adapter must therefore render exact blocks no matter
+// what the device asks for.
+#[test]
+fn fixed_output_blocks_renders_exact_blocks_for_odd_device_requests() {
+    const BLOCK: usize = 512;
+    const CHANNELS: usize = 2;
+    let mut blocks = FixedOutputBlocks::new(BLOCK, CHANNELS);
+    let mut render_sizes = Vec::new();
+    let mut next_sample = 0.0f32;
+
+    // The device request pattern PipeWire actually produced, plus a request
+    // larger than one block so the multi-block path is covered too.
+    let mut served = Vec::new();
+    for frames in [235usize, 235, 235, 1024, 7, 512] {
+        let mut device = vec![0.0f32; frames * CHANNELS];
+        blocks.serve(&mut device, |block| {
+            render_sizes.push(block.len());
+            for sample in block.iter_mut() {
+                *sample = next_sample;
+                next_sample += 1.0;
+            }
+        });
+        served.extend_from_slice(&device);
+    }
+
+    assert!(
+        render_sizes.iter().all(|len| *len == BLOCK * CHANNELS),
+        "every render must see one whole graph block, got {render_sizes:?}"
+    );
+    // Nothing is dropped or repeated: the device sees the rendered stream verbatim.
+    let expected: Vec<f32> = (0..served.len()).map(|index| index as f32).collect();
+    assert_eq!(served, expected, "adapter must not drop or duplicate samples");
+}
+
+// A host that already delivers exactly the requested block (CoreAudio) must not
+// pay any latency for the adapter: one device request renders one block and
+// drains it completely.
+#[test]
+fn fixed_output_blocks_adds_no_latency_when_device_matches_block() {
+    const BLOCK: usize = 512;
+    const CHANNELS: usize = 2;
+    let mut blocks = FixedOutputBlocks::new(BLOCK, CHANNELS);
+    for round in 0..4 {
+        let mut renders = 0;
+        let mut device = vec![0.0f32; BLOCK * CHANNELS];
+        blocks.serve(&mut device, |block| {
+            renders += 1;
+            block.fill(round as f32);
+        });
+        assert_eq!(renders, 1, "one device block must cost exactly one render");
+        assert!(device.iter().all(|sample| *sample == round as f32));
+    }
+}
+
+#[test]
+fn output_block_size_verifier_reports_first_callback_mismatch_once() {
+    let mut verifier = OutputBlockSizeVerifier::new(512);
+    assert_eq!(
+        verifier.observe(1024),
+        Some(OutputBlockSizeObservation::Mismatched {
+            requested: 512,
+            actual: 1024,
+        })
+    );
+    assert_eq!(verifier.observe(512), None);
+    assert_eq!(verifier.observe(256), None);
+}
 
 #[test]
 fn host_transport_clock_anchor_changes_only_on_transport_edges() {
@@ -286,6 +513,24 @@ fn key_locked_live_instrument_params_apply_per_note_after_base_offset() {
     assert_eq!(param_value(&c4_params, 1), Some(-12.0));
     assert_eq!(param_value(&d4_params, 1), Some(-7.0));
     assert_eq!(param_value(&offset_params, 1), Some(7.0));
+}
+
+/// Live jamming and playback of the recorded jam must agree: an ungated track
+/// is a one-shot on both paths, so key-up cuts nothing.
+#[test]
+fn live_key_release_only_cuts_gated_tracks() {
+    let state = SequencerState::new(1, vec![crate::sequencer::default_empty_effect_chain()]);
+    assert!(
+        state.pattern.track_params[0].is_gate_on(),
+        "tracks default to gated"
+    );
+    assert!(live_key_release_cuts_voice(&state, 0));
+
+    state.pattern.track_params[0].toggle_gate();
+    assert!(
+        !live_key_release_cuts_voice(&state, 0),
+        "an ungated track must ring out past key-up, matching the sequenced path"
+    );
 }
 
 #[test]
@@ -867,6 +1112,60 @@ fn active_keyboard_note_clear_by_lid_preserves_other_slot_voices() {
 }
 
 #[test]
+fn output_config_prefers_supported_graph_rate_hint_over_virtual_device_default() {
+    let ranges = [OutputFormatRange {
+        channels: 2,
+        min_sample_rate: 44_100,
+        max_sample_rate: 48_000,
+        supports_f32: true,
+    }];
+
+    assert_eq!(
+        select_output_config_with_preferred_rate(Some(48_000), 44_100, 2, ranges),
+        Some(OutputDeviceConfig {
+            sample_rate: 48_000,
+            channels: 2,
+        })
+    );
+}
+
+#[test]
+fn output_config_ignores_unsupported_graph_rate_hint() {
+    let ranges = [OutputFormatRange {
+        channels: 2,
+        min_sample_rate: 44_100,
+        max_sample_rate: 48_000,
+        supports_f32: true,
+    }];
+
+    assert_eq!(
+        select_output_config_with_preferred_rate(Some(96_000), 44_100, 2, ranges),
+        Some(OutputDeviceConfig {
+            sample_rate: 44_100,
+            channels: 2,
+        })
+    );
+}
+
+#[test]
+fn output_config_without_graph_rate_hint_keeps_device_default() {
+    let ranges = [OutputFormatRange {
+        channels: 2,
+        min_sample_rate: 44_100,
+        max_sample_rate: 48_000,
+        supports_f32: true,
+    }];
+
+    assert_eq!(
+        select_output_config_with_preferred_rate(None, 44_100, 2, ranges),
+        Some(OutputDeviceConfig {
+            sample_rate: 44_100,
+            channels: 2,
+        })
+    );
+}
+
+#[test]
 fn output_config_prefers_system_default_sample_rate_over_44100() {
     let ranges = [
         OutputFormatRange {
@@ -1214,6 +1513,10 @@ fn sampler_warp_ratio_speeds_source_when_project_bpm_is_higher() {
     let table = OnsetTableShared {
         onsets_frames: vec![0, 22_050],
         sample_len_frames: 44_100,
+        sample_rate: 44_100,
+        bpm: 120.0,
+        downbeat_frame: Some(0),
+        manual_edits: None,
     };
     let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
     state.runtime.sampler_onset_ptr_lo[0].store(lo.to_bits(), Ordering::Relaxed);
@@ -1225,6 +1528,51 @@ fn sampler_warp_ratio_speeds_source_when_project_bpm_is_higher() {
     assert!((ratio - (160.0 / 120.0)).abs() < 0.0001);
     assert!((sample_bpm - 120.0).abs() < 0.0001);
     assert!((project_bpm - 160.0).abs() < 0.0001);
+}
+
+#[test]
+fn transient_slice_resolution_selects_bounds_and_preserves_explicit_range_locks() {
+    let state = SequencerState::new(1, Vec::new());
+    state.runtime.sampler_analysis_status[0].store(2, Ordering::Relaxed);
+    let table = OnsetTableShared {
+        onsets_frames: vec![0, 4_000, 8_000],
+        sample_len_frames: 12_000,
+        sample_rate: 8_000,
+        bpm: 120.0,
+        downbeat_frame: Some(0),
+        manual_edits: None,
+    };
+    let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
+    state.runtime.sampler_onset_ptr_lo[0].store(lo.to_bits(), Ordering::Relaxed);
+    state.runtime.sampler_onset_ptr_hi[0].store(hi.to_bits(), Ordering::Relaxed);
+
+    let mut params = ScheduledSamplerParams {
+        slice_mode: 1.0,
+        slice_sensitivity: 1.0,
+        slice_base: -1.0,
+        end_point: 0.9,
+        end_point_locked: true,
+        ..ScheduledSamplerParams::default()
+    };
+    let mut transpose = 0.0;
+    assert_eq!(
+        resolve_slice(&state, 0, &mut params, &mut transpose),
+        SliceTriggerVerdict::Fire
+    );
+    assert!((params.start_point - 4_000.0 / 12_000.0).abs() < 1.0e-6);
+    assert_eq!(params.end_point, 0.9, "explicit end p-lock must win");
+    assert_eq!(transpose, 0.0, "slice playback must not repitch");
+
+    let mut out_of_range = ScheduledSamplerParams {
+        slice_mode: 1.0,
+        slice_sensitivity: 1.0,
+        ..ScheduledSamplerParams::default()
+    };
+    let mut transpose = 3.0;
+    assert_eq!(
+        resolve_slice(&state, 0, &mut out_of_range, &mut transpose),
+        SliceTriggerVerdict::Ignore
+    );
 }
 
 #[test]
@@ -1842,20 +2190,21 @@ fn live_keyboard_transpose_quantizes_after_transpose_ramp_offset() {
 }
 
 #[test]
-fn scheduled_triggers_respect_track_mute() {
+fn scheduled_triggers_fire_while_track_is_gain_muted() {
     let state = SequencerState::new(2, Vec::new());
     state.pattern.track_params[1].set_mute(true);
 
     assert!(track_accepts_scheduled_trigger(&state, 0));
-    assert!(!track_accepts_scheduled_trigger(&state, 1));
+    assert!(track_accepts_scheduled_trigger(&state, 1));
+    assert!(!track_accepts_scheduled_trigger(&state, 2));
 }
 
 #[test]
-fn scheduled_triggers_respect_solo_mutes() {
+fn scheduled_triggers_fire_while_track_is_muted_by_solo() {
     let state = SequencerState::new(3, Vec::new());
     state.pattern.track_params[0].set_solo(true);
 
     assert!(track_accepts_scheduled_trigger(&state, 0));
-    assert!(!track_accepts_scheduled_trigger(&state, 1));
-    assert!(!track_accepts_scheduled_trigger(&state, 2));
+    assert!(track_accepts_scheduled_trigger(&state, 1));
+    assert!(track_accepts_scheduled_trigger(&state, 2));
 }

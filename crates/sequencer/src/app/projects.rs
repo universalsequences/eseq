@@ -314,6 +314,7 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
             .collect(),
         ir: None,
         table: None,
+        sampler_slice_edits: None,
     }
 }
 
@@ -711,6 +712,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             .unwrap_or(crate::effects::NO_TRANSPORT_PHASE_PARAM),
         ir: slot.ir.clone(),
         table: slot.table.clone(),
+        sampler_slice_edits: slot.sampler_slice_edits.clone(),
     };
     snapshot.recompute_modulation_active_params(desc);
     snapshot
@@ -775,6 +777,7 @@ fn project_bus_pattern_snapshot_from_ui(
                     param_node_spans: Vec::new(),
                     ir: None,
                     table: None,
+                    sampler_slice_edits: None,
                 }
             })
             .collect(),
@@ -4439,7 +4442,7 @@ impl App {
             scene_slots,
             instrument_types: _,
             instrument_run_modes,
-            sample_paths: _,
+            sample_paths: pattern_sample_paths,
             sample_names: _,
             rack_tracks,
             process_chains,
@@ -4531,7 +4534,7 @@ impl App {
                     {
                         crate::effects::EffectSlotSnapshot::new_empty()
                     } else if self.is_sampler_track(track_idx) {
-                        let saved_slot =
+                        let mut saved_slot =
                             instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
                                 crate::project::ProjectEffectSlot {
                                     num_params: 0,
@@ -4545,8 +4548,26 @@ impl App {
                                     param_node_spans: Vec::new(),
                                     ir: None,
                                     table: None,
+                                    sampler_slice_edits: None,
                                 }
                             });
+                        // Validate the edits against the sample *this pattern*
+                        // saved, not against whatever is bound to the live
+                        // track right now: during a load `sampler_paths` still
+                        // reflects the previous project, and across scenes two
+                        // patterns on one track routinely hold different
+                        // samples. Only fall back to the live binding when the
+                        // pattern saved no path of its own.
+                        let resolved_sample_path = pattern_sample_paths
+                            .get(track_idx)
+                            .and_then(|path| path.clone())
+                            .map(PathBuf::from)
+                            .or_else(|| self.sampler_path_for_track(track_idx));
+                        let sample_path = resolved_sample_path
+                            .as_ref()
+                            .map(|path| path.to_string_lossy());
+                        saved_slot
+                            .discard_slice_edits_for_other_sample(sample_path.as_deref());
                         if saved_slot.num_params >= 4 {
                             // Sampler params already saved; sync to pick up params added after
                             // the project was written, such as enabled.
@@ -4594,6 +4615,7 @@ impl App {
                                     .unwrap_or(crate::effects::NO_TRANSPORT_PHASE_PARAM),
                                 ir: None,
                                 table: None,
+                                sampler_slice_edits: None,
                             }
                         }
                     } else {
@@ -4611,6 +4633,7 @@ impl App {
                                 param_node_spans: Vec::new(),
                                 ir: None,
                                 table: None,
+                                sampler_slice_edits: None,
                             }
                         });
                         if slot.num_params == 0 {
@@ -4929,6 +4952,7 @@ mod tests {
             param_node_spans: vec![1; 4],
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         migrate_legacy_dgen_effect_slot(&mut slot);
@@ -5065,6 +5089,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let restored =
@@ -5150,6 +5175,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         }
     }
 
@@ -5514,6 +5540,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
         let mut slots = vec![shimmer_slot];
         slots.resize_with(crate::lisp_host::MAX_CUSTOM_FX, Default::default);
@@ -5561,6 +5588,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let desc = crate::effects::EffectDescriptor {
@@ -5627,6 +5655,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let desc = crate::effects::EffectDescriptor {
@@ -5681,6 +5710,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let desc = crate::effects::EffectDescriptor {
@@ -5782,6 +5812,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let restored =
@@ -5852,6 +5883,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let restored =
@@ -5903,6 +5935,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let renamed_desc = crate::effects::EffectDescriptor {

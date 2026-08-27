@@ -139,6 +139,7 @@ fn migrate_slot(slot: &ProjectEffectSlot, desc: &EffectDescriptor) -> ProjectEff
             .collect(),
         ir: slot.ir.clone(),
         table: slot.table.clone(),
+        sampler_slice_edits: slot.sampler_slice_edits.clone(),
     };
     recompute_modulation_active_params(&mut migrated, desc);
     migrated

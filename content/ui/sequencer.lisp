@@ -704,14 +704,14 @@
         (sdf/fill (sdf/circle (* radius 0.8))
           (material
             :lighting (lighting :edge-min -0.12 :edge-max 0.9
-              :light (vec3 -0.3 0.7 0.8) :shininess 92.0)
+              :light (vec3 -0.3 0.7 3.8) :shininess 92.0)
             :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2)) (eseq.materials/color border border)))
           )
         
         (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
           (material
             :lighting (lighting :edge-min -0.15 :edge-max 1.0
-              :light (vec3 0.3 -2.0 2.8) :shininess 92.0)
+              :light (vec3 0.3 -2.0 0.8) :shininess 92.0)
             :color (* (if (= muted 1) 0.3 1) (eseq.materials/color offcol offcol))))
         ;; p-lock indicator
         (sdf/fill
@@ -1226,6 +1226,12 @@
 (def page-active-binding (track-id page)
   (bind-seq (slot-page-active-field track-id page)))
 
+(def expanded-cursor-param-binding (track-id)
+  (bind-seq (str "seqv-cursor-param-value-" track-id)))
+
+(def expanded-cursor-sync-index-binding (track-id)
+  (bind-seq (str "seqv-cursor-sync-index-" track-id)))
+
 (def step-active-binding (track step)
   (bind-seq (str "seq-track-step-active-" track "-" step)))
 
@@ -1241,9 +1247,11 @@
 (def step-param-haptic-binding (track mode step)
   (bind-seq (str "seq-track-step-param-haptic-" track "-" mode "-" step)))
 
-(def expanded-sync-current-label (track track-id)
-  (nth SEQ.sync-labels
-    (floor (+ 0.5 (eseq.seqv-track-params/seqv-param-value-at track 5 (track-current-step track track-id))))))
+(def expanded-sync-label-index (label)
+  (reduce |acc index|
+    (if (= label (nth SEQ.sync-labels index)) index acc)
+    0
+    (range 0 (len SEQ.sync-labels))))
 
 (def set-expanded-cursor (track track-id step)
   (do
@@ -1470,13 +1478,16 @@
           (label (param-header-name track mode)
             :font-size 11 :width (param-header-width mode) :color :white :bg :transparent))
         (if (= mode 5)
-          (box :width 8 :height 1.3
-            :key (str "expanded-sync-label-" track-id)
-            (label (expanded-sync-current-label track track-id)
-              :font-size 11 :color :white :bg :transparent))
+          (dropdown
+            :key (str "expanded-sync-picker-" track-id)
+            :value-index (expanded-cursor-sync-index-binding track-id)
+            :options SEQ.sync-labels
+            :on-change (lambda (label)
+              (set-expanded-current-param track track-id mode (expanded-sync-label-index label)))
+            :width 8 :height 1.3 :font-size 11)
           (number-picker :key (str "expanded-param-number-picker-" track-id)
             :border-color :white
-            :value (eseq.seqv-track-params/seqv-param-value-at track mode (track-current-step track track-id))
+            :value (expanded-cursor-param-binding track-id)
             :min (eseq.seqv-track-params/seqv-track-param-min track mode) :max (eseq.seqv-track-params/seqv-track-param-max track mode) :decimals (eseq.seqv-track-params/seqv-track-param-decimals track mode)
             :on-change (lambda (v) (set-expanded-current-param track track-id mode v))
             :width 8 :height 1.3 :font-size 11))
@@ -2164,12 +2175,12 @@
           :track-g (nth c 1)
           :track-b (nth c 2)
           :on-click |x y r| (select-group gidx))
-        (button (if (eseq.drum-rack-v2/collapsed? gidx) "▸" "▾")
+        (disclosure-button
           :key (group-element-key gidx "collapse")
-          :width 1.55 :height 1.4 :padding 0 :font-size 15
-          :background-color '(rgba 0.1 0.1 0.1 1.0)
-          :border-color :transparent
-          :color :white
+          :width 1.55 :height 1.4
+          :collapsed (eseq.drum-rack-v2/collapsed? gidx)
+          :surface-alpha 1.0
+          :focusable true
           :on-click |x y r| (eseq.drum-rack-v2/toggle-collapsed gidx))
         ;; Arm = drum-rack pad-play mode. A regular group is not an input
         ;; target and therefore contributes no Arm control or placeholder.

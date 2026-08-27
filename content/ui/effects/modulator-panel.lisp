@@ -15,7 +15,7 @@
 ;; reached through its identity compat alias while that file converts.
 
 (def modulator-param (inst name)
-  (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
+  (find-by-key (get inst :synth) :name name))
 
 (def modulator-knob (p label-text key)
   (subtree :key key

@@ -218,11 +218,14 @@ evaluated on an octave coordinate relative to the reference harmonic, so the
 runtime `cutoff` control transposes every preset by construction. Policies
 are explicit: sum in dB, per-frame peak normalization to 0 dB in the dB
 domain, clamp at the recipe's `db_floor`, convert to linear only when
-baking. Generation is fully deterministic (every stochastic element is
+baking. Generation has no ambient inputs (every stochastic element is
 seeded, and the seeds live in the recipe); the complete recipe is embedded in
-the asset's `recipe` field, and `bundled_factory_assets_match_their_recipes`
-fails if the baked files drift from the in-code definitions — regenerate with
-the bin after editing them.
+the asset's `recipe` field. Repeated bakes on one target are bit-identical, while platform
+libm implementations may differ in the final rounding bits of transcendental
+operations. `bundled_factory_assets_match_their_recipes` accepts only the
+small documented relative-error budget for that rounding and otherwise fails
+when baked files drift from the in-code definitions — regenerate with the bin
+after editing them.
 
 ### Element vocabulary
 

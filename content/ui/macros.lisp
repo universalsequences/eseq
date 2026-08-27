@@ -79,7 +79,7 @@
     0))
 
 (def macro-by-id (id)
-  (nth (filter |macro| (= (get macro :id) id) SEQ.macros) 0))
+  (find-by-key SEQ.macros :id id))
 
 (def macro-id-for-key (key)
   (let ((macro (macro-by-key key)))

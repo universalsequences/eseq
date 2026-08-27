@@ -2262,6 +2262,17 @@ pub(super) fn handle(
                     NEW_EFFECT_DRAFT_NAME,
                     slot,
                     track,
+                )?;
+                // Retain the compiled draft source directly: the draft name
+                // has no effects-library file, so the recorded-edit machinery
+                // must never fall back to a name-based disk read (eseq-u2h).
+                app.retain_compiled_effect_source_for_track_slot(
+                    track,
+                    slot,
+                    NEW_EFFECT_DRAFT_NAME,
+                    sequencer::lisp_host::EFFECT_TEMPLATE,
+                    file_path.parent().map(|parent| parent.to_path_buf()),
+                    sequencer::lisp_host::DGenSourceOrigin::Draft,
                 )
             }) {
                 Ok(()) => {}
@@ -2458,6 +2469,17 @@ pub(super) fn handle(
                     NEW_EFFECT_DRAFT_NAME,
                     slot,
                     track,
+                )?;
+                // Same as enter-new-effect-editor: retain the forked draft's
+                // compiled source so no path ever resolves the draft name
+                // against the effects library (eseq-u2h).
+                app.retain_compiled_effect_source_for_track_slot(
+                    track,
+                    slot,
+                    NEW_EFFECT_DRAFT_NAME,
+                    &starter_source,
+                    file_path.parent().map(|parent| parent.to_path_buf()),
+                    sequencer::lisp_host::DGenSourceOrigin::Draft,
                 )
             }) {
                 let _ = std::fs::remove_dir_all(&temp_dir);

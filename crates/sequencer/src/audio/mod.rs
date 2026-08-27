@@ -43,8 +43,12 @@ mod events;
 mod fire;
 mod graph_dispatch;
 mod params;
+#[cfg(target_os = "linux")]
+mod pipewire;
 mod rack;
 mod render;
+#[cfg(target_os = "linux")]
+mod rtkit;
 mod state;
 mod stream;
 mod voices;

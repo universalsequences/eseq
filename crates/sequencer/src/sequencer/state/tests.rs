@@ -291,6 +291,7 @@
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         }
     }
 
@@ -2789,6 +2790,7 @@
                     tensor_params: Vec::new(),
                     ir: None,
                     table: None,
+                    sampler_slice_edits: None,
                 }],
                 vec![EffectSlotSnapshot::new_empty()],
                 vec![EffectSlotSnapshot::new_empty()],
@@ -4650,6 +4652,18 @@
         assert_eq!(state.runtime.voice_lids.len(), MAX_SAMPLER_POOLS);
         assert_eq!(state.runtime.synth_node_ids.len(), MAX_SAMPLER_POOLS);
         assert_eq!(
+            state.runtime.sampler_analysis_status.len(),
+            MAX_SAMPLER_POOLS
+        );
+        assert_eq!(
+            state.runtime.sampler_onset_ptr_lo.len(),
+            MAX_SAMPLER_POOLS
+        );
+        assert_eq!(
+            state.runtime.sampler_onset_ptr_hi.len(),
+            MAX_SAMPLER_POOLS
+        );
+        assert_eq!(
             state.runtime.sampler_gatepitch_node_ids.len(),
             MAX_SAMPLER_POOLS
         );
@@ -5368,6 +5382,111 @@
         assert!(after.tracks[0].steps[3].active);
         assert_eq!(after.tracks[0].effect_slots[0].plocks[3][0], Some(0.75));
         assert_eq!(after.tracks[0].instrument_slot.plocks[3][0], Some(0.25));
+    }
+
+    /// Bead eseq-sj01: `start_playback`/`stop_playback`/`toggle_play` mutate
+    /// transport atomics only, so the published tracks are unchanged and their
+    /// `Arc`s must be reused — that removes a whole-project deep capture here
+    /// AND the matching whole-project deep free on whichever thread drops last.
+    #[test]
+    fn publish_transport_only_reuses_the_published_track_arcs() {
+        let state = make_state_with_tracks(3);
+        let before = state.latest_scheduler_snapshot();
+
+        state.transport.bpm.store(140, Ordering::Relaxed);
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        let after = state.publish_transport_only();
+
+        assert!(!Arc::ptr_eq(&before, &after), "a new snapshot is published");
+        assert_eq!(before.tracks.len(), after.tracks.len());
+        for (index, (old_track, new_track)) in
+            before.tracks.iter().zip(after.tracks.iter()).enumerate()
+        {
+            assert!(
+                Arc::ptr_eq(old_track, new_track),
+                "track {index} must be reused, not recaptured"
+            );
+        }
+        assert_eq!(after.transport.bpm, 140);
+        assert!(after.transport.playing);
+        assert_eq!(
+            after.transport.pattern_epoch,
+            before.transport.pattern_epoch + 1
+        );
+        assert!(Arc::ptr_eq(&after, &state.latest_scheduler_snapshot()));
+    }
+
+    /// The same guard `publish_scheduler_track` uses: a published track vector
+    /// that disagrees with the live track count is stale and must never be
+    /// republished as current.
+    #[test]
+    fn publish_transport_only_falls_back_to_a_full_capture_on_a_track_count_change() {
+        let state = make_state_with_tracks(2);
+        let before = state.latest_scheduler_snapshot();
+        assert_eq!(before.tracks.len(), 2);
+
+        state.transport.num_tracks.store(1, Ordering::Release);
+        let after = state.publish_transport_only();
+
+        assert_eq!(after.tracks.len(), 1, "the fallback recaptured the tracks");
+        assert_eq!(after.transport.num_tracks, 1);
+        assert!(!Arc::ptr_eq(&before.tracks[0], &after.tracks[0]));
+    }
+
+    /// Bead eseq-sj01: `coalesce_publishes` folds a multi-step transition into
+    /// one publication that lands after every mutation the scope performed.
+    #[test]
+    fn coalesce_publishes_emits_one_publication_after_the_scope() {
+        let state = make_state_with_tracks(1);
+        let before_version = state.scheduler_snapshot_version();
+
+        state.coalesce_publishes(|| {
+            state.transport.bpm.store(90, Ordering::Relaxed);
+            state.publish_scheduler_snapshot();
+            assert_eq!(
+                state.scheduler_snapshot_version(),
+                before_version,
+                "nothing publishes while the scope is open"
+            );
+            state.transport.bpm.store(91, Ordering::Relaxed);
+            state.publish_scheduler_snapshot();
+            state.coalesce_publishes(|| {
+                state.transport.bpm.store(92, Ordering::Relaxed);
+                state.publish_scheduler_snapshot();
+            });
+            assert_eq!(state.scheduler_snapshot_version(), before_version);
+        });
+
+        assert_eq!(state.scheduler_snapshot_version(), before_version + 1);
+        assert_eq!(state.latest_scheduler_snapshot().transport.bpm, 92);
+    }
+
+    /// A scope that publishes nothing must not manufacture a publication.
+    #[test]
+    fn coalesce_publishes_is_a_no_op_without_a_publish() {
+        let state = make_state_with_tracks(1);
+        let before_version = state.scheduler_snapshot_version();
+        state.coalesce_publishes(|| {});
+        assert_eq!(state.scheduler_snapshot_version(), before_version);
+    }
+
+    /// Every publication reaches the audio thread through the realtime handoff
+    /// ring, not through `latest_scheduler_snapshot`'s mutex (bead eseq-sj01).
+    #[test]
+    fn publishing_hands_the_snapshot_to_the_realtime_ring() {
+        let state = make_state_with_tracks(1);
+        let mut current = Arc::new(SequencerSnapshot::empty());
+        let mut version = state.scheduler_snapshot_version();
+        // Drain the publications made during construction.
+        state.snapshot_handoff().refresh(&mut current, &mut version);
+
+        state.transport.bpm.store(155, Ordering::Relaxed);
+        let published = state.publish_scheduler_snapshot();
+
+        assert!(state.snapshot_handoff().refresh(&mut current, &mut version));
+        assert!(Arc::ptr_eq(&current, &published));
+        assert_eq!(version, state.scheduler_snapshot_version());
     }
 
     #[test]

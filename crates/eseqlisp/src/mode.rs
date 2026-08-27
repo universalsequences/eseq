@@ -127,6 +127,11 @@ const ESEQLISP_BUILTINS: &[(&str, &str, &str)] = &[
         "Register a repeating hook that runs a quoted form on the host schedule.",
     ),
     (
+        "find-by-key",
+        "(find-by-key list :key value)",
+        "First map in list whose :key field equals value, or nil.",
+    ),
+    (
         "filter",
         "(filter fn xs)",
         "Return a list of items where fn returns truthy.",
@@ -228,13 +233,26 @@ pub fn completion_match(
     buffer: &Buffer,
     runtime_symbols: &[String],
     runtime_metadata: &HashMap<String, SymbolMetadata>,
+    module_names: &[String],
 ) -> Option<CompletionMatch> {
     let line = buffer.lines.get(buffer.cursor.0)?;
     let cursor_col = buffer.cursor.1.min(line.len());
-    let (start_col, prefix) = symbol_prefix(line, cursor_col)?;
+    let (start_col, prefix) = symbol_prefix(line, cursor_col).or_else(|| {
+        import_module_position(buffer, cursor_col).then(|| (cursor_col, String::new()))
+    })?;
     let prefix_lower = prefix.to_ascii_lowercase();
     let mut seen = HashSet::new();
-    let candidates = if prefix.starts_with(':') {
+    let candidates = if import_module_position(buffer, start_col) {
+        module_names
+            .iter()
+            .map(|label| CompletionItem {
+                label: label.clone(),
+                category: Some("module".to_string()),
+                signature: Some(format!("(import {label})")),
+                docs: Some("Installed package or importable module.".to_string()),
+            })
+            .collect()
+    } else if prefix.starts_with(':') {
         contextual_keyword_candidates(buffer, start_col, runtime_metadata)?
     } else {
         completion_candidates(mode, runtime_symbols, buffer)
@@ -267,11 +285,22 @@ pub fn completion_match(
 }
 
 pub fn has_completion_prefix(buffer: &Buffer) -> bool {
-    buffer
-        .lines
-        .get(buffer.cursor.0)
-        .and_then(|line| symbol_prefix(line, buffer.cursor.1.min(line.len())))
-        .is_some()
+    let Some(line) = buffer.lines.get(buffer.cursor.0) else {
+        return false;
+    };
+    let cursor_col = buffer.cursor.1.min(line.len());
+    symbol_prefix(line, cursor_col).is_some() || has_import_module_prefix(buffer)
+}
+
+pub fn has_import_module_prefix(buffer: &Buffer) -> bool {
+    let Some(line) = buffer.lines.get(buffer.cursor.0) else {
+        return false;
+    };
+    let cursor_col = buffer.cursor.1.min(line.len());
+    let start_col = symbol_prefix(line, cursor_col)
+        .map(|(start_col, _)| start_col)
+        .unwrap_or(cursor_col);
+    import_module_position(buffer, start_col)
 }
 
 pub fn highlight_line(
@@ -389,6 +418,11 @@ fn classify_token(
     None
 }
 
+fn import_module_position(buffer: &Buffer, prefix_start_col: usize) -> bool {
+    enclosing_form_tokens_before_cursor(buffer, prefix_start_col)
+        .is_some_and(|tokens| tokens.len() == 1 && tokens[0] == "import")
+}
+
 fn contextual_keyword_candidates(
     buffer: &Buffer,
     prefix_start_col: usize,
@@ -419,6 +453,24 @@ fn contextual_keyword_candidates(
 /// arguments in that form, so nested callback/list expressions do not disturb
 /// keyword/value pairing.
 fn enclosing_form_context(buffer: &Buffer, prefix_start_col: usize) -> Option<(String, bool)> {
+    let tokens = enclosing_form_tokens_before_cursor(buffer, prefix_start_col)?;
+    let callee = tokens.first()?.clone();
+
+    let mut expects_keyword = true;
+    for token in tokens.iter().skip(1) {
+        if expects_keyword && token.starts_with(':') {
+            expects_keyword = false;
+        } else if !expects_keyword {
+            expects_keyword = true;
+        }
+    }
+    Some((callee, expects_keyword))
+}
+
+fn enclosing_form_tokens_before_cursor(
+    buffer: &Buffer,
+    prefix_start_col: usize,
+) -> Option<Vec<String>> {
     let mut source = String::new();
     for (row, line) in buffer.lines.iter().enumerate().take(buffer.cursor.0 + 1) {
         if row == buffer.cursor.0 {
@@ -462,18 +514,7 @@ fn enclosing_form_context(buffer: &Buffer, prefix_start_col: usize) -> Option<(S
         }
     }
     let open = *stack.last()?;
-    let tokens = top_level_form_tokens(&source[open + 1..]);
-    let callee = tokens.first()?.clone();
-
-    let mut expects_keyword = true;
-    for token in tokens.iter().skip(1) {
-        if expects_keyword && token.starts_with(':') {
-            expects_keyword = false;
-        } else if !expects_keyword {
-            expects_keyword = true;
-        }
-    }
-    Some((callee, expects_keyword))
+    Some(top_level_form_tokens(&source[open + 1..]))
 }
 
 fn top_level_form_tokens(source: &str) -> Vec<String> {
@@ -808,10 +849,78 @@ mod tests {
             &buffer,
             &[String::from("seq-step"), String::from("seq-track-steps")],
             &HashMap::new(),
+            &[],
         )
         .unwrap();
         assert_eq!(result.start_col, 1);
         assert!(result.items.iter().any(|item| item.label == "seq-step"));
+    }
+
+    #[test]
+    fn import_completion_uses_dotted_module_prefix_in_first_argument() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(import alez.j");
+        buffer.cursor = (0, buffer.lines[0].len());
+        let modules = vec![
+            "alez.jaki".to_string(),
+            "alez.jaki.core".to_string(),
+            "alez.jaki.surface".to_string(),
+            "eseq.mixer".to_string(),
+        ];
+
+        let result = completion_match(
+            &BufferMode::ESeqLisp,
+            &buffer,
+            &["runtime-symbol".to_string()],
+            &HashMap::new(),
+            &modules,
+        )
+        .expect("import module completion");
+        let labels = result.items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>();
+
+        assert_eq!(result.start_col, "(import ".len());
+        assert_eq!(result.prefix, "alez.j");
+        assert_eq!(
+            labels,
+            vec!["alez.jaki", "alez.jaki.core", "alez.jaki.surface"]
+        );
+    }
+
+    #[test]
+    fn import_completion_supports_an_empty_first_argument() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(import ");
+        buffer.cursor = (0, buffer.lines[0].len());
+
+        let result = completion_match(
+            &BufferMode::ESeqLisp,
+            &buffer,
+            &[],
+            &HashMap::new(),
+            &["alez.jaki".to_string(), "eseq.mixer".to_string()],
+        )
+        .expect("empty import completion");
+
+        assert_eq!(result.start_col, buffer.cursor.1);
+        assert_eq!(result.prefix, "");
+        assert_eq!(result.items.len(), 2);
+        assert!(super::has_completion_prefix(&buffer));
+    }
+
+    #[test]
+    fn import_modules_are_not_offered_after_the_first_argument() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(import foo :refer (al");
+        buffer.cursor = (0, buffer.lines[0].len());
+
+        let result = completion_match(
+            &BufferMode::ESeqLisp,
+            &buffer,
+            &["alpha-runtime".to_string()],
+            &HashMap::new(),
+            &["alez.jaki.core".to_string()],
+        )
+        .expect("ordinary symbol completion inside refer list");
+
+        assert!(result.items.iter().any(|item| item.label == "alpha-runtime"));
+        assert!(!result.items.iter().any(|item| item.label == "alez.jaki.core"));
     }
 
     #[test]
@@ -832,7 +941,8 @@ mod tests {
             },
         )]);
 
-        let result = completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata).unwrap();
+        let result =
+            completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata, &[]).unwrap();
 
         assert_eq!(result.start_col, 5);
         assert_eq!(
@@ -859,7 +969,8 @@ mod tests {
             },
         )]);
 
-        let result = completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata).unwrap();
+        let result =
+            completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata, &[]).unwrap();
         let labels = result.items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>();
 
         assert_eq!(labels, vec![":init", ":resolution", ":tick"]);
@@ -878,7 +989,8 @@ mod tests {
             },
         )]);
 
-        let result = completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata).unwrap();
+        let result =
+            completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata, &[]).unwrap();
         let labels = result.items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>();
 
         assert_eq!(labels, vec![":at", ":track"]);
@@ -897,7 +1009,9 @@ mod tests {
             },
         )]);
 
-        assert!(completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata).is_none());
+        assert!(
+            completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata, &[]).is_none()
+        );
     }
 
     #[test]
@@ -917,7 +1031,8 @@ mod tests {
             },
         )]);
 
-        let result = completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata).unwrap();
+        let result =
+            completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata, &[]).unwrap();
 
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].label, ":background");
@@ -948,6 +1063,7 @@ mod tests {
             &buffer,
             &[String::from("polybook-from-eseqlisp-runtime")],
             &HashMap::new(),
+            &[],
         )
         .expect("DGenLisp manifest should provide polyblep completions");
         let polyblep = result
@@ -979,7 +1095,7 @@ mod tests {
         buffer.cursor = (0, 6);
 
         assert!(
-            completion_match(&BufferMode::ESeqLisp, &buffer, &[], &HashMap::new()).is_none(),
+            completion_match(&BufferMode::ESeqLisp, &buffer, &[], &HashMap::new(), &[]).is_none(),
             "ESeqLisp buffers should complete from ESeqLisp symbols, not DGenLisp"
         );
     }
@@ -1044,6 +1160,7 @@ mod tests {
             &buffer,
             &[String::from("seq-step")],
             &metadata,
+            &[],
         )
         .unwrap();
         let item = result
@@ -1064,6 +1181,7 @@ mod tests {
             &buffer,
             &[String::from("MODUM_DELAY")],
             &HashMap::new(),
+            &[],
         )
         .unwrap();
         assert!(result.items.iter().any(|item| item.label == "MODUM_DELAY"));
@@ -1073,8 +1191,14 @@ mod tests {
     fn completion_keeps_exact_special_form_match_visible() {
         let mut buffer = Buffer::from_text(0, "*test*", "(def");
         buffer.cursor = (0, 4);
-        let result = completion_match(&BufferMode::ESeqLisp, &buffer, &[], &HashMap::new())
-            .expect("exact special form should still produce a completion item");
+        let result = completion_match(
+            &BufferMode::ESeqLisp,
+            &buffer,
+            &[],
+            &HashMap::new(),
+            &[],
+        )
+        .expect("exact special form should still produce a completion item");
 
         assert!(result.items.iter().any(|item| item.label == "def"));
     }

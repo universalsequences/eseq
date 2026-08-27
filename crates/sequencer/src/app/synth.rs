@@ -485,6 +485,11 @@ impl App {
             self.state.schedule_mod_resync();
         }
         if self.is_sampler_track(track) {
+            // Slice controls are host-resolved at trigger time and deliberately
+            // have no sampler/modulator DSP state cell to push live.
+            if idx == u32::MAX as u64 {
+                return;
+            }
             let sample_rate = self.graph.sample_rate as f32;
             let (idx, fvalue) = match param_idx {
                 0 => (
@@ -951,6 +956,11 @@ impl App {
             self.state.schedule_mod_resync();
         }
         if route.instrument_type == InstrumentType::Sampler {
+            // Slice controls are host-resolved at trigger time and deliberately
+            // have no sampler/modulator DSP state cell to push live.
+            if idx == u32::MAX as u64 {
+                return;
+            }
             let sample_rate = route
                 .sample_rate
                 .unwrap_or(self.graph.sample_rate.max(1) as f32);

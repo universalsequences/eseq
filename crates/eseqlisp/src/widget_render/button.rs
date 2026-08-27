@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MouseEventOutcome,
+    CellBuffer, EventOutput, GpuPrimitive, GpuProportionalTextPrimitive, MouseEventOutcome,
     PointerEvent, WidgetDefinition, WidgetEvent, get_f32_prop, label::label_text_row, ndc_bounds,
     plock_active, plock_color, resolve_named_color, styled_cell,
 };
@@ -153,45 +153,23 @@ fn icon_value(props: &HashMap<String, Value>) -> Option<f32> {
 }
 
 fn click_info(phase: &str, modifiers: KeyModifiers) -> Value {
-    let mut info = HashMap::new();
+    let mut info = super::pointer_modifier_info(modifiers);
     info.insert(
         "phase".to_string(),
         std::rc::Rc::new(std::cell::RefCell::new(Value::String(phase.to_string()))),
     );
-    info.insert(
-        "shift".to_string(),
-        std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(
-            modifiers.contains(KeyModifiers::SHIFT),
-        ))),
-    );
-    info.insert(
-        "alt".to_string(),
-        std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(
-            modifiers.contains(KeyModifiers::ALT),
-        ))),
-    );
-    let super_pressed = modifiers.contains(KeyModifiers::SUPER);
-    info.insert(
-        "super".to_string(),
-        std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(super_pressed))),
-    );
-    info.insert(
-        "meta".to_string(),
-        std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(super_pressed))),
-    );
     Value::Map(info)
 }
 
-#[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: super::WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.001;
     }
+    let radius_px = super::ui_design_px(radius_px);
     let px_h = (rect.height * viewport.cell_h).max(1.0);
     ((radius_px * 2.0) / px_h).clamp(0.001, 1.0)
 }
 
-#[cfg(target_os = "macos")]
 fn button_icon_rect(rect: Rect) -> Rect {
     let icon_size = rect.height.min(1.08);
     Rect {
@@ -202,14 +180,12 @@ fn button_icon_rect(rect: Rect) -> Rect {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn button_icon_text_inset(rect: Rect) -> f32 {
     let icon_rect = button_icon_rect(rect);
     (icon_rect.col - rect.col) + icon_rect.width + 0.42
 }
 
-#[cfg(target_os = "macos")]
-const BUTTON_ICON_SHADER: &str = r#"
+const BUTTON_ICON_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float button_icon_box(float2 p, float2 b)
 {
     float2 q = abs(p) - b;
@@ -336,10 +312,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#;
+"#, super::wgsl::BUTTON_ICON_SHADER);
 
-#[cfg(target_os = "macos")]
-pub(crate) const BUTTON_SURFACE_SHADER: &str = r#"
+pub(crate) const BUTTON_SURFACE_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float button_surface_rounded_rect(float2 p, float2 size, float radius)
 {
     float2 q = abs(p) - (size - float2(radius));
@@ -436,7 +411,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#;
+"#, super::wgsl::BUTTON_SURFACE_SHADER);
 
 impl WidgetDefinition for ButtonWidget {
     fn names(&self) -> &'static [&'static str] {
@@ -607,22 +582,24 @@ impl WidgetDefinition for ButtonWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
-    fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
+    fn fragment_shader(
+        &self,
+        widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
         if widget_type == "button-icon" {
-            Some(BUTTON_ICON_SHADER)
+            BUTTON_ICON_SHADER.source(backend)
         } else {
-            Some(BUTTON_SURFACE_SHADER)
+            BUTTON_SURFACE_SHADER.source(backend)
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: super::WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let mut prims = Vec::new();
         let bg = variant_bg(&node.props);
         if bg.a > 0.0 {
@@ -630,7 +607,7 @@ impl WidgetDefinition for ButtonWidget {
             let px_w = node.rect.width * viewport.cell_w;
             let px_h = node.rect.height * viewport.cell_h;
             let corner_radius_px = get_f32_prop(&node.props, "corner-radius", 12.0).max(0.0);
-            prims.push(MetalPrimitive::WidgetInstance {
+            prims.push(GpuPrimitive::WidgetInstance {
                 widget_type: "button".to_string(),
                 instance: super::WidgetInstance {
                     ndc_min,
@@ -667,7 +644,7 @@ impl WidgetDefinition for ButtonWidget {
             let (ndc_min, ndc_max) = ndc_bounds(icon_rect, viewport);
             let px_w = icon_rect.width * viewport.cell_w;
             let px_h = icon_rect.height * viewport.cell_h;
-            prims.push(MetalPrimitive::WidgetInstance {
+            prims.push(GpuPrimitive::WidgetInstance {
                 widget_type: "button-icon".to_string(),
                 instance: super::WidgetInstance {
                     ndc_min,
@@ -709,8 +686,8 @@ impl WidgetDefinition for ButtonWidget {
             text_props
                 .entry("v-align".to_string())
                 .or_insert_with(|| Value::Keyword("center".to_string()));
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: label_text_row(&text_props, node.rect),
                     col: text_col,
                     align_width,
@@ -743,7 +720,6 @@ mod tests {
         )
     }
 
-    #[cfg(target_os = "macos")]
     fn test_viewport() -> super::super::WidgetViewport {
         super::super::WidgetViewport {
             vp_w: 100.0,
@@ -852,7 +828,6 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn button_metal_centers_text_vertically() {
         let props = HashMap::from([
@@ -863,11 +838,11 @@ mod tests {
         let node = test_button_node(props);
         let viewport = test_viewport();
 
-        let prims = ButtonWidget.build_metal_primitives("button", &node, viewport);
+        let prims = ButtonWidget.build_primitives("button", &node, viewport);
         let background_is_marked_background = prims.iter().any(|prim| {
             matches!(
                 prim,
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     is_background: true,
                     ..
@@ -881,7 +856,7 @@ mod tests {
         let text = prims
             .iter()
             .find_map(|prim| match prim {
-                MetalPrimitive::ProportionalText(text) => Some(text),
+                GpuPrimitive::ProportionalText(text) => Some(text),
                 _ => None,
             })
             .expect("button should emit centered text");
@@ -892,7 +867,6 @@ mod tests {
         assert!((text.h_align - 0.5).abs() < 0.0001);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn button_metal_background_carries_surface_detail_colors() {
         let props = HashMap::from([
@@ -909,11 +883,11 @@ mod tests {
             ("shadow-color".to_string(), color_value(0.0, 0.0, 0.0, 0.3)),
         ]);
         let node = test_button_node(props);
-        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let instance = prims
             .iter()
             .find_map(|prim| match prim {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     is_background: true,
@@ -959,7 +933,6 @@ mod tests {
         assert!(!BUTTON_WIDGET.bindable_props().contains(&"shape"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn active_tab_button_sets_tab_shape_flag() {
         let node = test_button_node(HashMap::from([
@@ -968,11 +941,11 @@ mod tests {
             ("active".to_string(), Value::Bool(true)),
         ]));
 
-        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let instance = prims
             .iter()
             .find_map(|prim| match prim {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     is_background: true,
@@ -984,7 +957,6 @@ mod tests {
         assert_eq!(instance.uniform_a[0], 1.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn inactive_tab_button_uses_normal_shape_flag() {
         let node = test_button_node(HashMap::from([
@@ -993,11 +965,11 @@ mod tests {
             ("active".to_string(), Value::Bool(false)),
         ]));
 
-        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let instance = prims
             .iter()
             .find_map(|prim| match prim {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     is_background: true,
@@ -1009,7 +981,6 @@ mod tests {
         assert_eq!(instance.uniform_a[0], 0.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn button_metal_left_aligns_icon_text_when_requested() {
         let node = test_button_node(HashMap::from([
@@ -1019,11 +990,11 @@ mod tests {
             ("font-size".to_string(), Value::Number(11.0)),
         ]));
 
-        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let text = prims
             .iter()
             .find_map(|prim| match prim {
-                MetalPrimitive::ProportionalText(text) => Some(text),
+                GpuPrimitive::ProportionalText(text) => Some(text),
                 _ => None,
             })
             .expect("button should emit text");
@@ -1037,7 +1008,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn button_metal_respects_custom_corner_radius_and_keeps_existing_default() {
         let background = (
@@ -1066,10 +1036,10 @@ mod tests {
 
         let corner_radius = |node: &LayoutNode| {
             ButtonWidget
-                .build_metal_primitives("button", node, test_viewport())
+                .build_primitives("button", node, test_viewport())
                 .into_iter()
                 .find_map(|prim| match prim {
-                    MetalPrimitive::WidgetInstance {
+                    GpuPrimitive::WidgetInstance {
                         widget_type,
                         instance,
                         is_background: true,
@@ -1085,7 +1055,6 @@ mod tests {
         assert!((corner_radius(&oversized_node) - 1.0).abs() < 0.0001);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn button_metal_resolves_reactive_corner_radius_at_draw_time() {
         let slots = crate::reactive::ReactiveBindingStore::default();
@@ -1117,10 +1086,10 @@ mod tests {
         ]));
         let render_radius = || {
             ButtonWidget
-                .build_metal_primitives("button", &node, test_viewport())
+                .build_primitives("button", &node, test_viewport())
                 .into_iter()
                 .find_map(|prim| match prim {
-                    MetalPrimitive::WidgetInstance {
+                    GpuPrimitive::WidgetInstance {
                         widget_type,
                         instance,
                         is_background: true,
@@ -1135,7 +1104,6 @@ mod tests {
         assert!((render_radius() - (4.0 / 30.0)).abs() < 0.0001);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn button_metal_resolves_reactive_active_colors_at_draw_time() {
         let slots = crate::reactive::ReactiveBindingStore::default();
@@ -1168,11 +1136,11 @@ mod tests {
             ),
         ]));
 
-        let inactive_prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let inactive_prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let inactive_bg = inactive_prims
             .iter()
             .find_map(|prim| match prim {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     is_background: true,
@@ -1183,11 +1151,11 @@ mod tests {
         assert_eq!(inactive_bg, [0.1, 0.2, 0.3, 1.0]);
 
         slots.write_float("BUTTON_TEST", "active", 1.0);
-        let active_prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let active_prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let active_bg = active_prims
             .iter()
             .find_map(|prim| match prim {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     is_background: true,

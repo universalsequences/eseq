@@ -11,8 +11,7 @@ use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
-use super::{MetalPatchCablePrimitive, MetalPrimitive, MetalRectPrimitive, WidgetViewport};
+use super::{GpuPatchCablePrimitive, GpuPrimitive, GpuRectPrimitive, WidgetViewport};
 
 pub struct EventViewWidget;
 
@@ -92,7 +91,6 @@ struct EventPoint {
     color_t: Option<f32>,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct HeatmapCell {
     brightness: f32,
@@ -327,7 +325,6 @@ fn prop_usize(props: &HashMap<String, Value>, key: &str, default: usize) -> usiz
         .unwrap_or(default)
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug)]
 struct IsoCube {
     rect: Rect,
@@ -341,7 +338,6 @@ struct IsoCube {
     z_row: f32,
 }
 
-#[cfg(target_os = "macos")]
 impl IsoCube {
     fn new(
         rect: Rect,
@@ -360,7 +356,7 @@ impl IsoCube {
             width: (rect.width - padding * 2.0).max(1.0),
             height: (rect.height - padding * 2.0).max(1.0),
         };
-        let stroke_safe_inset_px = 1.0_f32;
+        let stroke_safe_inset_px = super::ui_design_px(1.0);
         let drawing_col_px = drawing_rect.col * cell_w + stroke_safe_inset_px;
         let drawing_row_px = drawing_rect.row * cell_h + stroke_safe_inset_px;
         let drawing_width_px = (drawing_rect.width * cell_w - stroke_safe_inset_px * 2.0).max(1.0);
@@ -437,7 +433,6 @@ impl IsoCube {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn rotate_point([x, y, z]: [f32; 3], rotation: EventViewRotation) -> [f32; 3] {
     let (yaw_sin, yaw_cos) = rotation.yaw.sin_cos();
     let yaw_x = x * yaw_cos + z * yaw_sin;
@@ -450,22 +445,20 @@ fn rotate_point([x, y, z]: [f32; 3], rotation: EventViewRotation) -> [f32; 3] {
     ]
 }
 
-#[cfg(target_os = "macos")]
 fn color_with_alpha(color: Color, alpha: f32) -> Color {
     let [r, g, b, a] = color.to_rgba();
     Color::rgba(r, g, b, (a * alpha).clamp(0.0, 1.0))
 }
 
-#[cfg(target_os = "macos")]
 fn push_sdf_segment(
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
     start: [f32; 2],
     end: [f32; 2],
     radius_px: f32,
     color: Color,
 ) {
     let radius_px = radius_px.max(0.1);
-    primitives.push(MetalPrimitive::PatchCable(MetalPatchCablePrimitive {
+    primitives.push(GpuPrimitive::PatchCable(GpuPatchCablePrimitive {
         start,
         control1: start,
         control2: end,
@@ -478,9 +471,8 @@ fn push_sdf_segment(
     }));
 }
 
-#[cfg(target_os = "macos")]
 fn push_sdf_dot(
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
     center: [f32; 2],
     radius_px: f32,
     color: Color,
@@ -488,16 +480,17 @@ fn push_sdf_dot(
     push_sdf_segment(primitives, center, center, radius_px, color);
 }
 
-#[cfg(target_os = "macos")]
 fn push_iso_cube(
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
     props: &HashMap<String, Value>,
     cube: IsoCube,
 ) {
     let edge = resolve_named_color(props, "cube-color", Color::rgba(0.20, 0.43, 0.58, 0.55));
     let grid = resolve_named_color(props, "grid-color", Color::rgba(0.13, 0.27, 0.36, 0.32));
-    let edge_radius_px = get_f32_prop(props, "cube-line-radius-px", 0.72).max(0.1);
-    let grid_radius_px = get_f32_prop(props, "grid-line-radius-px", 0.38).max(0.1);
+    let edge_radius_px =
+        super::ui_design_px(get_f32_prop(props, "cube-line-radius-px", 0.72).max(0.1));
+    let grid_radius_px =
+        super::ui_design_px(get_f32_prop(props, "grid-line-radius-px", 0.38).max(0.1));
 
     let p = |x, y, z| cube.project(x, y, z);
     for t in [0.25_f32, 0.5, 0.75] {
@@ -680,20 +673,19 @@ impl WidgetDefinition for EventViewWidget {
         super::AnimationFramePolicy::LayoutStatic
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let points = parsed_events(&node.props);
         let bg = resolve_named_color(
             &node.props,
             "background",
             Color::rgba(0.02, 0.025, 0.03, 1.0),
         );
-        let mut primitives = vec![MetalPrimitive::Rect(MetalRectPrimitive {
+        let mut primitives = vec![GpuPrimitive::Rect(GpuRectPrimitive {
             rect: node.rect,
             color: bg,
         })];
@@ -726,7 +718,7 @@ impl WidgetDefinition for EventViewWidget {
                         if cell.brightness <= 0.0 {
                             continue;
                         }
-                        primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                        primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                             rect: Rect {
                                 row: node.rect.row + y as f32 * cell_h,
                                 col: node.rect.col + x as f32 * cell_w,
@@ -739,7 +731,9 @@ impl WidgetDefinition for EventViewWidget {
                 }
             }
             EventViewRenderer::Isometric => {
-                let radius = get_f32_prop(&node.props, "point-radius-px", 3.2).max(0.5);
+                let radius = super::ui_design_px(
+                    get_f32_prop(&node.props, "point-radius-px", 3.2).max(0.5),
+                );
                 let cube_padding = get_f32_prop(&node.props, "cube-padding", 0.0).max(0.0);
                 let mut rotation = get_rotation(node);
                 if prop_bool(&node.props, "auto-rotate", false) {
@@ -958,7 +952,6 @@ mod tests {
         assert!(size.height.is_finite() && size.height > 0.0);
     }
 
-    #[cfg(target_os = "macos")]
     fn layout_node(props: HashMap<String, Value>) -> LayoutNode {
         LayoutNode {
             widget_id: 99,
@@ -980,7 +973,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn viewport() -> WidgetViewport {
         WidgetViewport {
             cell_w: 10.0,
@@ -997,7 +989,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn viewport_at(time_seconds: f32) -> WidgetViewport {
         WidgetViewport {
             time_seconds,
@@ -1005,7 +996,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn heatmap_renderer_produces_event_primitives() {
         let mut props = props_with_events(vec![event(1.0, 1.0, 0.0, 0.75)]);
@@ -1014,16 +1004,15 @@ mod tests {
             Value::Keyword("heatmap".to_string()),
         );
         let prims =
-            EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &layout_node(props), viewport());
+            EVENT_VIEW_WIDGET.build_primitives("event-view", &layout_node(props), viewport());
         assert!(
             prims
                 .iter()
-                .any(|prim| matches!(prim, MetalPrimitive::Rect(_)))
+                .any(|prim| matches!(prim, GpuPrimitive::Rect(_)))
         );
         assert!(prims.len() > 1);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn heatmap_renderer_can_color_events_by_numeric_channel() {
         let mut props = props_with_events(vec![event(1.0, 1.0, 24.0, 1.0)]);
@@ -1057,9 +1046,9 @@ mod tests {
         );
 
         let prims =
-            EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &layout_node(props), viewport());
+            EVENT_VIEW_WIDGET.build_primitives("event-view", &layout_node(props), viewport());
         let event_rect = prims.iter().skip(1).find_map(|prim| match prim {
-            MetalPrimitive::Rect(rect) => Some(rect),
+            GpuPrimitive::Rect(rect) => Some(rect),
             _ => None,
         });
         let event_color = event_rect.expect("event heatmap rect").color.to_rgba();
@@ -1067,7 +1056,6 @@ mod tests {
         assert!(event_color[0] > event_color[2]);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn isometric_renderer_produces_event_primitives() {
         let mut props = props_with_events(vec![event(1.0, 1.0, 0.0, 0.75)]);
@@ -1076,22 +1064,21 @@ mod tests {
             Value::Keyword("isometric".to_string()),
         );
         let prims =
-            EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &layout_node(props), viewport());
+            EVENT_VIEW_WIDGET.build_primitives("event-view", &layout_node(props), viewport());
         assert!(
             prims
                 .iter()
-                .any(|prim| matches!(prim, MetalPrimitive::PatchCable(_)))
+                .any(|prim| matches!(prim, GpuPrimitive::PatchCable(_)))
         );
         assert!(
             prims
                 .iter()
-                .filter(|prim| matches!(prim, MetalPrimitive::PatchCable(_)))
+                .filter(|prim| matches!(prim, GpuPrimitive::PatchCable(_)))
                 .count()
                 > 12
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn cube_padding_controls_projection_extent() {
         fn bounds(cube: IsoCube) -> (f32, f32, f32, f32) {
@@ -1133,7 +1120,6 @@ mod tests {
         assert!(padded_bottom < tight_bottom);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn drag_rotation_changes_isometric_projection() {
         let mut props = props_with_events(vec![event(1.0, 1.0, 0.0, 0.75)]);
@@ -1142,7 +1128,7 @@ mod tests {
             Value::Keyword("isometric".to_string()),
         );
         let node = layout_node(props);
-        let before = EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &node, viewport());
+        let before = EVENT_VIEW_WIDGET.build_primitives("event-view", &node, viewport());
 
         let gesture = EVENT_VIEW_WIDGET
             .begin_gesture(&node, 4.0, 4.0, KeyModifiers::empty())
@@ -1162,17 +1148,16 @@ mod tests {
             MouseEventOutcome::Consume
         ));
 
-        let after = EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &node, viewport());
-        let first_cable_start = |prims: &[MetalPrimitive]| {
+        let after = EVENT_VIEW_WIDGET.build_primitives("event-view", &node, viewport());
+        let first_cable_start = |prims: &[GpuPrimitive]| {
             prims.iter().find_map(|prim| match prim {
-                MetalPrimitive::PatchCable(cable) => Some(cable.start),
+                GpuPrimitive::PatchCable(cable) => Some(cable.start),
                 _ => None,
             })
         };
         assert_ne!(first_cable_start(&before), first_cable_start(&after));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn auto_rotate_requests_animation_frames_and_changes_with_time() {
         let mut props = props_with_events(vec![event(1.0, 1.0, 0.0, 0.75)]);
@@ -1186,12 +1171,12 @@ mod tests {
 
         assert!(EVENT_VIEW_WIDGET.wants_animation_frames(&node));
         let at_zero =
-            EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &node, viewport_at(0.0));
+            EVENT_VIEW_WIDGET.build_primitives("event-view", &node, viewport_at(0.0));
         let at_one =
-            EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &node, viewport_at(1.0));
-        let first_cable_start = |prims: &[MetalPrimitive]| {
+            EVENT_VIEW_WIDGET.build_primitives("event-view", &node, viewport_at(1.0));
+        let first_cable_start = |prims: &[GpuPrimitive]| {
             prims.iter().find_map(|prim| match prim {
-                MetalPrimitive::PatchCable(cable) => Some(cable.start),
+                GpuPrimitive::PatchCable(cable) => Some(cable.start),
                 _ => None,
             })
         };

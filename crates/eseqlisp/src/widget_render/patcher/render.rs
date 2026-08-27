@@ -1,22 +1,17 @@
 use std::collections::HashMap;
-#[cfg(target_os = "macos")]
 use std::time::Instant;
 
-#[cfg(target_os = "macos")]
 use super::super::text_input::selection_range as text_selection_range;
 use super::super::{CellBuffer, styled_cell};
-#[cfg(target_os = "macos")]
 use super::super::{
-    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive, MetalPrimitive,
-    MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive, WidgetInstance,
-    WidgetViewport, ndc_bounds, z_layer,
+    GpuCirclePrimitive, GpuCircleVisibleHalf, GpuPatchCablePrimitive, GpuPrimitive,
+    GpuProportionalTextPrimitive, GpuQuadPrimitive, GpuRectPrimitive, WidgetInstance,
+    WidgetViewport, ndc_bounds, ui_design_px, z_layer,
 };
-#[cfg(target_os = "macos")]
 use crate::backend::{
     AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX, AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
     AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
 };
-#[cfg(target_os = "macos")]
 use crate::layout::LayoutNode;
 use crate::layout::{Rect, f64_to_f32};
 use crate::theme;
@@ -37,7 +32,8 @@ use super::metrics::{
     AGENTIC_HEADER_ROW_H, AGENTIC_HEADER_TEXT_ROWS, AGENTIC_INNER_PAD_X, AGENTIC_INNER_PAD_Y,
     AGENTIC_INNER_RADIUS_PX, AGENTIC_INNER_TOP, AGENTIC_LINE_H, AGENTIC_MORPH_COLOR_SECS,
     AGENTIC_MORPH_SHAPE_SECS, AGENTIC_SEND_DIAMETER_PX,
-    AGENTIC_SEND_ROW_H, AGENTIC_SPINNER_DIAMETER_PX, AGENTIC_SPINNER_GAP, CABLE_HANDLE_RADIUS_PX,
+    AGENTIC_SEND_ROW_H, AGENTIC_SPINNER_DIAMETER_PX, AGENTIC_SPINNER_GAP,
+    CABLE_FEEDBACK_RADIUS_PX, CABLE_FORWARD_RADIUS_PX, CABLE_HANDLE_RADIUS_PX,
     NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX, NODE_RESIZE_HANDLE_SIZE_CELLS,
     NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
     SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
@@ -47,7 +43,6 @@ use super::model::{
     OutputPortRef, Patch, PatchConnection, PatchNode, SourceOwner,
     connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
-#[cfg(target_os = "macos")]
 use super::project::OperatorPortDocumentation;
 use super::project::dgenlisp_operator_documentation;
 use super::state::{
@@ -59,17 +54,12 @@ use super::state::{
     ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
     set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
 };
-#[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;
-#[cfg(target_os = "macos")]
 use super::text_metrics::{measured_cursor_offset, measured_text_width, wrap_measured_text};
 
 /// Horizontal inset of the selected-row bar from the panel edge, in cells.
-#[cfg(target_os = "macos")]
 const AUTOCOMPLETE_ROW_INSET_CELLS: f32 = 0.22;
-#[cfg(target_os = "macos")]
 const PATCHER_TOOLTIP_CORNER_RADIUS_PX: f32 = 5.0;
-#[cfg(target_os = "macos")]
 const PATCHER_OVERLAY_Z: i32 = 1_000_000;
 
 pub(super) fn render_tui(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
@@ -102,17 +92,16 @@ pub(super) fn render_tui(props: &HashMap<String, Value>, rect: Rect, buf: &mut C
     }
 }
 
-#[cfg(target_os = "macos")]
-pub(super) fn build_metal_primitives_for_patcher(
+pub(super) fn build_primitives_for_patcher(
     node: &LayoutNode,
     viewport: WidgetViewport,
-) -> Vec<MetalPrimitive> {
+) -> Vec<GpuPrimitive> {
     let mut prims = Vec::new();
     // A patcher may occupy only part of a tile (for example beside an
     // inspector pane). Its cables and panned nodes must not paint across
     // sibling widgets merely because the tile-level scissor is wider.
-    prims.push(MetalPrimitive::PushClipRect(node.rect));
-    prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+    prims.push(GpuPrimitive::PushClipRect(node.rect));
+    prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
         rect: node.rect,
         color: theme::PATCHER_BG(),
     }));
@@ -179,8 +168,8 @@ pub(super) fn build_metal_primitives_for_patcher(
                 viewport,
                 &interaction_state,
             );
-            chrome_overlay_prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            chrome_overlay_prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: node.rect.row + 0.7,
                     col: if interaction_state.active_macro.is_some() {
                         node.rect.col + 3.2
@@ -201,8 +190,8 @@ pub(super) fn build_metal_primitives_for_patcher(
                 },
             ));
             if !patch.diagnostics.is_empty() {
-                chrome_overlay_prims.push(MetalPrimitive::ProportionalText(
-                    MetalProportionalTextPrimitive {
+                chrome_overlay_prims.push(GpuPrimitive::ProportionalText(
+                    GpuProportionalTextPrimitive {
                         row: node.rect.row + node.rect.height - 1.7,
                         col: node.rect.col + 1.0,
                         align_width: node.rect.width - 2.0,
@@ -221,8 +210,8 @@ pub(super) fn build_metal_primitives_for_patcher(
             push_z_layered(&mut prims, PATCHER_OVERLAY_Z + 50, chrome_overlay_prims);
         }
         Err(error) => {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: node.rect.row + 2.0,
                     col: node.rect.col + 2.0,
                     align_width: node.rect.width - 4.0,
@@ -236,11 +225,10 @@ pub(super) fn build_metal_primitives_for_patcher(
             ));
         }
     }
-    prims.push(MetalPrimitive::PopClipRect);
+    prims.push(GpuPrimitive::PopClipRect);
     prims
 }
 
-#[cfg(target_os = "macos")]
 fn patcher_initial_zoom(props: &HashMap<String, Value>) -> Option<f32> {
     let Some(Value::Number(zoom)) = props.get("initial-zoom") else {
         return None;
@@ -249,21 +237,18 @@ fn patcher_initial_zoom(props: &HashMap<String, Value>) -> Option<f32> {
     (zoom.is_finite() && zoom > 0.0).then_some(zoom)
 }
 
-#[cfg(target_os = "macos")]
 fn patcher_fit_enabled(props: &HashMap<String, Value>) -> bool {
     !matches!(props.get("fit"), Some(Value::Nil) | None)
 }
 
-#[cfg(target_os = "macos")]
 fn fit_zoom(content_size: (f32, f32), rect: Rect) -> f32 {
     let width_zoom = rect.width / content_size.0.max(1.0);
     let height_zoom = rect.height / content_size.1.max(1.0);
     width_zoom.min(height_zoom).clamp(0.05, 2.5)
 }
 
-#[cfg(target_os = "macos")]
 fn push_marquee(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     _rect: Rect,
     _viewport: WidgetViewport,
     interaction_state: &PatcherInteractionState,
@@ -284,7 +269,7 @@ fn push_marquee(
     }
     let fill = theme::PATCHER_MARQUEE_FILL();
     let border = theme::PATCHER_MARQUEE_BORDER();
-    prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+    prims.push(GpuPrimitive::Quad(GpuQuadPrimitive {
         x: marquee.col,
         y: marquee.row,
         width: marquee.width,
@@ -292,28 +277,28 @@ fn push_marquee(
         color: fill,
     }));
     let thickness = 0.08;
-    prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+    prims.push(GpuPrimitive::Quad(GpuQuadPrimitive {
         x: marquee.col,
         y: marquee.row,
         width: marquee.width,
         height: thickness,
         color: border,
     }));
-    prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+    prims.push(GpuPrimitive::Quad(GpuQuadPrimitive {
         x: marquee.col,
         y: marquee.row + marquee.height - thickness,
         width: marquee.width,
         height: thickness,
         color: border,
     }));
-    prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+    prims.push(GpuPrimitive::Quad(GpuQuadPrimitive {
         x: marquee.col,
         y: marquee.row,
         width: thickness,
         height: marquee.height,
         color: border,
     }));
-    prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+    prims.push(GpuPrimitive::Quad(GpuQuadPrimitive {
         x: marquee.col + marquee.width - thickness,
         y: marquee.row,
         width: thickness,
@@ -322,9 +307,8 @@ fn push_marquee(
     }));
 }
 
-#[cfg(target_os = "macos")]
 fn draw_agentic_bubbles(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     patch: &Patch,
     rect: Rect,
     viewport: WidgetViewport,
@@ -588,7 +572,8 @@ fn draw_agentic_bubbles(
         let header_left = x + AGENTIC_CARD_PAD_X * zoom;
         let pending = matches!(bubble.state, AgenticBubbleState::Pending { .. });
         // The spinner's own width, in cells, plus the gap after it.
-        let spinner_slot = AGENTIC_SPINNER_DIAMETER_PX * zoom / viewport.cell_w.max(0.001)
+        let spinner_slot = ui_design_px(AGENTIC_SPINNER_DIAMETER_PX) * zoom
+            / viewport.cell_w.max(0.001)
             + AGENTIC_SPINNER_GAP * zoom;
         let (status_left, status_width) = if pending {
             push_agentic_spinner(
@@ -612,8 +597,8 @@ fn draw_agentic_bubbles(
         // slot ahead of it.
         let detail_width = approx_text_width_cells(&detail, AGENTIC_HEADER_FONT_SIZE)
             + if pending { spinner_slot / zoom } else { 0.0 };
-        prims.push(MetalPrimitive::ProportionalText(
-            MetalProportionalTextPrimitive {
+        prims.push(GpuPrimitive::ProportionalText(
+            GpuProportionalTextPrimitive {
                 row: header_text_row,
                 col: status_left,
                 align_width: status_width,
@@ -668,8 +653,8 @@ fn draw_agentic_bubbles(
             if let Some(fitted) =
                 truncated_to_width_cells(macro_name, AGENTIC_HEADER_FONT_SIZE, available)
             {
-                prims.push(MetalPrimitive::ProportionalText(
-                    MetalProportionalTextPrimitive {
+                prims.push(GpuPrimitive::ProportionalText(
+                    GpuProportionalTextPrimitive {
                         row: header_text_row,
                         col: header_left,
                         align_width: header_width,
@@ -704,8 +689,8 @@ fn draw_agentic_bubbles(
         let text_left = header_left + AGENTIC_INNER_PAD_X * zoom;
         let body_top = body_rect.row + AGENTIC_INNER_PAD_Y * zoom;
         for (line_index, prompt_line) in prompt_lines.into_iter().enumerate() {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: body_top + line_index as f32 * AGENTIC_LINE_H * zoom,
                     col: text_left,
                     align_width: text_width,
@@ -746,14 +731,12 @@ fn draw_agentic_bubbles(
     super::state::set_agentic_bubble_buttons(send_buttons);
 }
 
-#[cfg(target_os = "macos")]
 fn rect_tuple(rect: Rect) -> (f32, f32, f32, f32) {
     (rect.col, rect.row, rect.width, rect.height)
 }
 
-#[cfg(target_os = "macos")]
 fn push_agentic_bubble_cursor(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     bubble: &super::state::AgenticBubble,
     text_left: f32,
     body_top: f32,
@@ -783,7 +766,7 @@ fn push_agentic_bubble_cursor(
         return;
     };
     let cursor_x = text_left + (cursor_before_prompt - cursor_before_line).max(0.0) * zoom;
-    prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+    prims.push(GpuPrimitive::ForegroundRect(GpuRectPrimitive {
         rect: Rect {
             row: body_top + (cursor_line_index as f32 * AGENTIC_LINE_H - 0.12) * zoom,
             col: cursor_x,
@@ -798,10 +781,9 @@ fn push_agentic_bubble_cursor(
 /// the typed text (or its placeholder), a caret and a send chevron, so the
 /// bubble reads as a conversation that is still open rather than a finished
 /// card. `body_rect` is the answer box it sits under.
-#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn push_agentic_follow_up(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     bubble: &super::state::AgenticBubble,
     lines: &[super::text_metrics::MeasuredLine],
     body_rect: Rect,
@@ -829,8 +811,8 @@ fn push_agentic_follow_up(
     let text_left = composer_rect.col + AGENTIC_INNER_PAD_X * zoom;
     let first_row = composer_rect.row + AGENTIC_INNER_PAD_Y * zoom;
     for (line_index, line) in lines.iter().enumerate() {
-        prims.push(MetalPrimitive::ProportionalText(
-            MetalProportionalTextPrimitive {
+        prims.push(GpuPrimitive::ProportionalText(
+            GpuProportionalTextPrimitive {
                 row: first_row + line_index as f32 * AGENTIC_LINE_H * zoom,
                 col: text_left,
                 align_width: text_width,
@@ -876,7 +858,7 @@ fn push_agentic_follow_up(
         };
         (line_index, (before_cursor - before_line).max(0.0))
     };
-    prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+    prims.push(GpuPrimitive::ForegroundRect(GpuRectPrimitive {
         rect: Rect {
             row: first_row + (cursor_line_index as f32 * AGENTIC_LINE_H - 0.12) * zoom,
             col: text_left + cursor_offset * zoom,
@@ -898,9 +880,8 @@ fn push_agentic_follow_up(
 //     lowering only the border's alpha will not fade it. Dim it in RGB.
 
 /// One of the inset text boxes on a bubble card.
-#[cfg(target_os = "macos")]
 fn push_agentic_inner_box(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     viewport: WidgetViewport,
     zoom: f32,
@@ -912,7 +893,7 @@ fn push_agentic_inner_box(
         theme::PATCHER_AGENTIC_BOX_BORDER(),
         viewport,
         zoom,
-        AGENTIC_INNER_RADIUS_PX,
+        ui_design_px(AGENTIC_INNER_RADIUS_PX),
         AGENTIC_INNER_BORDER_WIDTH_PX * zoom,
     );
 }
@@ -922,9 +903,8 @@ fn push_agentic_inner_box(
 /// This replaces pulsing the whole card: a large surface strobing at a few Hz
 /// competes with everything else on the canvas, where a small constant-area
 /// spinner is legible when looked at and ignorable when not.
-#[cfg(target_os = "macos")]
 fn push_agentic_spinner(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     left: f32,
     center_y: f32,
     viewport: WidgetViewport,
@@ -932,8 +912,9 @@ fn push_agentic_spinner(
     time_seconds: f32,
 ) {
     const DOTS: usize = 8;
-    let diameter_w = AGENTIC_SPINNER_DIAMETER_PX * zoom / viewport.cell_w.max(0.001);
-    let diameter_h = AGENTIC_SPINNER_DIAMETER_PX * zoom / viewport.cell_h.max(0.001);
+    let diameter_px = ui_design_px(AGENTIC_SPINNER_DIAMETER_PX);
+    let diameter_w = diameter_px * zoom / viewport.cell_w.max(0.001);
+    let diameter_h = diameter_px * zoom / viewport.cell_h.max(0.001);
     let center_x = left + diameter_w * 0.5;
     let dot_w = diameter_w * 0.24;
     let dot_h = diameter_h * 0.24;
@@ -959,15 +940,15 @@ fn push_agentic_spinner(
 /// The send affordance: a chevron in a soft disc, pinned to the bottom-right of
 /// a composer box. It gets its own reserved row (`AGENTIC_SEND_ROW_H`) rather
 /// than a horizontal inset, so the text wrap never has to dodge it.
-#[cfg(target_os = "macos")]
 fn push_agentic_send_chevron(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     box_rect: Rect,
     viewport: WidgetViewport,
     zoom: f32,
 ) -> Rect {
-    let width = AGENTIC_SEND_DIAMETER_PX * zoom / viewport.cell_w.max(0.001);
-    let height = AGENTIC_SEND_DIAMETER_PX * zoom / viewport.cell_h.max(0.001);
+    let diameter_px = ui_design_px(AGENTIC_SEND_DIAMETER_PX);
+    let width = diameter_px * zoom / viewport.cell_w.max(0.001);
+    let height = diameter_px * zoom / viewport.cell_h.max(0.001);
     let disc = Rect {
         col: box_rect.col + box_rect.width - AGENTIC_INNER_PAD_X * zoom - width,
         row: box_rect.row + box_rect.height - AGENTIC_INNER_PAD_Y * zoom - height,
@@ -980,8 +961,8 @@ fn push_agentic_send_chevron(
         theme::PATCHER_AGENTIC_SEND_BG(),
         viewport,
     );
-    prims.push(MetalPrimitive::ProportionalText(
-        MetalProportionalTextPrimitive {
+    prims.push(GpuPrimitive::ProportionalText(
+        GpuProportionalTextPrimitive {
             row: disc.row + (disc.height - AGENTIC_SEND_GLYPH_ROWS * zoom) * 0.5,
             col: disc.col,
             align_width: disc.width,
@@ -1000,10 +981,9 @@ fn push_agentic_send_chevron(
 /// it opens a picker. Returns the chip's rect, or `None` when the header has no
 /// room left for it — a truncated model name is worse than none, since the
 /// point of the chip is to tell you which model you are about to spend.
-#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn push_agentic_model_chip(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     model: &str,
     left: f32,
     header_row: f32,
@@ -1030,11 +1010,11 @@ fn push_agentic_model_chip(
         theme::PATCHER_AGENTIC_CHIP_BORDER(),
         viewport,
         zoom,
-        AGENTIC_MODEL_CHIP_RADIUS_PX,
+        ui_design_px(AGENTIC_MODEL_CHIP_RADIUS_PX),
         AGENTIC_INNER_BORDER_WIDTH_PX * zoom,
     );
-    prims.push(MetalPrimitive::ProportionalText(
-        MetalProportionalTextPrimitive {
+    prims.push(GpuPrimitive::ProportionalText(
+        GpuProportionalTextPrimitive {
             row: chip.row + (chip.height - AGENTIC_MODEL_CHIP_TEXT_ROWS * zoom) * 0.5,
             col: chip.col,
             align_width: chip.width,
@@ -1049,7 +1029,6 @@ fn push_agentic_model_chip(
     Some(chip)
 }
 
-#[cfg(target_os = "macos")]
 fn model_chip_label(model: &str) -> String {
     model.to_string()
 }
@@ -1057,7 +1036,6 @@ fn model_chip_label(model: &str) -> String {
 /// Width the model chip wants, in unscaled cells. The bubble reserves this at
 /// sizing time — a header control that silently vanishes when the card happens
 /// to be narrow is worse than a slightly wider card.
-#[cfg(target_os = "macos")]
 pub(super) fn model_chip_width_cells(model: &str) -> f32 {
     approx_text_width_cells(&model_chip_label(model), AGENTIC_MODEL_CHIP_FONT_SIZE)
         * AGENTIC_HEADER_WIDTH_SAFETY
@@ -1066,32 +1044,23 @@ pub(super) fn model_chip_width_cells(model: &str) -> f32 {
 
 /// Header width a model chip wants for itself, including the gap keeping it off
 /// the status word.
-#[cfg(target_os = "macos")]
 pub(super) fn header_model_chip_reservation_cells(model: &str) -> f32 {
     model_chip_width_cells(model) + AGENTIC_HEADER_GAP_CELLS
 }
 
-#[cfg(target_os = "macos")]
 const AGENTIC_MODEL_CHIP_FONT_SIZE: f32 = 10.0;
-#[cfg(target_os = "macos")]
 const AGENTIC_MODEL_CHIP_PAD_X: f32 = 0.45;
-#[cfg(target_os = "macos")]
 const AGENTIC_MODEL_CHIP_HEIGHT: f32 = 1.16;
-#[cfg(target_os = "macos")]
 const AGENTIC_MODEL_CHIP_RADIUS_PX: f32 = 7.0;
 /// Rough line box of the chip label at its font size, in cells.
-#[cfg(target_os = "macos")]
 const AGENTIC_MODEL_CHIP_TEXT_ROWS: f32 = 0.86;
 
-#[cfg(target_os = "macos")]
 const AGENTIC_SEND_GLYPH: &str = "↑";
 /// Rough line box of `AGENTIC_SEND_GLYPH` at its font size, in cells, used only
 /// to centre it in its disc.
-#[cfg(target_os = "macos")]
 const AGENTIC_SEND_GLYPH_ROWS: f32 = 0.92;
 
-#[cfg(target_os = "macos")]
-fn push_z_layered(prims: &mut Vec<MetalPrimitive>, z_index: i32, layer: Vec<MetalPrimitive>) {
+fn push_z_layered(prims: &mut Vec<GpuPrimitive>, z_index: i32, layer: Vec<GpuPrimitive>) {
     prims.extend(
         layer
             .into_iter()
@@ -1099,7 +1068,6 @@ fn push_z_layered(prims: &mut Vec<MetalPrimitive>, z_index: i32, layer: Vec<Meta
     );
 }
 
-#[cfg(target_os = "macos")]
 fn wrap_agentic_prompt_lines(
     text: &str,
     max_width_cells: f32,
@@ -1107,9 +1075,8 @@ fn wrap_agentic_prompt_lines(
     wrap_measured_text(text, max_width_cells, 13.0)
 }
 
-#[cfg(target_os = "macos")]
 fn push_back_button(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     viewport: WidgetViewport,
     interaction_state: &PatcherInteractionState,
@@ -1150,9 +1117,8 @@ fn push_back_button(
     );
 }
 
-#[cfg(target_os = "macos")]
 fn push_back_chevron_icon(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     button_rect: Rect,
     viewport: WidgetViewport,
     hovered: bool,
@@ -1171,7 +1137,7 @@ fn push_back_chevron_icon(
     } else {
         theme::PATCHER_BACK_BUTTON_TEXT()
     };
-    prims.push(MetalPrimitive::WidgetInstance {
+    prims.push(GpuPrimitive::WidgetInstance {
         widget_type: "patcher-back-chevron".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -1194,9 +1160,8 @@ fn push_back_chevron_icon(
     });
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn draw_patch(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     patch: &Patch,
     rect: Rect,
     viewport: WidgetViewport,
@@ -1217,9 +1182,8 @@ pub(super) fn draw_patch(
     );
 }
 
-#[cfg(target_os = "macos")]
 fn draw_patch_with_view_key(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     patch: &Patch,
     rect: Rect,
     viewport: WidgetViewport,
@@ -1420,7 +1384,6 @@ fn draw_patch_with_view_key(
     push_z_layered(prims, PATCHER_OVERLAY_Z + 30, tooltip_prims);
 }
 
-#[cfg(target_os = "macos")]
 enum TooltipAnchor {
     InputPort(usize),
     OutputPort(usize),
@@ -1428,7 +1391,6 @@ enum TooltipAnchor {
 }
 
 /// The argument index whose label token the pointer is on, for `node_id`.
-#[cfg(target_os = "macos")]
 fn hovered_label_arg_index(
     interaction_state: &PatcherInteractionState,
     node_id: &str,
@@ -1442,7 +1404,6 @@ fn hovered_label_arg_index(
 
 /// Top-edge point of the label token for `arg_index`, so an inlined argument's
 /// tooltip sits over the text the pointer is actually on.
-#[cfg(target_os = "macos")]
 fn label_arg_tooltip_anchor(
     patch: &Patch,
     node_id: &str,
@@ -1462,9 +1423,8 @@ fn label_arg_tooltip_anchor(
     Some((col, node_rect.row))
 }
 
-#[cfg(target_os = "macos")]
 fn push_hovered_port_tooltip(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     patch: &Patch,
     node_rects: &HashMap<String, Rect>,
     input_slot_counts: &HashMap<String, usize>,
@@ -1574,11 +1534,11 @@ fn push_hovered_port_tooltip(
         theme::PATCHER_TOOLTIP_BORDER(),
         viewport,
         zoom,
-        PATCHER_TOOLTIP_CORNER_RADIUS_PX,
+        ui_design_px(PATCHER_TOOLTIP_CORNER_RADIUS_PX),
         AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
     );
-    prims.push(MetalPrimitive::ProportionalText(
-        MetalProportionalTextPrimitive {
+    prims.push(GpuPrimitive::ProportionalText(
+        GpuProportionalTextPrimitive {
             row: panel.row + padding_y + 0.04 * zoom,
             col: panel.col + padding_x,
             align_width: panel.width - padding_x * 2.0,
@@ -1592,9 +1552,8 @@ fn push_hovered_port_tooltip(
     ));
 }
 
-#[cfg(target_os = "macos")]
 fn push_alignment_guides(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     panel: Rect,
     viewport: WidgetViewport,
     origin: (f32, f32),
@@ -1606,7 +1565,7 @@ fn push_alignment_guides(
     };
     for guide in &alignment.guides {
         if let Some(rect) = alignment_guide_rect(*guide, panel, viewport, origin, zoom) {
-            prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::ForegroundRect(GpuRectPrimitive {
                 rect,
                 color: theme::PATCHER_ALIGNMENT_GUIDE(),
             }));
@@ -1614,7 +1573,6 @@ fn push_alignment_guides(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn alignment_guide_rect(
     guide: AlignmentGuide,
     panel: Rect,
@@ -1622,7 +1580,7 @@ fn alignment_guide_rect(
     origin: (f32, f32),
     zoom: f32,
 ) -> Option<Rect> {
-    let thickness_px = 2.0;
+    let thickness_px = ui_design_px(2.0);
     match guide.kind {
         AlignmentGuideKind::Vertical => {
             let x = origin.0 + guide.position * zoom;
@@ -1727,9 +1685,8 @@ fn output_reference_name(node: &PatchNode) -> Option<String> {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn push_autocomplete_panel(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     node_rect: Rect,
     edit: &PatcherTextEdit,
     local_macros: &[super::model::MacroPatch],
@@ -1756,7 +1713,7 @@ fn push_autocomplete_panel(
         theme::COMP_BORDER(),
         viewport,
         zoom,
-        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+        ui_design_px(AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX),
         AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
     );
     let name_font_size = 11.5;
@@ -1778,12 +1735,12 @@ fn push_autocomplete_panel(
                 },
                 theme::COMP_SELECTED_BG(),
                 viewport,
-                AUTOCOMPLETE_ROW_CORNER_RADIUS_PX * zoom,
+                ui_design_px(AUTOCOMPLETE_ROW_CORNER_RADIUS_PX) * zoom,
                 false,
             );
         }
-        prims.push(MetalPrimitive::ProportionalText(
-            MetalProportionalTextPrimitive {
+        prims.push(GpuPrimitive::ProportionalText(
+            GpuProportionalTextPrimitive {
                 row: row + 0.18 * zoom,
                 col: text_col,
                 align_width: text_right - text_col,
@@ -1814,8 +1771,8 @@ fn push_autocomplete_panel(
         if (name_width + category_width + 2.0) * zoom > text_right - text_col {
             continue;
         }
-        prims.push(MetalPrimitive::ProportionalText(
-            MetalProportionalTextPrimitive {
+        prims.push(GpuPrimitive::ProportionalText(
+            GpuProportionalTextPrimitive {
                 row: row + 0.24 * zoom,
                 col: text_col,
                 align_width: text_right - text_col,
@@ -1840,39 +1797,31 @@ fn push_autocomplete_panel(
 /// Width of `text` in layout cells. Falls back to an average-advance estimate
 /// when the glyph-advance cache has no entry: suggestion names and category
 /// labels are never measured during layout, so the cache is empty for them.
-#[cfg(target_os = "macos")]
 fn approx_text_width_cells(text: &str, font_size: f32) -> f32 {
     measured_text_width(text, font_size)
         .unwrap_or_else(|| super::display::estimated_label_width_cells(text, font_size))
 }
 
 /// Font size of the agentic bubble's header row (status plus bound macro name).
-#[cfg(target_os = "macos")]
 pub(super) const AGENTIC_HEADER_FONT_SIZE: f32 = 11.5;
 /// Minimum blank space kept between the two header labels, in layout cells.
-#[cfg(target_os = "macos")]
 pub(super) const AGENTIC_HEADER_GAP_CELLS: f32 = 1.2;
-#[cfg(target_os = "macos")]
 /// Empty: the header names the macro on its own. A leading glyph here has to
 /// exist in the UI font, and the arrows tried previously rendered as tofu.
 pub(super) const AGENTIC_HEADER_MACRO_PREFIX: &str = "";
 /// Width of the prompt/working box, in layout cells, before any bound macro
 /// name widens it.
-#[cfg(target_os = "macos")]
 pub(super) const AGENTIC_PENDING_WIDTH_CELLS: f32 = 20.0;
 /// Width of the settled answer box, and the ceiling every bubble grows to.
-#[cfg(target_os = "macos")]
 pub(super) const AGENTIC_ANSWER_WIDTH_CELLS: f32 = 34.0;
 /// Header widths come from the average-advance estimate, which runs a little
 /// under the truth for the header's heavier glyphs. Reserved space is padded by
 /// this factor so a status and a name never touch on the strength of a
 /// rounding error.
-#[cfg(target_os = "macos")]
 const AGENTIC_HEADER_WIDTH_SAFETY: f32 = 1.2;
 
 /// Header width, in layout cells, that a bound macro name wants for itself —
 /// its prefix, its own text, and the gap that keeps it off the status.
-#[cfg(target_os = "macos")]
 pub(super) fn header_macro_name_reservation_cells(macro_name: &str) -> f32 {
     (approx_text_width_cells(AGENTIC_HEADER_MACRO_PREFIX, AGENTIC_HEADER_FONT_SIZE)
         + approx_text_width_cells(macro_name, AGENTIC_HEADER_FONT_SIZE))
@@ -1883,7 +1832,6 @@ pub(super) fn header_macro_name_reservation_cells(macro_name: &str) -> f32 {
 /// `text` cut to the longest prefix that fits `max_width_cells`, with an
 /// ellipsis when anything was dropped. `None` when not even one character plus
 /// the ellipsis fits, in which case the label is better left out entirely.
-#[cfg(target_os = "macos")]
 pub(super) fn truncated_to_width_cells(
     text: &str,
     font_size: f32,
@@ -1910,9 +1858,8 @@ pub(super) fn truncated_to_width_cells(
     Some(kept)
 }
 
-#[cfg(target_os = "macos")]
 fn push_autocomplete_documentation_panel(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     list_panel: Rect,
     suggestion: &super::text::PatcherAutocompleteSuggestion,
     viewport: WidgetViewport,
@@ -1941,15 +1888,15 @@ fn push_autocomplete_documentation_panel(
         theme::COMP_DOC_BORDER(),
         viewport,
         zoom,
-        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+        ui_design_px(AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX),
         AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
     );
     let max_chars = autocomplete_doc_wrap_chars(align_width, viewport, zoom);
     let mut visual_index = 0;
     for line in lines {
         for wrapped in wrap_autocomplete_doc_line(&line, max_chars) {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: panel.row + padding + visual_index as f32 * row_height,
                     col: panel.col + 0.9 * zoom,
                     align_width,
@@ -1966,7 +1913,6 @@ fn push_autocomplete_documentation_panel(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn autocomplete_doc_lines(suggestion: &super::text::PatcherAutocompleteSuggestion) -> Vec<String> {
     let Some(documentation) = suggestion.documentation.as_ref() else {
         return Vec::new();
@@ -1991,7 +1937,6 @@ fn autocomplete_doc_lines(suggestion: &super::text::PatcherAutocompleteSuggestio
     lines
 }
 
-#[cfg(target_os = "macos")]
 fn format_operator_ports(ports: &[OperatorPortDocumentation]) -> String {
     ports
         .iter()
@@ -2020,7 +1965,6 @@ fn format_operator_ports(ports: &[OperatorPortDocumentation]) -> String {
         .join("; ")
 }
 
-#[cfg(target_os = "macos")]
 fn autocomplete_wrapped_doc_line_count(
     lines: &[String],
     align_width: f32,
@@ -2034,14 +1978,12 @@ fn autocomplete_wrapped_doc_line_count(
         .sum()
 }
 
-#[cfg(target_os = "macos")]
 fn autocomplete_doc_wrap_chars(align_width: f32, viewport: WidgetViewport, _zoom: f32) -> usize {
     let width_px = align_width * viewport.cell_w;
     let char_px = (10.0_f32 * 0.74).max(1.0);
     ((width_px / char_px).floor() as usize).clamp(20, 56)
 }
 
-#[cfg(target_os = "macos")]
 fn wrap_autocomplete_doc_line(line: &str, max_chars: usize) -> Vec<String> {
     if line.chars().count() <= max_chars {
         return vec![line.to_string()];
@@ -2077,9 +2019,8 @@ fn wrap_autocomplete_doc_line(line: &str, max_chars: usize) -> Vec<String> {
     lines
 }
 
-#[cfg(target_os = "macos")]
 fn push_cable(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     start: (f32, f32),
     end: (f32, f32),
     connection: &PatchConnection,
@@ -2100,16 +2041,16 @@ fn push_cable(
         .segment
         .is_some_and(|segment| segment.is_segmented)
         && super::super::cable::should_render_segmented_cable(start, end);
-    prims.push(MetalPrimitive::PatchCable(MetalPatchCablePrimitive {
+    prims.push(GpuPrimitive::PatchCable(GpuPatchCablePrimitive {
         start: [curve.p0.0, curve.p0.1],
         control1: [curve.p1.0, curve.p1.1],
         control2: [curve.p2.0, curve.p2.1],
         end: [curve.p3.0, curve.p3.1],
-        radius_px: if connection.kind == ConnectionKind::Feedback {
-            3.6 * zoom
+        radius_px: ui_design_px(if connection.kind == ConnectionKind::Feedback {
+            CABLE_FEEDBACK_RADIUS_PX
         } else {
-            4.4 * zoom
-        },
+            CABLE_FORWARD_RADIUS_PX
+        }) * zoom,
         color,
         is_segmented,
         segment_row: connection
@@ -2120,9 +2061,8 @@ fn push_cable(
     }));
 }
 
-#[cfg(target_os = "macos")]
 fn push_preview_cable(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     start: (f32, f32),
     end: (f32, f32),
     kind: ConnectionKind,
@@ -2143,9 +2083,8 @@ fn push_preview_cable(
     push_cable(prims, start, end, &connection, 0.0, zoom, selected);
 }
 
-#[cfg(target_os = "macos")]
 fn push_cable_handles(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     connection: &PatchConnection,
     start: (f32, f32),
     end: (f32, f32),
@@ -2153,24 +2092,23 @@ fn push_cable_handles(
 ) {
     let (from_handle, to_handle) = connection_cable_edit_points(connection, start, end, zoom);
     for center in [from_handle, to_handle] {
-        prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
+        prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
             center: [center.0, center.1],
-            radius_px: CABLE_HANDLE_RADIUS_PX * zoom,
+            radius_px: ui_design_px(CABLE_HANDLE_RADIUS_PX) * zoom,
             color: theme::PATCHER_ERROR(),
-            visible_half: MetalCircleVisibleHalf::Full,
+            visible_half: GpuCircleVisibleHalf::Full,
         }));
-        prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
+        prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
             center: [center.0, center.1],
-            radius_px: CABLE_HANDLE_RADIUS_PX * 0.52 * zoom,
+            radius_px: ui_design_px(CABLE_HANDLE_RADIUS_PX) * 0.52 * zoom,
             color: theme::PATCHER_BG(),
-            visible_half: MetalCircleVisibleHalf::Full,
+            visible_half: GpuCircleVisibleHalf::Full,
         }));
     }
 }
 
-#[cfg(target_os = "macos")]
 fn push_node(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     node: &PatchNode,
     rect: Rect,
     input_indices: &[usize],
@@ -2234,7 +2172,7 @@ fn push_node(
                 chrome_bg,
                 chrome_border,
                 viewport,
-                NODE_BORDER_WIDTH_PX * zoom,
+                ui_design_px(NODE_BORDER_WIDTH_PX) * zoom,
                 corner_radius,
                 flatness,
             );
@@ -2281,8 +2219,8 @@ fn push_node(
     let mut text_prims = Vec::new();
     push_node_label(&mut text_prims, node, rect, text, edit, hovered_arg, zoom);
     if let Some(diagnostic) = &node.diagnostic {
-        text_prims.push(MetalPrimitive::ProportionalText(
-            MetalProportionalTextPrimitive {
+        text_prims.push(GpuPrimitive::ProportionalText(
+            GpuProportionalTextPrimitive {
                 row: rect.row + 2.65 * zoom,
                 col: rect.col + 1.0 * zoom,
                 align_width: rect.width - 2.0 * zoom,
@@ -2343,23 +2281,23 @@ fn highlighted_outputs_for_node(drag: &Option<PatcherDragState>, node_id: &str) 
     }
 }
 
-#[cfg(target_os = "macos")]
 fn push_node_chrome(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     bg: crate::backend::Color,
     border: crate::backend::Color,
     viewport: WidgetViewport,
     zoom: f32,
 ) {
-    let corner_radius = normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom);
+    let corner_radius =
+        normalized_corner_radius(rect, viewport, ui_design_px(NODE_CORNER_RADIUS_PX) * zoom);
     push_node_chrome_with_corner(
         prims,
         rect,
         bg,
         border,
         viewport,
-        NODE_BORDER_WIDTH_PX * zoom,
+        ui_design_px(NODE_BORDER_WIDTH_PX) * zoom,
         corner_radius,
         NODE_CHROME_FLATNESS,
     );
@@ -2370,9 +2308,8 @@ fn push_node_chrome(
 /// radius: a resting node's radius saturates `normalized_corner_radius`' 0.5
 /// clamp, so ramping the pixel radius would finish the visible rounding in the
 /// first third of the tween.
-#[cfg(target_os = "macos")]
 fn push_node_chrome_with_corner(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     bg: crate::backend::Color,
     border: crate::backend::Color,
@@ -2384,7 +2321,7 @@ fn push_node_chrome_with_corner(
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    prims.push(MetalPrimitive::WidgetInstance {
+    prims.push(GpuPrimitive::WidgetInstance {
         widget_type: "patcher-node".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -2407,9 +2344,8 @@ fn push_node_chrome_with_corner(
     });
 }
 
-#[cfg(target_os = "macos")]
 fn push_flat_panel_chrome(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     bg: crate::backend::Color,
     border: crate::backend::Color,
@@ -2421,7 +2357,7 @@ fn push_flat_panel_chrome(
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    prims.push(MetalPrimitive::WidgetInstance {
+    prims.push(GpuPrimitive::WidgetInstance {
         widget_type: "patcher-panel".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -2444,9 +2380,8 @@ fn push_flat_panel_chrome(
     });
 }
 
-#[cfg(target_os = "macos")]
 fn push_node_edit_selection(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     edit: Option<&PatcherTextEdit>,
     font_size: f32,
@@ -2470,7 +2405,7 @@ fn push_node_edit_selection(
     if width <= 0.0 {
         return;
     }
-    prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+    prims.push(GpuPrimitive::ForegroundRect(GpuRectPrimitive {
         rect: Rect {
             row: rect.row + 0.18 * zoom,
             col: x,
@@ -2481,9 +2416,8 @@ fn push_node_edit_selection(
     }));
 }
 
-#[cfg(target_os = "macos")]
 fn push_node_edit_cursor(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     edit: Option<&PatcherTextEdit>,
     font_size: f32,
@@ -2497,7 +2431,7 @@ fn push_node_edit_cursor(
         return;
     };
     let x = rect.col + NODE_TEXT_COL_OFFSET * zoom + cursor_x * zoom;
-    prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+    prims.push(GpuPrimitive::ForegroundRect(GpuRectPrimitive {
         rect: Rect {
             row: rect.row + 0.23 * zoom,
             col: x,
@@ -2508,9 +2442,8 @@ fn push_node_edit_cursor(
     }));
 }
 
-#[cfg(target_os = "macos")]
 fn push_node_label(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     node: &PatchNode,
     rect: Rect,
     head_color: crate::backend::Color,
@@ -2526,8 +2459,8 @@ fn push_node_label(
     };
     let text_col = rect.col + NODE_TEXT_COL_OFFSET * zoom;
     if let Some(edit) = edit {
-        prims.push(MetalPrimitive::ProportionalText(
-            MetalProportionalTextPrimitive {
+        prims.push(GpuPrimitive::ProportionalText(
+            GpuProportionalTextPrimitive {
                 row: text_row,
                 col: text_col,
                 align_width: rect.width - 1.84 * zoom,
@@ -2544,8 +2477,8 @@ fn push_node_label(
     let label = node_display_label(node);
     let (head, tail, tail_start) = split_label_head_tail(&label);
     let bg = crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0);
-    prims.push(MetalPrimitive::ProportionalText(
-        MetalProportionalTextPrimitive {
+    prims.push(GpuPrimitive::ProportionalText(
+        GpuProportionalTextPrimitive {
             row: text_row,
             col: text_col,
             align_width: rect.width - 1.84 * zoom,
@@ -2595,8 +2528,8 @@ fn push_node_label(
             .skip(range.start)
             .take(range.end - range.start)
             .collect();
-        prims.push(MetalPrimitive::ProportionalText(
-            MetalProportionalTextPrimitive {
+        prims.push(GpuPrimitive::ProportionalText(
+            GpuProportionalTextPrimitive {
                 row: text_row,
                 col: run_col,
                 align_width: (rect.col + rect.width - run_col - 0.92 * zoom).max(0.0),
@@ -2611,7 +2544,6 @@ fn push_node_label(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn split_label_head_tail(label: &str) -> (&str, &str, usize) {
     let trimmed_start = label
         .find(|ch: char| !ch.is_whitespace())
@@ -2632,9 +2564,8 @@ fn split_label_head_tail(label: &str) -> (&str, &str, usize) {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn push_port(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     center: (f32, f32),
     input: bool,
     node_bg: crate::backend::Color,
@@ -2649,7 +2580,7 @@ fn push_port(
     } else {
         theme::PATCHER_PORT_OUTPUT()
     };
-    let outer_radius_px = PORT_OUTER_DIAMETER_PX * 0.5 * zoom;
+    let outer_radius_px = ui_design_px(PORT_OUTER_DIAMETER_PX) * 0.5 * zoom;
     let rect = Rect {
         row: center.1 - outer_radius_px / viewport.cell_h.max(1.0),
         col: center.0 - outer_radius_px / viewport.cell_w.max(1.0),
@@ -2658,7 +2589,7 @@ fn push_port(
     };
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let visible_half = if input { 1.0 } else { -1.0 };
-    prims.push(MetalPrimitive::WidgetInstance {
+    prims.push(GpuPrimitive::WidgetInstance {
         widget_type: "patcher-port".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -2686,9 +2617,8 @@ fn push_port(
     });
 }
 
-#[cfg(target_os = "macos")]
 fn push_node_resize_handles(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     selected: bool,
     editing: bool,
@@ -2702,7 +2632,7 @@ fn push_node_resize_handles(
     let width = size_px / viewport.cell_w.max(1.0);
     let height = size_px / viewport.cell_h.max(1.0);
     for (_, center) in node_resize_handle_centers(rect) {
-        prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+        prims.push(GpuPrimitive::ForegroundRect(GpuRectPrimitive {
             rect: Rect {
                 col: center.0 - width * 0.5,
                 row: center.1 - height * 0.5,
@@ -2772,7 +2702,6 @@ fn with_alpha_scale(color: crate::backend::Color, scale: f32) -> crate::backend:
 /// Chrome rect, normalized corner radius, colours, and whether the prompt text
 /// is yet visible, for a bubble partway through its grow-in. Returns `None`
 /// once the bubble has settled.
-#[cfg(target_os = "macos")]
 pub(super) fn agentic_appear_chrome(
     created_at: Instant,
     rect: Rect,
@@ -2814,7 +2743,6 @@ pub(super) fn agentic_appear_chrome(
 /// Chrome for a bubble that is partway in or out of existence. `expansion` runs
 /// 0 (smallest, most rounded) to 1 (the settled card); `alpha` scales the
 /// colours independently so a grow-in can fade faster than it scales.
-#[cfg(target_os = "macos")]
 fn agentic_scaled_chrome(
     rect: Rect,
     expansion: f32,
@@ -2828,7 +2756,7 @@ fn agentic_scaled_chrome(
     let start_radius = normalized_corner_radius(
         scaled,
         viewport,
-        AGENTIC_APPEAR_START_RADIUS_PX / PATCHER_NODE_RADIUS_GAIN * zoom,
+        ui_design_px(AGENTIC_APPEAR_START_RADIUS_PX) / PATCHER_NODE_RADIUS_GAIN * zoom,
     );
     (
         scaled,
@@ -2845,7 +2773,6 @@ fn agentic_scaled_chrome(
 /// The grow-in played backwards, for a bubble dismissed with Escape. Returns
 /// `None` once the shrink-out has played to the end — the caller stops drawing
 /// the bubble at that point.
-#[cfg(target_os = "macos")]
 pub(super) fn agentic_close_chrome(
     closing_at: Instant,
     rect: Rect,
@@ -2883,7 +2810,6 @@ pub(super) fn agentic_close_chrome(
 /// Chrome rect, normalized corner radius and colours for a node partway through
 /// its agentic completion morph. Returns `None` once the morph has finished, or
 /// when no start pose was recorded.
-#[cfg(target_os = "macos")]
 #[allow(clippy::type_complexity)]
 pub(super) fn agentic_morph_chrome(
     morph: &AgenticMorph,
@@ -2919,7 +2845,11 @@ pub(super) fn agentic_morph_chrome(
     let Some(from) = morph.from else {
         return Some((
             rect,
-            normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom),
+            normalized_corner_radius(
+                rect,
+                viewport,
+                ui_design_px(NODE_CORNER_RADIUS_PX) * zoom,
+            ),
             resting_bg,
             border,
             NODE_CHROME_FLATNESS,
@@ -2937,8 +2867,11 @@ pub(super) fn agentic_morph_chrome(
     let shape_t = ease_out_cubic(progress);
     // Normalize against the rect actually being drawn so the radius tracks the
     // chrome as it resizes.
-    let target_corner =
-        normalized_corner_radius(chrome_rect, viewport, NODE_CORNER_RADIUS_PX * zoom);
+    let target_corner = normalized_corner_radius(
+        chrome_rect,
+        viewport,
+        ui_design_px(NODE_CORNER_RADIUS_PX) * zoom,
+    );
     // The card starts at its own resting radius and opens up into the node's,
     // so the morph still carries a shape beat now that the bubble is no longer
     // drawn square.
@@ -2958,16 +2891,13 @@ pub(super) fn agentic_morph_chrome(
 
 /// A resting node keeps the full fake-3d treatment: at pill size the bevel is
 /// most of what gives it its physicality.
-#[cfg(target_os = "macos")]
 pub(super) const NODE_CHROME_FLATNESS: f32 = 0.0;
 /// The agentic bubble card takes none of it. It is a large flat surface, and
 /// the bevel's diffuse falloff reads as a smudge as it approaches the border.
-#[cfg(target_os = "macos")]
 pub(super) const AGENTIC_CARD_FLATNESS: f32 = 1.0;
 
 /// `normalized_corner_radius`' floor — the squarest corner the node shader will
 /// draw.
-#[cfg(target_os = "macos")]
 pub(super) const SQUARE_CORNER_RADIUS: f32 = 0.001;
 
 /// The `patcher-node` shader multiplies `corner_radius` by 1.5 before using it
@@ -2976,7 +2906,6 @@ pub(super) const SQUARE_CORNER_RADIUS: f32 = 0.001;
 /// pixels has to have this divided back out for `patcher-node` — otherwise the
 /// bubble card and the box inset into it round by visibly different amounts
 /// despite being handed the same number.
-#[cfg(target_os = "macos")]
 const PATCHER_NODE_RADIUS_GAIN: f32 = 1.5;
 
 /// The bubble card's resting corner radius, normalized for `rect`.
@@ -2984,7 +2913,6 @@ const PATCHER_NODE_RADIUS_GAIN: f32 = 1.5;
 /// Recomputed against whatever rect is actually being drawn, so the radius
 /// holds its pixel size as the card grows line by line; scaled by `zoom` so it
 /// also holds it across the canvas zoom.
-#[cfg(target_os = "macos")]
 pub(super) fn agentic_card_corner_radius(
     rect: Rect,
     viewport: WidgetViewport,
@@ -2993,11 +2921,10 @@ pub(super) fn agentic_card_corner_radius(
     normalized_corner_radius(
         rect,
         viewport,
-        AGENTIC_CARD_RADIUS_PX / PATCHER_NODE_RADIUS_GAIN * zoom,
+        ui_design_px(AGENTIC_CARD_RADIUS_PX) / PATCHER_NODE_RADIUS_GAIN * zoom,
     )
 }
 
-#[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.001;
@@ -3012,9 +2939,8 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
 /// `normalized_corner_radius`, which clamps at 0.5 — half of the 1.0 the `box`
 /// shader needs to round a square all the way — so a "disc" asked for that way
 /// comes out a squircle no matter how large a radius it is handed.
-#[cfg(target_os = "macos")]
 fn push_disc(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     color: crate::backend::Color,
     viewport: WidgetViewport,
@@ -3022,7 +2948,7 @@ fn push_disc(
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    prims.push(MetalPrimitive::WidgetInstance {
+    prims.push(GpuPrimitive::WidgetInstance {
         widget_type: "box".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -3047,9 +2973,8 @@ fn push_disc(
     });
 }
 
-#[cfg(target_os = "macos")]
 fn push_rounded_rect(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     color: crate::backend::Color,
     viewport: WidgetViewport,
@@ -3059,7 +2984,7 @@ fn push_rounded_rect(
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    prims.push(MetalPrimitive::WidgetInstance {
+    prims.push(GpuPrimitive::WidgetInstance {
         widget_type: "box".to_string(),
         instance: WidgetInstance {
             ndc_min,

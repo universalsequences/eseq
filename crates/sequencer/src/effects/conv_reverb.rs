@@ -397,6 +397,10 @@ fn ir_prep_dir() -> PathBuf {
     crate::app_paths::app_paths().ir_prep_dir()
 }
 
+/// Unchecked tool location, kept for the tests' skip-if-absent probes; the
+/// compile path itself goes through `dgenlisp_tool_checked` so a missing
+/// compiler names the fetch command.
+#[cfg(test)]
 fn tool_path() -> PathBuf {
     crate::app_paths::app_paths().dgenlisp_tool()
 }
@@ -428,7 +432,9 @@ fn partition_channel(samples: &[f32], host_sr: u32) -> Result<ChannelIr, String>
     // no system-compiler fallback.
     let toolchain_root = crate::app_paths::app_paths().dgen_toolchain_root_checked()?;
     let out_name = format!("ir_{seq}");
-    let output = std::process::Command::new(tool_path())
+    let output = std::process::Command::new(
+        crate::app_paths::app_paths().dgenlisp_tool_checked()?,
+    )
         .args(["compile", lisp_path.to_str().unwrap()])
         .args(["-o", dir.to_str().unwrap()])
         .args(["--name", &out_name])
@@ -913,6 +919,73 @@ mod tests {
         assert!(
             half_residual < 0.05,
             "50% mix does not reconstruct the delayed input (dry/wet comb): residual {half_residual}"
+        );
+    }
+
+    // eseq-linux.73: the generated spectral code only emits overlap-add output
+    // when a hop boundary lands on a process-block boundary. Driven at a block
+    // size that is not hop-compatible — exactly what CPAL/ALSA hands the
+    // callback on Linux, 235 frames for a 512-frame request — the wet arm goes
+    // completely silent while the dry arm keeps passing, which is the reported
+    // "100% mix is silent" symptom.
+    //
+    // This pins the contract that `audio::FixedOutputBlocks` exists to uphold:
+    // the engine must never hand generated DGenLisp code a block size the DSP
+    // was not compiled for. If the audio callback ever goes back to rendering
+    // raw device-sized blocks, this test explains what breaks.
+    #[test]
+    fn bundled_dsp_wet_arm_needs_a_hop_compatible_block_size() {
+        if !tool_path().exists() {
+            eprintln!("skipping: DGenLisp tool not found at {:?}", tool_path());
+            return;
+        }
+
+        let sample_rate = 44_100u32;
+        let mut delta_re = vec![0.0f32; PART_LEN];
+        delta_re[..N].fill(1.0);
+        let zeros = vec![0.0f32; PART_LEN];
+
+        // Fully wet, so the output is the wet arm alone.
+        let wet_peak = |block_size: usize| {
+            let report = crate::lisp_host::render_effect_source_for_test(
+                dsp_source(),
+                &crate::lisp_host::EffectRenderOptions {
+                    sample_rate,
+                    block_size,
+                    frames: 8192,
+                    param_overrides: vec![("mix".to_string(), 1.0)],
+                    param_events: Vec::new(),
+                    tensor_overrides: vec![
+                        ("irL_re".to_string(), delta_re.clone()),
+                        ("irL_im".to_string(), zeros.clone()),
+                        ("irR_re".to_string(), zeros.clone()),
+                        ("irR_im".to_string(), zeros.clone()),
+                    ],
+                    input_overrides: vec![(1, 0.0)],
+                    input_tones: vec![(0, 440.0, 0.25)],
+                },
+            )
+            .expect("render bundled conv reverb DSP");
+            report
+                .samples
+                .iter()
+                .step_by(2)
+                .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+        };
+
+        let aligned = wet_peak(HOP);
+        assert!(
+            aligned > 0.01,
+            "a hop-sized block must produce wet output, got peak {aligned}"
+        );
+
+        // 235 is the frame count PipeWire actually delivers on the Linux
+        // workstation for a 512-frame request.
+        let misaligned = wet_peak(235);
+        assert_eq!(
+            misaligned, 0.0,
+            "the wet arm is expected to be silent at a hop-incompatible block \
+             size; if that changed, FixedOutputBlocks may no longer be needed"
         );
     }
 }

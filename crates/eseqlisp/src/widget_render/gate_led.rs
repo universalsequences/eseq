@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use super::live_audio::{LiveAudioSourceSelector, source_from_props};
 use super::{
-    CellBuffer, MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPrimitive, WidgetDefinition,
+    CellBuffer, GpuCirclePrimitive, GpuCircleVisibleHalf, GpuPrimitive, WidgetDefinition,
     WidgetViewport, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -107,13 +107,12 @@ impl WidgetDefinition for GateLedWidget {
         );
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let request = request_from_props(&node.props);
         let (gate_on, env) = read_gate_env(&request.data_key);
         let on_color =
@@ -132,9 +131,12 @@ impl WidgetDefinition for GateLedWidget {
             node.rect.col + node.rect.width * 0.5,
             node.rect.row + node.rect.height * 0.5,
         ];
-        let outer_px =
-            ((node.rect.width * cell_w).min(node.rect.height * cell_h) * 0.5 - 1.0).max(2.0);
-        let lamp_px = (outer_px - 2.0).max(1.5);
+        let bezel_inset_px = super::ui_design_px(1.0);
+        let lamp_inset_px = super::ui_design_px(2.0);
+        let outer_px = ((node.rect.width * cell_w).min(node.rect.height * cell_h) * 0.5
+            - bezel_inset_px)
+            .max(super::ui_design_px(2.0));
+        let lamp_px = (outer_px - lamp_inset_px).max(super::ui_design_px(1.5));
         let lamp_color = if gate_on {
             // The envelope magnitude adds a little glow on top of the lit base.
             let boost = 1.0 + 0.25 * env;
@@ -148,17 +150,17 @@ impl WidgetDefinition for GateLedWidget {
             off_color
         };
         vec![
-            MetalPrimitive::Circle(MetalCirclePrimitive {
+            GpuPrimitive::Circle(GpuCirclePrimitive {
                 center,
                 radius_px: outer_px,
                 color: bezel_color,
-                visible_half: MetalCircleVisibleHalf::Full,
+                visible_half: GpuCircleVisibleHalf::Full,
             }),
-            MetalPrimitive::Circle(MetalCirclePrimitive {
+            GpuPrimitive::Circle(GpuCirclePrimitive {
                 center,
                 radius_px: lamp_px,
                 color: lamp_color,
-                visible_half: MetalCircleVisibleHalf::Full,
+                visible_half: GpuCircleVisibleHalf::Full,
             }),
         ]
     }

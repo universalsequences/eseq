@@ -123,12 +123,26 @@ pub fn compile_and_load_uncached_with_asset_base(
     sample_rate: u32,
     asset_base: Option<&Path>,
 ) -> Result<CompileResult, String> {
+    compile_and_load_uncached_with_host_services(
+        source,
+        sample_rate,
+        asset_base,
+        dgen_host_services_v1(),
+    )
+}
+
+pub(in crate::lisp_host) fn compile_and_load_uncached_with_host_services(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+    host_services: *const DGenHostServicesV1,
+) -> Result<CompileResult, String> {
     let json = compile_lisp_with_asset_base(source, sample_rate, asset_base)?;
     let manifest = parse_manifest(&json)?;
     // Uncached path: the subprocess skipped its inline audit, so audit here
     // before the dylib is loaded (impl spec, slice E5).
     crate::lisp_host::dgen::dgen_audit::audit_dylib(&manifest.dylib_path)?;
-    let lib = load_dylib_prewarmed(&manifest)?;
+    let lib = load_dylib_prewarmed_with_host_services(&manifest, host_services)?;
     Ok(CompileResult {
         manifest,
         lib,
@@ -461,20 +475,22 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     std::fs::write(&src_path, effective_source)
         .map_err(|e| format!("Failed to write source: {e}"))?;
 
-    // Hermetic toolchain hand-off (impl spec, decision 1 / slice E2): the
-    // staged root is passed unconditionally and preflight-checked here; a
-    // missing/incomplete stage is a hard compile error, never a fallback to
-    // the system compiler.
+    // The stage is mandatory on every host. In particular, omitting this on
+    // Linux makes DGenLisp silently select /usr/bin/clang and destroys the
+    // reproducibility guarantee of the generated audio binary.
     let toolchain_root = crate::app_paths::app_paths().dgen_toolchain_root_checked()?;
-    let tool_path = dgenlisp_tool_path();
+    // Same hard-error contract for the compiler itself: it is fetched by lock
+    // (scripts/fetch_dgenlisp.sh), never tracked, so its absence must name
+    // the fetch command instead of surfacing as a spawn failure.
+    let tool_path = crate::app_paths::app_paths().dgenlisp_tool_checked()?;
     let mut command = std::process::Command::new(&tool_path);
     command
         .args(["compile", src_path.to_str().unwrap()])
         .args(["-o", dir.to_str().unwrap()])
         .args(["--name", dylib_name])
-        .args(["--sample-rate", &sample_rate.to_string()])
-        .arg("--toolchain-root")
-        .arg(&toolchain_root)
+        .args(["--sample-rate", &sample_rate.to_string()]);
+    command.arg("--toolchain-root").arg(&toolchain_root);
+    command
         // The host audits the artifact itself (dgen_audit.rs); DGenLisp's
         // inline shell audit would reintroduce the nm/otool (Command Line
         // Tools) dependency this path must not have.

@@ -157,15 +157,14 @@
 
 (def selection-click? (evt)
   (or (get evt :shift)
-    (get evt :cmd)
-    (get evt :super)
-    (get evt :meta)
+    (get evt :additive-selection)
     (get evt :ctrl)))
 
+;; Historical name retained because this function is part of the module's
+;; command-facing contract. The event field is semantic: Command on macOS and
+;; Alt on Linux, so the window manager never has to relinquish Super there.
 (def cmd-click? (evt)
-  (or (get evt :cmd)
-    (get evt :super)
-    (get evt :meta)
+  (or (get evt :additive-selection)
     (get evt :ctrl)))
 
 ;; PINNED (hazard i, lisp→lisp stub-then-override): ui/sequencer.lisp installs
