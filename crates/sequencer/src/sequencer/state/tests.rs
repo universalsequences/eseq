@@ -4398,6 +4398,70 @@
     }
 
     #[test]
+    fn scene_structure_restore_reverses_scene_reference_shifts_from_a_midlist_insert() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                snapshot_with_active_step(1, 0, 2),
+                snapshot_with_active_step(1, 0, 7),
+                snapshot_with_active_step(1, 0, 11),
+            ],
+            0,
+        );
+        state.with_scenes_mut(|scenes| {
+            scenes.install_scene_banks(vec![
+                SceneBank { id: SceneBankId(4), name: None, len: 1 },
+                SceneBank { id: SceneBankId(8), name: None, len: 2 },
+            ]);
+        });
+        let before = state.capture_project_scenes();
+        let mut arrangement = ProjectArrangement::new(1, 16.0);
+        arrangement.scene_lane = vec![
+            SceneEvent { start_beat: 0.0, scene: 0 },
+            SceneEvent { start_beat: 4.0, scene: 1 },
+            SceneEvent { start_beat: 8.0, scene: 2 },
+        ];
+        state.set_committed_arrangement(Some(arrangement)).unwrap();
+
+        let inserted = state
+            .clone_pattern_in_scene_bank(
+                SceneBankId(4),
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1, "scoped + inserts at the end of the non-final bank");
+        let scene_refs = |state: &SequencerState| {
+            state
+                .committed_arrangement()
+                .unwrap()
+                .scene_lane
+                .iter()
+                .map(|event| event.scene)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(scene_refs(&state), vec![0, 2, 3]);
+        let after = state.capture_project_scenes();
+
+        state.restore_project_scenes(&before).unwrap();
+        assert_eq!(
+            scene_refs(&state),
+            vec![0, 1, 2],
+            "undo of a mid-list insert must shift arrangement references back down",
+        );
+
+        state.restore_project_scenes(&after).unwrap();
+        assert_eq!(
+            scene_refs(&state),
+            vec![0, 2, 3],
+            "redo of a mid-list insert must re-apply the reference shift",
+        );
+    }
+
+    #[test]
     fn reorder_scene_rejects_out_of_range_indices_without_changes() {
         let state = make_state_with_tracks(1);
         state.replace_pattern_repository(

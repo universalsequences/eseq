@@ -1711,9 +1711,13 @@ impl SequencerState {
 
         // A scene-order edit stores the scene memento, while arrangement/song
         // references live outside it. Stable SceneId lets replay derive the
-        // exact old-index -> restored-index permutation without enlarging every
-        // scene-structure history entry. Only do this for a pure permutation;
-        // insertion/deletion have different reference semantics.
+        // exact old-index -> restored-index mapping without enlarging every
+        // scene-structure history entry. This covers a pure permutation plus
+        // the single-op insert/delete restores history produces (undo of a
+        // mid-list insert removes the inserted scene; redo re-adds it): every
+        // surviving reference follows its scene's id, and a reference to a
+        // scene the restore removes collapses onto the slot it vacated, the
+        // same policy as forward delete remapping.
         let current_scene_ids = self
             .pattern
             .scenes
@@ -1729,14 +1733,25 @@ impl SequencerState {
             .enumerate()
             .map(|(index, scene)| (scene.id, index))
             .collect::<HashMap<_, _>>();
-        if current_scene_ids.len() == target_scene_indices.len()
-            && current_scene_ids
-                .iter()
-                .all(|id| target_scene_indices.contains_key(id))
-        {
+        let shared_ids = current_scene_ids
+            .iter()
+            .filter(|id| target_scene_indices.contains_key(id))
+            .count();
+        let restores_superset = shared_ids == current_scene_ids.len();
+        let restores_subset = shared_ids == target_scene_indices.len();
+        if shared_ids > 0 && (restores_superset || restores_subset) {
             let remap = current_scene_ids
                 .iter()
-                .map(|id| target_scene_indices[id])
+                .enumerate()
+                .map(|(index, id)| {
+                    target_scene_indices.get(id).copied().unwrap_or_else(|| {
+                        let vacated = current_scene_ids[..index]
+                            .iter()
+                            .filter(|id| target_scene_indices.contains_key(id))
+                            .count();
+                        vacated.min(target_scene_indices.len() - 1)
+                    })
+                })
                 .collect::<Vec<_>>();
             self.with_committed_song_mut(|song| {
                 if let Some(song) = song {

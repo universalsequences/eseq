@@ -2392,6 +2392,7 @@ impl App {
             .collect::<Vec<_>>();
         let target_ids = target.scenes.iter().map(|scene| scene.id).collect::<Vec<_>>();
         let current_id_set = current_ids.iter().copied().collect::<HashSet<_>>();
+        let target_id_set = target_ids.iter().copied().collect::<HashSet<_>>();
         if current_ids.len() == target_ids.len()
             && target_ids.iter().all(|id| current_id_set.contains(id))
         {
@@ -2405,6 +2406,36 @@ impl App {
                     let id = current_ids.remove(source_index);
                     current_ids.insert(target_index, id);
                 }
+            }
+        } else if current_ids.len() + 1 == target_ids.len()
+            && current_ids.iter().all(|id| target_id_set.contains(id))
+        {
+            // Redo of a mid-list insert: replay the append-then-move shift the
+            // forward clone path applies to macro scene targets.
+            if let Some(inserted) = target_ids
+                .iter()
+                .position(|id| !current_id_set.contains(id))
+            {
+                if inserted != current_ids.len() {
+                    self.handle_scene_reordered(current_ids.len(), inserted);
+                }
+            }
+        } else if target_ids.len() + 1 == current_ids.len()
+            && target_ids.iter().all(|id| current_id_set.contains(id))
+        {
+            // Undo of an insert (or redo of a delete): shift macro scene
+            // targets down past the index the removed scene vacates.
+            if let Some(removed) = current_ids
+                .iter()
+                .position(|id| !target_id_set.contains(id))
+            {
+                let _ = self.state.quantized_launches().cancel_all();
+                self.scene_macro_runtime.clear();
+                let mut touched = self.macro_engine.release_all_scene_macros();
+                touched.extend(self.macro_engine.end_scene_push());
+                self.macro_engine
+                    .remap_scene_targets_after_delete(removed, target_ids.len());
+                self.send_macro_targets(touched);
             }
         }
 
