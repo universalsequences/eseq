@@ -1221,12 +1221,13 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     fn installed_monospace_font_name() -> String {
-        load_font(Query {
-            families: &[Family::Monospace],
-            ..Query::default()
-        })
-        .map(|loaded| loaded.post_script_name)
-        .expect("an installed monospace font")
+        // Generic-family aliases are not guaranteed to be configured even
+        // when fontdb loaded real monospaced faces (as on the minimal Linux CI
+        // image). Select from the faces themselves, matching the production
+        // fallback path rather than relying on a fontconfig alias.
+        load_any_font(true)
+            .map(|loaded| loaded.post_script_name)
+            .expect("an installed monospace font")
     }
 
     #[test]
