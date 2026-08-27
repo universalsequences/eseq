@@ -9298,6 +9298,48 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_word_alternation_mixes_filters_and_parameterized_post_words() {
+        // Alternation members need not be the same word: (right right
+        // (shift 1)) alternates a hand filter with a parameterized post word
+        // — two filtered cycles, then one full shifted cycle.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "alt3" :16
+                 . . - .
+                 -> 0 (right right (shift 1)))"#,
+        )
+        .expect("jak with mixed post alternation");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            3.75,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        // `. . - .` = 5 hits, 2 on the right hand; cycles 0/1 keep the right
+        // hand, cycle 2 plays all five (shifted by one unit)
+        let spq = 48_000.0_f64;
+        let cycle_len = (5.0 * 0.25 * spq) as u64;
+        let counts: Vec<usize> = (0..3)
+            .map(|cycle| {
+                let start = cycle * cycle_len;
+                let end = start + cycle_len;
+                out.iter()
+                    .filter(|e| e.sample_time > start && e.sample_time <= end)
+                    .count()
+            })
+            .collect();
+        assert_eq!(counts, vec![2, 2, 5], "{out:?}");
+    }
+
+    #[test]
     fn jaki_word_alternation_covers_xf_words_and_id() {
         // Parameterized/xf members alternate too: ((rot 1) id) rotates the
         // figure on even cycles only, so the per-cycle velocity contour
