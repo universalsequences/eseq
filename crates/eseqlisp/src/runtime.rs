@@ -3473,6 +3473,38 @@ impl Runtime {
         relayout_subtree_path_result(existing, tree, child_path, dirty_widget_ids, &engine)
     }
 
+    /// Reconcile a cached layout against a changed widget tree, reusing every
+    /// unchanged descendant and rebuilding changed subtrees in place when the
+    /// change occupies exactly the space its predecessor did (see
+    /// `layout::reconcile_layout_node`). Errs when a changed subtree needs
+    /// different space, in which case the caller falls back to a full
+    /// relayout.
+    pub(crate) fn reconcile_layout_for_tree_with_viewport(
+        &self,
+        existing: &LayoutNode,
+        tree: &Value,
+        viewport: Option<(f32, f32)>,
+        frame_viewport: Option<crate::layout::Rect>,
+        dirty_widget_ids: &mut Vec<u64>,
+    ) -> Result<(LayoutNode, usize), String> {
+        let (cols, rows) = viewport.unwrap_or((self.layout_cols, self.layout_rows));
+        let mut engine = if let Some(measurer) = self.text_measurer.as_deref() {
+            LayoutEngine::with_text_measurer_exact(
+                cols,
+                rows,
+                self.layout_aspect,
+                measurer,
+                self.layout_cell_w,
+                self.layout_cell_h,
+            )
+        } else {
+            LayoutEngine::new_exact(cols, rows, self.layout_aspect)
+        };
+        engine.frame_viewport = frame_viewport;
+        engine.content_scroll = self.layout_content_scroll;
+        crate::layout::reconcile_layout_node(existing, tree, &engine, dirty_widget_ids)
+    }
+
     /// Clear the current widget tree and layout without destroying reactive effects.
     /// Used when switching to a buffer/tile that has no widget tree.
     pub fn clear_current_widget_tree(&mut self) {
