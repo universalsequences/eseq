@@ -14,6 +14,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::step_history::COMMANDS.contains(&n) => super::step_history::handle(name, payload, app, editor, ctx),
         n if super::tracks::COMMANDS.contains(&n) => super::tracks::handle(name, payload, app, editor, ctx),
         n if super::scenes::COMMANDS.contains(&n) => super::scenes::handle(name, payload, app, editor, ctx),
+        n if super::scene_banks::COMMANDS.contains(&n) => super::scene_banks::handle(name, payload, app, editor, ctx),
         n if super::scene_slots::COMMANDS.contains(&n) => super::scene_slots::handle(name, payload, app, editor, ctx),
         n if super::song::COMMANDS.contains(&n) => super::song::handle(name, payload, app, editor, ctx),
         n if super::rack::COMMANDS.contains(&n) => super::rack::handle(name, payload, app, editor, ctx),
@@ -39,6 +40,18 @@ pub(crate) fn dispatch_custom_host_command(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scene_bank_commands_are_registered_with_their_handler() {
+        for command in [
+            "create-scene-bank",
+            "rename-scene-bank",
+            "delete-scene-bank",
+            "move-scene-to-scene-bank",
+        ] {
+            assert!(super::super::scene_banks::COMMANDS.contains(&command));
+        }
+    }
+
     #[test]
     fn sampler_slice_edit_command_is_registered_with_its_handler() {
         assert!(super::super::sampler_slices::COMMANDS.contains(&"edit-sampler-slice"));

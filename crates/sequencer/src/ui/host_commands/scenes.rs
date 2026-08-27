@@ -1091,28 +1091,75 @@ pub(super) fn handle(
             }
         }
         "clone-pattern" => {
+            let requested_bank = ["bank-id", "bank_id"]
+                .iter()
+                .find_map(|key| extract_usize_from_payload(&payload, key))
+                .and_then(|id| {
+                    (id != 0).then_some(sequencer::sequencer::SceneBankId(id as u64))
+                });
+            let insert_position = ["insert-position", "insert_position"]
+                .iter()
+                .find_map(|key| extract_usize_from_payload(&payload, key));
+            let target_bank = match requested_bank {
+                Some(bank) => {
+                    if insert_position.is_some_and(|position| {
+                        app.state.scene_bank_insert_position(bank) != Some(position)
+                    }) {
+                        Err("Insert position is not the end of the requested scene bank".to_string())
+                    } else {
+                        Ok(bank)
+                    }
+                }
+                None => match insert_position {
+                    Some(position) => app.state.scene_bank_for_insert_position(position),
+                    None => app
+                        .state
+                        .scene_bank_containing(app.state.current_scene_index())
+                        .ok_or_else(|| "The current scene does not belong to a scene bank".to_string()),
+                },
+            };
+            let target_bank = match target_bank {
+                Ok(bank) => bank,
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Could not create scene: {error}"
+                    )));
+                    return;
+                }
+            };
+
             let num_tracks = app.tracks.len();
             let created = app.apply_recorded_scene_structure_mutation(
                 "Create scene",
                 |app| {
-                    let source_pattern = app.state.current_scene_index();
-                    let new_idx = app.state.clone_pattern(
+                    let old_scene_count = app.state.scene_count();
+                    let new_idx = app.state.clone_pattern_in_scene_bank(
+                        target_bank,
                         num_tracks,
                         &app.graph.track_buffer_ids,
                         &app.graph.track_sample_rates,
                         &app.tracks,
                         &app.graph.track_instrument_types,
-                    );
+                    )?;
+                    if new_idx != old_scene_count {
+                        app.handle_scene_reordered(old_scene_count, new_idx);
+                    }
                     app.graph_controller().sync_current_pattern_mod_routes();
-                    app.clone_bus_pattern_from_to(source_pattern, new_idx);
+                    // ProjectScenes::new_scene_in_bank cloned the source
+                    // scene's bus pattern before inserting it. Re-reading by
+                    // the old source index here would be wrong when insertion
+                    // shifted that source to the right.
                     Ok(new_idx)
                 },
             );
-            let Ok(new_idx) = created else {
-                editor.handle_host_event(HostEvent::Status(
-                    "Could not create scene".to_string(),
-                ));
-                return;
+            let new_idx = match created {
+                Ok(new_idx) => new_idx,
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Could not create scene: {error}"
+                    )));
+                    return;
+                }
             };
             let rt = editor.runtime_mut();
             sync_pattern_state(rt, &state);

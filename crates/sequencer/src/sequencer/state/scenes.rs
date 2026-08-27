@@ -440,6 +440,159 @@ impl ProjectScenes {
         SceneBankId(self.next_bank_id)
     }
 
+    pub fn scene_banks(&self) -> &[SceneBank] {
+        &self.banks
+    }
+
+    pub fn scene_bank_containing(&self, scene: usize) -> Option<SceneBankId> {
+        let mut offset = 0;
+        self.banks.iter().find_map(|bank| {
+            let contains = scene >= offset && scene < offset + bank.len;
+            offset += bank.len;
+            contains.then_some(bank.id)
+        })
+    }
+
+    pub fn scene_bank_insert_position(&self, id: SceneBankId) -> Option<usize> {
+        let mut offset = 0;
+        for bank in &self.banks {
+            offset += bank.len;
+            if bank.id == id {
+                return Some(offset);
+            }
+        }
+        None
+    }
+
+    pub fn scene_bank_for_insert_position(
+        &self,
+        insert_position: usize,
+    ) -> Result<SceneBankId, String> {
+        let mut offset = 0;
+        let mut matched = None;
+        for bank in &self.banks {
+            offset += bank.len;
+            if offset != insert_position {
+                continue;
+            }
+            if matched.is_some() {
+                return Err(
+                    "Scene insert position is ambiguous; include the target scene bank id"
+                        .to_string(),
+                );
+            }
+            matched = Some(bank.id);
+        }
+        matched.ok_or_else(|| "Scene insert position is not the end of a bank".to_string())
+    }
+
+    pub fn create_scene_bank(&mut self) -> Result<SceneBankId, String> {
+        let id = SceneBankId(self.next_bank_id);
+        self.next_bank_id = self
+            .next_bank_id
+            .checked_add(1)
+            .ok_or_else(|| "Scene bank identity space is exhausted".to_string())?;
+        self.banks.push(SceneBank {
+            id,
+            name: None,
+            len: 0,
+        });
+        Ok(id)
+    }
+
+    pub fn rename_scene_bank(
+        &mut self,
+        id: SceneBankId,
+        name: Option<String>,
+    ) -> Result<(), String> {
+        let bank = self
+            .banks
+            .iter_mut()
+            .find(|bank| bank.id == id)
+            .ok_or_else(|| format!("Scene bank {} does not exist", id.0))?;
+        let name = name.and_then(|name| {
+            let trimmed = name.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+        if bank.name == name {
+            return Err("Scene bank name is unchanged".to_string());
+        }
+        bank.name = name;
+        Ok(())
+    }
+
+    pub fn delete_scene_bank(&mut self, id: SceneBankId) -> Result<(), String> {
+        if self.banks.len() == 1 {
+            return Err("The last scene bank cannot be deleted".to_string());
+        }
+        let index = self
+            .banks
+            .iter()
+            .position(|bank| bank.id == id)
+            .ok_or_else(|| format!("Scene bank {} does not exist", id.0))?;
+        let target = if index == 0 { 1 } else { index - 1 };
+        let merged_len = self.banks[target]
+            .len
+            .checked_add(self.banks[index].len)
+            .ok_or_else(|| "Scene bank length overflow".to_string())?;
+        if merged_len > MAX_SCENES_PER_BANK {
+            return Err(format!(
+                "Deleting scene bank {} would exceed the {MAX_SCENES_PER_BANK}-scene capacity",
+                id.0
+            ));
+        }
+        self.banks[target].len = merged_len;
+        self.banks.remove(index);
+        Ok(())
+    }
+
+    /// Reorder `scene` to the end of `target_bank`, returning its final index.
+    pub fn move_scene_to_bank(
+        &mut self,
+        scene: usize,
+        target_bank: SceneBankId,
+    ) -> Result<usize, String> {
+        if scene >= self.scenes.len() {
+            return Err("Scene index is out of range".to_string());
+        }
+        let source_bank = self
+            .scene_bank_containing(scene)
+            .ok_or_else(|| "Scene bank model does not own the scene".to_string())?;
+        let target_index = self
+            .banks
+            .iter()
+            .position(|bank| bank.id == target_bank)
+            .ok_or_else(|| format!("Scene bank {} does not exist", target_bank.0))?;
+        let source_index = self
+            .banks
+            .iter()
+            .position(|bank| bank.id == source_bank)
+            .expect("the containing bank exists");
+        if source_index != target_index && self.banks[target_index].len >= MAX_SCENES_PER_BANK {
+            return Err(format!(
+                "Scene bank {} already contains {MAX_SCENES_PER_BANK} scenes",
+                target_bank.0
+            ));
+        }
+
+        let target_end = self.banks[..=target_index]
+            .iter()
+            .map(|bank| bank.len)
+            .sum::<usize>();
+        let final_index = if scene < target_end {
+            target_end.saturating_sub(1)
+        } else {
+            target_end
+        };
+        self.reorder_scene(scene, final_index)
+            .ok_or_else(|| "Scene move produced an invalid index".to_string())?;
+        if source_index != target_index {
+            self.banks[source_index].len -= 1;
+            self.banks[target_index].len += 1;
+        }
+        Ok(final_index)
+    }
+
     /// Preserve bank identity and boundaries across legacy snapshot-based
     /// repository rebuilds that do not change scene topology.
     pub(crate) fn copy_scene_bank_model_from(&mut self, source: &ProjectScenes) {
@@ -1168,6 +1321,36 @@ impl ProjectScenes {
     }
 
     pub fn new_scene(&mut self) -> usize {
+        let mut bank = self
+            .banks
+            .last()
+            .expect("a project always has at least one scene bank")
+            .id;
+        if self.banks.last().is_some_and(|bank| bank.len >= MAX_SCENES_PER_BANK) {
+            bank = self
+                .create_scene_bank()
+                .expect("scene bank identity space exhausted");
+        }
+        self.new_scene_in_bank(bank)
+            .expect("the legacy append path always targets a valid non-full bank")
+    }
+
+    pub fn new_scene_in_bank(&mut self, bank_id: SceneBankId) -> Result<usize, String> {
+        let bank_index = self
+            .banks
+            .iter()
+            .position(|bank| bank.id == bank_id)
+            .ok_or_else(|| format!("Scene bank {} does not exist", bank_id.0))?;
+        if self.banks[bank_index].len >= MAX_SCENES_PER_BANK {
+            return Err(format!(
+                "Scene bank {} already contains {MAX_SCENES_PER_BANK} scenes",
+                bank_id.0
+            ));
+        }
+        let scene_idx = self.banks[..=bank_index]
+            .iter()
+            .map(|bank| bank.len)
+            .sum::<usize>();
         let source_scene = self.scenes.get(self.current_scene).cloned();
         let mut cells = vec![None; self.track_pools.len()];
         let mut cell_sounds = Vec::with_capacity(self.track_pools.len());
@@ -1197,7 +1380,6 @@ impl ProjectScenes {
             }
         }
 
-        let scene_idx = self.scenes.len();
         let (
             bus_patterns,
             mod_connections,
@@ -1222,9 +1404,10 @@ impl ProjectScenes {
             .next_scene_id
             .checked_add(1)
             .expect("scene identity space exhausted");
-        self.scenes.push(Scene {
+        let default_name = format!("Scene {}", self.scenes.len() + 1);
+        self.scenes.insert(scene_idx, Scene {
             id: SceneId(next_id),
-            name: format!("Scene {}", scene_idx + 1),
+            name: default_name,
             cells,
             cell_sounds,
             bus_patterns,
@@ -1234,27 +1417,10 @@ impl ProjectScenes {
             scene_slots,
             project_process_chain,
         });
-        let last_bank = self
-            .banks
-            .last_mut()
-            .expect("a project always has at least one scene bank");
-        if last_bank.len < MAX_SCENES_PER_BANK {
-            last_bank.len += 1;
-        } else {
-            let id = SceneBankId(self.next_bank_id);
-            self.next_bank_id = self
-                .next_bank_id
-                .checked_add(1)
-                .expect("scene bank identity space exhausted");
-            self.banks.push(SceneBank {
-                id,
-                name: None,
-                len: 1,
-            });
-        }
+        self.banks[bank_index].len += 1;
         self.current_scene = scene_idx;
         self.track_overrides.fill(None);
-        scene_idx
+        Ok(scene_idx)
     }
 
     /// Reorders the per-track take pool so it stays parallel with

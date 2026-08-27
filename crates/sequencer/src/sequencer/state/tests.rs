@@ -4351,6 +4351,53 @@
     }
 
     #[test]
+    fn scene_structure_restore_reverses_scene_reference_permutations() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                snapshot_with_active_step(1, 0, 2),
+                snapshot_with_active_step(1, 0, 7),
+                snapshot_with_active_step(1, 0, 11),
+            ],
+            0,
+        );
+        state.with_scenes_mut(|scenes| {
+            scenes.install_scene_banks(vec![
+                SceneBank { id: SceneBankId(4), name: None, len: 1 },
+                SceneBank { id: SceneBankId(8), name: None, len: 2 },
+            ]);
+        });
+        let before = state.capture_project_scenes();
+        let mut arrangement = ProjectArrangement::new(1, 16.0);
+        arrangement.scene_lane = vec![
+            SceneEvent { start_beat: 0.0, scene: 0 },
+            SceneEvent { start_beat: 4.0, scene: 1 },
+            SceneEvent { start_beat: 8.0, scene: 2 },
+        ];
+        state.set_committed_arrangement(Some(arrangement)).unwrap();
+
+        assert_eq!(state.move_scene_to_scene_bank(0, SceneBankId(8)), Ok(2));
+        assert_eq!(
+            state.committed_arrangement().unwrap().scene_lane
+                .iter().map(|event| event.scene).collect::<Vec<_>>(),
+            vec![2, 0, 1],
+        );
+        assert_eq!(
+            state.capture_project_scenes().banks.iter().map(|bank| bank.len).collect::<Vec<_>>(),
+            vec![0, 3],
+        );
+
+        state.restore_project_scenes(&before).unwrap();
+        assert_eq!(
+            state.committed_arrangement().unwrap().scene_lane
+                .iter().map(|event| event.scene).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "undo must keep arrangement events attached to stable scene identity",
+        );
+        assert_eq!(state.capture_project_scenes().banks, before.banks);
+    }
+
+    #[test]
     fn reorder_scene_rejects_out_of_range_indices_without_changes() {
         let state = make_state_with_tracks(1);
         state.replace_pattern_repository(
@@ -4452,6 +4499,100 @@
             scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(),
             vec![0, 2]
         );
+        assert!(scenes.validate_scene_bank_model().is_ok());
+    }
+
+    #[test]
+    fn scene_bank_editing_preserves_contiguous_spans_and_stable_scene_identity() {
+        let snapshots = vec![
+            snapshot_with_active_step(1, 0, 1),
+            snapshot_with_active_step(1, 0, 2),
+            snapshot_with_active_step(1, 0, 3),
+            snapshot_with_active_step(1, 0, 4),
+        ];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        scenes.install_scene_banks(vec![
+            SceneBank { id: SceneBankId(4), name: None, len: 2 },
+            SceneBank { id: SceneBankId(8), name: None, len: 2 },
+        ]);
+        let original_ids = scenes.scenes.iter().map(|scene| scene.id).collect::<Vec<_>>();
+
+        let empty = scenes.create_scene_bank().unwrap();
+        scenes.rename_scene_bank(SceneBankId(8), Some("  Peak  ".to_string())).unwrap();
+        assert_eq!(scenes.banks[1].name.as_deref(), Some("Peak"));
+        scenes.rename_scene_bank(SceneBankId(8), Some("  ".to_string())).unwrap();
+        assert_eq!(scenes.banks[1].name, None);
+
+        assert_eq!(scenes.move_scene_to_bank(0, SceneBankId(8)), Ok(3));
+        assert_eq!(
+            scenes.scenes.iter().map(|scene| scene.id).collect::<Vec<_>>(),
+            vec![original_ids[1], original_ids[2], original_ids[3], original_ids[0]],
+        );
+        assert_eq!(scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(), vec![1, 3, 0]);
+
+        assert_eq!(scenes.move_scene_to_bank(1, empty), Ok(3));
+        assert_eq!(scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(), vec![1, 2, 1]);
+        assert_eq!(scenes.scene_bank_containing(3), Some(empty));
+        assert!(scenes.validate_scene_bank_model().is_ok());
+    }
+
+    #[test]
+    fn delete_scene_bank_merges_toward_the_only_adjacent_target_and_enforces_capacity() {
+        let snapshots = vec![snapshot_with_active_step(1, 0, 3); 25];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        let ids_before_move = scenes.scenes.iter().map(|scene| scene.id).collect::<Vec<_>>();
+        assert!(scenes.move_scene_to_bank(24, SceneBankId(1)).unwrap_err().contains("24 scenes"));
+        assert_eq!(
+            scenes.scenes.iter().map(|scene| scene.id).collect::<Vec<_>>(),
+            ids_before_move,
+            "a move into a full bank must be atomic",
+        );
+        let third = scenes.create_scene_bank().unwrap();
+
+        assert!(
+            scenes.delete_scene_bank(SceneBankId(1)).unwrap_err().contains("capacity"),
+            "the first bank cannot merge forward into a non-empty full target"
+        );
+        scenes.delete_scene_bank(third).unwrap();
+        assert_eq!(scenes.banks.len(), 2, "an empty bank merges into its predecessor");
+        assert!(scenes.delete_scene_bank(SceneBankId(2)).unwrap_err().contains("capacity"));
+
+        let one = ProjectScenes::from_pattern_snapshots(&snapshots[..1], 0);
+        let mut one = one;
+        assert!(one.delete_scene_bank(SceneBankId(1)).unwrap_err().contains("last"));
+    }
+
+    #[test]
+    fn inserting_a_scene_into_a_full_bank_is_refused_without_minting_identity() {
+        let snapshots = vec![snapshot_with_active_step(1, 0, 3); MAX_SCENES_PER_BANK];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        let next_scene_id = scenes.next_scene_id;
+
+        assert!(scenes.new_scene_in_bank(SceneBankId(1)).unwrap_err().contains("24 scenes"));
+        assert_eq!(scenes.scenes.len(), MAX_SCENES_PER_BANK);
+        assert_eq!(scenes.banks[0].len, MAX_SCENES_PER_BANK);
+        assert_eq!(scenes.next_scene_id, next_scene_id);
+    }
+
+    #[test]
+    fn inserting_a_scene_targets_the_end_of_an_empty_or_nonfinal_bank() {
+        let snapshots = vec![
+            snapshot_with_active_step(1, 0, 3),
+            snapshot_with_active_step(1, 0, 9),
+        ];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        scenes.install_scene_banks(vec![
+            SceneBank { id: SceneBankId(4), name: None, len: 1 },
+            SceneBank { id: SceneBankId(8), name: None, len: 0 },
+            SceneBank { id: SceneBankId(12), name: None, len: 1 },
+        ]);
+        let old_second = scenes.scenes[1].id;
+
+        let inserted = scenes.new_scene_in_bank(SceneBankId(8)).unwrap();
+        assert_eq!(inserted, 1);
+        assert_eq!(scenes.scenes[2].id, old_second);
+        assert_eq!(scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(), vec![1, 1, 1]);
+        assert_eq!(scenes.current_scene, 1);
         assert!(scenes.validate_scene_bank_model().is_ok());
     }
 

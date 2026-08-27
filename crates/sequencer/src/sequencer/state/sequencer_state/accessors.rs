@@ -1708,6 +1708,58 @@ impl SequencerState {
         target
             .validate_scene_bank_model()
             .map_err(|error| format!("Scene history contains invalid scene banks: {error}"))?;
+
+        // A scene-order edit stores the scene memento, while arrangement/song
+        // references live outside it. Stable SceneId lets replay derive the
+        // exact old-index -> restored-index permutation without enlarging every
+        // scene-structure history entry. Only do this for a pure permutation;
+        // insertion/deletion have different reference semantics.
+        let current_scene_ids = self
+            .pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scenes
+            .iter()
+            .map(|scene| scene.id)
+            .collect::<Vec<_>>();
+        let target_scene_indices = target
+            .scenes
+            .iter()
+            .enumerate()
+            .map(|(index, scene)| (scene.id, index))
+            .collect::<HashMap<_, _>>();
+        if current_scene_ids.len() == target_scene_indices.len()
+            && current_scene_ids
+                .iter()
+                .all(|id| target_scene_indices.contains_key(id))
+        {
+            let remap = current_scene_ids
+                .iter()
+                .map(|id| target_scene_indices[id])
+                .collect::<Vec<_>>();
+            self.with_committed_song_mut(|song| {
+                if let Some(song) = song {
+                    for row in &mut song.rows {
+                        if let Some(scene) = row.scene.as_mut() {
+                            if let Some(target) = remap.get(*scene) {
+                                *scene = *target;
+                            }
+                        }
+                    }
+                }
+            });
+            self.with_committed_arrangement_mut(|arrangement| {
+                if let Some(arrangement) = arrangement {
+                    for event in &mut arrangement.scene_lane {
+                        if let Some(target) = remap.get(event.scene) {
+                            event.scene = *target;
+                        }
+                    }
+                }
+            });
+        }
+
         let _ = self.quantized_launches.cancel_all();
         *self.pattern.scenes.lock().unwrap() = target.clone();
         self.pattern.current_pattern.store(target.current_scene as u32, Ordering::Relaxed);

@@ -3318,6 +3318,101 @@
     }
 
     #[test]
+    fn recorded_scene_bank_commands_undo_and_redo_as_one_structure_edit() {
+        use crate::sequencer::{SceneBank, SceneBankId};
+
+        let graph = TestLiveGraph::new("recorded-scene-bank-edit-test");
+        let mut app = test_app_with_track_count(&graph, 1);
+        app.state.replace_pattern_repository(
+            vec![
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        app.state.with_scenes_mut(|scenes| {
+            scenes.install_scene_banks(vec![
+                SceneBank { id: SceneBankId(4), name: None, len: 1 },
+                SceneBank { id: SceneBankId(8), name: None, len: 2 },
+            ]);
+        });
+
+        let created_bank = app.apply_recorded_scene_structure_mutation(
+            "Create scene bank",
+            |app| app.state.create_scene_bank(),
+        ).unwrap();
+        assert_eq!(app.state.scene_banks().iter().map(|bank| bank.len).collect::<Vec<_>>(), vec![1, 2, 0]);
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scene_banks().len(), 2);
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scene_banks().last().unwrap().id, created_bank);
+
+        app.apply_recorded_scene_structure_mutation("Rename scene bank", |app| {
+            app.state.rename_scene_bank(created_bank, Some("Break".to_string()))
+        }).unwrap();
+        assert_eq!(app.state.scene_banks().last().unwrap().name.as_deref(), Some("Break"));
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scene_banks().last().unwrap().name, None);
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+
+        let inserted = app.apply_recorded_scene_structure_mutation("Create scene", |app| {
+            let source = app.state.current_scene_index();
+            let new_scene = app.state.clone_pattern_in_scene_bank(
+                SceneBankId(4),
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )?;
+            app.clone_bus_pattern_from_to(source, new_scene);
+            Ok(new_scene)
+        }).unwrap();
+        assert_eq!(inserted, 1, "scoped + inserts at the end of bank 4");
+        assert_eq!(app.state.scene_banks().iter().map(|bank| bank.len).collect::<Vec<_>>(), vec![2, 2, 0]);
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scene_count(), 3);
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scene_count(), 4);
+
+        let mut arrangement = ProjectArrangement::new(1, 16.0);
+        arrangement.scene_lane = (0..4)
+            .map(|scene| SceneEvent {
+                start_beat: scene as f64 * 4.0,
+                scene,
+            })
+            .collect();
+        app.state.set_committed_arrangement(Some(arrangement)).unwrap();
+        app.apply_recorded_scene_structure_mutation("Move scene to scene bank", |app| {
+            let target = app.state.move_scene_to_scene_bank(0, SceneBankId(8))?;
+            app.handle_scene_reordered(0, target);
+            Ok(())
+        }).unwrap();
+        assert_eq!(app.state.scene_banks().iter().map(|bank| bank.len).collect::<Vec<_>>(), vec![1, 3, 0]);
+        assert_eq!(
+            app.state.committed_arrangement().unwrap().scene_lane.iter().map(|event| event.scene).collect::<Vec<_>>(),
+            vec![3, 0, 1, 2],
+        );
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(
+            app.state.committed_arrangement().unwrap().scene_lane.iter().map(|event| event.scene).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+        );
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+
+        app.apply_recorded_scene_structure_mutation("Delete scene bank", |app| {
+            app.state.delete_scene_bank(created_bank)
+        }).unwrap();
+        assert_eq!(app.state.scene_banks().len(), 2);
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scene_banks().len(), 3);
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.state.scene_banks().len(), 2);
+        graph.process_block();
+    }
+
+    #[test]
     fn recorded_process_configuration_restores_stable_instance_and_lane_state() {
         let graph = TestLiveGraph::new("recorded-process-config-test");
         let mut app = test_app_with_track_count(&graph, 0);

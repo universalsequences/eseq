@@ -1280,6 +1280,45 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> usize {
+        self.clone_pattern_impl(
+            None,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        )
+        .expect("the append clone path always has room by creating a bank")
+    }
+
+    pub fn clone_pattern_in_scene_bank(
+        &self,
+        bank: SceneBankId,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> Result<usize, String> {
+        self.clone_pattern_impl(
+            Some(bank),
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        )
+    }
+
+    fn clone_pattern_impl(
+        &self,
+        bank: Option<SceneBankId>,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> Result<usize, String> {
         let new_idx = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let cur = self.current_scene_index();
@@ -1298,7 +1337,27 @@ impl SequencerState {
             current_snapshot.scene_slots = scenes.current_scene_slots();
             let save_masks = self.masked_save_masks();
             scenes.save_scene_snapshot_masked(cur, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
-            let new_idx = scenes.new_scene();
+            let old_scene_count = scenes.scene_count();
+            let new_idx = match bank {
+                Some(bank) => scenes.new_scene_in_bank(bank)?,
+                None => scenes.new_scene(),
+            };
+            if new_idx != old_scene_count {
+                self.with_committed_song_mut(|song| {
+                    if let Some(song) = song {
+                        remap_song_after_scene_move(song, old_scene_count, new_idx);
+                    }
+                });
+                self.with_committed_arrangement_mut(|arrangement| {
+                    if let Some(arrangement) = arrangement {
+                        remap_arrangement_after_scene_move(
+                            arrangement,
+                            old_scene_count,
+                            new_idx,
+                        );
+                    }
+                });
+            }
             self.pattern
                 .current_pattern
                 .store(new_idx as u32, Ordering::Relaxed);
@@ -1309,7 +1368,83 @@ impl SequencerState {
             new_idx
         };
         self.publish_scheduler_snapshot();
-        new_idx
+        Ok(new_idx)
+    }
+
+    pub fn create_scene_bank(&self) -> Result<SceneBankId, String> {
+        self.pattern.scenes.lock().unwrap().create_scene_bank()
+    }
+
+    pub fn rename_scene_bank(
+        &self,
+        bank: SceneBankId,
+        name: Option<String>,
+    ) -> Result<(), String> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .rename_scene_bank(bank, name)
+    }
+
+    pub fn delete_scene_bank(&self, bank: SceneBankId) -> Result<(), String> {
+        self.pattern.scenes.lock().unwrap().delete_scene_bank(bank)
+    }
+
+    pub fn move_scene_to_scene_bank(
+        &self,
+        scene: usize,
+        bank: SceneBankId,
+    ) -> Result<usize, String> {
+        let (target, current_scene) = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let target = scenes.move_scene_to_bank(scene, bank)?;
+            if target != scene {
+                let _ = self.quantized_launches.cancel_all();
+                self.with_committed_song_mut(|song| {
+                    if let Some(song) = song {
+                        remap_song_after_scene_move(song, scene, target);
+                    }
+                });
+                self.with_committed_arrangement_mut(|arrangement| {
+                    if let Some(arrangement) = arrangement {
+                        remap_arrangement_after_scene_move(arrangement, scene, target);
+                    }
+                });
+            }
+            (target, scenes.current_scene)
+        };
+        self.pattern
+            .current_pattern
+            .store(current_scene as u32, Ordering::Relaxed);
+        Ok(target)
+    }
+
+    pub fn scene_banks(&self) -> Vec<SceneBank> {
+        self.pattern.scenes.lock().unwrap().scene_banks().to_vec()
+    }
+
+    pub fn scene_bank_containing(&self, scene: usize) -> Option<SceneBankId> {
+        self.pattern.scenes.lock().unwrap().scene_bank_containing(scene)
+    }
+
+    pub fn scene_bank_for_insert_position(
+        &self,
+        insert_position: usize,
+    ) -> Result<SceneBankId, String> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scene_bank_for_insert_position(insert_position)
+    }
+
+    pub fn scene_bank_insert_position(&self, bank: SceneBankId) -> Option<usize> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scene_bank_insert_position(bank)
     }
 
     /// Reorder scenes while keeping the currently playing scene active and

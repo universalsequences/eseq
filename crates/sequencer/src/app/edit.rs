@@ -2379,6 +2379,35 @@ impl App {
         &mut self,
         target: &crate::sequencer::ProjectScenes,
     ) -> Result<(), String> {
+        // Scene-structure replay restores ProjectScenes directly, so replay
+        // the same stable-identity permutation through the macro engine that
+        // a forward reorder uses. Arrangement/song references are remapped by
+        // SequencerState::restore_project_scenes at the same seam.
+        let mut current_ids = self
+            .state
+            .capture_project_scenes()
+            .scenes
+            .into_iter()
+            .map(|scene| scene.id)
+            .collect::<Vec<_>>();
+        let target_ids = target.scenes.iter().map(|scene| scene.id).collect::<Vec<_>>();
+        let current_id_set = current_ids.iter().copied().collect::<HashSet<_>>();
+        if current_ids.len() == target_ids.len()
+            && target_ids.iter().all(|id| current_id_set.contains(id))
+        {
+            for target_index in 0..target_ids.len() {
+                let source_index = current_ids
+                    .iter()
+                    .position(|id| *id == target_ids[target_index])
+                    .expect("the identity sets were checked above");
+                if source_index != target_index {
+                    self.handle_scene_reordered(source_index, target_index);
+                    let id = current_ids.remove(source_index);
+                    current_ids.insert(target_index, id);
+                }
+            }
+        }
+
         let sample_ids = self.state.restore_project_scenes(target)?;
         self.graph_controller().apply_sample_ids(&sample_ids);
         self.graph_controller().sync_current_pattern_mod_routes();
