@@ -22794,6 +22794,27 @@
 
         editor
             .runtime_mut()
+            .set_reactive("SEQ", "scene-launch-quantize", Value::String("1 bar".into()));
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.transport/seq-switch-pattern 2)")
+            .expect("queue the playing-bank scene while viewing bank A");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "switch-pattern");
+                assert_eq!(extract_usize_from_payload(payload, "idx"), Some(2));
+                assert_eq!(
+                    extract_string_from_payload(payload, "quantize").as_deref(),
+                    Some("1 bar")
+                );
+            }
+            other => panic!("expected quantized switch-pattern command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
             .eval_str("(eseq.transport/seq-clone-pattern)")
             .expect("clone into viewed bank");
         let commands = editor.drain_host_commands();

@@ -1,6 +1,6 @@
 # Scene Banks Spec
 
-Status: rev 1 — design agreed 2026-08-27 (bead eseq-doy). Not yet implemented.
+Status: **BUILT** — implemented and acceptance-swept 2026-08-27 (epic `eseq-doy`).
 
 ## 1. Goal
 
@@ -85,10 +85,12 @@ pub scene_banks: Vec<ProjectSceneBank>,
 
 Load-time validation (in the `from_pattern_snapshots` path / project load):
 if `scene_banks` is empty, missing, or inconsistent (lengths don't sum to the
-scene count, a len > 24, zero banks), fall back to a single bank A holding all
-scenes rather than failing the load. `next_bank_id` is re-derived as
-`max(id) + 1` on load (ids need only be unique within a project; like
-`SceneId` they may be re-minted if absent).
+scene count, a len > 24, zero banks), fall back to consecutive unnamed banks
+of at most 24 scenes rather than failing the load. Thus every ordinary legacy
+project with at most 24 scenes loads wholly into bank A; larger legacy projects
+load into A/B/… chunks so the capacity invariant remains true. `next_bank_id`
+is re-derived as `max(id) + 1` on load (ids need only be unique within a
+project; like `SceneId` they may be re-minted if absent).
 
 Unlike scene names (a known persistence gap — not fixed here), **bank names
 and boundaries are persisted**.
@@ -186,7 +188,24 @@ Bank switching is a Lisp-state change re-rendering ~24 pills. The
 `SEQ.scene-banks` value changes only on structural edits (same cadence as
 `SEQ.scene-names`), so drags and playback publish nothing new.
 
-## 9. Out of scope
+## 9. Built status and deviations
+
+The implementation follows the agreed rev 1 model and interaction contract.
+The acceptance sweep covers global-index quantized launch into another bank,
+index-neutral non-empty bank deletion, arrangement and scene-macro reference
+identity, mixed bank/scene undo and redo, legacy load defaults, serialization
+of names and boundaries, and the bank-filtered transport UI.
+
+One contradiction in rev 1 was resolved during implementation: the original
+serialization section said every missing/invalid bank table became one bank A,
+while the model requires every bank to contain at most 24 scenes. As clarified
+in §3, projects with more than 24 scenes are chunked into unnamed A/B/… banks;
+projects of 24 scenes or fewer still load entirely into A. There are no other
+known deviations from the agreed v1 scope. In particular, the deferred UI and
+input surfaces below remain intentionally out of scope rather than partially
+implemented.
+
+## 10. Out of scope
 
 - Persisting scene names / durable `SceneId` (known gap, unchanged).
 - Auto-follow of the viewed bank on launch (indicator only in v1).

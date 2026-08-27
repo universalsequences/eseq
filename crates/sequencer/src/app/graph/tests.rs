@@ -3413,6 +3413,168 @@
     }
 
     #[test]
+    fn scene_bank_acceptance_mixed_edits_round_trip_through_undo_and_redo() {
+        use crate::macro_engine::{SceneMacroConfig, StealQuantize};
+        use crate::sequencer::{SceneBank, SceneBankId};
+
+        let graph = TestLiveGraph::new("scene-bank-mixed-history-acceptance-test");
+        let mut app = test_app_with_track_count(&graph, 1);
+        app.state.replace_pattern_repository(
+            vec![
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        app.state.with_scenes_mut(|scenes| {
+            scenes.install_scene_banks(vec![
+                SceneBank { id: SceneBankId(4), name: None, len: 1 },
+                SceneBank { id: SceneBankId(8), name: Some("Peak".to_string()), len: 2 },
+            ]);
+        });
+        let mut arrangement = ProjectArrangement::new(1, 16.0);
+        arrangement.scene_lane = (0..3)
+            .map(|scene| SceneEvent { start_beat: scene as f64 * 4.0, scene })
+            .collect();
+        app.state.set_committed_arrangement(Some(arrangement)).unwrap();
+        let scene_macro = app.macro_engine.create_macro(
+            "stable scene",
+            MacroKind::Scene(SceneMacroConfig {
+                target_scene: 2,
+                morph_params: false,
+                steal_patterns: false,
+                quantize: StealQuantize::Off,
+                track_mask: None,
+            }),
+        ).unwrap();
+
+        let snapshot = |app: &App| {
+            let scenes = app.state.capture_project_scenes();
+            (
+                scenes.scenes.iter().map(|scene| scene.id).collect::<Vec<_>>(),
+                scenes.banks,
+                app.state.committed_arrangement().unwrap().scene_lane
+                    .iter().map(|event| event.scene).collect::<Vec<_>>(),
+                app.macro_engine.scene_config(scene_macro).unwrap().target_scene,
+            )
+        };
+        let mut expected = vec![snapshot(&app)];
+
+        let created_bank = app.apply_recorded_scene_structure_mutation(
+            "Create scene bank",
+            |app| app.state.create_scene_bank(),
+        ).unwrap();
+        expected.push(snapshot(&app));
+
+        app.apply_recorded_scene_structure_mutation("Rename scene bank", |app| {
+            app.state.rename_scene_bank(created_bank, Some("Outro".to_string()))
+        }).unwrap();
+        expected.push(snapshot(&app));
+
+        app.apply_recorded_scene_structure_mutation("Create scene", |app| {
+            let old_scene_count = app.state.scene_count();
+            let inserted = app.state.clone_pattern_in_scene_bank(
+                SceneBankId(4),
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )?;
+            app.handle_scene_reordered(old_scene_count, inserted);
+            Ok(())
+        }).unwrap();
+        expected.push(snapshot(&app));
+
+        app.apply_recorded_scene_structure_mutation("Move scene to scene bank", |app| {
+            let target = app.state.move_scene_to_scene_bank(0, SceneBankId(8))?;
+            app.handle_scene_reordered(0, target);
+            Ok(())
+        }).unwrap();
+        expected.push(snapshot(&app));
+
+        let references_before_delete = snapshot(&app);
+        app.apply_recorded_scene_structure_mutation("Delete scene bank", |app| {
+            app.state.delete_scene_bank(SceneBankId(8))
+        }).unwrap();
+        let references_after_delete = snapshot(&app);
+        assert_eq!(references_after_delete.0, references_before_delete.0,
+            "deleting a non-empty bank must merge adjacent spans without moving scenes");
+        assert_eq!(references_after_delete.2, references_before_delete.2,
+            "index-neutral bank deletion must not rewrite arrangement references");
+        assert_eq!(references_after_delete.3, references_before_delete.3,
+            "index-neutral bank deletion must not rewrite scene-macro targets");
+        expected.push(references_after_delete);
+
+        for target in expected.iter().rev().skip(1) {
+            assert!(matches!(
+                crate::app::edit::undo(&mut app),
+                crate::app::history::HistoryReplay::Applied(_)
+            ));
+            assert_eq!(&snapshot(&app), target,
+                "each undo must restore the preceding mixed bank/scene state");
+        }
+        for target in expected.iter().skip(1) {
+            assert!(matches!(
+                crate::app::edit::redo(&mut app),
+                crate::app::history::HistoryReplay::Applied(_)
+            ));
+            assert_eq!(&snapshot(&app), target,
+                "each redo must restore the following mixed bank/scene state");
+        }
+        graph.process_block();
+    }
+
+    #[test]
+    fn quantized_launch_targets_a_global_scene_outside_the_first_bank() {
+        use crate::quantized_launch::{
+            LaunchQuantize, PatternLaunchTarget, PendingQuantizedLaunches,
+            QuantizedLaunchOwner, SessionLaunchInstall,
+        };
+        use crate::sequencer::{SceneBank, SceneBankId};
+
+        let graph = TestLiveGraph::new("scene-bank-quantized-launch-acceptance-test");
+        let mut app = test_app_with_track_count(&graph, 1);
+        app.state.replace_pattern_repository(
+            vec![crate::sequencer::PatternSnapshot::new_default(1, &[]); 4],
+            0,
+        );
+        app.state.with_scenes_mut(|scenes| {
+            scenes.install_scene_banks(vec![
+                SceneBank { id: SceneBankId(4), name: None, len: 2 },
+                SceneBank { id: SceneBankId(8), name: Some("Peak".to_string()), len: 2 },
+            ]);
+        });
+        let banks_before = app.state.scene_banks();
+        app.state.start_playback();
+        app.state.schedule_quantized_pattern_launch(
+            PatternLaunchTarget::Scene { scene: 3 },
+            LaunchQuantize::Bar,
+            QuantizedLaunchOwner::Transport,
+        ).expect("queue a scene in the non-viewed bank by global index");
+
+        let mut pending = PendingQuantizedLaunches::default();
+        app.state.quantized_launches()
+            .process_scheduler(&mut pending, 0.5, 0.5, true, false);
+        assert_eq!(app.state.current_scene_index(), 0,
+            "a quantized banked scene must not launch before its boundary");
+        let (_, install) = pending.next_session_chunk(4.0, 1_000.0, 512);
+        assert!(matches!(install, SessionLaunchInstall::AllTracks));
+        app.state.quantized_launches()
+            .process_scheduler(&mut pending, 4.0, 4.0, true, false);
+        let results = app.drain_due_pattern_launches();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        assert_eq!(app.state.current_scene_index(), 3);
+        assert_eq!(app.state.scene_banks(), banks_before,
+            "launching must not mutate scene-bank organization");
+        app.state.stop_playback();
+        graph.process_block();
+    }
+
+    #[test]
     fn recorded_process_configuration_restores_stable_instance_and_lane_state() {
         let graph = TestLiveGraph::new("recorded-process-config-test");
         let mut app = test_app_with_track_count(&graph, 0);
