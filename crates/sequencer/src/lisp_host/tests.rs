@@ -9340,6 +9340,58 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_rest_word_silences_its_cycle() {
+        // `rest`/`none` drop every event while keeping the cycle's length:
+        // (left left rest) plays the left hand twice, then a silent cycle;
+        // (every 2 rest) thins a route to alternate cycles.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "rests" :16
+                 . . - .
+                 -> 0 (left left rest)
+                 -> 1 (every 2 none))"#,
+        )
+        .expect("jak with rest members");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            3.75,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        let spq = 48_000.0_f64;
+        let cycle_len = (5.0 * 0.25 * spq) as u64;
+        let counts = |track: usize| -> Vec<usize> {
+            (0..3)
+                .map(|cycle| {
+                    let start = cycle * cycle_len;
+                    let end = start + cycle_len;
+                    out.iter()
+                        .filter(|e| {
+                            e.event.track == Some(track)
+                                && e.sample_time > start
+                                && e.sample_time <= end
+                        })
+                        .count()
+                })
+                .collect()
+        };
+        // left hand of `. . - .` is 3 hits; cycle 2 rests, cycle 3 (not
+        // scheduled here) would play left again
+        assert_eq!(counts(0), vec![3, 3, 0], "{out:?}");
+        // (every 2 none): silent on cycles where (c+1) % 2 == 0 (cycle 1),
+        // full 5 hits elsewhere
+        assert_eq!(counts(1), vec![5, 0, 5], "{out:?}");
+    }
+
+    #[test]
     fn jaki_word_alternation_covers_xf_words_and_id() {
         // Parameterized/xf members alternate too: ((rot 1) id) rotates the
         // figure on even cycles only, so the per-cycle velocity contour

@@ -121,7 +121,7 @@
 ;; the explicit spelling. `id` is the no-op member: (stac stac id).
 
 (def zero-word? (w)
-  (member? w '(left right accent rev stac ghost swap id)))
+  (member? w '(left right accent rev stac ghost swap id none rest)))
 
 (def alt-word? (w)
   (if (= (nth w 0) nil)
@@ -702,6 +702,9 @@
                  (apply-post-one res (nth op 2) cycle)
                  res)
       :alt (apply-post-one res (alt-pick (rest op) cycle) cycle)
+      ;; drop every event, keeping the cycle's length/timing: the silent
+      ;; alternation member ((left right none)) and (every n none) thinning
+      :none (merge res :events (list))
       _ res)))
 
 ;; evaluate a pattern for one cycle with explicit threading state
@@ -931,7 +934,8 @@
 ;;   Any per-cycle arg also reads Tidal-style implicit cyc: a list headed by
 ;;   a value is (cyc …) recursively — (1 2 (1 3)) = (cyc 1 2 (cyc 1 3))
 ;;   Whole WORDS alternate the same way: (right right right left) picks one
-;;   modifier per cycle ((cyc w…) is the explicit spelling, `id` the no-op);
+;;   modifier per cycle ((cyc w…) is the explicit spelling, `id` the no-op,
+;;   `none`/`rest` the silent cycle — also useful as (every n rest));
 ;;   members must all be post-lowerable or all figure transforms
 ;;   (vel s) (note n)
 ;;   (gate s) / (dur s) — multiply every gate by s (per-cycle arg: number,
@@ -966,6 +970,8 @@
         (match h
           'stac   (list :stac)
           'id     (list :id)
+          'none   (list :none)
+          'rest   (list :none)
           'gate   (list :gate (nth args 0))
           'dur    (list :gate (nth args 0))
           'quant  (list :quant (quant-units (nth args 0)))
@@ -1010,6 +1016,8 @@
       'accent (merge acc :p (filter (get acc :p) '(:accent true)))
       'rev    (merge acc :p (rev (get acc :p)))
       'stac   (merge acc :p (add-post (get acc :p) (list :stac) "stac"))
+      'none   (merge acc :p (add-post (get acc :p) (list :none) "none"))
+      'rest   (merge acc :p (add-post (get acc :p) (list :none) "none"))
       'ghost  (merge acc :p (ghost (get acc :p)))
       'swap   (merge acc :p (swap (get acc :p)))
       'rot    (merge acc :p (rot (get acc :p) (nth args 0)))
