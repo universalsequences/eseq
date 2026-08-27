@@ -1461,13 +1461,20 @@ fn rebuild_layout_node_at_rect(
 ) -> Result<LayoutNode, String> {
     const SIZE_EPSILON: f32 = 0.01;
     let rect = existing.rect;
+    // Measure UNCLAMPED: with max_width = rect.width the measurement of any
+    // non-explicit-width node clamps to exactly rect.width
+    // (clamp_size_for_node), so grown or shrunk content passed the guard and
+    // was rebuilt confined to a stale rect — content painted over the next
+    // sibling, and a panel dropped into a wider predecessor's rect kept its
+    // giant width. Only the honest natural size can prove the parent would
+    // assign the same rect.
     let measured = ctx
         .engine
         .measure_layout_child(
             tree,
             Constraints {
                 min_width: 0.0,
-                max_width: rect.width,
+                max_width: f32::INFINITY,
                 min_height: 0.0,
                 max_height: f32::INFINITY,
                 aspect: 1.0,
@@ -1475,9 +1482,16 @@ fn rebuild_layout_node_at_rect(
             inherited_font_size,
         )
         .ok_or_else(|| "measure-failed".to_string())?;
-    if (measured.width - rect.width).abs() > SIZE_EPSILON
-        || (measured.height - rect.height).abs() > SIZE_EPSILON
-    {
+    // A `:fill` axis is exempt: its assigned extent comes from the parent
+    // rect and the siblings' measures — both already proven unchanged by the
+    // reconcile walk — and a fill child's contribution to its parent's own
+    // measurement is content-independent (it measures to the incoming max),
+    // so nothing outside this subtree can see its content change.
+    let width_ok = prop_is_keyword(tree, "width", "fill")
+        || (measured.width - rect.width).abs() <= SIZE_EPSILON;
+    let height_ok = prop_is_keyword(tree, "height", "fill")
+        || (measured.height - rect.height).abs() <= SIZE_EPSILON;
+    if !width_ok || !height_ok {
         return Err(format!(
             "size-changed:{:.2}x{:.2}->{:.2}x{:.2}",
             rect.width, rect.height, measured.width, measured.height
@@ -4449,5 +4463,45 @@ mod tests {
         assert_eq!(layout.rect.width, 80.0);
         assert_eq!(layout.children[0].rect.width, 120.0);
         assert_eq!(layout.children[1].rect.col, 121.0);
+    }
+
+    #[test]
+    fn reconcile_never_accepts_geometry_a_full_relayout_would_change() {
+        // A child whose new content is wider than its old rect measures
+        // clamped to max_width == the old rect's width (clamp_size_for_node),
+        // so the size-changed guard in rebuild_layout_node_at_rect must not
+        // trust a clamped measurement: accepting it rebuilds the subtree
+        // confined to the stale rect while its content overflows over the
+        // next sibling, which keeps its stale position.
+        let chain = |inner_width: f64| {
+            hstack(
+                1.0,
+                vec![
+                    bx(
+                        None,
+                        Some(2.0),
+                        vec![bx(Some(inner_width), Some(2.0), vec![])],
+                    ),
+                    bx(Some(10.0), Some(2.0), vec![]),
+                ],
+            )
+        };
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&chain(10.0)).unwrap();
+        assert_eq!(layout.children[1].rect.col, 11.0);
+
+        let wider = chain(30.0);
+        let mut dirty = Vec::new();
+        if let Ok((reconciled, _)) = reconcile_layout_node(&layout, &wider, &engine, &mut dirty) {
+            let fresh = engine.layout(&wider).unwrap();
+            assert_eq!(
+                reconciled.children[1].rect.col, fresh.children[1].rect.col,
+                "reconcile accepted geometry that differs from a full relayout"
+            );
+            assert_eq!(
+                reconciled.children[0].children[0].rect.width,
+                fresh.children[0].children[0].rect.width,
+            );
+        }
     }
 }

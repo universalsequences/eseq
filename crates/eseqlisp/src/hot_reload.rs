@@ -17,6 +17,27 @@ pub fn set_global_load_fallback_roots(roots: Vec<PathBuf>) {
     let _ = LOAD_FALLBACK_ROOTS.set(roots);
 }
 
+/// Resolve a content-relative *asset* path the same way `resolve_load_path`
+/// resolves a relative `(load …)`: cwd first, then the installed content
+/// roots. Widgets that name a factory asset by its content-relative path
+/// (`instruments/core/wavetable/waves/bank.json`) resolved against the
+/// crate-dir cwd before the factory `content/` split and need this fallback
+/// now. Absolute paths and paths that resolve against the cwd are returned
+/// unchanged, so a host that never installs roots behaves exactly as before.
+pub fn resolve_content_relative_asset(path: &str) -> PathBuf {
+    let raw = PathBuf::from(path);
+    if raw.is_absolute() || raw.exists() {
+        return raw;
+    }
+    for root in load_fallback_roots() {
+        let candidate = root.join(&raw);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    raw
+}
+
 /// When the host never installs roots, fall back to the dev-workspace layout
 /// derived from this crate's manifest dir (same precedent as
 /// `defmacro_library::default_library_root`), so tests and helper tools

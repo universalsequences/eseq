@@ -121,7 +121,12 @@ fn load_bank(path: &str) -> Option<Arc<WavetableBank>> {
 }
 
 fn read_bank_file(path: &str) -> Option<WavetableBank> {
-    let text = std::fs::read_to_string(path).ok()?;
+    // `:file` names a factory asset by its content-relative path. That used to
+    // resolve against the process cwd (`crates/sequencer`); since the factory
+    // `content/` split it only resolves against the host's installed content
+    // roots, so go through the same fallback `(load …)` uses.
+    let resolved = crate::hot_reload::resolve_content_relative_asset(path);
+    let text = std::fs::read_to_string(&resolved).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     let (shape, data) = match &json {
         serde_json::Value::Object(map) => (map.get("shape"), map.get("data")?),
@@ -188,6 +193,34 @@ fn fold_sample(y: f32, fold: f32) -> f32 {
     1.0 - (v.rem_euclid(4.0) - 2.0).abs()
 }
 
+// ── Color vocabulary ──────────────────────────────────────────────────────
+//
+// Every color the viewer draws with is a prop, resolved through
+// `resolve_named_color` like the other widgets in this module, so a caller can
+// pass a literal `(rgba …)`, a theme keyword (`:accent`), or omit it. The
+// defaults below are the values these colors were hardcoded to before they
+// became props: omitting a prop renders exactly what it rendered before.
+//
+//   :background-color    plot background, and the widget's fill when the bank
+//                        is missing or empty
+//   :wave-color          the highlighted / current wave, morph-interpolated at
+//                        the fractional `:wave` position
+//   :inactive-color      the other wave strokes behind it (its alpha is the
+//                        stroke opacity, hence the < 1.0 default)
+//   :label-color         the terminal fallback's text (the GPU path draws no
+//                        text)
+//
+// The shader also paints a soft halo behind the highlighted wave; that is
+// derived from `:background-color` rather than being its own color, so it
+// follows the background automatically and needs no prop.
+
+/// Default `:background-color` — the near-black plot ground.
+pub const DEFAULT_BACKGROUND_COLOR: Color = Color::rgba(0.035, 0.038, 0.042, 1.0);
+/// Default `:wave-color` — the amber highlight on the current wave.
+pub const DEFAULT_WAVE_COLOR: Color = Color::rgba(1.0, 0.64, 0.22, 1.0);
+/// Default `:inactive-color` — dim gray strokes for the rest of the set.
+pub const DEFAULT_INACTIVE_COLOR: Color = Color::rgba(0.46, 0.46, 0.48, 0.55);
+
 impl WidgetDefinition for WavetableViewerWidget {
     fn names(&self) -> &'static [&'static str] {
         &["wavetable-viewer"]
@@ -229,6 +262,7 @@ impl WidgetDefinition for WavetableViewerWidget {
         let set = prop_num(props, "set", 0.0);
         let wave = prop_num(props, "wave", 0.0);
         let label = format!("wavetable set {set:.0} wave {wave:.1}");
+        let label_color = resolve_named_color(props, "label-color", theme::FG_MUTED());
         let row = rect.row.round() as u16;
         let col_start = rect.col.round() as u16;
         for (i, ch) in label.chars().enumerate() {
@@ -238,7 +272,7 @@ impl WidgetDefinition for WavetableViewerWidget {
             buf.set(
                 row,
                 col_start + i as u16,
-                styled_cell(ch, theme::FG_MUTED(), None),
+                styled_cell(ch, label_color, None),
             );
         }
     }
@@ -249,11 +283,8 @@ impl WidgetDefinition for WavetableViewerWidget {
         node: &LayoutNode,
         _viewport: WidgetViewport,
     ) -> Vec<GpuPrimitive> {
-        let bg_color = resolve_named_color(
-            &node.props,
-            "background-color",
-            Color::rgba(0.035, 0.038, 0.042, 1.0),
-        );
+        let bg_color =
+            resolve_named_color(&node.props, "background-color", DEFAULT_BACKGROUND_COLOR);
         let mut primitives = vec![GpuPrimitive::Rect(GpuRectPrimitive {
             rect: node.rect,
             color: bg_color,
@@ -290,13 +321,9 @@ impl WidgetDefinition for WavetableViewerWidget {
         let warp = prop_num(&node.props, "warp", 0.0).clamp(0.0, 1.0);
         let fold = prop_num(&node.props, "fold", 0.0).clamp(0.0, 1.0);
 
-        let selected_color =
-            resolve_named_color(&node.props, "wave-color", Color::rgba(1.0, 0.64, 0.22, 1.0));
-        let inactive_color = resolve_named_color(
-            &node.props,
-            "inactive-color",
-            Color::rgba(0.46, 0.46, 0.48, 0.55),
-        );
+        let selected_color = resolve_named_color(&node.props, "wave-color", DEFAULT_WAVE_COLOR);
+        let inactive_color =
+            resolve_named_color(&node.props, "inactive-color", DEFAULT_INACTIVE_COLOR);
 
         let magnitude = matches!(node.props.get("domain"), Some(Value::Keyword(value)) if value == "magnitude");
         primitives.push(GpuPrimitive::Wavetable(GpuWavetablePrimitive {
@@ -358,6 +385,175 @@ mod tests {
         assert!(!take_retired_bank_keys().contains(&key.to_string()));
         remove_published_bank(key);
         take_retired_bank_keys();
+    }
+
+    fn color_test_node(extra: &[(&str, Value)]) -> LayoutNode {
+        let key = "wavetable-viewer-color-prop-test";
+        // Two waves of two samples: enough for `waves_in_set >= 1` so
+        // `build_primitives` reaches the Wavetable primitive.
+        assert!(publish_bank(key, 2, Arc::new(vec![0.0, 1.0, 1.0, 0.0])));
+        let mut props = HashMap::from([
+            ("data-key".to_string(), Value::String(key.to_string())),
+            ("waves-per-set".to_string(), Value::Number(2.0)),
+        ]);
+        for (name, value) in extra {
+            props.insert((*name).to_string(), value.clone());
+        }
+        LayoutNode {
+            widget_id: 7,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "wavetable-viewer".to_string(),
+            rect: crate::layout::Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 20.0,
+                height: 4.0,
+            },
+            props,
+            children: Vec::new(),
+            focusable: false,
+            animation: Default::default(),
+        }
+    }
+
+    fn color_test_primitives(extra: &[(&str, Value)]) -> (Color, GpuWavetablePrimitive) {
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 800.0,
+            vp_h: 600.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 24.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let primitives = WAVETABLE_VIEWER_WIDGET.build_primitives(
+            "wavetable-viewer",
+            &color_test_node(extra),
+            viewport,
+        );
+        let background = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                GpuPrimitive::Rect(rect) => Some(rect.color),
+                _ => None,
+            })
+            .expect("background rect primitive");
+        let wavetable = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                GpuPrimitive::Wavetable(wavetable) => Some(wavetable.clone()),
+                _ => None,
+            })
+            .expect("wavetable primitive");
+        (background, wavetable)
+    }
+
+    /// The color props' defaults are the values the viewer had hardcoded
+    /// before they were props, so the Wavetable instrument panel and the
+    /// Filter Table panel — neither of which passes every color — keep
+    /// rendering exactly what they rendered before.
+    #[test]
+    fn omitted_color_props_fall_back_to_the_previously_hardcoded_values() {
+        let (background, wavetable) = color_test_primitives(&[]);
+        assert_eq!(background, Color::rgba(0.035, 0.038, 0.042, 1.0));
+        assert_eq!(wavetable.bg_color, Color::rgba(0.035, 0.038, 0.042, 1.0));
+        assert_eq!(wavetable.selected_color, Color::rgba(1.0, 0.64, 0.22, 1.0));
+        assert_eq!(
+            wavetable.inactive_color,
+            Color::rgba(0.46, 0.46, 0.48, 0.55)
+        );
+        // The exported defaults are the same values, so callers and the
+        // shader-facing primitive can never drift apart.
+        assert_eq!(background, DEFAULT_BACKGROUND_COLOR);
+        assert_eq!(wavetable.selected_color, DEFAULT_WAVE_COLOR);
+        assert_eq!(wavetable.inactive_color, DEFAULT_INACTIVE_COLOR);
+    }
+
+    /// Every color the GPU path draws with is overridable, and each prop takes
+    /// the standard color vocabulary (`(rgba …)` lists and `#rrggbbaa`
+    /// strings) through `resolve_named_color`.
+    #[test]
+    fn color_props_override_every_drawn_color() {
+        let rgba = |r: f64, g: f64, b: f64, a: f64| {
+            Value::List(
+                [r, g, b, a]
+                    .into_iter()
+                    .map(|n| std::rc::Rc::new(std::cell::RefCell::new(Value::Number(n))))
+                    .collect(),
+            )
+        };
+        let (background, wavetable) = color_test_primitives(&[
+            ("background-color", rgba(0.1, 0.2, 0.3, 1.0)),
+            ("wave-color", rgba(0.4, 0.5, 0.6, 1.0)),
+            ("inactive-color", Value::String("#20304080".to_string())),
+        ]);
+        assert_eq!(background, Color::rgba(0.1, 0.2, 0.3, 1.0));
+        assert_eq!(wavetable.bg_color, Color::rgba(0.1, 0.2, 0.3, 1.0));
+        assert_eq!(wavetable.selected_color, Color::rgba(0.4, 0.5, 0.6, 1.0));
+        // The halo behind the highlighted wave is derived from the background
+        // in the shader, so overriding the background moves it too — there is
+        // no separate halo color to set.
+        let inactive = wavetable.inactive_color;
+        assert!(
+            (inactive.r - 32.0 / 255.0).abs() < 1e-6
+                && (inactive.b - 64.0 / 255.0).abs() < 1e-6
+                && (inactive.a - 128.0 / 255.0).abs() < 1e-6,
+            "hex inactive-color should round-trip, got {inactive:?}"
+        );
+    }
+
+    /// The terminal fallback's label was the one color in the render path
+    /// that no prop could reach. It still defaults to the theme's muted
+    /// foreground, so an existing caller sees no change.
+    #[test]
+    fn label_color_prop_overrides_the_terminal_label_default() {
+        let render = |props: HashMap<String, Value>| {
+            let mut buf = CellBuffer::new(40, 4);
+            WAVETABLE_VIEWER_WIDGET.tui_render(
+                &props,
+                crate::layout::Rect {
+                    row: 0.0,
+                    col: 0.0,
+                    width: 40.0,
+                    height: 1.0,
+                },
+                &mut buf,
+            );
+            buf.get(0, 0).expect("label cell").style.fg
+        };
+        assert_eq!(render(HashMap::new()), theme::FG_MUTED());
+        assert_eq!(
+            render(HashMap::from([(
+                "label-color".to_string(),
+                Value::String("#ff0000".to_string()),
+            )])),
+            Color::rgb(1.0, 0.0, 0.0)
+        );
+    }
+
+    /// The Wavetable instrument's UI names its bank by the content-relative
+    /// path `instruments/core/wavetable/waves/bank.json`. Since the factory
+    /// `content/` split that no longer resolves against the process cwd
+    /// (`crates/sequencer`), so the viewer must fall back to the installed
+    /// content roots or `build_primitives` bails before drawing anything.
+    /// Filter Table instances are unaffected — they pass `data-key`.
+    #[test]
+    fn relative_file_banks_resolve_against_the_content_roots() {
+        let bank = load_bank("instruments/core/wavetable/waves/bank.json")
+            .expect("wavetable instrument bank should resolve through the content roots");
+        assert!(bank.frame_len >= 2, "frame_len={}", bank.frame_len);
+        assert!(
+            bank.wave_count >= 16,
+            "the viewer reads 16 waves per set, got {}",
+            bank.wave_count
+        );
     }
 
     #[test]

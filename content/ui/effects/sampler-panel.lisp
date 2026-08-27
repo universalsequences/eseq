@@ -289,7 +289,7 @@
 
 (def sampler-mode-cell (mode text label active)
   (button text
-    :width 5.2 :height 2.45 :padding 0 :font-size 9
+    :width 5.2 :height 2.8 :padding 0 :font-size 9
     :background-color :transparent
     :active active
     :active-color :yellow

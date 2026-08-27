@@ -32,8 +32,7 @@
         :plock-color-r (pc/param-plock-color-r)
         :plock-color-g (pc/param-plock-color-g)
         :plock-color-b (pc/param-plock-color-b)
-        :width 6.8 :height 2.5 :knob-size 1.85
-        :track-color '(rgba 0.4, 0.4, 0.4, 1)
+        :width 6.8 :height 2.0 :knob-size 1.75
         :on-change (lambda (v) (pc/param-set-control-value fx p v))))))
 
 (def percent-knob (fx label-text p)
@@ -235,14 +234,16 @@
         (table-engine (get fx :table-engine))
         (table-key (get fx :table-data-key)))
       (v-stack :gap 0.025
-        (box :width 36.4 :height (if (get fx :editor) 3.3 4.15) :padding 0.25
-          :background-color :instrument-control-bg :corner-radius 8
+        (box :width 36.4 :height (if (get fx :editor) 3.3 7.62) :padding 0.35
+          :background-color :instrument-control-bg :corner-radius 16
           :drop-types (list "sample")
           :drop-meta (merge (command-target fx) :kind "filter-table-source")
           :drop-hover-border-color :blue
           :on-drop (lambda (event) (drop-table event))
-          (v-stack :width :fill :height :fill :gap 0.08 :align :stretch
+          (v-stack :width :fill :height :fill :gap 0.12 :align :stretch
+            (box :height 0.1)
             (h-stack :width :fill :height 0.85 :gap 0.35 :align :baseline
+              (box :width 0.5)
               ;; The table name doubles as the preset picker: the dropdown
               ;; lists every loadable .fltab (user filter-tables/ + bundled
               ;; factory presets) and loads the selection as a baked asset.
@@ -251,7 +252,9 @@
                   (dropdown
                     :value (if table-name table-name "Drop a sample / pick a preset")
                     :bg-color :mixer-strip-bg
-                    :border-color :mixer-strip-selected-bg
+                    :border-color :buffer-bg
+                    :badge-color :yellow
+                    :chevron-color :black
                     :key (str "filter-table-preset-dd-" (get fx :slot-idx))
                     :options (get fx :table-options)
                     :on-change (lambda (v)
@@ -287,22 +290,26 @@
                     :value table-engine
                     :options '("Spectral" "Min Phase")
                     :bg-color :mixer-strip-bg
-                    :border-color :transparent
+                    :border-color :buffer-bg
+                    :badge-color :yellow
+                    :chevron-color :black
                     :on-change (lambda (v)
                       (set-engine fx (if (= v "Min Phase") "causal" "spectral")))
-                    :width 6.4 :height 0.8 :font-size 7.5))
+                    :width 6.4 :height 0.85 :font-size 9))
                 (if table-engine
                   (label table-engine :font-size 7.5 :color :dim :bg :transparent)
                   (box :width 0 :height 0)))
               ;; Response editor toggle (track/bus only; rack slots have no
               ;; editor command target, matching the mode limitation above).
-              (if (and table-key (not (get fx :rack-fx)) (not (get fx :editor)))
-                (button "EDIT"
-                  :width 3.0 :height 0.8 :padding 0 :font-size 7.5
-                  :border-color :transparent
-                  :background-color :accent :color :fg :on-click |x y r|
-                  (host-command "filter-table-editor-open" (ed-target fx)))
-                (box :width 0 :height 0)))
+              ;; note: removed due to author on 8/27/2026 (reason: too complicated)
+              ; (if (and table-key (not (get fx :rack-fx)) (not (get fx :editor)))
+              ; (button "EDIT"
+              ; :width 3.0 :height 0.8 :padding 0 :font-size 7.5
+              ; :border-color :transparent
+              ; :background-color :accent :color :fg :on-click |x y r|
+              ; (host-command "filter-table-editor-open" (ed-target fx)))
+              ;(box :width 0 :height 0))
+              )
             (if table-key
               (wavetable-viewer
                 :data-key table-key :domain :magnitude
@@ -311,31 +318,29 @@
                   (get (get fx :editor) :selected-frame-normalized)
                   (response-value fx frame-p :response-frame-field))
                 :wave-normalized true
-                :wave-color (if (get fx :editor)
-                  (rgba 1.0 0.62 0.25 1.0)
-                  (rgba 0.35 0.68 1.0 1.0))
-                :inactive-color (rgba 0.20 0.43 0.72 0.34)
+                :wave-color (rgba 1.0 0.62 0.25 1.0)                  
+                :inactive-color (rgba 0.20 0.43 0.72 0.14)
                 :background-color (rgba 0.035 0.045 0.060 1.0)
                 :width 35.9 :height (if (get fx :editor) 1.9 2.75))
-              (box :width :fill :height (if (get fx :editor) 1.9 2.75)))))
-        (if (and table-key (not (get fx :editor)))
-          (eq8-editor
-            :width 36.4 :height 2.55
-            :bands (list) :selected-band -1
-            :source (spectrum-source fx) :tap-point :pre-fx
-            :mode :eq :fft-size 8192 :time-slices 128
-            :min-db -96 :max-db 0 :smoothing 0.65
-            :freq-min 20 :freq-max 20000
-            :response-min-db -48 :response-max-db 8
-            :response-data-key table-key
-            :response-frame (response-value fx frame-p :response-frame-field)
-            :response-cutoff (response-value fx cutoff-p :response-cutoff-field)
-            :response-resonance (response-value fx res-p :response-resonance-field)
-            :background-color (rgba 0.045 0.055 0.070 1.0)
-            :curve-color (rgba 0.78 0.84 0.92 0.96)
-            :spectrum-color (rgba 0.18 0.38 0.64 0.30)
-            :spectrum-peak-color (rgba 0.36 0.62 0.92 0.58))
-          (box :width :fill :height 0))
+              (box :width :fill :height (if (get fx :editor) 1.9 2.75)))
+            (if (and table-key (not (get fx :editor)))
+              (eq8-editor
+                :width 35.3 :height 2.05
+                :bands (list) :selected-band -1
+                :source (spectrum-source fx) :tap-point :pre-fx
+                :mode :eq :fft-size 8192 :time-slices 128
+                :min-db -96 :max-db 0 :smoothing 0.65
+                :freq-min 20 :freq-max 20000
+                :response-min-db -48 :response-max-db 8
+                :response-data-key table-key
+                :response-frame (response-value fx frame-p :response-frame-field)
+                :response-cutoff (response-value fx cutoff-p :response-cutoff-field)
+                :response-resonance (response-value fx res-p :response-resonance-field)
+                :background-color :mixer-control-bg
+                :curve-color (rgba 0.78 0.84 0.92 0.96)
+                :spectrum-color (rgba 0.18 0.38 0.64 0.30)
+                :spectrum-peak-color (rgba 0.36 0.62 0.92 0.58))
+              (box :width :fill :height 0))))
         (if (get fx :editor)
           (editor-section fx (get fx :editor) table-key)
           (h-stack :gap 0.6 :align :center
@@ -343,4 +348,5 @@
             (if cutoff-p (freq-knob fx "cutoff" cutoff-p) (box :width 0 :height 0))
             (if res-p (percent-knob fx "resonance" res-p) (box :width 0 :height 0))
             (if mix-p (percent-knob fx "mix" mix-p) (box :width 0 :height 0))
-            (if output-p (number-knob fx "output" output-p 2) (box :width 0 :height 0))))))))
+            (if output-p (number-knob fx "output" output-p 2) (box :width 0 :height 0)))))))
+  )

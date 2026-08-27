@@ -95,12 +95,15 @@
       :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
       :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p))))
 
-(def div-button (fx p label-text)
+;; `current` must come from fx-param-text-value-for, not (get p :text-value):
+;; the params dict is frozen at panel build, so the raw text-value never sees a
+;; p-locked division — the :value-field SEQV binding does.
+(def div-button (fx p current label-text)
   (button label-text
     :width 2.72 :height 1.12 :padding 0 :font-size 8.0
-    :background-color (if (= (get p :text-value) label-text) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
+    :background-color (if (= current label-text) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
         :border-color :transparent
-    :color (if (= (get p :text-value) label-text) :black :dim)
+    :color (if (= current label-text) :black :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -109,25 +112,26 @@
 
 (def div-grid (fx p)
   (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "s8-div")
-    (v-stack :gap 0.11
-      (h-stack :gap 0.12
-        (div-button fx p "1/32")
-        (div-button fx p "1/16"))
-      (h-stack :gap 0.12
-        (div-button fx p "1/16t")
-        (div-button fx p "1/8"))
-      (h-stack :gap 0.12
-        (div-button fx p "1/8t")
-        (div-button fx p "1/8."))
-      (h-stack :gap 0.12
-        (div-button fx p "1/4")
-        (div-button fx p "1/4t"))
-      (h-stack :gap 0.12
-        (div-button fx p "1/4.")
-        (div-button fx p "1/2"))
-      (h-stack :gap 0.12
-        (div-button fx p "1")
-        (box :width 2.72 :height 0.82)))))
+    (let ((current (eseq.effects.param-controls/fx-param-text-value-for fx p)))
+      (v-stack :gap 0.11
+        (h-stack :gap 0.12
+          (div-button fx p current "1/32")
+          (div-button fx p current "1/16"))
+        (h-stack :gap 0.12
+          (div-button fx p current "1/16t")
+          (div-button fx p current "1/8"))
+        (h-stack :gap 0.12
+          (div-button fx p current "1/8t")
+          (div-button fx p current "1/8."))
+        (h-stack :gap 0.12
+          (div-button fx p current "1/4")
+          (div-button fx p current "1/4t"))
+        (h-stack :gap 0.12
+          (div-button fx p current "1/4.")
+          (div-button fx p current "1/2"))
+        (h-stack :gap 0.12
+          (div-button fx p current "1")
+          (box :width 2.72 :height 0.82))))))
 
 (def side (fx title sync-p div-p offset-p time-p)
   (box :width 6.15 :height 9.45 :padding 0.18
