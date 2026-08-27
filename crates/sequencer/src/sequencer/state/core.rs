@@ -285,8 +285,24 @@ pub struct PublishedSequencer {
     pub name: String,
     pub resolution: u8,
     pub tick_source: String,
+    /// Module names the shipped `tick_source` calls into (`:requires`). The
+    /// scheduler imports each through its module load path before compiling
+    /// the tick, so package functions (e.g. `alez.jaki.core/run`) resolve in
+    /// the scheduler VM without shipping the authoring file's source.
+    pub requires: Vec<String>,
     /// Present iff this is a graph-mode sequencer.
     pub graph: Option<crate::graph::GraphManifest>,
+}
+
+/// First tick failure of a registered generator, reported once by the
+/// scheduler and drained by the UI event loop (eseq-85a.5). Without this
+/// channel a failing `:tick` was silently `unwrap_or(empty)`-ed 16 times a
+/// bar — "publishes fine, plays nothing".
+#[derive(Clone, Debug)]
+pub struct GeneratorTickErrorNotice {
+    pub id: u64,
+    pub name: String,
+    pub error: String,
 }
 
 /// Live step-param print override (bead eseq-jc9), read lock-free by the
@@ -418,6 +434,17 @@ pub struct SequencerState {
     pub(super) scratch_source_version: AtomicU64,
     pub(super) published_sequencers: Mutex<Vec<PublishedSequencer>>,
     pub(super) published_sequencers_version: AtomicU64,
+    /// Scene-slot declarations (`defscene` name → default) shared across VMs.
+    /// Each runtime keeps its own declaration table for the slots it evaluated
+    /// itself; this map is the publish channel that lets a scheduler runtime
+    /// resolve a shipped `(__defscene-resolve …)` read whose declaring
+    /// `defscene` only ever ran in an authoring (UI) VM. Slot *values* cross
+    /// separately via the scheduler snapshot's `SceneSlotStore`.
+    pub(super) published_scene_slot_declarations:
+        Mutex<std::collections::BTreeMap<String, crate::process::ProcessLiteral>>,
+    /// First-failure tick errors reported by the scheduler, drained by the UI
+    /// event loop. Bounded; one pending entry per generator id.
+    pub(super) generator_tick_errors: Mutex<Vec<GeneratorTickErrorNotice>>,
     pub(super) published_process_authoring: Mutex<crate::process::PublishedProcessAuthoringSnapshot>,
     pub(super) published_process_authoring_version: AtomicU64,
     /// Control-thread channel writes awaiting the scheduler

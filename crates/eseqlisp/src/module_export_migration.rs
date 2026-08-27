@@ -151,7 +151,7 @@ fn analyze(source: &str) -> Result<SourceAnalysis, String> {
                 }
             }
             "export" => has_export = true,
-            "def" | "defn" | "defstate" | "defmacro" => {
+            "def" | "defn" | "defstate" | "defscene" | "defmacro" => {
                 let Some(name_expr) = items.get(1) else {
                     continue;
                 };

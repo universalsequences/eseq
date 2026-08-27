@@ -49,6 +49,7 @@ impl SequencerState {
                 }
             }
         }
+        snapshot.scene_slots = self.current_scene_slots();
         snapshot.project_process_chain = self.project_process_chain();
         let effect_descriptors = self.scratch_effect_descriptors.lock().unwrap().clone();
         let instrument_descriptors = self.scratch_instrument_descriptors.lock().unwrap().clone();
@@ -303,6 +304,8 @@ impl SequencerState {
             scratch_source_version: AtomicU64::new(0),
             published_sequencers: Mutex::new(Vec::new()),
             published_sequencers_version: AtomicU64::new(0),
+            published_scene_slot_declarations: Mutex::new(std::collections::BTreeMap::new()),
+            generator_tick_errors: Mutex::new(Vec::new()),
             published_process_authoring: Mutex::new(
                 crate::process::PublishedProcessAuthoringSnapshot::default(),
             ),
@@ -401,7 +404,7 @@ impl SequencerState {
         self.current_pattern_index()
     }
 
-    pub(crate) fn current_scene_id(&self) -> Option<SceneId> {
+    pub fn current_scene_id(&self) -> Option<SceneId> {
         self.pattern
             .scenes
             .lock()

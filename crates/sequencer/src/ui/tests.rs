@@ -14066,3 +14066,59 @@
     const ARR_BASELINE_MARQUEE_TICK_MS: f64 = 73.331;
     const ARR_BASELINE_SCROLL_TICK_MS: f64 = 60.966;
     const ARR_ENFORCE_TENFOLD: bool = true;
+
+    /// A squashed authoring transaction can bundle slot writes with ordinary
+    /// edits. Undo must still repaint every slot it rewrote, but only skip the
+    /// full topology/`ui_epoch` refresh when the entry is slot writes alone.
+    #[test]
+    fn scene_slot_replay_targets_span_composites_without_widening_the_light_path() {
+        use sequencer::app::history::{EditPatch, MacroConfigurationPatch, SceneSlotPatch};
+        use sequencer::sequencer::SceneId;
+
+        let slot = |scene: u64, name: &str| {
+            EditPatch::SceneSlot(SceneSlotPatch {
+                scene: SceneId(scene),
+                name: name.to_string(),
+                before: None,
+                after: Some(sequencer::process::ProcessLiteral::Number(1.0)),
+            })
+        };
+        let pure = EditPatch::Composite(vec![slot(3, "amount"), slot(4, "depth")]);
+        assert_eq!(
+            super::event_loop::scene_slot_replay_targets(&pure),
+            vec![
+                (SceneId(3), "amount".to_string()),
+                (SceneId(4), "depth".to_string()),
+            ]
+        );
+        assert!(super::event_loop::patch_is_only_scene_slots(&pure));
+
+        let unrelated = || {
+            let state = sequencer::macro_engine::MacroConfigurationState {
+                macros: Vec::new(),
+                next_id: 0,
+            };
+            EditPatch::MacroConfiguration(MacroConfigurationPatch {
+                before: state.clone(),
+                after: state,
+            })
+        };
+        let mixed = EditPatch::Composite(vec![slot(3, "amount"), unrelated()]);
+        assert_eq!(
+            super::event_loop::scene_slot_replay_targets(&mixed),
+            vec![(SceneId(3), "amount".to_string())],
+            "a mixed entry still repaints its slots"
+        );
+        assert!(
+            !super::event_loop::patch_is_only_scene_slots(&mixed),
+            "a mixed entry must keep the full refresh"
+        );
+        assert!(
+            !super::event_loop::patch_is_only_scene_slots(&EditPatch::Composite(Vec::new())),
+            "an empty composite is not a slot-only entry"
+        );
+        assert!(
+            super::event_loop::scene_slot_replay_targets(&unrelated()).is_empty(),
+            "an unrelated entry keeps the ordinary refresh path"
+        );
+    }

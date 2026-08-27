@@ -583,6 +583,8 @@ fn normalize_command_shortcuts_for(
     // The editor's select-all command is represented internally as Ctrl+A.
     // Only macOS input needs translating; Linux's platform-primary chord is
     // already Ctrl+A. Global UI dispatch sees the raw event before this step.
+    // Clipboard chords (Cmd-C/Cmd-V) are NOT translated: editor and widget
+    // handlers understand the platform-native modifier directly.
     if platform == ShortcutPlatform::MacOS
         && matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
         && has_primary_shortcut_modifier_for(key.modifiers, platform)
@@ -658,7 +660,17 @@ fn current_sequencer_param_mode(editor: &mut Editor) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::widget_type_captures_text_input;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{normalize_command_shortcuts, widget_type_captures_text_input};
+
+    #[test]
+    fn command_clipboard_shortcuts_keep_the_native_modifier_for_text_buffers() {
+        for key in ['c', 'v'] {
+            let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::SUPER);
+            assert_eq!(normalize_command_shortcuts(event), event);
+        }
+    }
 
     #[test]
     fn only_text_entry_widgets_capture_text_input_by_type() {

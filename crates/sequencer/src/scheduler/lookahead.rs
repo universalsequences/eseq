@@ -29,6 +29,15 @@ pub(super) struct SchedulerLookaheadState {
     /// Track-roll held notes (docs/rolling-core-spec.md 3), fed by the
     /// `RollCommand` channel drained in the worker loop.
     pub(super) roll: RollState,
+    /// Generators whose `:tick` failed (eseq-85a.5). The first failure is
+    /// reported through `SequencerState::report_generator_tick_error`; a
+    /// parked generator is skipped instead of re-erroring every boundary.
+    /// Cleared when the worker re-syncs generator definitions, so an edited
+    /// body gets a fresh attempt.
+    pub(super) parked_generators: std::collections::HashSet<u64>,
+    /// Last line emitted by the ESEQ_DEBUG_SCENE_SLOTS trace, so the seam
+    /// reports changes rather than one line per chunk boundary.
+    pub(super) last_scene_slot_debug: Option<(usize, usize, usize, String)>,
 }
 
 impl SchedulerLookaheadState {
@@ -50,6 +59,8 @@ impl SchedulerLookaheadState {
             quantized_launches: crate::quantized_launch::PendingQuantizedLaunches::default(),
             song: None,
             roll: RollState::new(),
+            parked_generators: std::collections::HashSet::new(),
+            last_scene_slot_debug: None,
         }
     }
 }
@@ -72,6 +83,36 @@ pub(super) fn mark_song_row_accum_resets(
             *reset = true;
         }
     }
+}
+
+/// The scene-slot overrides a chunk's generators must observe.
+///
+/// `chunk` is whichever snapshot governs this chunk: the live base snapshot,
+/// a song row's, or a quantized launch's. The latter two are PREBUILT — their
+/// `scene_slots` froze at preflight, so a slot written while the song plays
+/// would never reach a shipped tick (a row preflighted before the first write
+/// carries an empty store, and the fallback to the declaration default makes
+/// the override look silently inert).
+///
+/// The chunk still decides WHICH scene is playing; only the values come from
+/// the live table published with `base_snapshot`. For the base snapshot this
+/// is an identity — its table entry for its own scene is `scene_slots` — so
+/// one rule covers all three sources. The frozen copy is the fallback for a
+/// scene index the live table no longer has (a scene deleted mid-song).
+pub(super) fn scene_slot_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ESEQ_DEBUG_SCENE_SLOTS").is_some())
+}
+
+pub(super) fn scene_slots_for_chunk(
+    base_snapshot: &SequencerSnapshot,
+    chunk: &SequencerSnapshot,
+) -> Arc<crate::sequencer::SceneSlotStore> {
+    base_snapshot
+        .scene_slot_table
+        .get(chunk.transport.current_pattern)
+        .cloned()
+        .unwrap_or_else(|| Arc::new(chunk.scene_slots.clone()))
 }
 
 pub(super) fn build_scheduler_scratch_runtime(
@@ -226,6 +267,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let mut debug_graph_drive_chunks = scheduler.debug_graph_drive_chunks;
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
     let song_playback = &mut scheduler.song;
+    let parked_generators = &mut scheduler.parked_generators;
     let mut track_output_events = Vec::new();
 
     process_runtime.sync_step_process_aliases(
@@ -445,6 +487,27 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             .as_deref()
             .or(session_launch_snapshot.as_deref())
             .unwrap_or(base_snapshot);
+        if let Some(scratch) = scratch_runtime.as_ref() {
+            let chunk_slots = scene_slots_for_chunk(base_snapshot, snapshot);
+            // ESEQ_DEBUG_SCENE_SLOTS: one line per change at the seam where a
+            // chunk selects the scene its shipped ticks read.
+            if scene_slot_debug_enabled() {
+                let fingerprint = (
+                    snapshot.transport.current_pattern,
+                    base_snapshot.transport.current_pattern,
+                    base_snapshot.scene_slot_table.len(),
+                    format!("{:?}", chunk_slots.values()),
+                );
+                if scheduler.last_scene_slot_debug.as_ref() != Some(&fingerprint) {
+                    eprintln!(
+                        "[scene-slots] chunk_scene={} base_scene={} table_len={} values={}",
+                        fingerprint.0, fingerprint.1, fingerprint.2, fingerprint.3
+                    );
+                    scheduler.last_scene_slot_debug = Some(fingerprint);
+                }
+            }
+            scratch.set_scene_slot_snapshot(chunk_slots);
+        }
         let chunk_start_beats = clock.total_beats;
         // Control-thread channel writes land on the chunk boundary, in order,
         // with a defined beat (docs/jaki-live-channel-widgets-spec.md 7). This
@@ -1485,6 +1548,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     process_runtime.payload_epoch(),
                     process_runtime.channel_values(),
                 );
+                // Naming a generator means locking the definition registry
+                // and cloning every name; failures are rare, so collect ids
+                // here and resolve names once, after the block.
+                let mut tick_failures: Vec<(u64, String)> = Vec::new();
                 generator_runtime.process_block_with_controls(
                     chunk_start_beats,
                     chunk_end_beats,
@@ -1492,20 +1559,49 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     samples_per_quarter,
                     |input| {
                         let generator_index = input.generator_index;
+                        let generator_id = input.id;
                         let random_state = input.random_state;
                         let fallback_state = input.state.clone();
-                        scratch
-                            .invoke_sequencer_tick(generator_index, input)
-                            .unwrap_or(crate::generator::GeneratorTickResult {
-                                emitted: Vec::new(),
-                                controls: Vec::new(),
-                                random_state,
-                                state: fallback_state,
-                            })
+                        let empty = crate::generator::GeneratorTickResult {
+                            emitted: Vec::new(),
+                            controls: Vec::new(),
+                            random_state,
+                            state: fallback_state,
+                        };
+                        if parked_generators.contains(&generator_id) {
+                            return empty;
+                        }
+                        match scratch.invoke_sequencer_tick(generator_index, input) {
+                            Ok(result) => result,
+                            Err(error) => {
+                                // Report the first failure and park: a broken
+                                // tick must be one loud notice, not silence
+                                // re-erroring every boundary. The park clears
+                                // when definitions re-sync.
+                                tick_failures.push((generator_id, error));
+                                parked_generators.insert(generator_id);
+                                empty
+                            }
+                        }
                     },
                     &mut generator_emissions,
                     &mut generator_control_emissions,
                 );
+                if !tick_failures.is_empty() {
+                    let generator_names: std::collections::HashMap<u64, String> = scratch
+                        .sequencer_defs()
+                        .iter()
+                        .map(|definition| (definition.id, definition.name.clone()))
+                        .collect();
+                    for (generator_id, error) in tick_failures {
+                        let name = generator_names
+                            .get(&generator_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("generator {generator_id}"));
+                        eprintln!("sequencer tick failed for {name} ({generator_id}): {error}");
+                        state.report_generator_tick_error(generator_id, name, error);
+                    }
+                }
                 // Mixer-control holds ride to the app thread through the
                 // mailbox; the frame drain applies due ones
                 // (docs/jaki-mixer-control-routes-spec.md).

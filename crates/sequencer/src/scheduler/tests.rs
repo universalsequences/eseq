@@ -9087,3 +9087,154 @@
         assert_eq!(resumed.first().map(|trigger| trigger.step), Some(3));
         assert!(resumed.iter().any(|trigger| trigger.step == 4));
     }
+
+/// The bug this pins: a song row schedules from a snapshot prebuilt at
+/// preflight. A slot overridden after that preflight lives only in live state,
+/// so scheduling the row's frozen `scene_slots` pushed an EMPTY store at the
+/// generator runtime every chunk and every shipped tick fell back to its
+/// declaration default — the override looked inert with no error anywhere.
+#[test]
+fn a_prebuilt_chunk_reads_live_scene_slots_not_its_preflight_copy() {
+    use crate::sequencer::{SceneSlotStore, SequencerSnapshot};
+    use std::sync::Arc;
+
+    let overridden = {
+        let mut slots = SceneSlotStore::default();
+        slots
+            .write_literal("ds-vel", crate::process::ProcessLiteral::Number(0.1))
+            .expect("portable value");
+        slots
+    };
+    let mut base = SequencerSnapshot::empty();
+    base.transport.current_pattern = 0;
+    base.scene_slot_table = Arc::new(vec![
+        Arc::new(SceneSlotStore::default()),
+        Arc::new(overridden.clone()),
+    ]);
+
+    // The row was preflighted before the write: it plays scene 1 and carries
+    // an empty slot store.
+    let mut row = SequencerSnapshot::empty();
+    row.transport.current_pattern = 1;
+    assert_eq!(row.scene_slots.get("ds-vel"), None);
+
+    assert_eq!(
+        super::lookahead::scene_slots_for_chunk(&base, &row).get("ds-vel"),
+        Some(&crate::process::ProcessLiteral::Number(0.1)),
+        "a prebuilt chunk must resolve its scene against live state"
+    );
+
+    // The chunk still chooses WHICH scene plays: scene 0 has no override.
+    let mut other_row = SequencerSnapshot::empty();
+    other_row.transport.current_pattern = 0;
+    assert_eq!(
+        super::lookahead::scene_slots_for_chunk(&base, &other_row).get("ds-vel"),
+        None
+    );
+
+    // A scene index the live table no longer has falls back to the frozen copy
+    // rather than silently dropping every override.
+    let mut deleted_scene = SequencerSnapshot::empty();
+    deleted_scene.transport.current_pattern = 9;
+    deleted_scene.scene_slots = overridden;
+    assert_eq!(
+        super::lookahead::scene_slots_for_chunk(&base, &deleted_scene).get("ds-vel"),
+        Some(&crate::process::ProcessLiteral::Number(0.1))
+    );
+}
+
+
+/// A scene switch mid-playback must be audible to a scratch generator without
+/// stopping the transport: the chunk selects the scene, and the shipped tick
+/// resolves its `defscene` slots against that scene's live overrides.
+#[test]
+fn scratch_generator_follows_a_mid_playback_scene_switch() {
+    use crate::sequencer::{SceneSlotStore, SequencerSnapshot};
+    use std::sync::Arc;
+    run_with_scheduler_stack(|| {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.toggle_play();
+        let source = r#"
+(defscene ds-pattern '(1 0 0 0 1 0 0 0 1 0 0 0 1 0 0 0))
+(defscene ds-vel 0.9)
+(def-sequencer "defscene-probe"
+  :resolution :16
+  :tick
+  (if (= 1 (nth ds-pattern (mod (gen-tick) 16)))
+    (seq-emit :track 0 :vel ds-vel)
+    nil))
+"#;
+        let scratch_runtime =
+            super::lookahead::build_scheduler_scratch_runtime(Arc::clone(&state), source, false)
+                .expect("scratch runtime for the generator source");
+        let generator_defs = scratch_runtime.sequencer_defs();
+        let mut scratch_runtime = Some(scratch_runtime);
+
+        let published = state.publish_scheduler_snapshot();
+        let overridden = {
+            let mut slots = SceneSlotStore::default();
+            slots
+                .write_literal("ds-vel", crate::process::ProcessLiteral::Number(0.1))
+                .expect("portable value");
+            slots
+        };
+        // Scene 0 overrides the velocity; scene 1 falls back to the declaration.
+        let table = Arc::new(vec![Arc::new(overridden), Arc::new(SceneSlotStore::default())]);
+
+        // One scheduler state across both chunks: the transport never stops.
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        scheduler
+            .generator_runtime
+            .sync_definitions(&generator_defs, 0.0);
+        let mut scheduled_until_sample = 0u64;
+        let mut rendered = 0u64;
+
+        let mut velocities_for_scene = |scene: usize| -> Vec<f32> {
+            let mut snapshot: SequencerSnapshot = (*published).clone();
+            snapshot.transport.current_pattern = scene;
+            snapshot.scene_slot_table = Arc::clone(&table);
+            let snapshot = Arc::new(snapshot);
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+            let result = schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                rendered,
+                48_000,
+                24_000,
+                12_000,
+                samples_per_quarter,
+                scheduled_until_sample,
+                false,
+                false,
+            );
+            scheduled_until_sample = result.scheduled_until_sample;
+            rendered += 48_000;
+            let mut velocities = Vec::new();
+            while let Some(event) = queue.pop() {
+                if let ScheduledEventKind::NetworkTrigger { resolved, .. } = &event.kind {
+                    velocities.push(resolved.velocity);
+                }
+            }
+            velocities
+        };
+
+        let scene_0 = velocities_for_scene(0);
+        assert!(
+            !scene_0.is_empty() && scene_0.iter().all(|velocity| (velocity - 0.1).abs() < 1e-6),
+            "scene 0 must play its override: {scene_0:?}"
+        );
+        let scene_1 = velocities_for_scene(1);
+        assert!(
+            !scene_1.is_empty() && scene_1.iter().all(|velocity| (velocity - 0.9).abs() < 1e-6),
+            "the switch must be audible without restarting the transport: {scene_1:?}"
+        );
+    });
+}

@@ -2,6 +2,67 @@ use crate::*;
 
 type PendingPointerDrag = (crossterm::event::MouseEvent, (f32, f32));
 
+/// Every scene slot an undo/redo entry rewrites, including the slot writes
+/// nested inside a squashed authoring transaction.
+pub(super) fn scene_slot_replay_targets(
+    patch: &app::history::EditPatch,
+) -> Vec<(sequencer::sequencer::SceneId, String)> {
+    match patch {
+        app::history::EditPatch::SceneSlot(patch) => vec![(patch.scene, patch.name.clone())],
+        app::history::EditPatch::Composite(patches) => {
+            patches.iter().flat_map(scene_slot_replay_targets).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// True when replaying the entry touches nothing but scene slots, so the
+/// targeted reactive invalidation is the whole repaint and the full
+/// topology/`ui_epoch` refresh can be skipped.
+pub(super) fn patch_is_only_scene_slots(patch: &app::history::EditPatch) -> bool {
+    match patch {
+        app::history::EditPatch::SceneSlot(_) => true,
+        app::history::EditPatch::Composite(patches) => {
+            !patches.is_empty() && patches.iter().all(patch_is_only_scene_slots)
+        }
+        _ => false,
+    }
+}
+
+/// Re-dirty exactly the readers of the replayed slots. Slots that belong to a
+/// pattern other than the live one are skipped: nothing on screen reads them.
+fn repaint_scene_slot_history_targets(
+    editor: &mut Editor,
+    state: &sequencer::sequencer::SequencerState,
+    targets: &[(sequencer::sequencer::SceneId, String)],
+) {
+    if targets.is_empty() {
+        return;
+    }
+    let current = state.current_scene_id();
+    let mut repainted = false;
+    for (scene, name) in targets {
+        if current != Some(*scene) {
+            continue;
+        }
+        let epoch = state.current_scene_slots().epoch(name);
+        match editor.runtime_mut().invalidate_reactive_source(
+            sequencer::lisp_host::SCENE_SLOT_REACTIVE_NAMESPACE,
+            name,
+            Value::String(epoch.to_string()),
+        ) {
+            Ok(()) => repainted = true,
+            Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                "Scene-slot history repaint failed: {error:?}"
+            ))),
+        }
+    }
+    if repainted {
+        editor.refresh_runtime_side_effects();
+    }
+}
+
+
 fn flush_pending_pointer_drag(
     pending_drag: &mut Option<PendingPointerDrag>,
     mut dispatch: impl FnMut(crossterm::event::MouseEvent, f32, f32),
@@ -234,6 +295,15 @@ pub(crate) fn run_event_loop(
                     editor.handle_host_event(HostEvent::Error(message));
                 }
             }
+        }
+        // Generator tick failures (eseq-85a.5): the scheduler reports the
+        // first failure per generator and parks it; surface it here instead
+        // of letting a broken :tick play as silence.
+        for notice in shared.state.drain_generator_tick_errors() {
+            editor.handle_host_event(HostEvent::Error(format!(
+                "Sequencer '{}' tick failed (generator parked until its source changes): {}",
+                notice.name, notice.error
+            )));
         }
         app.graph_controller().reap_due_rack_teardowns();
         let queued_transport_scene = shared
@@ -652,12 +722,41 @@ pub(crate) fn run_event_loop(
                             app.ui.recording = false;
                         }
                         let track_count_before_replay = app.tracks.len();
+                        let replayed_patch = match shortcut {
+                            SequencerHistoryShortcut::Undo => app.history.next_undo_patch(),
+                            SequencerHistoryShortcut::Redo => app.history.next_redo_patch(),
+                        };
+                        // A squashed authoring transaction can mix slot writes
+                        // with ordinary edits, so collect every slot target and
+                        // only take the targeted (no `ui_epoch` bump) path when
+                        // the entry is nothing but slot writes.
+                        let scene_slot_targets =
+                            replayed_patch.map_or_else(Vec::new, scene_slot_replay_targets);
+                        let scene_slots_only = !scene_slot_targets.is_empty()
+                            && replayed_patch.is_some_and(patch_is_only_scene_slots);
                         let replay = match shortcut {
                             SequencerHistoryShortcut::Undo => app::edit::undo(&mut app),
                             SequencerHistoryShortcut::Redo => app::edit::redo(&mut app),
                         };
-                        let message = match replay {
-                            app::history::HistoryReplay::Applied(result) => {
+                        if matches!(replay, app::history::HistoryReplay::Applied(_)) {
+                            repaint_scene_slot_history_targets(
+                                &mut editor,
+                                &shared.state,
+                                &scene_slot_targets,
+                            );
+                        }
+                        let message = match (replay, scene_slots_only) {
+                            (app::history::HistoryReplay::Applied(result), true) => {
+                                match shortcut {
+                                    SequencerHistoryShortcut::Undo => {
+                                        format!("Undid {}", result.label)
+                                    }
+                                    SequencerHistoryShortcut::Redo => {
+                                        format!("Redid {}", result.label)
+                                    }
+                                }
+                            }
+                            (app::history::HistoryReplay::Applied(result), false) => {
                                 let topology_changed =
                                     app.tracks.len() != track_count_before_replay;
                                 if !topology_changed {
@@ -772,11 +871,11 @@ pub(crate) fn run_event_loop(
                                     }
                                 }
                             }
-                            app::history::HistoryReplay::Unavailable => match shortcut {
+                            (app::history::HistoryReplay::Unavailable, _) => match shortcut {
                                 SequencerHistoryShortcut::Undo => "Nothing to undo".to_string(),
                                 SequencerHistoryShortcut::Redo => "Nothing to redo".to_string(),
                             },
-                            app::history::HistoryReplay::Failed(error) => match shortcut {
+                            (app::history::HistoryReplay::Failed(error), _) => match shortcut {
                                 SequencerHistoryShortcut::Undo => {
                                     format!("Could not undo: {error:?}")
                                 }

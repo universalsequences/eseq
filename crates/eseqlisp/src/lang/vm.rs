@@ -2170,6 +2170,7 @@ pub struct VM {
     pending_reactive_sets: Vec<(String, String, Value)>,
     pub derived_bindings: HashMap<String, NodeId>,
     pub state_bindings: HashMap<String, NodeId>,
+    pub scene_bindings: HashSet<String>,
     execution_depth: usize,
     processing_reactive: bool,
     reactive_exec_timings: Vec<ReactiveExecTiming>,
@@ -2244,6 +2245,7 @@ pub struct VmStateSnapshot {
     pending_reactive_sets: Vec<(String, String, Value)>,
     derived_bindings: HashMap<String, NodeId>,
     state_bindings: HashMap<String, NodeId>,
+    scene_bindings: HashSet<String>,
     execution_depth: usize,
     processing_reactive: bool,
     reactive_exec_timings: Vec<ReactiveExecTiming>,
@@ -3938,6 +3940,7 @@ impl VM {
             pending_reactive_sets: Vec::new(),
             derived_bindings: HashMap::new(),
             state_bindings: HashMap::new(),
+            scene_bindings: HashSet::new(),
             execution_depth: 0,
             processing_reactive: false,
             reactive_exec_timings: Vec::new(),
@@ -4427,6 +4430,7 @@ impl VM {
             self.reactive_namespaces.clone(),
             self.derived_bindings.clone(),
             self.state_bindings.clone(),
+            self.scene_bindings.clone(),
             self.dag.next_id,
             self.macros.clone(),
             self.source_manager.current_source_file(),
@@ -4504,6 +4508,7 @@ impl VM {
             let reactive_namespaces = self.reactive_namespaces.clone();
             let derived_bindings = self.derived_bindings.clone();
             let state_bindings = self.state_bindings.clone();
+            let scene_bindings = self.scene_bindings.clone();
             let next_node_id = self.dag.next_id;
 
             let macros = self.macros.clone();
@@ -4520,6 +4525,7 @@ impl VM {
                     reactive_namespaces,
                     derived_bindings,
                     state_bindings,
+                    scene_bindings,
                     next_node_id,
                     macros,
                     source_file,
@@ -4540,6 +4546,7 @@ impl VM {
                         let names = compiler.take_global_names();
                         let derived = compiler.take_derived_bindings();
                         let states = compiler.take_state_bindings();
+                        let scenes = compiler.take_scene_bindings();
                         let next_node_id = compiler.next_node_id();
                         let macros = compiler.take_macros();
                         let warnings = compiler.take_warnings();
@@ -4550,6 +4557,7 @@ impl VM {
                             names,
                             derived,
                             states,
+                            scenes,
                             next_node_id,
                             macros,
                             warnings,
@@ -4570,6 +4578,7 @@ impl VM {
                     names,
                     derived,
                     states,
+                    scenes,
                     next_node_id,
                     macros,
                     warnings,
@@ -4580,6 +4589,7 @@ impl VM {
                     self.global_names = names;
                     self.derived_bindings = derived;
                     self.state_bindings = states;
+                    self.scene_bindings = scenes;
                     self.dag.next_id = next_node_id;
                     self.macros = macros;
                     for warning in warnings {
@@ -4731,6 +4741,7 @@ impl VM {
             pending_reactive_sets: self.pending_reactive_sets.clone(),
             derived_bindings: self.derived_bindings.clone(),
             state_bindings: self.state_bindings.clone(),
+            scene_bindings: self.scene_bindings.clone(),
             execution_depth: self.execution_depth,
             processing_reactive: self.processing_reactive,
             reactive_exec_timings: self.reactive_exec_timings.clone(),
@@ -4817,6 +4828,7 @@ impl VM {
         self.pending_reactive_sets = snapshot.pending_reactive_sets;
         self.derived_bindings = snapshot.derived_bindings;
         self.state_bindings = snapshot.state_bindings;
+        self.scene_bindings = snapshot.scene_bindings;
         self.execution_depth = snapshot.execution_depth;
         self.processing_reactive = snapshot.processing_reactive;
         self.reactive_exec_timings = snapshot.reactive_exec_timings;
@@ -4884,6 +4896,7 @@ impl VM {
         let reactive_namespaces = self.reactive_namespaces.clone();
         let derived_bindings = self.derived_bindings.clone();
         let state_bindings = self.state_bindings.clone();
+        let scene_bindings = self.scene_bindings.clone();
         let next_node_id = self.dag.next_id;
 
         let macros = self.macros.clone();
@@ -4900,6 +4913,7 @@ impl VM {
                 reactive_namespaces,
                 derived_bindings,
                 state_bindings,
+                scene_bindings,
                 next_node_id,
                 macros,
                 source_file,
@@ -4915,6 +4929,7 @@ impl VM {
                     compiler.take_global_names(),
                     compiler.take_derived_bindings(),
                     compiler.take_state_bindings(),
+                    compiler.take_scene_bindings(),
                     compiler.next_node_id(),
                     compiler.take_macros(),
                     compiler.take_warnings(),
@@ -4927,11 +4942,12 @@ impl VM {
             }
         };
         match compile_result {
-            Ok((chunks, names, derived, states, next_node_id, macros, warnings)) => {
+            Ok((chunks, names, derived, states, scenes, next_node_id, macros, warnings)) => {
                 self.chunks = chunks;
                 self.global_names = names;
                 self.derived_bindings = derived;
                 self.state_bindings = states;
+                self.scene_bindings = scenes;
                 self.dag.next_id = next_node_id;
                 self.macros = macros;
                 for warning in warnings {
@@ -5658,6 +5674,51 @@ impl VM {
         if let Some(reads) = self.current_effect_reactive_reads.as_mut() {
             reads.insert(key);
         }
+    }
+
+    /// Add an edge from a host-owned reactive source to the effect currently
+    /// rendering. A plain, non-rendering native call has no tracking context
+    /// and therefore resolves immediately without retaining a dependency.
+    pub(crate) fn inject_reactive_read(&mut self, namespace: &str, field: &str) {
+        let Some(effect_id) = self.tracking_stack.last().copied() else {
+            return;
+        };
+        self.record_reactive_read(namespace, field);
+        let source_id = self.get_or_create_source_node(namespace, field);
+        self.dag.add_edge(source_id, effect_id);
+    }
+
+    /// Return the fields in a host-owned namespace which currently have
+    /// reactive readers. Detached subtree readers remain subscribers so a
+    /// change while they are hidden is observed when they are reattached.
+    pub(crate) fn subscribed_injected_reactive_fields(&self, namespace: &str) -> Vec<String> {
+        let Some(fields) = self.dag.namespace_field_sources.get(namespace) else {
+            return Vec::new();
+        };
+        let mut subscribed = fields
+            .iter()
+            .filter_map(|(field, id)| {
+                self.dag.nodes.get(id).and_then(|node| match node {
+                    ReactiveNode::Source { dependents, .. } if !dependents.is_empty() => {
+                        Some(field.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .collect::<Vec<_>>();
+        subscribed.sort();
+        subscribed
+    }
+
+    /// Advance a host-owned source and dirty only effects which read it.
+    pub(crate) fn invalidate_injected_reactive_source(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        generation: Value,
+    ) {
+        let source_id = self.get_or_create_source_node(namespace, field);
+        self.mark_source_dependents_dirty(source_id, generation);
     }
 
     fn record_symbol_read(&mut self, name: &str) {
@@ -6426,7 +6487,7 @@ impl VM {
         self.mark_source_dependents_dirty(source_id, current);
     }
 
-    fn process_dirty_reactive(&mut self) -> Result<(), VMError> {
+    pub(crate) fn process_dirty_reactive(&mut self) -> Result<(), VMError> {
         if self.processing_reactive {
             return Ok(());
         }

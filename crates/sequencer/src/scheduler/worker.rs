@@ -253,6 +253,7 @@ pub fn spawn_scheduler_thread(
                                 seq.name.clone(),
                                 crate::sequencer::Timebase::from_index(seq.resolution as u32),
                                 seq.tick_source.clone(),
+                                &seq.requires,
                             ) {
                                 eprintln!(
                                     "failed to register published sequencer {:?} ({}): {error}",
@@ -270,6 +271,10 @@ pub fn spawn_scheduler_thread(
                         .map(|runtime| runtime.sequencer_defs())
                         .unwrap_or_default();
                     lookahead_state.generator_runtime.sync_definitions(&generator_defs, lookahead_state.clock.total_beats);
+                    // Edited/republished definitions get a fresh tick attempt
+                    // (eseq-85a.5): the parked-on-error set is scoped to one
+                    // runtime build.
+                    lookahead_state.parked_generators.clear();
                     let process_authoring = scratch_runtime
                         .as_ref()
                         .map(|runtime| runtime.process_authoring_snapshot())

@@ -304,6 +304,107 @@ impl SequencerState {
             .unwrap_or_default()
     }
 
+    /// Live scene-slot overrides for every scene, indexed by scene position.
+    ///
+    /// Captured into each published snapshot so scheduler-side readers can
+    /// resolve a chunk's scene without locking the bank on the scheduling
+    /// thread, and without trusting a prebuilt snapshot's preflight copy.
+    pub fn scene_slot_table(&self) -> Vec<std::sync::Arc<SceneSlotStore>> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scenes
+            .iter()
+            .map(|scene| std::sync::Arc::new(scene.scene_slots.clone()))
+            .collect()
+    }
+
+    pub fn current_scene_slots(&self) -> SceneSlotStore {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scenes
+            .get(self.current_pattern_index())
+            .map(|scene| scene.scene_slots.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn resolve_current_scene_slot(
+        &self,
+        name: &str,
+        declaration_default: &crate::process::ProcessLiteral,
+    ) -> (crate::process::ProcessLiteral, u64, bool) {
+        let slots = self.current_scene_slots();
+        let resolved = slots.resolve(name, declaration_default);
+        (resolved.value.clone(), resolved.epoch, resolved.overridden)
+    }
+
+    /// Persist one override into the current pattern and publish it to the
+    /// scheduler. The stable scene identity and previous override are captured
+    /// under the same lock as the write so an authoring host command can replay
+    /// the exact pattern even if selection changes before the command drains.
+    pub(crate) fn write_current_scene_slot_identified(
+        &self,
+        name: impl Into<String>,
+        value: crate::process::ProcessLiteral,
+    ) -> Result<(SceneId, Option<crate::process::ProcessLiteral>, u64), String> {
+        let name = name.into();
+        let (scene_id, previous, epoch) = {
+            let mut scenes = self
+                .pattern
+                .scenes
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let current = self.current_pattern_index();
+            let scene = scenes
+                .scenes
+                .get_mut(current)
+                .ok_or_else(|| "current pattern out of range".to_string())?;
+            let previous = scene.scene_slots.get(&name).cloned();
+            let epoch = scene.scene_slots.write_literal(name, value)?;
+            (scene.id, previous, epoch)
+        };
+        self.publish_scheduler_snapshot();
+        Ok((scene_id, previous, epoch))
+    }
+
+    pub fn write_current_scene_slot(
+        &self,
+        name: impl Into<String>,
+        value: crate::process::ProcessLiteral,
+    ) -> Result<u64, String> {
+        self.write_current_scene_slot_identified(name, value)
+            .map(|(_, _, epoch)| epoch)
+    }
+
+    /// Restore or replace a slot override in a stable pattern. This is the
+    /// history replay seam; selection order is deliberately irrelevant.
+    pub(crate) fn set_scene_slot_override(
+        &self,
+        scene_id: SceneId,
+        name: impl Into<String>,
+        value: Option<crate::process::ProcessLiteral>,
+    ) -> Result<u64, String> {
+        let name = name.into();
+        let epoch = {
+            let mut scenes = self
+                .pattern
+                .scenes
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let scene_idx = scenes
+                .scene_index(scene_id)
+                .ok_or_else(|| "scene-slot pattern no longer exists".to_string())?;
+            scenes.scenes[scene_idx]
+                .scene_slots
+                .set_override(name, value)?
+        };
+        self.publish_scheduler_snapshot();
+        Ok(epoch)
+    }
+
     pub fn current_mod_connections(&self) -> Vec<ModConnection> {
         self.current_scene_metadata().0
     }

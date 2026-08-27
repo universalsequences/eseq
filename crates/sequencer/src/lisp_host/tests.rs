@@ -8,8 +8,9 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         clear_neural_effect_plock_by_network_id, clear_neural_instrument_plock_by_network_id,
         compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,
         effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
-        new_eval_context, parse_manifest, parse_process_port_def, read_eseqlisp_init_source,
-        register_graph_authoring_natives, register_published_process_authoring_natives,
+        lisp_list, new_eval_context, parse_manifest, parse_process_port_def,
+        read_eseqlisp_init_source, register_graph_authoring_natives,
+        register_published_process_authoring_natives,
         register_sequencer_natives, scheduler_scratch_runtime_with_fallbacks,
         scratch_runtime_with_fallbacks, selected_neural_instrument_plock_value,
         set_selected_neural_instrument_plocks, shared_native_metadata, AccumulatorNoteSpan,
@@ -1121,6 +1122,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 name: name.clone(),
                 resolution: Timebase::Sixteenth as u8,
                 tick_source: String::new(),
+                requires: Vec::new(),
                 graph: Some(manifest),
             });
             Ok(Value::String(name))
@@ -3566,6 +3568,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             name: manifest.name.clone(),
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(manifest),
         });
 
@@ -3750,6 +3753,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             name: manifest.name.clone(),
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(manifest),
         });
 
@@ -3878,6 +3882,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             name: manifest.name.clone(),
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(manifest.clone()),
         });
 
@@ -4072,6 +4077,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             name: manifest.name.clone(),
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(manifest.clone()),
         });
         state.publish_sequencer(PublishedSequencer {
@@ -4079,6 +4085,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             name: fixed.name.clone(),
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(fixed),
         });
 
@@ -5093,6 +5100,380 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             ),
         );
         (state, runtime)
+    }
+
+    fn scene_slot_test_runtime() -> (Arc<SequencerState>, Runtime) {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![("current-pattern", Value::Number(0.0))], true);
+        register_sequencer_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            new_eval_context(0, 0),
+            shared_native_metadata(
+                fallback_effect_descriptors(1),
+                fallback_instrument_descriptors(1),
+            ),
+        );
+        (state, runtime)
+    }
+
+    /// The UI VM (`ui::natives::init_runtime`) does not install the full
+    /// sequencer native set; it registers the scene-slot natives on their own.
+    /// Guard that this registration stands alone, since a `defscene` read or
+    /// `set!` in a UI script has no other lowering target.
+    #[test]
+    fn scene_slot_natives_register_without_the_rest_of_the_sequencer_natives() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        super::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
+
+        assert_eq!(
+            runtime
+                .eval_str("(defscene rate 0.5)\nrate")
+                .expect("declare and read a scene slot in a bare runtime"),
+            Some(Value::Number(0.5))
+        );
+        assert_eq!(
+            runtime.eval_str("(set! rate 0.75)").expect("write"),
+            Some(Value::Number(0.75))
+        );
+        assert_eq!(
+            state.current_scene_slots().get("rate"),
+            Some(&crate::process::ProcessLiteral::Number(0.75))
+        );
+    }
+
+    #[test]
+    fn scene_slot_authoring_write_queues_stable_history_payload() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let scene = state.current_scene_id().expect("current scene identity");
+        let mut runtime = Runtime::new();
+        super::register_scene_slot_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str("(defscene amount 0.1)\n(set! amount 0.75)")
+            .expect("authoring write");
+        let mut editor = eseqlisp::Editor::new(runtime, eseqlisp::EditorConfig::default());
+        let commands = editor.drain_host_commands();
+        let payload = commands
+            .iter()
+            .find_map(|command| match command {
+                eseqlisp::HostCommand::Custom { name, payload }
+                    if name == "scene-slot-history-write" => Some(payload),
+                _ => None,
+            })
+            .expect("scene-slot history command");
+        let Value::Map(payload) = payload else {
+            panic!("history payload must be a map");
+        };
+        assert_eq!(
+            &*payload["scene-id"].borrow(),
+            &Value::String(scene.0.to_string())
+        );
+        assert_eq!(&*payload["slot"].borrow(), &Value::String("amount".to_string()));
+        assert_eq!(&*payload["old-present"].borrow(), &Value::Bool(false));
+        assert_eq!(&*payload["new"].borrow(), &Value::Number(0.75));
+    }
+
+    #[test]
+    fn scenes_introspection_lists_declared_slots_and_pattern_overrides() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.replace_pattern_repository(
+            vec![
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let mut runtime = Runtime::new();
+        super::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str("(defscene alpha 1)\n(defscene beta '(2 3))\n(set! alpha 4)")
+            .expect("declare slots and override the current pattern");
+        state
+            .set_scene_slot_override(
+                crate::sequencer::SceneId(2),
+                "beta",
+                Some(crate::process::ProcessLiteral::List(vec![
+                    crate::process::ProcessLiteral::Number(5.0),
+                ])),
+            )
+            .expect("override beta in the second pattern");
+
+        let Some(Value::List(patterns)) = runtime.eval_str("(scenes)").expect("introspect") else {
+            panic!("scenes must return a pattern list");
+        };
+        assert_eq!(patterns.len(), 2);
+
+        let slots_for = |pattern: &Rc<RefCell<Value>>| {
+            let Value::Map(pattern) = &*pattern.borrow() else {
+                panic!("each pattern must be a map");
+            };
+            let Value::List(slots) = &*pattern["slots"].borrow() else {
+                panic!("pattern slots must be a list");
+            };
+            slots
+                .iter()
+                .map(|slot| {
+                    let slot_value = slot.borrow();
+                    let Value::Map(slot) = &*slot_value else {
+                        panic!("each slot must be a map");
+                    };
+                    let Value::String(name) = &*slot["name"].borrow() else {
+                        panic!("slot name must be a string");
+                    };
+                    let Value::Bool(overridden) = &*slot["overridden"].borrow() else {
+                        panic!("overridden must be a bool");
+                    };
+                    let value = slot["value"].borrow().clone();
+                    (name.clone(), *overridden, value)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            slots_for(&patterns[0]),
+            vec![
+                ("alpha".to_string(), true, Value::Number(4.0)),
+                (
+                    "beta".to_string(),
+                    false,
+                    lisp_list(vec![Value::Number(2.0), Value::Number(3.0)])
+                ),
+            ]
+        );
+        assert_eq!(
+            slots_for(&patterns[1]),
+            vec![
+                ("alpha".to_string(), false, Value::Number(1.0)),
+                (
+                    "beta".to_string(),
+                    true,
+                    lisp_list(vec![Value::Number(5.0)])
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn oversized_scene_slot_write_is_stored_with_a_soft_diagnostic() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        super::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
+        runtime.eval_str("(defscene payload \"\")").expect("declare slot");
+        let payload = "x".repeat(crate::sequencer::SCENE_SLOT_SOFT_SERIALIZED_BYTES);
+        runtime
+            .eval_str(&format!("(set! payload \"{payload}\")"))
+            .expect("the soft cap must not reject the write");
+
+        let diagnostic = runtime
+            .take_status_message()
+            .expect("oversized authoring writes produce a status diagnostic");
+        assert!(diagnostic.contains("Scene slot 'payload'"), "{diagnostic}");
+        assert!(diagnostic.contains("soft cap"), "{diagnostic}");
+        assert_eq!(
+            state.current_scene_slots().get("payload"),
+            Some(&crate::process::ProcessLiteral::String(payload))
+        );
+    }
+
+    #[test]
+    fn defscene_bare_read_and_set_lower_to_current_pattern_slot_storage() {
+        let (state, mut runtime) = scene_slot_test_runtime();
+
+        assert_eq!(
+            runtime
+                .eval_str("(defscene figures '(1 2))\nfigures")
+                .expect("declare and read scene slot"),
+            Some(lisp_list(vec![Value::Number(1.0), Value::Number(2.0)]))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(set! figures '(3 5))")
+                .expect("write scene slot"),
+            Some(lisp_list(vec![Value::Number(3.0), Value::Number(5.0)]))
+        );
+        assert_eq!(
+            state.current_scene_slots().get("figures"),
+            Some(&crate::process::ProcessLiteral::List(vec![
+                crate::process::ProcessLiteral::Number(3.0),
+                crate::process::ProcessLiteral::Number(5.0),
+            ]))
+        );
+
+        runtime
+            .eval_str("(defscene figures '(8 13))")
+            .expect("rebind declaration default");
+        assert_eq!(
+            runtime.eval_str("figures").expect("read retained override"),
+            Some(lisp_list(vec![Value::Number(3.0), Value::Number(5.0)])),
+            "re-evaluating a declaration must not overwrite a stored pattern override"
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(set! figures (lambda () 1))")
+                .expect("native authoring diagnostics return false"),
+            Some(Value::Bool(false)),
+            "scene-slot writes must reject non-portable values"
+        );
+        assert_eq!(
+            state.current_scene_slots().get("figures"),
+            Some(&crate::process::ProcessLiteral::List(vec![
+                crate::process::ProcessLiteral::Number(3.0),
+                crate::process::ProcessLiteral::Number(5.0),
+            ])),
+            "a rejected value must not alter the stored override"
+        );
+    }
+
+    #[test]
+    fn defscene_render_reads_invalidate_by_slot_and_by_namespace_sweep() {
+        let (_state, mut runtime) = scene_slot_test_runtime();
+        runtime
+            .eval_str(
+                r#"
+                (defscene alpha 1)
+                (defscene beta 2)
+                (effect-buffer "*scene-slot-reactivity*"
+                  (h-stack
+                    (subtree :key "alpha" (label (str alpha)))
+                    (subtree :key "alpha-mirror" (label (str alpha)))
+                    (subtree :key "beta" (label (str beta)))
+                    (subtree :key "unrelated" (label "static"))))
+                "#,
+            )
+            .expect("render scene-slot readers");
+        let initial = runtime.take_pending_buffer_widget_trees();
+        assert!(
+            matches!(
+                initial.as_slice(),
+                [eseqlisp::vm::PendingUiUpdate::FullTree(_)]
+            ),
+            "initial render should publish exactly one full tree, got {} updates",
+            initial.len()
+        );
+
+        // Every scene-slot invalidation must arrive as targeted subtree
+        // replacements: a full-tree update here is the whole-UI-repaint
+        // failure mode this seam exists to prevent.
+        let replaced_roots = |updates: Vec<eseqlisp::vm::PendingUiUpdate>, label: &str| {
+            let mut roots = updates
+                .into_iter()
+                .map(|update| match update {
+                    eseqlisp::vm::PendingUiUpdate::ReplaceSubtree {
+                        subtree_root_id, ..
+                    } => subtree_root_id,
+                    eseqlisp::vm::PendingUiUpdate::FullTree(_) => {
+                        panic!("{label} must not repaint the full tree")
+                    }
+                })
+                .collect::<Vec<_>>();
+            roots.sort_unstable();
+            roots
+        };
+
+        runtime.eval_str("(set! alpha 3)").expect("write alpha");
+        let alpha_roots = replaced_roots(runtime.take_pending_buffer_widget_trees(), "alpha write");
+        assert_eq!(
+            alpha_roots.len(),
+            2,
+            "a write must replace every subtree reading that slot and nothing else"
+        );
+
+        runtime.eval_str("(set! beta 4)").expect("write beta");
+        let beta_roots = replaced_roots(runtime.take_pending_buffer_widget_trees(), "beta write");
+        assert_eq!(
+            beta_roots.len(),
+            1,
+            "a write must not touch subtrees reading a different slot"
+        );
+        assert!(
+            !alpha_roots.contains(&beta_roots[0]),
+            "slot writes must target disjoint readers"
+        );
+
+        runtime
+            .eval_str("(set! alpha 3)")
+            .expect("repeat equal alpha write");
+        assert_eq!(
+            replaced_roots(
+                runtime.take_pending_buffer_widget_trees(),
+                "equal alpha write",
+            ),
+            alpha_roots,
+            "every authored write advances the slot generation, and re-rendered \
+             subtrees keep their injected dependency"
+        );
+
+        // What a pattern sync does: sweep the namespace, handing every
+        // subscribed slot the newly-current scene's generation.
+        runtime.queue_reactive_namespace_invalidation(
+            super::SCENE_SLOT_REACTIVE_NAMESPACE,
+            |_| Value::String("scene-2".to_string()),
+        );
+        runtime.run_reactive_cycle();
+        let mut expected = alpha_roots.clone();
+        expected.extend_from_slice(&beta_roots);
+        expected.sort_unstable();
+        assert_eq!(
+            replaced_roots(runtime.take_pending_buffer_widget_trees(), "pattern switch"),
+            expected,
+            "pattern switch should replace every scene-slot reader and no unrelated subtree"
+        );
+
+        assert_eq!(
+            runtime
+                .eval_str("(set! alpha (lambda () 9))")
+                .expect("rejected write reports false"),
+            Some(Value::Bool(false))
+        );
+        assert!(
+            runtime.take_pending_buffer_widget_trees().is_empty(),
+            "a rejected write must not invalidate the slot"
+        );
+    }
+
+    #[test]
+    fn defscene_non_render_reads_resolve_without_retaining_dependencies() {
+        let (_state, mut runtime) = scene_slot_test_runtime();
+        assert_eq!(
+            runtime
+                .eval_str("(defscene immediate 1)\nimmediate")
+                .expect("plain read"),
+            Some(Value::Number(1.0))
+        );
+        runtime
+            .eval_str("(set! immediate 2)")
+            .expect("plain write");
+        assert!(
+            runtime.take_pending_buffer_widget_trees().is_empty(),
+            "non-render reads must not create reactive UI work"
+        );
+    }
+
+    #[test]
+    fn defscene_uses_defstate_module_qualification_and_declaration_order() {
+        let (state, mut runtime) = scene_slot_test_runtime();
+        runtime
+            .eval_str("(def figures 41)\n(def before figures)\n(defscene figures 2)")
+            .expect("compile declaration-order fixture");
+        assert_eq!(runtime.eval_str("before").unwrap(), Some(Value::Number(41.0)));
+        assert_eq!(runtime.eval_str("figures").unwrap(), Some(Value::Number(2.0)));
+
+        runtime
+            .eval_str(
+                "(module test.scene-slots)\n(defscene rate 0.5)\n(set! rate 0.75)",
+            )
+            .expect("declare module-qualified scene slot");
+        assert_eq!(
+            state.current_scene_slots().get("test.scene-slots/rate"),
+            Some(&crate::process::ProcessLiteral::Number(0.75))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("test.scene-slots/rate")
+                .expect("qualified read"),
+            Some(Value::Number(0.75))
+        );
     }
 
     #[test]
@@ -8065,6 +8446,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "published".to_string(),
                 Timebase::Sixteenth,
                 source.to_string(),
+                &[],
             )
             .expect("compile initial tick");
         assert_eq!(runtime.sequencer_tick_compile_count, 1);
@@ -8096,6 +8478,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "published".to_string(),
                 Timebase::Sixteenth,
                 "(seq-emit :track 0 :at :now :vel 0.75)".to_string(),
+                &[],
             )
             .expect("compile replacement tick");
         assert_eq!(runtime.sequencer_tick_compile_count, 2);
@@ -8108,6 +8491,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "published".to_string(),
                 Timebase::Sixteenth,
                 "(seq-emit".to_string(),
+                &[],
             )
             .expect_err("malformed replacement must fail");
         assert!(error.contains("failed to compile sequencer tick 42"), "{error}");
@@ -8122,6 +8506,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "published".to_string(),
                 Timebase::Sixteenth,
                 "(seq-emit".to_string(),
+                &[],
             )
             .is_err());
         assert_eq!(runtime.sequencer_tick_compile_count, 3);
@@ -9289,6 +9674,296 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn shipped_scene_references_resolve_from_the_selected_scheduler_snapshot() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = Runtime::new();
+        super::register_scene_slot_natives(&mut authoring, Arc::clone(&state));
+        let publish_state = Arc::clone(&state);
+        authoring.register_native("def-sequencer", move |args, _ctx| {
+            let published = super::published_sequencer_from_def_args(&args)?;
+            let name = published.name.clone();
+            publish_state.publish_sequencer(published);
+            Ok(Value::String(name))
+        });
+        authoring
+            .eval_str(
+                r#"(defscene figures 0.25)
+                   (def-sequencer "scene-reader" :resolution :16
+                     :tick (seq-emit :track 0 :vel figures))
+                   (def-sequencer "shadow-reader" :resolution :16
+                     :tick ((lambda (figures)
+                              (seq-emit :track 0 :vel figures))
+                            0.7))
+                   (set! figures 0.8)"#,
+            )
+            .expect("publish scene-driven sequencers");
+
+        let published = state.published_sequencers();
+        let scene_reader = published
+            .iter()
+            .find(|definition| definition.name == "scene-reader")
+            .expect("scene reader publication");
+        assert!(
+            scene_reader
+                .tick_source
+                .contains("(__defscene-resolve \"figures\")"),
+            "a free scene reference must ship by canonical name: {}",
+            scene_reader.tick_source
+        );
+        let shadow_reader = published
+            .iter()
+            .find(|definition| definition.name == "shadow-reader")
+            .expect("shadow reader publication");
+        assert!(
+            !shadow_reader.tick_source.contains("__defscene-resolve"),
+            "a lambda parameter must shadow the scene declaration: {}",
+            shadow_reader.tick_source
+        );
+
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        // No manual `(defscene figures …)` here: the scheduler VM resolves the
+        // declaration through the cross-VM published table the authoring
+        // `defscene` wrote (eseq-85a.2).
+        for definition in &published {
+            scheduler
+                .register_published_sequencer(
+                    definition.id,
+                    definition.name.clone(),
+                    Timebase::from_index(definition.resolution as u32),
+                    definition.tick_source.clone(),
+                    &definition.requires,
+                )
+                .expect("compile published sequencer");
+        }
+        let invoke_velocity = |scheduler: &mut ScratchControlRuntime, name: &str| {
+            let definitions = scheduler.sequencer_defs();
+            let index = definitions
+                .iter()
+                .position(|definition| definition.name == name)
+                .expect("registered sequencer");
+            let result = scheduler
+                .invoke_sequencer_tick(
+                    index,
+                    crate::generator::GeneratorTickInput {
+                        id: definitions[index].id,
+                        generator_index: index,
+                        tick_index: 0,
+                        beat: 0.0,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: HashMap::new(),
+                    },
+                )
+                .expect("invoke sequencer tick");
+            result.emitted[0].resolved.velocity
+        };
+
+        assert!((invoke_velocity(&mut scheduler, "scene-reader") - 0.8).abs() < 1e-6);
+        assert!((invoke_velocity(&mut scheduler, "shadow-reader") - 0.7).abs() < 1e-6);
+
+        authoring
+            .eval_str("(set! figures 0.4)")
+            .expect("publish a newer scene-slot snapshot");
+        assert!(
+            (invoke_velocity(&mut scheduler, "scene-reader") - 0.8).abs() < 1e-6,
+            "a callback must retain its selected boundary snapshot"
+        );
+        scheduler.set_scene_slot_snapshot(Arc::new(state.latest_scheduler_snapshot().scene_slots.clone()));
+        assert!(
+            (invoke_velocity(&mut scheduler, "scene-reader") - 0.4).abs() < 1e-6,
+            "the next boundary must observe the newly published snapshot"
+        );
+    }
+
+    #[test]
+    fn shipped_scene_references_lower_inside_quasiquote_holes_only() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = Runtime::new();
+        super::register_scene_slot_natives(&mut authoring, Arc::clone(&state));
+        let publish_state = Arc::clone(&state);
+        authoring.register_native("def-sequencer", move |args, _ctx| {
+            let published = super::published_sequencer_from_def_args(&args)?;
+            let name = published.name.clone();
+            publish_state.publish_sequencer(published);
+            Ok(Value::String(name))
+        });
+        authoring
+            .eval_str(
+                r#"(defscene figures 0.25)
+                   (def-sequencer "template-reader" :resolution :16
+                     :tick (seq-emit :track 0 :vel (first (rest `(figures ,figures)))))"#,
+            )
+            .expect("publish a quasiquoting sequencer");
+
+        // Exactly one lowering: the unquoted hole is a free read, while the
+        // bare `figures` in the same template is data. (Shipped source does
+        // not yet carry the quasiquote/unquote markers themselves — that is a
+        // separate gap in `compile_quoted_expression`.)
+        let template_reader = state
+            .published_sequencers()
+            .into_iter()
+            .find(|definition| definition.name == "template-reader")
+            .expect("template reader publication");
+        assert_eq!(
+            template_reader
+                .tick_source
+                .matches("__defscene-resolve")
+                .count(),
+            1,
+            "only the unquoted hole may lower: {}",
+            template_reader.tick_source
+        );
+        assert!(
+            template_reader
+                .tick_source
+                .contains("(figures (__defscene-resolve \"figures\"))"),
+            "the quasiquoted symbol must stay data: {}",
+            template_reader.tick_source
+        );
+    }
+
+    #[test]
+    fn shipped_scene_writes_ship_as_by_name_sets() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = Runtime::new();
+        super::register_scene_slot_natives(&mut authoring, Arc::clone(&state));
+        let publish_state = Arc::clone(&state);
+        authoring.register_native("def-sequencer", move |args, _ctx| {
+            let published = super::published_sequencer_from_def_args(&args)?;
+            let name = published.name.clone();
+            publish_state.publish_sequencer(published);
+            Ok(Value::String(name))
+        });
+        authoring
+            .eval_str(
+                r#"(defscene counter 0.25)
+                   (def-sequencer "counting-reader" :resolution :16
+                     :tick (do (set! counter (+ counter 0.25))
+                               (seq-emit :track 0 :vel counter)))"#,
+            )
+            .expect("publish a scene-writing sequencer");
+
+        let published = state.published_sequencers();
+        let writer = published
+            .iter()
+            .find(|definition| definition.name == "counting-reader")
+            .expect("writer publication");
+        assert!(
+            writer
+                .tick_source
+                .contains("(__defscene-set \"counter\" (+ (__defscene-resolve \"counter\") 0.25))"),
+            "a scene write must ship as a by-name set: {}",
+            writer.tick_source
+        );
+
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        // The declaration crosses via the published table (eseq-85a.2); the
+        // scheduler VM never evaluates the authoring `defscene` itself.
+        scheduler
+            .register_published_sequencer(
+                writer.id,
+                writer.name.clone(),
+                Timebase::from_index(writer.resolution as u32),
+                writer.tick_source.clone(),
+                &writer.requires,
+            )
+            .expect("compile the published writer");
+
+        let invoke = |scheduler: &mut ScratchControlRuntime| {
+            let definitions = scheduler.sequencer_defs();
+            let index = definitions
+                .iter()
+                .position(|definition| definition.name == "counting-reader")
+                .expect("registered sequencer");
+            scheduler
+                .invoke_sequencer_tick(
+                    index,
+                    crate::generator::GeneratorTickInput {
+                        id: definitions[index].id,
+                        generator_index: index,
+                        tick_index: 0,
+                        beat: 0.0,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: HashMap::new(),
+                    },
+                )
+                .expect("invoke sequencer tick")
+                .emitted[0]
+                .resolved
+                .velocity
+        };
+
+        // A scheduler callback resolves against the pattern selected for its
+        // chunk, which is not necessarily the UI's current pattern, so the
+        // write is refused (a native error, surfaced as a status) rather than
+        // landing in an unrelated scene. Reads keep working.
+        assert!((invoke(&mut scheduler) - 0.25).abs() < 1e-6);
+        assert!((invoke(&mut scheduler) - 0.25).abs() < 1e-6);
+        assert!(
+            state
+                .latest_scheduler_snapshot()
+                .scene_slots
+                .get("counter")
+                .is_none(),
+            "a refused scheduler write must not reach the live slot bank"
+        );
+    }
+
+    #[test]
+    fn generator_tick_error_channel_reports_once_per_generator() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.report_generator_tick_error(7, "broken".to_string(), "first".to_string());
+        state.report_generator_tick_error(7, "broken".to_string(), "second".to_string());
+        state.report_generator_tick_error(9, "other".to_string(), "boom".to_string());
+        let drained = state.drain_generator_tick_errors();
+        assert_eq!(drained.len(), 2, "one pending entry per generator id");
+        assert_eq!(drained[0].id, 7);
+        assert_eq!(drained[0].error, "first");
+        assert_eq!(drained[1].id, 9);
+        assert!(state.drain_generator_tick_errors().is_empty(), "drain empties");
+    }
+
+    #[test]
+    fn register_published_sequencer_fails_loudly_on_missing_required_module() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let error = scheduler
+            .register_published_sequencer(
+                1,
+                "needs-missing".to_string(),
+                Timebase::Sixteenth,
+                "(seq-emit :track 0 :vel 0.5)".to_string(),
+                &["alez.no-such-module".to_string()],
+            )
+            .expect_err("a missing :requires module must fail registration");
+        assert!(
+            error.contains("alez.no-such-module"),
+            "the error must name the module: {error}"
+        );
+    }
+
+    #[test]
     fn jaki_surface_regular_authoring_runtime_publishes_to_scheduler() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut authoring = jaki_authoring_runtime(Arc::clone(&state));
@@ -9304,7 +9979,15 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let published = state.published_sequencers();
         assert_eq!(published.len(), 1, "jak must publish, not register editor-locally");
         assert!(!published[0].tick_source.is_empty());
+        assert_eq!(
+            published[0].requires,
+            vec!["alez.jaki.core".to_string()],
+            "jak must declare the package module its shipped tick calls into"
+        );
 
+        // The scheduler VM starts empty — no manual jaki import. Registration
+        // imports the published `:requires` modules itself (eseq-85a.1); this
+        // is the exact seam a file-backed (UI-runtime) buffer exercises.
         let mut scheduler = ScratchControlRuntime::new_scheduler(
             Arc::clone(&state),
             fallback_effect_descriptors(1),
@@ -9313,14 +9996,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
         );
         scheduler
-            .eval("(import alez.jaki.surface :refer (jak))")
-            .expect("load Jaki on the scheduler VM");
-        scheduler
             .register_published_sequencer(
                 published[0].id,
                 published[0].name.clone(),
                 Timebase::from_index(published[0].resolution as u32),
                 published[0].tick_source.clone(),
+                &published[0].requires,
             )
             .expect("compile the published Jaki tick on the scheduler VM");
         let mut generators = crate::generator::GeneratorRuntime::default();
@@ -9402,6 +10083,226 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         };
         assert!(pat.contains("alez.jaki.core/from-list"), "{pat}");
         assert!(!pat.contains("alez.jaki.core/pat"), "{pat}");
+    }
+
+    #[test]
+    fn jaki_builder_uses_one_scene_driven_publication_and_plain_slot_edits() {
+        fn find_by_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| find_by_key(child, key))
+        }
+
+        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
+            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width > 0.0, "{:?}", node.rect);
+            assert!(node.rect.height > 0.0, "{:?}", node.rect);
+            assert!(node.rect.row >= 0.0 && node.rect.row < 18.0, "{:?}", node.rect);
+            assert!(node.rect.col >= 0.0 && node.rect.col < 34.0, "{:?}", node.rect);
+        }
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.replace_pattern_repository(
+            vec![
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let mut runtime = jaki_authoring_runtime(Arc::clone(&state));
+        super::register_scene_slot_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime.register_reactive(
+            "SEQ",
+            vec![("current-pattern", Value::Number(0.0))],
+            true,
+        );
+        runtime
+            .eval_str(
+                "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab \
+                   (label buffer sequencer source-path) nil)",
+            )
+            .expect("install script-tab test stub");
+        let source = std::fs::read_to_string(
+            crate::app_paths::app_paths()
+                .scripts_dir()
+                .join("sequencers/jaki-builder-demo.lisp"),
+        )
+        .expect("read Jaki builder script");
+        runtime.eval_str(&source).expect("evaluate Jaki builder script");
+
+        let published = state.published_sequencers();
+        assert_eq!(published.len(), 1, "the builder publishes exactly once at load");
+        assert!(
+            published[0]
+                .tick_source
+                .contains("(alez.jaki.core/run (__defscene-resolve \"jb-figures\"))"),
+            "the tick must late-resolve body data by scene: {}",
+            published[0].tick_source,
+        );
+
+        let tree = runtime
+            .take_pending_buffer_widget_trees()
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("builder should publish its panel");
+        let layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((34.0, 18.0)))
+            .expect("builder panel should lay out");
+        for key in [
+            "jaki-builder-shape-0",
+            "jaki-builder-mod-0",
+            "jaki-builder-add",
+            "jaki-builder-bake",
+            "jaki-builder-code",
+        ] {
+            assert_measured(find_by_key(&layout, key).unwrap_or_else(|| panic!("missing {key}")));
+        }
+
+        let mod_change = find_by_key(&layout, "jaki-builder-mod-0")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("modifier edit callback");
+        runtime
+            .invoke(mod_change, vec![Value::String("stac".to_string())])
+            .expect("edit first scene through plain set!");
+        assert_eq!(state.published_sequencers().len(), 1, "editing must not republish");
+        assert!(
+            runtime
+                .eval_str("(source jb-figures)")
+                .expect("read first scene body")
+                .is_some_and(|value| matches!(value, Value::String(source) if source.contains("(stac)"))),
+            "the first scene must retain its modifier",
+        );
+        let first_scheduler_slots = state.latest_scheduler_snapshot().scene_slots.clone();
+
+        let snapshots = state.export_pattern_repository();
+        state.replace_pattern_repository(snapshots, 1);
+        runtime
+            .eval_str("(jb-set-shape 0 \"- . . .\")")
+            .expect("edit second scene shape");
+        assert!(
+            runtime
+                .eval_str("(source jb-figures)")
+                .expect("read second scene body")
+                .is_some_and(|value| matches!(value, Value::String(source) if source.contains("(- . . .)"))),
+            "the second scene must resolve its own body",
+        );
+        let second_scheduler_slots = state.latest_scheduler_snapshot().scene_slots.clone();
+        let snapshots = state.export_pattern_repository();
+        state.replace_pattern_repository(snapshots, 0);
+        assert!(
+            runtime
+                .eval_str("(source jb-figures)")
+                .expect("return to first scene body")
+                .is_some_and(|value| matches!(value, Value::String(source) if source.contains("(stac)"))),
+            "switching back must recover the first scene without republishing",
+        );
+
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scheduler
+            .eval("(import alez.jaki.surface) (defscene jb-figures '())")
+            .expect("load Jaki and declare the scheduler slot");
+        scheduler
+            .register_published_sequencer(
+                published[0].id,
+                published[0].name.clone(),
+                Timebase::from_index(published[0].resolution as u32),
+                published[0].tick_source.clone(),
+                &published[0].requires,
+            )
+            .expect("compile the one published builder tick");
+        let invoke_duration = |scheduler: &mut ScratchControlRuntime| {
+            scheduler
+                .invoke_sequencer_tick(
+                    0,
+                    crate::generator::GeneratorTickInput {
+                        id: published[0].id,
+                        generator_index: 0,
+                        tick_index: 0,
+                        beat: 0.0,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: HashMap::new(),
+                    },
+                )
+                .expect("run scene-driven Jaki tick")
+                .emitted[0]
+                .resolved
+                .duration
+        };
+        scheduler.set_scene_slot_snapshot(Arc::new(first_scheduler_slots));
+        let first_duration = invoke_duration(&mut scheduler);
+        scheduler.set_scene_slot_snapshot(Arc::new(second_scheduler_slots));
+        let second_duration = invoke_duration(&mut scheduler);
+        assert!((first_duration - 0.0625).abs() < 1e-6, "stac scene: {first_duration}");
+        assert!((second_duration - 0.2).abs() < 1e-6, "plain scene: {second_duration}");
+
+        // The add/remove handlers are the other two plain-`set!` edits the panel
+        // exposes; they must keep the trailing route intact so the shipped tick
+        // stays runnable, and the count guard must refuse to empty the figure list.
+        let figure_source = |runtime: &mut Runtime| match runtime
+            .eval_str("(source jb-figures)")
+            .expect("read builder body")
+            .expect("builder body value")
+        {
+            Value::String(source) => source,
+            other => panic!("expected source string, got {other:?}"),
+        };
+        runtime.eval_str("(jb-add-figure)").expect("add a figure");
+        assert_eq!(
+            figure_source(&mut runtime),
+            "((fig (. . . .) (stac)) (fig (. . . .)) -> 0)",
+            "adding must append after the figures and keep the route last",
+        );
+        runtime.eval_str("(jb-remove-figure 1)").expect("remove the added figure");
+        assert_eq!(
+            figure_source(&mut runtime),
+            "((fig (. . . .) (stac)) -> 0)",
+            "removing must drop only the named figure and keep the route last",
+        );
+        runtime.eval_str("(jb-remove-figure 0)").expect("attempt to remove the last figure");
+        assert_eq!(
+            figure_source(&mut runtime),
+            "((fig (. . . .) (stac)) -> 0)",
+            "the last figure must survive so the published tick still has a body",
+        );
+
+        runtime.eval_str("(jb-bake)").expect("bake current body");
+        let baked = runtime
+            .eval_str("jb-baked-code")
+            .expect("read baked source")
+            .expect("baked source value");
+        assert!(
+            matches!(&baked, Value::String(source) if source.starts_with("(jak \"jaki-builder\" :16") && source.contains("(stac)")),
+            "bake must export an authorable (jak ...) form, got {baked:?}",
+        );
+
+        let mut editor = eseqlisp::Editor::new(runtime, eseqlisp::EditorConfig::default());
+        assert!(
+            editor.drain_host_commands().iter().any(|command| {
+                matches!(command, eseqlisp::HostCommand::Custom { name, .. }
+                    if name == "scene-slot-history-write")
+            }),
+            "the panel's set! must enter the scene-slot undo path",
+        );
     }
 
     #[test]
@@ -10513,6 +11414,58 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 value: 5.0,
             }]
         );
+    }
+
+    #[test]
+    fn process_run_scene_references_ship_by_name() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"(defscene amount 2)
+                   (def-process scene-process
+                     :target (step-param :transpose)
+                     :run (target-set! amount))"#,
+            )
+            .expect("define scene-driven process");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "scene-process")
+            .expect("scene process definition");
+        let source = def.run_source.expect("run source");
+        assert!(
+            source.contains("(__defscene-resolve \"amount\")"),
+            "process body must carry the scene reference by name: {source}"
+        );
+
+        state
+            .write_current_scene_slot("amount", crate::process::ProcessLiteral::Number(5.0))
+            .expect("write scene override");
+        scratch.set_scene_slot_snapshot(Arc::new(state.latest_scheduler_snapshot().scene_slots.clone()));
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 92,
+                source,
+                beat: 0.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                step_context: None,
+                ports: def.ports,
+                reads: crate::process::ProcessReadSnapshot::default(),
+                seed: 1,
+            })
+            .expect("invoke scene-driven process");
+        assert_eq!(result.target_writes[0].value, 5.0);
     }
 
     #[test]

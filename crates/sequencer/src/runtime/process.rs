@@ -838,6 +838,29 @@ pub enum ProcessLiteral {
 }
 
 impl ProcessLiteral {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.retained_heap_bytes()
+    }
+
+    fn retained_heap_bytes(&self) -> usize {
+        match self {
+            Self::Number(_) | Self::Bool(_) | Self::Nil => 0,
+            Self::String(value) | Self::Symbol(value) | Self::Keyword(value) => value.capacity(),
+            Self::List(items) => {
+                items.capacity() * std::mem::size_of::<Self>()
+                    + items.iter().map(Self::retained_heap_bytes).sum::<usize>()
+            }
+            Self::Map(items) => items
+                .iter()
+                .map(|(key, value)| {
+                    std::mem::size_of::<(String, Self)>()
+                        + key.capacity()
+                        + value.retained_heap_bytes()
+                })
+                .sum(),
+        }
+    }
+
     pub fn from_value(value: &Value) -> Result<Self, String> {
         match value {
             Value::Number(value) => Ok(Self::Number(*value)),

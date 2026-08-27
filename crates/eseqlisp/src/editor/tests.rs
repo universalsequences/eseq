@@ -2347,6 +2347,50 @@ fn platform_paste_shortcuts_replace_region_from_system_clipboard() {
 }
 
 #[test]
+fn platform_copy_shortcuts_copy_region_in_text_only_mode() {
+    for modifiers in crate::ui::platform::primary_clipboard_key_modifiers() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_test_clipboard("");
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+        editor.active_buffer_mut().cursor = (0, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('c'), modifiers));
+
+        assert_eq!(editor.test_clipboard(), Some("abc"), "modifiers: {modifiers:?}");
+        assert_eq!(editor.active_buffer().text(), "abc def");
+        assert_eq!(editor.active_region_range(), Some(((0, 0), (0, 3))));
+    }
+}
+
+#[test]
+fn platform_paste_shortcuts_replace_region_in_text_only_mode() {
+    for modifiers in crate::ui::platform::primary_clipboard_key_modifiers() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_test_clipboard("XYZ");
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+        editor.active_buffer_mut().cursor = (0, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('v'), modifiers));
+
+        assert_eq!(editor.active_buffer().text(), "XYZ def", "modifiers: {modifiers:?}");
+        assert_eq!(editor.active_buffer().cursor, (0, 3));
+        assert!(editor.active_region_range().is_none());
+    }
+}
+
+#[test]
 fn typing_clears_active_mark() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -2561,6 +2605,30 @@ fn vim_delete_word_operator_accepts_count_between_keys() {
 
     assert_eq!(editor.active_buffer().text(), "three four");
     assert_eq!(editor.active_buffer().cursor, (0, 0));
+}
+
+#[test]
+fn vim_dollar_operator_deletes_to_line_end_and_is_undoable() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            vim_mode: true,
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*test*", "one two\nthree");
+    editor.active_buffer_mut().cursor = (0, 4);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::SHIFT));
+
+    assert_eq!(editor.active_buffer().text(), "one \nthree");
+    assert_eq!(editor.active_buffer().cursor, (0, 4));
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), "one two\nthree");
+    assert_eq!(editor.active_buffer().cursor, (0, 4));
 }
 
 #[test]

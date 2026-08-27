@@ -119,6 +119,7 @@ pub(super) struct GeneratorChannelSnapshot {
 }
 
 pub(super) type SharedGeneratorChannels = Arc<Mutex<GeneratorChannelSnapshot>>;
+pub(super) type SharedSceneSlotSnapshot = Arc<Mutex<Arc<crate::sequencer::SceneSlotStore>>>;
 pub(super) type ProcessPublishHook = Arc<dyn Fn(crate::process::PublishedProcessAuthoringSnapshot) + 'static>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,6 +330,7 @@ pub struct ScratchControlRuntime {
     pub(super) sequencers: SharedRegisteredSequencers,
     pub(super) generator_tick: SharedGeneratorTickContext,
     pub(super) generator_channels: SharedGeneratorChannels,
+    pub(super) scene_slots: SharedSceneSlotSnapshot,
     pub(super) process_authoring: SharedProcessAuthoring,
     pub(super) process_eval: SharedProcessEvalContext,
     pub(super) graph_node: SharedGraphNodeContext,
@@ -399,6 +401,9 @@ impl ScratchControlRuntime {
         let generator_tick = Arc::new(Mutex::new(None));
         let generator_channels: SharedGeneratorChannels =
             Arc::new(Mutex::new(GeneratorChannelSnapshot::default()));
+        let scene_slots: SharedSceneSlotSnapshot = Arc::new(Mutex::new(Arc::new(
+            state.latest_scheduler_snapshot().scene_slots.clone(),
+        )));
         let process_authoring = Arc::new(Mutex::new(ProcessAuthoringRegistry::default()));
         let process_eval = Arc::new(Mutex::new(None));
         let graph_node: SharedGraphNodeContext = Arc::new(Mutex::new(None));
@@ -427,6 +432,16 @@ impl ScratchControlRuntime {
             Arc::clone(&sequencers),
             Arc::clone(&generator_tick),
             Arc::clone(&generator_channels),
+        );
+        // Scratch callbacks execute against the immutable snapshot selected
+        // for their scheduler chunk, never by locking the mutable UI scene
+        // bank. Re-registering replaces the live resolver installed by the
+        // general native set while retaining the same lowering targets.
+        register_scene_slot_natives_with_snapshot(
+            &mut runtime,
+            Arc::clone(&state),
+            Some(Arc::clone(&scene_slots)),
+            false,
         );
         register_process_natives(
             &mut runtime,
@@ -464,6 +479,7 @@ impl ScratchControlRuntime {
             sequencers,
             generator_tick,
             generator_channels,
+            scene_slots,
             process_authoring,
             process_eval,
             graph_node,
@@ -496,6 +512,19 @@ impl ScratchControlRuntime {
                 values: Arc::new(values),
             };
         }
+    }
+
+    /// Select the immutable pattern snapshot observed by shipped callbacks at
+    /// the next scheduler boundary.
+    pub fn set_scene_slot_snapshot(&self, slots: Arc<crate::sequencer::SceneSlotStore>) {
+        // Recover through poisoning rather than skipping the update: silently
+        // keeping a stale snapshot forever would make every shipped tick read
+        // the previous chunk's slots with no diagnostic.
+        let mut guard = self
+            .scene_slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = slots;
     }
 
     pub fn set_position(&mut self, track: usize, cursor_step: usize) {
@@ -847,6 +876,7 @@ impl ScratchControlRuntime {
         SharedRegisteredSequencers,
         SharedGeneratorTickContext,
         SharedGeneratorChannels,
+        SharedSceneSlotSnapshot,
         SharedProcessAuthoring,
         SharedProcessEvalContext,
         SharedGraphNodeContext,
@@ -863,6 +893,7 @@ impl ScratchControlRuntime {
             self.sequencers,
             self.generator_tick,
             self.generator_channels,
+            self.scene_slots,
             self.process_authoring,
             self.process_eval,
             self.graph_node,
@@ -882,6 +913,7 @@ impl ScratchControlRuntime {
         sequencers: SharedRegisteredSequencers,
         generator_tick: SharedGeneratorTickContext,
         generator_channels: SharedGeneratorChannels,
+        scene_slots: SharedSceneSlotSnapshot,
         process_authoring: SharedProcessAuthoring,
         process_eval: SharedProcessEvalContext,
         graph_node: SharedGraphNodeContext,
@@ -898,6 +930,7 @@ impl ScratchControlRuntime {
             sequencers,
             generator_tick,
             generator_channels,
+            scene_slots,
             process_authoring,
             process_eval,
             graph_node,
@@ -925,7 +958,41 @@ impl ScratchControlRuntime {
         name: String,
         resolution: Timebase,
         tick_source: String,
+        requires: &[String],
     ) -> Result<(), String> {
+        // Import the tick's declared modules (`:requires`) before compiling.
+        // This runtime carries the full package module load path, so shipped
+        // ticks that call package functions resolve without the authoring
+        // file's source ever crossing the VM boundary. `__import-module`
+        // reports failure through its return value (and load-once dedups
+        // repeat registrations), so a bad module fails registration loudly
+        // instead of surfacing as per-tick UnknownVariable errors.
+        for module in requires {
+            if !eseqlisp::modules::is_valid_module_name(module) {
+                return Err(format!(
+                    "sequencer {name} ({id}): invalid :requires module name '{module}'"
+                ));
+            }
+            let result = self.runtime.eval_str(&format!("(import {module})"));
+            // `eval_str` does not consume load errors itself; drain them so a
+            // failure is reported here and can never poison a later
+            // path-based eval on this runtime.
+            let load_errors = self.runtime.take_source_load_errors();
+            match result {
+                Ok(_) if load_errors.is_empty() => {}
+                Ok(_) => {
+                    return Err(format!(
+                        "sequencer {name} ({id}): failed to import required module: {}",
+                        load_errors.join("; ")
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "sequencer {name} ({id}): failed to import required module {module}: {error:?}"
+                    ));
+                }
+            }
+        }
         if let Err(error) = self.sequencer_tick_callback(id, &tick_source) {
             self.sequencers
                 .lock()

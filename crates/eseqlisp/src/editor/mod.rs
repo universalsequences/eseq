@@ -6046,6 +6046,10 @@ impl Editor {
                         self.vim_delete_words(count);
                         true
                     }
+                    ('d', KeyCode::Char('$')) => {
+                        self.vim_delete_to_line_end(count);
+                        true
+                    }
                     ('y', KeyCode::Char('w')) => {
                         self.vim_yank_words(count);
                         true
@@ -6206,6 +6210,32 @@ impl Editor {
         }
         let start = self.active_buffer().cursor;
         let end = self.vim_word_forward_position(start, count);
+        if end == start {
+            return;
+        }
+        self.record_undo_snapshot();
+        let text = self.active_buffer().slice_range(start, end);
+        self.kill_ring.push(text);
+        self.vim_linewise_yank = None;
+        self.active_buffer_mut().delete_range(start, end);
+        self.sync_text_horizontal_scroll_to_viewport();
+        self.sync_runtime_context();
+        self.refresh_completion();
+    }
+
+    fn vim_delete_to_line_end(&mut self, count: usize) {
+        if self.guard_read_only() {
+            return;
+        }
+        let start = self.active_buffer().cursor;
+        let end_row = start
+            .0
+            .saturating_add(count.saturating_sub(1))
+            .min(self.active_buffer().lines.len().saturating_sub(1));
+        let end = (
+            end_row,
+            self.active_buffer().lines[end_row].chars().count(),
+        );
         if end == start {
             return;
         }

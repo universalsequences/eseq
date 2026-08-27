@@ -16,12 +16,17 @@ natives are the internal hooks `def-accumulator`/`def-midi-fx`/
 
 use super::super::*;
 
+/// Reactive namespace injected for `defscene` slot reads. History replay
+/// re-dirties readers through this same namespace, so it is shared rather
+/// than restated at each invalidation site.
+pub const SCENE_SLOT_REACTIVE_NAMESPACE: &str = "__scene-slot";
+
 pub const DEF_SEQUENCER_SIGNATURE: &str =
-    "(def-sequencer name :resolution timebase :res timebase :tick callback :tick-source source :init callback :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
+    "(def-sequencer name :resolution timebase :res timebase :tick callback :tick-source source :init callback :requires (module ...) :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
 pub const DEF_SEQUENCER_DOCS: &str =
-    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :tick-source is the internal prebuilt-source path; :init is reserved for generator initialization.";
+    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :tick-source is the internal prebuilt-source path; :init is reserved for generator initialization; :requires lists module names the tick body calls into, imported by the scheduler VM before compiling the shipped tick.";
 pub const DEF_SEQUENCER_KEYWORDS: &[&str] = &[
-    ":resolution", ":res", ":tick", ":tick-source", ":init", ":shape", ":energy-decay", ":reset-every",
+    ":resolution", ":res", ":tick", ":tick-source", ":init", ":requires", ":shape", ":energy-decay", ":reset-every",
     ":seed-on-reset", ":max-poly", ":max-poly-selection", ":duration", ":dur", ":swing",
 ];
 pub const SEQ_EMIT_SIGNATURE: &str =
@@ -39,6 +44,212 @@ pub const SEQ_EMIT_CONTROL_DOCS: &str =
      muted/soloed from :at for :dur beats. Targets are validated when the hold is applied; \
      an unknown track or group reports a host error and applies nothing.";
 pub const SEQ_EMIT_CONTROL_KEYWORDS: &[&str] = &[":op", ":track", ":group", ":at", ":dur"];
+
+/// Install the `defscene` lowering targets (`__defscene-register`,
+/// `__defscene-resolve`, `__defscene-set`) that `compiler.rs` emits for a
+/// scene-slot declaration, bare read, and `set!`.
+///
+/// Every VM that can evaluate user source needs these: the scratch/scheduler
+/// runtimes get them through `register_sequencer_natives_with_accumulators`,
+/// and the UI runtime — the primary consumer, since panels read and `set!`
+/// slots — registers them directly in `ui::natives::init_runtime`. The
+/// declaration table is per-runtime (it only caches defaults); the values
+/// themselves live in the shared `SequencerState` pattern store.
+pub fn register_scene_slot_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+) {
+    register_scene_slot_natives_with_snapshot(runtime, state, None, false);
+}
+
+/// Register scene-slot writes for the UI authoring VM. Writes still land
+/// synchronously so a handler can read its own `set!`, while an explicit host
+/// command carries the stable target and before/after values into App history.
+pub fn register_scene_slot_authoring_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+) {
+    register_scene_slot_natives_with_snapshot(runtime, state, None, true);
+}
+
+pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+    scheduler_slots: Option<SharedSceneSlotSnapshot>,
+    record_history: bool,
+) {
+    let declarations = Arc::new(Mutex::new(BTreeMap::<
+        String,
+        crate::process::ProcessLiteral,
+    >::new()));
+
+    let declarations_for_register = Arc::clone(&declarations);
+    let state_for_register = Arc::clone(&state);
+    runtime.register_native("__defscene-register", move |args, _ctx| {
+        let [EValue::String(name), default] = args.as_slice() else {
+            return Err("defscene expects a symbol name and default value".to_string());
+        };
+        let literal = crate::process::ProcessLiteral::from_value(default)
+            .map_err(|error| format!("scene slot '{}': {}", name, error))?;
+        crate::sequencer::SceneSlotStore::validate_literal(name, &literal)?;
+        declarations_for_register
+            .lock()
+            .map_err(|_| "failed to lock scene-slot declarations".to_string())?
+            .insert(name.clone(), literal.clone());
+        // Cross-VM publish: a scheduler runtime compiling a shipped tick
+        // resolves declarations it never evaluated through this table.
+        state_for_register.publish_scene_slot_declaration(name.clone(), literal);
+        Ok(default.clone())
+    });
+
+    let declarations_for_scenes = Arc::clone(&declarations);
+    let state_for_scenes = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "scenes",
+        "(scenes)",
+        "List project patterns, declared scene slots, and their resolved or overridden values.",
+        move |args, _ctx| {
+            if !args.is_empty() {
+                return Err("scenes expects no arguments".to_string());
+            }
+            let declarations = declarations_for_scenes
+                .lock()
+                .map_err(|_| "failed to lock scene-slot declarations".to_string())?
+                .clone();
+            // Introspection reads the live bank under its own lock rather
+            // than taking the history-grade `capture_project_scenes` clone:
+            // this native is also registered in the scheduler-side runtime,
+            // where deep-cloning every pattern's pools to print slot names
+            // would be paid on a script callback.
+            let patterns = state_for_scenes.with_project_scenes(|project| {
+                let current = project.current_scene;
+                project
+                    .scenes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, scene)| {
+                        let slots = declarations
+                            .iter()
+                            .map(|(name, default)| {
+                                let resolved = scene.scene_slots.resolve(name, default);
+                                let mut slot = HashMap::new();
+                                slot.insert("name".to_string(), lisp_string(name));
+                                slot.insert("default".to_string(), lisp_value(default.to_value()));
+                                slot.insert("value".to_string(), lisp_value(resolved.value.to_value()));
+                                slot.insert("overridden".to_string(), lisp_bool(resolved.overridden));
+                                slot.insert(
+                                    "epoch".to_string(),
+                                    lisp_string(resolved.epoch.to_string()),
+                                );
+                                EValue::Map(slot)
+                            })
+                            .collect();
+                        let mut pattern = HashMap::new();
+                        pattern.insert("pattern".to_string(), lisp_number(index as f64));
+                        pattern.insert("id".to_string(), lisp_string(scene.id.0.to_string()));
+                        pattern.insert("name".to_string(), lisp_string(&scene.name));
+                        pattern.insert("current".to_string(), lisp_bool(index == current));
+                        pattern.insert("slots".to_string(), lisp_value(lisp_list(slots)));
+                        EValue::Map(pattern)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Ok(lisp_list(patterns))
+        },
+    );
+
+    // A snapshot-backed runtime reads the pattern selected for its scheduler
+    // chunk, which is not necessarily the UI's current pattern. A write there
+    // would land in the wrong scene and stay invisible to its own next read.
+    let snapshot_backed = scheduler_slots.is_some();
+
+    let declarations_for_resolve = Arc::clone(&declarations);
+    let state_for_resolve = Arc::clone(&state);
+    runtime.register_native("__defscene-resolve", move |args, ctx| {
+        let [EValue::String(name)] = args.as_slice() else {
+            return Err("scene-slot read expects one declaration name".to_string());
+        };
+        let local = declarations_for_resolve
+            .lock()
+            .map_err(|_| "failed to lock scene-slot declarations".to_string())?
+            .get(name)
+            .cloned();
+        // Fall back to the cross-VM published table: shipped ticks read slots
+        // whose `defscene` only ever ran in an authoring VM.
+        let default = local
+            .or_else(|| state_for_resolve.published_scene_slot_declaration(name))
+            .ok_or_else(|| format!("scene slot '{}' is not declared", name))?;
+        let (value, _epoch, _overridden) = if let Some(slots) = &scheduler_slots {
+            let slots = slots
+                .lock()
+                .map_err(|_| "failed to lock scheduler scene-slot snapshot".to_string())?;
+            let resolved = slots.resolve(name, &default);
+            (resolved.value.clone(), resolved.epoch, resolved.overridden)
+        } else {
+            state_for_resolve.resolve_current_scene_slot(name, &default)
+        };
+        // Writes and scene switches advance this qualified slot source.
+        // NativeContext retains the edge only during reactive rendering.
+        ctx.track_reactive_read(SCENE_SLOT_REACTIVE_NAMESPACE, name);
+        Ok(value.to_value())
+    });
+
+    let declarations_for_set = Arc::clone(&declarations);
+    runtime.register_native("__defscene-set", move |args, ctx| {
+        let [EValue::String(name), value] = args.as_slice() else {
+            return Err("set! on a scene slot expects a declaration name and value".to_string());
+        };
+        if snapshot_backed {
+            return Err(format!(
+                "scene slot '{}' cannot be written from a scheduler callback; \
+                 set! it from the UI or a panel handler",
+                name
+            ));
+        }
+        let declared_locally = declarations_for_set
+            .lock()
+            .map_err(|_| "failed to lock scene-slot declarations".to_string())?
+            .contains_key(name);
+        if !declared_locally && state.published_scene_slot_declaration(name).is_none() {
+            return Err(format!("scene slot '{}' is not declared", name));
+        }
+        let literal = crate::process::ProcessLiteral::from_value(value)
+            .map_err(|error| format!("scene slot '{}': {}", name, error))?;
+        let (scene_id, previous, epoch) = state
+            .write_current_scene_slot_identified(name.clone(), literal.clone())?;
+        // Diagnosed after the write lands: the cap is soft, and a value the
+        // store rejects outright deserves its own portability error instead.
+        if let Some(diagnostic) =
+            crate::sequencer::SceneSlotStore::soft_size_diagnostic(name, &literal)
+        {
+            ctx.set_status(diagnostic);
+        }
+        if record_history {
+            let mut payload = HashMap::new();
+            payload.insert(
+                "scene-id".to_string(),
+                lisp_string(scene_id.0.to_string()),
+            );
+            payload.insert("slot".to_string(), lisp_string(name.clone()));
+            payload.insert("old-present".to_string(), lisp_bool(previous.is_some()));
+            payload.insert(
+                "old".to_string(),
+                lisp_value(previous.map_or(EValue::Nil, |value| value.to_value())),
+            );
+            payload.insert("new".to_string(), lisp_value(literal.to_value()));
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "scene-slot-history-write".to_string(),
+                payload: EValue::Map(payload),
+            });
+        }
+        ctx.invalidate_reactive_source(
+            SCENE_SLOT_REACTIVE_NAMESPACE,
+            name,
+            EValue::String(epoch.to_string()),
+        );
+        Ok(value.clone())
+    });
+}
 
 pub(in crate::lisp_host) fn register_sequencer_natives(
     runtime: &mut Runtime,
@@ -587,6 +798,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
         |ctx: &SharedSequencerEvalContext| ctx.lock().map(|guard| guard.cursor_step).unwrap_or(0);
 
     let _ = install_runtime_globals(runtime, &context, &metadata, &[]);
+    register_scene_slot_natives(runtime, Arc::clone(&state));
 
     // `def-sequencer` is a plain variadic builtin (NOT a macro): eseqlisp macros are
     // fixed-arity with no unquote-splicing, and builtins already receive variadic
@@ -2639,6 +2851,33 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
 }
 
 
+/// Parse a `def-sequencer` `:requires` value — an auto-quoted list of module
+/// name symbols/strings — into validated module names for the scheduler VM to
+/// import before it compiles the shipped tick.
+fn parse_requires_arg(value: &EValue) -> Result<Vec<String>, String> {
+    let EValue::List(items) = value else {
+        return Err("def-sequencer :requires expects a list of module names".to_string());
+    };
+    let mut names = Vec::with_capacity(items.len());
+    for item in items {
+        let name = match &*item.borrow() {
+            EValue::Symbol(s) | EValue::String(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "def-sequencer :requires expects module name symbols, got {other:?}"
+                ))
+            }
+        };
+        if !eseqlisp::modules::is_valid_module_name(&name) {
+            return Err(format!(
+                "def-sequencer :requires: invalid module name '{name}'"
+            ));
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
 pub(in crate::lisp_host) fn register_sequencer_impl(
     args: &[EValue],
     sequencers: &SharedRegisteredSequencers,
@@ -2672,6 +2911,11 @@ pub(in crate::lisp_host) fn register_sequencer_impl(
                 _ => return Err("def-sequencer :tick-source expects a string".to_string()),
             },
             "init" => { /* reserved for future one-time init */ }
+            // Validated for parity with the published path, but not imported
+            // here: this VM just evaluated the authoring source, so any module
+            // the tick calls into is already loaded (or the tick itself was
+            // unresolvable and never got this far).
+            "requires" => drop(parse_requires_arg(&args[idx])?),
             _ => return Err(format!("def-sequencer unknown key :{key}")),
         }
         idx += 1;
@@ -2750,6 +2994,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
             name,
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(manifest),
         });
     }
@@ -2757,6 +3002,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
     let mut resolution: u8 = Timebase::Sixteenth as u8;
     let mut tick: Option<String> = None;
     let mut prebuilt_tick_source: Option<String> = None;
+    let mut requires: Vec<String> = Vec::new();
     let mut idx = 1;
     while idx < args.len() {
         let key = match &args[idx] {
@@ -2777,6 +3023,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
                 _ => return Err("def-sequencer :tick-source expects a string".to_string()),
             },
             "init" => { /* reserved for future one-time init */ }
+            "requires" => requires = parse_requires_arg(value)?,
             _ => return Err(format!("def-sequencer unknown key :{key}")),
         }
         idx += 1;
@@ -2792,6 +3039,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
         name,
         resolution,
         tick_source,
+        requires,
         graph: None,
     })
 }

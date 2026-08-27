@@ -22,6 +22,7 @@ struct RowStaging {
     mod_connections: Vec<ModConnection>,
     neural_networks: Vec<crate::neural::ProjectNeuralNetwork>,
     graph_overrides: Vec<crate::graph::ProjectGraphOverrides>,
+    scene_slots: SceneSlotStore,
     project_process_chain: crate::process::TrackProcessChain,
 }
 
@@ -377,6 +378,9 @@ impl SequencerState {
                         graph_overrides: scene
                             .map(|scene| scene.graph_overrides.clone())
                             .unwrap_or_default(),
+                        scene_slots: scene
+                            .map(|scene| scene.scene_slots.clone())
+                            .unwrap_or_default(),
                         project_process_chain: scene
                             .map(|scene| scene.project_process_chain.clone())
                             .unwrap_or_default(),
@@ -394,6 +398,7 @@ impl SequencerState {
                 staging.mod_connections,
                 staging.neural_networks,
                 staging.graph_overrides,
+                staging.scene_slots,
                 staging.project_process_chain,
             );
             // Row snapshots are only ever scheduled while the song transport
