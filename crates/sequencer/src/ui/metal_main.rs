@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Create App. Start intentionally empty so the first action is choosing
     // a sound instead of editing a canned pattern.
     let master_recorder = eng.master_recorder.clone();
-    let app = app::App::new(
+    let mut app = app::App::new(
         eng.state.clone(),
         eng.lg_ptr,
         eng.sample_rate,
@@ -199,6 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         midi_fx_names: _,
         sample_browser,
         piano_roll_clipboard,
+        process_authoring,
     } = init_runtime(
         &app,
         state.clone(),
@@ -229,6 +230,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         auto_follow_override_until.clone(),
         lg_raw,
     );
+
+    // A project switch resets this registry, so `App` needs the handle
+    // (bead eseq-jo7.21).
+    app.editor.ui_process_authoring = Some(process_authoring);
 
     let (editor, backend) = create_editor_and_backend(runtime, &app)?;
 

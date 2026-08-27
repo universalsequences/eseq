@@ -875,6 +875,24 @@ impl App {
         self.song_transport_mode = crate::app::song_transport::SongTransportMode::Stopped;
     }
 
+    /// Drop every trace of the outgoing project's authored jaki sequencers,
+    /// processes and channels (bead eseq-jo7.21). Package-level `def-process`
+    /// classes loaded from `content/` are library declarations rather than
+    /// live state, so they survive; everything the project itself authored —
+    /// `def-sequencer` publications, process instances, channels, patches,
+    /// conductor attachments, `defscene` declarations — is cleared before the
+    /// incoming project's Lisp is evaluated.
+    pub(crate) fn clear_project_authored_processes(&mut self) {
+        self.state.clear_project_authored_processes();
+        // The UI VM's registry is the source of truth that republishes the
+        // snapshot on the next authoring call, so clearing only the published
+        // copy above would let project A's graph reappear the moment the user
+        // evaluates anything in project B.
+        if let Some(authoring) = self.editor.ui_process_authoring.clone() {
+            authoring.reset_project_authored();
+        }
+    }
+
     pub fn start_new_project(&mut self) {
         self.editor.pending_project_load = None;
         self.groups.clear();
@@ -953,6 +971,7 @@ impl App {
         self.editor.scratch_cursor = (0, 0);
         self.editor.scratch_runtime = None;
         self.state.set_scratch_source(String::new());
+        self.clear_project_authored_processes();
         self.clear_control_hooks();
 
         self.ui.value_buffer.clear();
@@ -4182,6 +4201,7 @@ impl App {
         self.editor.scratch_cursor = (scratch.cursor_row, scratch.cursor_col);
         self.editor.scratch_runtime = None;
         self.state.set_scratch_source(evaluated_scratch);
+        self.clear_project_authored_processes();
         self.clear_control_hooks();
         let repaired_sidechains = self.repair_stale_sidechain_effect_slots()?;
         let status = if pending.fallback_samples > 0 {
@@ -4910,6 +4930,139 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bead eseq-jo7.21: a project switch used to leave the outgoing
+    /// project's jaki sequencers, process instances and channels registered,
+    /// so they kept scheduling under the incoming project. Package-level
+    /// `def-process` classes are library declarations and must survive.
+    #[test]
+    fn project_switch_clears_project_authored_processes_but_keeps_package_defs() {
+        use crate::app::AudioBuses;
+        use crate::audiograph::LiveGraphPtr;
+        use crate::recorder::MasterRecorder;
+        use crate::sequencer::{default_empty_effect_chain, SequencerState};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Mutex;
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = eseqlisp::Runtime::new();
+        let authoring = lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        // The package layer: what `content/processes/builtin.lisp` contributes
+        // at runtime construction, before any project source runs.
+        runtime
+            .eval_str(
+                r#"(def-process package-veto
+                     :in ((prob :float 0 1 :default 1))
+                     :run (if (> (rand) (in :prob)) (veto!) nil))"#,
+            )
+            .expect("evaluate the package process library");
+        authoring.mark_package_defs();
+
+        // Project A authors its own class, an instance of it, and a channel.
+        runtime
+            .eval_str(
+                r#"
+                (def-process project-a-thing
+                  :in ((amount :float 0 1 :default 0.5))
+                  :run nil)
+                (def a-chan (defchan a-chan 0.25))
+                (def a-chain (processes :track 0 (project-a-thing :amount 0.75)))
+                "#,
+            )
+            .expect("evaluate project A authoring source");
+        state.publish_sequencer(crate::sequencer::PublishedSequencer {
+            id: 7,
+            name: "project-a-seq".to_string(),
+            resolution: 0,
+            tick_source: "(lambda () nil)".to_string(),
+            requires: Vec::new(),
+            graph: None,
+        });
+        state.publish_scene_slot_declaration(
+            "a-slot".to_string(),
+            crate::process::ProcessLiteral::Number(1.0),
+        );
+
+        let published = state.published_process_authoring();
+        assert!(
+            published.defs.iter().any(|def| def.name == "project-a-thing"),
+            "project A's def should be published before the switch"
+        );
+        assert!(
+            !published.instances.is_empty() && !published.channels.is_empty(),
+            "project A's instance and channel should be published before the switch"
+        );
+
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(
+            Arc::clone(&state),
+            LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.editor.ui_process_authoring = Some(authoring);
+
+        app.clear_project_authored_processes();
+
+        let published = state.published_process_authoring();
+        assert_eq!(
+            published
+                .defs
+                .iter()
+                .map(|def| def.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["package-veto"],
+            "only package definitions survive a project switch"
+        );
+        assert!(
+            published.instances.is_empty()
+                && published.channels.is_empty()
+                && published.patches.is_empty()
+                && published.conductors.is_empty(),
+            "project A's live process state must not survive the switch"
+        );
+        assert!(
+            state.published_sequencers().is_empty(),
+            "project A's def-sequencer must not survive the switch"
+        );
+        assert!(
+            state.published_scene_slot_declaration("a-slot").is_none(),
+            "project A's defscene declaration must not survive the switch"
+        );
+
+        // The UI VM republishes from its own registry on the next authoring
+        // call; project A must not reappear through that path.
+        runtime
+            .eval_str("(defchan b-chan 0.5)")
+            .expect("evaluate project B authoring source");
+        let published = state.published_process_authoring();
+        assert_eq!(
+            published
+                .channels
+                .iter()
+                .filter_map(|channel| channel.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["b-chan"],
+            "republishing after the switch must not resurrect project A's channels"
+        );
+        assert!(
+            published.instances.is_empty(),
+            "republishing after the switch must not resurrect project A's instances"
+        );
+    }
 
     #[test]
     fn legacy_dgen_slot_migration_shifts_only_header_relative_indices() {

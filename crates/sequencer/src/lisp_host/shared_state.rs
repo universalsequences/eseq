@@ -149,6 +149,24 @@ impl PublishedProcessAuthoringNatives {
             self.publish.clone(),
         )
     }
+
+    /// Freeze the definitions registered so far as the package layer (see
+    /// [`ProcessAuthoringRegistry::mark_package_defs`]).
+    pub fn mark_package_defs(&self) {
+        if let Ok(mut registry) = self.process_authoring.lock() {
+            registry.mark_package_defs();
+        }
+    }
+
+    /// Drop the outgoing project's authored processes, channels, patches and
+    /// conductor attachments, then republish so every consumer of the
+    /// published snapshot sees the cleared registry (bead eseq-jo7.21).
+    pub fn reset_project_authored(&self) {
+        if let Ok(mut registry) = self.process_authoring.lock() {
+            registry.reset_project_authored();
+        }
+        publish_process_authoring(&self.process_authoring, &self.publish);
+    }
 }
 pub(super) const UI_PROCESS_HANDLE_BASE: u64 = 1_u64 << 48;
 /// A lisp `def-sequencer` definition as held by the scheduler-side VM: its id
@@ -185,6 +203,15 @@ pub(crate) struct GeneratorTickContext {
 #[derive(Default)]
 pub(super) struct ProcessAuthoringRegistry {
     pub(super) next_handle_id: u64,
+    /// The value `next_handle_id` started at, so a project switch can rewind
+    /// handle minting to the same base the registry was constructed with.
+    pub(super) handle_base: u64,
+    /// Ids of the `def-process` definitions that belong to the package layer
+    /// (`content/processes/builtin.lisp`, evaluated once at runtime
+    /// construction). These are library classes, not live state, so they
+    /// survive a project switch; everything else in this registry is
+    /// project-authored and is dropped (bead eseq-jo7.21).
+    pub(super) package_def_ids: HashSet<u64>,
     pub(super) defs: Vec<crate::process::ProcessDef>,
     pub(super) instances: Vec<crate::process::AuthoredProcessInstance>,
     pub(super) channels: Vec<crate::process::AuthoredChannel>,
@@ -208,8 +235,35 @@ impl ProcessAuthoringRegistry {
     pub(super) fn with_handle_base(handle_base: u64) -> Self {
         Self {
             next_handle_id: handle_base,
+            handle_base,
             ..Self::default()
         }
+    }
+
+    /// Freeze the currently registered definitions as the package layer. Call
+    /// this once, right after the process library has been evaluated into the
+    /// runtime and before any project source can reach it.
+    pub(super) fn mark_package_defs(&mut self) {
+        self.package_def_ids = self.defs.iter().map(|def| def.id).collect();
+    }
+
+    /// Drop every project-authored entry, keeping only the package
+    /// definitions marked by [`ProcessAuthoringRegistry::mark_package_defs`].
+    /// Instances, channels, patches and conductor attachments are live state
+    /// keyed to the outgoing project's tracks and handles, so none of them
+    /// survive — otherwise the previous project's jaki sequencers keep
+    /// scheduling under the new one.
+    pub(super) fn reset_project_authored(&mut self) {
+        self.defs.retain(|def| self.package_def_ids.contains(&def.id));
+        self.instances.clear();
+        self.channels.clear();
+        self.patches.clear();
+        self.conductors.clear();
+        self.outlet_handles.clear();
+        self.channel_handles.clear();
+        self.pending_channel_writes.clear();
+        self.channel_write_echo.clear();
+        self.next_handle_id = self.handle_base;
     }
 
     pub(super) fn next_id(&mut self) -> u64 {

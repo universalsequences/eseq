@@ -1919,6 +1919,7 @@
             midi_fx_names: _,
             sample_browser: _,
             piano_roll_clipboard: _,
+            process_authoring: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -2822,6 +2823,7 @@
             midi_fx_names: _,
             sample_browser,
             piano_roll_clipboard,
+            process_authoring: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -13291,6 +13293,7 @@
             midi_fx_names: _,
             sample_browser: _,
             piano_roll_clipboard: _,
+            process_authoring: _,
         } = init_runtime(
             &app,
             state.clone(),

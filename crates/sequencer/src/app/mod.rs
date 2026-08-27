@@ -500,6 +500,11 @@ pub struct EditorState {
     pub scratch_buffer: String,
     pub scratch_cursor: (usize, usize),
     pub scratch_runtime: Option<ScratchControlRuntime>,
+    /// Handle onto the UI VM's process/jaki authoring registry, installed by
+    /// the front end once its runtime exists. A project switch resets it so
+    /// the outgoing project's processes stop republishing (bead eseq-jo7.21).
+    /// `None` in headless/test hosts that never build a UI runtime.
+    pub ui_process_authoring: Option<crate::lisp_host::PublishedProcessAuthoringNatives>,
     hooks: Vec<SequencerHook>,
     pending_hook_invocations: VecDeque<PendingHookInvocation>,
     next_hook_id: u64,
@@ -2439,6 +2444,7 @@ impl App {
                 scratch_buffer: String::new(),
                 scratch_cursor: (0, 0),
                 scratch_runtime: None,
+                ui_process_authoring: None,
                 hooks: Vec::new(),
                 pending_hook_invocations: VecDeque::new(),
                 next_hook_id: 1,

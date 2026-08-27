@@ -106,6 +106,28 @@ impl SequencerState {
         self.published_process_authoring_version
             .load(Ordering::Acquire)
     }
+    /// Drop every cross-thread channel that carries project-authored jaki /
+    /// process state (bead eseq-jo7.21). A project switch replaces the
+    /// authoring source wholesale, so the outgoing project's generators,
+    /// process graph, scene-slot declarations and channel values must not
+    /// survive into the incoming one. Both version counters are bumped so the
+    /// scheduler rebuilds its scratch runtime from the cleared state on its
+    /// next loop.
+    pub fn clear_project_authored_processes(&self) {
+        self.published_sequencers.lock().unwrap().clear();
+        self.published_sequencers_version
+            .fetch_add(1, Ordering::AcqRel);
+        self.published_scene_slot_declarations.lock().unwrap().clear();
+        *self.published_process_authoring.lock().unwrap() =
+            crate::process::PublishedProcessAuthoringSnapshot::default();
+        self.published_process_authoring_version
+            .fetch_add(1, Ordering::AcqRel);
+        self.pending_process_channel_writes.lock().unwrap().clear();
+        self.process_channel_values.lock().unwrap().clear();
+        self.process_channel_values_version
+            .fetch_add(1, Ordering::AcqRel);
+        self.generator_tick_errors.lock().unwrap().clear();
+    }
     /// Queue control-thread channel writes for the scheduler to apply at the
     /// top of the next lookahead chunk
     /// (docs/jaki-live-channel-widgets-spec.md 7).

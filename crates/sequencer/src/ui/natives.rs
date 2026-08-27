@@ -2,6 +2,9 @@ use super::*;
 
 pub(crate) struct RuntimeInit {
     pub(crate) runtime: Runtime,
+    /// The UI VM's process/jaki authoring registry, handed to `App` so a
+    /// project switch can reset it (bead eseq-jo7.21).
+    pub(crate) process_authoring: sequencer::lisp_host::PublishedProcessAuthoringNatives,
     pub(crate) accumulator_names: Arc<Mutex<Vec<String>>>,
     pub(crate) midi_fx_names: Arc<Mutex<Vec<String>>>,
     pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,
@@ -2484,6 +2487,10 @@ pub(crate) fn init_runtime(
     if !process_library.trim().is_empty() {
         let _ = runtime.eval_str(&process_library);
     }
+    // Everything registered up to here is the package layer and survives a
+    // project switch; anything a project authors afterwards does not
+    // (bead eseq-jo7.21).
+    process_authoring_natives.mark_package_defs();
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
@@ -5617,6 +5624,7 @@ pub(crate) fn init_runtime(
         Ok(Value::String(label))
     });
 
+    let process_authoring_for_init = process_authoring_natives.clone();
     register_ui_def_accumulator_dispatch(
         &mut runtime,
         Arc::clone(&accumulator_names),
@@ -6403,6 +6411,7 @@ pub(crate) fn init_runtime(
         midi_fx_names,
         sample_browser,
         piano_roll_clipboard: piano_clipboard,
+        process_authoring: process_authoring_for_init,
     }
 }
 
