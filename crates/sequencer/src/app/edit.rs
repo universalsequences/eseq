@@ -711,6 +711,43 @@ impl App {
         result: crate::lisp_host::CompileResult,
     ) -> Result<(), String> {
         let source = self.retained_effect_source_for_name(name)?;
+        self.apply_compiled_bus_effect_to_slot_recorded_with_retained(
+            bus_idx, slot, name, result, source,
+        )
+    }
+
+    /// Bus twin of [`Self::apply_compiled_effect_to_slot_recorded_with_source`]
+    /// (eseq-u2h): edit sessions retain the source they compiled rather than
+    /// re-reading the effects library by name.
+    pub fn apply_compiled_bus_effect_to_slot_recorded_with_source(
+        &mut self,
+        bus_idx: usize,
+        slot: usize,
+        name: &str,
+        result: crate::lisp_host::CompileResult,
+        source: &str,
+        asset_base: Option<std::path::PathBuf>,
+        origin: crate::lisp_host::DGenSourceOrigin,
+    ) -> Result<(), String> {
+        let source = RetainedEffectSource::Compiled {
+            name: name.to_string(),
+            source: source.to_string(),
+            asset_base,
+            origin,
+        };
+        self.apply_compiled_bus_effect_to_slot_recorded_with_retained(
+            bus_idx, slot, name, result, source,
+        )
+    }
+
+    fn apply_compiled_bus_effect_to_slot_recorded_with_retained(
+        &mut self,
+        bus_idx: usize,
+        slot: usize,
+        name: &str,
+        result: crate::lisp_host::CompileResult,
+        source: RetainedEffectSource,
+    ) -> Result<(), String> {
         let bus_id = self.buses.get(bus_idx)
             .map(|bus| bus.id)
             .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
@@ -1327,6 +1364,42 @@ impl App {
         track: usize,
     ) -> Result<(), String> {
         let source = self.retained_effect_source_for_name(name)?;
+        self.apply_compiled_effect_to_slot_recorded_with_retained(result, name, slot, track, source)
+    }
+
+    /// Edit-session variant of [`Self::apply_compiled_effect_to_slot_recorded`]:
+    /// retains the exact source that was compiled instead of re-reading the
+    /// effects library by name. Draft sessions (new-effect / fork drafts)
+    /// compile out of a temp directory under a name the library does not hold,
+    /// so the name-based lookup fails with a bare missing-file error
+    /// (eseq-u2h).
+    pub fn apply_compiled_effect_to_slot_recorded_with_source(
+        &mut self,
+        result: crate::lisp_host::CompileResult,
+        name: &str,
+        slot: usize,
+        track: usize,
+        source: &str,
+        asset_base: Option<std::path::PathBuf>,
+        origin: crate::lisp_host::DGenSourceOrigin,
+    ) -> Result<(), String> {
+        let source = RetainedEffectSource::Compiled {
+            name: name.to_string(),
+            source: source.to_string(),
+            asset_base,
+            origin,
+        };
+        self.apply_compiled_effect_to_slot_recorded_with_retained(result, name, slot, track, source)
+    }
+
+    fn apply_compiled_effect_to_slot_recorded_with_retained(
+        &mut self,
+        result: crate::lisp_host::CompileResult,
+        name: &str,
+        slot: usize,
+        track: usize,
+        source: RetainedEffectSource,
+    ) -> Result<(), String> {
         self.apply_recorded_track_effect_chain_mutation(
             track,
             "Replace audio effect",

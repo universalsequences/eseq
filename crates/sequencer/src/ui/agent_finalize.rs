@@ -292,19 +292,29 @@ pub(super) fn write_patcher_layout_sidecar(dsp_path: &Path, layout: &str) -> std
     })
 }
 
+/// Apply a compiled edit-session preview/restore to the session's target
+/// slot. `source`/`origin` must describe the source the `result` was compiled
+/// from: the retained source is handed to the apply explicitly because a
+/// draft session's name (`new-effect-draft/`) has no effects-library file, so
+/// name-based retention would fail with a missing-file error (eseq-u2h).
 pub(super) fn apply_compiled_effect_edit_session(
     app: &mut app::App,
     session: &EffectEditSession,
     name: &str,
     result: sequencer::lisp_host::CompileResult,
+    source: &str,
+    asset_base: Option<PathBuf>,
+    origin: sequencer::lisp_host::DGenSourceOrigin,
 ) -> Result<(), String> {
     match session.target {
-        EffectEditTarget::Track { track, slot } => {
-            app.apply_compiled_effect_to_slot_recorded(result, name, slot, track)
-        }
-        EffectEditTarget::Bus { bus, slot } => {
-            app.apply_compiled_bus_effect_to_slot_recorded(bus, slot, name, result)
-        }
+        EffectEditTarget::Track { track, slot } => app
+            .apply_compiled_effect_to_slot_recorded_with_source(
+                result, name, slot, track, source, asset_base, origin,
+            ),
+        EffectEditTarget::Bus { bus, slot } => app
+            .apply_compiled_bus_effect_to_slot_recorded_with_source(
+                bus, slot, name, result, source, asset_base, origin,
+            ),
     }
 }
 

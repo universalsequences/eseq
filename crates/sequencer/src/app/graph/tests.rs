@@ -3053,6 +3053,82 @@
         graph.process_block();
     }
 
+    /// eseq-u2h: effect-authoring previews compile out of a draft temp dir
+    /// under a name the effects library has never seen. The recorded apply
+    /// used to re-read the source from the library by name and surfaced a
+    /// bare "No such file or directory (os error 2)" in the patch editor;
+    /// the session now hands the compiled source over explicitly.
+    #[test]
+    fn draft_effect_recorded_apply_never_reads_the_effects_library() {
+        let graph = TestLiveGraph::new("draft-effect-recorded-apply-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("track for the draft effect");
+        let draft_name = "eseq-u2h-test-draft/";
+        assert!(
+            !crate::lisp_host::effect_source_path(draft_name).exists(),
+            "the draft name must not resolve to an effects-library file"
+        );
+        let source = crate::lisp_host::EFFECT_TEMPLATE;
+        let sample_rate = app.graph.sample_rate;
+        let compile = |app: &App| {
+            app.editor
+                .dylib_cache
+                .acquire(
+                    crate::lisp_host::DGenCompileKind::Effect,
+                    crate::lisp_host::DGenSourceOrigin::Draft,
+                    source,
+                    sample_rate,
+                    None,
+                )
+                .expect("draft effect template should compile")
+        };
+        let slot = app.next_free_custom_slot().expect("free custom slot");
+
+        // Seed the slot the way enter-new-effect-editor does: sync apply plus
+        // explicit draft-source retention (no library file exists to fall
+        // back on).
+        let seeded = compile(&app);
+        app.apply_compiled_effect_to_slot_sync(seeded, draft_name, slot, 0)
+            .expect("draft effect should seed its slot");
+        app.retain_compiled_effect_source_for_track_slot(
+            0,
+            slot,
+            draft_name,
+            source,
+            None,
+            crate::lisp_host::DGenSourceOrigin::Draft,
+        )
+        .expect("draft source retention should not require a library file");
+
+        // The preview writeback: a recorded apply carrying the compiled
+        // source must succeed even though the name has no on-disk source.
+        let previewed = compile(&app);
+        app.apply_compiled_effect_to_slot_recorded_with_source(
+            previewed,
+            draft_name,
+            slot,
+            0,
+            source,
+            None,
+            crate::lisp_host::DGenSourceOrigin::Draft,
+        )
+        .expect("recorded draft apply must not read the effects library");
+
+        // The legacy name-based path still fails for a library-less draft
+        // name, but now says which path it expected instead of a bare
+        // os-error string.
+        let error = app
+            .retained_effect_source_for_name(draft_name)
+            .expect_err("a library-less name cannot be retained by name");
+        assert!(
+            error.contains("Failed to read effect source"),
+            "missing-source diagnostics should carry context: {error}"
+        );
+        graph.process_block();
+    }
+
     #[test]
     fn recorded_rack_slot_delete_undoes_with_identity_fx_and_macro_state() {
         let graph = TestLiveGraph::new("recorded-delete-rack-slot-test");

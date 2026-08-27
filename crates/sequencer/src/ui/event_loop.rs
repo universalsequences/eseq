@@ -1655,11 +1655,35 @@ pub(crate) fn run_event_loop(
             let session = pending.session;
             match completed_cancel_restore {
                 Ok(result) => {
+                    // The restore compiled the persisted source (fork restores
+                    // compile the fork origin's) with Custom origin; retain
+                    // that same source rather than re-reading it by name.
+                    let (restore_source, restore_asset_base) = match session.fork_restore.as_ref()
+                    {
+                        Some(restore) => (
+                            restore.persisted_source.clone(),
+                            restore.origin_path.parent().map(Path::to_path_buf),
+                        ),
+                        None => (
+                            match &session.mode {
+                                EffectEditMode::EditExisting { persisted_source } => {
+                                    persisted_source.clone()
+                                }
+                                EffectEditMode::CreateDraft { .. } => {
+                                    session.last_valid_source.clone()
+                                }
+                            },
+                            session.path.parent().map(Path::to_path_buf),
+                        ),
+                    };
                     match apply_compiled_effect_edit_session(
                         &mut app,
                         &session,
                         &session.name,
                         result,
+                        &restore_source,
+                        restore_asset_base,
+                        sequencer::lisp_host::DGenSourceOrigin::Custom,
                     ) {
                         Ok(()) => {
                             // See the instrument restore above: the forked
@@ -1910,7 +1934,13 @@ pub(crate) fn run_event_loop(
                                 Ok(result) => {
                                     let name = session.name.clone();
                                     match apply_compiled_effect_edit_session(
-                                        &mut app, session, &name, result,
+                                        &mut app,
+                                        session,
+                                        &name,
+                                        result,
+                                        &source,
+                                        session.path.parent().map(Path::to_path_buf),
+                                        sequencer::lisp_host::DGenSourceOrigin::Draft,
                                     ) {
                                         Ok(()) => {
                                             session.last_valid_source = source;
