@@ -440,26 +440,33 @@ pub(crate) fn reactive_tick_and_render(
                 &ctx.shared.selected_steps,
                 &selected_neural_snapshot,
             );
-            if fx_visible {
-                // The selecting native already issued the structural fx
-                // revision for this owner change. Leave the panel values to
-                // that branch below instead of building them twice. Direct
-                // current-track writers that did not issue an fx revision
-                // still get a complete destination panel here.
-                let fx_ep = ctx.shared.fx_epoch.load(Ordering::Relaxed);
-                let fx_value_ep = ctx.shared.fx_value_epoch.load(Ordering::Relaxed);
-                if fx_ep == ctx.frame.prev_fx_epoch
-                    && fx_value_ep == ctx.frame.prev_fx_value_epoch
-                {
-                    sync_fx_panel_state(
-                        rt,
-                        &app,
-                        &ctx.shared.state,
-                        Some(ct),
-                        &ctx.shared.selected_steps,
-                        true,
-                    );
-                }
+            // The selecting native already issued the structural fx
+            // revision for this owner change. Leave the panel values to
+            // that branch below instead of building them twice. Direct
+            // current-track writers that did not issue an fx revision
+            // still get a complete destination panel here.
+            let fx_ep = ctx.shared.fx_epoch.load(Ordering::Relaxed);
+            let fx_value_ep = ctx.shared.fx_value_epoch.load(Ordering::Relaxed);
+            if fx_visible
+                && fx_ep == ctx.frame.prev_fx_epoch
+                && fx_value_ep == ctx.frame.prev_fx_value_epoch
+            {
+                sync_fx_panel_state(
+                    rt,
+                    &app,
+                    &ctx.shared.state,
+                    Some(ct),
+                    &ctx.shared.selected_steps,
+                    true,
+                );
+            } else if fx_ep == ctx.frame.prev_fx_epoch {
+                // No structural fx revision is pending, yet the panel was not
+                // rebuilt above — either *fx* is hidden, or only a value
+                // revision is pending (a value patch cannot carry the new
+                // owner's panel STRUCTURE). Bump fx_epoch so the fx-epoch
+                // branch rebuilds structurally: this frame if visible, else
+                // on the first frame *fx* is shown again.
+                ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
             }
             sync_sidebar_browser(rt, &app, ct);
             ctx.frame.prev_current_track = ct;

@@ -477,13 +477,26 @@ sidebar's names-only query therefore stats and clones names from the cached bank
 instead of reading and parsing Drift's 132 KB JSON bank on every switch; saves
 invalidate the cache explicitly.
 
-Available-host release validation (Apple M1 Max, 2026-08-26) measured
-`track_switch_ms` at **1.61-1.78 ms** and `epoch_sync_ms` at **1.52-1.76 ms**
-across all four scenarios. The always-run smoke probe and the release probe both
-kept the destination owner, highlight, binding-identity, panel-identity, and
-parameter-isolation assertions green. Linux absolute follow-up remains the
-reviewer's machine check; these host numbers are not substituted into the Linux
+Same-machine before/after (Apple M1 Max, 2026-08-26, medians at 832f073a vs
+this change): `track_switch_ms` fell from **4.20/4.08/3.19/3.09 ms** to
+**1.72/1.75/1.47/1.45 ms** (2.1-2.45x) across drift-a-to-b / drift-b-to-a /
+synthid-a-to-b / synthid-b-to-a. `epoch_sync_ms` stayed flat
+(**1.57/1.52/1.21/1.18 -> 1.65/1.70/1.53/1.48 ms**): on this host it was never
+inflated — the duplicate panel build this change removes was accounted in
+`track_switch_ms`, and the fx-epoch branch's remaining cost is the single
+necessary destination-panel build. Combined publication cost per switch:
+5.77 -> 3.37 ms. The always-run smoke probe and the release probe both kept the
+destination owner, highlight, binding-identity, panel-identity, and
+parameter-isolation assertions green. Linux before/after remains to be measured
+on that machine; these host numbers are not substituted into the Linux
 total-latency table above.
+
+Review hardening (eseq-md1n.2): a track switch that defers panel publication
+now bumps `fx_epoch` when no structural revision is pending — covering a switch
+with an empty selection while `*fx*` is hidden (the panel catches up
+structurally on the first frame `*fx*` is shown again) and a switch frame where
+only `fx_value_epoch` is pending (a value patch cannot carry the new owner's
+panel structure).
 
 Work counts are unchanged and are the point: one track switch re-runs 5
 buffer roots and dirties 10 reactive fields, and `subtree_reruns` stays 0.
