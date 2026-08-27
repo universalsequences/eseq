@@ -379,7 +379,7 @@ impl ProjectScenes {
             });
         }
 
-        let scene_count = scenes.len();
+        let (default_banks, default_next_bank_id) = Self::default_scene_banks(scenes.len());
         let mut built = Self {
             take_pools: vec![TrackTakePool::default(); track_pools.len()],
             track_pools,
@@ -387,24 +387,38 @@ impl ProjectScenes {
             current_scene: current_scene.min(snapshots.len().saturating_sub(1)),
             track_overrides: vec![None; track_count],
             track_sounds: vec![None; track_count],
-            banks: vec![SceneBank {
-                id: SceneBankId(1),
-                name: None,
-                len: scene_count,
-            }],
+            banks: default_banks,
             next_scene_id: u64::try_from(snapshots.len().max(1))
                 .expect("scene count exceeds stable identity space")
                 .checked_add(1)
                 .expect("scene identity space exhausted"),
-            next_bank_id: 2,
+            next_bank_id: default_next_bank_id,
         };
         built.ensure_track_sounds();
         built
     }
 
-    /// Replace the default bank with serialized bank metadata when it forms a
-    /// valid partition. Invalid or legacy metadata deliberately repairs to one
-    /// unnamed bank containing every scene, so organization data can never
+    /// Default partition for scenes carrying no usable bank metadata:
+    /// consecutive unnamed banks of at most `MAX_SCENES_PER_BANK` scenes, ids
+    /// minted from 1. Chunking (rather than one bank of everything) matters
+    /// because a legacy project may hold far more than 24 scenes, and a
+    /// fallback that violates the capacity invariant would poison every later
+    /// validation of the model.
+    fn default_scene_banks(scene_count: usize) -> (Vec<SceneBank>, u64) {
+        let bank_count = scene_count.div_ceil(MAX_SCENES_PER_BANK).max(1);
+        let banks = (0..bank_count)
+            .map(|idx| SceneBank {
+                id: SceneBankId(idx as u64 + 1),
+                name: None,
+                len: (scene_count - idx * MAX_SCENES_PER_BANK).min(MAX_SCENES_PER_BANK),
+            })
+            .collect();
+        (banks, bank_count as u64 + 1)
+    }
+
+    /// Replace the default bank layout with serialized bank metadata when it
+    /// forms a valid partition. Invalid or legacy metadata deliberately
+    /// repairs to the default chunked layout, so organization data can never
     /// make an otherwise usable project fail to load.
     pub fn install_scene_banks(&mut self, banks: Vec<SceneBank>) {
         let next_bank_id = banks
@@ -416,12 +430,9 @@ impl ProjectScenes {
             self.banks = banks;
             self.next_bank_id = next_bank_id.expect("checked above");
         } else {
-            self.banks = vec![SceneBank {
-                id: SceneBankId(1),
-                name: None,
-                len: self.scenes.len(),
-            }];
-            self.next_bank_id = 2;
+            let (banks, next_bank_id) = Self::default_scene_banks(self.scenes.len());
+            self.banks = banks;
+            self.next_bank_id = next_bank_id;
         }
     }
 

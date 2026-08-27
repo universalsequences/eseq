@@ -4359,6 +4359,51 @@
     }
 
     #[test]
+    fn default_scene_bank_layout_chunks_large_projects_under_the_capacity_cap() {
+        // The live-rig case: far more scenes than one bank may hold. The
+        // default (and fallback) layout must still satisfy the bank
+        // invariants, or every later validation of the model would fail —
+        // including the one snapshot-based repository rebuilds panic on.
+        let snapshots = vec![snapshot_with_active_step(1, 0, 3); 25];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        assert_eq!(
+            scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(),
+            vec![24, 1]
+        );
+        assert!(scenes.validate_scene_bank_model().is_ok());
+
+        // Inconsistent serialized metadata over the same scene count must
+        // repair to the same chunked layout, not a single oversized bank.
+        scenes.install_scene_banks(vec![SceneBank {
+            id: SceneBankId(9),
+            name: None,
+            len: 3,
+        }]);
+        assert_eq!(
+            scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(),
+            vec![24, 1]
+        );
+        assert!(scenes.validate_scene_bank_model().is_ok());
+    }
+
+    #[test]
+    fn snapshot_repository_edits_survive_projects_larger_than_one_bank() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(vec![snapshot_with_active_step(1, 0, 3); 25], 0);
+
+        // Regression: with a single default bank of 25 scenes this panicked
+        // inside copy_scene_bank_model_from's validity expect.
+        state.edit_non_current_pattern_snapshots(|_| {});
+
+        let scenes = state.capture_project_scenes();
+        assert_eq!(
+            scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(),
+            vec![24, 1]
+        );
+        assert!(scenes.validate_scene_bank_model().is_ok());
+    }
+
+    #[test]
     fn project_scenes_create_and_delete_keep_scene_bank_partition_consistent() {
         let snapshots = vec![
             snapshot_with_active_step(1, 0, 3),
