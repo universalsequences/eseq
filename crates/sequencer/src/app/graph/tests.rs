@@ -767,6 +767,109 @@
     }
 
     #[test]
+    fn track_gain_mutes_silence_post_fader_sends_and_restore_sustaining_audio() {
+        let graph = TestLiveGraph::new("track-gain-mute-send-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add source track");
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add solo control track");
+        app.graph_controller()
+            .ensure_bus_graph_node(BusId::DEFAULT_A, "Bus A");
+
+        let track_nodes = app.graph.track_node_ids[0].clone();
+        let source_l = graph.add_constant_source("gain_mute_source_l");
+        let source_r = graph.add_constant_source("gain_mute_source_r");
+        unsafe {
+            crate::audiograph::graph_connect(graph.ptr.0, source_l, 0, track_nodes.voice_sum_id, 0);
+            crate::audiograph::graph_connect(graph.ptr.0, source_r, 0, track_nodes.voice_sum_r_id, 0);
+        }
+        app.state.pattern.track_params[0].set_output(TrackOutput::None);
+        app.graph_controller().apply_track_output_routing(0);
+        app.state.pattern.track_params[0].set_sends(vec![TrackSendSnapshot {
+            destination: BusId::DEFAULT_A,
+            amount: 1.0,
+        }]);
+        app.graph_controller().apply_track_bus_sends(0);
+
+        let bus_meter_id = app
+            .graph
+            .bus_node_ids
+            .iter()
+            .find(|nodes| nodes.id == BusId::DEFAULT_A)
+            .expect("Bus A graph nodes")
+            .meter_id;
+        let bus_peak = || {
+            graph
+                .read_node_state::<{ crate::effects::peak_meter::PEAK_METER_STATE_SIZE }>(
+                    bus_meter_id,
+                )
+                .expect("watched bus meter")[crate::effects::peak_meter::STATE_PEAK_L]
+        };
+        let track_peak = || {
+            graph
+                .read_panner_state(track_nodes.delay_id)
+                .expect("watched post-mute track meter")
+                [crate::effects::stereo_panner::STATE_PEAK_L]
+        };
+        let process_blocks = |count| {
+            for _ in 0..count {
+                graph.process_block();
+            }
+        };
+
+        process_blocks(4);
+        assert!(bus_peak() > 0.1, "the sustaining source should reach its send");
+        assert!(track_peak() > 0.1, "the active track meter should show signal");
+
+        app.state.pattern.track_params[0].set_mute(true);
+        app.push_track_mute(0);
+        process_blocks(120);
+        assert!(
+            bus_peak() < 0.001,
+            "track mute must silence the post-fader send; peak={}",
+            bus_peak(),
+        );
+        assert!(
+            track_peak() < 0.001,
+            "the post-mute track meter must read silent; peak={}",
+            track_peak(),
+        );
+
+        app.state.pattern.track_params[0].set_mute(false);
+        app.push_track_mute(0);
+        process_blocks(4);
+        assert!(
+            bus_peak() > 0.1,
+            "unmuting must reveal the already-sustaining source without a new trigger"
+        );
+
+        app.state.pattern.track_params[1].set_solo(true);
+        app.push_track_solo_mutes();
+        process_blocks(120);
+        assert!(
+            bus_peak() < 0.001,
+            "muted-by-solo must silence the post-fader send; peak={}",
+            bus_peak(),
+        );
+        assert!(
+            track_peak() < 0.001,
+            "the solo-muted track meter must read silent; peak={}",
+            track_peak(),
+        );
+
+        app.state.pattern.track_params[1].set_solo(false);
+        app.push_track_solo_mutes();
+        process_blocks(4);
+        assert!(
+            bus_peak() > 0.1,
+            "clearing solo must reveal the already-sustaining source without a new trigger"
+        );
+    }
+
+    #[test]
     fn track_and_bus_fx_chains_terminate_at_their_post_fx_faders() {
         let graph = TestLiveGraph::new("post-fx-chain-host-test");
         let mut app = test_app_with_track_count(&graph, 0);

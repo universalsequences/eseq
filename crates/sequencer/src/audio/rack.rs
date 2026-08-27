@@ -1,8 +1,8 @@
 /*!
 Rack-slot processing: routing, macros, choke groups, and rack note firing.
 
-Decides which slots of a rack track accept a trigger (routing, key ranges,
-mute/solo), applies rack macro curves at a step, collects and dispatches
+Routes triggers to rack slots, applies rack macro curves and per-slot gain
+mutes at a step, collects and dispatches
 slot note-offs and choke-group releases, and fires notes into rack slots —
 `fire_rack_slot_note`/`fire_rack_resolved` for sequenced triggers and
 `fire_live_keyboard_rack_note` for live keyboard input.
@@ -10,14 +10,6 @@ slot note-offs and choke-group releases, and fires notes into rack slots —
 
 #[allow(unused_imports)]
 use super::*;
-
-pub(super) fn rack_slot_accepts_trigger(slot: &RackSlotSnapshot, has_solo: bool) -> bool {
-    if has_solo {
-        slot.solo && !slot.mute
-    } else {
-        !slot.mute
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ResolvedRackSlotParams {
@@ -155,14 +147,6 @@ pub(super) fn apply_rack_macros_at_step(
                 }
             }
         }
-    }
-}
-
-pub(super) fn rack_slot_accepts_resolved(params: ResolvedRackSlotParams, has_solo: bool) -> bool {
-    if has_solo {
-        params.solo && !params.mute
-    } else {
-        !params.mute
     }
 }
 
@@ -557,14 +541,10 @@ pub(super) fn fire_live_keyboard_rack_note(
     } else {
         0.0
     };
-    let has_solo = rack.slots.iter().any(|slot| slot.solo);
     let mut active_voices = [ActiveKeyboardVoice::default(); MAX_RACK_SLOTS];
     let mut active_voice_count = 0;
 
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
-        if !rack_slot_accepts_trigger(slot, has_solo) {
-            continue;
-        }
         if let Some(choke_group) = slot.choke_group {
             release_rack_choke_group_voices(
                 data,
@@ -1122,9 +1102,6 @@ pub(super) fn fire_rack_resolved(
             data.state.runtime.rack_slot_pan_lids[track_idx][slot_idx].load(Ordering::Acquire);
         unsafe {
             push_rack_slot_panner_params(data.lg.0, slot_pan_lid, slot_params, muted_by_solo);
-        }
-        if !rack_slot_accepts_resolved(slot_params, has_solo) {
-            continue;
         }
         unsafe {
             dispatch_snapshot_effect_params_at_step(data.lg.0, &slot.effect_slots, step);
