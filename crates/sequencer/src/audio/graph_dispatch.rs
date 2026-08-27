@@ -338,7 +338,7 @@ pub(super) unsafe fn dispatch_effect_chain_for_track(
             ParamMsg {
                 idx: param.idx,
                 logical_id: param.logical_id,
-                fvalue: param.value,
+                fvalue: param.current_value(),
             },
         );
     }

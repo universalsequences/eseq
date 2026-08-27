@@ -6769,11 +6769,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     42,
                 )],
                 EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
-                vec![ScheduledEffectParam {
-                    logical_id: 42,
-                    idx: 2,
-                    value: effect_initial,
-                }],
+                vec![ScheduledEffectParam::fixed(42, 2, effect_initial)],
                 vec![ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: 0,
@@ -6849,11 +6845,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 16,
                 vec![EffectSlotSnapshot::new_default(&effect_desc, 42)],
                 EffectSlotSnapshot::new_default(&instrument_desc, 7),
-                vec![ScheduledEffectParam {
-                    logical_id: 42,
-                    idx: 2,
-                    value: effect_initial,
-                }],
+                vec![ScheduledEffectParam::fixed(42, 2, effect_initial)],
                 vec![ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: 0,
@@ -13106,11 +13098,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     42,
                 )],
                 EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
-                vec![ScheduledEffectParam {
-                    logical_id: 42,
-                    idx: 1,
-                    value: 0.0,
-                }],
+                vec![ScheduledEffectParam::fixed(42, 1, 0.0)],
                 vec![ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: 0,

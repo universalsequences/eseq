@@ -73,7 +73,50 @@
     }
 
     #[test]
-    fn scheduler_events_apply_track_send_plock_then_restore_zero_baseline() {
+    fn queued_track_send_events_restore_the_latest_live_baseline() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        let destination = crate::sequencer::BusId::DEFAULT_A;
+        state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination,
+            amount: 0.2,
+        }]);
+        state.pattern.track_send_plocks[0].set(3, destination, 0.85);
+        state.set_track_send_runtime_targets(0, vec![crate::sequencer::TrackSendRuntimeTarget {
+            destination,
+            left_id: 700,
+            right_id: 701,
+        }]);
+        let stale_snapshot = state.publish_scheduler_snapshot();
+
+        // These model an already queued locked step followed by its baseline
+        // restoration. No scheduler snapshot is published for the mixer edit.
+        let locked = resolve_track_send_params(&stale_snapshot, 0, 3);
+        let restored = resolve_track_send_params(&stale_snapshot, 0, 4);
+        state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination,
+            amount: 0.65,
+        }]);
+
+        assert!(locked.iter().all(|param| param.current_value() == 0.85));
+        assert!(restored.iter().all(|param| param.current_value() == 0.65));
+
+        // Publishing an unrelated track mutation must neither be required for
+        // correctness nor detach queued restorations from the live authority.
+        state.toggle_step_and_clear_plocks(1, 0);
+        let _unrelated_snapshot = state.publish_scheduler_snapshot();
+        state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination,
+            amount: 0.4,
+        }]);
+        assert!(locked.iter().all(|param| param.current_value() == 0.85));
+        assert!(restored.iter().all(|param| param.current_value() == 0.4));
+    }
+
+    #[test]
+    fn scheduler_events_apply_track_send_plock_then_restore_latest_live_baseline() {
         // schedule_playing_lookahead needs the scheduler thread's stack budget.
         run_with_scheduler_stack(|| {
             let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -121,18 +164,26 @@
                 false,
             );
 
+            // Reproduce the command race after lookahead has queued all three
+            // events. This is the state mutation performed by SetTrackSends;
+            // it deliberately does not publish another scheduler snapshot.
+            state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+                destination,
+                amount: 0.35,
+            }]);
+
             let mut values = Vec::new();
             while let Some(event) = queue.pop() {
                 if let ScheduledEventKind::ResolvedTrigger { step, effect_params, .. } = event.kind {
                     let value = effect_params.iter()
                         .find(|param| param.logical_id == 700)
-                        .map(|param| param.value);
+                        .map(ScheduledEffectParam::current_value);
                     values.push((step, value));
                 }
             }
-            assert!(values.contains(&(0, Some(0.0))), "step 0 baseline missing: {values:?}");
+            assert!(values.contains(&(0, Some(0.35))), "step 0 live baseline missing: {values:?}");
             assert!(values.contains(&(1, Some(0.8))), "step 1 send p-lock missing: {values:?}");
-            assert!(values.contains(&(2, Some(0.0))), "step 2 baseline restore missing: {values:?}");
+            assert!(values.contains(&(2, Some(0.35))), "step 2 latest restore missing: {values:?}");
         });
     }
 
@@ -4956,16 +5007,12 @@
         assert_eq!(
             params,
             vec![
-                ScheduledEffectParam {
-                    logical_id: 42,
-                    idx: 12,
-                    value: 0.75,
-                },
-                ScheduledEffectParam {
-                    logical_id: 77,
-                    idx: crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
-                    value: 1.0,
-                },
+                ScheduledEffectParam::fixed(42, 12, 0.75),
+                ScheduledEffectParam::fixed(
+                    77,
+                    crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
+                    1.0,
+                ),
             ]
         );
     }
@@ -5189,11 +5236,11 @@
 
         assert_eq!(
             event.effect_params,
-            vec![ScheduledEffectParam {
-                logical_id: 77,
-                idx: crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
-                value: 1.0,
-            }]
+            vec![ScheduledEffectParam::fixed(
+                77,
+                crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
+                1.0,
+            )]
         );
 
         let mut stale_snapshot = snapshot.clone();
@@ -5349,11 +5396,11 @@
                 assert_eq!(track, 1);
                 assert_eq!(
                     effect_params,
-                    vec![ScheduledEffectParam {
-                        logical_id: 42,
-                        idx: filter_node_param_idx as u64,
-                        value: 640.0,
-                    }]
+                    vec![ScheduledEffectParam::fixed(
+                        42,
+                        filter_node_param_idx as u64,
+                        640.0,
+                    )]
                 );
             }
             other => panic!("expected effect params, got {other:?}"),
@@ -5449,11 +5496,11 @@
                 assert_eq!(track, 1);
                 assert_eq!(
                     effect_params,
-                    vec![ScheduledEffectParam {
-                        logical_id: 42,
-                        idx: filter_node_param_idx as u64,
-                        value: 900.0,
-                    }]
+                    vec![ScheduledEffectParam::fixed(
+                        42,
+                        filter_node_param_idx as u64,
+                        900.0,
+                    )]
                 );
             }
             other => panic!("expected cross-track effect params, got {other:?}"),

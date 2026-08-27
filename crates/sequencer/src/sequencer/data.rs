@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::audio::MAX_VOICES;
 
@@ -59,6 +60,36 @@ impl Default for TrackOutput {
 pub struct TrackSendSnapshot {
     pub destination: BusId,
     pub amount: f32,
+}
+
+/// Lock-free authority for one track-to-bus send's live mixer baseline.
+///
+/// Scheduler events retain this cell rather than copying the baseline out of
+/// an immutable pattern snapshot. The control thread can therefore move a
+/// send while lookahead events are already queued, and those events resolve
+/// the current value when the audio callback dispatches them. `TrackParams`
+/// retains every cell it creates for its lifetime, so dropping a queued event
+/// can never free the cell on the realtime thread.
+#[derive(Debug)]
+pub struct TrackSendBaseline {
+    amount_bits: AtomicU32,
+}
+
+impl TrackSendBaseline {
+    fn new(amount: f32) -> Self {
+        Self {
+            amount_bits: AtomicU32::new(amount.clamp(0.0, 1.0).to_bits()),
+        }
+    }
+
+    pub fn load(&self) -> f32 {
+        f32::from_bits(self.amount_bits.load(Ordering::Acquire))
+    }
+
+    fn store(&self, amount: f32) {
+        self.amount_bits
+            .store(amount.clamp(0.0, 1.0).to_bits(), Ordering::Release);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -928,6 +959,10 @@ pub struct TrackParams {
     pub send: AtomicU32,
     pub output: Mutex<TrackOutput>,
     pub sends: Mutex<Vec<TrackSendSnapshot>>,
+    /// Grow-only ownership for live send baseline cells. Entries remain here
+    /// after a send is removed so queued events never perform the last `Arc`
+    /// drop on the audio thread; re-adding the destination reuses its cell.
+    send_baselines: Mutex<HashMap<BusId, Arc<TrackSendBaseline>>>,
     pub polyphonic: AtomicBool,
     pub max_polyphony: AtomicU32,
     pub timebase: AtomicU32,
@@ -958,6 +993,7 @@ impl TrackParams {
             send: AtomicU32::new(0.0_f32.to_bits()),
             output: Mutex::new(TrackOutput::Mix),
             sends: Mutex::new(Vec::new()),
+            send_baselines: Mutex::new(HashMap::new()),
             polyphonic: AtomicBool::new(true),
             max_polyphony: AtomicU32::new(6),
             timebase: AtomicU32::new(Timebase::Sixteenth as u32),
@@ -1069,13 +1105,31 @@ impl TrackParams {
         self.sends.lock().unwrap().clone()
     }
     pub fn set_sends(&self, sends: Vec<TrackSendSnapshot>) {
-        *self.sends.lock().unwrap() = sends
+        let sends = sends
             .into_iter()
             .map(|mut send| {
                 send.amount = send.amount.clamp(0.0, 1.0);
                 send
             })
-            .collect();
+            .collect::<Vec<_>>();
+        {
+            let mut baselines = self.send_baselines.lock().unwrap();
+            for send in &sends {
+                baselines
+                    .entry(send.destination)
+                    .or_insert_with(|| Arc::new(TrackSendBaseline::new(send.amount)))
+                    .store(send.amount);
+            }
+        }
+        *self.sends.lock().unwrap() = sends;
+    }
+
+    pub fn send_baseline(&self, destination: BusId) -> Option<Arc<TrackSendBaseline>> {
+        self.send_baselines
+            .lock()
+            .unwrap()
+            .get(&destination)
+            .cloned()
     }
     pub fn is_polyphonic(&self) -> bool {
         self.polyphonic.load(Ordering::Relaxed)

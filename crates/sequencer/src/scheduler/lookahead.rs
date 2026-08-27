@@ -1189,7 +1189,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
                 let same_track_process_targets = target_track == trigger.track;
                 let mut effect_params = resolve_effect_params(snapshot, target_track, trigger.step);
-                effect_params.extend(resolve_track_send_params(snapshot, target_track, trigger.step));
+                effect_params.extend(resolve_track_send_params(
+                    snapshot,
+                    target_track,
+                    trigger.step,
+                ));
                 let mut instrument_params =
                     resolve_instrument_params(snapshot, target_track, trigger.step);
                 let midi_fx_params = if same_track_process_targets {

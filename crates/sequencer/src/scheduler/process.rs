@@ -228,11 +228,11 @@ pub(super) fn process_scheduled_effect_param(
     value: f32,
 ) -> Option<ScheduledEffectParam> {
     let identity = process_slot_param_identity(slot, param_idx)?;
-    value.is_finite().then_some(ScheduledEffectParam {
-        logical_id: identity.logical_id,
-        idx: identity.node_param_idx as u64,
+    value.is_finite().then_some(ScheduledEffectParam::fixed(
+        identity.logical_id,
+        identity.node_param_idx as u64,
         value,
-    })
+    ))
 }
 
 pub(super) fn process_device_write_value(
@@ -1641,11 +1641,11 @@ pub(super) fn resolve_neuron_effect_override(
     if logical_id != override_param.param_id.logical_id {
         return None;
     }
-    Some(ScheduledEffectParam {
+    Some(ScheduledEffectParam::fixed(
         logical_id,
         idx,
-        value: override_param.value,
-    })
+        override_param.value,
+    ))
 }
 
 pub(super) fn apply_neuron_output_overrides(

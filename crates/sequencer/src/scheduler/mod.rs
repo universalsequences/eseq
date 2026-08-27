@@ -47,8 +47,9 @@ use crate::lisp_host::{self, AccumulatorNoteSpan};
 use crate::neural::{NeuralOutput, NeuralRuntime, ParamNodeId};
 use crate::process::ProcessMidiFxParamOverride;
 use self::scheduled_event::{
-    resolved_chord_transpose, EventSource, ScheduledChordData, ScheduledEffectParam,
-    ScheduledEvent, ScheduledEventKind, ScheduledEventQueue, ScheduledInstrumentParam,
+    resolved_chord_transpose, EventSource, LiveScheduledEffectValue, ScheduledChordData,
+    ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
+    ScheduledInstrumentParam,
     ScheduledInstrumentParamTarget, ScheduledInstrumentParams, ScheduledInstrumentTensorParam,
     ScheduledInstrumentTensorParams, ScheduledSamplerParams, StepEvent,
 };

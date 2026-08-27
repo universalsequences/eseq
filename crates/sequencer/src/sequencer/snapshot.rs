@@ -8,8 +8,9 @@ use crate::macro_engine::MacroParamKey;
 use crate::neural::ProjectNeuralNetwork;
 
 use super::data::{
-    CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution, Timebase,
-    TrackParamsSnapshot, TrackSendRuntimeTarget, TrackSendSnapshot, MAX_STEPS, NUM_PARAMS,
+    BusId, CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution,
+    Timebase, TrackParamsSnapshot, TrackSendBaseline, TrackSendRuntimeTarget, TrackSendSnapshot,
+    MAX_STEPS, NUM_PARAMS,
 };
 use super::state::{RackTrackSnapshot, SequencerState, TrackPatternData};
 
@@ -86,6 +87,9 @@ pub struct SequencerTrackSnapshot {
     pub instrument_descriptor: EffectDescriptor,
     pub instrument_slot: EffectSlotSnapshot,
     pub track_send_runtime_targets: Vec<TrackSendRuntimeTarget>,
+    /// Live mixer baselines paired with the immutable runtime targets above.
+    /// The cells outlive queued events and update without snapshot publication.
+    pub track_send_live_baselines: Vec<(BusId, Arc<TrackSendBaseline>)>,
     pub steps: Vec<SequencerStepSnapshot>,
 }
 
@@ -246,6 +250,14 @@ impl SequencerSnapshot {
                 .get(track_idx)
                 .cloned()
                 .unwrap_or_default();
+            track.track_send_live_baselines = track.track_send_runtime_targets
+                .iter()
+                .filter_map(|target| {
+                    state.pattern.track_params[track_idx]
+                        .send_baseline(target.destination)
+                        .map(|baseline| (target.destination, baseline))
+                })
+                .collect();
             state.sync_rack_macro_runtime_track(track_idx, track.rack_track.as_ref());
             if let Some(rack) = track.rack_track.as_mut() {
                 rack.attach_runtime_macro_values(state.rack_macro_runtime_values(), track_idx);
@@ -345,6 +357,21 @@ fn capture_live_track(
     if let Some(rack) = rack_track.as_mut() {
         rack.attach_runtime_macro_values(state.rack_macro_runtime_values(), track);
     }
+    let track_send_runtime_targets = state
+        .pattern
+        .track_send_runtime_targets
+        .lock()
+        .unwrap()
+        .get(track)
+        .cloned()
+        .unwrap_or_default();
+    let track_send_live_baselines = track_send_runtime_targets
+        .iter()
+        .filter_map(|target| {
+            tp.send_baseline(target.destination)
+                .map(|baseline| (target.destination, baseline))
+        })
+        .collect();
     SequencerTrackSnapshot {
         params,
         scene_silenced: state.is_scene_silenced(track),
@@ -359,10 +386,8 @@ fn capture_live_track(
         midi_fx_slots,
         instrument_descriptor,
         instrument_slot,
-        track_send_runtime_targets: state.pattern.track_send_runtime_targets.lock().unwrap()
-            .get(track)
-            .cloned()
-            .unwrap_or_default(),
+        track_send_runtime_targets,
+        track_send_live_baselines,
         steps,
     }
 }
@@ -510,6 +535,7 @@ fn track_snapshot_from_pattern_data(
         instrument_descriptor,
         instrument_slot: data.instrument_slot.clone(),
         track_send_runtime_targets: Vec::new(),
+        track_send_live_baselines: Vec::new(),
         steps,
     }
 }
