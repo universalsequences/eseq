@@ -9325,6 +9325,72 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jak_with_a_bare_symbol_body_delegates_to_register() {
+        // (jak "yo" :16 pat) with `pat` a defscene slot: a one-symbol body is
+        // never pattern data, so jak expands to the register path and the
+        // shipped tick resolves the slot per boundary.
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = jaki_authoring_runtime(Arc::clone(&state));
+        super::register_scene_slot_natives(&mut authoring, Arc::clone(&state));
+        authoring
+            .eval_str(
+                r#"(import alez.jaki.surface :refer (jak))
+                   (defscene pat '(
+                       . . - (minvel 0)
+                       -> 0 left
+                       ))
+                   (jak "yo" :16 pat)"#,
+            )
+            .expect("jak with a slot body");
+
+        let published = state.published_sequencers();
+        let definition = published
+            .iter()
+            .find(|definition| definition.name == "yo")
+            .expect("published sequencer");
+        assert!(
+            definition.tick_source.contains("(__defscene-resolve \"pat\")"),
+            "slot body must ship as a by-name read: {}",
+            definition.tick_source
+        );
+
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scheduler
+            .register_published_sequencer(
+                definition.id,
+                definition.name.clone(),
+                Timebase::from_index(definition.resolution as u32),
+                definition.tick_source.clone(),
+                &definition.requires,
+            )
+            .expect("compile published sequencer");
+        let result = scheduler
+            .invoke_sequencer_tick(
+                0,
+                crate::generator::GeneratorTickInput {
+                    id: definition.id,
+                    generator_index: 0,
+                    tick_index: 0,
+                    beat: 0.0,
+                    resolution_beats: 0.25,
+                    samples_per_quarter: 48_000.0,
+                    random_state: 1,
+                    state: HashMap::new(),
+                },
+            )
+            .expect("invoke tick");
+        // unit window [0,1) of `. . -` holds the first left-hand dot
+        assert_eq!(result.emitted.len(), 1, "{:?}", result.emitted);
+        assert_eq!(result.emitted[0].track, Some(0));
+    }
+
+    #[test]
     fn jaki_register_defscene_body_drives_control_routes_per_scene() {
         // The scene-varying mute sequencer: `alez.jaki.surface/register`
         // publishes once with a defscene slot as its body; each scene's

@@ -123,7 +123,24 @@
        (alez.jaki.core/init ,res)
        (alez.jaki.core/run ,body))))
 
+;; A body of exactly one bare non-event symbol is never pattern data — it is
+;; an expression body (typically a defscene slot): (jak "yo" :16 pat)
+;; delegates to `register`, resolving `pat` at each scheduler boundary.
+(def expression-body? (body)
+  (if (= (len body) 1)
+      (let ((x (nth body 0)))
+        (and (= (nth x 0) nil)
+             (and (not (= x '.)) (not (= x '-)))))
+      false))
+
 (defmacro jak (name res &rest body)
+  (if (alez.jaki.surface/expression-body? body)
+      `(alez.jaki.surface/register ,name ,res ,(nth body 0))
+      (jak-literal name res body)))
+
+;; the quoted-body expansion `jak` has always had, split out so the macro can
+;; branch on body shape at expansion time
+(def jak-literal (name res body)
   (let ((walked (channel-walk-list body name 0)))
     (let ((decls (list 'quote (get walked :decls)))
           (bindings (list 'quote (get walked :bindings)))
