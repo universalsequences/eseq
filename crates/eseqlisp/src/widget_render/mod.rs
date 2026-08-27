@@ -38,6 +38,7 @@ pub mod scroll;
 pub mod sdf_widget;
 pub mod sound_glyph;
 pub mod spectrogram;
+pub mod stroke;
 pub mod tabs;
 pub mod text_input;
 pub mod time_view;
@@ -722,6 +723,24 @@ pub struct GpuTrianglePrimitive {
     pub color: Color,
 }
 
+/// One vertex of a shaded mesh: a position in cell units, like every other
+/// primitive, and its own color. The color is linearly interpolated across the
+/// face of the triangle it belongs to, alpha included.
+#[derive(Clone, Copy)]
+pub struct GpuShadedVertex {
+    pub point: [f32; 2],
+    pub color: Color,
+}
+
+/// A Gouraud-shaded triangle list: every three consecutive vertices are one
+/// triangle. Batching a widget's whole soft-edged geometry into one primitive
+/// keeps the per-frame primitive clone/offset work in the backends proportional
+/// to widgets rather than to triangles.
+#[derive(Clone)]
+pub struct GpuShadedMeshPrimitive {
+    pub vertices: Vec<GpuShadedVertex>,
+}
+
 #[derive(Clone)]
 pub struct GpuGlyphRunPrimitive {
     pub row: f32,
@@ -870,6 +889,12 @@ pub enum GpuPrimitive {
     /// text selections and cursors on widgets whose chassis intentionally masks
     /// cables or other canvas geometry.
     ForegroundRect(GpuRectPrimitive),
+    /// Gouraud-shaded triangle list drawn in the same late pass as
+    /// `ForegroundRect`, i.e. above widget instances, live spectrograms and
+    /// circles. Per-vertex colors let widgets feather an edge to alpha 0, which
+    /// is how `stroke::ShadedMesh` builds anti-aliased curves without a
+    /// dedicated SDF pipeline. Z-order inside one mesh is vertex order.
+    ForegroundMesh(GpuShadedMeshPrimitive),
     Quad(GpuQuadPrimitive),
     Triangle(GpuTrianglePrimitive),
     GlyphRun(GpuGlyphRunPrimitive),
@@ -2961,6 +2986,11 @@ fn offset_primitive_x_mut(prim: &mut GpuPrimitive, dx: f32, viewport: WidgetView
         GpuPrimitive::ZLayer { primitive, .. } => offset_primitive_x_mut(primitive, dx, viewport),
         GpuPrimitive::Rect(r) => r.rect.col += dx,
         GpuPrimitive::ForegroundRect(r) => r.rect.col += dx,
+        GpuPrimitive::ForegroundMesh(m) => {
+            for vertex in &mut m.vertices {
+                vertex.point[0] += dx;
+            }
+        }
         GpuPrimitive::Quad(q) => q.x += dx,
         GpuPrimitive::Triangle(t) => {
             for point in &mut t.points {
@@ -2996,6 +3026,11 @@ fn offset_primitive_y_mut(prim: &mut GpuPrimitive, dy: f32, viewport: WidgetView
         GpuPrimitive::ZLayer { primitive, .. } => offset_primitive_y_mut(primitive, dy, viewport),
         GpuPrimitive::Rect(r) => r.rect.row += dy,
         GpuPrimitive::ForegroundRect(r) => r.rect.row += dy,
+        GpuPrimitive::ForegroundMesh(m) => {
+            for vertex in &mut m.vertices {
+                vertex.point[1] += dy;
+            }
+        }
         GpuPrimitive::Quad(q) => q.y += dy,
         GpuPrimitive::Triangle(t) => {
             for point in &mut t.points {
@@ -3385,6 +3420,20 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join(":"),
                 color_token(triangle.color)
+            ),
+            GpuPrimitive::ForegroundMesh(mesh) => format!(
+                "fg-mesh:{}:{}",
+                mesh.vertices.len(),
+                mesh.vertices
+                    .iter()
+                    .map(|vertex| format!(
+                        "{:08x}:{:08x}:{}",
+                        vertex.point[0].to_bits(),
+                        vertex.point[1].to_bits(),
+                        color_token(vertex.color)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(":")
             ),
             GpuPrimitive::GlyphRun(run) => format!(
                 "glyph:{:08x}:{}:{}:{}:{}",

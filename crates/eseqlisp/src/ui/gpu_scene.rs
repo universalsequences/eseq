@@ -334,7 +334,8 @@ pub(crate) fn build_widget_primitive_quads(
                     );
                 }
             }
-            widget_render::GpuPrimitive::ForegroundRect(_) => {}
+            widget_render::GpuPrimitive::ForegroundRect(_)
+            | widget_render::GpuPrimitive::ForegroundMesh(_) => {}
             // Proportional text is rendered in a separate pass with its own atlas.
             widget_render::GpuPrimitive::ProportionalText(_) => {}
             widget_render::GpuPrimitive::PatchCable(_) => {}
@@ -361,12 +362,17 @@ pub(crate) fn build_foreground_rect_quads(
 ) -> Vec<Vertex> {
     let mut verts = Vec::new();
     for primitive in primitives {
-        let widget_render::GpuPrimitive::ForegroundRect(rect) =
-            widget_render::innermost_primitive(primitive)
-        else {
-            continue;
-        };
-        push_solid_rect_vertices(rect.rect, rect.color, cell_w, cell_h, vp_w, vp_h, &mut verts);
+        match widget_render::innermost_primitive(primitive) {
+            widget_render::GpuPrimitive::ForegroundRect(rect) => {
+                push_solid_rect_vertices(
+                    rect.rect, rect.color, cell_w, cell_h, vp_w, vp_h, &mut verts,
+                );
+            }
+            widget_render::GpuPrimitive::ForegroundMesh(mesh) => {
+                push_shaded_mesh_vertices(mesh, cell_w, cell_h, vp_w, vp_h, &mut verts);
+            }
+            _ => {}
+        }
     }
     verts
 }
@@ -1330,6 +1336,34 @@ pub(crate) fn push_solid_triangle_vertices(
     ]);
 }
 
+/// Gouraud-shaded triangle list: each vertex carries its own color, which the
+/// fragment shader interpolates (alpha included). Widgets use this to feather a
+/// stroke edge to fully transparent, which is what anti-aliases a curve.
+/// Dual-maintained with `metal_backend::push_shaded_mesh_vertices`.
+pub(crate) fn push_shaded_mesh_vertices(
+    mesh: &widget_render::GpuShadedMeshPrimitive,
+    cell_w: f32,
+    cell_h: f32,
+    vp_w: f32,
+    vp_h: f32,
+    verts: &mut Vec<Vertex>,
+) {
+    let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+    let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+    for vertex in &mesh.vertices {
+        let rgba = vertex.color.to_rgba();
+        verts.push(Vertex {
+            position: [
+                ndc_x(vertex.point[0] * cell_w),
+                ndc_y(vertex.point[1] * cell_h),
+            ],
+            uv: [0.0, 0.0],
+            fg: rgba,
+            bg: rgba,
+        });
+    }
+}
+
 pub(crate) fn push_rect_px(
     verts: &mut Vec<Vertex>,
     x: f32,
@@ -1991,6 +2025,14 @@ pub(crate) fn extend_right_edge_primitive(
             }
             widget_render::GpuPrimitive::Triangle(t)
         }
+        widget_render::GpuPrimitive::ForegroundMesh(mut m) => {
+            for vertex in &mut m.vertices {
+                if reaches_right(vertex.point[0]) {
+                    vertex.point[0] += extra_cols;
+                }
+            }
+            widget_render::GpuPrimitive::ForegroundMesh(m)
+        }
         widget_render::GpuPrimitive::ProportionalText(mut p) => {
             if p.align_width > 0.0 && reaches_right(p.col + p.align_width) {
                 p.align_width += extra_cols;
@@ -2094,6 +2136,13 @@ pub(crate) fn offset_primitive(
             r.rect.col += col_off;
             r.rect.row += row_off;
             widget_render::GpuPrimitive::ForegroundRect(r)
+        }
+        widget_render::GpuPrimitive::ForegroundMesh(mut m) => {
+            for vertex in &mut m.vertices {
+                vertex.point[0] += col_off;
+                vertex.point[1] += row_off;
+            }
+            widget_render::GpuPrimitive::ForegroundMesh(m)
         }
         widget_render::GpuPrimitive::Quad(mut q) => {
             q.x += col_off;

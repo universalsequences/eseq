@@ -31,6 +31,16 @@ const DEFAULT_Q_MIN: f32 = 0.1;
 const DEFAULT_Q_MAX: f32 = 18.0;
 const DEFAULT_SAMPLE_RATE: f32 = 48_000.0;
 const RESPONSE_POINTS: usize = 128;
+const MAX_RESPONSE_POINTS: usize = 512;
+/// Horizontal spacing between response samples, in **device** pixels — this is
+/// about how many rasterized columns a sample has to itself, so it is
+/// deliberately not design-scaled. Finer and adjacent samples land on the same
+/// column; coarser and a resonant peak starts to look faceted.
+const RESPONSE_SAMPLE_SPACING_PX: f32 = 1.5;
+/// Half width of the opaque core of the response stroke, in design pixels. The
+/// anti-aliasing fringe adds a soft pixel on each side, so the line reads at
+/// roughly the 2 px weight the per-column discs used to have.
+const CURVE_HALF_WIDTH: f32 = 0.75;
 
 #[derive(Clone, Copy, Debug)]
 struct LiveBandState {
@@ -236,6 +246,13 @@ fn plot_point(rect: Rect, x_t: f32, y_t: f32) -> [f32; 2] {
 
 fn band_y_t(band: &Eq8Band) -> f32 {
     linear_to_t(band.gain, band.gain_min, band.gain_max)
+}
+
+/// How many points the response curve is sampled at for a plot `width_px`
+/// device pixels wide. Shared with the tests so they never re-derive it.
+fn response_point_count(width_px: f32) -> usize {
+    ((width_px / RESPONSE_SAMPLE_SPACING_PX).round() as usize)
+        .clamp(RESPONSE_POINTS, MAX_RESPONSE_POINTS)
 }
 
 fn nearest_band(node: &LayoutNode, col: f32, row: f32) -> Option<i32> {
@@ -695,7 +712,7 @@ impl WidgetDefinition for Eq8EditorWidget {
         &self,
         _widget_type: &str,
         node: &LayoutNode,
-        _viewport: WidgetViewport,
+        viewport: WidgetViewport,
     ) -> Vec<GpuPrimitive> {
         let mut bands = prop_bands(&node.props);
         let table_response = table_response(&node.props);
@@ -795,52 +812,52 @@ impl WidgetDefinition for Eq8EditorWidget {
             }
         }
 
-        let response_points = if table_response.is_some() { 256 } else { RESPONSE_POINTS };
-        for idx in 0..response_points {
-            let x_t = idx as f32 / (response_points - 1) as f32;
-            let freq = freq_from_t(x_t, min_hz, max_hz);
-            let db = table_response
-                .as_ref()
-                .map(|response| 20.0 * response.magnitude_at(freq).max(1.0e-9).log10())
-                .unwrap_or_else(|| combined_response_db(&bands, freq, sample_rate))
-                .clamp(min_db, max_db);
-            let y_t = response_y_t(db, min_db, max_db);
-            primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
-                center: plot_point(node.rect, x_t, y_t),
-                radius_px: super::ui_design_px(1.45),
-                color: curve_color,
-                visible_half: GpuCircleVisibleHalf::Full,
-            }));
-        }
+        let response_points = response_point_count(node.rect.width * viewport.cell_w.max(1.0));
+        let curve: Vec<[f32; 2]> = (0..response_points)
+            .map(|idx| {
+                let x_t = idx as f32 / (response_points - 1) as f32;
+                let freq = freq_from_t(x_t, min_hz, max_hz);
+                let db = table_response
+                    .as_ref()
+                    .map(|response| 20.0 * response.magnitude_at(freq).max(1.0e-9).log10())
+                    .unwrap_or_else(|| combined_response_db(&bands, freq, sample_rate))
+                    .clamp(min_db, max_db);
+                plot_point(node.rect, x_t, response_y_t(db, min_db, max_db))
+            })
+            .collect();
+        // A stroked ribbon rather than one disc per column: at a steep
+        // resonant peak the columns are pixels apart vertically, and discs
+        // separate into a dotted trail where a ribbon stays continuous. The
+        // curve and the band handles share one mesh, so the whole late-pass
+        // layer of this widget is a single primitive; the handles go in last,
+        // which is what keeps them on top of the curve.
+        let mut mesh = super::stroke::ShadedMesh::new();
+        mesh.push_polyline(&curve, curve_color, viewport, CURVE_HALF_WIDTH);
 
         if table_response.is_none() {
-          for band in &bands {
-            let x_t = freq_to_t(band.freq, band.freq_min, band.freq_max);
-            let y_t = band_y_t(band);
-            let center = plot_point(node.rect, x_t, y_t);
-            let color = if !band.enabled {
-                inactive_color
-            } else if band.selected {
-                selected_color
-            } else {
-                curve_color
-            };
-            primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
-                center,
-                radius_px: super::ui_design_px(if band.selected { 12.0 } else { 10.0 }),
-                color,
-                visible_half: GpuCircleVisibleHalf::Full,
-            }));
-            if band.enabled && !band.selected {
-                primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
+            for band in &bands {
+                let x_t = freq_to_t(band.freq, band.freq_min, band.freq_max);
+                let y_t = band_y_t(band);
+                let center = plot_point(node.rect, x_t, y_t);
+                let color = if !band.enabled {
+                    inactive_color
+                } else if band.selected {
+                    selected_color
+                } else {
+                    curve_color
+                };
+                mesh.push_disc(
                     center,
-                    radius_px: super::ui_design_px(5.4),
-                    color: color_with_alpha(background, 0.95),
-                    visible_half: GpuCircleVisibleHalf::Full,
-                }));
+                    if band.selected { 12.0 } else { 10.0 },
+                    color,
+                    viewport,
+                );
+                if band.enabled && !band.selected {
+                    mesh.push_disc(center, 5.4, color_with_alpha(background, 0.95), viewport);
+                }
             }
-          }
         }
+        mesh.push_into(&mut primitives);
 
         primitives
     }
@@ -1091,12 +1108,115 @@ mod tests {
         let spectrogram = spectrogram.expect("eq8 editor should emit a live spectrum primitive");
         assert!(spectrogram.eq_line_color.a > 0.0);
         assert!(spectrogram.eq_fill_color.a > 0.0);
+        // The response curve is one batched shaded mesh in the late pass
+        // (18 vertices per ribbon segment), not one disc per sampled column.
+        let mesh = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                GpuPrimitive::ForegroundMesh(mesh) => Some(mesh),
+                _ => None,
+            })
+            .expect("eq8 editor should emit a batched foreground mesh");
+        assert!(mesh.vertices.len() >= (RESPONSE_POINTS - 1) * 18);
+        // Exactly one: the curve and the band handles share the mesh.
+        assert_eq!(
+            primitives
+                .iter()
+                .filter(|primitive| matches!(primitive, GpuPrimitive::ForegroundMesh(_)))
+                .count(),
+            1
+        );
+        // Grid dots are still circles.
         assert!(
             primitives
                 .iter()
-                .filter(|primitive| matches!(primitive, GpuPrimitive::Circle(_)))
-                .count()
-                >= RESPONSE_POINTS
+                .any(|primitive| matches!(primitive, GpuPrimitive::Circle(_)))
+        );
+    }
+
+    #[test]
+    fn a_steep_resonant_peak_keeps_a_continuous_full_width_ribbon() {
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 800.0,
+            vp_h: 600.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 24.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        // A narrow, heavily boosted bell: adjacent samples are far apart
+        // vertically, which is exactly where per-column discs used to separate
+        // and where a clamped miter pinched the apex to a sliver.
+        let mut node = layout_node();
+        node.props.insert(
+            "bands".to_string(),
+            Value::List(vec![rc(map(vec![
+                ("id", Value::Number(0.0)),
+                ("type", Value::Keyword("bell".to_string())),
+                ("freq", Value::Number(1_000.0)),
+                ("gain", Value::Number(24.0)),
+                ("q", Value::Number(18.0)),
+                ("enabled", Value::Bool(true)),
+                ("selected", Value::Bool(true)),
+            ]))]),
+        );
+        let primitives = EQ8_EDITOR_WIDGET.build_primitives("eq8-editor", &node, viewport);
+        let mesh = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                GpuPrimitive::ForegroundMesh(mesh) => Some(mesh),
+                _ => None,
+            })
+            .expect("eq8 editor should emit a batched foreground mesh");
+        // The curve is pushed into the mesh before the band handles, so the
+        // leading `18 * segments` vertices are the ribbon's segment quads.
+        let segments = response_point_count(node.rect.width * viewport.cell_w) - 1;
+        let expected_half_width = super::super::ui_design_px(CURVE_HALF_WIDTH).max(0.1);
+        let to_px = |point: [f32; 2]| [point[0] * viewport.cell_w, point[1] * viewport.cell_h];
+        let midpoint = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+        let mut previous_end: Option<[f32; 2]> = None;
+        let mut steepest_jump = 0.0f32;
+        for segment in 0..segments {
+            // Core quad order: left_start, left_end, right_end, left_start,
+            // right_end, right_start.
+            let base = segment * 18;
+            let left_start = to_px(mesh.vertices[base].point);
+            let left_end = to_px(mesh.vertices[base + 1].point);
+            let right_end = to_px(mesh.vertices[base + 2].point);
+            let right_start = to_px(mesh.vertices[base + 5].point);
+            // Rails are symmetric about the path, so their midpoints recover it.
+            let start = midpoint(left_start, right_start);
+            let end = midpoint(left_end, right_end);
+            if let Some(previous) = previous_end {
+                let gap = (previous[0] - start[0]).hypot(previous[1] - start[1]);
+                assert!(gap < 1.0e-3, "ribbon broke between segments: {gap} px");
+            }
+            previous_end = Some(end);
+            let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
+            let length = dx.hypot(dy);
+            assert!(length > 0.0);
+            let normal = [-dy / length, dx / length];
+            let separation = [
+                left_start[0] - right_start[0],
+                left_start[1] - right_start[1],
+            ];
+            let half_width = (separation[0] * normal[0] + separation[1] * normal[1]).abs() * 0.5;
+            assert!(
+                (half_width - expected_half_width).abs() < 1.0e-3,
+                "segment {segment} inks {half_width} px instead of {expected_half_width}"
+            );
+            steepest_jump = steepest_jump.max(dy.abs());
+        }
+        // And the peak really is steep enough to have dotted (and to have
+        // saturated the old miter clamp) before.
+        assert!(
+            steepest_jump > 3.0,
+            "expected a slope steeper than the old disc diameter, got {steepest_jump}"
         );
     }
 }
