@@ -176,6 +176,9 @@ pub(crate) struct GeneratorTickContext {
     pub(super) random_state: u64,
     pub(super) state: HashMap<String, f64>,
     pub(super) emitted: Vec<EmittedAccumulatorEvent>,
+    /// Mixer-control holds pushed by `seq-emit-control`
+    /// (docs/jaki-mixer-control-routes-spec.md).
+    pub(super) controls: Vec<crate::mixer_control::EmittedMixerControl>,
 }
 
 #[derive(Default)]
@@ -1045,6 +1048,7 @@ impl ScratchControlRuntime {
                 random_state: input.random_state,
                 state: input.state,
                 emitted: Vec::new(),
+                controls: Vec::new(),
             });
         }
         let invocation = self
@@ -1060,6 +1064,7 @@ impl ScratchControlRuntime {
         invocation?;
         Ok(crate::generator::GeneratorTickResult {
             emitted: ctx.emitted,
+            controls: ctx.controls,
             random_state: ctx.random_state,
             state: ctx.state,
         })

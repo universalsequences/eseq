@@ -166,6 +166,45 @@ pub(crate) fn run_event_loop(
                 ))),
             }
         }
+        // Sequenced mixer controls (jaki mute/solo routes): apply due holds
+        // and mirror the state flips into the mixer UI
+        // (docs/jaki-mixer-control-routes-spec.md §3).
+        {
+            let rendered = shared.state.audio_rendered_sample();
+            let outcome = app.drain_due_mixer_controls(rendered);
+            for applied in outcome.applied {
+                use sequencer::app::mixer_controls::MixerControlApplied;
+                match applied {
+                    MixerControlApplied::TrackMute { track } => {
+                        shared.ui_invalidations.push(UiInvalidation::TrackMixer {
+                            track,
+                            change: TrackMixerInvalidation::Mute,
+                        });
+                    }
+                    MixerControlApplied::TrackSolo { track } => {
+                        shared.ui_invalidations.push(UiInvalidation::TrackMixer {
+                            track,
+                            change: TrackMixerInvalidation::Solo,
+                        });
+                    }
+                    MixerControlApplied::BusMute { bus_index } => {
+                        shared.ui_invalidations.push(UiInvalidation::BusMixer {
+                            bus: bus_index,
+                            change: BusMixerInvalidation::Mute,
+                        });
+                    }
+                    MixerControlApplied::BusSolo { bus_index } => {
+                        shared.ui_invalidations.push(UiInvalidation::BusMixer {
+                            bus: bus_index,
+                            change: BusMixerInvalidation::Solo,
+                        });
+                    }
+                }
+            }
+            for error in outcome.errors {
+                editor.handle_host_event(HostEvent::Error(error));
+            }
+        }
         // Song playback notices (docs/song-mode-spec.md 10.2): mirror
         // scheduler-authoritative row transitions control-side (no epoch
         // bump), stop through the state machine on end, surface start

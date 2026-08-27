@@ -317,6 +317,7 @@ impl SequencerState {
             pending_accumulator_reset_all: AtomicBool::new(false),
             pending_accumulator_reset_tracks: std::array::from_fn(|_| AtomicBool::new(false)),
             quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox::default(),
+            scheduled_mixer_controls: crate::mixer_control::MixerControlMailbox::default(),
             song_playback: SongPlaybackMailbox::default(),
             song_manual_latch: AtomicU64::new(0),
             song_scene_latch: AtomicBool::new(false),
@@ -337,6 +338,10 @@ impl SequencerState {
 
     pub fn quantized_launches(&self) -> &crate::quantized_launch::QuantizedLaunchMailbox {
         &self.quantized_launches
+    }
+
+    pub fn scheduled_mixer_controls(&self) -> &crate::mixer_control::MixerControlMailbox {
+        &self.scheduled_mixer_controls
     }
 
     pub fn schedule_quantized_pattern_launch(

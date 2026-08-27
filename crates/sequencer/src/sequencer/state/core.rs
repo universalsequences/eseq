@@ -434,6 +434,10 @@ pub struct SequencerState {
     pub(super) pending_accumulator_reset_all: AtomicBool,
     pub(super) pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
     pub(super) quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox,
+    /// Sequenced mixer-control holds (jaki mute/solo routes): the scheduler
+    /// lookahead pushes sample-stamped holds; the app thread drains due ones
+    /// each frame (docs/jaki-mixer-control-routes-spec.md).
+    pub(super) scheduled_mixer_controls: crate::mixer_control::MixerControlMailbox,
     /// Song playback command/notice channels plus render-rate position
     /// atomics (docs/song-mode-spec.md 10.2).
     pub(super) song_playback: SongPlaybackMailbox,

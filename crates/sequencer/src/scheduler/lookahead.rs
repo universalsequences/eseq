@@ -1476,6 +1476,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // NetworkTrigger here.
         if !generator_runtime.is_empty() {
             let mut generator_emissions = Vec::new();
+            let mut generator_control_emissions = Vec::new();
             if let Some(scratch) = scratch_runtime.as_mut() {
                 // Channel snapshot for chan-get: ticks in this chunk observe
                 // process-channel writes from earlier chunks (processes run
@@ -1484,7 +1485,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     process_runtime.payload_epoch(),
                     process_runtime.channel_values(),
                 );
-                generator_runtime.process_block(
+                generator_runtime.process_block_with_controls(
                     chunk_start_beats,
                     chunk_end_beats,
                     scheduled_until_sample,
@@ -1497,12 +1498,26 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             .invoke_sequencer_tick(generator_index, input)
                             .unwrap_or(crate::generator::GeneratorTickResult {
                                 emitted: Vec::new(),
+                                controls: Vec::new(),
                                 random_state,
                                 state: fallback_state,
                             })
                     },
                     &mut generator_emissions,
+                    &mut generator_control_emissions,
                 );
+                // Mixer-control holds ride to the app thread through the
+                // mailbox; the frame drain applies due ones
+                // (docs/jaki-mixer-control-routes-spec.md).
+                for emission in generator_control_emissions.drain(..) {
+                    state.scheduled_mixer_controls().push(
+                        emission.engage_sample,
+                        emission.release_sample,
+                        emission.generator_index,
+                        emission.control.op,
+                        emission.control.target,
+                    );
+                }
             } else if debug_routing_enabled() {
                 eprintln!(
                     "[routing] skip generator-block reason=no-scratch-runtime chunk=({:.6}..{:.6})",

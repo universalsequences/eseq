@@ -8694,6 +8694,155 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_control_route_emits_track_mute_holds_beside_notes() {
+        // -> (mute 3) turns each event's gate into a timed mute hold on
+        // track 3 while -> 0 keeps emitting notes — the two never conflate
+        // (docs/jaki-mixer-control-routes-spec.md).
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "gate" :16
+                 . . - .
+                 -> 0
+                 -> (mute 3))"#,
+        )
+        .expect("jak with control route");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        generators.process_block_with_controls(
+            0.0,
+            1.25,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+            &mut controls,
+        );
+
+        // one 5-unit cycle of notes on track 0, untouched by the control route
+        assert_eq!(out.len(), 5);
+        assert!(out.iter().all(|e| e.event.track == Some(0)));
+
+        // five gate windows (each 4/5 unit = 0.2 beats = 9600 samples), one
+        // hold per event, all on the mute op for track 3
+        assert_eq!(controls.len(), 5);
+        for control in &controls {
+            assert_eq!(control.control.op, crate::mixer_control::MixerControlOp::Mute);
+            assert_eq!(
+                control.control.target,
+                crate::mixer_control::MixerControlTarget::Track(3)
+            );
+            assert_eq!(control.release_sample, control.engage_sample + 9_600);
+        }
+        let engages: Vec<u64> = controls.iter().map(|c| c.engage_sample).collect();
+        assert_eq!(engages, vec![12_000, 24_000, 36_000, 48_000, 60_000]);
+    }
+
+    #[test]
+    fn jaki_control_route_group_solo_inv_emits_gap_windows() {
+        // `inv` complements the union of gate windows within the cycle: the
+        // solo holds cover the 1/5-unit gaps between gates, targeting the
+        // group by name.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "gate2" :16
+                 . - .
+                 -> (solo (group "Drums")) inv)"#,
+        )
+        .expect("jak with inv control route");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        generators.process_block_with_controls(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+            &mut controls,
+        );
+
+        assert!(out.is_empty(), "a control-only jak emits no notes");
+        // 4-unit cycle, gates [k, k+4/5) for k=0..4 → complements
+        // [k+4/5, k+1): 0.05 beats = 2400 samples each, 0.2 beats past the
+        // owning boundary
+        assert_eq!(controls.len(), 4);
+        for control in &controls {
+            assert_eq!(control.control.op, crate::mixer_control::MixerControlOp::Solo);
+            assert_eq!(
+                control.control.target,
+                crate::mixer_control::MixerControlTarget::Group("Drums".to_string())
+            );
+            assert_eq!(control.release_sample, control.engage_sample + 2_400);
+        }
+        let engages: Vec<u64> = controls.iter().map(|c| c.engage_sample).collect();
+        assert_eq!(engages, vec![21_600, 33_600, 45_600, 57_600]);
+    }
+
+    #[test]
+    fn jaki_seq_emit_control_validates_argument_shape() {
+        // Native errors follow the seq-emit contract: report a status and
+        // return false with nothing emitted. The tick encodes each call's
+        // return value into a note velocity so the test can read it back.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(__register-sequencer "jaki-control-shape"
+                 :resolution :16
+                 :tick (lambda ()
+                   (do
+                     (seq-emit :track 0 :at :now
+                       :vel (if (seq-emit-control :op "mute" :at 0 :dur 0.5) 0.9 0.1))
+                     (seq-emit :track 1 :at :now
+                       :vel (if (seq-emit-control :op "bogus" :track 1 :at 0 :dur 0.5) 0.9 0.1))
+                     (seq-emit :track 2 :at :now
+                       :vel (if (seq-emit-control :op "solo" :track 1 :group "Drums"
+                                                  :at 0 :dur 0.5)
+                                0.9 0.1))
+                     (seq-emit :track 3 :at :now
+                       :vel (if (seq-emit-control :op "mute" :track 2 :at 0 :dur 0.5)
+                                0.9 0.1)))))"#,
+        )
+        .expect("register sequencer");
+        let definition = rt.sequencer_defs().remove(0);
+        let result = rt
+            .invoke_sequencer_tick(
+                0,
+                crate::generator::GeneratorTickInput {
+                    id: definition.id,
+                    generator_index: 0,
+                    tick_index: 0,
+                    beat: 0.0,
+                    resolution_beats: 0.25,
+                    samples_per_quarter: 48_000.0,
+                    random_state: 1,
+                    state: Default::default(),
+                },
+            )
+            .expect("tick");
+        let vels: Vec<f32> = result.emitted.iter().map(|e| e.resolved.velocity).collect();
+        // missing target, unknown op, and both targets are all rejected;
+        // only the well-formed final call emits a control
+        assert_close(
+            &vels.iter().map(|v| *v as f64).collect::<Vec<_>>(),
+            &[0.1, 0.1, 0.1, 0.9],
+        );
+        assert_eq!(result.controls.len(), 1);
+        assert_eq!(result.controls[0].op, crate::mixer_control::MixerControlOp::Mute);
+        assert_eq!(
+            result.controls[0].target,
+            crate::mixer_control::MixerControlTarget::Track(2)
+        );
+        assert!((result.controls[0].duration_beats - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
     fn jaki_surface_flat_route_grammar_fans_out() {
         // tier-2 surface: same routing as the plumbed fan-out test above, but
         // authored through the bare `jak` macro and the `->` route grammar

@@ -94,6 +94,12 @@ impl SequencerState {
         self.audio_rendered_sample.store(sample, Ordering::Release);
     }
 
+    /// The audio clock published above — the "now" that due-ness of sequenced
+    /// mixer controls is measured against on the app thread.
+    pub fn audio_rendered_sample(&self) -> u64 {
+        self.audio_rendered_sample.load(Ordering::Acquire)
+    }
+
     /// Publish the scheduler's rendered-beat clock (the `rendered_beats`
     /// domain quantized-launch deadlines live in). Called once per scheduler
     /// loop from scheduler/worker.rs; song capture reads it back for

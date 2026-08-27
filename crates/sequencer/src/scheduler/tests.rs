@@ -2345,6 +2345,81 @@
         out
     }
 
+    /// docs/jaki-mixer-control-routes-spec.md §2: control holds emitted from
+    /// a generator tick ride the production lookahead into the mixer-control
+    /// mailbox with absolute engage/release sample times.
+    #[test]
+    fn sequenced_mixer_controls_reach_the_mailbox_with_sample_times() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"(__register-sequencer "mute-gate"
+                         :resolution :4
+                         :tick (lambda ()
+                           (do
+                             (seq-emit-control :op "mute" :track 0 :at 0 :dur 0.25)
+                             (seq-emit-control :op "solo" :group "Drums" :at 0.125 :dur 0.5))))"#,
+                )
+                .expect("register control generator");
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler
+                .generator_runtime
+                .sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<32>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                24_000,
+                48_000,
+                6_000,
+                24_000.0,
+                0,
+                false,
+                false,
+            );
+
+            // One :4 boundary (beat 1.0 → sample 24000) fires inside the
+            // horizon; both holds land in the mailbox stamped from it.
+            let due = state.scheduled_mixer_controls().drain_due(u64::MAX);
+            assert_eq!(due.len(), 2, "{due:?}");
+            assert_eq!(due[0].op, crate::mixer_control::MixerControlOp::Mute);
+            assert_eq!(
+                due[0].target,
+                crate::mixer_control::MixerControlTarget::Track(0)
+            );
+            assert_eq!(due[0].engage_sample, 24_000);
+            assert_eq!(due[0].release_sample, 30_000);
+            assert_eq!(due[1].op, crate::mixer_control::MixerControlOp::Solo);
+            assert_eq!(
+                due[1].target,
+                crate::mixer_control::MixerControlTarget::Group("Drums".to_string())
+            );
+            assert_eq!(due[1].engage_sample, 27_000);
+            assert_eq!(due[1].release_sample, 39_000);
+        });
+    }
+
     /// docs/jaki-live-channel-widgets-spec.md 7 and 8.1: control-thread
     /// channel writes reach `chan-get` on the next chunk, while a process write
     /// is mirrored back through the same channel handle for inline UI polling.
