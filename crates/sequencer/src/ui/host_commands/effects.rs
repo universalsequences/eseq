@@ -36,6 +36,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "move-effect-slot",
     "copy-effect-values-to-all-scenes",
     "move-midi-fx-slot",
+    "copy-selected-effect",
+    "paste-effect",
     "delete-effect",
     "delete-midi-fx",
 ];
@@ -2136,6 +2138,73 @@ pub(super) fn handle(
                         "Error moving MIDI FX: {error}"
                     ))),
                 }
+            }
+        }
+        "copy-selected-effect" => {
+            let chain = extract_string_from_payload(&payload, "chain");
+            let track = extract_usize_from_payload(&payload, "track");
+            let bus = extract_usize_from_payload(&payload, "bus");
+            let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+            let slot = extract_usize_from_payload(&payload, "slot");
+            let result = match (chain.as_deref(), track, bus, rack_slot, slot) {
+                (Some("audio"), Some(track), _, _, Some(slot)) => {
+                    app.copy_track_effect_to_clipboard(track, slot)
+                }
+                (Some("midi"), Some(track), _, _, Some(slot)) => {
+                    app.copy_midi_effect_to_clipboard(track, slot)
+                }
+                (Some("bus"), _, Some(bus), _, Some(slot)) => {
+                    app.copy_bus_effect_to_clipboard(bus, slot)
+                }
+                (Some("rack"), Some(track), _, Some(rack_slot), Some(slot)) => {
+                    app.copy_rack_effect_to_clipboard(track, rack_slot, slot)
+                }
+                _ => Err("No effect selected to copy".to_string()),
+            };
+            match result {
+                Ok(effect_name) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Copied effect '{effect_name}'"
+                ))),
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
+        "paste-effect" => {
+            let track = current_track.load(Ordering::Relaxed);
+            match app.paste_effect_clipboard_to_track(track) {
+                Ok(message) => {
+                    let rt = editor.runtime_mut();
+                    rt.set_reactive(
+                        "SEQ",
+                        "effects",
+                        build_effects_value(
+                            &state,
+                            track,
+                            &app.graph.effect_descriptors,
+                            &selected_steps,
+                        ),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        "midi-effects",
+                        build_midi_effects_value(&state, track, &selected_steps),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        "step-has-plocks",
+                        build_step_has_plocks(
+                            &state,
+                            track,
+                            &app.graph.effect_descriptors,
+                        ),
+                    );
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    editor.reset_widget_scroll_for_buffer_named("*fx*");
+                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    editor.handle_host_event(HostEvent::Status(message));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
         }
         "delete-effect" => {

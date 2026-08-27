@@ -264,12 +264,22 @@
         (track-selection-panel))
       (track-selection-panel))))))
 
+(def copy-selected-effect ()
+  (seq-copy-selected-effect))
+
+(def paste-effect ()
+  (seq-paste-effect))
+
 (define-mode "seq-fx-mode" :read-only true :live-keys true)
 ;; Handler strings qualify against THIS module; the two below live in other
 ;; converted modules, so they are written pre-qualified (dispatch resolves an
 ;; already-qualified name directly, resolve_handler_name).
 (mode-bind-key "seq-fx-mode" "BS" "eseq.effects.panel-widgets/delete-selected-effect")
 (mode-bind-key "seq-fx-mode" "Delete" "eseq.effects.panel-widgets/delete-selected-effect")
+(mode-bind-key "seq-fx-mode" "s-c" "copy-selected-effect")
+(mode-bind-key "seq-fx-mode" "s-v" "paste-effect")
+(mode-bind-key "seq-fx-mode" "C-S-c" "copy-selected-effect")
+(mode-bind-key "seq-fx-mode" "C-S-v" "paste-effect")
 (mode-bind-key "seq-fx-mode" "RET" "eseq.effects.process-panel/open-selected-source")
 (set-buffer-mode-for "*fx*" "seq-fx-mode")
 

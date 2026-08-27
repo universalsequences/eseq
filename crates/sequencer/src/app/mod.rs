@@ -895,6 +895,7 @@ pub struct App {
     pub track_registry: crate::sequencer::TrackRegistry,
     pub device_registry: DeviceIdentityRegistry,
     pub history: history::UndoManager<history::EditPatch>,
+    effect_clipboard: Option<effects::EffectClipboard>,
     pub macro_engine: crate::macro_engine::MacroEngine,
     scene_macro_runtime: HashMap<crate::macro_engine::MacroId, SceneMacroRuntime>,
     /// Debug tripwire for the override-leak invariant (takes spec §17.10 /
@@ -2354,6 +2355,7 @@ impl App {
             track_registry: crate::sequencer::TrackRegistry::default(),
             device_registry: DeviceIdentityRegistry::default(),
             history: history::UndoManager::default(),
+            effect_clipboard: None,
             macro_engine: crate::macro_engine::MacroEngine::default(),
             #[cfg(debug_assertions)]
             macro_base_shadow: std::sync::Mutex::new(HashMap::new()),

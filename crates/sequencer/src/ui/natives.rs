@@ -3359,6 +3359,78 @@ pub(crate) fn init_runtime(
         Ok(active_delete_target_kind(guard.as_ref()))
     });
 
+    let copy_target = active_delete_target.clone();
+    let copy_track = current_track.clone();
+    runtime.register_native("seq-copy-selected-effect", move |_args, ctx| {
+        let Some(target) = copy_target.lock().unwrap().clone() else {
+            ctx.set_status("No effect selected to copy");
+            return Ok(Value::Bool(false));
+        };
+        let mut payload = std::collections::HashMap::new();
+        match target {
+            ActiveDeleteTarget::FxEffect { chain, bus, slot } => {
+                let chain = match chain {
+                    FxDeleteChain::Audio => "audio",
+                    FxDeleteChain::Midi => "midi",
+                    FxDeleteChain::Bus => "bus",
+                };
+                payload.insert(
+                    "chain".to_string(),
+                    Rc::new(RefCell::new(Value::String(chain.to_string()))),
+                );
+                if let Some(bus) = bus {
+                    payload.insert(
+                        "bus".to_string(),
+                        Rc::new(RefCell::new(Value::Number(bus as f64))),
+                    );
+                }
+                payload.insert(
+                    "track".to_string(),
+                    Rc::new(RefCell::new(Value::Number(
+                        copy_track.load(Ordering::Relaxed) as f64,
+                    ))),
+                );
+                payload.insert(
+                    "slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(slot as f64))),
+                );
+            }
+            ActiveDeleteTarget::RackEffect { track, rack_slot, effect_slot } => {
+                payload.insert(
+                    "chain".to_string(),
+                    Rc::new(RefCell::new(Value::String("rack".to_string()))),
+                );
+                for (key, value) in [
+                    ("track", track),
+                    ("rack-slot", rack_slot),
+                    ("slot", effect_slot),
+                ] {
+                    payload.insert(
+                        key.to_string(),
+                        Rc::new(RefCell::new(Value::Number(value as f64))),
+                    );
+                }
+            }
+            _ => {
+                ctx.set_status("No effect selected to copy");
+                return Ok(Value::Bool(false));
+            }
+        }
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "copy-selected-effect".to_string(),
+            payload: Value::Map(payload),
+        });
+        Ok(Value::Bool(true))
+    });
+
+    runtime.register_native("seq-paste-effect", move |_args, ctx| {
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "paste-effect".to_string(),
+            payload: Value::Nil,
+        });
+        Ok(Value::Bool(true))
+    });
+
     let projection = expanded_step_projection.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seqv-sync-expanded-step-slots", move |args, _ctx| {
@@ -7224,6 +7296,16 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-delete-active-target",
             "(seq-delete-active-target)",
             "Delete the active destructive keyboard target when valid for the current buffer.",
+        ),
+        (
+            "seq-copy-selected-effect",
+            "(seq-copy-selected-effect)",
+            "Copy the selected audio or MIDI effect into the internal effect clipboard.",
+        ),
+        (
+            "seq-paste-effect",
+            "(seq-paste-effect)",
+            "Append the internal effect clipboard to the current track's matching chain.",
         ),
         (
             "seq-clone-active-track-pattern",

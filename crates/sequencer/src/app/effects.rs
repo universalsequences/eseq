@@ -42,6 +42,35 @@ struct BusEffectEntry {
     custom_name: Option<String>,
 }
 
+#[derive(Clone)]
+pub(super) enum EffectClipboard {
+    Audio {
+        source: RetainedEffectSource,
+        values: crate::effects::EffectSlotValuesSnapshot,
+    },
+    Midi {
+        name: String,
+        values: crate::effects::EffectSlotValuesSnapshot,
+    },
+}
+
+fn without_parameter_locks(
+    mut values: crate::effects::EffectSlotValuesSnapshot,
+) -> crate::effects::EffectSlotValuesSnapshot {
+    for step in &mut values.plocks {
+        step.fill(None);
+    }
+    values.key_locks.clear();
+    values
+}
+
+fn retained_effect_name(source: &RetainedEffectSource) -> &str {
+    match source {
+        RetainedEffectSource::NativeBuiltin { name }
+        | RetainedEffectSource::Compiled { name, .. } => name,
+    }
+}
+
 /// Patch any host-routed sidechain params on a descriptor with the current
 /// source-track labels. Builtin descriptors (e.g. Compressor) ship with a
 /// placeholder "off"-only enum; lisp effects get theirs from
@@ -86,6 +115,208 @@ fn instrument_display_name(name: &str) -> String {
 }
 
 impl App {
+    pub fn copy_track_effect_to_clipboard(
+        &mut self,
+        track: usize,
+        slot: usize,
+    ) -> Result<String, String> {
+        let state = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot))
+            .ok_or_else(|| "Selected audio effect no longer exists".to_string())?;
+        if state.node_id.load(Ordering::Relaxed) == 0 {
+            return Err("Selected audio effect no longer exists".to_string());
+        }
+        let name = self.graph.effect_descriptors[track][slot].name.trim().to_string();
+        let source = self
+            .editor
+            .effect_chain_leases
+            .source(FxChainLocator::Track(track), slot)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| self.retained_effect_source_for_name(&name))?;
+        let values = without_parameter_locks(EffectSlotSnapshot::capture_authoring_values(state));
+        self.retain_effect_source(FxChainLocator::Track(track), slot, source.clone())?;
+        self.effect_clipboard = Some(EffectClipboard::Audio { source, values });
+        Ok(name)
+    }
+
+    pub fn copy_bus_effect_to_clipboard(
+        &mut self,
+        bus: usize,
+        slot: usize,
+    ) -> Result<String, String> {
+        let bus_id = self.bus_fx_locator(bus)?;
+        let state = self
+            .buses
+            .get(bus)
+            .and_then(|bus| bus.effect_slots.get(slot))
+            .filter(|state| state.node_id != 0)
+            .ok_or_else(|| "Selected bus effect no longer exists".to_string())?;
+        let name = self.buses[bus].effect_descriptors[slot].name.trim().to_string();
+        let source = self
+            .editor
+            .effect_chain_leases
+            .source(bus_id, slot)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| self.retained_effect_source_for_name(&name))?;
+        let values = without_parameter_locks(state.authoring_values());
+        self.retain_effect_source(bus_id, slot, source.clone())?;
+        self.effect_clipboard = Some(EffectClipboard::Audio { source, values });
+        Ok(name)
+    }
+
+    pub fn copy_rack_effect_to_clipboard(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+    ) -> Result<String, String> {
+        let rack = self.rack_slot_effect_snapshot(track, rack_slot)?;
+        let state = rack
+            .effect_slots
+            .get(effect_slot)
+            .filter(|state| state.node_id != 0)
+            .ok_or_else(|| "Selected rack-slot effect no longer exists".to_string())?;
+        let name = rack.effect_descriptors[effect_slot].name.trim().to_string();
+        let locator = FxChainLocator::RackSlot {
+            track,
+            slot: rack_slot,
+        };
+        let source = self
+            .editor
+            .effect_chain_leases
+            .source(locator, effect_slot)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| self.retained_effect_source_for_name(&name))?;
+        let values = without_parameter_locks(state.authoring_values());
+        self.retain_effect_source(locator, effect_slot, source.clone())?;
+        self.effect_clipboard = Some(EffectClipboard::Audio { source, values });
+        Ok(name)
+    }
+
+    pub fn copy_midi_effect_to_clipboard(
+        &mut self,
+        track: usize,
+        slot: usize,
+    ) -> Result<String, String> {
+        let name = self
+            .state
+            .pattern
+            .track_params
+            .get(track)
+            .and_then(|params| params.midi_fx_chain().get(slot).cloned())
+            .ok_or_else(|| "Selected MIDI FX no longer exists".to_string())?;
+        let state = self
+            .state
+            .pattern
+            .midi_fx_slots
+            .get(track)
+            .and_then(|slots| slots.get(slot))
+            .ok_or_else(|| "Selected MIDI FX no longer exists".to_string())?;
+        let values = without_parameter_locks(EffectSlotSnapshot::capture_authoring_values(state));
+        self.effect_clipboard = Some(EffectClipboard::Midi {
+            name: name.clone(),
+            values,
+        });
+        Ok(name)
+    }
+
+    pub fn paste_effect_clipboard_to_track(&mut self, track: usize) -> Result<String, String> {
+        if track >= self.tracks.len() {
+            return Err(format!("Track {} does not exist", track + 1));
+        }
+        let copied = self
+            .effect_clipboard
+            .clone()
+            .ok_or_else(|| "Effect clipboard is empty".to_string())?;
+        match copied {
+            EffectClipboard::Audio { source, values } => {
+                let name = retained_effect_name(&source).to_string();
+                let slot = (BUILTIN_SLOT_COUNT..BUILTIN_SLOT_COUNT + MAX_CUSTOM_FX)
+                    .find(|slot| {
+                        self.state.pattern.effect_chains[track]
+                            .get(*slot)
+                            .is_some_and(|state| {
+                                state.node_id.load(Ordering::Relaxed) == 0
+                            })
+                    })
+                    .ok_or_else(|| "No free audio effect slots available".to_string())?;
+                self.apply_recorded_track_effect_chain_mutation(
+                    track,
+                    "Paste audio effect",
+                    |app| {
+                        match &source {
+                            RetainedEffectSource::NativeBuiltin { name } => {
+                                app.load_builtin_effect_to_slot_sync(track, slot, name)?;
+                            }
+                            RetainedEffectSource::Compiled {
+                                name,
+                                source,
+                                asset_base,
+                                origin,
+                            } => {
+                                let result = app.editor.dylib_cache.acquire(
+                                    lisp_host::DGenCompileKind::Effect,
+                                    *origin,
+                                    source,
+                                    app.graph.sample_rate,
+                                    asset_base.as_deref(),
+                                )?;
+                                app.apply_compiled_effect_to_slot_sync(result, name, slot, track)?;
+                            }
+                        }
+                        app.retain_effect_source(FxChainLocator::Track(track), slot, source.clone())?;
+                        EffectSlotSnapshot::restore_authoring_values(
+                            &app.state.pattern.effect_chains[track][slot],
+                            &values,
+                        )?;
+                        app.state.save_current_track_effect_snapshot(track);
+                        app.push_track_effect_slot_defaults(track, slot);
+                        let node_id = app.state.pattern.effect_chains[track][slot]
+                            .node_id
+                            .load(Ordering::Relaxed) as i32;
+                        if let (Some(reference), Some(ir)) = (&values.ir, &values.prepared_ir) {
+                            app.restore_prepared_track_effect_ir(track, slot, reference, ir.clone())?;
+                        }
+                        if let (Some(reference), Some(table)) = (&values.table, &values.prepared_table) {
+                            app.apply_restored_filter_table_to_node(node_id, reference, table.clone())?;
+                        }
+                        app.state.publish_scheduler_snapshot();
+                        Ok(())
+                    },
+                )?;
+                Ok(format!("Pasted audio effect '{name}' to track {}", track + 1))
+            }
+            EffectClipboard::Midi { name, values } => {
+                let slot = self
+                    .next_free_midi_fx_slot(track)
+                    .ok_or_else(|| "No free MIDI FX slots available".to_string())?;
+                self.apply_recorded_track_midi_fx_chain_mutation(
+                    track,
+                    "Paste MIDI FX",
+                    |app| {
+                        let pasted_slot = app.add_midi_fx_to_track_sync(track, &name)?;
+                        debug_assert_eq!(pasted_slot, slot);
+                        EffectSlotSnapshot::restore_authoring_values(
+                            &app.state.pattern.midi_fx_slots[track][pasted_slot],
+                            &values,
+                        )?;
+                        app.state.save_current_track_midi_fx_snapshot(track);
+                        app.state.publish_scheduler_snapshot();
+                        Ok(())
+                    },
+                )?;
+                Ok(format!("Pasted MIDI FX '{name}' to track {}", track + 1))
+            }
+        }
+    }
+
     pub(super) fn reclaim_applied_effect_leases(&mut self) {
         let applied =
             unsafe { crate::audiograph::graph_edit_applied_batch_serial(self.graph.lg.0) };
@@ -7782,6 +8013,117 @@ mod tests {
         ));
         assert_eq!(app.graph.effect_descriptors[0][slot].name, "Filter");
         assert_eq!(app.state.pattern.effect_chains[0][slot].defaults.get(0), retained_value);
+        graph.process_block();
+    }
+
+    #[test]
+    fn audio_effect_clipboard_preserves_values_is_independent_and_undoable() {
+        let graph = TestLiveGraph::new("audio-fx-clipboard-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let source_slot = app.add_builtin_effect_sync(0, "Filter").unwrap();
+        app.state.pattern.effect_chains[0][source_slot]
+            .defaults
+            .set(0, 0.37);
+
+        assert_eq!(
+            app.copy_track_effect_to_clipboard(0, source_slot).unwrap(),
+            "Filter"
+        );
+        app.paste_effect_clipboard_to_track(1).unwrap();
+        let pasted_slot = BUILTIN_SLOT_COUNT;
+        assert_eq!(app.graph.effect_descriptors[1][pasted_slot].name, "Filter");
+        assert_eq!(
+            app.state.pattern.effect_chains[1][pasted_slot].defaults.get(0),
+            0.37
+        );
+        let source_node = app.state.pattern.effect_chains[0][source_slot]
+            .node_id
+            .load(Ordering::Relaxed);
+        let pasted_node = app.state.pattern.effect_chains[1][pasted_slot]
+            .node_id
+            .load(Ordering::Relaxed);
+        assert_ne!(source_node, pasted_node, "paste must create an independent DSP instance");
+
+        app.state.pattern.effect_chains[1][pasted_slot]
+            .defaults
+            .set(0, 0.91);
+        assert_eq!(
+            app.state.pattern.effect_chains[0][source_slot].defaults.get(0),
+            0.37,
+            "editing the paste must not mutate the source"
+        );
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.state.pattern.effect_chains[1][pasted_slot]
+                .node_id
+                .load(Ordering::Relaxed),
+            0
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn midi_effect_clipboard_preserves_values_and_reports_empty_clipboard() {
+        let mut app = test_app_with_track_count(2);
+        assert_eq!(
+            app.paste_effect_clipboard_to_track(1).unwrap_err(),
+            "Effect clipboard is empty"
+        );
+        let source_slot = app.add_midi_fx_to_track_sync(0, "arp").unwrap();
+        app.state.pattern.midi_fx_slots[0][source_slot]
+            .defaults
+            .set(0, 0.42);
+
+        assert_eq!(
+            app.copy_midi_effect_to_clipboard(0, source_slot).unwrap(),
+            "arp"
+        );
+        app.paste_effect_clipboard_to_track(1).unwrap();
+        assert_eq!(app.state.pattern.track_params[1].midi_fx_chain(), vec!["arp"]);
+        assert_eq!(app.state.pattern.midi_fx_slots[1][0].defaults.get(0), 0.42);
+        let source_id = app.device_registry.midi_effect(app.track_registry.id_at(0).unwrap(), 0);
+        let pasted_id = app.device_registry.midi_effect(app.track_registry.id_at(1).unwrap(), 0);
+        assert_ne!(source_id, pasted_id);
+
+        app.state.pattern.midi_fx_slots[1][0].defaults.set(0, 0.73);
+        assert_eq!(app.state.pattern.midi_fx_slots[0][0].defaults.get(0), 0.42);
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(app.state.pattern.track_params[1].midi_fx_chain().is_empty());
+    }
+
+    #[test]
+    fn copied_effect_uses_retained_draft_source_and_excludes_parameter_locks() {
+        let graph = TestLiveGraph::new("retained-fx-clipboard-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let slot = app.add_builtin_effect_sync(0, "Filter").unwrap();
+        let retained = RetainedEffectSource::Compiled {
+            name: "unsaved-draft".to_string(),
+            source: "(effect (param cutoff 0.5))".to_string(),
+            asset_base: Some(std::path::PathBuf::from("/tmp/unsaved-draft")),
+            origin: lisp_host::DGenSourceOrigin::Custom,
+        };
+        app.retain_effect_source(FxChainLocator::Track(0), slot, retained.clone())
+            .unwrap();
+        app.state.pattern.effect_chains[0][slot]
+            .plocks
+            .set(0, 0, 0.25);
+
+        app.copy_track_effect_to_clipboard(0, slot).unwrap();
+        let Some(EffectClipboard::Audio { source, values }) = &app.effect_clipboard else {
+            panic!("audio effect should be copied");
+        };
+        assert_eq!(source, &retained, "copy must not resolve an unsaved draft by library name");
+        assert!(values.plocks.iter().flatten().all(Option::is_none));
+        assert!(values.key_locks.is_empty());
         graph.process_block();
     }
 

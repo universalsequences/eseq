@@ -1177,6 +1177,36 @@ pub(crate) fn handle_metal_soft_step_param_key(
     }
 }
 
+/// Give an explicit major-mode clipboard binding ownership before the editor's
+/// global text clipboard binding. Focused text widgets remain first-class text
+/// editors and therefore keep the same chord for themselves.
+fn handle_mode_clipboard_shortcut(
+    editor: &mut Editor,
+    key: &crossterm::event::KeyEvent,
+) -> bool {
+    use crossterm::event::KeyCode;
+
+    if editor.minibuffer_prompt().is_some()
+        || editor.prompt_text().is_some()
+        || focused_widget_captures_text_input(editor)
+        || key.modifiers != clipboard_shortcut_modifier_for(CURRENT_SHORTCUT_PLATFORM)
+        || !matches!(key.code, KeyCode::Char('c' | 'C' | 'v' | 'V'))
+    {
+        return false;
+    }
+    let Some(handler) = editor.active_mode_keybinding(*key).map(str::to_string) else {
+        return false;
+    };
+    if let Err(error) = editor.runtime_mut().invoke_global(&handler, Vec::new()) {
+        editor.handle_host_event(HostEvent::Status(format!(
+            "Could not run clipboard shortcut: {error:?}"
+        )));
+    }
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+    true
+}
+
 /// Arrangement (Arr tab) region clipboard seam (region spec 5.3).
 ///
 /// The region and the edit cursor are Rust-owned but published as
@@ -1389,6 +1419,10 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
 
     if focused_samples_search_should_hand_off_to_tree(editor, key) {
         return focus_samples_browser_active_tree(editor);
+    }
+
+    if handle_mode_clipboard_shortcut(editor, key) {
+        return true;
     }
 
     if handle_arrangement_region_shortcut(editor, key) {

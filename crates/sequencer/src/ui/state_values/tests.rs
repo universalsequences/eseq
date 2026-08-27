@@ -6389,6 +6389,31 @@
 
         {
             let active = Arc::clone(&active);
+            editor.runtime_mut().register_native(
+                "seq-copy-selected-effect",
+                move |_args, ctx| {
+                    if active.lock().unwrap().is_none() {
+                        ctx.set_status("No effect selected to copy");
+                        return Ok(Value::Bool(false));
+                    }
+                    ctx.enqueue_command(HostCommand::Custom {
+                        name: "copy-selected-effect".to_string(),
+                        payload: Value::Nil,
+                    });
+                    Ok(Value::Bool(true))
+                },
+            );
+        }
+        editor.runtime_mut().register_native("seq-paste-effect", move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "paste-effect".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        });
+
+        {
+            let active = Arc::clone(&active);
             editor
                 .runtime_mut()
                 .register_native("seq-delete-active-target", move |_args, ctx| {
@@ -21102,8 +21127,8 @@
     }
 
     #[test]
-    fn metal_seq_copy_paste_step_shortcuts_work_outside_grid_buffers() {
-        use crossterm::event::{KeyCode, KeyEvent};
+    fn metal_seq_fx_clipboard_shortcuts_override_steps_but_not_text_or_other_buffers() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use eseqlisp::ui::platform::{
             clipboard_shortcut_modifier_for, CURRENT_SHORTCUT_PLATFORM,
         };
@@ -21113,77 +21138,82 @@
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let step_clipboard = Arc::new(Mutex::new(None));
-        let ui_epoch = AtomicUsize::new(0);
-
         state.pattern.patterns[0].set_step_active(0, true);
-        let mut app = test_app_for_track_visual_state(Arc::clone(&state));
         editor
             .runtime_mut()
             .eval_str(
                 r#"
                   (set-window-buffer "*fx*")
                   (set! cursor-step 0)
+                  (seq-set-delete-target :fx-effect (dict :chain "audio" :slot 8))
                 "#,
             )
-            .expect("switch to fx buffer and set cursor");
+            .expect("switch to fx buffer and select an effect");
         editor.refresh_runtime_side_effects();
         editor.drain_host_commands();
+        assert_eq!(
+            editor.runtime_mut().eval_str("(seq-active-delete-target-kind)").unwrap(),
+            Some(Value::String("fx-effect".to_string()))
+        );
 
-        let clipboard_modifiers =
-            clipboard_shortcut_modifier_for(CURRENT_SHORTCUT_PLATFORM);
-        assert!(handle_metal_command_shortcut_with_ui_epoch(
+        for (modifiers, expected) in [
+            (KeyModifiers::SUPER, "eseq.effects.buffers/copy-selected-effect"),
+            (
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                "eseq.effects.buffers/copy-selected-effect",
+            ),
+        ] {
+            assert_eq!(
+                editor.active_mode_keybinding(KeyEvent::new(KeyCode::Char('c'), modifiers)),
+                Some(expected),
+                "both macOS and Linux clipboard chords must be bound in seq-fx-mode"
+            );
+        }
+
+        let clipboard_modifiers = clipboard_shortcut_modifier_for(CURRENT_SHORTCUT_PLATFORM);
+        assert!(handle_metal_command_shortcut(
             &mut editor,
             &KeyEvent::new(KeyCode::Char('c'), clipboard_modifiers),
             &state,
             &current_track,
             &selected_steps,
             &step_clipboard,
-            &ui_epoch,
         ));
-        assert!(step_clipboard.lock().unwrap().is_some());
-        assert_eq!(
-            ui_epoch.load(Ordering::Relaxed),
-            0,
-            "copy should not invalidate sequencer UI state"
+        assert!(step_clipboard.lock().unwrap().is_none());
+        let commands = editor.drain_host_commands();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, .. }]
+                    if name == "copy-selected-effect"
+            ),
+            "copy shortcut commands: {commands:?}"
         );
 
-        editor
-            .runtime_mut()
-            .eval_str("(set! cursor-step 1)")
-            .expect("move cursor");
-        assert!(handle_metal_command_shortcut_with_ui_epoch(
+        assert!(handle_metal_command_shortcut(
             &mut editor,
             &KeyEvent::new(KeyCode::Char('v'), clipboard_modifiers),
             &state,
             &current_track,
             &selected_steps,
             &step_clipboard,
-            &ui_epoch,
         ));
-        assert!(
-            !state.pattern.patterns[0].is_active(1),
-            "the input layer should defer paste mutation to the history-aware host command"
-        );
-        assert_eq!(
-            ui_epoch.load(Ordering::Relaxed),
-            0,
-            "the host-command dispatcher owns paste invalidation"
-        );
         let commands = editor.drain_host_commands();
-        let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
-            panic!("paste shortcut should enqueue one custom host command: {commands:?}");
-        };
-        assert_eq!(name, "paste-steps");
-        let (outcome, track) =
-            apply_step_paste_host_command(&mut app, &step_clipboard, payload)
-                .expect("apply queued paste through the history-aware command path");
-        assert!(matches!(outcome, app::edit::EditOutcome::Applied(_)));
-        assert_eq!(track, 0);
-        assert!(state.pattern.patterns[0].is_active(1));
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, .. }] if name == "paste-effect"
+        ));
+
         assert_eq!(
-            ui_epoch.load(Ordering::Relaxed),
-            0,
-            "the shortcut helper must not duplicate the dispatcher-owned invalidation"
+            editor
+                .runtime_mut()
+                .eval_str("(do (seq-clear-delete-target) (seq-copy-selected-effect))")
+                .unwrap(),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            editor.runtime_mut().take_status_message().as_deref(),
+            Some("No effect selected to copy")
         );
 
         editor
@@ -21199,6 +21229,7 @@
             &selected_steps,
             &step_clipboard,
         ));
+        assert!(step_clipboard.lock().unwrap().is_some());
 
         editor.open_scratch_buffer("*editable*", "");
         assert!(!handle_metal_command_shortcut(
