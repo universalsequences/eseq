@@ -54,6 +54,11 @@
 ;; state/accessor hub with no `effect-buffer`, not one of the four UI roots.
 (import eseq.seq-step-tabs :as tabs)
 
+;; Shared scene-bank view state (see the module header). A state/accessor
+;; hub with no effect-buffer, and ui/main.lisp reaches it through this import
+;; before the transport body runs.
+(import eseq.scene-banks)
+
 (export transport-stop
         seq-set-scene-launch-quantize
         seq-set-record-quantize
@@ -624,53 +629,21 @@
   (host-command "switch-pattern"
     (dict :idx idx :quantize (or SEQ.scene-launch-quantize "off"))))
 
-;; UI source evaluation can precede the first song-state publication. Keep the
-;; strip renderable during that interval; the reactive SEQ.scene-banks read
-;; replaces this model-consistent single-bank value as soon as sync arrives.
+;; Scene-bank view state lives in eseq.scene-banks so the mixer clip grid
+;; (scene-banks spec 10.1) shares one viewed bank with this strip. These four
+;; are thin local spellings of that module's accessors; the writes below name
+;; the module's state directly.
 (def scene-banks ()
-  (if (> (len SEQ.scene-banks) 0)
-    SEQ.scene-banks
-    (list (dict :id 0 :label "A" :name nil :len SEQ.num-patterns :offset 0))))
+  (eseq.scene-banks/scene-banks))
 
 (def scene-bank-index-containing (scene)
-  (let ((banks (scene-banks)))
-    (let ((matches (filter
-            (lambda (i)
-              (let ((bank (nth banks i)))
-                (and (>= scene (get bank :offset))
-                  (< scene (+ (get bank :offset) (get bank :len))))))
-            (range 0 (len banks)))))
-      (if (> (len matches) 0) (nth matches 0) 0))))
-
-;; Pure presentation state: switching this index never calls the host. The -1
-;; sentinel initializes the first rendered view to the bank containing the
-;; current scene. Structural edits clamp a stale index to the nearest survivor.
-(defstate viewed-scene-bank-index -1)
-(defstate viewed-scene-bank-pending-new false)
+  (eseq.scene-banks/scene-bank-index-containing scene))
 
 (def scene-viewed-bank-index ()
-  (let ((count (len (scene-banks))))
-    (if (= count 0)
-      0
-      (if viewed-scene-bank-pending-new
-        (if (< viewed-scene-bank-index count)
-          (do
-            (set! viewed-scene-bank-pending-new false)
-            viewed-scene-bank-index)
-          ;; The host has not published the appended bank yet. Keep the pending
-          ;; index intact while rendering the old last bank in the meantime.
-          (- count 1))
-        (let ((index (if (< viewed-scene-bank-index 0)
-                (scene-bank-index-containing SEQ.current-pattern)
-                (min viewed-scene-bank-index (- count 1)))))
-          (do
-            (if (not (= viewed-scene-bank-index index))
-              (set! viewed-scene-bank-index index)
-              nil)
-            index))))))
+  (eseq.scene-banks/scene-viewed-bank-index))
 
 (def scene-viewed-bank ()
-  (nth (scene-banks) (scene-viewed-bank-index)))
+  (eseq.scene-banks/scene-viewed-bank))
 
 (def scene-bank-labels ()
   (reduce |labels bank|
@@ -690,14 +663,14 @@
     (do
       ;; create-scene-bank appends. Keep the pending index unclamped until the
       ;; host publishes the new SEQ.scene-banks entry, then the view lands on it.
-      (set! viewed-scene-bank-index (len (scene-banks)))
-      (set! viewed-scene-bank-pending-new true)
+      (set! eseq.scene-banks/viewed-scene-bank-index (len (scene-banks)))
+      (set! eseq.scene-banks/viewed-scene-bank-pending-new true)
       (host-command "create-scene-bank" (dict)))
     (let ((index (scene-bank-index-for-label label)))
       (if (>= index 0)
         (do
-          (set! viewed-scene-bank-pending-new false)
-          (set! viewed-scene-bank-index index))
+          (set! eseq.scene-banks/viewed-scene-bank-pending-new false)
+          (set! eseq.scene-banks/viewed-scene-bank-index index))
         nil))))
 
 (def scene-playing-in-other-bank? ()
@@ -764,8 +737,8 @@
           (fallback-index (max 0 (- (scene-viewed-bank-index) 1))))
       (do
         (set! scene-bank-ops-menu-open false)
-        (set! viewed-scene-bank-pending-new false)
-        (set! viewed-scene-bank-index fallback-index)
+        (set! eseq.scene-banks/viewed-scene-bank-pending-new false)
+        (set! eseq.scene-banks/viewed-scene-bank-index fallback-index)
         (host-command "delete-scene-bank" (dict :bank-id (get bank :id)))))
     nil))
 

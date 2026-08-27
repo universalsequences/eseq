@@ -3856,6 +3856,52 @@
     }
 
     #[test]
+    fn track_pattern_bank_indices_map_clips_to_the_banks_that_reference_them() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![sample_pattern_snapshot(1), sample_pattern_snapshot(1)],
+            0,
+        );
+        let scene_zero_id = state.scene_track_pattern_id(0, 0).unwrap();
+        let scene_one_id = state.scene_track_pattern_id(1, 0).unwrap();
+
+        // Both scenes start in bank A, so both clips belong to bank 0.
+        let memberships = state.with_project_scenes(|scenes| scenes.track_pattern_bank_indices(0));
+        assert_eq!(memberships.get(&scene_zero_id), Some(&vec![0]));
+        assert_eq!(memberships.get(&scene_one_id), Some(&vec![0]));
+
+        let bank_b = state.create_scene_bank().expect("scene bank created");
+        state
+            .move_scene_to_scene_bank(1, bank_b)
+            .expect("scene moved into bank B");
+
+        let memberships = state.with_project_scenes(|scenes| scenes.track_pattern_bank_indices(0));
+        assert_eq!(memberships.get(&scene_zero_id), Some(&vec![0]));
+        assert_eq!(
+            memberships.get(&scene_one_id),
+            Some(&vec![1]),
+            "a clip follows the bank of the scene whose cell references it"
+        );
+
+        // An unreferenced clip (the grid's orphan case) is absent from the
+        // map entirely; the Lisp side shows those in every bank.
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+        assert!(state
+            .clear_scene_cell(
+                0,
+                0,
+                1,
+                &buffer_ids,
+                &sample_rates,
+                &names,
+                &instrument_types,
+            )
+            .is_some());
+        let memberships = state.with_project_scenes(|scenes| scenes.track_pattern_bank_indices(0));
+        assert_eq!(memberships.get(&scene_zero_id), None);
+    }
+
+    #[test]
     fn set_current_scene_cell_restores_shared_pattern_without_override() {
         let state = make_state_with_tracks(1);
         let first = PatternSnapshot::new_default(1, &[]);

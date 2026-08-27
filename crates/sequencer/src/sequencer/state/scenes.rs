@@ -1209,6 +1209,34 @@ impl ProjectScenes {
             .collect()
     }
 
+    /// Scene-bank membership of this track's clips: for every pool pattern a
+    /// scene cell on `track` references, the indices of the banks holding
+    /// those scenes (a pattern reachable from two banks lists both). Patterns
+    /// no scene references are absent — the mixer clip grid treats those
+    /// orphans as belonging to whichever bank is being viewed, so a freshly
+    /// created clip is never unreachable.
+    pub fn track_pattern_bank_indices(
+        &self,
+        track: usize,
+    ) -> std::collections::HashMap<PatternId, Vec<usize>> {
+        let mut memberships: std::collections::HashMap<PatternId, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut offset = 0usize;
+        for (bank_index, bank) in self.banks.iter().enumerate() {
+            for scene in self.scenes.iter().skip(offset).take(bank.len) {
+                let Some(id) = scene.cells.get(track).copied().flatten() else {
+                    continue;
+                };
+                let banks = memberships.entry(id).or_default();
+                if !banks.contains(&bank_index) {
+                    banks.push(bank_index);
+                }
+            }
+            offset += bank.len;
+        }
+        memberships
+    }
+
     pub fn set_cell(&mut self, scene: usize, track: usize, id: PatternId) -> bool {
         let Some(pool) = self.track_pools.get(track) else {
             return false;

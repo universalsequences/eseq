@@ -124,13 +124,31 @@ pub(crate) fn build_track_pattern_cells_value(
     state: &Arc<SequencerState>,
     track_count: usize,
 ) -> Value {
+    // Scene-bank membership per clip (scene-banks spec 10.1): the mixer clip
+    // grid renders only the viewed bank's clips, and the viewed bank is pure
+    // Lisp state, so the host publishes the membership rather than the slice.
+    // Resolved for every track under one lock, before `track_pattern_cells`
+    // takes it again per track.
+    let bank_memberships = state.with_project_scenes(|scenes| {
+        (0..track_count)
+            .map(|track| scenes.track_pattern_bank_indices(track))
+            .collect::<Vec<_>>()
+    });
     list_value((0..track_count).map(|track| {
-        list_value(
-            state
-                .track_pattern_cells(track)
-                .into_iter()
-                .map(|cell| map_value([("id", Value::Number(cell.pattern_id.0 as f64))])),
-        )
+        let memberships = &bank_memberships[track];
+        list_value(state.track_pattern_cells(track).into_iter().map(|cell| {
+            let banks = memberships
+                .get(&cell.pattern_id)
+                .map(|banks| banks.as_slice())
+                .unwrap_or(&[]);
+            map_value([
+                ("id", Value::Number(cell.pattern_id.0 as f64)),
+                (
+                    "banks",
+                    list_value(banks.iter().map(|index| Value::Number(*index as f64))),
+                ),
+            ])
+        }))
     }))
 }
 

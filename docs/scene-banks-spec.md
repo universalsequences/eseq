@@ -1,6 +1,8 @@
 # Scene Banks Spec
 
 Status: **BUILT** — implemented and acceptance-swept 2026-08-27 (epic `eseq-doy`).
+Rev 2 (2026-08-27, `eseq-doy.9`) adds §10: the mixer clip grid is bank-scoped
+too, which rev 1 had excluded.
 
 ## 1. Goal
 
@@ -212,11 +214,53 @@ projects of 24 scenes or fewer still load entirely into A. There are no other
 known deviations from the agreed v1 scope. Keyboard bank switching remains
 intentionally deferred rather than partially implemented.
 
-## 10. Out of scope
+## 10. Mixer clip grid (rev 2)
+
+The per-track clip grid in the mixer (`track-pattern-grid`,
+`content/ui/mixer.lisp`) is bank-scoped too, superseding rev 1's exclusion of
+it. Without this the grid renders every pattern in a track's pool into a fixed
+6x4 container and clips beyond ~24 overflow it — the same problem banking
+solves for the scene strip.
+
+### 10.1 Membership
+
+A clip belongs to the banks whose scenes reference it: bank k contains clip
+`p` on track `t` if some scene in bank k's span has `cells[t] == p`. Clips are
+pool patterns, not scenes, so this is derived, not stored — no engine or
+serialization change. Consequences:
+
+- A bank holds at most 24 scenes, so at most 24 referenced clips per track —
+  exactly the grid's capacity.
+- A clip reachable from two banks renders in both. That is the honest view: it
+  is one clip, launchable from either bank.
+- **Orphans** — clips no scene in any bank references (a freshly cloned clip,
+  a clip whose only scene was deleted) — render in *every* bank. Hiding them
+  would strand a new clip behind a bank the user cannot guess, and the first
+  click on one assigns it to the current scene, which gives it a bank.
+
+Host feed: `SEQ.track-pattern-cells` cells gain a `:banks` field — the list of
+bank indices referencing that clip, empty for orphans — built in
+`build_track_pattern_cells_value` from
+`ProjectScenes::track_pattern_bank_indices`. The viewed bank stays pure Lisp
+state, so the host publishes membership rather than a pre-sliced list.
+
+### 10.2 Which bank view
+
+The grid follows the **transport's viewed bank** — one bank view for the whole
+session, so switching banks in the strip re-scopes every track's clips at
+once. That shared state moved out of `ui/transport.lisp` into a new
+`eseq.scene-banks` module (`content/ui/scene-banks.lisp`) that both render
+roots import: `ui/main.lisp` loads `ui/mixer.lisp` *before* `ui/transport.lisp`,
+so a transport-owned `defstate` would not exist when the mixer's readers
+compile. The module is a state/accessor hub with no `effect-buffer`, so
+importing it from a render root is safe. Bank switching remains a pure view
+change: no host command, no engine work.
+
+## 11. Out of scope
 
 - Persisting scene names / durable `SceneId` (known gap, unchanged).
 - Auto-follow of the viewed bank on launch (indicator only in v1).
 - Keyboard/pad access for bank switching (mouse-only dropdown).
 - Cross-bank drag of pills, bank reordering UI, per-bank colors.
-- Any per-track clip-grid (mixer.lisp) banking — this spec covers the scene
-  strip only.
+- Cross-bank drag of clips in the mixer grid; a per-clip durable bank
+  assignment independent of the scenes that reference it.

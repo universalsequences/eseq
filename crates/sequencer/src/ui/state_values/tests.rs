@@ -1000,6 +1000,7 @@
             // under ui/ is listed here now. Keep it that way: when a file
             // gains a module header, add it here in the same commit.
             "ui/seq-core-state.lisp",
+            "ui/scene-banks.lisp",
             "ui/seq-grid-mode.lisp",
             "ui/seq-step-tabs.lisp",
             "ui/seq-script-picker.lisp",
@@ -6203,9 +6204,19 @@
             Some(Value::Number(1.0))
         );
         assert_eq!(
+            cell.get("banks").map(|value| match &*value.borrow() {
+                Value::List(items) =>
+                    items.iter().map(|item| item.borrow().clone()).collect::<Vec<_>>(),
+                other => panic!("bank membership should be a list, got {other:?}"),
+            }),
+            Some(vec![Value::Number(0.0)]),
+            "the sole scene's clip reports membership in bank A"
+        );
+        assert_eq!(
             cell.len(),
-            1,
-            "track pattern cell topology should only include stable identity"
+            2,
+            "track pattern cell topology should only include stable identity \
+             and scene-bank membership"
         );
     }
 
@@ -22584,7 +22595,7 @@
             .set_reactive("SEQ", "scene-banks", scene_banks);
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.transport/viewed-scene-bank-index 0)")
+            .eval_str("(set! eseq.scene-banks/viewed-scene-bank-index 0)")
             .expect("select fixture scene bank");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -22721,7 +22732,7 @@
             .set_reactive("SEQ", "current-pattern", Value::Number(2.0));
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.transport/viewed-scene-bank-index -1)")
+            .eval_str("(set! eseq.scene-banks/viewed-scene-bank-index -1)")
             .expect("reset viewed bank initialization");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -22845,7 +22856,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.transport/viewed-scene-bank-index")
+                .eval_str("eseq.scene-banks/viewed-scene-bank-index")
                 .expect("read delete fallback bank"),
             Some(Value::Number(0.0)),
             "deleting a viewed bank must fall back to the previous bank"
@@ -22985,7 +22996,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.transport/viewed-scene-bank-index")
+                .eval_str("eseq.scene-banks/viewed-scene-bank-index")
                 .expect("read pending viewed bank"),
             Some(Value::Number(2.0)),
             "New bank must select the appended bank's pending index"
@@ -33228,6 +33239,93 @@
         summarize("input", &input_samples);
         summarize("frame", &frame_samples);
         summarize("total", &total_samples);
+    }
+
+    #[test]
+    fn metal_seq_mixer_clip_grid_renders_only_the_viewed_scene_bank() {
+        // Scene-banks spec 10.1: the clip grid shows the clips of the bank the
+        // transport strip is viewing, plus orphans no scene references yet.
+        let mut editor = mixer_v2_perf_editor(1, 4);
+        let banked_cell = |id: f64, banks: Vec<f64>| {
+            map_value([
+                ("id", Value::Number(id)),
+                (
+                    "banks",
+                    test_list(banks.into_iter().map(Value::Number).collect()),
+                ),
+            ])
+        };
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-pattern-cells",
+            test_list(vec![test_list(vec![
+                banked_cell(1.0, vec![0.0]),
+                banked_cell(2.0, vec![0.0, 1.0]),
+                banked_cell(3.0, vec![1.0]),
+                banked_cell(4.0, Vec::new()),
+            ])]),
+        );
+        let scene_banks = editor
+            .runtime_mut()
+            .eval_str(
+                "(list (dict :id 11 :label \"A\" :name nil :len 2 :offset 0) \
+                       (dict :id 22 :label \"B\" :name nil :len 2 :offset 2))",
+            )
+            .expect("evaluate scene bank fixture")
+            .expect("scene bank fixture value");
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "scene-banks", scene_banks);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-patterns", Value::Number(4.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-pattern", Value::Number(0.0));
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.scene-banks/viewed-scene-bank-index 0)")
+            .expect("view scene bank A");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("bank A mixer layout");
+        for pattern_id in [1, 2, 4] {
+            let key = format!("/track-pattern-cell-0-{pattern_id}");
+            assert!(
+                find_layout_node_by_stable_key_suffix(&layout, &key).is_some(),
+                "bank A must render clip {pattern_id}"
+            );
+        }
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/track-pattern-cell-0-3").is_none(),
+            "bank A must not render a clip only bank B's scenes reference"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.scene-banks/viewed-scene-bank-index 1)")
+            .expect("view scene bank B");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("bank B mixer layout");
+        for pattern_id in [2, 3, 4] {
+            let key = format!("/track-pattern-cell-0-{pattern_id}");
+            assert!(
+                find_layout_node_by_stable_key_suffix(&layout, &key).is_some(),
+                "bank B must render clip {pattern_id}"
+            );
+        }
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/track-pattern-cell-0-1").is_none(),
+            "switching the viewed bank must drop bank A's clips from the grid"
+        );
+        assert_eq!(
+            count_stable_key_prefix(&layout, "eseq.mixer/track-pattern-cell-"),
+            3,
+            "the grid renders the viewed bank's clips plus unreferenced orphans"
+        );
     }
 
     #[test]

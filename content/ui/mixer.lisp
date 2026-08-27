@@ -16,6 +16,9 @@
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
 (import eseq.effects.drag-drop :as effect-dd)
+;; Shared scene-bank view state: the clip grid below shows only the bank the
+;; transport strip is viewing (scene-banks spec 10.1).
+(import eseq.scene-banks)
 
 (export muted?
         track-color-r
@@ -578,8 +581,15 @@
         :quantize (or SEQ.scene-launch-quantize "off")))
     (seq-set-delete-target :track-pattern (dict :track track :pattern-id (get cell :id)))))
 
+;; Clips of `track` that belong to the viewed scene bank (spec 10.1). A bank
+;; holds at most 24 scenes, so at most 24 referenced clips per track — the
+;; grid's 6x4 capacity — plus any orphan clips no scene references yet.
+(def viewed-bank-track-pattern-cells (track)
+  (filter (lambda (cell) (eseq.scene-banks/clip-in-viewed-bank? cell))
+    (track-pattern-cells track)))
+
 (def track-pattern-grid (track)
-  (let ((cells (track-pattern-cells track)))
+  (let ((cells (viewed-bank-track-pattern-cells track)))
     (box :width :fill :height 4.0 :align :top :bg :black :background-color :buffer-bg
       (grid :cols 6 :col-width 2.0 :row-height 1.0 :align :center
         (each cells |cell cell-idx|
