@@ -381,6 +381,11 @@ struct RegisteredSubtreeOwner {
 /// dependency mean the render is reproducible.
 struct SubtreeRenderCache {
     value: Value,
+    /// Stable-id annotation of `value` for its most recent embedding context.
+    /// The raw cached value is sealed before insertion, so matching its marker
+    /// cell is a sufficient identity check: its contents cannot change behind
+    /// this memo.
+    annotation: Option<CachedWidgetAnnotation>,
     chunk_idx: usize,
     /// Deep-cloned captured upvalues from render time. Live cells can be
     /// mutated in place by reactive writes, so the snapshot must not share
@@ -392,6 +397,20 @@ struct SubtreeRenderCache {
     reactive_reads: HashSet<ReactiveFieldKey>,
     /// Every global symbol read during the render, descendants included.
     symbol_reads: HashSet<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct WidgetAnnotationContext {
+    source_buffer_id: Option<BufferId>,
+    source_file: Option<std::path::PathBuf>,
+    target: EffectTarget,
+    parent_stable_id: Option<u64>,
+    path: Vec<usize>,
+}
+
+struct CachedWidgetAnnotation {
+    context: WidgetAnnotationContext,
+    value: Value,
 }
 
 /// Equality for cached subtree captured inputs. Deliberately stricter than
@@ -603,6 +622,17 @@ thread_local! {
     static FROZEN_TREE_PRUNE_THRESHOLD: std::cell::Cell<usize> = const { std::cell::Cell::new(4096) };
 }
 
+// Pre-annotation subtree cache entries need a release-build immutability
+// guarantee: stable-id annotation is memoized by their cell identity. Keep a
+// separate registry so ordinary committed-tree freezing remains a zero-cost
+// debug assertion in release builds.
+thread_local! {
+    static SEALED_ANNOTATION_INPUT_CELLS: RefCell<HashMap<usize, std::rc::Weak<RefCell<Value>>>> =
+        RefCell::new(HashMap::new());
+    static SEALED_ANNOTATION_PRUNE_THRESHOLD: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(4096) };
+}
+
 /// Register every list/map cell reachable from `tree` as frozen. Idempotent
 /// and cheap on re-freeze: an already-registered live cell short-circuits its
 /// whole subtree (shared cells imply shared subtrees). No-op in release.
@@ -659,11 +689,80 @@ fn freeze_tree_cell(
     freeze_value_cells(&cell.borrow(), cells);
 }
 
+/// Seal an identity-keyed annotation input in every build. Unlike committed
+/// widget trees, these values exist before annotation and are otherwise live
+/// Lisp data; allowing a later field write would make an identity cache return
+/// stale annotated content.
+fn seal_widget_tree_annotation_input(tree: &Value) {
+    SEALED_ANNOTATION_INPUT_CELLS.with(|cells| {
+        let mut cells = cells.borrow_mut();
+        SEALED_ANNOTATION_PRUNE_THRESHOLD.with(|threshold| {
+            if cells.len() > threshold.get() {
+                cells.retain(|_, weak| weak.strong_count() > 0);
+                threshold.set((cells.len() * 2).max(4096));
+            }
+        });
+        seal_annotation_value_cells(tree, &mut cells);
+    });
+}
+
+fn seal_annotation_value_cells(
+    value: &Value,
+    cells: &mut HashMap<usize, std::rc::Weak<RefCell<Value>>>,
+) {
+    match value {
+        Value::List(items) => {
+            for cell in items {
+                seal_annotation_cell(cell, cells);
+            }
+        }
+        Value::Map(map) => {
+            for cell in map.values() {
+                seal_annotation_cell(cell, cells);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn seal_annotation_cell(
+    cell: &Rc<RefCell<Value>>,
+    cells: &mut HashMap<usize, std::rc::Weak<RefCell<Value>>>,
+) {
+    let ptr = Rc::as_ptr(cell) as usize;
+    if cells
+        .get(&ptr)
+        .is_some_and(|existing| existing.strong_count() > 0)
+    {
+        return;
+    }
+    cells.insert(ptr, Rc::downgrade(cell));
+    seal_annotation_value_cells(&cell.borrow(), cells);
+}
+
+fn panic_if_sealed_annotation_input(cell: &Rc<RefCell<Value>>, context: &'static str) {
+    SEALED_ANNOTATION_INPUT_CELLS.with(|cells| {
+        let mut cells = cells.borrow_mut();
+        let ptr = Rc::as_ptr(cell) as usize;
+        match cells.get(&ptr) {
+            Some(sealed) if sealed.strong_count() > 0 => panic!(
+                "widget-tree annotation cache violation: {context} mutating a sealed \
+                 subtree render; render-cache values are immutable"
+            ),
+            Some(_) => {
+                cells.remove(&ptr);
+            }
+            None => {}
+        }
+    });
+}
+
 /// Panic (debug builds only) if `cell` belongs to a frozen widget tree.
 /// Mutation of a stored tree must instead deep-clone at the mutation site,
 /// scoped to the subtree it modifies (spec §3.2).
 #[inline]
 pub fn debug_assert_cell_not_frozen(cell: &Rc<RefCell<Value>>, context: &'static str) {
+    panic_if_sealed_annotation_input(cell, context);
     #[cfg(debug_assertions)]
     FROZEN_TREE_CELLS.with(|cells| {
         let mut cells = cells.borrow_mut();
@@ -1974,6 +2073,19 @@ fn explicit_subtree_root_metadata(value: &Value) -> Option<(u64, String)> {
     Some((root_id, stable_key))
 }
 
+fn same_subtree_render_identity(a: &Value, b: &Value) -> bool {
+    let (Value::Map(a), Value::Map(b)) = (a, b) else {
+        return false;
+    };
+    match (
+        a.get(SUBTREE_ROOT_ID_PROP),
+        b.get(SUBTREE_ROOT_ID_PROP),
+    ) {
+        (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
 fn annotate_explicit_subtree_root(
     value: &Value,
     subtree_root_id: u64,
@@ -2054,6 +2166,7 @@ fn annotate_widget_tree_stable_ids(
     target: &EffectTarget,
     parent_stable_id: Option<u64>,
     path: &mut Vec<usize>,
+    subtree_render_cache: &mut HashMap<u64, SubtreeRenderCache>,
 ) -> Value {
     let Value::Map(map) = value else {
         return value.deep_clone();
@@ -2065,6 +2178,28 @@ fn annotate_widget_tree_stable_ids(
     }) else {
         return value.deep_clone();
     };
+
+    let cached_subtree_root_id = prop_u64_rc(map, SUBTREE_ROOT_ID_PROP).filter(|root_id| {
+        subtree_render_cache
+            .get(root_id)
+            .is_some_and(|cached| same_subtree_render_identity(value, &cached.value))
+    });
+    // Context owns a path and module path, so construct it only for an actual
+    // cache input rather than allocating once per ordinary widget.
+    let annotation_context = cached_subtree_root_id.map(|_| WidgetAnnotationContext {
+        source_buffer_id,
+        source_file: source_file.map(std::path::Path::to_path_buf),
+        target: target.clone(),
+        parent_stable_id,
+        path: path.clone(),
+    });
+    if let Some(annotation) = cached_subtree_root_id
+        .and_then(|root_id| subtree_render_cache.get(&root_id))
+        .and_then(|cached| cached.annotation.as_ref())
+        .filter(|annotation| Some(&annotation.context) == annotation_context.as_ref())
+    {
+        return annotation.value.clone();
+    }
 
     let key = prop_string_rc(map, STABLE_KEY_PROP).or_else(|| stable_key_value(map));
     let stable_id = stable_widget_hash(
@@ -2093,6 +2228,7 @@ fn annotate_widget_tree_stable_ids(
                                 target,
                                 Some(stable_id),
                                 path,
+                                subtree_render_cache,
                             );
                             path.pop();
                             Rc::new(RefCell::new(annotated_child))
@@ -2148,7 +2284,18 @@ fn annotate_widget_tree_stable_ids(
         );
     }
 
-    Value::Map(annotated)
+    let annotated = Value::Map(annotated);
+    if let (Some(root_id), Some(annotation_context)) =
+        (cached_subtree_root_id, annotation_context)
+        && let Some(cached) = subtree_render_cache.get_mut(&root_id)
+        && same_subtree_render_identity(value, &cached.value)
+    {
+        cached.annotation = Some(CachedWidgetAnnotation {
+            context: annotation_context,
+            value: annotated.clone(),
+        });
+    }
+    annotated
 }
 
 struct ActiveExpansionSite {
@@ -6096,10 +6243,15 @@ impl VM {
             .iter()
             .map(|cell| cell.borrow().deep_clone())
             .collect();
+        // Stable-id annotation memoizes this graph by cell identity. Sealing
+        // makes that identity meaningful in release builds too: VM field
+        // writes cannot mutate a cached render behind the memo.
+        seal_widget_tree_annotation_input(rendered);
         self.subtree_render_cache.insert(
             owner.root_id,
             SubtreeRenderCache {
                 value: rendered.clone(),
+                annotation: None,
                 chunk_idx: *chunk_idx,
                 upvalues,
                 parent_root_id: owner.parent_root_id,
@@ -6771,6 +6923,7 @@ impl VM {
                                 &self.current_effect_target,
                                 None,
                                 &mut path,
+                                &mut self.subtree_render_cache,
                             );
                             freeze_widget_tree(&annotated_tree);
                             {
@@ -7889,6 +8042,7 @@ impl VM {
                             &self.current_effect_target,
                             None,
                             &mut path,
+                            &mut self.subtree_render_cache,
                         );
                         freeze_widget_tree(&annotated_tree);
                         if let Some((subtree_root_id, _stable_key)) =
@@ -10873,6 +11027,16 @@ counter
         let (tree, label_cell) = tree_with_label("frozen");
         freeze_widget_tree(&tree);
         debug_assert_cell_not_frozen(&label_cell, "test mutation");
+    }
+
+    #[test]
+    fn sealed_annotation_input_rejects_mutation_in_every_build() {
+        let (tree, label_cell) = tree_with_label("sealed");
+        super::seal_widget_tree_annotation_input(&tree);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            debug_assert_cell_not_frozen(&label_cell, "test sealed mutation");
+        }));
+        assert!(result.is_err(), "sealed render-cache input must be immutable");
     }
 
     #[test]
