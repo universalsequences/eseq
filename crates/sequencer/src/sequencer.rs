@@ -56,8 +56,8 @@ pub use state::{
     TrackInstrumentPatternState, TrackInstrumentPatternStateSnapshot, TrackOutputEvent,
     Mix, MixId, Patch, PatchId, SoundEntityMeta, SoundRefs, StoredPattern, TrackPatternSeq,
     TrackSoundPool, SOUND_COLOR_SET,
-    Scene, SceneId, TrackPatternCellView, TrackPatternData, TrackPatternId, TrackPatternPool, TrackRegistry, TrackRegistryError,
-    TrackPatternLaneState,
+    Scene, SceneBank, SceneBankId, SceneId, TrackPatternCellView, TrackPatternData, TrackPatternId, TrackPatternPool, TrackRegistry, TrackRegistryError,
+    TrackPatternLaneState, MAX_SCENES_PER_BANK,
     NeuralInstrumentOverrideState, TrackEffectBindingStateSnapshot,
     RACK_MACRO_COUNT, RACK_SLOT_PARAM_COUNT,
 };

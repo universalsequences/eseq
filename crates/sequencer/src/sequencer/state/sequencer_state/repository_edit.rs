@@ -257,6 +257,7 @@ impl SequencerState {
         let mut snapshots = scenes.snapshots();
         let result = edit(&mut snapshots, current_pattern);
         let mut rebuilt = ProjectScenes::from_pattern_snapshots(&snapshots, current_pattern);
+        rebuilt.copy_scene_bank_model_from(&scenes);
         for (scene, bus_patterns) in rebuilt.scenes.iter_mut().zip(bus_patterns) {
             scene.bus_patterns = bus_patterns;
         }

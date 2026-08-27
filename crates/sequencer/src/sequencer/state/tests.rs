@@ -4359,6 +4359,108 @@
     }
 
     #[test]
+    fn project_scenes_create_and_delete_keep_scene_bank_partition_consistent() {
+        let snapshots = vec![
+            snapshot_with_active_step(1, 0, 3),
+            snapshot_with_active_step(1, 0, 9),
+        ];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        scenes.install_scene_banks(vec![
+            SceneBank {
+                id: SceneBankId(4),
+                name: Some("Intro".to_string()),
+                len: 1,
+            },
+            SceneBank {
+                id: SceneBankId(8),
+                name: None,
+                len: 1,
+            },
+        ]);
+
+        assert_eq!(scenes.new_scene(), 2);
+        assert_eq!(
+            scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(scenes.validate_scene_bank_model().is_ok());
+
+        assert_eq!(scenes.delete_scene(0), Some(0));
+        assert_eq!(
+            scenes.banks.iter().map(|bank| bank.len).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert!(scenes.validate_scene_bank_model().is_ok());
+    }
+
+    #[test]
+    fn snapshot_repository_edits_preserve_scene_bank_metadata() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                snapshot_with_active_step(1, 0, 3),
+                snapshot_with_active_step(1, 0, 9),
+            ],
+            0,
+        );
+        state.with_scenes_mut(|scenes| {
+            scenes.install_scene_banks(vec![
+                SceneBank {
+                    id: SceneBankId(4),
+                    name: Some("Intro".to_string()),
+                    len: 1,
+                },
+                SceneBank {
+                    id: SceneBankId(8),
+                    name: None,
+                    len: 1,
+                },
+            ]);
+        });
+
+        state.edit_non_current_pattern_snapshots(|_| {});
+
+        let scenes = state.capture_project_scenes();
+        assert_eq!(
+            scenes.banks,
+            vec![
+                SceneBank {
+                    id: SceneBankId(4),
+                    name: Some("Intro".to_string()),
+                    len: 1,
+                },
+                SceneBank {
+                    id: SceneBankId(8),
+                    name: None,
+                    len: 1,
+                },
+            ]
+        );
+        assert_eq!(scenes.next_scene_bank_id(), SceneBankId(9));
+    }
+
+    #[test]
+    fn scene_bank_validation_rejects_broken_partitions_and_identities() {
+        let snapshots = vec![
+            snapshot_with_active_step(1, 0, 3),
+            snapshot_with_active_step(1, 0, 9),
+        ];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        scenes.banks = vec![SceneBank {
+            id: SceneBankId(1),
+            name: None,
+            len: 1,
+        }];
+        assert!(scenes.validate_scene_bank_model().is_err());
+
+        scenes.banks = vec![
+            SceneBank { id: SceneBankId(1), name: None, len: 1 },
+            SceneBank { id: SceneBankId(1), name: None, len: 1 },
+        ];
+        assert!(scenes.validate_scene_bank_model().is_err());
+    }
+
+    #[test]
     fn deleted_scene_identity_is_not_reused_by_a_new_scene() {
         let snapshots = vec![
             snapshot_with_active_step(1, 0, 3),

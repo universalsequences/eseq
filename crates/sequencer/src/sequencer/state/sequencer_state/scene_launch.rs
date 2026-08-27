@@ -1476,6 +1476,7 @@ impl SequencerState {
             .map(|scene| scene.bus_patterns.clone())
             .collect::<Vec<_>>();
         let mut rebuilt = ProjectScenes::from_pattern_snapshots(&snapshots, cur);
+        rebuilt.copy_scene_bank_model_from(&scenes);
         for (scene, bus_patterns) in rebuilt.scenes.iter_mut().zip(bus_patterns) {
             scene.bus_patterns = bus_patterns;
         }

@@ -134,6 +134,10 @@ pub struct ProjectFile {
     pub patterns: Vec<ProjectPattern>,
     #[serde(default)]
     pub groups: Vec<ProjectTrackGroup>,
+    /// Ordered contiguous spans over the flat pattern/scene bank. Additive
+    /// metadata: legacy files omit it and load as one unnamed bank.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scene_banks: Vec<ProjectSceneBank>,
     #[serde(default)]
     pub macros: Vec<ProjectMacro>,
     #[serde(default = "default_next_macro_id")]
@@ -201,6 +205,15 @@ impl ProjectFile {
         }
         Ok(())
     }
+}
+
+/// Serialized scene-bank boundary and optional user label.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSceneBank {
+    pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub len: usize,
 }
 
 /// One referent's sound refs (takes spec 17.2), as file-local entity ids.
@@ -325,6 +338,8 @@ struct ProjectFileWire {
     #[serde(default)]
     groups: Vec<ProjectTrackGroup>,
     #[serde(default)]
+    scene_banks: Vec<ProjectSceneBank>,
+    #[serde(default)]
     macros: Vec<ProjectMacro>,
     #[serde(default = "default_next_macro_id")]
     next_macro_id: u32,
@@ -375,6 +390,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             scratch,
             patterns: wire.patterns,
             groups: wire.groups,
+            scene_banks: wire.scene_banks,
             macros: wire.macros,
             next_macro_id: wire.next_macro_id,
             arrangement: wire.arrangement,
@@ -3558,6 +3574,7 @@ mod tests {
             },
             buses: default_project_buses(),
             groups: Vec::new(),
+            scene_banks: Vec::new(),
             tracks: vec![
                 ProjectTrack {
                     id: TrackId(1),
@@ -3856,6 +3873,123 @@ mod tests {
             scene_cell_presence: Vec::new(),
             take_pools: Vec::new(),
             track_sounds: Vec::new(),
+        }
+    }
+
+    fn scenes_from_project_banks(project: &ProjectFile) -> crate::sequencer::ProjectScenes {
+        let snapshots = vec![
+            PatternSnapshot::new_default(0, &[]);
+            project.patterns.len().max(1)
+        ];
+        let mut scenes = crate::sequencer::ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        scenes.install_scene_banks(
+            project
+                .scene_banks
+                .iter()
+                .map(|bank| crate::sequencer::SceneBank {
+                    id: crate::sequencer::SceneBankId(bank.id),
+                    name: bank.name.clone(),
+                    len: bank.len,
+                })
+                .collect(),
+        );
+        scenes
+    }
+
+    #[test]
+    fn scene_banks_round_trip_boundaries_names_and_ids_without_a_version_bump() {
+        let mut project = sample_project();
+        project.patterns.push(project.patterns[0].clone());
+        project.scene_banks = vec![
+            ProjectSceneBank {
+                id: 7,
+                name: None,
+                len: 1,
+            },
+            ProjectSceneBank {
+                id: 19,
+                name: Some("Peak".to_string()),
+                len: 1,
+            },
+        ];
+        let version = project.version;
+
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let loaded: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+
+        assert_eq!(loaded.version, version);
+        assert_eq!(loaded.scene_banks, project.scene_banks);
+        let scenes = scenes_from_project_banks(&loaded);
+        assert_eq!(
+            scenes.banks,
+            vec![
+                crate::sequencer::SceneBank {
+                    id: crate::sequencer::SceneBankId(7),
+                    name: None,
+                    len: 1,
+                },
+                crate::sequencer::SceneBank {
+                    id: crate::sequencer::SceneBankId(19),
+                    name: Some("Peak".to_string()),
+                    len: 1,
+                },
+            ]
+        );
+        assert_eq!(scenes.next_scene_bank_id(), crate::sequencer::SceneBankId(20));
+        assert!(scenes.validate_scene_bank_model().is_ok());
+    }
+
+    #[test]
+    fn legacy_project_without_scene_banks_loads_as_one_unnamed_bank() {
+        let project = sample_project();
+        let mut json = serde_json::to_value(&project).expect("serialize project");
+        json.as_object_mut()
+            .expect("project object")
+            .remove("scene_banks");
+
+        let loaded: ProjectFile = serde_json::from_value(json).expect("deserialize legacy project");
+        assert!(loaded.scene_banks.is_empty());
+        let scenes = scenes_from_project_banks(&loaded);
+        assert_eq!(
+            scenes.banks,
+            vec![crate::sequencer::SceneBank {
+                id: crate::sequencer::SceneBankId(1),
+                name: None,
+                len: 1,
+            }]
+        );
+        assert_eq!(scenes.next_scene_bank_id(), crate::sequencer::SceneBankId(2));
+        assert!(scenes.validate_scene_bank_model().is_ok());
+    }
+
+    #[test]
+    fn inconsistent_serialized_scene_banks_fall_back_instead_of_failing_load() {
+        let mut project = sample_project();
+        project.patterns.push(project.patterns[0].clone());
+        let invalid_banks = [
+            vec![ProjectSceneBank { id: 3, name: None, len: 1 }],
+            vec![ProjectSceneBank { id: 3, name: None, len: 25 }],
+            vec![
+                ProjectSceneBank { id: 3, name: None, len: 1 },
+                ProjectSceneBank { id: 3, name: None, len: 1 },
+            ],
+        ];
+
+        for banks in invalid_banks {
+            project.scene_banks = banks;
+            let json = serde_json::to_string(&project).expect("serialize invalid metadata");
+            let loaded: ProjectFile =
+                serde_json::from_str(&json).expect("bank metadata must not reject project");
+            let scenes = scenes_from_project_banks(&loaded);
+            assert_eq!(
+                scenes.banks,
+                vec![crate::sequencer::SceneBank {
+                    id: crate::sequencer::SceneBankId(1),
+                    name: None,
+                    len: 2,
+                }]
+            );
+            assert!(scenes.validate_scene_bank_model().is_ok());
         }
     }
 

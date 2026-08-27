@@ -11,6 +11,23 @@ pub struct PatternId(pub u64);
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SceneId(pub u64);
 
+/// Stable identity for an ordered scene bank.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SceneBankId(pub u64);
+
+pub const MAX_SCENES_PER_BANK: usize = 24;
+
+/// One contiguous span in the flat scene presentation order.
+///
+/// The offset is deliberately derived from the lengths of preceding banks;
+/// storing it here would create a second, fallible source of truth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneBank {
+    pub id: SceneBankId,
+    pub name: Option<String>,
+    pub len: usize,
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct TrackPatternId {
     pub track: TrackId,
@@ -286,7 +303,10 @@ pub struct ProjectScenes {
     /// `current_scene`, unaffected by transport and scene launches. Kept
     /// parallel to `track_pools`; `ensure_track_sounds` repairs gaps.
     pub track_sounds: Vec<Option<PatternId>>,
+    /// Ordered contiguous spans over `scenes`. Always non-empty.
+    pub banks: Vec<SceneBank>,
     pub(super) next_scene_id: u64,
+    pub(super) next_bank_id: u64,
 }
 
 impl ProjectScenes {
@@ -359,6 +379,7 @@ impl ProjectScenes {
             });
         }
 
+        let scene_count = scenes.len();
         let mut built = Self {
             take_pools: vec![TrackTakePool::default(); track_pools.len()],
             track_pools,
@@ -366,13 +387,94 @@ impl ProjectScenes {
             current_scene: current_scene.min(snapshots.len().saturating_sub(1)),
             track_overrides: vec![None; track_count],
             track_sounds: vec![None; track_count],
+            banks: vec![SceneBank {
+                id: SceneBankId(1),
+                name: None,
+                len: scene_count,
+            }],
             next_scene_id: u64::try_from(snapshots.len().max(1))
                 .expect("scene count exceeds stable identity space")
                 .checked_add(1)
                 .expect("scene identity space exhausted"),
+            next_bank_id: 2,
         };
         built.ensure_track_sounds();
         built
+    }
+
+    /// Replace the default bank with serialized bank metadata when it forms a
+    /// valid partition. Invalid or legacy metadata deliberately repairs to one
+    /// unnamed bank containing every scene, so organization data can never
+    /// make an otherwise usable project fail to load.
+    pub fn install_scene_banks(&mut self, banks: Vec<SceneBank>) {
+        let next_bank_id = banks
+            .iter()
+            .map(|bank| bank.id.0)
+            .max()
+            .and_then(|id| id.checked_add(1));
+        if self.validate_scene_banks(&banks).is_ok() && next_bank_id.is_some() {
+            self.banks = banks;
+            self.next_bank_id = next_bank_id.expect("checked above");
+        } else {
+            self.banks = vec![SceneBank {
+                id: SceneBankId(1),
+                name: None,
+                len: self.scenes.len(),
+            }];
+            self.next_bank_id = 2;
+        }
+    }
+
+    pub(crate) fn next_scene_bank_id(&self) -> SceneBankId {
+        SceneBankId(self.next_bank_id)
+    }
+
+    /// Preserve bank identity and boundaries across legacy snapshot-based
+    /// repository rebuilds that do not change scene topology.
+    pub(crate) fn copy_scene_bank_model_from(&mut self, source: &ProjectScenes) {
+        assert_eq!(
+            self.scenes.len(),
+            source.scenes.len(),
+            "scene-bank metadata can only cross a topology-preserving rebuild"
+        );
+        source
+            .validate_scene_bank_model()
+            .expect("source scene-bank model must be valid");
+        self.banks = source.banks.clone();
+        self.next_bank_id = source.next_bank_id;
+    }
+
+    pub fn validate_scene_bank_model(&self) -> Result<(), String> {
+        self.validate_scene_banks(&self.banks)?;
+        if self.next_bank_id == 0
+            || self.banks.iter().any(|bank| bank.id.0 >= self.next_bank_id)
+        {
+            return Err("scene bank identity cursor is invalid".to_string());
+        }
+        Ok(())
+    }
+
+    fn validate_scene_banks(&self, banks: &[SceneBank]) -> Result<(), String> {
+        if banks.is_empty() {
+            return Err("a project must contain at least one scene bank".to_string());
+        }
+        if banks.iter().any(|bank| bank.len > MAX_SCENES_PER_BANK) {
+            return Err(format!(
+                "a scene bank exceeds the {MAX_SCENES_PER_BANK}-scene capacity"
+            ));
+        }
+        let ids: HashSet<_> = banks.iter().map(|bank| bank.id).collect();
+        if ids.len() != banks.len() || ids.iter().any(|id| id.0 == 0) {
+            return Err("scene bank identities must be nonzero and unique".to_string());
+        }
+        let covered = banks.iter().try_fold(0usize, |sum, bank| {
+            sum.checked_add(bank.len)
+                .ok_or_else(|| "scene bank lengths overflow".to_string())
+        })?;
+        if covered != self.scenes.len() {
+            return Err("scene bank lengths do not cover the scene list".to_string());
+        }
+        Ok(())
     }
 
     /// The track's own sound carrier pattern (track-sound spec §2.1).
@@ -662,6 +764,17 @@ impl ProjectScenes {
             return None;
         }
         self.scenes.remove(scene_idx);
+        let mut offset = 0usize;
+        let owning_bank = self
+            .banks
+            .iter()
+            .position(|bank| {
+                let owns = scene_idx >= offset && scene_idx < offset + bank.len;
+                offset += bank.len;
+                owns
+            })
+            .expect("valid scene-bank partition must own every scene");
+        self.banks[owning_bank].len -= 1;
         let new_idx = scene_idx.min(self.scenes.len() - 1);
         self.current_scene = new_idx;
         self.track_overrides.fill(None);
@@ -1110,6 +1223,24 @@ impl ProjectScenes {
             scene_slots,
             project_process_chain,
         });
+        let last_bank = self
+            .banks
+            .last_mut()
+            .expect("a project always has at least one scene bank");
+        if last_bank.len < MAX_SCENES_PER_BANK {
+            last_bank.len += 1;
+        } else {
+            let id = SceneBankId(self.next_bank_id);
+            self.next_bank_id = self
+                .next_bank_id
+                .checked_add(1)
+                .expect("scene bank identity space exhausted");
+            self.banks.push(SceneBank {
+                id,
+                name: None,
+                len: 1,
+            });
+        }
         self.current_scene = scene_idx;
         self.track_overrides.fill(None);
         scene_idx

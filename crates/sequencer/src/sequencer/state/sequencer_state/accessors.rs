@@ -502,6 +502,13 @@ impl SequencerState {
         );
     }
 
+    /// Install additive scene-bank metadata after rebuilding a project from
+    /// its serialized pattern snapshots. Malformed metadata is repaired by
+    /// `ProjectScenes` rather than rejecting the project load.
+    pub(crate) fn install_project_scene_banks(&self, banks: Vec<SceneBank>) {
+        self.pattern.scenes.lock().unwrap().install_scene_banks(banks);
+    }
+
     /// Insert `chunks` into `track`'s pattern pool and register a take over
     /// them (takes spec 6.1). Production facade for scenes mutation (the raw
     /// `with_scenes_mut` seam is test-only).
@@ -1698,6 +1705,9 @@ impl SequencerState {
         {
             return Err("Scene history contains invalid or duplicate scene identities".to_string());
         }
+        target
+            .validate_scene_bank_model()
+            .map_err(|error| format!("Scene history contains invalid scene banks: {error}"))?;
         let _ = self.quantized_launches.cancel_all();
         *self.pattern.scenes.lock().unwrap() = target.clone();
         self.pattern.current_pattern.store(target.current_scene as u32, Ordering::Relaxed);

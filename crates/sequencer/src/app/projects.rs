@@ -2251,6 +2251,15 @@ impl App {
         // track's take pool with its chunk patterns inline — chunks are in
         // no scene cell, so the pattern bank never carries them.
         let scenes_for_takes = self.state.capture_project_scenes();
+        let scene_banks = scenes_for_takes
+            .banks
+            .iter()
+            .map(|bank| crate::project::ProjectSceneBank {
+                id: bank.id.0,
+                name: bank.name.clone(),
+                len: bank.len,
+            })
+            .collect();
         let scene_cell_presence: Vec<Vec<bool>> = scenes_for_takes
             .scenes
             .iter()
@@ -2559,6 +2568,7 @@ impl App {
             },
             patterns,
             groups: self.groups.clone(),
+            scene_banks,
             // The arrangement always exists (empty-arrangement spec 7):
             // every save writes one, the empty arrangement included.
             // Serialization maps live pattern-pool ids into the
@@ -3796,6 +3806,7 @@ impl App {
             device_instances,
             patterns: _,
             groups,
+            scene_banks,
             arrangement,
             macros,
             next_macro_id,
@@ -3827,6 +3838,16 @@ impl App {
         };
         self.state
             .replace_pattern_repository(pattern_repository, current_pattern);
+        self.state.install_project_scene_banks(
+            scene_banks
+                .into_iter()
+                .map(|bank| crate::sequencer::SceneBank {
+                    id: crate::sequencer::SceneBankId(bank.id),
+                    name: bank.name,
+                    len: bank.len,
+                })
+                .collect(),
+        );
         // Takes spec 6.1/11.1: re-apply per-scene cell absence (bare lanes)
         // and rebuild each track's take pool. Chunk patterns convert through
         // the same snapshot path as scene patterns (sample resolution
@@ -5518,6 +5539,7 @@ mod tests {
             },
             buses: Vec::new(),
             groups: Vec::new(),
+            scene_banks: Vec::new(),
             tracks: vec![ProjectTrack {
                 id: crate::sequencer::TrackId(1),
                 name: None,
