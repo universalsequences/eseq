@@ -94,6 +94,24 @@ pub struct BufferDesc {
     pub channel_count: c_int,
 }
 
+pub const ENGINE_SCHED_POLICY_UNKNOWN: c_int = -1;
+pub const ENGINE_SCHED_POLICY_MIXED: c_int = -2;
+pub const ENGINE_SCHED_PRIORITY_MIXED: c_int = -1;
+
+/// Snapshot of the scheduling policy actually observed by audiograph threads.
+/// Policy fields contain native `SCHED_*` values on Linux.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineRtStatus {
+    pub worker_count: c_int,
+    pub workers_reported: c_int,
+    pub worker_policy: c_int,
+    pub worker_priority: c_int,
+    pub callback_reported: c_int,
+    pub callback_policy: c_int,
+    pub callback_priority: c_int,
+}
+
 /// Opaque handle — we only ever hold `*mut LiveGraph`.
 #[repr(C)]
 pub struct LiveGraph {
@@ -137,7 +155,17 @@ extern "C" {
     pub fn engine_clear_os_workgroup();
     pub fn engine_enable_rt_logging(enable: c_int);
     pub fn engine_enable_graph_logging(enable: c_int);
-    pub fn engine_enable_rt_time_constraint(enable: c_int);
+    pub fn engine_enable_rt_scheduling(enable: c_int);
+    pub fn engine_set_rt_priority(priority: c_int);
+    pub fn engine_get_rt_status(status: *mut EngineRtStatus);
+    #[cfg(target_os = "linux")]
+    pub fn engine_set_rtkit_hooks(
+        worker_hook: Option<extern "C" fn(libc::pid_t, c_int) -> c_int>,
+        callback_hook: Option<extern "C" fn(libc::pid_t, c_int) -> c_int>,
+    );
+    pub fn engine_promote_current_thread_rt();
+    #[cfg(target_os = "linux")]
+    pub fn engine_record_rtkit_callback_result(tid: libc::pid_t);
     pub fn debug_dump_graph(lg: *mut LiveGraph);
 
     // Graph lifecycle
@@ -280,6 +308,81 @@ pub unsafe fn enable_graph_logging(enable: bool) {
     engine_enable_graph_logging(if enable { 1 } else { 0 });
 }
 
-pub unsafe fn enable_rt_time_constraint(enable: bool) {
-    engine_enable_rt_time_constraint(if enable { 1 } else { 0 });
+pub unsafe fn enable_rt_scheduling(enable: bool) {
+    engine_enable_rt_scheduling(if enable { 1 } else { 0 });
+}
+
+pub unsafe fn set_rt_priority(priority: i32) {
+    engine_set_rt_priority(priority);
+}
+
+pub unsafe fn rt_status() -> EngineRtStatus {
+    let mut status = EngineRtStatus {
+        worker_count: 0,
+        workers_reported: 0,
+        worker_policy: ENGINE_SCHED_POLICY_UNKNOWN,
+        worker_priority: 0,
+        callback_reported: 0,
+        callback_policy: ENGINE_SCHED_POLICY_UNKNOWN,
+        callback_priority: 0,
+    };
+    engine_get_rt_status(&mut status);
+    status
+}
+
+#[cfg(target_os = "linux")]
+fn scheduling_policy_name(policy: c_int) -> String {
+    match policy {
+        ENGINE_SCHED_POLICY_UNKNOWN => "unknown".to_string(),
+        ENGINE_SCHED_POLICY_MIXED => "mixed".to_string(),
+        libc::SCHED_OTHER => "SCHED_OTHER".to_string(),
+        libc::SCHED_FIFO => "SCHED_FIFO".to_string(),
+        libc::SCHED_RR => "SCHED_RR".to_string(),
+        libc::SCHED_BATCH => "SCHED_BATCH".to_string(),
+        libc::SCHED_IDLE => "SCHED_IDLE".to_string(),
+        other => format!("policy {other}"),
+    }
+}
+
+/// Human-readable achieved scheduling state. This deliberately formats native
+/// policies rather than assuming FIFO, so a future rtkit SCHED_RR result is
+/// reported without changing the status contract.
+#[cfg(target_os = "linux")]
+pub fn format_rt_status(status: EngineRtStatus) -> String {
+    let workers = if status.worker_count == 0 {
+        "workers none".to_string()
+    } else if status.workers_reported != status.worker_count {
+        format!(
+            "workers pending ({}/{} reported)",
+            status.workers_reported, status.worker_count
+        )
+    } else {
+        format!(
+            "workers {} priority {}",
+            scheduling_policy_name(status.worker_policy),
+            if status.worker_priority == ENGINE_SCHED_PRIORITY_MIXED {
+                "mixed".to_string()
+            } else {
+                status.worker_priority.to_string()
+            }
+        )
+    };
+    let callback = if status.callback_reported == 0 {
+        "callback pending".to_string()
+    } else {
+        format!(
+            "callback {} priority {}",
+            scheduling_policy_name(status.callback_policy), status.callback_priority
+        )
+    };
+    format!("{workers}, {callback}")
+}
+
+/// Promote the calling thread to realtime scheduling. Linux first requests
+/// SCHED_FIFO at the configured priority + 1; permission denial publishes the
+/// TID to a non-realtime RealtimeKit helper for asynchronous SCHED_RR
+/// promotion. No-op on Apple (CoreAudio already provides an RT callback
+/// thread) and when realtime scheduling is disabled.
+pub unsafe fn promote_current_thread_rt() {
+    engine_promote_current_thread_rt();
 }

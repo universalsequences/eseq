@@ -1,7 +1,6 @@
 #ifndef GRAPH_TYPES_H
 #define GRAPH_TYPES_H
 
-#define _GNU_SOURCE
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>

@@ -216,7 +216,10 @@ impl Ord for TimedEvent {
 }
 
 pub struct ScheduledEventQueue<const CAPACITY: usize> {
-    slots: [UnsafeCell<MaybeUninit<ScheduledEvent>>; CAPACITY],
+    // The queue can hold large event payloads. Keeping its fixed-capacity
+    // storage inline made construction reserve tens of MiB on the caller's
+    // stack in debug builds before Arc could move it to the heap.
+    slots: Box<[UnsafeCell<MaybeUninit<ScheduledEvent>>]>,
     head: AtomicUsize,
     tail: AtomicUsize,
 }
@@ -225,8 +228,12 @@ unsafe impl<const CAPACITY: usize> Sync for ScheduledEventQueue<CAPACITY> {}
 
 impl<const CAPACITY: usize> ScheduledEventQueue<CAPACITY> {
     pub fn new() -> Self {
+        let slots = (0..CAPACITY)
+            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Self {
-            slots: std::array::from_fn(|_| UnsafeCell::new(MaybeUninit::uninit())),
+            slots,
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
         }

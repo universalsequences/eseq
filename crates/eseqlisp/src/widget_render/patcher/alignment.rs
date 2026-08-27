@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+use super::super::ui_design_px;
 use super::display::node_size_for_ports;
 use super::geometry::{
     patch_input_indices, patch_input_slot_counts, patch_output_counts, port_x_offset,
@@ -64,20 +65,20 @@ pub(super) fn align_dragged_primary_position(
     };
 
     let x_threshold = model_threshold(
-        if snap_state.snapped_x {
+        ui_design_px(if snap_state.snapped_x {
             ALIGNMENT_ENTER_THRESHOLD_PX * ALIGNMENT_ESCAPE_MULTIPLIER
         } else {
             ALIGNMENT_ENTER_THRESHOLD_PX
-        },
+        }),
         zoom,
         cell_w,
     );
     let y_threshold = model_threshold(
-        if snap_state.snapped_y {
+        ui_design_px(if snap_state.snapped_y {
             ALIGNMENT_ENTER_THRESHOLD_PX * ALIGNMENT_ESCAPE_MULTIPLIER
         } else {
             ALIGNMENT_ENTER_THRESHOLD_PX
-        },
+        }),
         zoom,
         cell_h,
     );

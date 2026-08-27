@@ -1,0 +1,7 @@
+eseqlisp deterministic text reference
+Proportional glyphs: Width, rhythm, baseline, gjpqy.
+ !\"#$%&'()*+,-./0123456789:;<=>?@
+ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`
+abcdefghijklmnopqrstuvwxyz{|}~
+The quick brown fox jumps over the lazy dog.
+mmmmmmmm  iiiiiiii  WWWWWWWW

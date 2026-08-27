@@ -118,6 +118,109 @@ impl HostTransportClockRuntime {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OutputBlockSizeObservation {
+    Matched { frames: usize },
+    Mismatched { requested: usize, actual: usize },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct OutputBlockSizeVerifier {
+    requested_frames: usize,
+    first_callback_seen: bool,
+    mismatch_reported: bool,
+}
+
+impl OutputBlockSizeVerifier {
+    pub(super) fn new(requested_frames: usize) -> Self {
+        Self {
+            requested_frames,
+            first_callback_seen: false,
+            mismatch_reported: false,
+        }
+    }
+
+    pub(super) fn observe(&mut self, actual_frames: usize) -> Option<OutputBlockSizeObservation> {
+        let first_callback = !self.first_callback_seen;
+        self.first_callback_seen = true;
+        if actual_frames != self.requested_frames {
+            if self.mismatch_reported {
+                return None;
+            }
+            self.mismatch_reported = true;
+            return Some(OutputBlockSizeObservation::Mismatched {
+                requested: self.requested_frames,
+                actual: actual_frames,
+            });
+        }
+        first_callback.then_some(OutputBlockSizeObservation::Matched {
+            frames: actual_frames,
+        })
+    }
+}
+
+/// Feeds `audio_callback` a fixed number of frames per invocation, whatever
+/// the device asks for.
+///
+/// CPAL's ALSA backend serves whatever `snd_pcm_avail_update` reports, so on
+/// Linux (PipeWire in particular) a `BufferSize::Fixed(512)` request is routinely
+/// answered with odd sizes like 235 — and the graph then renders a 235-frame
+/// slice. Generated DGenLisp spectral code cannot survive that: its
+/// `overlap-add` emits a hop's worth of output only when a hop boundary lands on
+/// a block boundary, so a block size that is not hop-compatible silences the wet
+/// arm of every FFT-based effect (Convolution Reverb, Filter Table) while the dry
+/// arm keeps passing (eseq-linux.73).
+///
+/// Rendering into a full-block scratch and serving the device out of it restores
+/// the contract for every node at once. The cost is up to `block_frames - 1`
+/// frames of extra output latency, and none at all on a host that already
+/// delivers exactly `block_frames` (the scratch drains exactly once per call).
+///
+/// When the device period is *shorter* than `block_frames`, there is a second,
+/// less obvious cost: average CPU is unchanged, but the instantaneous deadline
+/// tightens. Only the callbacks that drain the scratch render — roughly
+/// `device_frames / block_frames` of them — and each of those must complete a
+/// full `block_frames` render inside the much shorter device-period deadline
+/// (with 512-frame blocks against PipeWire's 235-frame periods, about 46% of
+/// callbacks). There is no lookahead past the single scratch block, so only
+/// whatever ring headroom the host keeps beyond one period absorbs the burst:
+/// a per-block render cost that fits the `block_frames` budget on average can
+/// still xrun under small device periods.
+pub(super) struct FixedOutputBlocks {
+    scratch: Vec<f32>,
+    /// Read cursor into `scratch`, in samples. Starts drained so the first
+    /// device request renders.
+    position: usize,
+}
+
+impl FixedOutputBlocks {
+    pub(super) fn new(block_frames: usize, channels: usize) -> Self {
+        let samples = block_frames.max(1) * channels.max(1);
+        Self {
+            scratch: vec![0.0; samples],
+            position: samples,
+        }
+    }
+
+    /// Fill `output` (interleaved) by repeatedly rendering exact blocks.
+    /// `render` is always called with a slice of exactly `block_frames *
+    /// channels` samples. Allocation-free, so it is safe on the audio thread.
+    pub(super) fn serve(&mut self, output: &mut [f32], mut render: impl FnMut(&mut [f32])) {
+        let mut written = 0;
+        while written < output.len() {
+            if self.position >= self.scratch.len() {
+                render(&mut self.scratch);
+                self.position = 0;
+            }
+            let take = (output.len() - written).min(self.scratch.len() - self.position);
+            output[written..written + take]
+                .copy_from_slice(&self.scratch[self.position..self.position + take]);
+            self.position += take;
+            written += take;
+        }
+    }
+}
+
 pub(super) struct AudioCallbackData {
     pub(super) lg: LiveGraphPtr,
     pub(super) state: Arc<SequencerState>,
@@ -129,7 +232,7 @@ pub(super) struct AudioCallbackData {
     pub(super) custom_engine_pools: Vec<CustomEnginePool>,
     pub(super) scheduler_snapshot: Arc<SequencerSnapshot>,
     pub(super) scheduler_snapshot_version: u64,
-    pub(super) active_keyboard_notes: [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    pub(super) active_keyboard_notes: Vec<[Option<ActiveKeyboardNote>; MAX_VOICES]>,
     pub(super) keyboard_rx: std::sync::mpsc::Receiver<KeyboardTrigger>,
     pub(super) master_recorder: Arc<MasterRecorder>,
     pub(super) accumulator_states: [crate::accumulator::AccumulatorRuntimeState; MAX_TRACKS],
@@ -156,6 +259,14 @@ pub(super) struct AudioCallbackData {
     pub(super) block_events: Vec<BlockEvent>,
     pub(super) block_events_need_sort: bool,
     pub(super) current_callback_nframes: usize,
+    pub(super) output_block_size: OutputBlockSizeVerifier,
+    /// One-shot latch for per-thread setup that can only run on the cpal
+    /// callback thread itself: FTZ/DAZ subnormal flushing everywhere, plus
+    /// SCHED_FIFO promotion on Linux. cpal exposes no thread-spawn hook, but
+    /// the callback IS that thread, so the first entry initializes itself.
+    /// (CoreAudio already hands macOS clients a realtime callback thread, so
+    /// only the subnormal-flush half applies there.)
+    pub(super) callback_thread_initialized: bool,
     pub(super) rendered_samples: Arc<AtomicU64>,
     /// Bus effect slots, published by the UI thread so the callback can reach
     /// each bus effect's modulator node for the transport clock/phase
@@ -225,7 +336,7 @@ pub(super) struct FreePatchTransportRouteTarget {
 }
 
 pub(super) fn clear_active_keyboard_note_by_lid(
-    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]],
     logical_id: u64,
 ) {
     if logical_id == 0 {
@@ -244,7 +355,7 @@ pub(super) fn clear_active_keyboard_note_by_lid(
 }
 
 pub(super) fn store_active_keyboard_note(
-    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]],
     track_idx: usize,
     source_transpose: f32,
     midi_note: Option<u8>,
@@ -272,7 +383,7 @@ pub(super) fn store_active_keyboard_note(
 }
 
 pub(super) fn take_active_keyboard_note(
-    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]],
     track_idx: usize,
     source_transpose: f32,
 ) -> Option<ActiveKeyboardNote> {

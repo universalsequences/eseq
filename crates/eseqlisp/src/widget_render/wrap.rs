@@ -140,6 +140,7 @@ impl WidgetDefinition for WrapWidget {
         area: Rect,
         children: &[Value],
         aspect: f32,
+        _measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
@@ -293,6 +294,12 @@ mod tests {
             },
             &children,
             1.0,
+            &MeasureCtx {
+                text_measurer: None,
+                cell_w: 1.0,
+                cell_h: 1.0,
+                inherited_font_size: 12.0,
+            },
             LayoutCtx::default(),
             &mut |child, _| Some(child_size(child)),
             &mut |_, rect, _| {

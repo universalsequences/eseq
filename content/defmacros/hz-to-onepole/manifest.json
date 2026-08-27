@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "hz-to-onepole",
+  "params": [
+    "hz"
+  ],
+  "outputs": [
+    "alpha"
+  ],
+  "summary": "Cutoff frequency in Hz to onepole coefficient alpha (0..1); alpha = 1 - e^(-2π·hz/sr), for y = y + alpha*(x - y).",
+  "tags": [
+    "math",
+    "filter",
+    "utility"
+  ]
+}

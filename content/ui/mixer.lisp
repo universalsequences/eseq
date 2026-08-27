@@ -175,9 +175,11 @@
     (set! eseq.seq-core-state/selected-bus -1)
     (clear-delete-target)))
 
-;; cmd/super/meta-click on a mixer strip toggles multi-select membership.
+;; The platform selection gesture toggles membership: Command-click on macOS,
+;; Alt-click on Linux. Rust supplies the semantic field so this behavior does
+;; not depend on window-manager ownership of Super.
 (def multi-select-click? (event)
-  (or (get event :cmd) (get event :super) (get event :meta)))
+  (get event :additive-selection))
 
 (def toggle-track-select (i)
   (do
@@ -856,7 +858,7 @@
         ;; bus); the container provides the color above. A small spacer keeps
         ;; the pattern grid aligned with loose strips.
         (if (track-grouped? i)
-          (box :width :fill :height 0.85 :bg :transparent)
+          (box :width :fill :height 0.55 :bg :transparent)
           (subtree :key (str "mixer-v2-track-output-sub-" i)
             (dropdown :value (nth SEQ.track-outputs i)
               :key (str "track-output-" i)
@@ -1461,7 +1463,7 @@
       (c (group-color gidx))
       (bus-idx (bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :key (str "group-bus-strip-" bus-idx)
-      :width 10.2 :height 13.72
+      :width 10.2 :height 13.75
       :corner-radius 12
       :padding 0.1
       :background-color :mixer-strip-bg
@@ -1485,19 +1487,19 @@
           (box :width 0.0 :height 0.0 :bg :transparent))
         (group-control-buttons gidx bus-idx)
         (bus-mod-port-row (get group :bus-id))
-        (box :corner-radius 34 :background-color c :width 9.5 :padding 0.2
+        (box :corner-radius 34 :background-color c :width 9.5 :padding 0.1
+          
           :key (str "group-badge-" (get group :id))
           :selected (group-delete-target? (get group :id))
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (select-group-delete-target gidx))
           :on-right-click (lambda (event) (open-group-menu event gidx))
-          (h-stack :gap 0.2
-            (button (if (get group :collapsed) "▸" "▾")
-              :width 2.0 :height 0.9 :padding 0 :font-size 14
-              :corner-radius 16
-              :background-color '(rgba 0.1 0.1 0.1 0.35)
-              :border-color :transparent
-              :color :white
+          (h-stack :gap 0.2 :align :center
+            (box :width 0.01)
+            (box :background "disclosure-button"
+              :width 1.7 :height 0.8
+              :collapsed (get group :collapsed)
+              :surface-alpha 0.35
               :on-click (lambda (event)
                 (do
                   (select-group gidx)
@@ -1558,7 +1560,7 @@
       (c (group-color gidx)))
     (box
       :corner-radius 16
-      :padding 0.2
+      :padding 0.3
       ;; Selection is a bound state, not a computed color (eseq-4jv): the
       ;; selected look keeps a constant border width so it never relayouts.
       :selected (group-selected-binding gidx)
@@ -1577,7 +1579,7 @@
         (if (get group :collapsed)
           (box :width 0.0 :height 0.0 :bg :transparent)
           (v-stack :gap 0.0
-            (box :width :fill :height 0.2 :bg :transparent)
+            (box :width :fill :height 0.4 :bg :transparent)
             (h-stack :gap 0.1
               (each (get group :members) |m|
                 (subtree :key (str "mixer-v2-track-" m)

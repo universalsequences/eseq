@@ -1,5 +1,6 @@
 fn main() {
-    cc::Build::new()
+    let mut audiograph = cc::Build::new();
+    audiograph
         .files([
             "audiograph/graph_api.c",
             "audiograph/graph_edit.c",
@@ -9,16 +10,32 @@ fn main() {
             "audiograph/ready_queue.c",
             "audiograph/wrapper.c",
             "audiograph/dgen_host_services.c",
+            // Compiled on every target, not just the ones whose host-services
+            // table uses it: the tests that pin the portable FFT to the same
+            // reference vDSP is pinned to have to run on macOS too, or the two
+            // backends were never actually compared (eseq-linux.9).
+            "audiograph/dgen_fft.c",
         ])
         .include("audiograph")
         .flag("-std=c11")
         .flag("-O2")
-        .flag("-pthread")
-        .compile("audiograph");
+        .flag("-pthread");
 
-    // The DGen ABI v1 host-services table is vDSP-backed; the app links
-    // Accelerate (generated DGen dylibs never do — they stay libSystem-only).
-    println!("cargo:rustc-link-lib=framework=Accelerate");
+    // Strict C11 suppresses glibc's default feature set. Audiograph uses GNU/
+    // POSIX APIs including pthread rwlocks, posix_memalign, strdup, and usleep.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        audiograph.define("_GNU_SOURCE", None);
+    }
+
+    audiograph.compile("audiograph");
+
+    // On Apple platforms the DGen ABI v1 host-services table stays vDSP-backed,
+    // so the app links Accelerate (generated DGen dylibs never do — they stay
+    // libSystem-only). Elsewhere the table is served by audiograph/dgen_fft.c
+    // and there is nothing to link (eseq-linux.9).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-lib=framework=Accelerate");
+    }
 
     println!("cargo:rerun-if-changed=audiograph/");
     println!("cargo:rerun-if-env-changed=CFLAGS");

@@ -1,6 +1,6 @@
 //! Reusable Metal focus decorations for measured widget bounds.
 
-use super::{MetalPrimitive, MetalRectPrimitive, WidgetViewport};
+use super::{GpuPrimitive, GpuRectPrimitive, WidgetViewport};
 use crate::backend::Color;
 use crate::layout::Rect;
 
@@ -13,14 +13,14 @@ pub enum FocusDecoration {
 }
 
 impl FocusDecoration {
-    pub(crate) fn metal_primitives(
+    pub(crate) fn primitives(
         self,
         rect: Rect,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         match self {
             Self::None => Vec::new(),
-            Self::Corners(style) => style.metal_primitives(rect, viewport),
+            Self::Corners(style) => style.primitives(rect, viewport),
         }
     }
 }
@@ -45,7 +45,7 @@ impl FocusCornerStyle {
         }
     }
 
-    fn metal_primitives(self, rect: Rect, viewport: WidgetViewport) -> Vec<MetalPrimitive> {
+    fn primitives(self, rect: Rect, viewport: WidgetViewport) -> Vec<GpuPrimitive> {
         if !rect.row.is_finite()
             || !rect.col.is_finite()
             || !rect.width.is_finite()
@@ -62,7 +62,7 @@ impl FocusCornerStyle {
 
         let width_px = rect.width * viewport.cell_w;
         let height_px = rect.height * viewport.cell_h;
-        let inset_px = self.inset_px.max(0.0);
+        let inset_px = super::ui_design_px(self.inset_px.max(0.0));
         let inset_x_px = inset_px.min(width_px * 0.5);
         let inset_y_px = inset_px.min(height_px * 0.5);
         let inner_width_px = (width_px - inset_x_px * 2.0).max(0.0);
@@ -71,10 +71,10 @@ impl FocusCornerStyle {
             return Vec::new();
         }
 
-        let requested_arm_px = self.arm_length_px.max(0.0);
+        let requested_arm_px = super::ui_design_px(self.arm_length_px.max(0.0));
         let arm_x_px = requested_arm_px.min(inner_width_px);
         let arm_y_px = requested_arm_px.min(inner_height_px);
-        let requested_stroke_px = self.stroke_width_px.max(0.0);
+        let requested_stroke_px = super::ui_design_px(self.stroke_width_px.max(0.0));
         let stroke_x_px = requested_stroke_px.min(arm_x_px);
         let stroke_y_px = requested_stroke_px.min(arm_y_px);
         if arm_x_px <= 0.0 || arm_y_px <= 0.0 || stroke_x_px <= 0.0 || stroke_y_px <= 0.0 {
@@ -148,7 +148,7 @@ impl FocusCornerStyle {
         rects
             .into_iter()
             .map(|rect| {
-                MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+                GpuPrimitive::ForegroundRect(GpuRectPrimitive {
                     rect,
                     color: self.color,
                 })
@@ -177,11 +177,11 @@ mod tests {
         }
     }
 
-    fn focus_rects(primitives: &[MetalPrimitive]) -> Vec<Rect> {
+    fn focus_rects(primitives: &[GpuPrimitive]) -> Vec<Rect> {
         primitives
             .iter()
             .map(|primitive| match primitive {
-                MetalPrimitive::ForegroundRect(rect) => rect.rect,
+                GpuPrimitive::ForegroundRect(rect) => rect.rect,
                 _ => panic!("focus corners must render as foreground rectangles"),
             })
             .collect()
@@ -204,7 +204,7 @@ mod tests {
             height: 4.0,
         };
         let primitives = FocusDecoration::Corners(FocusCornerStyle::new(Color::WHITE))
-            .metal_primitives(rect, viewport(10.0, 20.0));
+            .primitives(rect, viewport(10.0, 20.0));
         let rects = focus_rects(&primitives);
 
         assert_eq!(rects.len(), 8);
@@ -232,7 +232,7 @@ mod tests {
             ..FocusCornerStyle::new(Color::WHITE)
         };
         let rects = focus_rects(
-            &FocusDecoration::Corners(style).metal_primitives(rect, viewport(10.0, 10.0)),
+            &FocusDecoration::Corners(style).primitives(rect, viewport(10.0, 10.0)),
         );
 
         assert_eq!(rects.len(), 8);
@@ -253,7 +253,7 @@ mod tests {
         };
         assert!(
             FocusDecoration::Corners(FocusCornerStyle::new(Color::WHITE))
-                .metal_primitives(rect, viewport(10.0, 20.0))
+                .primitives(rect, viewport(10.0, 20.0))
                 .is_empty()
         );
     }

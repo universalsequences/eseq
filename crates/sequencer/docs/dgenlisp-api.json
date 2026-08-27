@@ -188,7 +188,8 @@
           "partitioned-convolve",
           "phase-vocoder",
           "spectrum-delay",
-          "spectrum-delay-mod"
+          "spectrum-delay-mod",
+          "svf-freq"
         ]
       },
       {
@@ -508,6 +509,14 @@
         "used_by": [
           "param"
         ]
+      },
+      {
+        "name": "@window",
+        "summary": "Attribute observed in evaluator source.",
+        "type": "unknown",
+        "used_by": [
+          "svf-freq"
+        ]
       }
     ],
     "comments": [
@@ -596,6 +605,11 @@
         "name": "e",
         "summary": "Euler's constant.",
         "value": "Euler's number"
+      },
+      {
+        "name": "samplerate",
+        "summary": "The host sample rate in Hz. Alias: sample-rate.",
+        "value": "host sample rate in Hz"
       },
       {
         "name": "true",
@@ -1371,6 +1385,95 @@
           "(adsr gate_sig trigger_sig attack_ms decay_ms sustain release_ms)"
         ],
         "summary": "Instrument preamble envelope helper with attack, decay, sustain, and release controls. Returns an amplitude envelope signal."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 8,
+          "minimum": 8
+        },
+        "attribute_docs": [],
+        "attributes": [],
+        "category": "preamble",
+        "documentation": {
+          "port_docs": "curated-from-signature",
+          "source": "curated-preamble"
+        },
+        "implementation": {
+          "function": null,
+          "source_file": "generated preamble"
+        },
+        "input_count": {
+          "maximum": 8,
+          "minimum": 8
+        },
+        "inputs": [
+          {
+            "kind": "signal|float",
+            "name": "gate_sig",
+            "required": true,
+            "summary": "Gate signal; nonzero while the note is held."
+          },
+          {
+            "kind": "signal|float",
+            "name": "trigger_sig",
+            "required": true,
+            "summary": "Trigger signal for envelope restart."
+          },
+          {
+            "kind": "signal|float",
+            "name": "attack_ms",
+            "required": true,
+            "summary": "Attack time in milliseconds."
+          },
+          {
+            "kind": "signal|float",
+            "name": "decay_ms",
+            "required": true,
+            "summary": "Decay time in milliseconds."
+          },
+          {
+            "kind": "signal|float",
+            "name": "sustain",
+            "required": true,
+            "summary": "Sustain level, usually 0..1."
+          },
+          {
+            "kind": "signal|float",
+            "name": "release_ms",
+            "required": true,
+            "summary": "Release time in milliseconds."
+          },
+          {
+            "kind": "signal|float",
+            "name": "attack_curve",
+            "required": true,
+            "summary": "Positive attack exponent: 1 is linear, below 1 is concave, above 1 is convex."
+          },
+          {
+            "kind": "signal|float",
+            "name": "fall_curve",
+            "required": true,
+            "summary": "Positive decay/release exponent: 1 is linear, below 1 is concave, above 1 is convex."
+          }
+        ],
+        "name": "adsrexp",
+        "output_count": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "outputs": [
+          {
+            "index": 0,
+            "kind": "value",
+            "name": "out",
+            "summary": "Operator result."
+          }
+        ],
+        "signatures": [
+          "(adsrexp gate_sig trigger_sig attack_ms decay_ms sustain release_ms attack_curve fall_curve)"
+        ],
+        "summary": "Finite-duration ADSR with independent power curves for attack and for decay/release. Curves are positive exponents; 1 is linear."
       },
       {
         "aliases": [],
@@ -3396,6 +3499,44 @@
           "(in channel @name mod1 @modulator 1)"
         ],
         "summary": "Audio input channel."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": null
+        },
+        "attribute_docs": [],
+        "attributes": [],
+        "category": "uncategorized",
+        "documentation": {
+          "port_docs": "not-yet-curated",
+          "source": "source-discovered"
+        },
+        "implementation": {
+          "function": "evalIota",
+          "source_file": "LispEvaluator.swift"
+        },
+        "input_count": {
+          "maximum": null,
+          "minimum": null
+        },
+        "inputs": [],
+        "name": "iota",
+        "output_count": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "outputs": [
+          {
+            "index": 0,
+            "kind": "value",
+            "name": "out",
+            "summary": "Operator result."
+          }
+        ],
+        "signatures": [],
+        "summary": "Operator implemented in DGenLisp evaluator."
       },
       {
         "aliases": [],
@@ -6919,6 +7060,61 @@
           "(svf input cutoff q mode)"
         ],
         "summary": "State-variable filter helper. Cutoff is Hz, q is resonance, mode is 0=LP, 1=BP, 2=HP, 3=notch, 4=peak, 5=allpass."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": null
+        },
+        "attribute_docs": [
+          {
+            "aliases": [
+              "@hopSize"
+            ],
+            "name": "@hop",
+            "summary": "Hop size for STFT and hop-rate operators.",
+            "type": "int"
+          },
+          {
+            "name": "@window",
+            "summary": "Attribute observed in evaluator source.",
+            "type": "unknown"
+          }
+        ],
+        "attributes": [
+          "@hop",
+          "@window"
+        ],
+        "category": "uncategorized",
+        "documentation": {
+          "port_docs": "not-yet-curated",
+          "source": "source-discovered"
+        },
+        "implementation": {
+          "function": "evalSVFFrequencySampled",
+          "source_file": "LispEvaluator.swift"
+        },
+        "input_count": {
+          "maximum": null,
+          "minimum": null
+        },
+        "inputs": [],
+        "name": "svf-freq",
+        "output_count": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "outputs": [
+          {
+            "index": 0,
+            "kind": "value",
+            "name": "out",
+            "summary": "Operator result."
+          }
+        ],
+        "signatures": [],
+        "summary": "Operator implemented in DGenLisp evaluator."
       },
       {
         "aliases": [],

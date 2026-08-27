@@ -170,8 +170,36 @@ typedef struct Engine {
   _Atomic int oswg_version;      // incremented on each workgroup change for re-join detection
   _Atomic int rt_log; // enable lightweight debug prints from workers
   _Atomic int graph_log; // enable per-block audiograph scheduler/output trace
-  _Atomic int rt_time_constraint; // apply Mach RT time-constraint policy
+  _Atomic int rt_scheduling; // apply the platform realtime worker policy
+  _Atomic int rt_priority; // SCHED_FIFO priority on Linux
+
+  // Actual scheduling observed after each Linux thread's promotion attempt.
+  // Per-worker slots let the public snapshot detect a partial/mixed outcome.
+  _Atomic int *workerPolicies;
+  _Atomic int *workerPriorities;
+  _Atomic int workerStartupCount;
+  pthread_mutex_t workerStartupMtx;
+  pthread_cond_t workerStartupCv;
+  _Atomic int callbackPolicy;
+  _Atomic int callbackPriority;
+  _Atomic int callbackReported;
 } Engine;
+
+// `worker_policy` and `callback_policy` are native pthread_getschedparam policy
+// values (SCHED_OTHER/SCHED_FIFO/SCHED_RR). Keeping the achieved native policy
+// makes this API able to report an rtkit SCHED_RR grant as well as direct FIFO.
+#define ENGINE_SCHED_POLICY_UNKNOWN (-1)
+#define ENGINE_SCHED_POLICY_MIXED (-2)
+#define ENGINE_SCHED_PRIORITY_MIXED (-1)
+typedef struct EngineRtStatus {
+  int worker_count;
+  int workers_reported;
+  int worker_policy;
+  int worker_priority;
+  int callback_reported;
+  int callback_policy;
+  int callback_priority;
+} EngineRtStatus;
 
 void engine_start_workers(int workers);
 void engine_stop_workers(void);
@@ -187,8 +215,33 @@ void engine_clear_os_workgroup(void);
 void engine_enable_rt_logging(int enable);
 void engine_enable_graph_logging(int enable);
 
-// Enable/disable Mach time-constraint scheduling for workers (Apple only).
-void engine_enable_rt_time_constraint(int enable);
+// Enable/disable platform realtime scheduling for workers. macOS uses Mach
+// time constraints; Linux uses SCHED_FIFO.
+void engine_enable_rt_scheduling(int enable);
+void engine_set_rt_priority(int priority);
+void engine_get_rt_status(EngineRtStatus *status);
+#ifdef __linux__
+typedef int (*EngineRtKitWorkerHook)(pid_t tid, int requested_priority);
+typedef int (*EngineRtKitCallbackHook)(pid_t tid, int requested_priority);
+// Optional host hooks. Null preserves the standalone C engine's graceful
+// SCHED_OTHER fallback without introducing a D-Bus or Rust link dependency.
+void engine_set_rtkit_hooks(EngineRtKitWorkerHook worker_hook,
+                            EngineRtKitCallbackHook callback_hook);
+#endif
+
+// Promote the calling thread to realtime scheduling. Intended for the audio
+// callback thread, which drives each block and helps drain the graph: on
+// Linux it gets SCHED_FIFO at the configured rt priority + 1 so it outranks
+// the workers it feeds. No-op on Apple (CoreAudio already delivers the
+// callback on a realtime thread) and when rt scheduling is disabled; a
+// permission failure is published to the non-RT Rust RealtimeKit helper; the
+// thread continues at normal priority if that fallback is unavailable.
+void engine_promote_current_thread_rt(void);
+#ifdef __linux__
+// Called by the RealtimeKit helper after its asynchronous callback-thread
+// request, to publish the native policy observed for that Linux TID.
+void engine_record_rtkit_callback_result(pid_t tid);
+#endif
 bool push_block_event(LiveGraph *lg, GraphBlockEvent event);
 
 // ===================== Live Graph Operations =====================

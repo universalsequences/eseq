@@ -96,6 +96,11 @@ pub fn spawn_scheduler_thread(
             let debug_graph = std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some();
 
             loop {
+                // Free whatever the audio callback retired instead of dropping
+                // on its own thread (bead eseq-sj01). This loop runs every
+                // 1-2 ms, so the retire ring stays shallow even when nothing
+                // publishes.
+                state.drain_retired_scheduler_snapshots();
                 let snapshot = state.latest_scheduler_snapshot();
                 let playing = snapshot.transport.playing;
                 let pattern = snapshot.transport.current_pattern;

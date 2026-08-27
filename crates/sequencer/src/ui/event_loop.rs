@@ -1,5 +1,4 @@
 use crate::*;
-use eseqlisp::metal_backend::MetalBackend;
 
 type PendingPointerDrag = (crossterm::event::MouseEvent, (f32, f32));
 
@@ -20,7 +19,7 @@ fn flush_pending_pointer_drag(
 pub(crate) fn run_event_loop(
     mut app: app::App,
     mut editor: Editor,
-    mut backend: MetalBackend,
+    mut backend: AppBackend,
     mut track_names: Vec<String>,
     shared: SharedHandles,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -376,6 +375,7 @@ pub(crate) fn run_event_loop(
         }
         let (cols, rows) = backend.viewport_size();
         let (cell_w, cell_h) = backend.cell_dimensions();
+        editor.set_layout_cell_dimensions(cell_w, cell_h);
         if let Some((text_cell_w, text_cell_h)) = backend.sync_text_zoom(editor.text_zoom()) {
             editor.set_text_cell_dimensions(cell_w, cell_h, text_cell_w, text_cell_h);
         }
@@ -428,11 +428,11 @@ pub(crate) fn run_event_loop(
             let render_elapsed = render_started.elapsed();
             ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
             match render_status {
-                eseqlisp::metal_backend::TiledRenderStatus::Presented => {
+                TiledRenderStatus::Presented => {
                     editor.clear_needs_redraw();
                     last_render_at = Instant::now();
                 }
-                eseqlisp::metal_backend::TiledRenderStatus::NotPresented => {
+                TiledRenderStatus::NotPresented => {
                     eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
                     last_render_at = Instant::now();
                 }
@@ -461,6 +461,7 @@ pub(crate) fn run_event_loop(
         if let Some(event) = backend.poll_backend_event(timeout) {
             let event_started = Instant::now();
             match event {
+                BackendEvent::Quit => editor.request_quit(),
                 BackendEvent::FileDrop(paths) => {
                     match SampleImportSession::from_drop(
                         paths,
@@ -861,7 +862,7 @@ pub(crate) fn run_event_loop(
                             &shared.keyboard_octave,
                             &shared.held_notes,
                             &shared.roll_record,
-                            &shared.ui_epoch,
+                            &shared.ui_invalidations,
                             sequence_roll_binding,
                         )
                     } else {
@@ -875,20 +876,14 @@ pub(crate) fn run_event_loop(
                         editor.mark_needs_redraw();
                     }
                     if recording_key_outcome.recorded() {
+                        // The recorded write bumped ui_epoch, and this same
+                        // iteration ends in the reactive tick, whose
+                        // epoch-driven resync republishes the step grid and
+                        // refreshes the sequencer layout. Repeating that sync
+                        // + relayout inline here doubled the cost of every
+                        // recorded release and made fast chord stabs starve
+                        // the next notes' key events on slow machines.
                         app.mark_recording_take_changed();
-                        let ct = shared.current_track.load(Ordering::Relaxed);
-                        let rt = editor.runtime_mut();
-                        rt.set_reactive("SEQ", "steps", build_steps_value(&shared.state, ct));
-                        sync_all_track_sequencer_state(
-                            rt,
-                            &shared.state,
-                            &app,
-                            ct,
-                            &shared.selected_steps,
-                        );
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
-                        editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
                         editor.mark_needs_redraw();
                     }
                     // Only pass Press events to the editor (Release is only for note-off)

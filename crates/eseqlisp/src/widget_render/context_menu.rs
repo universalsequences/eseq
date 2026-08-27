@@ -18,12 +18,10 @@
 use std::collections::HashMap;
 
 use super::WidgetDefinition;
-#[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive, WidgetViewport,
+    GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive, WidgetViewport,
     resolve_named_color,
 };
-#[cfg(target_os = "macos")]
 use crate::backend::Color;
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size,
@@ -187,7 +185,6 @@ fn menu_item_select_info(node: &LayoutNode) -> Value {
 
 /// Panel border + background. Same chrome family as the dropdown menu and the
 /// modal panel, with a tighter corner radius; no scrim behind it.
-#[cfg(target_os = "macos")]
 pub(crate) fn emit_menu_chrome(
     props: &HashMap<String, Value>,
     panel_rect: Rect,
@@ -242,6 +239,7 @@ impl WidgetDefinition for ContextMenuWidget {
         area: Rect,
         children: &[Value],
         aspect: f32,
+        _measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
@@ -379,13 +377,12 @@ impl WidgetDefinition for MenuItemWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let mut prims = Vec::new();
         let disabled = item_disabled(&node.props);
         let dim = |color: Color| {
@@ -396,7 +393,7 @@ impl WidgetDefinition for MenuItemWidget {
             }
         };
         if !disabled && super::pointer_hovered(node.widget_id) {
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: super::menu_style::row_highlight_rect(node.rect),
                 color: resolve_named_color(
                     &node.props,
@@ -408,8 +405,8 @@ impl WidgetDefinition for MenuItemWidget {
         let font_size = super::menu_style::menu_font_size_from_props(&node.props);
         let text_row = node.rect.row + (ITEM_ROW_HEIGHT - 1.0) * 0.5;
         if let Some(Value::String(text)) = node.props.get("text") {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: text_row,
                     col: node.rect.col + ITEM_PADDING_COLS,
                     align_width: 0.0,
@@ -433,8 +430,8 @@ impl WidgetDefinition for MenuItemWidget {
                 let base = crate::theme::DROPDOWN_FG();
                 Color::rgba(base.r, base.g, base.b, base.a * 0.55)
             });
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: text_row,
                     col: node.rect.col + ITEM_PADDING_COLS,
                     align_width: (node.rect.width - ITEM_PADDING_COLS * 2.0).max(0.0),
@@ -471,15 +468,14 @@ impl WidgetDefinition for MenuSeparatorWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let line_height = 1.0 / viewport.cell_h.max(1.0);
-        vec![MetalPrimitive::Rect(MetalRectPrimitive {
+        vec![GpuPrimitive::Rect(GpuRectPrimitive {
             rect: Rect {
                 row: node.rect.row + (node.rect.height - line_height) * 0.5,
                 col: node.rect.col + ITEM_PADDING_COLS,

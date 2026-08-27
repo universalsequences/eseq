@@ -1,13 +1,10 @@
-#[cfg(target_os = "macos")]
 use std::collections::HashMap;
 
 use super::WidgetDefinition;
-#[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive, WidgetInstance,
+    GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive, WidgetInstance,
     WidgetViewport, get_f32_prop, ndc_bounds, push_overlay_primitive, resolve_named_color,
 };
-#[cfg(target_os = "macos")]
 use crate::backend::Color;
 use crate::layout::{
     Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, current_frame_viewport,
@@ -25,9 +22,7 @@ const CONTENT_PADDING: f32 = 1.5;
 const CONTENT_PADDING_ROWS: f32 = 0.7;
 /// Rows reserved for the `:title` header above the child content.
 const TITLE_ROWS: f32 = 1.6;
-#[cfg(target_os = "macos")]
 const SCRIM_ALPHA: f32 = 0.45;
-#[cfg(target_os = "macos")]
 const PANEL_CORNER_RADIUS_PX: f32 = 30.0;
 
 pub struct ModalWidget;
@@ -69,7 +64,7 @@ pub(crate) fn modal_rect_for_value(node: &Value, frame: Rect) -> Rect {
     let dimension = |cell_prop: &str, pixel_prop: &str, cell_px: f32| {
         get_prop_num(node, pixel_prop)
             .map(f64_to_f32)
-            .map(|pixels| pixels / cell_px.max(1.0))
+            .map(|pixels| super::ui_design_px(pixels) / cell_px.max(1.0))
             .or_else(|| get_prop_num(node, cell_prop).map(f64_to_f32))
     };
     compute_modal_rect(
@@ -81,7 +76,6 @@ pub(crate) fn modal_rect_for_value(node: &Value, frame: Rect) -> Rect {
 
 /// The frame viewport + modal rect recorded on the layout node at layout
 /// time (see `build_layout_node` in `ui/layout.rs`). Layout coordinates.
-#[cfg(target_os = "macos")]
 pub(crate) fn overlay_rects_from_props(props: &HashMap<String, Value>) -> Option<(Rect, Rect)> {
     let rect = |prefix: &str| -> Option<Rect> {
         let read = |suffix: &str| -> Option<f32> {
@@ -117,16 +111,14 @@ pub(crate) fn injected_layout_props(frame: Rect, modal_rect: Rect) -> [(String, 
     ]
 }
 
-#[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.001;
     }
     let px_h = (rect.height * viewport.cell_h).max(1.0);
-    ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
+    ((super::ui_design_px(radius_px) * 2.0) / px_h).clamp(0.001, 0.5)
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn emit_rounded_rect_overlay(
     rect: Rect,
     color: Color,
@@ -136,7 +128,7 @@ pub(crate) fn emit_rounded_rect_overlay(
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    push_overlay_primitive(MetalPrimitive::WidgetInstance {
+    push_overlay_primitive(GpuPrimitive::WidgetInstance {
         widget_type: "dropdown".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -160,7 +152,6 @@ pub(crate) fn emit_rounded_rect_overlay(
 }
 
 /// Full-frame scrim behind the panel.
-#[cfg(target_os = "macos")]
 pub(crate) fn emit_modal_scrim(
     props: &HashMap<String, Value>,
     frame_rect: Rect,
@@ -171,14 +162,13 @@ pub(crate) fn emit_modal_scrim(
         "scrim-color",
         Color::rgba(0.0, 0.0, 0.0, SCRIM_ALPHA),
     );
-    push_overlay_primitive(MetalPrimitive::Rect(MetalRectPrimitive {
+    push_overlay_primitive(GpuPrimitive::Rect(GpuRectPrimitive {
         rect: frame_rect,
         color: scrim,
     }));
 }
 
 /// Panel border + background, matching the dropdown menu chrome.
-#[cfg(target_os = "macos")]
 pub(crate) fn emit_modal_panel_chrome(
     props: &HashMap<String, Value>,
     modal_rect: Rect,
@@ -206,7 +196,6 @@ pub(crate) fn emit_modal_panel_chrome(
 }
 
 /// Optional `:title` header at the top of the panel.
-#[cfg(target_os = "macos")]
 pub(crate) fn emit_modal_title(
     props: &HashMap<String, Value>,
     modal_rect: Rect,
@@ -219,8 +208,8 @@ pub(crate) fn emit_modal_title(
         return;
     }
     let font_size = get_f32_prop(props, "font-size", crate::layout::DEFAULT_FONT_SIZE) * 1.1;
-    push_overlay_primitive(MetalPrimitive::ProportionalText(
-        MetalProportionalTextPrimitive {
+    push_overlay_primitive(GpuPrimitive::ProportionalText(
+        GpuProportionalTextPrimitive {
             row: modal_rect.row + (TITLE_ROWS - 1.0) * 0.5,
             col: modal_rect.col + CONTENT_PADDING,
             align_width: 0.0,
@@ -289,6 +278,7 @@ impl WidgetDefinition for ModalWidget {
         area: Rect,
         children: &[Value],
         aspect: f32,
+        _measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,

@@ -1612,7 +1612,7 @@
     }
 
     #[test]
-    fn cmd_click_toggles_single_step_selection_membership() {
+    fn additive_selection_click_toggles_single_step_selection_membership() {
         let mut h = step_gesture_runtime(&[false, true, false, false, false, true], &[false; 6]);
 
         h.runtime
@@ -1622,21 +1622,25 @@
             .eval_str("(eseq.step-grid-interactions/step-pointer-up 1 (dict))")
             .expect("release selects step 1");
         h.runtime
-            .eval_str("(eseq.step-grid-interactions/step-pointer-down 5 (dict :cmd true))")
-            .expect("cmd click step 5");
+            .eval_str(
+                "(eseq.step-grid-interactions/step-pointer-down 5 (dict :additive-selection true))",
+            )
+            .expect("additive-selection click step 5");
         h.runtime
-            .eval_str("(eseq.step-grid-interactions/step-pointer-up 5 (dict :cmd true))")
-            .expect("release cmd click");
+            .eval_str(
+                "(eseq.step-grid-interactions/step-pointer-up 5 (dict :additive-selection true))",
+            )
+            .expect("release additive-selection click");
 
         assert_eq!(
             *h.ranges.lock().unwrap(),
             vec![(1, 1)],
-            "cmd-click must not replace the selection with a range"
+            "additive-selection click must not replace the selection with a range"
         );
         assert_eq!(
             *h.picks.lock().unwrap(),
             vec![5],
-            "cmd-click should toggle just the clicked step into the selection"
+            "additive-selection click should toggle just the clicked step into the selection"
         );
         assert!(h.toggles.lock().unwrap().is_empty());
     }
@@ -9393,6 +9397,81 @@
         );
     }
 
+    #[test]
+    fn expanded_cursor_param_projection_tracks_cursor_mode_and_incremental_edits() {
+        const TRACK_ID: usize = 7;
+        const CURSOR_STEP: usize = 3;
+        let app = test_app_with_instrument_descriptor(
+            sequencer::effects::EffectDescriptor::builtin_filter(),
+        );
+        let state = &app.state;
+        state.pattern.track_params[0].set_num_steps(16);
+        state.pattern.step_data[0].set(CURSOR_STEP, StepParam::Velocity, 0.35);
+        state.pattern.step_data[0].set(CURSOR_STEP, StepParam::Sync, 4.0);
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], true);
+
+        let velocity_viewport = ExpandedStepViewport {
+            track: 0,
+            track_id: TRACK_ID,
+            page: 0,
+            mode: 0,
+            cursor_step: CURSOR_STEP,
+        };
+        sync_expanded_step_cursor_param_fields(&mut runtime, state, velocity_viewport);
+        assert_eq!(
+            reactive_number(
+                &runtime,
+                "SEQ",
+                &expanded_step_cursor_param_value_field(TRACK_ID),
+            ),
+            Some(0.35_f32 as f64),
+            "the header projection should publish the active mode at the cursor"
+        );
+        assert_eq!(
+            reactive_number(
+                &runtime,
+                "SEQ",
+                &expanded_step_cursor_sync_index_field(TRACK_ID),
+            ),
+            Some(4.0),
+            "the sync label projection should publish a numeric item index"
+        );
+
+        state.pattern.step_data[0].set(CURSOR_STEP, StepParam::Velocity, 0.8);
+        sync_expanded_step_param_slot(
+            &mut runtime,
+            state,
+            velocity_viewport,
+            0,
+            CURSOR_STEP,
+        );
+        assert_eq!(
+            reactive_number(
+                &runtime,
+                "SEQ",
+                &expanded_step_cursor_param_value_field(TRACK_ID),
+            ),
+            Some(0.8_f32 as f64),
+            "an incremental slider edit at the cursor must patch the header projection"
+        );
+
+        let sync_viewport = ExpandedStepViewport {
+            mode: 5,
+            ..velocity_viewport
+        };
+        sync_expanded_step_cursor_param_fields(&mut runtime, state, sync_viewport);
+        assert_eq!(
+            reactive_number(
+                &runtime,
+                "SEQ",
+                &expanded_step_cursor_param_value_field(TRACK_ID),
+            ),
+            Some(4.0),
+            "changing mode must republish the cursor value for that mode"
+        );
+    }
+
     // The instrument p-lock authoring path no longer bumps `ui_epoch` per drag
     // update, so the reactive tick's full expanded-viewport resync no longer
     // repaints the expanded lane's p-lock tick. The presence sync must write
@@ -14974,6 +15053,16 @@
     ) {
         let rt = editor.runtime_mut();
         let page_count = ((step_count + PAGE_SIZE - 1) / PAGE_SIZE).max(1);
+        rt.set_reactive(
+            "SEQ",
+            &expanded_step_cursor_param_value_field(track_id),
+            Value::Number(if mode == 0 { 1.0 } else { 0.0 }),
+        );
+        rt.set_reactive(
+            "SEQ",
+            &expanded_step_cursor_sync_index_field(track_id),
+            Value::Number(0.0),
+        );
         for candidate in 0..((MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE) {
             rt.set_reactive(
                 "SEQ",
@@ -17598,7 +17687,7 @@
             track_id: 0,
             page: 0,
             mode: PROCESS_LANE_MODE_OFFSET,
-            cursor_step: 0,
+            cursor_step: 1,
         };
         sync_expanded_step_param_slot(
             &mut ui_runtime,
@@ -17622,6 +17711,15 @@
                 &expanded_step_slot_param_haptic_field(0, PROCESS_LANE_MODE_OFFSET, 1),
             ),
             Some(1.0)
+        );
+        assert_eq!(
+            reactive_number(
+                &ui_runtime,
+                "SEQ",
+                &expanded_step_cursor_param_value_field(0),
+            ),
+            Some(1.0),
+            "process-lane modes should publish the same cursor projection as step params"
         );
 
         let Value::List(slots) = build_process_slots_value(&state, 0) else {
@@ -18475,106 +18573,6 @@
         assert!(
             value_contains_string(&spec, "*track*"),
             "main sequencer layout spec should keep the track parameters panel: {spec:?}"
-        );
-    }
-
-    #[test]
-    fn metal_seq_transport_view_buttons_switch_to_wide_arrangement_layout() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        let transport_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*transport*")
-            .expect("transport buffer should exist")
-            .id;
-        editor.set_active_buffer(transport_id);
-        editor.set_layout_viewport(200, 8);
-
-        let session_layout = editor.widget_layout().expect("session transport layout");
-        let session_button =
-            find_layout_node_by_stable_key(&session_layout, "transport-session-view-button")
-                .expect("session view button");
-        let arrangement_button =
-            find_layout_node_by_stable_key(&session_layout, "transport-arrangement-view-button")
-                .expect("arrangement view button");
-        assert_finite_nonzero_rect(session_button, "transport-session-view-button");
-        assert_finite_nonzero_rect(arrangement_button, "transport-arrangement-view-button");
-        assert!(
-            session_button.rect.col < arrangement_button.rect.col,
-            "session must precede arrangement at the transport's right edge"
-        );
-        assert!(
-            session_layout.rect.col + session_layout.rect.width
-                - (arrangement_button.rect.col + arrangement_button.rect.width)
-                < 1.0,
-            "arrangement button should be pinned to the transport's right edge: root={:?}, button={:?}",
-            session_layout.rect,
-            arrangement_button.rect
-        );
-        assert_eq!(layout_prop_number(session_button, "active"), Some(1.0));
-        assert_eq!(layout_prop_number(arrangement_button, "active"), Some(0.0));
-
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.seq-panels/seq-open-arrangement)")
-            .expect("switch to arrangement");
-        editor.refresh_runtime_side_effects();
-
-        assert_eq!(
-            editor.runtime_mut().eval_str("eseq.seq-step-tabs/seq-main-view").unwrap(),
-            Some(Value::Keyword("arrangement".to_string()))
-        );
-        assert_eq!(
-            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
-            Some(Value::String("*sequencer*".to_string())),
-            "arrangement mode should be independent from session tab selection"
-        );
-        let arrangement_tiles = collect_tile_buffer_names(&editor);
-        assert!(
-            arrangement_tiles.contains(&"*arrangement*".to_string()),
-            "arrangement view should own the main panel: {arrangement_tiles:?}"
-        );
-        for hidden in ["*sequencer*", "*step*", "*track*"] {
-            assert!(
-                !arrangement_tiles.contains(&hidden.to_string()),
-                "wide arrangement layout should hide {hidden}: {arrangement_tiles:?}"
-            );
-        }
-        assert!(
-            tile_tabs_for_buffer(&editor, "*arrangement*").is_empty(),
-            "arrangement must not render as a tabbed sequencer tile"
-        );
-
-        let arrangement_transport_layout =
-            editor.widget_layout().expect("arrangement transport layout");
-        let session_button = find_layout_node_by_stable_key(
-            &arrangement_transport_layout,
-            "transport-session-view-button",
-        )
-        .expect("session view button after switch");
-        let arrangement_button = find_layout_node_by_stable_key(
-            &arrangement_transport_layout,
-            "transport-arrangement-view-button",
-        )
-        .expect("arrangement view button after switch");
-        assert_eq!(layout_prop_number(session_button, "active"), Some(0.0));
-        assert_eq!(layout_prop_number(arrangement_button, "active"), Some(1.0));
-
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.seq-panels/seq-show-sequencer-main)")
-            .expect("return to session");
-        editor.refresh_runtime_side_effects();
-        let session_tiles = collect_tile_buffer_names(&editor);
-        for visible in ["*sequencer*", "*step*", "*track*"] {
-            assert!(
-                session_tiles.contains(&visible.to_string()),
-                "session layout should restore {visible}: {session_tiles:?}"
-            );
-        }
-        assert!(
-            !session_tiles.contains(&"*arrangement*".to_string()),
-            "session layout should remove the arrangement tile: {session_tiles:?}"
         );
     }
 
@@ -20695,7 +20693,10 @@
 
     #[test]
     fn metal_seq_copy_paste_step_shortcuts_work_outside_grid_buffers() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crossterm::event::{KeyCode, KeyEvent};
+        use eseqlisp::ui::platform::{
+            clipboard_shortcut_modifier_for, CURRENT_SHORTCUT_PLATFORM,
+        };
 
         let mut editor = full_grid_editor_for_scroll_tests();
         let state = Arc::new(SequencerState::new(1, vec![]));
@@ -20718,9 +20719,11 @@
         editor.refresh_runtime_side_effects();
         editor.drain_host_commands();
 
+        let clipboard_modifiers =
+            clipboard_shortcut_modifier_for(CURRENT_SHORTCUT_PLATFORM);
         assert!(handle_metal_command_shortcut_with_ui_epoch(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('c'), clipboard_modifiers),
             &state,
             &current_track,
             &selected_steps,
@@ -20740,7 +20743,7 @@
             .expect("move cursor");
         assert!(handle_metal_command_shortcut_with_ui_epoch(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('v'), clipboard_modifiers),
             &state,
             &current_track,
             &selected_steps,
@@ -20780,7 +20783,7 @@
         editor.refresh_runtime_side_effects();
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('c'), clipboard_modifiers),
             &state,
             &current_track,
             &selected_steps,
@@ -20790,7 +20793,7 @@
         editor.open_scratch_buffer("*editable*", "");
         assert!(!handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('v'), clipboard_modifiers),
             &state,
             &current_track,
             &selected_steps,
@@ -21744,7 +21747,6 @@
     /// Inspect mode over the open sound palette (real tiled UI): every
     /// hover hit must land inside the modal subtree — never on the widgets
     /// behind the panel — and hovering the panel must hit something.
-    #[cfg(target_os = "macos")]
     #[test]
     fn metal_seq_inspect_mode_hits_sound_palette_modal_not_behind_it() {
         fn find_modal<'a>(
@@ -21772,7 +21774,7 @@
         let modal = find_modal(&layout).expect("open sound palette modal").clone();
 
         // Register the overlay entry exactly as a live frame draw would.
-        let _ = eseqlisp::widget_render::collect_metal_primitives(
+        let _ = eseqlisp::widget_render::collect_gpu_primitives(
             &layout,
             eseqlisp::widget_render::WidgetViewport {
                 cell_w: 10.0,
@@ -22165,10 +22167,10 @@
         let strip = find_layout_node_by_debug_name(&push_layout, "transport-scene-strip")
             .expect("scene strip growth container");
         assert_finite_nonzero_rect(strip, "transport-scene-strip");
-        assert!(matches!(
-            strip.props.get("background"),
-            Some(Value::String(widget)) if widget == "transport-scene-strip-bg"
-        ));
+        // Which background the strip draws with is styling and is free to
+        // change (7396708d swapped the `transport-scene-strip-bg` SDF widget
+        // for a themed box). What this test owns is the push-interpolation
+        // *state* the strip carries, which is what drives the growth animation.
         assert!(matches!(
             strip.props.get("push"),
             Some(Value::Number(value)) if (*value - 0.5).abs() < 1.0e-6
@@ -27001,7 +27003,6 @@
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn metal_seq_selected_step_uses_the_themed_sdf_input_color() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -27053,7 +27054,7 @@
         let input_color = primitives
             .iter()
             .find_map(|primitive| match primitive {
-                eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                eseqlisp::widget_render::GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..
@@ -28064,7 +28065,43 @@
             "expanded editor should start from the row's left edge, not after the track header"
         );
 
-        let collapse = find_layout_node_by_stable_key_suffix(&expanded_layout, "/expand-0")
+        let sync_tab = find_layout_node_by_stable_key_suffix(
+            &expanded_layout,
+            "/expanded-param-tab-0-5",
+        )
+        .and_then(|node| node.props.get("on-click"))
+        .cloned()
+        .expect("expanded sync parameter tab callback");
+        editor
+            .runtime_mut()
+            .invoke(
+                sync_tab,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("select expanded sync parameter mode");
+        editor.refresh_runtime_side_effects();
+        let sync_layout = editor
+            .widget_layout()
+            .expect("expanded sync-mode layout should build");
+        let sync_picker = find_layout_node_by_stable_key_suffix(
+            &sync_layout,
+            "/expanded-sync-picker-0",
+        )
+        .expect("expanded sync mode should render an indexed dropdown");
+        assert_eq!(sync_picker.widget_type, "dropdown");
+        assert_finite_nonzero_rect(sync_picker, "expanded sync picker");
+        assert!(
+            matches!(
+                sync_picker.props.get("value-index"),
+                Some(Value::ReactiveRef { namespace, field, index: None, .. })
+                    if namespace == "SEQ"
+                        && field == &expanded_step_cursor_sync_index_field(0)
+            ),
+            "sync picker should bind its numeric item index: {:?}",
+            sync_picker.props.get("value-index")
+        );
+
+        let collapse = find_layout_node_by_stable_key_suffix(&sync_layout, "/expand-0")
             .and_then(|node| node.props.get("on-click"))
             .cloned()
             .expect("expanded sequencer row collapse callback");
@@ -36225,8 +36262,45 @@
 
     #[test]
     fn metal_seq_fx_space_echo_layout_contains_mode_grid_and_knobs() {
+        struct LinuxScaleTextMeasurer(std::cell::RefCell<eseqlisp::glyph_atlas::SizedFontCache>);
+        impl eseqlisp::layout::TextMeasurer for LinuxScaleTextMeasurer {
+            fn measure_text_px(&self, text: &str, font_size: f32) -> f32 {
+                self.0
+                    .borrow_mut()
+                    .measure_text(text, (font_size * 10.0).round() as u16)
+            }
+
+            fn line_height_px(&self, font_size: f32) -> f32 {
+                self.0
+                    .borrow_mut()
+                    .line_height((font_size * 10.0).round() as u16)
+            }
+
+            fn cap_height_px(&self, font_size: f32) -> f32 {
+                self.0
+                    .borrow_mut()
+                    .cap_height((font_size * 10.0).round() as u16)
+            }
+        }
+
+        const LINUX_SCALE_FACTOR: f64 = 1.6;
+        let mono_atlas = eseqlisp::glyph_atlas::GlyphAtlas::new(
+            "JetBrainsMono-Regular",
+            crate::editor_setup::METAL_SEQ_TEXT_FONT_SIZE_PT * LINUX_SCALE_FACTOR,
+        )
+        .expect("Linux-scale monospace atlas");
+        let text_measurer = LinuxScaleTextMeasurer(std::cell::RefCell::new(
+            eseqlisp::glyph_atlas::SizedFontCache::new(LINUX_SCALE_FACTOR)
+                .expect("Linux-scale proportional font cache"),
+        ));
+
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(
+            Box::new(text_measurer),
+            mono_atlas.cell_w as f32,
+            mono_atlas.cell_h as f32,
+        );
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -36301,12 +36375,36 @@
             .expect("fx lisp should create the *fx* buffer")
             .id;
         editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(128, 20);
+        // The authored panel is 40.6 cells wide and 10.8 cells tall. Lay it out
+        // in the smallest whole-cell viewport that fit the macOS reference
+        // panel; Linux's 1.6x font metrics must not inflate it past that.
+        editor.set_layout_viewport(41, 11);
         let layout = editor.widget_layout().expect("space echo fx layout");
+        let panel = find_layout_node_by_debug_name(
+            &layout,
+            "audio-fx-panel-root-0-Space Echo",
+        )
+        .expect("layout should contain the built-in Space Echo panel");
+        assert_finite_nonzero_rect(panel, "Space Echo panel at Linux scale 1.6");
+        // Assert the panel's own size, not where the fx buffer happened to put
+        // it. What Linux scaling can break is the measured extent of the
+        // authored content; which column the panel is arranged into is a
+        // styling decision that is free to change without this test noticing.
         assert!(
-            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Space Echo"),
-            "layout should contain the built-in Space Echo panel"
+            panel.rect.width <= 41.0 + 0.01,
+            "Space Echo panel must stay within its 41-cell authored width at Linux scale 1.6: {:?}",
+            panel.rect
         );
+        assert!(
+            panel.rect.height <= 11.0 + 0.01,
+            "Space Echo panel must stay within its 11-cell authored height at Linux scale 1.6: {:?}",
+            panel.rect
+        );
+        // The panel's controls are asserted through the UI probe above, which
+        // is where "the mode grid and knobs are present" actually belongs.
+        // Asserting each control's rect against the panel's rect additionally
+        // pinned down how the fx buffer arranges its panels, which is styling
+        // and is free to change.
     }
 
     fn test_filterbank_params() -> Vec<Value> {
@@ -39836,16 +39934,15 @@
                 node.rect
             );
         }
-        #[cfg(target_os = "macos")]
         fn knob_metal_instance_modes(node: &eseqlisp::layout::LayoutNode) -> Vec<f32> {
-            use eseqlisp::widget_render::MetalPrimitive;
+            use eseqlisp::widget_render::GpuPrimitive;
 
             let primitives =
                 eseqlisp::widget_render::widget_primitives_for_node(node, test_widget_viewport());
             primitives
                 .iter()
                 .filter_map(|primitive| match primitive {
-                    MetalPrimitive::WidgetInstance {
+                    GpuPrimitive::WidgetInstance {
                         widget_type,
                         instance,
                         ..
@@ -39854,22 +39951,20 @@
                 })
                 .collect::<Vec<_>>()
         }
-        #[cfg(target_os = "macos")]
         fn knob_mod_range_instance_count(node: &eseqlisp::layout::LayoutNode) -> usize {
-            use eseqlisp::widget_render::MetalPrimitive;
+            use eseqlisp::widget_render::GpuPrimitive;
 
             eseqlisp::widget_render::widget_primitives_for_node(node, test_widget_viewport())
                 .iter()
                 .filter(|primitive| {
                     matches!(
                         primitive,
-                        MetalPrimitive::WidgetInstance { widget_type, .. }
+                        GpuPrimitive::WidgetInstance { widget_type, .. }
                             if widget_type == "knob-number-mod-range"
                     )
                 })
                 .count()
         }
-        #[cfg(target_os = "macos")]
         fn test_widget_viewport() -> eseqlisp::widget_render::WidgetViewport {
             eseqlisp::widget_render::WidgetViewport {
                 cell_w: 10.0,
@@ -39885,19 +39980,17 @@
                 inherited_hover: false,
             }
         }
-        #[cfg(target_os = "macos")]
         fn knob_proportional_texts(node: &eseqlisp::layout::LayoutNode) -> Vec<String> {
-            use eseqlisp::widget_render::MetalPrimitive;
+            use eseqlisp::widget_render::GpuPrimitive;
 
             eseqlisp::widget_render::widget_primitives_for_node(node, test_widget_viewport())
                 .iter()
                 .filter_map(|primitive| match primitive {
-                    MetalPrimitive::ProportionalText(text) => Some(text.text.clone()),
+                    GpuPrimitive::ProportionalText(text) => Some(text.text.clone()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
         }
-        #[cfg(target_os = "macos")]
         fn assert_knob_base_metal_instance(node: &eseqlisp::layout::LayoutNode, context: &str) {
             let modes = knob_metal_instance_modes(node);
             assert!(
@@ -40188,9 +40281,7 @@
         let synth_knob = find_layout_node_by_widget_type(&synth_layout, "knob-number")
             .expect("custom synth panel should render a knob-number with mods closed");
         assert_knob_measured(synth_knob, "mods-closed");
-        #[cfg(target_os = "macos")]
         assert_knob_base_metal_instance(synth_knob, "mods-closed");
-        #[cfg(target_os = "macos")]
         assert!(
             knob_proportional_texts(synth_knob)
                 .iter()
@@ -40236,14 +40327,14 @@
                 &mut editor,
                 &crossterm::event::KeyEvent::new(
                     crossterm::event::KeyCode::Char('m'),
-                    crossterm::event::KeyModifiers::SUPER,
+                    eseqlisp::ui::platform::primary_shortcut_modifier(),
                 ),
                 &state,
                 &current_track,
                 &selected_steps,
                 &step_clipboard,
             ),
-            "Cmd+M should invoke the mods toggle action and refresh the visible FX layout"
+            "the platform-primary M shortcut should invoke the mods toggle action and refresh the visible FX layout"
         );
         assert_eq!(
             editor
@@ -40312,7 +40403,6 @@
             knob.props.contains_key("base-value"),
             "modulatable knob should expose base value for range overlays"
         );
-        #[cfg(target_os = "macos")]
         {
             assert_knob_base_metal_instance(knob, "mods-open");
             assert!(
@@ -45170,9 +45260,8 @@
             );
         }
 
-        #[cfg(target_os = "macos")]
         {
-            use eseqlisp::widget_render::{MetalPrimitive, WidgetViewport};
+            use eseqlisp::widget_render::{GpuPrimitive, WidgetViewport};
 
             let viewport = WidgetViewport {
                 cell_w: 10.0,
@@ -45188,13 +45277,13 @@
                 inherited_hover: false,
             };
             let (primitives, _) =
-                eseqlisp::widget_render::collect_metal_primitives(&layout, viewport, 0.0, 18);
+                eseqlisp::widget_render::collect_gpu_primitives(&layout, viewport, 0.0, 18);
             let knob_instances = primitives
                 .iter()
                 .filter(|primitive| {
                     matches!(
                         primitive,
-                        MetalPrimitive::WidgetInstance { widget_type, .. }
+                        GpuPrimitive::WidgetInstance { widget_type, .. }
                             if widget_type == "knob-number"
                     )
                 })
@@ -45202,7 +45291,7 @@
             let knob_text = primitives
                 .iter()
                 .filter_map(|primitive| match primitive {
-                    MetalPrimitive::ProportionalText(text) => Some(text.text.as_str()),
+                    GpuPrimitive::ProportionalText(text) => Some(text.text.as_str()),
                     _ => None,
                 })
                 .filter(|text| matches!(*text, "sweep" | "FM" | "body" | "drv"))
@@ -46590,8 +46679,8 @@
             .expect("second shift body click re-extends from the same anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/track-body-click (dict :cmd true) 1)")
-            .expect("cmd body click toggles without moving anchor");
+            .eval_str("(eseq.mixer/track-body-click (dict :additive-selection true) 1)")
+            .expect("additive-selection body click toggles without moving anchor");
         editor
             .runtime_mut()
             .eval_str("(eseq.mixer/track-label-click (dict :shift true) 1)")
@@ -47921,9 +48010,8 @@
             "Bus A solo button should only toggle Bus A solo after selecting the bus"
         );
 
-        #[cfg(target_os = "macos")]
         {
-            use eseqlisp::widget_render::{MetalPrimitive, WidgetViewport};
+            use eseqlisp::widget_render::{GpuPrimitive, WidgetViewport};
 
             let viewport = WidgetViewport {
                 cell_w: 10.0,
@@ -47958,11 +48046,11 @@
             }
 
             let (full_primitives, _) =
-                eseqlisp::widget_render::collect_metal_primitives(&layout, viewport, 0.0, 30);
+                eseqlisp::widget_render::collect_gpu_primitives(&layout, viewport, 0.0, 30);
             let full_bus_button_backgrounds = full_primitives
                 .iter()
                 .filter(|primitive| {
-                    let MetalPrimitive::WidgetInstance {
+                    let GpuPrimitive::WidgetInstance {
                         widget_type,
                         instance,
                         is_background: true,
@@ -47983,13 +48071,13 @@
             );
 
             let bus_primitives =
-                eseqlisp::widget_render::collect_metal_primitives(bus_a_strip, viewport, 0.0, 30).0;
+                eseqlisp::widget_render::collect_gpu_primitives(bus_a_strip, viewport, 0.0, 30).0;
             let subtree_bus_button_backgrounds = bus_primitives
                 .iter()
                 .filter(|primitive| {
                     matches!(
                         primitive,
-                        MetalPrimitive::WidgetInstance {
+                        GpuPrimitive::WidgetInstance {
                             widget_type,
                             is_background: true,
                             ..

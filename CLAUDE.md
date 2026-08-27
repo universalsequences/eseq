@@ -61,28 +61,79 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 ## Build & Test
 
 Prefer `cargo nextest run` and select the narrowest exact test that validates a
-change. Full workspace runs are reserved for explicitly exhaustive work such as
-eseq-4tl; see `AGENTS.md` for selection examples and runtime policy.
+change. Verify the prerequisite with `cargo nextest --version`; install it with
+`brew install cargo-nextest` on macOS or
+`cargo install cargo-nextest --locked` on Linux. Full workspace runs are
+reserved for explicitly exhaustive work such as eseq-4tl; see `AGENTS.md` for
+selection examples and runtime policy.
+
+### DGenLisp compiler (fetched, not tracked)
+
+The DGenLisp compiler binary is not in git. `content/dgenlisp.lock` pins the
+published distribution per target; run `./scripts/fetch_dgenlisp.sh` once per
+fresh checkout (idempotent, sha256-verified) to install it under
+`crates/sequencer/tools/` (gitignored). Anything that needs the compiler and
+cannot find it hard-fails naming that command. `ESEQ_DGENLISP_TOOL=/abs/path`
+overrides it with a locally built compiler.
+
+The compiler is only half of it: it shells out to a hermetic clang/lld stage
+pinned in `content/dgen-toolchain.lock` and installed by
+`./scripts/fetch_dgen_toolchain.sh`, also once per fresh checkout. That script
+can only fetch targets with a published `url` in the lock — currently just
+`x86_64-unknown-linux-gnu`. `arm64-apple-macos` is pinned but unpublished and is
+vendored by `./rebuild_dgenlisp_tool.sh` from a local dgen-audio checkout, so a
+Mac without that checkout cannot bootstrap the stage and every DGen compile
+hard-fails.
 
 ### Cheap clean-HEAD check
 
 Do not stash and do not cold-clone the repository to determine whether one test
-fails at HEAD. Reuse one isolated worktree, the current checkout's compiled
-target directory, and its staged (gitignored) DGen toolchain:
+fails at HEAD. Reuse an isolated worktree and a dedicated target directory.
+Resolve HEAD once in the working checkout and pin both worktree commands to that
+commit: a bare `HEAD` passed to `git -C "$wt"` resolves against the worktree's
+own detached HEAD, so a reused worktree would silently stay on whatever commit
+it was left at and answer for the wrong tree.
 
 ```bash
-root=$PWD; wt=/tmp/eseq-head-test
-[ -e "$wt/.git" ] || git worktree add --detach "$wt" HEAD
-git -C "$wt" checkout --detach HEAD
+wt=/tmp/eseq-head-test; target="$HOME/.cache/eseq-head-test-target"
+root=$PWD
+head=$(git rev-parse HEAD)
+[ -e "$wt/.git" ] || git worktree add --detach "$wt" "$head"
+git -C "$wt" checkout --detach "$head"
 (cd "$wt" && \
-  CARGO_TARGET_DIR="$root/target" \
+  CARGO_TARGET_DIR="$target" \
   ESEQ_DGEN_TOOLCHAIN_ROOT="$root/crates/sequencer/tools/dgen-toolchain" \
   cargo nextest run -p <package> -E 'test(=<fully-qualified-test-name>)')
 ```
 
-The worktree is disposable and isolated, so resetting it never touches the
-working checkout. Remove it with `git worktree remove /tmp/eseq-head-test` when
-it is no longer useful.
+The fetched compiler and the hermetic clang/lld stage are both gitignored, so a
+worktree does not inherit either one. `ESEQ_DGEN_TOOLCHAIN_ROOT` (resolved in
+the working checkout as `root`, like `head`) points the worktree at the main
+checkout's stage; a test that also needs the compiler itself wants
+`./scripts/fetch_dgenlisp.sh` run inside the worktree, or `ESEQ_DGENLISP_TOOL`
+pointed at the main checkout's binary.
+
+The dedicated target directory keeps Cargo artifacts from the clean checkout
+separate from working-checkout artifacts and off `/tmp`, which is a 3.9 GB tmpfs
+on the Linux workstation and cannot hold a Cargo target directory. Sharing a
+target directory between worktrees can make Cargo run a binary built from the
+wrong source tree. The worktree is disposable and isolated, so resetting it
+never touches the working checkout.
+
+Budget for the cold build before starting. `-E` filters which tests *run*, not
+what gets *built*, so even the narrowest exact test pays for its package's whole
+dependency graph: measured 2026-08-24, one `-p sequencer` test took 5m51s and
+left 8.1 GB in the dedicated target directory. Still prefer the narrowest exact
+test — it saves run time and keeps the output readable — but do not expect it to
+save disk. A `--workspace` run costs more of both.
+
+Clean up both directories when they are no longer useful; each is several GB and
+easy to forget:
+
+```bash
+git worktree remove /tmp/eseq-head-test
+rm -rf "$HOME/.cache/eseq-head-test-target"
+```
 
 ### Test stack budget
 
@@ -103,9 +154,17 @@ bead is complete. With the configured budget, any remaining overflow is
 isolated by nextest and reported as the named test rather than aborting a shared
 test binary.
 
-As of 2026-08-20 there are no known pre-existing failures: full debug is 4,272
-passed / 32 skipped and full release is 4,270 passed / 32 skipped. Commands and
-timings are recorded in `docs/test-suite-performance.md`.
+There are no known pre-existing failures in the validated platform baselines:
+
+- On Apple Silicon macOS as of 2026-08-20, the full workspace is green: debug is
+  4,272 passed / 32 skipped and release is 4,270 passed / 32 skipped. Commands
+  and timings are recorded in `docs/test-suite-performance.md`.
+- On x86_64 Linux as of 2026-08-24,
+  `cargo nextest run -p eseqlisp --features wgpu` is green with 1,699 passed and
+  3 skipped. Both shared-state tests that failed spuriously under plain
+  `cargo test` pass under nextest process isolation. A full Linux workspace
+  baseline has not yet been established; do not use the macOS workspace counts
+  as a Linux expectation.
 
 ## Architecture Overview
 

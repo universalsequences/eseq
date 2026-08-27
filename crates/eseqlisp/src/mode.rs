@@ -127,6 +127,11 @@ const ESEQLISP_BUILTINS: &[(&str, &str, &str)] = &[
         "Register a repeating hook that runs a quoted form on the host schedule.",
     ),
     (
+        "find-by-key",
+        "(find-by-key list :key value)",
+        "First map in list whose :key field equals value, or nil.",
+    ),
+    (
         "filter",
         "(filter fn xs)",
         "Return a list of items where fn returns truthy.",

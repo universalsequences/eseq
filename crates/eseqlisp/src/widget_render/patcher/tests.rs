@@ -28,6 +28,7 @@ use crate::defmacro_library::DefmacroLibrary;
 use crate::editor::{Editor, EditorConfig};
 use crate::layout::{LayoutNode, MeasureCtx, Rect, TextMeasurer};
 use crate::runtime::Runtime;
+use crate::ui::platform::primary_shortcut_modifier;
 use crate::theme;
 use crate::vm::Value;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -1146,10 +1147,8 @@ fn source_expr(scope: SourceScopeId, form_index: usize, path: &[usize]) -> Sourc
     }
 }
 
-#[cfg(target_os = "macos")]
 struct FixedWidthTextMeasurer;
 
-#[cfg(target_os = "macos")]
 impl TextMeasurer for FixedWidthTextMeasurer {
     fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
         text.chars()
@@ -1164,15 +1163,12 @@ impl TextMeasurer for FixedWidthTextMeasurer {
 
 /// One cell-width-times-`PRIMED_GLYPH_ADVANCE_CELLS` per character, whatever
 /// the text: the geometry fixtures below are written against a uniform advance.
-#[cfg(target_os = "macos")]
 struct MonospaceTextMeasurer;
 
 /// Glyph advance, in layout cells per character, the patcher geometry fixtures
 /// are dimensioned for.
-#[cfg(target_os = "macos")]
 const PRIMED_GLYPH_ADVANCE_CELLS: f32 = 1.16;
 
-#[cfg(target_os = "macos")]
 impl TextMeasurer for MonospaceTextMeasurer {
     fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
         text.chars().count() as f32 * PRIMED_GLYPH_ADVANCE_CELLS * 10.0
@@ -1191,7 +1187,6 @@ impl TextMeasurer for MonospaceTextMeasurer {
 /// Every node's drawn label and its editable text go in, which also pins the
 /// average advance the width estimator calibrates against, so labels not listed
 /// here come out at the same uniform advance.
-#[cfg(target_os = "macos")]
 fn prime_patcher_text_metrics(patch: &Patch) {
     let measurer = MonospaceTextMeasurer;
     let measure_ctx = MeasureCtx {
@@ -1215,9 +1210,6 @@ fn prime_patcher_text_metrics(patch: &Patch) {
         }
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-fn prime_patcher_text_metrics(_patch: &Patch) {}
 
 struct VariableWidthTextMeasurer;
 
@@ -1275,8 +1267,7 @@ fn patcher_props_for_path(path: &std::path::Path) -> HashMap<String, Value> {
     ])
 }
 
-#[cfg(target_os = "macos")]
-fn inner_prim(prim: &MetalPrimitive) -> &MetalPrimitive {
+fn inner_prim(prim: &GpuPrimitive) -> &GpuPrimitive {
     crate::widget_render::innermost_primitive(prim)
 }
 
@@ -1284,15 +1275,14 @@ fn inner_prim(prim: &MetalPrimitive) -> &MetalPrimitive {
 /// `patcher-node` chrome shader with real nodes (so the completion morph can
 /// interpolate between them), so they are told apart by size — a bubble is far
 /// larger than any node.
-#[cfg(target_os = "macos")]
 fn agentic_bubble_body_sizes(
-    prims: &[MetalPrimitive],
+    prims: &[GpuPrimitive],
     viewport: WidgetViewport,
 ) -> Vec<(f32, f32)> {
     prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::WidgetInstance {
+            GpuPrimitive::WidgetInstance {
                 widget_type,
                 instance,
                 ..
@@ -1317,8 +1307,7 @@ fn settle_agentic_bubbles(state: &mut PatcherInteractionState) {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn effective_z(prim: &MetalPrimitive) -> i32 {
+fn effective_z(prim: &GpuPrimitive) -> i32 {
     crate::widget_render::effective_z_index(prim)
 }
 
@@ -1821,6 +1810,52 @@ fn stale_and_malformed_sidecar_entries_do_not_change_semantics() {
     );
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const DGENLISP_TOOL_FILENAME: &str = "DGenLisp-macos-arm64";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const DGENLISP_TOOL_FILENAME: &str = "DGenLisp-linux-x86_64";
+
+fn patcher_test_dgenlisp_tool(repo_root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    if let Some(path) = std::env::var_os("ESEQ_DGENLISP_TOOL").filter(|path| !path.is_empty()) {
+        return Ok(path.into());
+    }
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))]
+    {
+        // The compiler is not tracked in git; content/dgenlisp.lock pins the
+        // published distribution and scripts/fetch_dgenlisp.sh installs it at
+        // this path. Same contract as AppPaths::dgenlisp_tool_checked: a
+        // missing binary is a hard error naming the exact fetch command.
+        let tool = repo_root
+            .join("crates/sequencer/tools")
+            .join(DGENLISP_TOOL_FILENAME);
+        if tool.is_file() {
+            Ok(tool)
+        } else {
+            Err(format!(
+                "DGenLisp compiler not found at {}. Run ./scripts/fetch_dgenlisp.sh at the \
+                 repo root to install the distribution pinned in content/dgenlisp.lock, or \
+                 set ESEQ_DGENLISP_TOOL to a locally built compiler.",
+                tool.display()
+            ))
+        }
+    }
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    )))]
+    {
+        Err(format!(
+            "no DGenLisp distribution is published for {}-{}; set ESEQ_DGENLISP_TOOL to a \
+             locally built compiler",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    }
+}
+
 fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
     let source_path = temp_patcher_source_path("patcher-dgen-compile");
     let out_dir = source_path.with_extension("out");
@@ -1831,13 +1866,21 @@ fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
         .parent()
         .and_then(|path| path.parent())
         .expect("eseqlisp crate should live below the repository root");
-    let tool_path = repo_root.join("crates/sequencer/tools/DGenLisp");
+    let tool_path = patcher_test_dgenlisp_tool(repo_root)?;
     let output = std::process::Command::new(tool_path)
         .args(["compile", source_path.to_str().unwrap()])
         .args(["-o", out_dir.to_str().unwrap()])
         .args(["--name", "patcher_dgen_compile_test"])
         .args(["--sample-rate", "44100"])
         .args(["--voices", "12"])
+        // No DGEN_RUNTIME_INCLUDE / toolchain hint: the pinned distribution
+        // carries its own headers and resolves them relative to the
+        // executable. Exporting a hint overrides that resolution, and an
+        // absent stage silently turns into `dgen_runtime.h not found`.
+        // eseq audits the produced dylib itself (see
+        // crates/sequencer/src/lisp_host/dgen/dgen_audit.rs), so the
+        // compiler's inline audit is redundant here.
+        .arg("--skip-inline-audit")
         .output()
         .map_err(|error| error.to_string())?;
 
@@ -1924,13 +1967,12 @@ fn patcher_test_node(path: &std::path::Path) -> LayoutNode {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_patcher_primitives_are_clipped_to_the_widget_rect() {
     let path = temp_patcher_source_path("primitive-clip");
     fs::write(&path, "(def signal (sin 440))\n(out signal)").expect("write patch");
     let node = patcher_test_node(&path);
-    let prims = build_metal_primitives_for_patcher(
+    let prims = build_primitives_for_patcher(
         &node,
         WidgetViewport {
             cell_w: 10.0,
@@ -1948,9 +1990,9 @@ fn metal_patcher_primitives_are_clipped_to_the_widget_rect() {
     );
     assert!(matches!(
         prims.first(),
-        Some(MetalPrimitive::PushClipRect(rect)) if *rect == node.rect
+        Some(GpuPrimitive::PushClipRect(rect)) if *rect == node.rect
     ));
-    assert!(matches!(prims.last(), Some(MetalPrimitive::PopClipRect)));
+    assert!(matches!(prims.last(), Some(GpuPrimitive::PopClipRect)));
     let _ = fs::remove_file(path);
 }
 
@@ -2954,7 +2996,7 @@ fn agentic_bubble_cmd_k_creates_ephemeral_prompt_without_source_write() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
 
@@ -3056,7 +3098,7 @@ fn agentic_bubble_cmd_k_uses_last_pointer_model_position() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
 
@@ -3081,7 +3123,7 @@ fn agentic_bubble_enter_emits_submit_payload_and_pending_state() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let key = patcher_state_key(&node);
@@ -3125,7 +3167,6 @@ fn agentic_bubble_enter_emits_submit_payload_and_pending_state() {
 
 /// Clicking the send chevron submits exactly as Enter does. The chevron's hit
 /// rect is recorded by the render pass, so the bubble has to be drawn first.
-#[cfg(target_os = "macos")]
 #[test]
 fn clicking_the_agentic_send_chevron_submits_the_prompt() {
     let path = temp_patcher_source_path("agentic-bubble-send-click");
@@ -3171,7 +3212,7 @@ fn clicking_the_agentic_send_chevron_submits_the_prompt() {
         scroll_left: 0.0,
         inherited_hover: false,
     };
-    let _ = build_metal_primitives_for_patcher(&node, viewport);
+    let _ = build_primitives_for_patcher(&node, viewport);
 
     let button = super::state::agentic_buttons_for_test()
         .into_iter()
@@ -3237,7 +3278,6 @@ fn clicking_the_agentic_send_chevron_submits_the_prompt() {
 /// The header's model chip names the model the bubble will run on, and clicking
 /// it asks the host to open `M-x choose-model`. The picker itself is the host's
 /// — the patcher only raises the request.
-#[cfg(target_os = "macos")]
 #[test]
 fn clicking_the_agentic_model_chip_asks_the_host_for_the_picker() {
     let path = temp_patcher_source_path("agentic-bubble-model-chip");
@@ -3282,7 +3322,7 @@ fn clicking_the_agentic_model_chip_asks_the_host_for_the_picker() {
         scroll_left: 0.0,
         inherited_hover: false,
     };
-    let _ = build_metal_primitives_for_patcher(&node, viewport);
+    let _ = build_primitives_for_patcher(&node, viewport);
 
     let chip = super::state::agentic_buttons_for_test()
         .into_iter()
@@ -3442,7 +3482,7 @@ fn agentic_bubble_resolve_writes_macro_and_keeps_instance_edit_ephemeral() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let key = patcher_state_key(&node);
@@ -3488,7 +3528,7 @@ fn agentic_bubble_resolve_ignores_unrelated_invalid_created_nodes() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let key = patcher_state_key(&node);
@@ -3573,7 +3613,7 @@ fn cmd_k_on_a_library_macro_targets_that_macro_rather_than_creating_a_new_one() 
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
 
@@ -3611,7 +3651,7 @@ fn agentic_bubble_cmd_k_on_selected_macro_creates_edit_target() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
 
@@ -3634,7 +3674,6 @@ fn agentic_bubble_cmd_k_on_selected_macro_creates_edit_target() {
 }
 
 /// A bubble opened on a selected macro is scoped to it, so it says so.
-#[cfg(target_os = "macos")]
 #[test]
 fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
     let path = temp_patcher_source_path("agentic-bubble-bound-label");
@@ -3657,7 +3696,7 @@ fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let mut state = get_patcher_interaction_state(key);
@@ -3681,7 +3720,7 @@ fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
     settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
 
-    let prims = build_metal_primitives_for_patcher(
+    let prims = build_primitives_for_patcher(
         &node,
         WidgetViewport {
             cell_w: 10.0,
@@ -3701,7 +3740,7 @@ fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
     assert!(
         prims.iter().any(|prim| matches!(
             inner_prim(prim),
-            MetalPrimitive::ProportionalText(text)
+            GpuPrimitive::ProportionalText(text)
                 if text.text.contains("smooth") && text.h_align > 0.5
         )),
         "a macro-bound bubble names the macro on its header line"
@@ -3710,7 +3749,6 @@ fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
 
 /// A settled answer carries a follow-up composer under its body, below the last
 /// answer line, so the conversation reads as still open.
-#[cfg(target_os = "macos")]
 #[test]
 fn agentic_bubble_answer_renders_a_follow_up_composer_below_its_body() {
     let path = temp_patcher_source_path("agentic-bubble-follow-up-render");
@@ -3742,7 +3780,7 @@ fn agentic_bubble_answer_renders_a_follow_up_composer_below_its_body() {
     settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
 
-    let prims = build_metal_primitives_for_patcher(
+    let prims = build_primitives_for_patcher(
         &node,
         WidgetViewport {
             cell_w: 10.0,
@@ -3763,7 +3801,7 @@ fn agentic_bubble_answer_renders_a_follow_up_composer_below_its_body() {
         prims
             .iter()
             .find_map(|prim| match inner_prim(prim) {
-                MetalPrimitive::ProportionalText(text) if text.text.contains(needle) => {
+                GpuPrimitive::ProportionalText(text) if text.text.contains(needle) => {
                     Some(text.row)
                 }
                 _ => None,
@@ -3793,7 +3831,7 @@ fn agentic_bubble_edit_submit_payload_includes_macro_context() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let mut state = get_patcher_interaction_state(key);
@@ -4001,7 +4039,7 @@ fn agentic_bubble_follow_up_leaves_command_chords_to_the_patcher() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     let state = get_patcher_interaction_state(key);
@@ -4060,7 +4098,6 @@ fn agentic_bubble_macro_edit_resolution_replaces_macro_and_keeps_instance() {
 
 /// A freshly opened bubble grows into its box: it scales up, fades in, squares
 /// off, and holds its prompt text back until the box has formed.
-#[cfg(target_os = "macos")]
 #[test]
 fn agentic_bubble_grows_into_its_box_on_open() {
     let viewport = WidgetViewport {
@@ -4131,7 +4168,6 @@ fn agentic_bubble_grows_into_its_box_on_open() {
 
 /// Escape plays the grow-in backwards: the box shrinks, fades, and re-rounds,
 /// and its text goes at once so it never overflows the shrinking box.
-#[cfg(target_os = "macos")]
 #[test]
 fn agentic_bubble_shrinks_out_when_dismissed() {
     let viewport = WidgetViewport {
@@ -4199,7 +4235,6 @@ fn agentic_bubble_shrinks_out_when_dismissed() {
 
 /// The completion morph eases the node's chrome out of the bubble's square box
 /// and into its own rounded chrome, then hands off to the resting node.
-#[cfg(target_os = "macos")]
 #[test]
 fn agentic_completion_morph_interpolates_bubble_box_into_node_chrome() {
     let viewport = WidgetViewport {
@@ -11702,7 +11737,6 @@ fn label_arg_spans_track_argument_indices_not_token_order() {
     );
 }
 
-#[cfg(target_os = "macos")]
 fn cache_inline_arg_label_widths(patch: &Patch, node_id: &str) -> String {
     let measurer = VariableWidthTextMeasurer;
     let measure_ctx = MeasureCtx {
@@ -11719,7 +11753,6 @@ fn cache_inline_arg_label_widths(patch: &Patch, node_id: &str) -> String {
 
 /// Center of the `arg_index` token of `label`, in the same coordinates the
 /// renderer draws it at.
-#[cfg(target_os = "macos")]
 fn label_arg_center_col(
     label: &str,
     spans: &[(usize, std::ops::Range<usize>)],
@@ -11733,7 +11766,6 @@ fn label_arg_center_col(
     node_rect.col + NODE_TEXT_COL_OFFSET * zoom + (start + end) * 0.5 * zoom
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn hit_patcher_label_arg_picks_the_token_under_the_pointer() {
     let patch = parse(inline_arg_tooltip_patch_source());
@@ -11778,7 +11810,6 @@ fn hit_patcher_label_arg_picks_the_token_under_the_pointer() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn hovered_port_wins_over_the_label_token_under_the_same_pointer() {
     let path = temp_patcher_source_path("label-arg-hover-precedence");
@@ -11826,7 +11857,6 @@ fn hovered_port_wins_over_the_label_token_under_the_same_pointer() {
     let _ = fs::remove_file(path);
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn hovered_inline_arg_renders_the_same_tooltip_as_its_port() {
     let patch = parse(inline_arg_tooltip_patch_source());
@@ -11891,7 +11921,7 @@ fn hovered_inline_arg_renders_the_same_tooltip_as_its_port() {
     let tooltips = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ProportionalText(text) if text.text == expected => Some(text.clone()),
+            GpuPrimitive::ProportionalText(text) if text.text == expected => Some(text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -11913,7 +11943,6 @@ fn hovered_inline_arg_renders_the_same_tooltip_as_its_port() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn hovered_inline_arg_token_is_tinted_apart_from_the_rest_of_the_label() {
     let patch = parse(inline_arg_tooltip_patch_source());
@@ -11946,7 +11975,7 @@ fn hovered_inline_arg_token_is_tinted_apart_from_the_rest_of_the_label() {
         prims
             .iter()
             .filter_map(|prim| match inner_prim(prim) {
-                MetalPrimitive::ProportionalText(text)
+                GpuPrimitive::ProportionalText(text)
                     if "fm-operator 0.5 1".contains(text.text.trim())
                         && !text.text.trim().is_empty() =>
                 {
@@ -13431,7 +13460,7 @@ fn segment_row_drag_clamps_normal_and_wraparound_cases() {
 }
 
 #[test]
-fn super_y_initializes_selected_cable_segment_at_rendered_midpoint_after_zoom() {
+fn platform_primary_y_initializes_selected_cable_segment_at_rendered_midpoint_after_zoom() {
     let source = r#"
         (def pitch (in 1 @name pitch))
         (def sig (phasor pitch))
@@ -13535,7 +13564,7 @@ fn super_y_initializes_selected_cable_segment_at_rendered_midpoint_after_zoom() 
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Char('y'),
-                    modifiers: KeyModifiers::SUPER,
+                    modifiers: primary_shortcut_modifier(),
                 },
             )
             .is_some()
@@ -13564,7 +13593,6 @@ fn super_y_initializes_selected_cable_segment_at_rendered_midpoint_after_zoom() 
 }
 
 #[test]
-#[cfg(target_os = "macos")]
 fn segmented_cable_render_row_tracks_pan_origin_once() {
     let source = r#"
         (def pitch (in 1 @name pitch))
@@ -13641,7 +13669,7 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
     let first_segment_row = prims
         .iter()
         .find_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::PatchCable(cable) if cable.is_segmented => Some(cable.segment_row),
+            GpuPrimitive::PatchCable(cable) if cable.is_segmented => Some(cable.segment_row),
             _ => None,
         })
         .unwrap();
@@ -13676,7 +13704,7 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
     let second_segment_row = prims
         .iter()
         .find_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::PatchCable(cable) if cable.is_segmented => Some(cable.segment_row),
+            GpuPrimitive::PatchCable(cable) if cable.is_segmented => Some(cable.segment_row),
             _ => None,
         })
         .unwrap();
@@ -13691,7 +13719,6 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
 }
 
 #[test]
-#[cfg(target_os = "macos")]
 fn segmented_cable_rendering_collapses_aligned_ports_to_vertical_curve() {
     let source = r#"
         (def pitch (in 1 @name pitch))
@@ -13765,7 +13792,7 @@ fn segmented_cable_rendering_collapses_aligned_ports_to_vertical_curve() {
     let cable = prims
         .iter()
         .find_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::PatchCable(cable) => Some(cable),
+            GpuPrimitive::PatchCable(cable) => Some(cable),
             _ => None,
         })
         .unwrap();
@@ -14394,7 +14421,6 @@ fn patcher_alignment_hysteresis_keeps_existing_x_snap_until_escape_threshold() {
 fn patcher_alignment_snaps_dragged_output_to_other_input_x() {
     let mut patch = parse("(def a (in 1 @name a))\n(def b (phasor a))");
     set_patch_node_position(&mut patch, "a", (0.0, 10.0));
-    set_patch_node_position(&mut patch, "b", (12.77, 20.0));
     {
         let source = patch.nodes.iter_mut().find(|node| node.id == "a").unwrap();
         source.width = Some(12.0);
@@ -14407,9 +14433,42 @@ fn patcher_alignment_snaps_dragged_output_to_other_input_x() {
         .unwrap()
         .width = Some(20.0);
     prime_patcher_text_metrics(&patch);
+
+    // Explicit node widths are minimums: the rendered label can make a node
+    // wider, and its measured width differs between text backends. Position
+    // the target from the same geometry that rendering and snapping use so
+    // this test isolates output-to-input alignment rather than font metrics.
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
+    let source = patch.nodes.iter().find(|node| node.id == "a").unwrap();
+    let target = patch.nodes.iter().find(|node| node.id == "b").unwrap();
+    let source_size = node_size_for_ports(
+        source,
+        input_slot_counts.get("a").copied().unwrap_or(0),
+        output_counts.get("a").copied().unwrap_or(0),
+    );
+    let target_size = node_size_for_ports(
+        target,
+        input_slot_counts.get("b").copied().unwrap_or(0),
+        output_counts.get("b").copied().unwrap_or(0),
+    );
+    let source_output_offset = port_x_offset(1, output_counts["a"], source_size.0);
+    let target_input = input_indices["b"][0];
+    let target_input_offset =
+        port_x_offset(target_input, input_slot_counts["b"], target_size.0);
+    let expected_aligned_x = 0.5;
+    set_patch_node_position(
+        &mut patch,
+        "b",
+        (
+            expected_aligned_x + source_output_offset - target_input_offset,
+            20.0,
+        ),
+    );
+
     let mut snap = AlignmentSnapState::default();
     let selected = HashSet::from(["a".to_string()]);
-
     let aligned = align_dragged_primary_position(
         &patch,
         "a",
@@ -14421,7 +14480,10 @@ fn patcher_alignment_snaps_dragged_output_to_other_input_x() {
         20.0,
     );
 
-    assert!((aligned.0 - 0.5).abs() < 0.001, "{aligned:?}");
+    assert!(
+        (aligned.0 - expected_aligned_x).abs() < 0.001,
+        "{aligned:?}"
+    );
     assert!(snap.snapped_x);
 }
 
@@ -14489,7 +14551,7 @@ fn patcher_alignment_group_drag_applies_primary_adjustment_to_all_selected_nodes
 }
 
 #[test]
-fn patcher_alignment_super_drag_bypasses_snapping() {
+fn patcher_alignment_platform_primary_drag_bypasses_snapping() {
     let path = temp_patcher_source_path("patcher-alignment-super-bypass");
     fs::write(&path, "(def a (in 1 @name a))\n(def b (phasor a))").unwrap();
     let node = patcher_test_node(&path);
@@ -14529,7 +14591,7 @@ fn patcher_alignment_super_drag_bypasses_snapping() {
         &node,
         start.0 + delta_x,
         start.1,
-        KeyModifiers::SUPER,
+        primary_shortcut_modifier(),
         10.0,
         20.0,
     );
@@ -15228,6 +15290,13 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
     assert_eq!(constant.diagnostic, None);
     assert_eq!(constant.args.len(), 0);
     assert_eq!(constant.outputs.len(), 1);
+
+    let samplerate = node_from_editor_text("sr", "samplerate", (0.0, 0.0), &macro_arities, false);
+    assert_eq!(samplerate.kind, NodeKind::Constant);
+    assert_eq!(node_display_label(&samplerate), "samplerate");
+    assert_eq!(samplerate.diagnostic, None);
+    assert_eq!(samplerate.args.len(), 0);
+    assert_eq!(samplerate.outputs.len(), 1);
 
     let number = node_from_editor_text("num", "3", (0.0, 0.0), &macro_arities, false);
     assert_eq!(number.kind, NodeKind::Constant);
@@ -17703,7 +17772,6 @@ fn fixture_lexilush_projects_without_parse_failure() {
     assert!(!patch.nodes.is_empty());
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_emits_nodes_and_cables() {
     let patch = parse(
@@ -17741,24 +17809,24 @@ fn metal_render_emits_nodes_and_cables() {
     );
     let text_count = prims
         .iter()
-        .filter(|prim| matches!(inner_prim(prim), MetalPrimitive::ProportionalText(_)))
+        .filter(|prim| matches!(inner_prim(prim), GpuPrimitive::ProportionalText(_)))
         .count();
     let rect_count = prims
         .iter()
-        .filter(|prim| matches!(inner_prim(prim), MetalPrimitive::Rect(_)))
+        .filter(|prim| matches!(inner_prim(prim), GpuPrimitive::Rect(_)))
         .count();
     let rounded_count = prims
         .iter()
-        .filter(|prim| matches!(inner_prim(prim), MetalPrimitive::WidgetInstance { .. }))
+        .filter(|prim| matches!(inner_prim(prim), GpuPrimitive::WidgetInstance { .. }))
         .count();
     let cable_count = prims
         .iter()
-        .filter(|prim| matches!(inner_prim(prim), MetalPrimitive::PatchCable(_)))
+        .filter(|prim| matches!(inner_prim(prim), GpuPrimitive::PatchCable(_)))
         .count();
     let min_cable_radius = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::PatchCable(cable) => Some(cable.radius_px),
+            GpuPrimitive::PatchCable(cable) => Some(cable.radius_px),
             _ => None,
         })
         .fold(f32::INFINITY, f32::min);
@@ -17772,7 +17840,6 @@ fn metal_render_emits_nodes_and_cables() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_vertically_centers_normal_node_text_band() {
     let patch = parse("(def sig (phasor 440))");
@@ -17811,7 +17878,7 @@ fn metal_render_vertically_centers_normal_node_text_band() {
     let text_row = prims
         .iter()
         .find_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ProportionalText(text) if text.text == "phasor" => Some(text.row),
+            GpuPrimitive::ProportionalText(text) if text.text == "phasor" => Some(text.row),
             _ => None,
         })
         .expect("phasor node text");
@@ -17823,7 +17890,6 @@ fn metal_render_vertically_centers_normal_node_text_band() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_groups_node_sublayers_by_z_order() {
     let patch = parse(
@@ -17862,7 +17928,7 @@ fn metal_render_groups_node_sublayers_by_z_order() {
     let node_chrome_z = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::WidgetInstance { widget_type, .. } if widget_type == "patcher-node" => {
+            GpuPrimitive::WidgetInstance { widget_type, .. } if widget_type == "patcher-node" => {
                 Some(effective_z(prim))
             }
             _ => None,
@@ -17871,7 +17937,7 @@ fn metal_render_groups_node_sublayers_by_z_order() {
     let port_z = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::WidgetInstance { widget_type, .. } if widget_type == "patcher-port" => {
+            GpuPrimitive::WidgetInstance { widget_type, .. } if widget_type == "patcher-port" => {
                 Some(effective_z(prim))
             }
             _ => None,
@@ -17880,7 +17946,7 @@ fn metal_render_groups_node_sublayers_by_z_order() {
     let text_z = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ProportionalText(text)
+            GpuPrimitive::ProportionalText(text)
                 if text.text == "in" || text.text == "phasor" =>
             {
                 Some(effective_z(prim))
@@ -17891,7 +17957,7 @@ fn metal_render_groups_node_sublayers_by_z_order() {
     let cable_z = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::PatchCable(_) => Some(effective_z(prim)),
+            GpuPrimitive::PatchCable(_) => Some(effective_z(prim)),
             _ => None,
         })
         .next()
@@ -17906,7 +17972,6 @@ fn metal_render_groups_node_sublayers_by_z_order() {
     assert!(cable_z > PATCHER_Z_SLOTS_PER_NODE + PatcherZSlot::Text as i32);
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_marks_selected_cable_and_handles() {
     let patch = parse(
@@ -17952,7 +18017,7 @@ fn metal_render_marks_selected_cable_and_handles() {
         .filter(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::PatchCable(cable) if cable.color == theme::PATCHER_ERROR()
+                GpuPrimitive::PatchCable(cable) if cable.color == theme::PATCHER_ERROR()
             )
         })
         .count();
@@ -17961,7 +18026,7 @@ fn metal_render_marks_selected_cable_and_handles() {
         .filter(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::Circle(circle) if circle.color == theme::PATCHER_ERROR()
+                GpuPrimitive::Circle(circle) if circle.color == theme::PATCHER_ERROR()
             )
         })
         .count();
@@ -17970,7 +18035,6 @@ fn metal_render_marks_selected_cable_and_handles() {
     assert_eq!(handle_shell_count, 2);
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_emits_alignment_guide_rects_for_node_drag() {
     let patch = parse("(def a (in 1 @name a))\n(def b (phasor a))");
@@ -18023,7 +18087,7 @@ fn metal_render_emits_alignment_guide_rects_for_node_drag() {
     let guide_rects = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ForegroundRect(rect)
+            GpuPrimitive::ForegroundRect(rect)
                 if rect.color == theme::PATCHER_ALIGNMENT_GUIDE() =>
             {
                 Some(rect.rect)
@@ -18036,7 +18100,6 @@ fn metal_render_emits_alignment_guide_rects_for_node_drag() {
     assert!(guide_rects[0].height > 0.0);
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_emits_resize_handles_for_selected_node_only() {
     let patch = parse(
@@ -18077,7 +18140,7 @@ fn metal_render_emits_resize_handles_for_selected_node_only() {
     let handles = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ForegroundRect(rect)
+            GpuPrimitive::ForegroundRect(rect)
                 if rect.color == theme::PATCHER_NODE_SELECTED_BORDER()
                     && rect.rect.height <= NODE_RESIZE_HANDLE_SIZE_CELLS * DEFAULT_ZOOM + 0.001 =>
             {
@@ -18097,7 +18160,6 @@ fn metal_render_emits_resize_handles_for_selected_node_only() {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_suppresses_resize_handles_for_active_text_edit() {
     let mut state = PatcherInteractionState::default();
@@ -18143,7 +18205,7 @@ fn metal_render_suppresses_resize_handles_for_active_text_edit() {
         .filter(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ForegroundRect(rect)
+                GpuPrimitive::ForegroundRect(rect)
                     if rect.color == theme::PATCHER_NODE_SELECTED_BORDER()
                         && rect.rect.height <= NODE_RESIZE_HANDLE_SIZE_CELLS * DEFAULT_ZOOM + 0.001
             )
@@ -18152,7 +18214,6 @@ fn metal_render_suppresses_resize_handles_for_active_text_edit() {
     assert_eq!(handle_count, 0);
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_endpoint_drag_replaces_original_selected_cable() {
     let patch = parse(
@@ -18230,14 +18291,14 @@ fn metal_render_endpoint_drag_replaces_original_selected_cable() {
 
     let cable_count = prims
         .iter()
-        .filter(|prim| matches!(inner_prim(prim), MetalPrimitive::PatchCable(_)))
+        .filter(|prim| matches!(inner_prim(prim), GpuPrimitive::PatchCable(_)))
         .count();
     let selected_cable_count = prims
         .iter()
         .filter(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::PatchCable(cable) if cable.color == theme::PATCHER_ERROR()
+                GpuPrimitive::PatchCable(cable) if cable.color == theme::PATCHER_ERROR()
             )
         })
         .count();
@@ -18246,7 +18307,7 @@ fn metal_render_endpoint_drag_replaces_original_selected_cable() {
         .filter(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::Circle(circle) if circle.color == theme::PATCHER_ERROR()
+                GpuPrimitive::Circle(circle) if circle.color == theme::PATCHER_ERROR()
             )
         })
         .count();
@@ -18259,7 +18320,6 @@ fn metal_render_endpoint_drag_replaces_original_selected_cable() {
     assert_eq!(handle_shell_count, 2);
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_emits_edit_cursor_as_foreground_overlay() {
     let mut state = PatcherInteractionState::default();
@@ -18319,7 +18379,7 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
     let cursors = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ForegroundRect(rect) if rect.color == theme::PATCHER_EDIT_CURSOR() => {
+            GpuPrimitive::ForegroundRect(rect) if rect.color == theme::PATCHER_EDIT_CURSOR() => {
                 Some(rect)
             }
             _ => None,
@@ -18339,7 +18399,6 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_macro_back_button_uses_shader_chevron_not_text_glyph() {
     let path = temp_patcher_source_path("macro-back-chevron-render");
@@ -18360,7 +18419,7 @@ fn metal_render_macro_back_button_uses_shader_chevron_not_text_glyph() {
     };
     set_patcher_interaction_state(key, state);
 
-    let prims = build_metal_primitives_for_patcher(
+    let prims = build_primitives_for_patcher(
         &node,
         WidgetViewport {
             cell_w: 10.0,
@@ -18381,7 +18440,7 @@ fn metal_render_macro_back_button_uses_shader_chevron_not_text_glyph() {
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::WidgetInstance { widget_type, .. }
+                GpuPrimitive::WidgetInstance { widget_type, .. }
                     if widget_type == "patcher-back-chevron"
             )
         }),
@@ -18391,14 +18450,13 @@ fn metal_render_macro_back_button_uses_shader_chevron_not_text_glyph() {
         !prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ProportionalText(text) if text.text == "<"
+                GpuPrimitive::ProportionalText(text) if text.text == "<"
             )
         }),
         "macro back button should not render the old ASCII chevron text glyph"
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
     let path = temp_patcher_source_path("agentic-bubble-foreground-render");
@@ -18439,7 +18497,7 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
         scroll_left: 0.0,
         inherited_hover: false,
     };
-    let prims = build_metal_primitives_for_patcher(&node, viewport);
+    let prims = build_primitives_for_patcher(&node, viewport);
 
     assert_eq!(
         agentic_bubble_body_sizes(&prims, viewport).len(),
@@ -18451,7 +18509,7 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
         .filter(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. }
                     if widget_type == "patcher-node"
                         && (instance.ndc_max[0] - instance.ndc_min[0]) / 2.0 * viewport.vp_w
                             / viewport.cell_w
@@ -18466,7 +18524,7 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
         .filter(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::WidgetInstance { widget_type, .. }
+                GpuPrimitive::WidgetInstance { widget_type, .. }
                     if widget_type == "patcher-port" || widget_type == "patcher-cable"
             )
         })
@@ -18481,7 +18539,6 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
 
 /// An answer arrives in a much bigger box than the pending spinner it replaces.
 /// The box eases between the two layouts instead of snapping.
-#[cfg(target_os = "macos")]
 #[test]
 fn agentic_answer_eases_the_bubble_from_the_pending_box_to_the_answer_box() {
     let path = temp_patcher_source_path("agentic-bubble-answer-resize");
@@ -18531,7 +18588,7 @@ fn agentic_answer_eases_the_bubble_from_the_pending_box_to_the_answer_box() {
         cache_agentic_bubble_text_widths(bubble, &ctx);
         settle_agentic_bubbles(&mut state);
         set_patcher_interaction_state(key, state);
-        let prims = build_metal_primitives_for_patcher(&node, viewport);
+        let prims = build_primitives_for_patcher(&node, viewport);
         agentic_bubble_body_sizes(&prims, viewport)
             .into_iter()
             .next()
@@ -18557,7 +18614,6 @@ fn agentic_answer_eases_the_bubble_from_the_pending_box_to_the_answer_box() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
     let path = temp_patcher_source_path("agentic-bubble-answer-render");
@@ -18605,7 +18661,7 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
         scroll_left: 0.0,
         inherited_hover: false,
     };
-    let prims = build_metal_primitives_for_patcher(&node, viewport);
+    let prims = build_primitives_for_patcher(&node, viewport);
 
     let (body_width, _) = agentic_bubble_body_sizes(&prims, viewport)
         .into_iter()
@@ -18619,7 +18675,7 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
     let answer_lines = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ProportionalText(text)
+            GpuPrimitive::ProportionalText(text)
                 if text.text.contains("macro")
                     || text.text.contains("TR-707")
                     || text.text.contains("Envelopes")
@@ -18657,7 +18713,6 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
     let mut state = PatcherInteractionState::default();
@@ -18706,7 +18761,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ProportionalText(text) if text.text == "biquad"
+                GpuPrimitive::ProportionalText(text) if text.text == "biquad"
             )
         }),
         "active operator prefix should render its autocomplete suggestion"
@@ -18715,7 +18770,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ProportionalText(text) if text.text == "IIR biquad filter."
+                GpuPrimitive::ProportionalText(text) if text.text == "IIR biquad filter."
             )
         }),
         "autocomplete documentation panel should render structured documentation from the operator manifest"
@@ -18724,7 +18779,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ProportionalText(text)
+                GpuPrimitive::ProportionalText(text)
                     if text.text.contains("inlets:")
                         && text.text.contains("signal signal|float")
             )
@@ -18735,7 +18790,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ProportionalText(text)
+                GpuPrimitive::ProportionalText(text)
                     if text.text.contains("outlets:")
                         && text.text.contains("out")
             )
@@ -18745,14 +18800,14 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
     let suggestion_col = prims
         .iter()
         .find_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ProportionalText(text) if text.text == "biquad" => Some(text.col),
+            GpuPrimitive::ProportionalText(text) if text.text == "biquad" => Some(text.col),
             _ => None,
         })
         .expect("suggestion text");
     let doc_col = prims
         .iter()
         .find_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ProportionalText(text) if text.text == "IIR biquad filter." => {
+            GpuPrimitive::ProportionalText(text) if text.text == "IIR biquad filter." => {
                 Some(text.col)
             }
             _ => None,
@@ -18766,7 +18821,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. }
                     if widget_type == "patcher-panel"
                         && instance.color_a == theme::COMP_BORDER().to_rgba()
                         && instance.color_b == theme::COMP_UNSELECTED_BG().to_rgba()
@@ -18778,7 +18833,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. }
                     if widget_type == "patcher-panel"
                         && instance.color_a == theme::COMP_DOC_BORDER().to_rgba()
                         && instance.color_b == theme::COMP_DOC_BG().to_rgba()
@@ -18790,7 +18845,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         !prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. }
                     if widget_type == "patcher-node"
                         && instance.color_b == theme::COMP_UNSELECTED_BG().to_rgba()
             )
@@ -18801,7 +18856,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. }
                     if widget_type == "box"
                         && instance.color_a == theme::COMP_SELECTED_BG().to_rgba()
                         && instance.corner_radius > 0.0
@@ -18813,7 +18868,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ProportionalText(text)
+                GpuPrimitive::ProportionalText(text)
                     if text.text == "biquad"
                         && text.fg == theme::COMP_SELECTED_FG()
             )
@@ -18824,7 +18879,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ProportionalText(text)
+                GpuPrimitive::ProportionalText(text)
                     if text.fg == theme::COMP_CATEGORY_FG()
             )
         }),
@@ -18832,7 +18887,6 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_wraps_selected_autocomplete_documentation() {
     let mut state = PatcherInteractionState::default();
@@ -18880,7 +18934,7 @@ fn metal_render_wraps_selected_autocomplete_documentation() {
     let suggestion_col = prims
         .iter()
         .find_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ProportionalText(text) if text.text == "phase-vocoder" => {
+            GpuPrimitive::ProportionalText(text) if text.text == "phase-vocoder" => {
                 Some(text.col)
             }
             _ => None,
@@ -18889,7 +18943,7 @@ fn metal_render_wraps_selected_autocomplete_documentation() {
     let doc_lines: Vec<&str> = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ProportionalText(text) if text.col > suggestion_col + 10.0 => {
+            GpuPrimitive::ProportionalText(text) if text.col > suggestion_col + 10.0 => {
                 Some(text.text.as_str())
             }
             _ => None,
@@ -18906,7 +18960,6 @@ fn metal_render_wraps_selected_autocomplete_documentation() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_uses_single_text_run_for_active_node_edit_with_spaces() {
     let mut state = PatcherInteractionState::default();
@@ -18954,7 +19007,7 @@ fn metal_render_uses_single_text_run_for_active_node_edit_with_spaces() {
     let label_runs: Vec<&str> = prims
         .iter()
         .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ProportionalText(text) => Some(text.text.as_str()),
+            GpuPrimitive::ProportionalText(text) => Some(text.text.as_str()),
             _ => None,
         })
         .collect();
@@ -18968,7 +19021,6 @@ fn metal_render_uses_single_text_run_for_active_node_edit_with_spaces() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn metal_render_places_committed_node_tail_after_measured_space_width() {
     let label = "in 7 8".to_string();
@@ -19034,11 +19086,11 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
     );
 
     let head = prims.iter().find_map(|prim| match inner_prim(prim) {
-        MetalPrimitive::ProportionalText(text) if text.text == "in" => Some(text.col),
+        GpuPrimitive::ProportionalText(text) if text.text == "in" => Some(text.col),
         _ => None,
     });
     let tail = prims.iter().find_map(|prim| match inner_prim(prim) {
-        MetalPrimitive::ProportionalText(text) if text.text == "7 8" => Some(text.col),
+        GpuPrimitive::ProportionalText(text) if text.text == "7 8" => Some(text.col),
         _ => None,
     });
     let head = head.expect("committed in node should render head text");
@@ -20549,7 +20601,6 @@ fn default_layout_never_overlaps_wide_params_and_named_inputs() {
                 "node {id} with label {label:?} should be wider than the minimum: {rect:?}"
             );
         }
-        #[cfg(target_os = "macos")]
         for scale in [1.0_f64, 2.0] {
             let rendered = rendered_label_width_cells(&label, node_font_size(node), scale);
             assert!(
@@ -20633,12 +20684,11 @@ fn default_layout_keeps_named_inputs_clear_of_the_param_stack() {
     );
 }
 
-/// True rendered width of `text` in layout cells, measured the way the macOS
-/// backend does: CoreText advances of the system font at `font_size * scale`
-/// device pixels, over a monospace cell of `MONO_CELL_POINTS * scale` device
-/// pixels. Both sides carry the scale factor, so the ratio cancels it - which
-/// is exactly what a cells-per-character estimate has to reproduce.
-#[cfg(target_os = "macos")]
+/// True rendered width of `text` in layout cells, measured by the portable
+/// system-font cache at `font_size * scale` device pixels, over a monospace
+/// cell of `MONO_CELL_POINTS * scale` device pixels. Both sides carry the scale
+/// factor, so the ratio cancels it - exactly what a cells-per-character
+/// estimate has to reproduce.
 fn rendered_label_width_cells(text: &str, font_size: f32, scale: f64) -> f32 {
     use crate::glyph_atlas::SizedFontCache;
 
@@ -20647,12 +20697,11 @@ fn rendered_label_width_cells(text: &str, font_size: f32, scale: f64) -> f32 {
     const MONO_CELL_POINTS: f64 = 13.0;
     const MONO_ADVANCE_EM: f64 = 0.6;
     let cell_w = (MONO_CELL_POINTS * MONO_ADVANCE_EM * scale) as f32;
-    let mut fonts = SizedFontCache::new(14.0 * scale, scale).expect("system font");
+    let mut fonts = SizedFontCache::new(scale).expect("system font");
     fonts.measure_text(text, (font_size * 10.0).round() as u16) / cell_w
 }
 
 #[test]
-#[cfg(target_os = "macos")]
 fn estimated_label_width_matches_the_rendered_width_at_every_display_scale() {
     let labels = [
         "param attack 0.01 0.001 2",
@@ -20680,7 +20729,6 @@ fn estimated_label_width_matches_the_rendered_width_at_every_display_scale() {
 }
 
 #[test]
-#[cfg(target_os = "macos")]
 fn estimated_label_width_calibrates_against_measured_advances() {
     let measurer = FixedWidthTextMeasurer;
     let measure_ctx = MeasureCtx {
@@ -20716,7 +20764,6 @@ fn estimated_label_width_calibrates_against_measured_advances() {
 /// elapsed counter ticks) and the bound macro name, so the name has to be cut
 /// to whatever is left instead of running under the status text.
 #[test]
-#[cfg(target_os = "macos")]
 fn bound_macro_name_is_truncated_to_the_header_space_left() {
     let name = "a-very-long-macro-name-that-cannot-fit";
     let full = estimated_label_width_cells(name, AGENTIC_HEADER_FONT_SIZE);
@@ -20766,7 +20813,7 @@ fn cmd_enter_creates_empty_node_below_selected_node() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Enter,
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(event.is_some(), "cmd+enter should be consumed");
@@ -20821,7 +20868,7 @@ fn cmd_up_connects_last_two_touched_nodes_on_first_ports() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Up,
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(
@@ -20878,7 +20925,7 @@ fn cmd_up_touch_order_ignores_vertical_order_for_direction() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Up,
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
 
@@ -20913,7 +20960,7 @@ fn patcher_undo_redo_round_trips_created_node() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(undone.is_some(), "undo should be consumed");
@@ -20933,7 +20980,7 @@ fn patcher_undo_redo_round_trips_created_node() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('Z'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
     assert!(redone.is_some(), "redo should be consumed");
@@ -20951,7 +20998,7 @@ fn patcher_undo_redo_round_trips_created_node() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
     assert!(
@@ -20997,7 +21044,7 @@ fn patcher_undo_restores_deleted_selection() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(undone.is_some());
@@ -21060,7 +21107,7 @@ fn patcher_copy_paste_duplicates_selection_and_wires() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(copied.is_some(), "copy should be consumed");
@@ -21122,7 +21169,7 @@ fn patcher_copy_paste_duplicates_selection_and_wires() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(undone.is_some());
@@ -21227,7 +21274,7 @@ fn encapsulate_via_key_event(node: &LayoutNode) -> Option<WidgetEvent> {
         node,
         WidgetKeyEvent {
             code: KeyCode::Char('e'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     )
 }
@@ -21565,7 +21612,7 @@ fn cmd_e_encapsulation_is_a_single_undo_step() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
-            modifiers: KeyModifiers::SUPER,
+            modifiers: primary_shortcut_modifier(),
         },
     );
     assert!(event.is_some(), "cmd+z consumed");
@@ -22527,7 +22574,7 @@ fn cmd_shift_k_opens_a_connect_bubble_for_the_selected_macro_instance() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
 
@@ -22568,7 +22615,7 @@ fn cmd_shift_k_without_a_single_selection_is_not_consumed() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
     assert!(event.is_none(), "no selection should not open a bubble");
@@ -22581,7 +22628,7 @@ fn cmd_shift_k_without_a_single_selection_is_not_consumed() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
     assert!(event.is_none(), "multi-selection should not open a bubble");
@@ -22957,7 +23004,7 @@ fn connect_bubble_submit_payload_carries_the_patch_context() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
     let mut state = get_patcher_interaction_state(key);
@@ -23002,7 +23049,6 @@ fn connect_bubble_submit_payload_carries_the_patch_context() {
 
 /// The renderer can only wrap text a measure pass has cached, so a bubble whose
 /// placeholder is not measured silently disappears.
-#[cfg(target_os = "macos")]
 #[test]
 fn connect_bubble_renders_its_placeholder_and_subject_badge() {
     let (node, key, instance) = connect_test_node("connect-render");
@@ -23018,7 +23064,7 @@ fn connect_bubble_renders_its_placeholder_and_subject_badge() {
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
-            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            modifiers: primary_shortcut_modifier() | KeyModifiers::SHIFT,
         },
     );
 
@@ -23041,7 +23087,7 @@ fn connect_bubble_renders_its_placeholder_and_subject_badge() {
     settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
 
-    let prims = build_metal_primitives_for_patcher(
+    let prims = build_primitives_for_patcher(
         &node,
         WidgetViewport {
             cell_w: 10.0,
@@ -23061,14 +23107,14 @@ fn connect_bubble_renders_its_placeholder_and_subject_badge() {
     assert!(
         prims.iter().any(|prim| matches!(
             inner_prim(prim),
-            MetalPrimitive::ProportionalText(text) if text.text.contains("connect this node")
+            GpuPrimitive::ProportionalText(text) if text.text.contains("connect this node")
         )),
         "the connect placeholder must be measured, or the bubble draws nothing"
     );
     assert!(
         prims.iter().any(|prim| matches!(
             inner_prim(prim),
-            MetalPrimitive::ProportionalText(text)
+            GpuPrimitive::ProportionalText(text)
                 if text.text.contains("voice") && text.h_align > 0.5
         )),
         "a connect bubble names its subject on the header line"

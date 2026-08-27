@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use super::{CellBuffer, ImageFit, WidgetDefinition};
-#[cfg(target_os = "macos")]
-use super::{MetalImagePrimitive, MetalPrimitive};
+use super::{GpuImagePrimitive, GpuPrimitive};
 use crate::backend::Color;
 use crate::layout::{
     Constraints, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, prop_is_keyword,
@@ -130,13 +129,12 @@ impl WidgetDefinition for ImageWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &crate::layout::LayoutNode,
         _viewport: super::WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let Some(src) = node.props.get("src").and_then(|value| match value {
             Value::String(src) => Some(src.clone()),
             _ => None,
@@ -146,12 +144,12 @@ impl WidgetDefinition for ImageWidget {
         if src.is_empty() || node.rect.width <= 0.0 || node.rect.height <= 0.0 {
             return Vec::new();
         }
-        vec![MetalPrimitive::Image(MetalImagePrimitive {
+        vec![GpuPrimitive::Image(GpuImagePrimitive {
             widget_id: node.widget_id,
             rect: node.rect,
             src,
             fit: image_fit(&node.props),
-            radius_px: radius_px(&node.props),
+            radius_px: super::ui_design_px(radius_px(&node.props)),
             opacity: opacity(&node.props),
             rotation: rotation(&node.props),
             rotation_speed: rotation_speed(&node.props),

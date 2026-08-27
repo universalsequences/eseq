@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use super::{CellBuffer, WidgetDefinition, resolve_named_color, styled_cell};
-#[cfg(target_os = "macos")]
-use super::{MetalPrimitive, MetalRectPrimitive, WidgetViewport};
+use super::{GpuPrimitive, GpuRectPrimitive, WidgetViewport};
 use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
@@ -97,13 +96,12 @@ impl WidgetDefinition for LanePreviewWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let values = lane_values(&node.props);
         let background = resolve_named_color(
             &node.props,
@@ -115,7 +113,7 @@ impl WidgetDefinition for LanePreviewWidget {
             "active-color",
             Color::rgba(0.95, 0.55, 0.2, 1.0),
         );
-        let mut primitives = vec![MetalPrimitive::Rect(MetalRectPrimitive {
+        let mut primitives = vec![GpuPrimitive::Rect(GpuRectPrimitive {
             rect: node.rect,
             color: background,
         })];
@@ -127,7 +125,7 @@ impl WidgetDefinition for LanePreviewWidget {
         for (index, value) in values.iter().enumerate() {
             let normalized = ((*value - min) / (max - min)).clamp(0.0, 1.0);
             let height = (node.rect.height - 0.8).max(0.1) * normalized.max(0.035);
-            primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: Rect {
                     row: node.rect.row + node.rect.height - 0.4 - height,
                     col: node.rect.col + index as f32 * step_width + 0.08,

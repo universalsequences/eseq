@@ -512,6 +512,7 @@ pub(super) fn sync_single_step_param_binding(
         }
     }
     for viewport in expanded_step_projection.viewports_for_track(track) {
+        dirty |= sync_expanded_step_cursor_param_change(rt, state, viewport, mode, step);
         if let Some(slot) = visible_slot_for_step(viewport, step) {
             dirty |= sync_expanded_step_param_slot(rt, state, viewport, mode, slot);
         }

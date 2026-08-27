@@ -300,23 +300,23 @@ int main(void) {
   printf("       avg=%.3f ms  median=%.3f ms  min=%.3f ms  max=%.3f ms\n",
          r2.avg_ms, r2.median_ms, r2.min_ms, r2.max_ms);
 
-  // --- Config 3: 4 Mach RT threads ---
-  printf("\n[3/4] 4 Mach RT threads...\n");
-  engine_enable_rt_time_constraint(1);
+  // --- Config 3: three workers request the platform RT policy ---
+  printf("\n[3/4] 3 RT-requested workers + audio thread...\n");
+  engine_enable_rt_scheduling(1);
   engine_start_workers(3);
   BenchResult r3 = run_benchmark(lg);
   engine_stop_workers();
-  engine_enable_rt_time_constraint(0);
+  engine_enable_rt_scheduling(0);
   printf("       avg=%.3f ms  median=%.3f ms  min=%.3f ms  max=%.3f ms\n",
          r3.avg_ms, r3.median_ms, r3.min_ms, r3.max_ms);
 
-  // --- Config 4: 8 Mach RT threads ---
-  printf("\n[4/4] 8 Mach RT threads...\n");
-  engine_enable_rt_time_constraint(1);
+  // --- Config 4: seven workers request the platform RT policy ---
+  printf("\n[4/4] 7 RT-requested workers + audio thread...\n");
+  engine_enable_rt_scheduling(1);
   engine_start_workers(7);
   BenchResult r4 = run_benchmark(lg);
   engine_stop_workers();
-  engine_enable_rt_time_constraint(0);
+  engine_enable_rt_scheduling(0);
   printf("       avg=%.3f ms  median=%.3f ms  min=%.3f ms  max=%.3f ms\n",
          r4.avg_ms, r4.median_ms, r4.min_ms, r4.max_ms);
 
@@ -332,10 +332,10 @@ int main(void) {
   printf("│ 4 normal threads                     │ %7.2f ms │  %4.2fx  │ %5.1f%%   │\n",
          r2.median_ms, baseline / r2.median_ms,
          (r2.median_ms / budget_ms) * 100.0);
-  printf("│ 4 Mach RT threads                    │ %7.2f ms │  %4.2fx  │ %5.1f%%   │\n",
+  printf("│ 3 RT-requested workers + audio       │ %7.2f ms │  %4.2fx  │ %5.1f%%   │\n",
          r3.median_ms, baseline / r3.median_ms,
          (r3.median_ms / budget_ms) * 100.0);
-  printf("│ 8 Mach RT threads                    │ %7.2f ms │  %4.2fx  │ %5.1f%%   │\n",
+  printf("│ 7 RT-requested workers + audio       │ %7.2f ms │  %4.2fx  │ %5.1f%%   │\n",
          r4.median_ms, baseline / r4.median_ms,
          (r4.median_ms / budget_ms) * 100.0);
   printf("│ 4 RT threads + OS Workgroup (*)      │     —      │    —    │    —     │\n");

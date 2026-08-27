@@ -34,8 +34,33 @@ void engine_clear_os_workgroup(void);
 // Optional: enable minimal logging from RT workers (join success/failure)
 void engine_enable_rt_logging(int enable);
 
-// Enable/disable Mach time-constraint scheduling for workers (Apple only)
-void engine_enable_rt_time_constraint(int enable);
+// Enable/disable platform realtime scheduling for workers. Apple uses Mach
+// time constraints; Linux uses SCHED_FIFO. The priority applies to Linux only.
+void engine_enable_rt_scheduling(int enable);
+void engine_set_rt_priority(int priority);
+
+#define ENGINE_SCHED_POLICY_UNKNOWN (-1)
+#define ENGINE_SCHED_POLICY_MIXED (-2)
+#define ENGINE_SCHED_PRIORITY_MIXED (-1)
+typedef struct EngineRtStatus {
+  int worker_count;
+  int workers_reported;
+  int worker_policy;
+  int worker_priority;
+  int callback_reported;
+  int callback_policy;
+  int callback_priority;
+} EngineRtStatus;
+
+// Snapshot the policies and priorities actually observed on the worker and
+// callback threads. Policies are native SCHED_* values on Linux.
+void engine_get_rt_status(EngineRtStatus *status);
+
+// Promote the calling thread (the audio callback thread) to realtime
+// scheduling: Linux SCHED_FIFO at rt priority + 1 so it outranks the workers
+// it drives. No-op on Apple, where CoreAudio already supplies an RT callback
+// thread, and when rt scheduling is disabled.
+void engine_promote_current_thread_rt(void);
 
 // ===================== Live Graph Management =====================
 

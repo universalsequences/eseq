@@ -1,5 +1,4 @@
 use crate::*;
-use eseqlisp::metal_backend::MetalBackend;
 
 /// Values computed earlier in the loop iteration that the tick consumes.
 pub(crate) struct TickInputs {
@@ -121,7 +120,7 @@ fn sync_fx_param_bindings_delta(
 pub(crate) fn reactive_tick_and_render(
     mut app: &mut app::App,
     mut editor: &mut Editor,
-    backend: &mut MetalBackend,
+    backend: &mut AppBackend,
     ctx: &mut LoopCtx<'_>,
     inputs: TickInputs,
     last_render_at: &mut Instant,
@@ -1741,7 +1740,7 @@ pub(crate) fn reactive_tick_and_render(
                     .render_tiled(tiled_frame)
                     .map_err(|_| "render failed")?;
                 ui_loop_stats.note_frame(Duration::ZERO, render_started.elapsed());
-                if render_status == eseqlisp::metal_backend::TiledRenderStatus::Presented {
+                if render_status == TiledRenderStatus::Presented {
                     *last_render_at = Instant::now();
                     return Ok(TickFlow::Continue);
                 }
@@ -1765,7 +1764,7 @@ pub(crate) fn reactive_tick_and_render(
         let render_elapsed = render_started.elapsed();
         ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
         match render_status {
-            eseqlisp::metal_backend::TiledRenderStatus::Presented => {
+            TiledRenderStatus::Presented => {
                 editor.clear_needs_redraw();
                 if backend.agent_instrument_stub_animation_visible() {
                     stub_animation_cache.store(inputs.viewport_size, tiled_frame);
@@ -1774,7 +1773,7 @@ pub(crate) fn reactive_tick_and_render(
                 }
                 *last_render_at = Instant::now();
             }
-            eseqlisp::metal_backend::TiledRenderStatus::NotPresented => {
+            TiledRenderStatus::NotPresented => {
                 eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
                 *last_render_at = Instant::now();
             }

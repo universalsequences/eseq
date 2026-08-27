@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use super::{
-    CellBuffer, MetalPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
+    CellBuffer, GpuPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
     resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -161,22 +161,24 @@ impl WidgetDefinition for RoarFilterWidget {
         }
     }
 
-    fn metal_shader_uses_time(&self) -> bool {
+    fn shader_uses_time(&self) -> bool {
         false
     }
 
-    #[cfg(target_os = "macos")]
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(ROAR_FILTER_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        ROAR_FILTER_SHADER.source(backend)
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let display = display_from_props(&node.props);
         let bg_color = resolve_named_color(
             &node.props,
@@ -196,7 +198,7 @@ impl WidgetDefinition for RoarFilterWidget {
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;
-        vec![MetalPrimitive::WidgetInstance {
+        vec![GpuPrimitive::WidgetInstance {
             widget_type: widget_type.to_string(),
             instance: WidgetInstance {
                 ndc_min,
@@ -221,8 +223,7 @@ impl WidgetDefinition for RoarFilterWidget {
 }
 
 // Dual-maintained with `filter_magnitude` above.
-#[cfg(target_os = "macos")]
-const ROAR_FILTER_SHADER: &str = r#"
+const ROAR_FILTER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float roarFilterMagnitude(int filterType, float cutoff, float res, float freq)
 {
     float omega = freq / max(cutoff, 20.0);
@@ -285,7 +286,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     col.rgb = mix(col.rgb, in.color_a.rgb, fill);
     return col;
 }
-"#;
+"#, super::wgsl::ROAR_FILTER_SHADER);
 
 #[cfg(test)]
 mod tests {

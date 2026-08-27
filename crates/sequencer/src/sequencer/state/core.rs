@@ -369,6 +369,16 @@ pub struct SequencerState {
     pub runtime: RuntimeBindingState,
     pub(super) scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     pub(super) scheduler_snapshot_version: AtomicU64,
+    /// Realtime-safe delivery of the published snapshot to the audio callback,
+    /// and of the outgoing snapshot back to a non-realtime thread that frees it
+    /// (bead eseq-sj01). The audio thread never touches `scheduler_snapshot`.
+    pub(super) snapshot_handoff: SchedulerSnapshotHandoff,
+    /// Depth of the active `publish coalescing` scopes. While non-zero,
+    /// `publish_scheduler_snapshot` records the intent in
+    /// `pending_coalesced_publish` instead of capturing, and the scope's exit
+    /// performs one capture for the whole transition (bead eseq-sj01).
+    pub(super) publish_coalesce_depth: AtomicU64,
+    pub(super) pending_coalesced_publish: AtomicBool,
     /// Command-thread macro values waiting to be folded into the next
     /// immutable scheduler snapshot. The scheduler never reads this lock.
     pub(super) live_macro_overrides: Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,

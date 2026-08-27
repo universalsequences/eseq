@@ -296,8 +296,8 @@
   (pc/param-mod-wrapper fx p (str key "-mod-wrapper")
     (subtree :key key
       (box :debug-name (str "fx-param-compact-knob-" (get p :name))
-           :width (compact-control-width)
-           :height (compact-control-height) :padding 0
+        :width (compact-control-width)
+        :height (compact-control-height) :padding 0
         (knob-number :label (compact-label p)
           :value (pc/fx-param-value-for fx p)
           :min (pc/param-control-min fx p) :max (pc/param-control-max fx p) :decimals 2
@@ -348,7 +348,7 @@
     (subtree :key key-prefix
       (box :width 23.2 :height :fill
            :background-color :instrument-control-bg
-           :border-width 1 :corner-radius 7 :padding 0.16
+           :border-width 1 :corner-radius 16 :padding 0.16
            :debug-name (str "fx-param-env-" env-name)
         (v-stack :width :fill :height :fill :gap 0.12
           (box :width :fill :height 2.95 :padding 0.08
@@ -485,13 +485,13 @@
     (box :width (group-row-panel-width controls)
          :height (group-row-panel-height controls)
          :background-color (panel-bg all-params groups fx group-name)
-         :border-width 1 :corner-radius 12 :padding (group-panel-padding)
+         :border-width 1 :corner-radius 16 :padding (group-panel-padding)
          :debug-name (str "fx-param-group-" group-label)
          :on-click (panel-select-callback all-params groups fx group-name)
       (h-stack :width :fill :height :fill :gap (group-label-gap) :align :center
         (box :width (group-label-width) :height :fill
              :h-align :start :v-align :center :padding (group-label-padding)
-          (label group-label :font-size 9.4 :width 4.8
+          (label group-label :font-size 11.4 :width 4.8
                  :color :dim :bg :transparent))
         (v-stack :width (group-controls-column-width controls)
                  :height :fill :gap (group-row-gap) :align :start

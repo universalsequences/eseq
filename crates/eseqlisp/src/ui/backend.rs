@@ -10,6 +10,8 @@ use crossterm::event::Event;
 pub enum BackendEvent {
     Terminal(Event),
     FileDrop(Vec<PathBuf>),
+    /// The window system requested that the application close.
+    Quit,
 }
 
 // ── Colors ───────────────────────────────────────────────────────────────────

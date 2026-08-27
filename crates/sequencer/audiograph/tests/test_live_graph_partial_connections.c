@@ -18,8 +18,14 @@
 #include <assert.h>
 #include <math.h>
 #include <pthread.h>
-#include <sys/sysctl.h>
 #include <time.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#else
+#error "CPU count detection is not implemented for this platform"
+#endif
 
 // Test configuration
 #define NUM_WORKERS 8     // High worker count to maximize contention
@@ -56,12 +62,17 @@ static PartialConnectionsTestState g_partial_test;
 
 // Get CPU count for worker sizing
 int get_cpu_count() {
+#if defined(__APPLE__)
   int cpu_count = 1;
   size_t size = sizeof(cpu_count);
   if (sysctlbyname("hw.ncpu", &cpu_count, &size, NULL, 0) != 0) {
-    cpu_count = 4; // fallback
+    cpu_count = 1;
   }
   return cpu_count;
+#elif defined(__linux__)
+  long cpu_count = sysconf(_SC_NPROCESSORS_ONLN);
+  return cpu_count > 0 ? (int)cpu_count : 1;
+#endif
 }
 
 // Create a live graph with 8 oscillators but only 2 connected

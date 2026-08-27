@@ -55,6 +55,13 @@ pub use lang::modules;
 pub use lang::parser;
 pub use lang::vm;
 
+#[cfg(feature = "capture-harness")]
+pub(crate) mod capture_scenes;
+#[cfg(all(target_os = "macos", feature = "capture-harness"))]
+pub mod metal_shader_capture;
+#[cfg(all(feature = "wgpu", feature = "capture-harness"))]
+pub mod shader_capture;
+
 pub use ui::backend;
 pub use ui::frame;
 pub use ui::glyph_atlas;
@@ -62,10 +69,15 @@ pub use ui::layout;
 pub use ui::metal_backend;
 pub use ui::theme;
 pub use ui::tui;
+#[cfg(feature = "wgpu")]
+pub use ui::wgpu_app;
+#[cfg(feature = "wgpu")]
+pub use ui::wgpu_backend;
 
 // ── Root-level modules ───────────────────────────────────────────────────
 pub mod audio;
 pub mod buffer;
+pub(crate) mod clipboard;
 pub mod defmacro_library;
 mod dgenlisp;
 pub mod editor;
@@ -80,6 +92,7 @@ pub mod reactive;
 pub mod runtime;
 pub mod sound_glyph_data;
 pub mod text;
+pub mod text_capture;
 pub mod tile;
 pub mod widget_render;
 pub mod widgets;
@@ -218,6 +231,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
         let (cols, rows) = backend.viewport_size();
         // Set aspect ratio for uniform spacing (cell_h / cell_w)
         let (cell_w, cell_h) = backend.cell_dimensions();
+        editor.set_layout_cell_dimensions(cell_w, cell_h);
         if let Some((text_cell_w, text_cell_h)) = backend.sync_text_zoom(editor.text_zoom()) {
             editor.set_text_cell_dimensions(cell_w, cell_h, text_cell_w, text_cell_h);
         }
@@ -2052,7 +2066,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_set_bang_updates_lisp_state_and_reruns_effects() {
         let mut runtime = Runtime::new();
@@ -3882,11 +3895,10 @@ mod modal_layout_tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn open_modal_emits_overlay_primitives_beyond_a_short_tile() {
         use crate::widget_render::{
-            OverlayKind, WidgetViewport, clear_overlay, collect_metal_primitives, topmost_overlay,
+            OverlayKind, WidgetViewport, clear_overlay, collect_gpu_primitives, topmost_overlay,
         };
 
         clear_overlay();
@@ -3912,7 +3924,7 @@ mod modal_layout_tests {
             inherited_hover: false,
         };
 
-        let (tile_prims, overlay_prims) = collect_metal_primitives(&layout, viewport, 0.0, 8);
+        let (tile_prims, overlay_prims) = collect_gpu_primitives(&layout, viewport, 0.0, 8);
         assert!(
             !overlay_prims.is_empty(),
             "open modal must emit overlay primitives"
@@ -3928,7 +3940,7 @@ mod modal_layout_tests {
         let tile_text: Vec<String> = tile_prims
             .iter()
             .filter_map(|prim| match prim {
-                crate::widget_render::MetalPrimitive::ProportionalText(t) => Some(t.text.clone()),
+                crate::widget_render::GpuPrimitive::ProportionalText(t) => Some(t.text.clone()),
                 _ => None,
             })
             .collect();

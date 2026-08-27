@@ -11,9 +11,23 @@
  * math/intrinsics section is vendored here.
  *
  * Source: tools/dgen-toolchain/include/dgen_runtime.h
- * Source-sha256: 73baeab623bb7f2aa1f4971e1117ea3757769731f49e7d2f8967bd0a6f3a0e50
+ * Source-sha256: 2019896b7c69f2d46acc1c7f6c69c315df3181a859df026a0a145dbac1a2a15e
+ * That hash covers only the vendored ABI section of the staged header, not the
+ * whole file: the bytes from the start of the line "typedef void
+ * *DGenFFTSetupV1;" through the end of the line "DGEN_EXPORT void
+ * dgen_set_param_value_v1(int32_t cell_id, float value);" (inclusive, trailing
+ * newline excluded). The header's math/intrinsics section, which this file does
+ * not vendor, differs per target — the mac stage includes <arm_neon.h> where the
+ * Linux stage includes "dgen_simd_compat.h" — so one whole-file hash cannot
+ * satisfy both pins in content/dgen-toolchain.lock. Recompute with:
+ *   python3 -c 'import hashlib,sys;d=open(sys.argv[1],"rb").read();\
+ *     s=b"typedef void *DGenFFTSetupV1;";\
+ *     e=b"DGEN_EXPORT void dgen_set_param_value_v1(int32_t cell_id, float value);";\
+ *     i=d.index(s);j=d.index(e)+len(e);\
+ *     print(hashlib.sha256(d[i:j]).hexdigest())' \
+ *     tools/dgen-toolchain/include/dgen_runtime.h
  * A Rust test (lisp_host/tests.rs, vendored_dgen_abi_header_matches_staged_
- * toolchain_header) recomputes the staged header's sha256 and fails with a
+ * toolchain_header) recomputes that section hash and fails with a
  * "re-vendor dgen_abi_v1.h" message when it drifts.
  *
  * Note (spec risk 2): dgen_set_param_value_v1 is emitted as a no-op stub by

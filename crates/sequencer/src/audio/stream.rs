@@ -89,7 +89,10 @@ pub fn build_output_stream(
         eprintln!("audio-trace: enabled");
     }
 
-    let mut cb_data = AudioCallbackData {
+    // Keep the large callback state behind one pointer before handing the
+    // closure through CPAL's generic stream builders. Passing it by value makes
+    // debug builds reserve a copy-sized stack slot at every generic layer.
+    let cb_data = Box::new(AudioCallbackData {
         lg: LiveGraphPtr(lg),
         state,
         num_channels,
@@ -100,7 +103,7 @@ pub fn build_output_stream(
         custom_engine_pools,
         scheduler_snapshot: initial_scheduler_snapshot,
         scheduler_snapshot_version: initial_scheduler_snapshot_version,
-        active_keyboard_notes: [[None; MAX_VOICES]; MAX_TRACKS],
+        active_keyboard_notes: (0..MAX_TRACKS).map(|_| [None; MAX_VOICES]).collect(),
         keyboard_rx: audio_keyboard_rx,
         master_recorder,
         accumulator_states: [crate::accumulator::AccumulatorRuntimeState::default(); MAX_TRACKS],
@@ -119,6 +122,8 @@ pub fn build_output_stream(
         block_events: Vec::with_capacity(SCHEDULED_BLOCK_SCRATCH_CAPACITY),
         block_events_need_sort: false,
         current_callback_nframes: block_size,
+        output_block_size: OutputBlockSizeVerifier::new(block_size),
+        callback_thread_initialized: false,
         rendered_samples: Arc::clone(&rendered_samples),
         bus_effect_runtime,
         dropped_scheduled_events: 0,
@@ -132,7 +137,7 @@ pub fn build_output_stream(
         transport_was_playing: false,
         metronome: MetronomeState::default(),
         preview: preview::PreviewVoice::default(),
-    };
+    });
     crate::scheduler::spawn_scheduler_thread(
         Arc::clone(&cb_data.state),
         sample_rate,
@@ -153,11 +158,43 @@ pub fn build_output_stream(
         buffer_size: cpal::BufferSize::Fixed(block_size as u32),
     };
 
+    start_cpal_output_stream(&device, &config, block_size, cb_data)
+}
+
+fn start_cpal_output_stream(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    block_size: usize,
+    mut cb_data: Box<AudioCallbackData>,
+) -> Result<Stream, String> {
+    let channels = cb_data.num_channels;
+    // CPAL honors `BufferSize::Fixed` only as a hint on ALSA; PipeWire answers a
+    // 512-frame request with whatever `avail_update` reports (235 frames on the
+    // Linux workstation). Render exact graph blocks and serve the device out of
+    // them so every node — spectral DGenLisp effects above all — sees the block
+    // size it was compiled for (eseq-linux.73).
+    let mut blocks = FixedOutputBlocks::new(block_size, channels);
     let stream = device
         .build_output_stream(
-            &config,
+            config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                audio_callback(&mut cb_data, data);
+                if let Some(observation) =
+                    cb_data.output_block_size.observe(data.len() / channels.max(1))
+                {
+                    match observation {
+                        OutputBlockSizeObservation::Matched { frames } => {
+                            eprintln!(
+                                "audio: output callback block size verified at {frames} frames"
+                            );
+                        }
+                        OutputBlockSizeObservation::Mismatched { requested, actual } => {
+                            eprintln!(
+                                "audio: output callback uses {actual} frames after requesting {requested}; rendering fixed {requested}-frame graph blocks"
+                            );
+                        }
+                    }
+                }
+                blocks.serve(data, |block| audio_callback(&mut cb_data, block));
             },
             |err| eprintln!("Audio stream error: {err}"),
             None,
@@ -190,7 +227,13 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
             supports_f32: range.sample_format() == cpal::SampleFormat::F32,
         })
         .collect();
-    let selected = select_output_config(
+    #[cfg(target_os = "linux")]
+    let preferred_sample_rate = pipewire::default_output_graph_rate();
+    #[cfg(not(target_os = "linux"))]
+    let preferred_sample_rate = None;
+
+    let selected = select_output_config_with_preferred_rate(
+        preferred_sample_rate,
         default_config.sample_rate().0,
         default_config.channels(),
         ranges,
@@ -205,6 +248,17 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
             default_config.sample_rate().0
         )
     })?;
+
+    if let Some(graph_rate) = preferred_sample_rate {
+        if selected.sample_rate == graph_rate {
+            eprintln!("audio: matched output to the PipeWire graph rate at {graph_rate} Hz");
+        } else {
+            eprintln!(
+                "audio: PipeWire graph rate {graph_rate} Hz is unsupported by the default output; using {} Hz",
+                selected.sample_rate
+            );
+        }
+    }
 
     Ok((selected.sample_rate, selected.channels))
 }

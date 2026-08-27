@@ -467,120 +467,141 @@ impl App {
                 Ok(None)
             }
             SongTransportMode::SongPlayback => {
-                let teardown = self.state.stop_song_playback();
-                self.active_runtime_song = None;
-                self.active_song_start_beat = None;
-                self.song_mirrored_row = None;
-                // Persist the live grid BEFORE the latch clears and the
-                // resync below re-launches from the pool: overdub-claimed
-                // lanes (override-pinned) self-write their recorded content
-                // into the pattern they play; every other stale lane is
-                // skipped by the mask, exactly like the row mirror's
-                // save-backs. Skipping this save discards live recordings.
-                let _ = self.state.save_current_pattern_snapshot(
-                    self.tracks.len(),
-                    &self.graph.track_buffer_ids,
-                    &self.graph.track_sample_rates,
-                    &self.tracks,
-                    &self.graph.track_instrument_types,
-                );
-                // The latch SURVIVES the stop (Ableton's Back to Arrangement
-                // semantics): pausing and playing again keeps the performer's
-                // overrides; only the explicit Back-to-Arrangement gesture
-                // (or a capture punch-out) hands the lanes back. The TAKE
-                // governance mask does NOT survive — nothing plays a take
-                // while stopped, and a stale mask keeps suppressing the clip
-                // grid's cell lights and blocks scene launches from claiming
-                // the lane (regression the user caught: stopped clip clicks
-                // "did nothing" on a lane that had played a take).
-                self.state.set_song_take_lane_mask(0);
-                self.state.stop_playback();
-                self.set_song_transport_mode(SongTransportMode::Stopped);
-                // Hand NON-latched lanes back to the scene: the last row
-                // played may have silenced lanes it resolved nothing for,
-                // and that silencing belongs to the song, not to session
-                // mode. Latched lanes keep the performer's live content.
-                self.state.resync_live_grid_to_current_scene();
-                teardown.map_err(|error| format!("Song playback teardown failed: {error}"))?;
-                Ok(Some("Song playback stopped".to_string()))
+                // One transition, one publication (bead eseq-sj01). Without
+                // this scope the arm publishes at least twice — `stop_playback`
+                // and then `resync_live_grid_to_current_scene` — and each
+                // publication costs a whole-project deep capture on this thread
+                // plus a whole-project deep free wherever the last `Arc`
+                // reference lands. The deferred publish runs when the scope
+                // ends, after the resync's `pattern_epoch` bump and
+                // `schedule_mod_resync`, so the scheduler still observes every
+                // epoch it needs.
+                let state = Arc::clone(&self.state);
+                state.coalesce_publishes(|| self.song_playback_stop())
             }
-            SongTransportMode::ArrangementCapture => {
-                // Stop-commit (spec 7.4.7/10.4): the authoritative Stop
-                // boundary is the latency-compensated record clock — the same
-                // clock every capture event was recorded against (immediate
-                // launches, manual clip launches and take notes all stamp
-                // `record_beats_at_instant`) — read BEFORE the transport stops
-                // (the scheduler rewinds its clock once it observes the
-                // stopped transport). Reading the raw scheduler frontier here
-                // would place Q one output-latency ahead of the events it
-                // bounds; it stays only as the fallback for the case where the
-                // audio callback never published a record-clock anchor.
-                let end_raw_beats = self
-                    .state
-                    .record_beats_at_instant(std::time::Instant::now())
-                    .unwrap_or_else(|| self.state.scheduler_rendered_beats())
-                    .max(0.0);
-                // Capture-on-playback teardown (takes spec 9.3): the song
-                // was playing underneath; the latch auto-clears at
-                // punch-out (spec 10) — the committed song now CONTAINS the
-                // performance.
-                let playback_teardown = if self.active_runtime_song.is_some() {
-                    self.active_runtime_song = None;
-                    self.active_song_start_beat = None;
-                    self.song_mirrored_row = None;
-                    Some(self.state.stop_song_playback())
-                } else {
-                    None
-                };
-                self.state.stop_playback();
-                // Persist the live grid like the SongPlayback arm does
-                // (track-sound spec §2.3): the save is masked, so latched
-                // lanes with pins self-write, other stale lanes are skipped,
-                // and bare lanes flow their device tweaks into the TRACK
-                // SOUND — device edits made while recording must survive the
-                // stop. Runs BEFORE the latch clears so the masking still
-                // sees latched lanes as stale.
-                let _ = self.state.save_current_pattern_snapshot(
-                    self.tracks.len(),
-                    &self.graph.track_buffer_ids,
-                    &self.graph.track_sample_rates,
-                    &self.tracks,
-                    &self.graph.track_instrument_types,
-                );
-                // Unlock the song editing primitives before committing: the
-                // commit itself goes through `song_replace`.
-                self.set_song_transport_mode(SongTransportMode::Stopped);
-                let result = self.finish_song_capture_take(end_raw_beats).map(Some);
-                // The latch clears only AFTER the commit: the commit's
-                // scene-sync snapshot must still see latched lanes as stale
-                // (their live grid holds the performer's launch, not the
-                // current scene's pattern) or it writes that content over
-                // the scene cell's real pattern.
-                let released_latch = self.state.song_manual_latch_mask();
-                self.state.clear_song_manual_latch();
-                // Capture ran on top of song playback, so the same row-owned
-                // lane state has to be handed back to the scene.
-                if playback_teardown.is_some() {
-                    self.state.resync_live_grid_to_current_scene();
-                }
-                // Claim-end reinstall (track-sound spec §2.8): a lane the
-                // latch just released keeps the performer's LAUNCH in its
-                // mirror — the resync above deliberately holds track-owned
-                // lanes (it assumes their mirror is already the track sound).
-                // In arrangement context the track owns them again, so put
-                // the track sound's device half back NOW; otherwise the next
-                // save-back persists the launch's stock state into the
-                // shared track-sound entities, retuning every take sharing
-                // them. Also makes the audible state honest: the launch is
-                // over, the user hears the track sound again.
-                self.state
-                    .restore_track_sounds_to_mirror_masked(released_latch);
-                if let Some(Err(error)) = playback_teardown {
-                    return Err(format!("Song playback teardown failed: {error}"));
-                }
-                result
-            }
+            SongTransportMode::ArrangementCapture => self.arrangement_capture_stop(),
         }
+    }
+
+    /// The `SongTransportMode::SongPlayback` arm of [`Self::song_transport_stop`].
+    /// Split out so the whole transition can run inside one
+    /// `coalesce_publishes` scope (bead eseq-sj01).
+    fn song_playback_stop(&mut self) -> Result<Option<String>, String> {
+        let teardown = self.state.stop_song_playback();
+        self.active_runtime_song = None;
+        self.active_song_start_beat = None;
+        self.song_mirrored_row = None;
+        // Persist the live grid BEFORE the latch clears and the
+        // resync below re-launches from the pool: overdub-claimed
+        // lanes (override-pinned) self-write their recorded content
+        // into the pattern they play; every other stale lane is
+        // skipped by the mask, exactly like the row mirror's
+        // save-backs. Skipping this save discards live recordings.
+        let _ = self.state.save_current_pattern_snapshot(
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        );
+        // The latch SURVIVES the stop (Ableton's Back to Arrangement
+        // semantics): pausing and playing again keeps the performer's
+        // overrides; only the explicit Back-to-Arrangement gesture
+        // (or a capture punch-out) hands the lanes back. The TAKE
+        // governance mask does NOT survive — nothing plays a take
+        // while stopped, and a stale mask keeps suppressing the clip
+        // grid's cell lights and blocks scene launches from claiming
+        // the lane (regression the user caught: stopped clip clicks
+        // "did nothing" on a lane that had played a take).
+        self.state.set_song_take_lane_mask(0);
+        self.state.stop_playback();
+        self.set_song_transport_mode(SongTransportMode::Stopped);
+        // Hand NON-latched lanes back to the scene: the last row
+        // played may have silenced lanes it resolved nothing for,
+        // and that silencing belongs to the song, not to session
+        // mode. Latched lanes keep the performer's live content.
+        self.state.resync_live_grid_to_current_scene();
+        teardown.map_err(|error| format!("Song playback teardown failed: {error}"))?;
+        Ok(Some("Song playback stopped".to_string()))
+    }
+
+    /// The `SongTransportMode::ArrangementCapture` arm of
+    /// [`Self::song_transport_stop`].
+    fn arrangement_capture_stop(&mut self) -> Result<Option<String>, String> {
+        // Stop-commit (spec 7.4.7/10.4): the authoritative Stop
+        // boundary is the latency-compensated record clock — the same
+        // clock every capture event was recorded against (immediate
+        // launches, manual clip launches and take notes all stamp
+        // `record_beats_at_instant`) — read BEFORE the transport stops
+        // (the scheduler rewinds its clock once it observes the
+        // stopped transport). Reading the raw scheduler frontier here
+        // would place Q one output-latency ahead of the events it
+        // bounds; it stays only as the fallback for the case where the
+        // audio callback never published a record-clock anchor.
+        let end_raw_beats = self
+            .state
+            .record_beats_at_instant(std::time::Instant::now())
+            .unwrap_or_else(|| self.state.scheduler_rendered_beats())
+            .max(0.0);
+        // Capture-on-playback teardown (takes spec 9.3): the song
+        // was playing underneath; the latch auto-clears at
+        // punch-out (spec 10) — the committed song now CONTAINS the
+        // performance.
+        let playback_teardown = if self.active_runtime_song.is_some() {
+            self.active_runtime_song = None;
+            self.active_song_start_beat = None;
+            self.song_mirrored_row = None;
+            Some(self.state.stop_song_playback())
+        } else {
+            None
+        };
+        self.state.stop_playback();
+        // Persist the live grid like the SongPlayback arm does
+        // (track-sound spec §2.3): the save is masked, so latched
+        // lanes with pins self-write, other stale lanes are skipped,
+        // and bare lanes flow their device tweaks into the TRACK
+        // SOUND — device edits made while recording must survive the
+        // stop. Runs BEFORE the latch clears so the masking still
+        // sees latched lanes as stale.
+        let _ = self.state.save_current_pattern_snapshot(
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        );
+        // Unlock the song editing primitives before committing: the
+        // commit itself goes through `song_replace`.
+        self.set_song_transport_mode(SongTransportMode::Stopped);
+        let result = self.finish_song_capture_take(end_raw_beats).map(Some);
+        // The latch clears only AFTER the commit: the commit's
+        // scene-sync snapshot must still see latched lanes as stale
+        // (their live grid holds the performer's launch, not the
+        // current scene's pattern) or it writes that content over
+        // the scene cell's real pattern.
+        let released_latch = self.state.song_manual_latch_mask();
+        self.state.clear_song_manual_latch();
+        // Capture ran on top of song playback, so the same row-owned
+        // lane state has to be handed back to the scene.
+        if playback_teardown.is_some() {
+            self.state.resync_live_grid_to_current_scene();
+        }
+        // Claim-end reinstall (track-sound spec §2.8): a lane the
+        // latch just released keeps the performer's LAUNCH in its
+        // mirror — the resync above deliberately holds track-owned
+        // lanes (it assumes their mirror is already the track sound).
+        // In arrangement context the track owns them again, so put
+        // the track sound's device half back NOW; otherwise the next
+        // save-back persists the launch's stock state into the
+        // shared track-sound entities, retuning every take sharing
+        // them. Also makes the audible state honest: the launch is
+        // over, the user hears the track sound again.
+        self.state
+            .restore_track_sounds_to_mirror_masked(released_latch);
+        if let Some(Err(error)) = playback_teardown {
+            return Err(format!("Song playback teardown failed: {error}"));
+        }
+        result
     }
 
     /// Toggle Play/Stop through the state machine (the `seq-toggle-play`
@@ -812,6 +833,39 @@ mod tests {
         )
         .expect("arr_replace_rows succeeds");
         app
+    }
+
+    /// Bead eseq-sj01: one Stop, one publication. Every scheduler-snapshot
+    /// publication costs a whole-project deep capture on this thread and a
+    /// whole-project deep free wherever the last `Arc` reference lands — which
+    /// was the audio callback. The stop arm used to publish at least twice
+    /// (`stop_playback`, then `resync_live_grid_to_current_scene`); only the
+    /// last one describes the state the user ends up in.
+    #[test]
+    fn stopping_song_playback_publishes_exactly_one_scheduler_snapshot() {
+        let mut app = app_with_song();
+        app.song_transport_play(false).expect("song playback starts");
+        assert_eq!(app.song_transport_mode, SongTransportMode::SongPlayback);
+
+        let before = app.state.scheduler_snapshot_version();
+        app.song_transport_stop().expect("stop succeeds");
+        assert_eq!(
+            app.state.scheduler_snapshot_version(),
+            before + 1,
+            "the whole stop transition must coalesce into one publication"
+        );
+
+        // The coalesced publication runs AFTER the resync's epoch bumps, so
+        // the scheduler still observes the stopped transport and the new epoch.
+        let published = app.state.latest_scheduler_snapshot();
+        assert!(!published.transport.playing);
+        assert_eq!(
+            published.transport.pattern_epoch,
+            app.state
+                .transport
+                .pattern_epoch
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 
     /// A song row that resolves nothing for a lane silences it, and stopping

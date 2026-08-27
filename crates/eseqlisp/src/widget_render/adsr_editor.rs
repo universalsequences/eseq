@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::{cell::RefCell, rc::Rc};
 
 use super::{
-    CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
+    CellBuffer, EventOutput, GpuPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
     WidgetInstance, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -67,7 +67,11 @@ fn update_interaction_state(widget_id: u64, update: impl FnOnce(&mut AdsrInterac
         let before = *state;
         update(state);
         if *state != before {
-            super::bump_widget_state_generation();
+            // Own-widget-only state: the drag envelope and handle highlight
+            // never affect another widget's primitives, so a per-event
+            // global generation bump would only defeat every other widget's
+            // primitive cache for the whole gesture (eseq-eeng).
+            super::bump_widget_state_revision(widget_id);
         }
     });
 }
@@ -76,6 +80,35 @@ fn visual_envelope(node: &LayoutNode) -> AdsrEnvelope {
     interaction_state(node.widget_id)
         .last_drag_envelope
         .unwrap_or_else(|| AdsrEnvelope::from_node(node))
+}
+
+/// Test support: the local-cell center of a drag handle (1=attack, 2=decay,
+/// 3=sustain, 4=release), so harnesses can aim real pointer events at a
+/// handle. Mirrors the plot points `nearest_handle` hit-tests against.
+pub fn adsr_handle_center(node: &LayoutNode, handle_idx: i32) -> Option<(f32, f32)> {
+    let (x1, x2, x3, x4) = adsr_x_positions(&node.props);
+    let sustain = prop_unit(&node.props, "sustain", 0.5);
+    let (data_x, data_y) = match handle_idx {
+        1 => (x1, 1.0),
+        2 => (x2, sustain),
+        3 => (x3, sustain),
+        4 => (x4, 0.0),
+        _ => return None,
+    };
+    Some(plot_point(data_x, data_y, node.rect))
+}
+
+/// Test support: the envelope the renderer would draw for this node right
+/// now — live drag state first, layout props otherwise. Interaction state is
+/// thread-local, so this only observes drags dispatched on the same thread.
+pub fn adsr_visual_envelope(node: &LayoutNode) -> (f32, f32, f32, f32) {
+    let envelope = visual_envelope(node);
+    (
+        envelope.attack,
+        envelope.decay,
+        envelope.sustain,
+        envelope.release,
+    )
 }
 
 fn clamp_measured_axis(requested: f32, min: f32, max: f32) -> f32 {
@@ -411,18 +444,20 @@ impl WidgetDefinition for AdsrEditorWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(ADSR_EDITOR_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        ADSR_EDITOR_SHADER.source(backend)
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let envelope = visual_envelope(node);
         let attack = envelope.attack;
         let decay = envelope.decay;
@@ -464,7 +499,7 @@ impl WidgetDefinition for AdsrEditorWidget {
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;
-        vec![MetalPrimitive::WidgetInstance {
+        vec![GpuPrimitive::WidgetInstance {
             widget_type: widget_type.to_string(),
             instance: WidgetInstance {
                 ndc_min,
@@ -473,7 +508,7 @@ impl WidgetDefinition for AdsrEditorWidget {
                 orientation: 0.0,
                 itime: viewport.time_seconds,
                 uniform_a: [attack, decay, sustain, release],
-                uniform_b: [hold, visual_handle, 0.0, 0.0],
+                uniform_b: [hold, visual_handle, super::ui_px_scale(), 0.0],
                 uniform_c: [attack_max, decay_max, release_max, 0.0],
                 uniform_d: [0.0; 4],
                 color_a: curve_color.to_rgba(),
@@ -488,8 +523,7 @@ impl WidgetDefinition for AdsrEditorWidget {
     }
 }
 
-#[cfg(target_os = "macos")]
-const ADSR_EDITOR_SHADER: &str = r#"
+const ADSR_EDITOR_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float adsr_sdSegment(float2 p, float2 a, float2 b) {
     float2 pa = p - a;
     float2 ba = b - a;
@@ -578,6 +612,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     col.rgb = mix(col.rgb, in.color_c.rgb, baseline * in.color_c.a * 0.25 * insidePlot);
 
     float2 uvPerPixel = max(float2(fwidth(uv.x), fwidth(uv.y)), float2(1e-6));
+    float pxScale = (in.uniform_b.z > 0.0) ? in.uniform_b.z : 1.0;
     float2 pPx = uv / uvPerPixel;
     float2 plotMinPx = float2(plotLeft, plotTop) / uvPerPixel;
     float2 plotMaxPx = float2(plotRight, plotBottom) / uvPerPixel;
@@ -589,9 +624,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float bottomBracketHeightPx = plotMaxPx.y - envelopeBottomPx;
     float bracketDist = 1000.0;
     bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMinPx, float2(1.0, 1.0), float2(leftBracketWidthPx, topBracketHeightPx)));
-    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, float2(plotMaxPx.x, plotMinPx.y), float2(-1.0, 1.0), float2(16.0, topBracketHeightPx)));
+    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, float2(plotMaxPx.x, plotMinPx.y), float2(-1.0, 1.0), float2(16.0 * pxScale, topBracketHeightPx)));
     bracketDist = min(bracketDist, adsr_bracketDistance(pPx, float2(plotMinPx.x, plotMaxPx.y), float2(1.0, -1.0), float2(leftBracketWidthPx, bottomBracketHeightPx)));
-    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMaxPx, float2(-1.0, -1.0), float2(16.0, bottomBracketHeightPx)));
+    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMaxPx, float2(-1.0, -1.0), float2(16.0 * pxScale, bottomBracketHeightPx)));
     float brackets = 1.0 - smoothstep(0.5, 1.25, bracketDist);
     col.rgb = mix(col.rgb, in.color_a.rgb, brackets * in.color_a.a);
 
@@ -630,8 +665,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     for (int i = 1; i < 5; ++i) {
         float2 h = adsr_point(i, x1, x2, x3, x4, sustain);
         bool highlighted = abs(float(i) - activeHandle) < 0.5;
-        float handleHalfPx = highlighted ? 7.2 : 6.0;
-        float handleStrokePx = 1.5;
+        float handleHalfPx = (highlighted ? 7.2 : 6.0) * pxScale;
+        float handleStrokePx = 1.5 * pxScale;
         float2 pxDelta = float2((uv.x - h.x) / uvPerPixel.x,
                                 (uv.y - h.y) / pixelY);
         float2 d = abs(pxDelta);
@@ -647,7 +682,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return col;
 }
-"#;
+"#, super::wgsl::ADSR_EDITOR_SHADER);
 
 #[cfg(test)]
 mod tests {
@@ -815,17 +850,15 @@ mod tests {
         assert_eq!(map_value(&release_env, "active"), Value::Bool(false));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn shader_draws_only_the_four_live_handles() {
-        assert!(ADSR_EDITOR_SHADER.contains("for (int i = 1; i < 5; ++i)"));
-        assert!(!ADSR_EDITOR_SHADER.contains("for (int i = 0; i < 5; ++i)"));
-        assert!(
-            ADSR_EDITOR_SHADER.contains(
-                "return clamp((x - attackOrigin) / max(x1 - attackOrigin, 1e-5), 0.0, 1.0)"
-            )
-        );
-        assert!(ADSR_EDITOR_SHADER.contains("? segmentT"));
-        assert!(!ADSR_EDITOR_SHADER.contains("adsr_expRise"));
+        let shader = ADSR_EDITOR_SHADER.source(crate::widget_render::ShaderBackend::Msl).unwrap();
+        assert!(shader.contains("for (int i = 1; i < 5; ++i)"));
+        assert!(!shader.contains("for (int i = 0; i < 5; ++i)"));
+        assert!(shader.contains(
+            "return clamp((x - attackOrigin) / max(x1 - attackOrigin, 1e-5), 0.0, 1.0)"
+        ));
+        assert!(shader.contains("? segmentT"));
+        assert!(!shader.contains("adsr_expRise"));
     }
 }

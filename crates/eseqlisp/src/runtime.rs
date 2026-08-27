@@ -93,6 +93,21 @@ pub struct UiInvalidationTrace {
     pub relayout_failure_reason: Option<String>,
 }
 
+/// Monotonic UI work counters suitable for event-boundary snapshots.
+///
+/// Unlike the one-second `ESEQLISP_PROFILE_UI` aggregate, these counters are
+/// always available and never reset, so probes can subtract snapshots around
+/// one input event without depending on wall-clock logging windows.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UiWorkCounters {
+    pub full_buffer_reruns: u64,
+    pub subtree_reruns: u64,
+    pub reevaluated_subtree_roots: u64,
+    pub relayout_reused: u64,
+    pub relayout_full: u64,
+    pub relayout_subtree: u64,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReactiveSetResult {
     pub changed: bool,
@@ -455,6 +470,33 @@ struct SdfCompileResult {
     state_symbols: Vec<String>,
 }
 
+/// Compile an SDF widget shader in the language of the platform's render
+/// backend: MSL for the macOS Metal backend, WGSL for the wgpu backend
+/// everywhere else. The registry stores exactly one source per widget, so the
+/// emitter choice must match the backend that will consume it.
+fn compile_sdf_for_platform_backend(
+    expr: &crate::parser::Expression,
+    state_symbols: &[String],
+    options: crate::lang::sdf_codegen::SdfShaderOptions,
+) -> Result<crate::lang::sdf_codegen::SdfShaderOutput, crate::lang::sdf_codegen::CodegenError> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::lang::sdf_codegen::compile_sdf_to_metal_with_state_and_options(
+            expr,
+            state_symbols,
+            options,
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::lang::sdf_codegen::compile_sdf_to_wgsl_with_state_and_options(
+            expr,
+            state_symbols,
+            options,
+        )
+    }
+}
+
 fn compile_sdf_value(
     value: &Value,
     vm: &mut VM,
@@ -465,9 +507,9 @@ fn compile_sdf_value(
     let mut state_symbols =
         crate::lang::sdf_codegen::collect_state_symbols(&expanded, state_bindings);
     state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
-    let output =
-        crate::lang::sdf_codegen::compile_sdf_to_metal_with_state(&expanded, &state_symbols)
-            .map_err(|e| e.to_string())?;
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
+    let output = compile_sdf_for_platform_backend(&expanded, &state_symbols, options)
+        .map_err(|e| e.to_string())?;
     Ok(SdfCompileResult {
         output,
         expanded_expr: expanded,
@@ -480,6 +522,67 @@ use std::hash::{Hash, Hasher};
 
 thread_local! {
     static MATERIAL_SHADER_CACHE: RefCell<HashMap<u64, String>> = RefCell::new(HashMap::new());
+    /// Theme generation the SDF widget registry was last recompiled against.
+    static SDF_THEME_RECOMPILE_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Iterative walk — SDF expressions can nest deeply enough that recursion is a
+/// stack risk (see Expression::clone).
+fn expression_contains_keyword(expr: &crate::parser::Expression) -> bool {
+    use crate::parser::Expression;
+    let mut stack = vec![expr];
+    while let Some(e) = stack.pop() {
+        match e {
+            Expression::Keyword(_) => return true,
+            Expression::List(items) | Expression::QuoteList(items) => stack.extend(items.iter()),
+            Expression::Quasiquote(inner)
+            | Expression::Unquote(inner)
+            | Expression::UnquoteSplicing(inner) => stack.push(inner),
+            Expression::Symbol(_)
+            | Expression::String(_)
+            | Expression::QuoteSymbol(_)
+            | Expression::Number(_) => {}
+        }
+    }
+    false
+}
+
+/// Theme keyword colors are baked into SDF shader source as literals at emit
+/// time, so a theme switch has to re-emit those shaders. Re-registering a def
+/// under the same name changes its stored source and bumps the registry
+/// generation, which makes both render backends rebuild exactly the changed
+/// pipelines on the next frame. Returns true if any shader source changed.
+pub fn recompile_theme_dependent_sdf_shaders() -> bool {
+    let generation = crate::ui::theme::generation();
+    if SDF_THEME_RECOMPILE_GENERATION.with(|g| g.get()) == generation {
+        return false;
+    }
+    SDF_THEME_RECOMPILE_GENERATION.with(|g| g.set(generation));
+    let options = match crate::lang::sdf_codegen::SdfShaderOptions::from_env() {
+        Ok(options) => options,
+        Err(_) => return false,
+    };
+    let mut changed = false;
+    for def in crate::widget_render::sdf_widget::sdf_widget_defs() {
+        if !expression_contains_keyword(&def.sdf_expr) {
+            continue;
+        }
+        match compile_sdf_for_platform_backend(&def.sdf_expr, &def.state_uniforms, options) {
+            Ok(output) => {
+                if output.shader_source != def.shader_source {
+                    let mut new_def = (*def).clone();
+                    new_def.shader_source = output.shader_source;
+                    new_def.region_count = output.region_count;
+                    crate::widget_render::sdf_widget::register_sdf_widget(new_def);
+                    changed = true;
+                }
+            }
+            Err(e) => {
+                eprintln!("theme recompile of SDF widget '{}' failed: {}", def.name, e);
+            }
+        }
+    }
+    changed
 }
 
 /// Extract origin_t from a widget's min/max/origin props.
@@ -628,6 +731,8 @@ fn compile_widget_material(
     let mut binding_keys = bindings.iter().cloned().collect::<Vec<_>>();
     binding_keys.sort();
     binding_keys.hash(&mut hasher);
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
+    options.hash(&mut hasher);
     let cache_key = hasher.finish();
 
     if let Some(name) = MATERIAL_SHADER_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
@@ -636,9 +741,8 @@ fn compile_widget_material(
 
     let mut state_symbols = crate::lang::sdf_codegen::collect_state_symbols(&expanded, &bindings);
     state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
-    let output =
-        crate::lang::sdf_codegen::compile_sdf_to_metal_with_state(&expanded, &state_symbols)
-            .map_err(|e| e.to_string())?;
+    let output = compile_sdf_for_platform_backend(&expanded, &state_symbols, options)
+        .map_err(|e| e.to_string())?;
 
     let paint_margin =
         crate::widget_render::sdf_widget::estimate_shadow_paint_margin(&expanded, 16.0, 8.0);
@@ -647,6 +751,7 @@ fn compile_widget_material(
     crate::widget_render::sdf_widget::register_inline_shader(
         shader_name.clone(),
         output.shader_source,
+        expanded,
         state_symbols,
         paint_margin,
     );
@@ -1192,6 +1297,7 @@ pub struct Runtime {
     widget_id_offset: u64,
     text_measurer: Option<Rc<dyn TextMeasurer>>,
     perf_stats: RuntimePerfStats,
+    ui_work_counters: UiWorkCounters,
     last_ui_invalidation_trace: Option<UiInvalidationTrace>,
 }
 
@@ -1257,6 +1363,7 @@ impl Runtime {
             widget_id_offset: 0,
             text_measurer: None,
             perf_stats: RuntimePerfStats::new(),
+            ui_work_counters: UiWorkCounters::default(),
             last_ui_invalidation_trace: None,
         };
         runtime.document_builtin_symbols();
@@ -1753,6 +1860,7 @@ impl Runtime {
             ("each", "(each list owner-path callback)", "Map over a list with item index and optional widget ownership metadata."),
             ("map", "(map callback list)", "Return a list containing callback applied to each item."),
             ("filter", "(filter callback list)", "Return list items for which callback is truthy."),
+            ("find-by-key", "(find-by-key list :key value)", "Return the first map in list whose :key field equals value, or nil."),
             ("reduce", "(reduce callback initial list)", "Reduce list by calling callback with accumulator and item."),
             ("for-each", "(for-each callback list)", "Call callback for each item and return nil."),
             ("defhook", "(defhook \"name\")", "Declare an extension hook and define a function of that name that runs its listeners."),
@@ -2577,14 +2685,34 @@ impl Runtime {
     }
 
     pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
+        self.set_layout_viewport_exact_inner(cols, rows, true);
+    }
+
+    /// `set_layout_viewport_exact` that leaves a pending deferred layout
+    /// invalidation pending instead of settling it.
+    ///
+    /// Input routing sets the layout viewport to the tile it is about to
+    /// dispatch into, and it does that once per *raw* event. Settling there
+    /// turns a coalesced scroll burst back into one full relayout per event —
+    /// precisely what `invalidate_layout_deferred` exists to avoid — while the
+    /// layout it would rebuild is thrown away again by the next event in the
+    /// same burst. Render paths still settle; they are the ones that need the
+    /// new geometry.
+    pub fn set_layout_viewport_exact_deferring(&mut self, cols: f32, rows: f32) {
+        self.set_layout_viewport_exact_inner(cols, rows, false);
+    }
+
+    fn set_layout_viewport_exact_inner(&mut self, cols: f32, rows: f32, settle_deferred: bool) {
         let cols = cols.max(1.0);
         let rows = rows.max(1.0);
         if self.layout_cols.to_bits() == cols.to_bits()
             && self.layout_rows.to_bits() == rows.to_bits()
         {
-            self.flush_deferred_layout_invalidation();
+            if settle_deferred {
+                self.flush_deferred_layout_invalidation();
+            }
             if self.current_layout.is_none() && self.current_widget_tree.is_some() {
-                self.relayout_current_tree();
+                self.relayout_current_tree_because("viewport-settle");
             }
             return;
         }
@@ -2595,7 +2723,7 @@ impl Runtime {
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
         self.deferred_layout_invalidated = false;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("viewport-resize");
     }
 
     /// Set the whole-window viewport in the current tile's local cell
@@ -2637,7 +2765,7 @@ impl Runtime {
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
         self.force_layout_revision_bump = true;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("invalidate-layout");
     }
 
     /// Coalesce state-driven relayout work until the next frame build.
@@ -2662,7 +2790,7 @@ impl Runtime {
         let previous_layout = self.current_layout.clone();
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("deferred-invalidation");
     }
 
     pub fn layout_aspect(&self) -> f32 {
@@ -2671,6 +2799,23 @@ impl Runtime {
 
     pub fn layout_cell_dims(&self) -> (f32, f32) {
         (self.layout_cell_w, self.layout_cell_h)
+    }
+
+    pub fn set_layout_cell_dimensions(&mut self, cell_w: f32, cell_h: f32) {
+        if !cell_w.is_finite() || !cell_h.is_finite() || cell_w <= 0.0 || cell_h <= 0.0 {
+            return;
+        }
+        if (self.layout_cell_w - cell_w).abs() < f32::EPSILON
+            && (self.layout_cell_h - cell_h).abs() < f32::EPSILON
+        {
+            return;
+        }
+        self.layout_cell_w = cell_w;
+        self.layout_cell_h = cell_h;
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
+        self.current_layout = None;
+        self.relayout_current_tree_because("cell-dimensions");
     }
 
     /// Set the text measurer for proportional font layout (Metal backend).
@@ -2687,7 +2832,7 @@ impl Runtime {
         let previous_layout = self.current_layout.clone();
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("text-measurer");
     }
 
     pub fn set_widget_id_offset(&mut self, offset: u64) {
@@ -2698,7 +2843,7 @@ impl Runtime {
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.widget_id_offset = offset;
         self.current_layout = None;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("widget-id-offset");
     }
 
     pub fn set_layout_aspect(&mut self, aspect: f32) {
@@ -2709,7 +2854,7 @@ impl Runtime {
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.layout_aspect = aspect;
         self.current_layout = None;
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("layout-aspect");
     }
 
     pub fn invoke(
@@ -2990,6 +3135,10 @@ impl Runtime {
 
     pub fn last_ui_invalidation_trace(&self) -> Option<UiInvalidationTrace> {
         self.last_ui_invalidation_trace.clone()
+    }
+
+    pub fn ui_work_counters(&self) -> UiWorkCounters {
+        self.ui_work_counters
     }
 
     pub(crate) fn drain_host_commands(&mut self) -> Vec<HostCommand> {
@@ -3274,7 +3423,7 @@ impl Runtime {
             None,
             Vec::new(),
         )));
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("layout-snapshot");
         let snapshot = self.current_layout.clone();
 
         self.current_widget_tree = saved_tree;
@@ -3368,7 +3517,7 @@ impl Runtime {
             current_buffer_id,
             Vec::new(),
         )));
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("set-widget-tree");
     }
 
     pub(crate) fn position_current_layout(
@@ -3397,7 +3546,7 @@ impl Runtime {
             current_buffer_id,
             Vec::new(),
         )));
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("restore-widget-tree");
         // Force layout revision bump so GPU caches rebuild
         self.layout_revision = self.layout_revision.wrapping_add(1);
     }
@@ -3443,7 +3592,7 @@ impl Runtime {
             self.layout_revision = layout_revision.wrapping_add(1);
         } else {
             self.current_layout = None;
-            self.relayout_current_tree();
+            self.relayout_current_tree_because("restore-cached-layout-miss");
             self.layout_revision = self.layout_revision.wrapping_add(1);
         }
     }
@@ -3465,7 +3614,7 @@ impl Runtime {
             ))
         });
         self.commit_current_ui_snapshot(snapshot);
-        self.relayout_current_tree();
+        self.relayout_current_tree_because("adopt-snapshot");
         self.layout_revision = self.layout_revision.wrapping_add(1);
     }
 
@@ -3613,6 +3762,8 @@ impl Runtime {
             None,
             relayout_started.elapsed(),
         );
+        self.ui_work_counters.relayout_reused += 1;
+        self.ui_work_counters.relayout_subtree += 1;
         self.perf_stats
             .note_relayout(true, true, relayout_started.elapsed(), None);
         Ok(())
@@ -3625,7 +3776,7 @@ impl Runtime {
         self.try_upgrade_full_tree_to_current_subtree_without_relayout(pending)
             .inspect(|upgraded| {
                 if *upgraded {
-                    self.relayout_current_tree();
+                    self.relayout_current_tree_because("subtree-upgrade");
                     self.layout_revision = self.layout_revision.wrapping_add(1);
                 }
             })
@@ -3871,7 +4022,7 @@ impl Runtime {
             &mut inactive_pending,
         );
         if active_tree_requires_full_relayout {
-            self.relayout_current_tree();
+            self.relayout_current_tree_because("reactive-full-tree");
             self.layout_revision = self.layout_revision.wrapping_add(1);
         } else if !active_changed_subtree_roots.is_empty()
             && let Err(reason) =
@@ -3880,7 +4031,7 @@ impl Runtime {
             if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                 trace.subtree_failure_reason = Some(reason);
             }
-            self.relayout_current_tree();
+            self.relayout_current_tree_because("reactive-subtree-fallback");
             self.layout_revision = self.layout_revision.wrapping_add(1);
         }
         if trace && pending_widget_tree_count > 0 {
@@ -3902,6 +4053,10 @@ impl Runtime {
             .extend(inactive_pending);
         let mut affected_buffers = affected_buffers.into_iter().collect::<Vec<_>>();
         affected_buffers.sort();
+        self.ui_work_counters.full_buffer_reruns += full_buffer_reruns as u64;
+        self.ui_work_counters.subtree_reruns += subtree_reruns as u64;
+        self.ui_work_counters.reevaluated_subtree_roots +=
+            reevaluated_subtree_roots as u64;
         ReactiveFlushStats {
             widget_tree_flushes: pending_widget_tree_count,
             pending_widget_tree_count,
@@ -3915,7 +4070,16 @@ impl Runtime {
         }
     }
 
-    fn relayout_current_tree(&mut self) {
+    /// Relayout the current tree, recording `cause` as the call site that asked
+    /// for it.
+    ///
+    /// Most callers null `current_layout` before calling in, which destroys the
+    /// `previous_layout` the reuse path needs *and* the input
+    /// `reuse_layout_failure_reason` is derived from — so the profiler used to
+    /// report those relayouts as `fail=-`, with no way to tell which setter
+    /// fired. `cause` is the fallback reason so `[ui-profile][runtime] fail=`
+    /// names the caller instead.
+    fn relayout_current_tree_because(&mut self, cause: &'static str) {
         let relayout_started = Instant::now();
         let previous_layout = self.current_layout.clone();
         let Some(tree) = self.current_widget_tree.as_ref() else {
@@ -3928,6 +4092,7 @@ impl Runtime {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
             self.update_last_trace_relayout("clear", None, relayout_started.elapsed());
+            self.ui_work_counters.relayout_reused += 1;
             self.perf_stats
                 .note_relayout(true, false, relayout_started.elapsed(), None);
             return;
@@ -3949,13 +4114,15 @@ impl Runtime {
             }
             self.force_layout_revision_bump = false;
             self.update_last_trace_relayout("reuse", None, relayout_started.elapsed());
+            self.ui_work_counters.relayout_reused += 1;
             self.perf_stats
                 .note_relayout(true, false, relayout_started.elapsed(), None);
             return;
         }
         let failure_reason = previous_layout
             .as_ref()
-            .and_then(|existing| reuse_layout_failure_reason(existing.as_ref(), tree));
+            .and_then(|existing| reuse_layout_failure_reason(existing.as_ref(), tree))
+            .or_else(|| Some(format!("cleared:{cause}")));
         let mut engine = if let Some(measurer) = self.text_measurer.as_deref() {
             LayoutEngine::with_text_measurer_exact(
                 self.layout_cols,
@@ -3999,6 +4166,7 @@ impl Runtime {
                 failure_reason.clone(),
                 relayout_started.elapsed(),
             );
+            self.ui_work_counters.relayout_full += 1;
             self.perf_stats
                 .note_relayout(false, false, relayout_started.elapsed(), failure_reason);
         }
@@ -4055,5 +4223,52 @@ fn collect_shader_widget_ids_recursive(node: &LayoutNode, ids: &mut Vec<u64>) {
     }
     for child in &node.children {
         collect_shader_widget_ids_recursive(child, ids);
+    }
+}
+
+#[cfg(test)]
+mod theme_shader_recompile_tests {
+    use crate::backend::Color;
+    use crate::parser::Expression;
+    use crate::ui::theme;
+    use crate::widget_render::sdf_widget::{SdfWidgetDef, register_sdf_widget, sdf_widget_def};
+
+    fn parse_one(src: &str) -> Expression {
+        let tokens = crate::parser::Parser::new(src.to_string()).parse().unwrap();
+        let mut ast = crate::parser::ASTParser::new(tokens);
+        ast.parse().unwrap().into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn theme_change_reemits_keyword_baked_shaders() {
+        let expr = parse_one("(sdf/layer (sdf/fill (- x 0.5) :accent))");
+        let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env().unwrap();
+        let baked = super::compile_sdf_for_platform_backend(&expr, &[], options).unwrap();
+        register_sdf_widget(SdfWidgetDef {
+            name: "theme-recompile-probe".into(),
+            shader_source: baked.shader_source.clone(),
+            sdf_expr: expr,
+            state_uniforms: Vec::new(),
+            bindable_props: Vec::new(),
+            region_count: baked.region_count,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: false,
+        });
+
+        // Same theme the shader was baked against: nothing to re-emit.
+        assert!(!super::recompile_theme_dependent_sdf_shaders());
+
+        let mut theme = theme::current();
+        theme.accent = Color::from_hex(0x01, 0x02, 0x03);
+        theme::set_current(theme);
+
+        assert!(super::recompile_theme_dependent_sdf_shaders());
+        let def = sdf_widget_def("theme-recompile-probe").unwrap();
+        assert_ne!(def.shader_source, baked.shader_source);
+
+        // Guarded by theme generation: a second pass is a no-op.
+        assert!(!super::recompile_theme_dependent_sdf_shaders());
     }
 }

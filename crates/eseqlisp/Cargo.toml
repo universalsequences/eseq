@@ -6,7 +6,9 @@ license = "GPL-3.0-only"
 autoexamples = false
 
 [features]
+capture-harness = []
 patcher-test-support = []
+wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]
 
 [dependencies]
 ratatui = "0.29"
@@ -16,9 +18,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 similar = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+etagere = "0.2"
+bytemuck = { version = "1", features = ["derive"], optional = true }
+winit = "0.29"
+wgpu = { version = "24", optional = true }
+pollster = { version = "0.4", optional = true }
+
+[dev-dependencies]
+naga = { version = "24", features = ["wgsl-in"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-metal = { version = "0.3", features = [
@@ -35,16 +45,38 @@ objc2-metal = { version = "0.3", features = [
 ] }
 objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer"] }
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSColor", "NSResponder", "NSAppearance", "NSHapticFeedback"] }
-objc2-core-foundation = { version = "0.3", features = ["CFAttributedString", "CFDictionary"] }
-objc2-core-text = { version = "0.3", features = ["CTFont", "CTFontDescriptor", "CTLine", "CTStringAttributes"] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes", "CFString"] }
+objc2-core-text = { version = "0.3", features = ["CTFont"] }
 objc2-core-graphics = { version = "0.3", features = [
     "CGBitmapContext",
     "CGColorSpace",
     "CGContext",
     "CGImage",
 ] }
-winit = "0.29"
-etagere = "0.2"
+
+# macOS rasterizes through CoreText; every other platform discovers fonts with
+# fontdb and rasterizes them with fontdue. See src/ui/glyph_atlas.rs.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+fontdb = "0.23"
+fontdue = "0.9"
+
+# Deterministic WGSL pipeline captures; see crates/eseqlisp/src/shader_capture.rs.
+[[bin]]
+name = "eseqlisp_shader_capture"
+path = "src/bin/eseqlisp_shader_capture.rs"
+required-features = ["wgpu", "capture-harness"]
+
+# Deterministic MSL pipeline captures; the Metal reference half of
+# eseq-linux.25. See crates/eseqlisp/src/metal_shader_capture.rs.
+[[bin]]
+name = "eseqlisp_metal_shader_capture"
+path = "src/bin/eseqlisp_metal_shader_capture.rs"
+required-features = ["capture-harness"]
+
+[[bin]]
+name = "eseqlisp_sdf_lighting_probe"
+path = "src/bin/eseqlisp_sdf_lighting_probe.rs"
+required-features = ["wgpu", "capture-harness"]
 
 [[example]]
 name = "embed"
@@ -53,6 +85,15 @@ path = "examples/embed.rs"
 [[example]]
 name = "metal_window"
 path = "examples/metal_window.rs"
+
+[[example]]
+name = "winit_window"
+path = "examples/winit_window.rs"
+
+[[example]]
+name = "wgpu_window"
+path = "examples/wgpu_window.rs"
+required-features = ["wgpu"]
 
 [[example]]
 name = "piano_roll_embed"

@@ -11,8 +11,58 @@ mix, metering, and CPU-load accounting.
 #[allow(unused_imports)]
 use super::*;
 
+/// Flush subnormal floats to zero for all math on the calling thread.
+///
+/// The intrinsics are deprecated because changing MXCSR behind the compiler is
+/// formally outside the default floating-point environment; setting FTZ/DAZ on
+/// dedicated DSP threads is nonetheless the standard audio-engine practice this
+/// codebase relies on, and nothing on these threads depends on subnormal
+/// precision (f32 subnormals sit below roughly -750 dBFS).
+#[allow(deprecated)]
+pub(super) fn enable_flush_denormals_to_zero() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+        const MXCSR_FLUSH_TO_ZERO: u32 = 1 << 15;
+        const MXCSR_DENORMALS_ARE_ZERO: u32 = 1 << 6;
+        _mm_setcsr(_mm_getcsr() | MXCSR_FLUSH_TO_ZERO | MXCSR_DENORMALS_ARE_ZERO);
+    }
+}
+
 pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
+    if !data.callback_thread_initialized {
+        data.callback_thread_initialized = true;
+        // FTZ/DAZ are per-thread MXCSR state and this thread executes graph
+        // nodes, so it needs the same subnormal-flush mode the audiograph
+        // workers set in worker_main (see flush_denormals_to_zero there for
+        // why silence is otherwise more expensive than sound on x86).
+        enable_flush_denormals_to_zero();
+        // cpal's ALSA backend spawns the callback thread with default
+        // scheduling and no spawn hook, so promote it here on first entry.
+        // The callback thread actively helps drain the graph; leaving it
+        // SCHED_OTHER while the workers run SCHED_FIFO inverts priorities in
+        // the audio path.
+        #[cfg(target_os = "linux")]
+        {
+            unsafe { promote_current_thread_rt() };
+            // Direct FIFO promotion is final immediately. An rtkit request is
+            // still pending here; its non-RT helper prints the achieved RR (or
+            // normal-priority) result after the D-Bus reply instead.
+            //
+            // Either way the printing happens on the helper thread: formatting
+            // the status allocates and `eprintln!` takes the process stderr
+            // lock, neither of which belongs on the callback thread. This is a
+            // single atomic store.
+            let status = unsafe { audiograph::rt_status() };
+            if status.callback_reported != 0 {
+                super::rtkit::request_status_print();
+            }
+        }
+    }
     let callback_start = Instant::now();
+    // Always the graph block size: `FixedOutputBlocks` in stream.rs absorbs the
+    // device's actual request, which on ALSA/PipeWire is neither fixed nor
+    // hop-compatible (eseq-linux.73).
     let nframes = output.len() / data.num_channels;
     data.current_callback_nframes = nframes;
     data.trace_callback_counter = data.trace_callback_counter.wrapping_add(1);
@@ -20,11 +70,20 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     // Reading live num_tracks/epochs independently can observe the middle of
     // an add-track publication and clear valid events before the scheduler can
     // possibly have produced replacements.
-    let scheduler_snapshot_version = data.state.scheduler_snapshot_version();
-    if scheduler_snapshot_version != data.scheduler_snapshot_version {
-        data.scheduler_snapshot = data.state.latest_scheduler_snapshot();
-        data.scheduler_snapshot_version = scheduler_snapshot_version;
-    }
+    //
+    // Both halves of this refresh are realtime-safe (bead eseq-sj01): the
+    // snapshot arrives through a bounded lock-free ring rather than
+    // `latest_scheduler_snapshot()`'s `std::sync::Mutex` (no priority
+    // inheritance, so a publish landing here could futex-wait the audio thread
+    // behind the UI thread), and the outgoing `Arc` is handed to the reclaimer
+    // instead of being dropped here. When this thread held the last reference,
+    // that drop freed the whole deep structure — per-step chord `Vec`s,
+    // per-step effect p-locks, `String`-bearing effect descriptors, order tens
+    // of thousands of frees — inside the block budget.
+    data.state.snapshot_handoff().refresh(
+        &mut data.scheduler_snapshot,
+        &mut data.scheduler_snapshot_version,
+    );
     let num_tracks = data.scheduler_snapshot.transport.num_tracks;
     let topology_epoch = data.scheduler_snapshot.transport.topology_epoch;
     if num_tracks != data.last_num_tracks || topology_epoch != data.last_topology_epoch {

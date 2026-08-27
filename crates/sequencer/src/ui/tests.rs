@@ -21,6 +21,36 @@
     use eseqlisp::parser::{ASTParser, Parser};
     use std::path::{Path, PathBuf};
 
+    /// Placeholder every sample reference in the checked-in `drift-switch`
+    /// fixture carries, so the fixture depends on no private sample library.
+    /// See `scripts/make_drift_switch_fixture.py`.
+    const DRIFT_FIXTURE_SAMPLE_SENTINEL: &str = "@PROBE_SAMPLE@";
+
+    /// Enforced medians for `drift_same_instrument_track_switch_end_to_end_perf`
+    /// (eseq-pgru). These are a COARSE guard, not a tight gate, and the
+    /// reason is measured: on the x86_64 Linux workstation described in
+    /// UI_PERFORMANCE_TUNING.md (a 4-core i5-8250U laptop part) the SAME
+    /// tuned binary measured `drift-b-to-a` at 159 ms running alone on a
+    /// quiet machine, 205 ms sharing a nextest invocation with one other
+    /// test, and 251 ms with the desktop also busy — a 1.6x spread with no
+    /// code change. An absolute ceiling tight enough to prove the eseq-pgru
+    /// speedup would therefore be flaky, so these clear the worst observed
+    /// contended run with margin and only catch a gross regression (the fix
+    /// reverted, or something newly ~1.5x worse).
+    ///
+    /// The meaningful comparison is the quiet-machine median recorded in
+    /// UI_PERFORMANCE_TUNING.md: 149 / 159 / 101 / 72 ms, against a pre-fix
+    /// 235.7 / 243.3 / 161.4 / 94.4 ms. Rerun the probe alone, on a quiet
+    /// machine, in release, and compare medians there. eseq-md1n.5 (a Lisp
+    /// VM profiler) and a quieter CI host would both let this become a real
+    /// gate.
+    const DRIFT_SWITCH_CEILINGS_MS: &[(&str, f64)] = &[
+        ("drift-a-to-b", 260.0),
+        ("drift-b-to-a", 275.0),
+        ("synthid-a-to-b", 185.0),
+        ("synthid-b-to-a", 130.0),
+    ];
+
     fn perf_probe_project_fixture(name: &str) -> PathBuf {
         let path = sequencer::app_paths::app_paths()
             .perf_probe_projects_dir()
@@ -2352,6 +2382,20 @@
     }
 
     #[test]
+    #[ignore = "eseq-z85k.1: Linux release-mode perf probe: cross-slider velocity sweeps in the expanded track editor with one and three expanded tracks"]
+    fn project_92_full_layout_expanded_step_slider_drag_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-expanded-step-slider-drag-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| {
+                project_92_ui_performance_probe_impl(Project92UiProbe::ExpandedStepSliderDrag)
+            })
+            .expect("spawn project 92 expanded step-slider drag probe")
+            .join()
+            .expect("project 92 expanded step-slider drag probe should pass");
+    }
+
+    #[test]
     #[ignore = "eseq-4tl: release-mode perf probe: *step*-buffer Transpose/Velocity/Duration number-picker drags (real mouse -> lisp -> set-step-param-history handler) under the production multi-pane layout"]
     fn project_92_full_layout_step_buffer_param_drag_end_to_end_perf() {
         std::thread::Builder::new()
@@ -2387,13 +2431,41 @@
             .expect("project 92 full-layout group/track selection probe should pass");
     }
 
-    /// NOT ignored: the functional half of the owner-switch probe runs in the
-    /// normal suite. Same fixture, same real clicks and tick replay, same
-    /// correctness assertions (selection state, *sel-sync* projection fields,
-    /// fx-owner panel markers, retained-run integrity) — but 1 warmup + 2
-    /// samples and no timing ceilings, so it is a behavior regression test,
-    /// not a benchmark. Timing stays in the ignored release probe above.
     #[test]
+    #[ignore = "eseq-pgru: release-mode perf probe: same-instrument track switching (two factory:core/drift tracks, and the two factory:drums/synthid-808 tracks as a same-project comparison) on the checked-in drift-switch fixture, under the production multi-pane layout"]
+    fn drift_same_instrument_track_switch_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("drift-same-instrument-track-switch-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::DriftTrackSwitch))
+            .expect("spawn drift track-switch probe")
+            .join()
+            .expect("drift track-switch probe should pass");
+    }
+
+    /// The always-run functional half of the drift track-switch probe: same
+    /// fixture, real clicks, panel-identity and param-isolation assertions,
+    /// but one sample per transition and no timing ceilings. Unlike the
+    /// project-92 owner-switch smoke test this one is NOT ignored - the
+    /// drift-switch fixture ships with the repository and its only sample
+    /// reference is rewritten to a checked-in factory WAV.
+    #[test]
+    fn drift_same_instrument_track_switch_owner_state_smoke() {
+        std::thread::Builder::new()
+            .name("drift-same-instrument-track-switch-smoke".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::DriftTrackSwitchSmoke))
+            .expect("spawn drift track-switch smoke")
+            .join()
+            .expect("drift track-switch smoke should pass");
+    }
+
+    /// The functional half of the owner-switch probe uses the same real clicks,
+    /// tick replay, and correctness assertions as the release probe above, but
+    /// without timing ceilings. It remains ignored because project 92 references
+    /// a sample WAV from the author's local library that is not in the repository.
+    #[test]
+    #[ignore = "project 92 references a sample WAV from the author's local library that is absent from fresh checkouts"]
     fn project_92_full_layout_group_track_selection_owner_switch_smoke() {
         std::thread::Builder::new()
             .name("project-92-full-layout-owner-switch-smoke".to_string())
@@ -2404,6 +2476,32 @@
             .expect("spawn project 92 owner-switch smoke test")
             .join()
             .expect("project 92 owner-switch smoke test should pass");
+    }
+
+    #[test]
+    #[ignore = "eseq-eeng: release-mode perf probe: cold press + immediate first drag on an fx-tile instrument knob (tile activation + focus inside the timed region) versus warm steady-state drags, under the real production multi-pane layout"]
+    fn project_92_full_layout_instrument_knob_cold_focus_drag_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-full-layout-cold-knob-drag-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| {
+                project_92_ui_performance_probe_impl(Project92UiProbe::InstrumentKnobColdFocusDrag)
+            })
+            .expect("spawn project 92 cold-focus knob drag probe")
+            .join()
+            .expect("project 92 cold-focus knob drag probe should pass");
+    }
+
+    #[test]
+    #[ignore = "eseq-eeng: release-mode perf probe: real core/triton adsr-editor handle drag (production instrument load, real set-instrument-param-batch dispatch seam), cold press + first drag versus warm drags, under the real production multi-pane layout"]
+    fn project_92_full_layout_triton_adsr_drag_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-full-layout-triton-adsr-drag-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::TritonAdsrDrag))
+            .expect("spawn project 92 triton adsr drag probe")
+            .join()
+            .expect("project 92 triton adsr drag probe should pass");
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2454,6 +2552,13 @@
         /// `dispatch_custom_host_command` seam (not a mirror of it) so the
         /// handler's own epoch/invalidation policy is what the probe measures.
         StepBufferParamDrag,
+        /// Cross-slider velocity sweeps over the expanded track editor's real
+        /// 16-column vslider grid, measured with one and three expanded track
+        /// subtrees. Each coalesced-size drag event crosses six columns, so
+        /// interpolation, hit testing, callback dispatch, targeted host
+        /// invalidations, reactive work, tiled-frame construction, and
+        /// retained primitive updates all remain inside the timed region.
+        ExpandedStepSliderDrag,
         /// Scene launch and track-clip launch under the production
         /// multi-pane layout, at "large project" clip scale: after loading
         /// project 92 the fixture grows every track's pattern pool to 20
@@ -2488,6 +2593,41 @@
         /// fixture, clicks, tick replay, and correctness assertions, but 1
         /// warmup + 2 samples and no timing ceilings (debug-safe).
         GroupTrackSelectionSmoke,
+        /// Cold press + immediate first drag on an instrument knob in the
+        /// INACTIVE *fx* tile versus the warm steady-state drags of the same
+        /// gesture (eseq-eeng). Unlike `InstrumentPlockKnobDrag`, the mouse
+        /// Down (tile activation + focus routing) and the first drag stay
+        /// INSIDE the timed region, and every round de-warms by switching
+        /// back to the sequencer tile, so the one-time first-interaction
+        /// costs the other probes deliberately pay outside their clocks are
+        /// exactly what this probe measures.
+        InstrumentKnobColdFocusDrag,
+        /// The checked-in core/triton custom instrument UI's real
+        /// `adsr-editor`, added as a new track through the production
+        /// compile/load path and dragged by a real handle (eseq-eeng). Each
+        /// drag update must emit exactly one `set-instrument-param-batch`
+        /// (dispatched through the REAL `dispatch_custom_host_command`
+        /// seam), the editor-local visual envelope must reflect the drag
+        /// position before any host echo, the adsr widget must survive the
+        /// gesture without being rebuilt, and mouse-up must commit the four
+        /// final values exactly once. Cold press + first drag is timed
+        /// separately from warm drags, as in `InstrumentKnobColdFocusDrag`.
+        TritonAdsrDrag,
+        /// Same-instrument track switching on the checked-in `drift-switch`
+        /// fixture (eseq-pgru): the reported nine-track project with two
+        /// `factory:core/drift` tracks (3 and 4), two
+        /// `factory:drums/synthid-808` tracks (0 and 1), a `factory:core/triton`
+        /// track, four sampler tracks and a six-member group, under the
+        /// production multi-pane layout. Neither direction changes the fx
+        /// owner *kind* - the panel stays a custom-instrument panel for the
+        /// same instrument - so everything the transition costs is
+        /// re-published, re-rendered or re-laid-out work the destination
+        /// track did not need done from scratch.
+        DriftTrackSwitch,
+        /// The always-run functional variant of `DriftTrackSwitch`: same
+        /// fixture, clicks, panel-identity and param-isolation assertions,
+        /// 0 warmups + 1 sample, no timing ceilings (debug-safe).
+        DriftTrackSwitchSmoke,
     }
 
     fn project_92_ui_performance_probe_impl(probe: Project92UiProbe) {
@@ -2518,21 +2658,113 @@
                 | Project92UiProbe::InstrumentPlockKnobDrag
                 | Project92UiProbe::ResponseCurveEditorDrag
                 | Project92UiProbe::StepBufferParamDrag
+                | Project92UiProbe::ExpandedStepSliderDrag
                 | Project92UiProbe::SceneAndClipLaunch
                 | Project92UiProbe::GroupTrackSelection
                 | Project92UiProbe::GroupTrackSelectionSmoke
+                | Project92UiProbe::InstrumentKnobColdFocusDrag
+                | Project92UiProbe::TritonAdsrDrag
+                | Project92UiProbe::DriftTrackSwitch
+                | Project92UiProbe::DriftTrackSwitchSmoke
         );
         // The production layout packs seven tiles; 180x70 leaves the smaller
         // step-panel tile too short to keep all 64 step cells on screen, so
         // the full-layout variant runs at a larger cell viewport with the
         // same ~1250x850 production aspect.
         let (vp_cols, vp_rows): (u16, u16) = if full_layout { (220, 110) } else { (180, 70) };
-        let project_name = if probe == Project92UiProbe::PianoholdSelection {
-            "pianohold"
-        } else {
-            "92"
+        let drift_switch = matches!(
+            probe,
+            Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke
+        );
+        let project_name = match probe {
+            Project92UiProbe::PianoholdSelection => "pianohold",
+            Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke => {
+                "drift-switch"
+            }
+            _ => "92",
         };
         let project_fixture = perf_probe_project_fixture(project_name);
+        // Project 92 references content-addressed samples from the author's
+        // local library. The eseq-eeng probes measure pointer latency, not
+        // sample content, and must run on any machine (the Linux workstation
+        // has none of those WAVs), so they load a patched copy of the
+        // fixture in which every sample reference that does not resolve
+        // against this machine's store is redirected to a checked-in WAV.
+        // The other probes keep the pristine fixture: their absolute
+        // ceilings are calibrated on the author's Mac, and on 2026-08-25
+        // running the plock probe against the patched fixture on the Linux
+        // workstation passed every ratio gate but exceeded the 12ms plock
+        // ceiling (apply_coalesced_device_plock_batch cost 8-12ms here), so
+        // un-stranding the rest of the family needs its own ceiling
+        // decision (bead filed by eseq-eeng).
+        // The `drift-switch` fixture (scripts/make_drift_switch_fixture.py)
+        // is derived from the reported private project with every sample
+        // reference replaced by one sentinel, so the checked-in file carries
+        // no dependency on the author's sample library. Resolve the sentinel
+        // to a checked-in factory WAV before the load.
+        let project_fixture = if drift_switch {
+            let source = std::fs::read_to_string(&project_fixture).expect("read probe fixture");
+            let fixture_wav = sequencer::app_paths::app_paths()
+                .factory_root()
+                .join("impulses/prepared/king-tubby.wav");
+            assert!(
+                fixture_wav.is_file(),
+                "checked-in fixture sample missing: {}",
+                fixture_wav.display()
+            );
+            assert!(
+                source.contains(DRIFT_FIXTURE_SAMPLE_SENTINEL),
+                "the drift-switch fixture must carry the {DRIFT_FIXTURE_SAMPLE_SENTINEL} sentinel"
+            );
+            let patched = source.replace(
+                DRIFT_FIXTURE_SAMPLE_SENTINEL,
+                &fixture_wav.display().to_string(),
+            );
+            let patched_path = std::env::temp_dir().join(format!(
+                "eseq-pgru-probe-{project_name}-{}.json",
+                std::process::id()
+            ));
+            std::fs::write(&patched_path, patched).expect("write patched drift-switch fixture");
+            patched_path
+        } else if matches!(
+            probe,
+            Project92UiProbe::InstrumentKnobColdFocusDrag
+                | Project92UiProbe::TritonAdsrDrag
+                | Project92UiProbe::ExpandedStepSliderDrag
+        ) {
+            let source = std::fs::read_to_string(&project_fixture).expect("read probe fixture");
+            let fallback_wav = sequencer::app_paths::app_paths()
+                .factory_root()
+                .join("impulses/prepared/king-tubby.wav");
+            assert!(
+                fallback_wav.is_file(),
+                "checked-in fallback sample missing: {}",
+                fallback_wav.display()
+            );
+            let samples_dir = sequencer::app_paths::app_paths().samples_dir();
+            let mut patched = source.clone();
+            let mut search = source.as_str();
+            while let Some(start) = search.find("samples/") {
+                let rest = &search[start..];
+                let Some(end) = rest.find(".wav") else { break };
+                let reference = &rest[..end + 4];
+                if let Some(name) = std::path::Path::new(reference).file_name() {
+                    if !samples_dir.join(name).is_file() {
+                        patched = patched
+                            .replace(reference, &fallback_wav.display().to_string());
+                    }
+                }
+                search = &rest[end + 4..];
+            }
+            let patched_path = std::env::temp_dir().join(format!(
+                "eseq-eeng-probe-{project_name}-{}.json",
+                std::process::id()
+            ));
+            std::fs::write(&patched_path, patched).expect("write patched probe fixture");
+            patched_path
+        } else {
+            project_fixture
+        };
 
         let eng = engine::init_headless_engine(44_100, 2).expect("initialize headless app graph");
         let lg_raw = eng.lg_ptr.0;
@@ -2669,9 +2901,12 @@
             !app.has_pending_project_load(),
             "project {project_name} load did not finish"
         );
+        // The drift-switch fixture is the reported project verbatim: one
+        // scene. Every other probe fixture is multi-scene.
+        let required_scenes = if drift_switch { 1 } else { 2 };
         assert!(
-            app.state.scene_count() >= 2,
-            "project {project_name} should have multiple scenes"
+            app.state.scene_count() >= required_scenes,
+            "project {project_name} should have at least {required_scenes} scene(s)"
         );
 
         if probe == Project92UiProbe::ArrangedStepInteractions {
@@ -2932,6 +3167,11 @@
             const TRACK: usize = 0;
             const WARMUPS: usize = 5;
             const SAMPLES: usize = 20;
+            let additive_selection_modifier = if cfg!(target_os = "macos") {
+                KeyModifiers::SUPER
+            } else {
+                KeyModifiers::ALT
+            };
             let num_steps = state.pattern.track_params[TRACK].get_num_steps();
             assert!(
                 num_steps >= 34,
@@ -3005,14 +3245,14 @@
                 scroll_left: initial_seq_frame.frame.widget_layout_scroll_left,
                 inherited_hover: false,
             };
-            let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+            let (mut retained_runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                 initial_layout,
                 viewport,
                 viewport.scroll_top,
                 70,
             );
             let retained_run_indices =
-                eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+                eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
             let step_clipboard = Arc::new(Mutex::new(None));
             let step_center = |editor: &mut Editor, step: usize| {
                 let layout = editor.widget_layout().expect("sequencer layout");
@@ -3102,7 +3342,7 @@
                     .as_ref()
                     .expect("sequencer layout after pianohold action");
                 let (_, stats) =
-                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                    eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                         layout,
                         viewport,
                         viewport.scroll_top,
@@ -3222,8 +3462,8 @@
                     target_row,
                 );
 
-                // (c) cmd-click-drag multi-select: arm with a real cmd-click
-                // on step 20, then time one drag tick onto step 21.
+                // (c) additive-selection drag: Command on macOS, Alt elsewhere.
+                // Arm step 20, then time one drag tick onto step 21.
                 clear_selection(&mut editor, &mut app, &mut finish_visible_update);
                 let (col, row, width, height) = step_center(&mut editor, 20);
                 editor.handle_mouse_precise(
@@ -3231,7 +3471,7 @@
                         kind: MouseEventKind::Down(MouseButton::Left),
                         column: col.floor() as u16,
                         row: row.floor() as u16,
-                        modifiers: KeyModifiers::SUPER,
+                        modifiers: additive_selection_modifier,
                     },
                     0,
                     0,
@@ -3250,7 +3490,7 @@
                         kind: MouseEventKind::Drag(MouseButton::Left),
                         column: target_col.floor() as u16,
                         row: target_row.floor() as u16,
-                        modifiers: KeyModifiers::SUPER,
+                        modifiers: additive_selection_modifier,
                     },
                     0,
                     0,
@@ -3267,14 +3507,14 @@
                 assert_eq!(
                     *selected_steps.lock().unwrap(),
                     HashSet::from([20, 21]),
-                    "cmd drag must add the dragged-over step to the selection",
+                    "additive-selection drag must add the dragged-over step",
                 );
                 editor.handle_mouse_precise(
                     MouseEvent {
                         kind: MouseEventKind::Up(MouseButton::Left),
                         column: target_col.floor() as u16,
                         row: target_row.floor() as u16,
-                        modifiers: KeyModifiers::SUPER,
+                        modifiers: additive_selection_modifier,
                     },
                     0,
                     0,
@@ -3538,8 +3778,8 @@
             struct TileRetained {
                 buffer_name: String,
                 viewport: eseqlisp::widget_render::WidgetViewport,
-                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
-                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
             }
             let mut tile_retained: Vec<TileRetained> = Vec::new();
             for tile in &initial_frame.tiles {
@@ -3562,13 +3802,13 @@
                     scroll_left: tile.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     layout,
                     viewport,
                     viewport.scroll_top,
                     vp_rows,
                 );
-                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                 tile_retained.push(TileRetained {
                     buffer_name: tile.frame.buffer_name.clone(),
                     viewport,
@@ -3989,7 +4229,7 @@
                     });
                     let tile_started = Instant::now();
                     let (_, stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
@@ -4004,14 +4244,14 @@
                         // Production fallback (metal_backend.rs): a tile whose
                         // widget structure changed rebuilds its whole run
                         // scene, and that cost stays inside the timed region.
-                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
                             vp_rows,
                         );
                         entry.indices =
-                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                         entry.runs = runs;
                     }
                     tile_stats.push((
@@ -4794,6 +5034,1683 @@
         }
 
         // ---------------------------------------------------------------
+        // eseq-eeng: cold press + immediate first drag, and the core/triton
+        // adsr-editor gesture.
+        //
+        // The other drag probes open the gesture OUTSIDE the timed region,
+        // so tile activation, focus routing, and every first-interaction
+        // cache miss are invisible to them. Here the mouse Down and the
+        // first drag stay inside the clock, each round de-warms by
+        // switching back to the sequencer tile, and the warm drags of the
+        // same gesture provide the like-for-like comparison the ratio gate
+        // uses. The Triton variant adds the checked-in core/triton
+        // instrument as a real track (production compile/load path), drags
+        // a real adsr-editor handle, and drives the resulting
+        // set-instrument-param-batch through the REAL
+        // `dispatch_custom_host_command` seam.
+        // ---------------------------------------------------------------
+        if matches!(
+            probe,
+            Project92UiProbe::InstrumentKnobColdFocusDrag | Project92UiProbe::TritonAdsrDrag
+        ) {
+            const STEP_COUNT: usize = 64;
+            const ROUNDS: usize = 6;
+            const WARM_PER_ROUND: usize = 12;
+            let triton_probe = probe == Project92UiProbe::TritonAdsrDrag;
+            let probe_prefix = if triton_probe {
+                "project-92-fullayout-triton-adsr"
+            } else {
+                "project-92-fullayout-cold-knob"
+            };
+            // ESEQ_PROBE_BASELINE=1 reports pre-fix behavior without gating:
+            // it skips the timing ceilings AND downgrades the
+            // responsiveness assertions to eprintln reports so a broken
+            // tree can still be measured. Ceilings additionally only bind
+            // on optimized builds.
+            let baseline = std::env::var_os("ESEQ_PROBE_BASELINE").is_some();
+            let enforce_ceilings = !cfg!(debug_assertions) && !baseline;
+
+            let sequencer_buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == "*sequencer*")
+                .expect("sequencer buffer index");
+            let sequencer_tile = editor
+                .tile_root
+                .leaf_ids()
+                .into_iter()
+                .find(|tile_id| {
+                    editor
+                        .tile_root
+                        .find_leaf(*tile_id)
+                        .is_some_and(|leaf| leaf.buffer_idx == sequencer_buffer_idx)
+                })
+                .expect("the production layout must show *sequencer*");
+            editor.switch_active_tile(sequencer_tile);
+
+            // Triton: a real track through the production compile/load path,
+            // then make it current so the *fx* tile shows its custom UI.
+            let track: usize = if triton_probe {
+                let track = app
+                    .add_saved_instrument_track_sync("core/triton")
+                    .expect("add the checked-in core/triton instrument as a track");
+                current_track.store(track, Ordering::Relaxed);
+                *record_armed.lock().unwrap() = vec![false; app.tracks.len()];
+                app.sync_track_sound_bindings();
+                track
+            } else {
+                0
+            };
+            state.pattern.track_params[track].set_num_steps(STEP_COUNT);
+            assert!(
+                selected_steps.lock().unwrap().is_empty(),
+                "the cold-drag probes measure the no-selection batch path"
+            );
+
+            let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
+            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
+            assert!(fx_visible, "production layout must show the *fx* panel");
+            assert!(mixer_visible, "production layout must show the *mixer* strip");
+            assert!(
+                transport_visible,
+                "production layout must show the *transport* bar"
+            );
+
+            sync_all_track_sequencer_state(
+                editor.runtime_mut(),
+                &state,
+                &app,
+                track,
+                &selected_steps,
+            );
+            {
+                let rt = editor.runtime_mut();
+                sync_step_param_lists(rt, &state, track);
+                rt.set_reactive("SEQ", "steps", build_steps_value(&state, track));
+                rt.set_reactive(
+                    "SEQ",
+                    "effects",
+                    build_effects_value(
+                        &state,
+                        track,
+                        &app.graph.effect_descriptors,
+                        &selected_steps,
+                    ),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "instrument-panel",
+                    build_instrument_panel_value(&app, track, &selected_steps),
+                );
+            }
+            sync_track_params_with_neural_selection(
+                editor.runtime_mut(),
+                &app,
+                &state,
+                track,
+                &selected_steps,
+                None,
+            );
+            sync_fx_param_binding_fields_with_neural_selection(
+                editor.runtime_mut(),
+                &app,
+                &state,
+                track,
+                &selected_steps,
+                None,
+            );
+
+            let mut song_frame = super::state_values::SongFrameState::default();
+            app.sync_track_sound_bindings();
+            super::state_values::sync_song_state(
+                editor.runtime_mut(),
+                &app,
+                &mut song_frame,
+                transport_visible,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.update_tile_rects(vp_cols, vp_rows);
+
+            let initial_frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                &mut editor,
+                vp_cols as usize,
+                vp_rows as usize,
+            );
+            let visible_buffers: Vec<String> = initial_frame
+                .tiles
+                .iter()
+                .map(|tile| tile.frame.buffer_name.clone())
+                .collect();
+            for required in ["*sequencer*", "*fx*", "*mixer*", "*transport*"] {
+                assert!(
+                    visible_buffers.iter().any(|name| name == required),
+                    "the production layout must show {required}, got {visible_buffers:?}"
+                );
+            }
+            eprintln!("[{probe_prefix}-visible-buffers] {visible_buffers:?}");
+
+            struct TileRetained {
+                buffer_name: String,
+                viewport: eseqlisp::widget_render::WidgetViewport,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
+            }
+            let mut tile_retained: Vec<TileRetained> = Vec::new();
+            for tile in &initial_frame.tiles {
+                let layout = tile.frame.widget_layout.as_ref().unwrap_or_else(|| {
+                    panic!(
+                        "visible tile {} must have a widget layout",
+                        tile.frame.buffer_name
+                    )
+                });
+                let viewport = eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    vp_w: vp_cols as f32 * 8.0,
+                    vp_h: vp_rows as f32 * 16.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: tile.frame.focused_widget_id,
+                    focused_branch: tile.is_active,
+                    overlay_viewport_bottom: vp_rows as f32,
+                    scroll_top: tile.frame.widget_scroll_top + tile.frame.text_scroll_top as f32,
+                    scroll_left: tile.frame.widget_layout_scroll_left,
+                    inherited_hover: false,
+                };
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
+                    layout,
+                    viewport,
+                    viewport.scroll_top,
+                    vp_rows,
+                );
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
+                tile_retained.push(TileRetained {
+                    buffer_name: tile.frame.buffer_name.clone(),
+                    viewport,
+                    runs,
+                    indices,
+                });
+            }
+
+            let fx_tile = initial_frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*fx*")
+                .expect("visible fx tile");
+            let fx_origin_col = fx_tile.body_rect.col.floor();
+            let fx_origin_row = fx_tile.body_rect.row.floor();
+            let fx_scroll_top =
+                fx_tile.frame.widget_scroll_top + fx_tile.frame.text_scroll_top as f32;
+            let fx_scroll_left = fx_tile.frame.widget_layout_scroll_left;
+            let fx_body_rect = fx_tile.body_rect;
+
+            // The real host-command seam (same shape as the step-buffer
+            // probe): every handle is the one the lisp natives and this
+            // probe's own syncs already share.
+            let cached_track_peak_levels = vec![0.0; app.tracks.len()];
+            let shared = SharedHandles {
+                state: state.clone(),
+                lg_raw,
+                current_track: current_track.clone(),
+                selected_tracks: selected_tracks.clone(),
+                selected_steps: selected_steps.clone(),
+                selected_neural_neurons: selected_neural_neurons.clone(),
+                piano_roll_selection: piano_roll_selection.clone(),
+                piano_roll_move_state: piano_roll_move_state.clone(),
+                piano_roll_focus: piano_roll_focus.clone(),
+                step_clipboard: Arc::new(Mutex::new(None)),
+                ui_epoch: ui_epoch.clone(),
+                fx_epoch: fx_epoch.clone(),
+                fx_value_epoch: fx_value_epoch.clone(),
+                ui_invalidations: ui_invalidations.clone(),
+                expanded_step_projection: expanded_step_projection.clone(),
+                active_delete_target: active_delete_target.clone(),
+                active_delete_target_version: active_delete_target_version.clone(),
+                auto_follow_override_until: auto_follow_override_until.clone(),
+                track_pan_ids: track_pan_ids.clone(),
+                track_collapsed: track_collapsed.clone(),
+                bus_state: bus_state.clone(),
+                bus_node_ids: bus_node_ids.clone(),
+                track_groups: track_groups.clone(),
+                record_armed: record_armed.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
+                recording: recording.clone(),
+                master_recording: master_recording.clone(),
+                held_notes: Arc::new(Mutex::new(Vec::new())),
+                roll_record: Arc::new(Mutex::new(RollRecordBuffer::default())),
+                step_print: Arc::new(Mutex::new(StepPrintState::default())),
+                keyboard_octave: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+                sample_browser: sample_browser.clone(),
+                keyboard_tx: keyboard_tx.clone(),
+                accumulator_names: accumulator_names.clone(),
+                piano_roll_clipboard: piano_roll_clipboard.clone(),
+                arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
+            };
+            let mut sessions = EditSessionState::default();
+            let mut frame_diff = FrameDiffState::default();
+            let mut gesture_state = GestureState::default();
+            let mut meters = MeterCache {
+                cached_peak_l_level: 0.0,
+                cached_peak_r_level: 0.0,
+                cached_track_peak_levels: cached_track_peak_levels.clone(),
+                cached_rack_slot_peak_levels: Vec::new(),
+                cached_bus_peak_levels: cached_bus_peak_levels.clone(),
+                cached_modulator_phases: Vec::new(),
+                cached_modulator_levels: Vec::new(),
+                cached_cpu_load_bits: 0.0f32.to_bits(),
+                last_meter_poll_at: Instant::now(),
+                last_cpu_ui_poll_at: Instant::now(),
+                last_neural_visualization_poll_at: Instant::now(),
+                visualization_liveness: VisualizationLiveness::default(),
+                last_voice_count_log_at: Instant::now(),
+            };
+            let mut ctx_track_names = track_names.clone();
+
+            let mut apply_host_commands = |editor: &mut Editor,
+                                           app: &mut app::App,
+                                           commands: Vec<HostCommand>|
+             -> usize {
+                let mut applied = 0usize;
+                for command in commands {
+                    let HostCommand::Custom { name, payload } = command else {
+                        continue;
+                    };
+                    let mut ctx = LoopCtx {
+                        sessions: &mut sessions,
+                        meters: &mut meters,
+                        frame: &mut frame_diff,
+                        gesture: &mut gesture_state,
+                        track_names: &mut ctx_track_names,
+                        shared: &shared,
+                    };
+                    dispatch_custom_host_command(&name, payload, app, editor, &mut ctx);
+                    applied += 1;
+                }
+                applied
+            };
+
+            // --- visible update: the real reactive tick, minus the render --
+            let neural = selected_neural_neurons.lock().unwrap().clone();
+            let mut prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
+            let mut prev_fx_epoch = fx_epoch.load(Ordering::Relaxed);
+            let mut track_param_sync_revision: Option<super::loop_ctx::ParamSyncRevision> = None;
+            let mut fx_param_sync_revision: Option<super::loop_ctx::ParamSyncRevision> = None;
+
+            struct ColdUpdate {
+                tick_sync_ms: f64,
+                invalidation_ms: f64,
+                epoch_sync_ms: f64,
+                reactive_ms: f64,
+                frame_ms: f64,
+                retained_ms: f64,
+                scene_ms: f64,
+                ui_epoch_fired: bool,
+                fx_epoch_fired: bool,
+                structural_rebuilds: usize,
+                layout_refresh_count: usize,
+            }
+
+            let mut finish_visible_update = |editor: &mut Editor,
+                                             app: &mut app::App,
+                                             tiles: &mut Vec<TileRetained>|
+             -> ColdUpdate {
+                let started = Instant::now();
+                app.sync_track_sound_bindings();
+                super::state_values::sync_song_state(
+                    editor.runtime_mut(),
+                    app,
+                    &mut song_frame,
+                    transport_visible,
+                );
+                let tick_sync_done = Instant::now();
+                let invalidations = ui_invalidations.drain();
+                if !invalidations.is_empty() {
+                    apply_ui_invalidations(
+                        invalidations,
+                        UiInvalidationApplyCtx {
+                            app,
+                            editor,
+                            state: &state,
+                            track_collapsed: &track_collapsed,
+                            bus_state: &bus_state,
+                            current_track_idx: track,
+                            selected_steps: &selected_steps,
+                            selected_neural_neurons: &neural,
+                            piano_roll_selection: &piano_roll_selection,
+                            accumulator_names: &accumulator_names,
+                            cached_track_peak_levels: &cached_track_peak_levels,
+                            cached_bus_peak_levels: &cached_bus_peak_levels,
+                            record_armed: &record_armed,
+                            active_delete_target: &active_delete_target,
+                            active_delete_target_version: &active_delete_target_version,
+                            expanded_step_projection: &expanded_step_projection,
+                            fx_visible,
+                            sequencer_visible: true,
+                            mixer_visible,
+                        },
+                    );
+                }
+                let invalidations_done = Instant::now();
+
+                let ui_ep = ui_epoch.load(Ordering::Relaxed);
+                let fx_ep = fx_epoch.load(Ordering::Relaxed);
+                let ui_epoch_fired = ui_ep != prev_ui_epoch;
+                let fx_epoch_fired = fx_visible && fx_ep != prev_fx_epoch;
+                if ui_epoch_fired {
+                    let mut sorted_steps: Vec<usize> =
+                        selected_steps.lock().unwrap().iter().copied().collect();
+                    sorted_steps.sort_unstable();
+                    let revision = super::loop_ctx::ParamSyncRevision {
+                        track,
+                        scene: state.current_scene_index(),
+                        pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
+                        song_row_mirror_epoch: app.song_row_mirror_epoch,
+                        ui_epoch: ui_ep,
+                        fx_epoch: fx_ep,
+                        sound_binding_epoch: app.sound_binding_epoch,
+                        display_step: displayed_plock_step(
+                            &state,
+                            track,
+                            sorted_steps.first().copied(),
+                        ),
+                        selected_steps: sorted_steps,
+                        selected_neural_neurons: neural.iter().copied().collect(),
+                    };
+                    sync_shared_track_collapsed(&track_collapsed, app);
+                    {
+                        let rt = editor.runtime_mut();
+                        sync_macro_state(rt, app);
+                        sync_track_name_state(rt, &mut track_names, app);
+                        rt.set_reactive("SEQ", "steps", build_steps_value(&state, track));
+                        sync_step_param_lists(rt, &state, track);
+                        sync_all_track_sequencer_state(rt, &state, app, track, &selected_steps);
+                        let _ = sync_all_expanded_step_viewports(
+                            rt,
+                            &state,
+                            app,
+                            &selected_steps,
+                            track,
+                            &expanded_step_projection,
+                        );
+                        sync_track_mixer_state(rt, app, &state);
+                        sync_bus_mixer_state(rt, app);
+                        sync_track_peak_fields(rt, &cached_track_peak_levels);
+                        sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                        *accumulator_names.lock().unwrap() = build_accumulator_names(app);
+                        if super::reactive_tick::claim_param_sync_revision(
+                            &mut track_param_sync_revision,
+                            &revision,
+                        ) {
+                            sync_track_params_with_neural_selection(
+                                rt,
+                                app,
+                                &state,
+                                track,
+                                &selected_steps,
+                                Some(&neural),
+                            );
+                        }
+                        let _ = sync_track_plock_variant_preview(
+                            rt,
+                            app,
+                            &state,
+                            track,
+                            &selected_steps,
+                            None,
+                        );
+                        if super::reactive_tick::claim_param_sync_revision(
+                            &mut fx_param_sync_revision,
+                            &revision,
+                        ) {
+                            let _ = sync_fx_param_binding_fields_with_neural_selection(
+                                rt,
+                                app,
+                                &state,
+                                track,
+                                &selected_steps,
+                                Some(&neural),
+                            );
+                        }
+                        rt.set_reactive(
+                            "SEQ",
+                            "selected-steps",
+                            build_selection_value(&selected_steps),
+                        );
+                        sync_piano_roll_state(rt, app, &state, track, &piano_roll_selection);
+                        rt.set_reactive(
+                            "SEQ",
+                            "step-has-plocks",
+                            build_step_has_plocks(&state, track, &app.graph.effect_descriptors),
+                        );
+                        sync_mixer_delete_target_binding_fields(
+                            rt,
+                            app.tracks.len(),
+                            &state,
+                            active_delete_target.lock().unwrap().as_ref(),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "record-armed",
+                            build_record_armed_value(&record_armed.lock().unwrap()),
+                        );
+                    }
+                    prev_ui_epoch = ui_ep;
+                }
+                if fx_epoch_fired {
+                    let rt = editor.runtime_mut();
+                    rt.set_reactive(
+                        "SEQ",
+                        "effects",
+                        build_effects_value(
+                            &state,
+                            track,
+                            &app.graph.effect_descriptors,
+                            &selected_steps,
+                        ),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        "midi-effects",
+                        build_midi_effects_value(&state, track, &selected_steps),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        "instrument-panel",
+                        build_instrument_panel_value(app, track, &selected_steps),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        "step-has-plocks",
+                        build_step_has_plocks(&state, track, &app.graph.effect_descriptors),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        "bus-effects",
+                        build_bus_effects_value_for_selection(app, Some(&selected_steps)),
+                    );
+                    prev_fx_epoch = fx_ep;
+                }
+                let epoch_sync_done = Instant::now();
+
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let layout_refresh_count = editor.last_layout_refresh_timings().len();
+                if ui_epoch_fired {
+                    editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                }
+                let reactive_done = Instant::now();
+                let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                let frame_done = Instant::now();
+                let mut structural_rebuilds = 0usize;
+                for tile in &frame.tiles {
+                    let Some(entry) = tiles
+                        .iter_mut()
+                        .find(|entry| entry.buffer_name == tile.frame.buffer_name)
+                    else {
+                        continue;
+                    };
+                    let layout = tile.frame.widget_layout.as_ref().unwrap_or_else(|| {
+                        panic!(
+                            "visible tile {} must keep a widget layout",
+                            tile.frame.buffer_name
+                        )
+                    });
+                    let (_, stats) =
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
+                            layout,
+                            entry.viewport,
+                            entry.viewport.scroll_top,
+                            vp_rows,
+                            &mut entry.runs,
+                            &entry.indices,
+                            &tile.frame.dirty_widget_ids,
+                        );
+                    if stats.missing_previous_runs > 0 || stats.invalid_previous_runs > 0 {
+                        structural_rebuilds += 1;
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
+                            layout,
+                            entry.viewport,
+                            entry.viewport.scroll_top,
+                            vp_rows,
+                        );
+                        entry.indices =
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
+                        entry.runs = runs;
+                    }
+                }
+                let retained_done = Instant::now();
+                // Production-Linux parity: the wgpu backend keeps no
+                // retained scene — it re-collects every widget primitive
+                // each frame (ui/wgpu_frame_stats.rs). Time that full
+                // collect for every visible tile with the frame's own
+                // focus/scroll state; this is the per-frame render-prep
+                // cost the Linux workstation actually pays.
+                for tile in &frame.tiles {
+                    let Some(entry) = tiles
+                        .iter()
+                        .find(|entry| entry.buffer_name == tile.frame.buffer_name)
+                    else {
+                        continue;
+                    };
+                    let Some(layout) = tile.frame.widget_layout.as_ref() else {
+                        continue;
+                    };
+                    let viewport = eseqlisp::widget_render::WidgetViewport {
+                        focused_widget_id: tile.frame.focused_widget_id,
+                        focused_branch: false,
+                        scroll_top: tile.frame.widget_scroll_top
+                            + tile.frame.text_scroll_top as f32,
+                        scroll_left: tile.frame.widget_layout_scroll_left,
+                        ..entry.viewport
+                    };
+                    let _ = eseqlisp::widget_render::collect_gpu_primitive_runs(
+                        layout,
+                        viewport,
+                        viewport.scroll_top,
+                        vp_rows,
+                    );
+                }
+                let scene_done = Instant::now();
+                ColdUpdate {
+                    tick_sync_ms: duration_ms(tick_sync_done - started),
+                    invalidation_ms: duration_ms(invalidations_done - tick_sync_done),
+                    epoch_sync_ms: duration_ms(epoch_sync_done - invalidations_done),
+                    reactive_ms: duration_ms(reactive_done - epoch_sync_done),
+                    frame_ms: duration_ms(frame_done - reactive_done),
+                    retained_ms: duration_ms(retained_done - frame_done),
+                    scene_ms: duration_ms(scene_done - retained_done),
+                    ui_epoch_fired,
+                    fx_epoch_fired,
+                    structural_rebuilds,
+                    layout_refresh_count,
+                }
+            };
+
+            // The triton track was added after the prologue's initial syncs;
+            // run one epoch-driven resync so every surface shows it before
+            // measurement begins.
+            ui_epoch.fetch_add(1, Ordering::Relaxed);
+            fx_epoch.fetch_add(1, Ordering::Relaxed);
+            let _ = finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+
+            // Per-round target discovery: the fx layout is rebuilt between
+            // rounds, so the target is re-found each time. Returns the
+            // screen-space press point and the target's widget id.
+            let locate_target = |editor: &mut Editor| -> (f32, f32, u64) {
+                let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                let fx = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*fx*")
+                    .expect("visible fx tile");
+                let layout = fx.frame.widget_layout.as_ref().expect("fx layout");
+                let (local_col, local_row, widget_id) = if triton_probe {
+                    let mut nodes = Vec::new();
+                    collect_layout_nodes(
+                        layout,
+                        &mut |node| node.widget_type == "adsr-editor",
+                        &mut nodes,
+                    );
+                    let node = nodes
+                        .first()
+                        .copied()
+                        .expect("the core/triton custom UI must render an adsr-editor");
+                    let (col, row) =
+                        eseqlisp::widget_render::adsr_editor::adsr_handle_center(node, 1)
+                            .expect("attack handle center");
+                    (col, row, node.widget_id)
+                } else {
+                    let mut nodes = Vec::new();
+                    collect_layout_nodes(
+                        layout,
+                        &mut |node| {
+                            node.widget_type == "knob-number"
+                                && node
+                                    .stable_key
+                                    .as_deref()
+                                    .is_some_and(|key| key.starts_with("sampler-param-"))
+                        },
+                        &mut nodes,
+                    );
+                    let node = nodes
+                        .iter()
+                        .find(|node| {
+                            let center_col = fx_origin_col + node.rect.col
+                                + node.rect.width * 0.5
+                                - fx_scroll_left;
+                            let center_row = fx_origin_row + node.rect.row
+                                + node.rect.height * 0.5
+                                - fx_scroll_top;
+                            center_col >= fx_body_rect.col
+                                && center_col < fx_body_rect.col + fx_body_rect.width
+                                && center_row >= fx_body_rect.row
+                                && center_row < fx_body_rect.row + fx_body_rect.height
+                        })
+                        .copied()
+                        .expect("an on-screen sampler knob target in the fx tile");
+                    (
+                        node.rect.col + node.rect.width * 0.5,
+                        node.rect.row + node.rect.height * 0.5,
+                        node.widget_id,
+                    )
+                };
+                let down_col = fx_origin_col + local_col - fx_scroll_left;
+                let down_row = fx_origin_row + local_row - fx_scroll_top;
+                assert!(
+                    down_col >= fx_body_rect.col
+                        && down_col < fx_body_rect.col + fx_body_rect.width
+                        && down_row >= fx_body_rect.row
+                        && down_row < fx_body_rect.row + fx_body_rect.height,
+                    "drag target must be on screen inside the fx tile ({down_col},{down_row})"
+                );
+                (down_col, down_row, widget_id)
+            };
+
+            // Maps a set-instrument-param-batch payload to (attack, decay,
+            // sustain, release) user values via the descriptor param names.
+            let batch_envelope = |app: &app::App, payload: &Value| {
+                let Value::Map(map) = payload else {
+                    panic!("batch payload must be a map: {payload:?}");
+                };
+                let updates = map
+                    .get("updates")
+                    .map(|updates| updates.borrow().clone())
+                    .expect("batch payload has updates");
+                let Value::List(items) = updates else {
+                    panic!("updates must be a list: {updates:?}");
+                };
+                let descriptors = app
+                    .graph
+                    .instrument_descriptors
+                    .get(track)
+                    .expect("triton descriptors");
+                let mut envelope = [f64::NAN; 4];
+                for item in &items {
+                    let Value::Map(update) = item.borrow().clone() else {
+                        panic!("update entries must be maps");
+                    };
+                    let param_idx = map_usize(&update, "param-idx").expect("param-idx");
+                    let value = map_number(&update, "value").expect("value");
+                    let name = descriptors
+                        .params
+                        .get(param_idx)
+                        .map(|param| param.name.clone())
+                        .unwrap_or_default();
+                    let slot = match name.as_str() {
+                        "aeg_attack_ms" => 0,
+                        "aeg_decay_ms" => 1,
+                        "aeg_sustain" => 2,
+                        "aeg_release_ms" => 3,
+                        other => panic!("unexpected batch param {other:?}"),
+                    };
+                    envelope[slot] = value;
+                }
+                assert_eq!(
+                    items.len(),
+                    4,
+                    "the adsr batch must carry exactly the four ADSR params"
+                );
+                envelope
+            };
+
+            struct RoundSamples {
+                cold_total: Vec<f64>,
+                cold_dispatch: Vec<f64>,
+                cold_host: Vec<f64>,
+                cold_reactive: Vec<f64>,
+                cold_frame: Vec<f64>,
+                cold_retained: Vec<f64>,
+                cold_scene: Vec<f64>,
+                warm_total: Vec<f64>,
+                warm_dispatch: Vec<f64>,
+                warm_host: Vec<f64>,
+                warm_scene: Vec<f64>,
+                mid_gesture_epoch_updates: usize,
+                commit_epoch_updates: usize,
+                structural_rebuilds_mid_gesture: usize,
+            }
+            let mut samples = RoundSamples {
+                cold_total: Vec::new(),
+                cold_dispatch: Vec::new(),
+                cold_host: Vec::new(),
+                cold_reactive: Vec::new(),
+                cold_frame: Vec::new(),
+                cold_retained: Vec::new(),
+                cold_scene: Vec::new(),
+                warm_total: Vec::new(),
+                warm_dispatch: Vec::new(),
+                warm_host: Vec::new(),
+                warm_scene: Vec::new(),
+                mid_gesture_epoch_updates: 0,
+                commit_epoch_updates: 0,
+                structural_rebuilds_mid_gesture: 0,
+            };
+            let mut widget_id_changes = 0usize;
+            let mut stale_visuals = 0usize;
+            let mut mid_gesture_layout_refreshes = 0usize;
+            let mut cold_down_samples: Vec<f64> = Vec::new();
+            let mut cold_first_drag_samples: Vec<f64> = Vec::new();
+
+            for round in 0..ROUNDS {
+                // De-warm: the user was working in the sequencer tile.
+                editor.switch_active_tile(sequencer_tile);
+                assert_eq!(editor.active_buffer().name, "*sequencer*");
+                let _ = finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                let (down_col, down_row, gesture_widget_id) = locate_target(&mut editor);
+
+                // --- cold: press + immediate first drag, all inside the
+                // timed region ------------------------------------------
+                let cold_offset = if round % 2 == 0 { 1.2 } else { -1.2 };
+                let (drag_col, drag_row) = if triton_probe {
+                    (down_col + cold_offset, down_row)
+                } else {
+                    (down_col, down_row + cold_offset)
+                };
+                let started = Instant::now();
+                editor.handle_tiled_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Down(MouseButton::Left),
+                        down_col.floor() as u16,
+                        down_row.floor() as u16,
+                    ),
+                    down_col,
+                    down_row,
+                    0,
+                );
+                let down_commands = editor.drain_host_commands();
+                let down_done = Instant::now();
+                editor.handle_tiled_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        drag_col.floor() as u16,
+                        drag_row.floor() as u16,
+                    ),
+                    drag_col,
+                    drag_row,
+                    0,
+                );
+                let commands = editor.drain_host_commands();
+                let dispatch_done = Instant::now();
+                cold_down_samples.push(duration_ms(down_done - started));
+                cold_first_drag_samples.push(duration_ms(dispatch_done - down_done));
+                assert_eq!(
+                    editor.active_buffer().name,
+                    "*fx*",
+                    "round {round}: pressing the control must activate the fx tile"
+                );
+                assert!(
+                    !commands.is_empty(),
+                    "round {round}: the first drag must emit a host command"
+                );
+                if triton_probe {
+                    assert!(
+                        down_commands.is_empty(),
+                        "round {round}: adsr mouse-down alone must not emit host commands"
+                    );
+                    let batch: Vec<_> = commands
+                        .iter()
+                        .filter_map(|command| match command {
+                            HostCommand::Custom { name, payload } => {
+                                Some((name.clone(), payload.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        batch.len(),
+                        1,
+                        "round {round}: one drag update must emit exactly one host command, got {:?}",
+                        batch.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>()
+                    );
+                    let (name, payload) = &batch[0];
+                    assert_eq!(name, "set-instrument-param-batch");
+                    let Value::Map(ref map) = payload else {
+                        panic!("batch payload must be a map");
+                    };
+                    assert!(
+                        !map_bool(map, "commit"),
+                        "round {round}: mid-gesture batches must not commit"
+                    );
+                    let dispatched = batch_envelope(&app, payload);
+                    // The editor-local visual envelope must already show the
+                    // drag position — before the host command is applied and
+                    // before any reactive echo.
+                    let layout = editor.widget_layout().expect("fx layout after drag");
+                    let mut nodes = Vec::new();
+                    collect_layout_nodes(
+                        &layout,
+                        &mut |node| node.widget_type == "adsr-editor",
+                        &mut nodes,
+                    );
+                    let node = nodes.first().copied().expect("adsr node after drag");
+                    let visual =
+                        eseqlisp::widget_render::adsr_editor::adsr_visual_envelope(node);
+                    let visual = [
+                        visual.0 as f64,
+                        visual.1 as f64,
+                        visual.2 as f64,
+                        visual.3 as f64,
+                    ];
+                    let matches_drag = visual
+                        .iter()
+                        .zip(dispatched.iter())
+                        .all(|(shown, sent)| (shown - sent).abs() <= sent.abs() * 1e-3 + 1e-3);
+                    if !matches_drag {
+                        stale_visuals += 1;
+                    }
+                    if !baseline {
+                        assert!(
+                            matches_drag,
+                            "round {round}: the adsr curve must show the dragged envelope \
+                             immediately (visual {visual:?} vs dispatched {dispatched:?})"
+                        );
+                    }
+                }
+                apply_host_commands(&mut editor, &mut app, commands);
+                let host_done = Instant::now();
+                let update = finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                let cold_total = duration_ms(started.elapsed());
+                samples.cold_total.push(cold_total);
+                samples
+                    .cold_dispatch
+                    .push(duration_ms(dispatch_done - started));
+                samples.cold_host.push(duration_ms(host_done - dispatch_done));
+                samples.cold_reactive.push(update.reactive_ms);
+                samples.cold_frame.push(update.frame_ms);
+                samples.cold_retained.push(update.retained_ms);
+                samples.cold_scene.push(update.scene_ms);
+                if update.ui_epoch_fired || update.fx_epoch_fired {
+                    samples.mid_gesture_epoch_updates += 1;
+                }
+                mid_gesture_layout_refreshes += update.layout_refresh_count;
+
+                // --- warm: steady-state drags of the same gesture ---------
+                for iteration in 0..WARM_PER_ROUND {
+                    let offset = if iteration % 2 == 0 { -1.2 } else { 1.2 };
+                    let (drag_col, drag_row) = if triton_probe {
+                        (down_col + offset, down_row)
+                    } else {
+                        (down_col, down_row + offset)
+                    };
+                    let started = Instant::now();
+                    editor.handle_tiled_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Drag(MouseButton::Left),
+                            drag_col.floor() as u16,
+                            drag_row.floor() as u16,
+                        ),
+                        drag_col,
+                        drag_row,
+                        0,
+                    );
+                    let commands = editor.drain_host_commands();
+                    let dispatch_done = Instant::now();
+                    assert!(
+                        !commands.is_empty(),
+                        "round {round}: warm drag {iteration} must emit a host command"
+                    );
+                    if triton_probe {
+                        let custom = commands
+                            .iter()
+                            .filter(|command| matches!(command, HostCommand::Custom { .. }))
+                            .count();
+                        assert_eq!(
+                            custom, 1,
+                            "round {round}: warm drag {iteration} must emit exactly one \
+                             batched instrument command"
+                        );
+                    }
+                    apply_host_commands(&mut editor, &mut app, commands);
+                    let host_done = Instant::now();
+                    let update =
+                        finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                    samples.warm_total.push(duration_ms(started.elapsed()));
+                    samples
+                        .warm_dispatch
+                        .push(duration_ms(dispatch_done - started));
+                    samples.warm_host.push(duration_ms(host_done - dispatch_done));
+                    samples.warm_scene.push(update.scene_ms);
+                    if update.ui_epoch_fired || update.fx_epoch_fired {
+                        samples.mid_gesture_epoch_updates += 1;
+                    }
+                    samples.structural_rebuilds_mid_gesture += update.structural_rebuilds;
+                    mid_gesture_layout_refreshes += update.layout_refresh_count;
+                }
+
+                // The gesture's widget must survive its own drags: a panel
+                // rebuild mid-gesture strands the pointer on a stale node
+                // (the frozen-curve failure mode).
+                if triton_probe {
+                    let layout = editor.widget_layout().expect("fx layout after warm drags");
+                    let mut nodes = Vec::new();
+                    collect_layout_nodes(
+                        &layout,
+                        &mut |node| node.widget_type == "adsr-editor",
+                        &mut nodes,
+                    );
+                    let current_id = nodes.first().map(|node| node.widget_id);
+                    if current_id != Some(gesture_widget_id) {
+                        widget_id_changes += 1;
+                    }
+                    if !baseline {
+                        assert_eq!(
+                            current_id,
+                            Some(gesture_widget_id),
+                            "round {round}: the adsr-editor must not be rebuilt mid-gesture"
+                        );
+                    }
+                }
+
+                // --- close the gesture (outside the timed region) ---------
+                let epoch_before =
+                    (ui_epoch.load(Ordering::Relaxed), fx_epoch.load(Ordering::Relaxed));
+                editor.handle_tiled_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Up(MouseButton::Left),
+                        drag_col.floor() as u16,
+                        drag_row.floor() as u16,
+                    ),
+                    drag_col,
+                    drag_row,
+                    0,
+                );
+                let commands = editor.drain_host_commands();
+                if triton_probe {
+                    let commits = commands
+                        .iter()
+                        .filter_map(|command| match command {
+                            HostCommand::Custom { name, payload }
+                                if name == "set-instrument-param-batch" =>
+                            {
+                                match payload {
+                                    Value::Map(ref map) => Some(map_bool(map, "commit")),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        commits,
+                        vec![true],
+                        "round {round}: mouse-up must commit the final ADSR values exactly once"
+                    );
+                }
+                apply_host_commands(&mut editor, &mut app, commands);
+                let _ = finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                let epoch_after =
+                    (ui_epoch.load(Ordering::Relaxed), fx_epoch.load(Ordering::Relaxed));
+                if epoch_after != epoch_before {
+                    samples.commit_epoch_updates += 1;
+                }
+                app::edit::finish_active_gesture(&mut app);
+            }
+
+            let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                samples[index]
+            };
+            let mut cold_total = samples.cold_total.clone();
+            let mut warm_total = samples.warm_total.clone();
+            let mut cold_dispatch = samples.cold_dispatch.clone();
+            let mut warm_dispatch = samples.warm_dispatch.clone();
+            let mut cold_host = samples.cold_host.clone();
+            let mut warm_host = samples.warm_host.clone();
+            let cold_median = percentile(&mut cold_total, 0.5);
+            let cold_p95 = percentile(&mut cold_total, 0.95);
+            let warm_median = percentile(&mut warm_total, 0.5);
+            let warm_p95 = percentile(&mut warm_total, 0.95);
+            let ratio = cold_median / warm_median.max(f64::MIN_POSITIVE);
+            eprintln!(
+                "[{probe_prefix}-cold] median_ms={cold_median:.3} p95_ms={cold_p95:.3} \
+                 dispatch_median_ms={:.3} host_median_ms={:.3} down_median_ms={:.3} \
+                 first_drag_median_ms={:.3}",
+                percentile(&mut cold_dispatch, 0.5),
+                percentile(&mut cold_host, 0.5),
+                percentile(&mut cold_down_samples, 0.5),
+                percentile(&mut cold_first_drag_samples, 0.5),
+            );
+            let mut warm_scene = samples.warm_scene.clone();
+            eprintln!(
+                "[{probe_prefix}-warm] median_ms={warm_median:.3} p95_ms={warm_p95:.3} \
+                 dispatch_median_ms={:.3} host_median_ms={:.3} scene_median_ms={:.3}",
+                percentile(&mut warm_dispatch, 0.5),
+                percentile(&mut warm_host, 0.5),
+                percentile(&mut warm_scene, 0.5),
+            );
+            eprintln!(
+                "[{probe_prefix}-comparison] cold_vs_warm={ratio:.2}x \
+                 widget_id_changes={widget_id_changes} stale_visuals={stale_visuals} \
+                 mid_gesture_epochs={} commit_epochs={} mid_gesture_structural_rebuilds={} \
+                 mid_gesture_layout_refreshes={mid_gesture_layout_refreshes}",
+                samples.mid_gesture_epoch_updates,
+                samples.commit_epoch_updates,
+                samples.structural_rebuilds_mid_gesture,
+            );
+            {
+                let mut cold_reactive = samples.cold_reactive.clone();
+                let mut cold_frame = samples.cold_frame.clone();
+                let mut cold_retained = samples.cold_retained.clone();
+                let mut cold_scene = samples.cold_scene.clone();
+                eprintln!(
+                    "[{probe_prefix}-cold-phases] reactive_median_ms={:.3} \
+                     frame_median_ms={:.3} retained_median_ms={:.3} scene_median_ms={:.3}",
+                    percentile(&mut cold_reactive, 0.5),
+                    percentile(&mut cold_frame, 0.5),
+                    percentile(&mut cold_retained, 0.5),
+                    percentile(&mut cold_scene, 0.5),
+                );
+            }
+
+            // A continuous drag must not resync the world per event.
+            assert_eq!(
+                samples.mid_gesture_epoch_updates, 0,
+                "no drag update may bump ui/fx epochs mid-gesture"
+            );
+            if triton_probe {
+                // The commit is the one place the epoch bump is the contract
+                // (rack.rs bumps both on `commit: true`).
+                assert_eq!(
+                    samples.commit_epoch_updates, ROUNDS,
+                    "every mouse-up commit must run the epoch-driven resync exactly once"
+                );
+            }
+            if enforce_ceilings {
+                // Machine-tolerant primary gate: the cold press+first-drag
+                // must stay in the same regime as a warm drag of the very
+                // same gesture. Observed on the Linux reference workstation
+                // (release, 2026-08-25): knob 3.29x (cold 50.1ms / warm
+                // 15.2ms), triton in the same band — while the pre-fix
+                // triton tree measured 16.3x with a first-drag dispatch two
+                // orders of magnitude over warm dispatch. The absolute
+                // ceilings are loose (~2x the observed medians; machines
+                // vary) — the ratio is the real gate.
+                assert!(
+                    ratio < 6.0,
+                    "cold press + first drag must stay close to a warm drag, got {ratio:.2}x \
+                     (cold {cold_median:.3}ms vs warm {warm_median:.3}ms)"
+                );
+                assert!(
+                    cold_median < 100.0,
+                    "cold press + first drag median {cold_median:.3}ms"
+                );
+                assert!(
+                    warm_median < 30.0,
+                    "warm drag median {warm_median:.3}ms"
+                );
+            }
+            return;
+        }
+
+        // ---------------------------------------------------------------
+        // Expanded-editor cross-slider sweep. The pointer moves six full
+        // columns in one event, deliberately exercising the distance-based
+        // interpolation path rather than a one-cell synthetic drag.
+        // ---------------------------------------------------------------
+        if probe == Project92UiProbe::ExpandedStepSliderDrag {
+            const TRACK: usize = 0;
+            const FIRST_SLOT: usize = 2;
+            const LAST_SLOT: usize = 8;
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+            const VELOCITY_EPSILON: f32 = 0.0001;
+            let probe_prefix = "project-92-expanded-step-slider-drag";
+
+            let sequencer_buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == "*sequencer*")
+                .expect("sequencer buffer index");
+            let sequencer_tile = editor
+                .tile_root
+                .leaf_ids()
+                .into_iter()
+                .find(|tile_id| {
+                    editor
+                        .tile_root
+                        .find_leaf(*tile_id)
+                        .is_some_and(|leaf| leaf.buffer_idx == sequencer_buffer_idx)
+                })
+                .expect("the production layout must show *sequencer*");
+            editor.switch_active_tile(sequencer_tile);
+
+            let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
+            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
+            assert!(transport_visible && fx_visible && mixer_visible);
+            assert!(!editor_has_visible_buffer(&editor, "*arrangement*"));
+            assert!(app.tracks.len() >= 3, "project 92 must have at least three tracks");
+            for track in 0..3 {
+                state.pattern.track_params[track].set_num_steps(16);
+            }
+
+            sync_all_track_sequencer_state(
+                editor.runtime_mut(),
+                &state,
+                &app,
+                TRACK,
+                &selected_steps,
+            );
+            {
+                let rt = editor.runtime_mut();
+                sync_step_param_lists(rt, &state, TRACK);
+                rt.set_reactive("SEQ", "steps", build_steps_value(&state, TRACK));
+            }
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.update_tile_rects(vp_cols, vp_rows);
+
+            struct TileRetained {
+                buffer_name: String,
+                viewport: eseqlisp::widget_render::WidgetViewport,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
+            }
+            let initial_frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                &mut editor,
+                vp_cols as usize,
+                vp_rows as usize,
+            );
+            let visible_buffers = initial_frame
+                .tiles
+                .iter()
+                .map(|tile| tile.frame.buffer_name.clone())
+                .collect::<Vec<_>>();
+            eprintln!("[{probe_prefix}-visible-buffers] {visible_buffers:?}");
+            let mut tile_retained = initial_frame
+                .tiles
+                .iter()
+                .map(|tile| {
+                    let layout = tile.frame.widget_layout.as_ref().unwrap_or_else(|| {
+                        panic!("visible tile {} must have a layout", tile.frame.buffer_name)
+                    });
+                    let viewport = eseqlisp::widget_render::WidgetViewport {
+                        cell_w: 8.0,
+                        cell_h: 16.0,
+                        vp_w: vp_cols as f32 * 8.0,
+                        vp_h: vp_rows as f32 * 16.0,
+                        time_seconds: 0.0,
+                        focused_widget_id: tile.frame.focused_widget_id,
+                        focused_branch: tile.is_active,
+                        overlay_viewport_bottom: vp_rows as f32,
+                        scroll_top: tile.frame.widget_scroll_top
+                            + tile.frame.text_scroll_top as f32,
+                        scroll_left: tile.frame.widget_layout_scroll_left,
+                        inherited_hover: false,
+                    };
+                    let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
+                        layout,
+                        viewport,
+                        viewport.scroll_top,
+                        vp_rows,
+                    );
+                    let indices =
+                        eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
+                    TileRetained {
+                        buffer_name: tile.frame.buffer_name.clone(),
+                        viewport,
+                        runs,
+                        indices,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let cached_track_peak_levels = vec![0.0; app.tracks.len()];
+            let shared = SharedHandles {
+                state: state.clone(),
+                lg_raw,
+                current_track: current_track.clone(),
+                selected_tracks: selected_tracks.clone(),
+                selected_steps: selected_steps.clone(),
+                selected_neural_neurons: selected_neural_neurons.clone(),
+                piano_roll_selection: piano_roll_selection.clone(),
+                piano_roll_move_state: piano_roll_move_state.clone(),
+                piano_roll_focus: piano_roll_focus.clone(),
+                step_clipboard: Arc::new(Mutex::new(None)),
+                ui_epoch: ui_epoch.clone(),
+                fx_epoch: fx_epoch.clone(),
+                fx_value_epoch: fx_value_epoch.clone(),
+                ui_invalidations: ui_invalidations.clone(),
+                expanded_step_projection: expanded_step_projection.clone(),
+                active_delete_target: active_delete_target.clone(),
+                active_delete_target_version: active_delete_target_version.clone(),
+                auto_follow_override_until: auto_follow_override_until.clone(),
+                track_pan_ids: track_pan_ids.clone(),
+                track_collapsed: track_collapsed.clone(),
+                bus_state: bus_state.clone(),
+                bus_node_ids: bus_node_ids.clone(),
+                track_groups: track_groups.clone(),
+                record_armed: record_armed.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
+                recording: recording.clone(),
+                master_recording: master_recording.clone(),
+                held_notes: Arc::new(Mutex::new(Vec::new())),
+                roll_record: Arc::new(Mutex::new(RollRecordBuffer::default())),
+                step_print: Arc::new(Mutex::new(StepPrintState::default())),
+                keyboard_octave: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+                sample_browser: sample_browser.clone(),
+                keyboard_tx: keyboard_tx.clone(),
+                accumulator_names: accumulator_names.clone(),
+                piano_roll_clipboard: piano_roll_clipboard.clone(),
+                arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
+            };
+            let mut sessions = EditSessionState::default();
+            let mut frame_diff = FrameDiffState::default();
+            let mut gesture_state = GestureState::default();
+            let mut meters = MeterCache {
+                cached_peak_l_level: 0.0,
+                cached_peak_r_level: 0.0,
+                cached_track_peak_levels: cached_track_peak_levels.clone(),
+                cached_rack_slot_peak_levels: Vec::new(),
+                cached_bus_peak_levels: cached_bus_peak_levels.clone(),
+                cached_modulator_phases: Vec::new(),
+                cached_modulator_levels: Vec::new(),
+                cached_cpu_load_bits: 0.0f32.to_bits(),
+                last_meter_poll_at: Instant::now(),
+                last_cpu_ui_poll_at: Instant::now(),
+                last_neural_visualization_poll_at: Instant::now(),
+                visualization_liveness: VisualizationLiveness::default(),
+                last_voice_count_log_at: Instant::now(),
+            };
+            let mut ctx_track_names = track_names.clone();
+            let mut apply_host_commands = |editor: &mut Editor,
+                                           app: &mut app::App,
+                                           commands: Vec<HostCommand>| {
+                let mut names = Vec::new();
+                for command in commands {
+                    let HostCommand::Custom { name, payload } = command else {
+                        continue;
+                    };
+                    let mut ctx = LoopCtx {
+                        sessions: &mut sessions,
+                        meters: &mut meters,
+                        frame: &mut frame_diff,
+                        gesture: &mut gesture_state,
+                        track_names: &mut ctx_track_names,
+                        shared: &shared,
+                    };
+                    dispatch_custom_host_command(&name, payload, app, editor, &mut ctx);
+                    names.push(name);
+                }
+                names
+            };
+
+            let neural = selected_neural_neurons.lock().unwrap().clone();
+            let mut song_frame = super::state_values::SongFrameState::default();
+            let mut prev_auto_follow =
+                super::state_values::auto_follow_enabled(&auto_follow_override_until);
+            let mut finish_visible_update = |editor: &mut Editor,
+                                             app: &mut app::App,
+                                             retained: &mut Vec<TileRetained>| {
+                app.sync_track_sound_bindings();
+                super::state_values::sync_song_state(
+                    editor.runtime_mut(),
+                    app,
+                    &mut song_frame,
+                    transport_visible,
+                );
+                let invalidations = ui_invalidations.drain();
+                if !invalidations.is_empty() {
+                    apply_ui_invalidations(
+                        invalidations,
+                        UiInvalidationApplyCtx {
+                            app,
+                            editor,
+                            state: &state,
+                            track_collapsed: &track_collapsed,
+                            bus_state: &bus_state,
+                            current_track_idx: TRACK,
+                            selected_steps: &selected_steps,
+                            selected_neural_neurons: &neural,
+                            piano_roll_selection: &piano_roll_selection,
+                            accumulator_names: &accumulator_names,
+                            cached_track_peak_levels: &cached_track_peak_levels,
+                            cached_bus_peak_levels: &cached_bus_peak_levels,
+                            record_armed: &record_armed,
+                            active_delete_target: &active_delete_target,
+                            active_delete_target_version: &active_delete_target_version,
+                            expanded_step_projection: &expanded_step_projection,
+                            fx_visible,
+                            sequencer_visible: true,
+                            mixer_visible,
+                        },
+                    );
+                }
+                let auto_follow =
+                    super::state_values::auto_follow_enabled(&auto_follow_override_until);
+                if auto_follow != prev_auto_follow {
+                    editor
+                        .runtime_mut()
+                        .set_reactive("SEQ", "auto-follow", Value::Bool(auto_follow));
+                    prev_auto_follow = auto_follow;
+                }
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                for tile in &frame.tiles {
+                    let entry = retained
+                        .iter_mut()
+                        .find(|entry| entry.buffer_name == tile.frame.buffer_name)
+                        .expect("retained visible tile");
+                    let layout = tile.frame.widget_layout.as_ref().expect("visible tile layout");
+                    let (_, stats) =
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
+                            layout,
+                            entry.viewport,
+                            entry.viewport.scroll_top,
+                            vp_rows,
+                            &mut entry.runs,
+                            &entry.indices,
+                            &tile.frame.dirty_widget_ids,
+                        );
+                    if stats.missing_previous_runs > 0 || stats.invalid_previous_runs > 0 {
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
+                            layout,
+                            entry.viewport,
+                            entry.viewport.scroll_top,
+                            vp_rows,
+                        );
+                        entry.indices =
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
+                        entry.runs = runs;
+                    }
+                }
+            };
+
+            let track_ids = app
+                .graph
+                .track_node_ids
+                .iter()
+                .take(3)
+                .map(|ids| ids.pan_id)
+                .collect::<Vec<_>>();
+            let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                samples[((samples.len() - 1) as f64 * fraction).round() as usize]
+            };
+            let counter_delta = |after: eseqlisp::runtime::UiWorkCounters,
+                                 before: eseqlisp::runtime::UiWorkCounters| {
+                eseqlisp::runtime::UiWorkCounters {
+                    full_buffer_reruns: after.full_buffer_reruns - before.full_buffer_reruns,
+                    subtree_reruns: after.subtree_reruns - before.subtree_reruns,
+                    reevaluated_subtree_roots: after.reevaluated_subtree_roots
+                        - before.reevaluated_subtree_roots,
+                    relayout_reused: after.relayout_reused - before.relayout_reused,
+                    relayout_full: after.relayout_full - before.relayout_full,
+                    relayout_subtree: after.relayout_subtree - before.relayout_subtree,
+                }
+            };
+
+            for expanded_tracks in [1usize, 3usize] {
+                for track_id in track_ids.iter().take(expanded_tracks) {
+                    editor
+                        .runtime_mut()
+                        .eval_str(&format!(
+                            "(eseq.sequencer/set-track-expanded {track_id} true)"
+                        ))
+                        .unwrap_or_else(|error| panic!("expand track {track_id}: {error:?}"));
+                }
+                finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+
+                let (start, end, slider_rect, seq_body) = {
+                    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                        &mut editor,
+                        vp_cols as usize,
+                        vp_rows as usize,
+                    );
+                    let tile = frame
+                        .tiles
+                        .iter()
+                        .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                        .expect("visible sequencer tile");
+                    let layout = tile.frame.widget_layout.as_ref().expect("sequencer layout");
+                    for track_id in track_ids.iter().take(expanded_tracks) {
+                        for slot in 0..16 {
+                            assert!(
+                                find_layout_node_by_stable_key_suffix(
+                                    layout,
+                                    &format!("/expanded-step-slider-{track_id}-{slot}"),
+                                )
+                                .is_some(),
+                                "expanded track editor {track_id} must contain slider {slot}"
+                            );
+                        }
+                    }
+                    let first = find_layout_node_by_stable_key_suffix(
+                        layout,
+                        &format!("/expanded-step-slider-{}-{FIRST_SLOT}", track_ids[TRACK]),
+                    )
+                    .expect("first sweep slider");
+                    let last = find_layout_node_by_stable_key_suffix(
+                        layout,
+                        &format!("/expanded-step-slider-{}-{LAST_SLOT}", track_ids[TRACK]),
+                    )
+                    .expect("last sweep slider");
+                    let origin_col = tile.body_rect.col.floor();
+                    let origin_row = tile.body_rect.row.floor();
+                    let scroll_top = tile.frame.widget_scroll_top
+                        + tile.frame.text_scroll_top as f32;
+                    let scroll_left = tile.frame.widget_layout_scroll_left;
+                    (
+                        origin_col + first.rect.col + first.rect.width * 0.5 - scroll_left,
+                        origin_col + last.rect.col + last.rect.width * 0.5 - scroll_left,
+                        (
+                            origin_row + first.rect.row - scroll_top,
+                            first.rect.height,
+                        ),
+                        tile.body_rect,
+                    )
+                };
+                assert!(
+                    start >= seq_body.col
+                        && end < seq_body.col + seq_body.width
+                        && slider_rect.0 >= seq_body.row
+                        && slider_rect.0 + slider_rect.1 <= seq_body.row + seq_body.height,
+                    "the measured sweep must be visible inside the sequencer tile"
+                );
+
+                let mut total_samples = Vec::with_capacity(SAMPLES);
+                let mut input_samples = Vec::with_capacity(SAMPLES);
+                let mut host_samples = Vec::with_capacity(SAMPLES);
+                let mut work_samples = Vec::with_capacity(SAMPLES);
+                let mut drag_samples = Vec::with_capacity(SAMPLES);
+                for iteration in 0..(WARMUPS + SAMPLES) {
+                    let forward = iteration % 2 == 0;
+                    // Change the target value on every event. Direction and
+                    // value alternate independently enough to exercise both
+                    // sweep directions without timing handler NoOps.
+                    let fraction = if iteration % 2 == 0 { 0.25 } else { 0.75 };
+                    let row = slider_rect.0 + slider_rect.1 * fraction;
+                    let (from, to, final_slot) = if forward {
+                        (start, end, LAST_SLOT)
+                    } else {
+                        (end, start, FIRST_SLOT)
+                    };
+                    editor.handle_tiled_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Down(MouseButton::Left),
+                            from.floor() as u16,
+                            row.floor() as u16,
+                        ),
+                        from,
+                        row,
+                        0,
+                    );
+                    let down_commands = editor.drain_host_commands();
+                    assert!(down_commands.is_empty(), "vslider down must not edit");
+
+                    let work_before = editor.runtime().ui_work_counters();
+                    let started = Instant::now();
+                    editor.handle_tiled_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Drag(MouseButton::Left),
+                            to.floor() as u16,
+                            row.floor() as u16,
+                        ),
+                        to,
+                        row,
+                        0,
+                    );
+                    let commands = editor.drain_host_commands();
+                    let dispatch_done = Instant::now();
+                    let drag_stats = eseqlisp::ui::drag_profile::take_last_drag_path_stats()
+                        .expect("cross-slider drag path counters");
+                    assert!(
+                        drag_stats.interpolation_subsamples > LAST_SLOT as u64 - FIRST_SLOT as u64,
+                        "the drag must interpolate more samples than crossed sliders"
+                    );
+                    assert!(
+                        commands.len() >= LAST_SLOT - FIRST_SLOT + 1,
+                        "the sweep must dispatch every crossed slider, got {} commands",
+                        commands.len()
+                    );
+                    let names = apply_host_commands(&mut editor, &mut app, commands);
+                    let host_done = Instant::now();
+                    assert!(
+                        names.iter().all(|name| name == "set-step-param-history"),
+                        "expanded sliders must lower to set-step-param-history: {names:?}"
+                    );
+                    finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                    let total_ms = duration_ms(started.elapsed());
+                    let work = counter_delta(
+                        editor.runtime().ui_work_counters(),
+                        work_before,
+                    );
+                    let expected = 1.0 - fraction;
+                    for step in FIRST_SLOT..=LAST_SLOT {
+                        let actual = state.pattern.step_data[TRACK]
+                            .get(step, StepParam::Velocity);
+                        assert!(
+                            (actual - expected).abs() <= VELOCITY_EPSILON,
+                            "crossed step {step} must hold {expected}, got {actual}"
+                        );
+                    }
+                    let cursor_field = format!("cursor-step-{}", track_ids[TRACK]);
+                    assert_eq!(
+                        editor
+                            .runtime()
+                            .reactive_field_value("SEQV", &cursor_field)
+                            .and_then(|value| match value {
+                                Value::Number(value) => Some(*value as usize),
+                                _ => None,
+                            }),
+                        Some(final_slot),
+                        "cursor must land on the last crossed step"
+                    );
+                    let layout = editor.widget_layout().expect("expanded sequencer layout");
+                    let header = find_layout_node_by_stable_key_suffix(
+                        &layout,
+                        &format!(
+                            "/expanded-param-number-picker-{}",
+                            track_ids[TRACK]
+                        ),
+                    )
+                    .and_then(|node| find_layout_node_by_widget_type(node, "number-picker"))
+                    .expect("expanded velocity header number-picker");
+                    let header_field =
+                        format!("seqv-cursor-param-value-{}", track_ids[TRACK]);
+                    assert!(
+                        matches!(
+                            header.props.get("value"),
+                            Some(Value::ReactiveRef { namespace, field, index: None, .. })
+                                if namespace == "SEQ" && field == &header_field
+                        ),
+                        "expanded header must bind directly to the cursor projection: {:?}",
+                        header.props.get("value")
+                    );
+                    let header_value = editor
+                        .runtime()
+                        .reactive_field_value("SEQ", &header_field)
+                        .and_then(|value| match value {
+                            Value::Number(value) => Some(*value as f32),
+                            _ => None,
+                        })
+                        .expect("expanded header projection value");
+                    assert!(
+                        (header_value - expected).abs() <= VELOCITY_EPSILON,
+                        "header must show cursor step value {expected}, got {header_value}"
+                    );
+
+                    editor.handle_tiled_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Up(MouseButton::Left),
+                            to.floor() as u16,
+                            row.floor() as u16,
+                        ),
+                        to,
+                        row,
+                        0,
+                    );
+                    let up_commands = editor.drain_host_commands();
+                    apply_host_commands(&mut editor, &mut app, up_commands);
+                    app::edit::finish_active_gesture(&mut app);
+
+                    if iteration >= WARMUPS {
+                        total_samples.push(total_ms);
+                        input_samples.push(duration_ms(dispatch_done - started));
+                        host_samples.push(duration_ms(host_done - dispatch_done));
+                        work_samples.push(work);
+                        drag_samples.push(drag_stats);
+                    }
+                }
+
+                let median = percentile(&mut total_samples, 0.50);
+                let p95 = percentile(&mut total_samples, 0.95);
+                let work_sum = work_samples.iter().fold(
+                    eseqlisp::runtime::UiWorkCounters::default(),
+                    |mut sum, work| {
+                        sum.full_buffer_reruns += work.full_buffer_reruns;
+                        sum.subtree_reruns += work.subtree_reruns;
+                        sum.reevaluated_subtree_roots += work.reevaluated_subtree_roots;
+                        sum.relayout_reused += work.relayout_reused;
+                        sum.relayout_full += work.relayout_full;
+                        sum.relayout_subtree += work.relayout_subtree;
+                        sum
+                    },
+                );
+                let drag_sum = drag_samples.iter().fold(
+                    eseqlisp::ui::drag_profile::DragPathStats::default(),
+                    |mut sum, stats| {
+                        sum.interpolation_subsamples += stats.interpolation_subsamples;
+                        sum.hit_tests += stats.hit_tests;
+                        sum.layout_node_clones += stats.layout_node_clones;
+                        sum
+                    },
+                );
+                let n = SAMPLES as u64;
+                eprintln!(
+                    "[{probe_prefix}-{expanded_tracks}-tracks] samples={SAMPLES} warmups={WARMUPS} viewport={vp_cols}x{vp_rows} median_ms={median:.3} p95_ms={p95:.3} input_median_ms={:.3} host_median_ms={:.3} work/event=reruns(full:{:.2} sub:{:.2} roots:{:.2}) relayout(reused:{:.2} full:{:.2} subtree:{:.2}) drag(interpolation:{:.2} hit_tests:{:.2} layout_node_clones:{:.2})",
+                    percentile(&mut input_samples, 0.50),
+                    percentile(&mut host_samples, 0.50),
+                    work_sum.full_buffer_reruns as f64 / n as f64,
+                    work_sum.subtree_reruns as f64 / n as f64,
+                    work_sum.reevaluated_subtree_roots as f64 / n as f64,
+                    work_sum.relayout_reused as f64 / n as f64,
+                    work_sum.relayout_full as f64 / n as f64,
+                    work_sum.relayout_subtree as f64 / n as f64,
+                    drag_sum.interpolation_subsamples as f64 / n as f64,
+                    drag_sum.hit_tests as f64 / n as f64,
+                    drag_sum.layout_node_clones as f64 / n as f64,
+                );
+            }
+            return;
+        }
+
+        // ---------------------------------------------------------------
         // *step*-buffer parameter edits (step-buffer.lisp ->
         // fx-step-parameters-panel): drag Transpose / Velocity / Duration
         // with the step cursor parked on a step and NOTHING selected — the
@@ -4932,8 +6849,8 @@
             struct TileRetained {
                 buffer_name: String,
                 viewport: eseqlisp::widget_render::WidgetViewport,
-                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
-                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
             }
             let mut tile_retained: Vec<TileRetained> = Vec::new();
             for tile in &initial_frame.tiles {
@@ -4956,13 +6873,13 @@
                     scroll_left: tile.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     layout,
                     viewport,
                     viewport.scroll_top,
                     vp_rows,
                 );
-                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                 tile_retained.push(TileRetained {
                     buffer_name: tile.frame.buffer_name.clone(),
                     viewport,
@@ -5350,7 +7267,7 @@
                     });
                     let tile_started = Instant::now();
                     let (_, stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
@@ -5362,14 +7279,14 @@
                     let structural_rebuild =
                         stats.missing_previous_runs > 0 || stats.invalid_previous_runs > 0;
                     if structural_rebuild {
-                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
                             vp_rows,
                         );
                         entry.indices =
-                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                         entry.runs = runs;
                     }
                     tile_stats.push((
@@ -6149,8 +8066,8 @@
             struct TileRetained {
                 buffer_name: String,
                 viewport: eseqlisp::widget_render::WidgetViewport,
-                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
-                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
             }
             let mut tile_retained: Vec<TileRetained> = Vec::new();
             for tile in &initial_frame.tiles {
@@ -6173,13 +8090,13 @@
                     scroll_left: tile.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     layout,
                     viewport,
                     viewport.scroll_top,
                     vp_rows,
                 );
-                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                 tile_retained.push(TileRetained {
                     buffer_name: tile.frame.buffer_name.clone(),
                     viewport,
@@ -6575,7 +8492,7 @@
                     });
                     let tile_started = Instant::now();
                     let (_, stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
@@ -6587,14 +8504,14 @@
                     let structural_rebuild =
                         stats.missing_previous_runs > 0 || stats.invalid_previous_runs > 0;
                     if structural_rebuild {
-                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
                             vp_rows,
                         );
                         entry.indices =
-                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                         entry.runs = runs;
                     }
                     tile_stats.push((
@@ -7249,24 +9166,45 @@
 
         if matches!(
             probe,
-            Project92UiProbe::GroupTrackSelection | Project92UiProbe::GroupTrackSelectionSmoke
+            Project92UiProbe::GroupTrackSelection
+                | Project92UiProbe::GroupTrackSelectionSmoke
+                | Project92UiProbe::DriftTrackSwitch
+                | Project92UiProbe::DriftTrackSwitchSmoke
         ) {
             // Smoke mode is the always-run functional variant: same fixture,
             // clicks, and assertions, minimal iterations, no ceilings.
-            let smoke = probe == Project92UiProbe::GroupTrackSelectionSmoke;
+            let smoke = matches!(
+                probe,
+                Project92UiProbe::GroupTrackSelectionSmoke
+                    | Project92UiProbe::DriftTrackSwitchSmoke
+            );
             // Smoke budget: one iteration per transition (every correctness
             // assertion runs on iteration 0) keeps the always-run variant
             // inside a ~10s debug budget; the ignored release probe keeps the
             // statistical 5+20 configuration.
             let warmups: usize = if smoke { 0 } else { 5 };
             let sample_count: usize = if smoke { 1 } else { 20 };
-            let probe_prefix = "project-92-fullayout-owner-switch";
+            let probe_prefix = if drift_switch {
+                "drift-switch"
+            } else {
+                "project-92-fullayout-owner-switch"
+            };
             // Fixture indices (see the GroupTrackSelection fixture block):
             // the group holds tracks {0,2..=7,10}; 10 is the 1-slot rack.
+            // The drift-switch fixture is the reported project verbatim:
+            // 0/1 are the two synthid-808 tracks, 3/4 the two drift tracks,
+            // 2 a sampler and 5 a triton.
             let rack_track = 10usize;
             let sampler_track = 2usize;
+            // Both fixtures put the same-instrument pair at 3 and 4:
+            // project 92's two saved custom-instrument tracks, and
+            // drift-switch's two factory:core/drift tracks.
             let plain_a = 3usize;
             let plain_b = 4usize;
+            // drift-switch's same-project comparison pair: the two
+            // factory:drums/synthid-808 tracks.
+            let compare_a = 0usize;
+            let compare_b = 1usize;
             let group_id = app.groups[0].id;
             let group_bus_idx = {
                 let bus_id = app.groups[0].bus_id;
@@ -7477,8 +9415,8 @@
             struct TileRetained {
                 buffer_name: String,
                 viewport: eseqlisp::widget_render::WidgetViewport,
-                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
-                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
             }
             let mut tile_retained: Vec<TileRetained> = Vec::new();
             for tile in &initial_frame.tiles {
@@ -7501,13 +9439,13 @@
                     scroll_left: tile.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     layout,
                     viewport,
                     viewport.scroll_top,
                     vp_rows,
                 );
-                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                 tile_retained.push(TileRetained {
                     buffer_name: tile.frame.buffer_name.clone(),
                     viewport,
@@ -7537,6 +9475,9 @@
                 dirty_fields: usize,
                 full_buffer_reruns: usize,
                 subtree_reruns: usize,
+                /// Slowest effect bodies the reactive cycle re-ran, as
+                /// (name, ms), for the phase breakdown.
+                rerun_cost: Vec<(String, f64)>,
                 tiles: Vec<(String, usize, f64, bool)>,
             }
 
@@ -7875,21 +9816,36 @@
                 // reactive work inline in the dispatch (process_dirty_reactive
                 // inside Runtime::invoke), which leaves the trace stale — so
                 // only report counts for updates that actually ran a cycle.
-                let (dirty_fields, full_buffer_reruns, subtree_reruns) =
+                let (dirty_fields, full_buffer_reruns, subtree_reruns, rerun_cost) =
                     if track_switch_fired || ui_epoch_fired || fx_epoch_fired {
                         editor
                             .runtime()
                             .last_ui_invalidation_trace()
                             .map(|trace| {
+                                // Which effect bodies the cycle actually
+                                // re-ran, slowest first. A selection change
+                                // should dirty widgets, not re-run buffer
+                                // roots, so this list is the work count that
+                                // matters most for a track switch.
+                                let mut timings = trace
+                                    .reactive_exec_timings
+                                    .iter()
+                                    .map(|(name, elapsed)| {
+                                        (name.clone(), duration_ms(*elapsed))
+                                    })
+                                    .collect::<Vec<_>>();
+                                timings.sort_by(|a, b| b.1.total_cmp(&a.1));
+                                timings.truncate(6);
                                 (
                                     trace.dirty_fields.len(),
                                     trace.full_buffer_reruns,
                                     trace.subtree_reruns,
+                                    timings,
                                 )
                             })
-                            .unwrap_or((0, 0, 0))
+                            .unwrap_or((0, 0, 0, Vec::new()))
                     } else {
-                        (0, 0, 0)
+                        (0, 0, 0, Vec::new())
                     };
                 let frame_built = eseqlisp::frame::build_tiled_render_frame_borderless(
                     editor,
@@ -7918,7 +9874,7 @@
                     });
                     let tile_started = Instant::now();
                     let (_, stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
@@ -7930,14 +9886,14 @@
                     let structural_rebuild =
                         stats.missing_previous_runs > 0 || stats.invalid_previous_runs > 0;
                     if structural_rebuild {
-                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
                             vp_rows,
                         );
                         entry.indices =
-                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                         entry.runs = runs;
                     }
                     tile_stats.push((
@@ -7966,6 +9922,7 @@
                     dirty_fields,
                     full_buffer_reruns,
                     subtree_reruns,
+                    rerun_cost,
                     tiles: tile_stats,
                 }
             };
@@ -8067,6 +10024,95 @@
                 )
             };
 
+            // Which tracks the *fx* tile's instrument controls are actually
+            // bound to. Every custom-instrument control binds the SEQ float
+            // field `track-<track>-instrument-param-<idx>-<name>`
+            // (state_values::shared::instrument_param_value_field), so the
+            // set of track indices in the rendered tile is the panel's real
+            // identity: a stale panel keeps binding the previous track.
+            let fx_instrument_binding_tracks =
+                |editor: &mut Editor| -> std::collections::BTreeSet<usize> {
+                    fn collect_binding_tracks(
+                        node: &eseqlisp::layout::LayoutNode,
+                        out: &mut std::collections::BTreeSet<usize>,
+                    ) {
+                        for value in node.props.values() {
+                            let Value::ReactiveRef {
+                                namespace, field, ..
+                            } = value
+                            else {
+                                continue;
+                            };
+                            if namespace != "SEQ" {
+                                continue;
+                            }
+                            let Some(rest) = field.strip_prefix("track-") else {
+                                continue;
+                            };
+                            let Some((track, tail)) = rest.split_once('-') else {
+                                continue;
+                            };
+                            if !tail.starts_with("instrument-param-") {
+                                continue;
+                            }
+                            if let Ok(track) = track.parse::<usize>() {
+                                out.insert(track);
+                            }
+                        }
+                        for child in &node.children {
+                            collect_binding_tracks(child, out);
+                        }
+                    }
+                    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                        editor,
+                        vp_cols as usize,
+                        vp_rows as usize,
+                    );
+                    let tile = frame
+                        .tiles
+                        .iter()
+                        .find(|tile| tile.frame.buffer_name == "*fx*")
+                        .expect("visible fx tile");
+                    let layout = tile.frame.widget_layout.as_ref().expect("fx tile layout");
+                    let mut tracks = std::collections::BTreeSet::new();
+                    collect_binding_tracks(layout, &mut tracks);
+                    tracks
+                };
+
+            // The instrument name the *fx* tile displays, read off the
+            // rendered header label the panel builds from
+            // `SEQ.instrument-panel`'s `:display-name`.
+            let fx_shows_instrument_label = |editor: &mut Editor, label: &str| -> bool {
+                let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                let Some(tile) = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*fx*")
+                else {
+                    return false;
+                };
+                let Some(layout) = tile.frame.widget_layout.as_ref() else {
+                    return false;
+                };
+                let mut labels = Vec::new();
+                collect_layout_nodes(
+                    layout,
+                    &mut |node| {
+                        node.widget_type == "label"
+                            && matches!(
+                                node.props.get("text"),
+                                Some(Value::String(text)) if text == label
+                            )
+                    },
+                    &mut labels,
+                );
+                !labels.is_empty()
+            };
+
             let percentile = |samples: &mut Vec<f64>, fraction: f64| {
                 samples.sort_by(|a, b| a.total_cmp(b));
                 let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
@@ -8091,6 +10137,7 @@
                 dirty_fields: usize,
                 full_buffer_reruns: usize,
                 subtree_reruns: usize,
+                rerun_cost: std::collections::BTreeMap<String, Vec<f64>>,
                 track_switch_updates: usize,
                 ui_epoch_updates: usize,
                 fx_epoch_updates: usize,
@@ -8123,6 +10170,12 @@
                     self.dirty_fields += update.dirty_fields;
                     self.full_buffer_reruns += update.full_buffer_reruns;
                     self.subtree_reruns += update.subtree_reruns;
+                    for (name, elapsed) in &update.rerun_cost {
+                        self.rerun_cost
+                            .entry(name.clone())
+                            .or_default()
+                            .push(*elapsed);
+                    }
                     if update.track_switch_fired {
                         self.track_switch_updates += 1;
                     }
@@ -8201,6 +10254,23 @@
                     .collect::<Vec<_>>()
                     .join(" ");
                 eprintln!("[{probe_prefix}-{label}-retained-tiles] {tile_breakdown}");
+                let mut rerun_medians = samples
+                    .rerun_cost
+                    .iter_mut()
+                    .map(|(name, values)| {
+                        (name.clone(), percentile(values, 0.50), values.len())
+                    })
+                    .collect::<Vec<_>>();
+                rerun_medians.sort_by(|a, b| b.1.total_cmp(&a.1));
+                rerun_medians.truncate(6);
+                eprintln!(
+                    "[{probe_prefix}-{label}-reruns] {}",
+                    rerun_medians
+                        .iter()
+                        .map(|(name, median, count)| format!("{name}={median:.3}(n={count})"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
                 reports.push(ScenarioReport {
                     label: label.to_string(),
                     median_ms: median,
@@ -8272,6 +10342,11 @@
                  timed_suffix: &str,
                  expect_track: Option<usize>,
                  expect_bus: Option<usize>,
+                 // Instrument header the *fx* tile must show after the
+                 // switch. Only the drift-switch probe checks it; the
+                 // owner-switch scenarios pass "" and rely on the
+                 // bus/rack/sampler marker check instead.
+                 instrument_label: &str,
                  editor: &mut Editor,
                  app: &mut app::App,
                  frame_diff: &mut FrameDiffState,
@@ -8370,10 +10445,34 @@
                                 );
                             }
                         }
+                        if drift_switch {
+                            // Panel identity: after the switch the *fx*
+                            // tile's instrument controls must bind the
+                            // destination track and nothing else. This is
+                            // checked on EVERY sample, not just iteration 0
+                            // — a one-frame-late panel is exactly the
+                            // failure a faster switch could introduce.
+                            let track = expect_track.expect("drift transitions select a track");
+                            let bound = fx_instrument_binding_tracks(editor);
+                            assert_eq!(
+                                bound,
+                                std::collections::BTreeSet::from([track]),
+                                "{label} click {iteration}: the fx tile must bind only track {track}'s instrument params"
+                            );
+                        }
                         if iteration == 0 {
                             let (bus_chain, sampler_panel, rack_panel) =
                                 fx_owner_markers(editor);
-                            if expect_bus.is_some() {
+                            if drift_switch {
+                                assert!(
+                                    !bus_chain && !rack_panel && !sampler_panel,
+                                    "{label}: a custom-instrument track must show a plain instrument panel"
+                                );
+                                assert!(
+                                    fx_shows_instrument_label(editor, instrument_label),
+                                    "{label}: the fx tile must show the {instrument_label} instrument header"
+                                );
+                            } else if expect_bus.is_some() {
                                 assert!(
                                     bus_chain,
                                     "{label}: the fx tile must show the group's bus chain"
@@ -8422,6 +10521,194 @@
                 };
 
             let plain_a_suffix = track_select_suffix(plain_a);
+            if drift_switch {
+                // eseq-pgru: the reported gesture is a plain same-instrument
+                // track switch. Both directions of the drift pair are
+                // measured (the acceptance gate is the SLOWER of the two),
+                // and the two synthid-808 tracks give a same-project,
+                // different-instrument comparison that separates
+                // instrument-UI complexity from the shared selection cost.
+                let drift_a = track_select_suffix(plain_a);
+                let drift_b = track_select_suffix(plain_b);
+                let compare_a_suffix = track_select_suffix(compare_a);
+                let compare_b_suffix = track_select_suffix(compare_b);
+                for (label, setup, timed, expect, instrument) in [
+                    ("drift-a-to-b", &drift_a, &drift_b, plain_b, "drift"),
+                    ("drift-b-to-a", &drift_b, &drift_a, plain_a, "drift"),
+                    (
+                        "synthid-a-to-b",
+                        &compare_a_suffix,
+                        &compare_b_suffix,
+                        compare_b,
+                        "synthid-808",
+                    ),
+                    (
+                        "synthid-b-to-a",
+                        &compare_b_suffix,
+                        &compare_a_suffix,
+                        compare_a,
+                        "synthid-808",
+                    ),
+                ] {
+                    run_transition(
+                        label,
+                        &[setup.as_str()],
+                        timed.as_str(),
+                        Some(expect),
+                        None,
+                        instrument,
+                        &mut editor,
+                        &mut app,
+                        &mut frame_diff,
+                        &mut tile_retained,
+                        &mut scenario_reports,
+                    );
+                }
+
+                // eseq-pgru correctness: a parameter edit after the switch
+                // must reach ONLY the destination instrument instance. The
+                // edit goes through the same `set-instrument-param` host
+                // command the real knob lowers to, and both the app-side
+                // value and the SEQ float field the panel binds are checked.
+                {
+                    let param_idx = app
+                        .graph
+                        .instrument_descriptors
+                        .get(plain_b)
+                        .expect("drift destination instrument descriptor")
+                        .params
+                        .iter()
+                        .position(|param| {
+                            matches!(
+                                param.kind,
+                                sequencer::effects::ParamKind::Continuous { .. }
+                            ) && param.max > param.min
+                        })
+                        .expect("drift must expose a continuous instrument param");
+                    let descriptor = app.graph.instrument_descriptors[plain_b].params
+                        [param_idx]
+                        .clone();
+                    let before_source = app
+                        .effective_instrument_param_value(plain_a, param_idx)
+                        .unwrap_or(descriptor.default);
+                    let before_dest = app
+                        .effective_instrument_param_value(plain_b, param_idx)
+                        .unwrap_or(descriptor.default);
+                    // Pick a target far from the current value so a dropped
+                    // write cannot look like a pass.
+                    let target = if (before_dest - descriptor.min).abs()
+                        >= (descriptor.max - before_dest).abs()
+                    {
+                        descriptor.min
+                    } else {
+                        descriptor.max
+                    };
+                    assert!(
+                        (target - before_dest).abs() > f32::EPSILON,
+                        "the isolation probe must actually change the destination value"
+                    );
+                    // Park on the source drift track, then switch to the
+                    // destination through the real header click.
+                    for suffix in [&drift_a, &drift_b] {
+                        let (col, row) = locate_seq_target(&mut editor, suffix);
+                        for kind in [
+                            MouseEventKind::Down(MouseButton::Left),
+                            MouseEventKind::Up(MouseButton::Left),
+                        ] {
+                            editor.handle_tiled_mouse_precise(
+                                mouse_event(kind, col.floor() as u16, row.floor() as u16),
+                                col,
+                                row,
+                                0,
+                            );
+                            let commands = editor.drain_host_commands();
+                            apply_host_commands(&mut editor, &mut app, &mut frame_diff, commands);
+                        }
+                        finish_visible_update(
+                            &mut editor,
+                            &mut app,
+                            &mut frame_diff,
+                            &mut tile_retained,
+                        );
+                    }
+                    assert_eq!(current_track.load(Ordering::Relaxed), plain_b);
+
+                    let mut payload = std::collections::HashMap::new();
+                    payload.insert(
+                        "param-idx".to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::Number(
+                            param_idx as f64,
+                        ))),
+                    );
+                    payload.insert(
+                        "value".to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::Number(
+                            descriptor.stored_to_user(target) as f64,
+                        ))),
+                    );
+                    apply_host_commands(
+                        &mut editor,
+                        &mut app,
+                        &mut frame_diff,
+                        vec![HostCommand::Custom {
+                            name: "set-instrument-param".to_string(),
+                            payload: Value::Map(payload),
+                        }],
+                    );
+                    finish_visible_update(
+                        &mut editor,
+                        &mut app,
+                        &mut frame_diff,
+                        &mut tile_retained,
+                    );
+
+                    let after_source = app
+                        .effective_instrument_param_value(plain_a, param_idx)
+                        .unwrap_or(descriptor.default);
+                    let after_dest = app
+                        .effective_instrument_param_value(plain_b, param_idx)
+                        .unwrap_or(descriptor.default);
+                    assert!(
+                        (after_dest - target).abs() <= 1e-3,
+                        "the post-switch edit must land on track {plain_b}: {before_dest} -> {after_dest}, wanted {target}"
+                    );
+                    assert!(
+                        (after_source - before_source).abs() <= f32::EPSILON,
+                        "the post-switch edit must NOT touch track {plain_a}: {before_source} -> {after_source}"
+                    );
+                    // Same spelling as
+                    // state_values::shared::instrument_param_value_field.
+                    let field = format!(
+                        "track-{plain_b}-instrument-param-{param_idx}-{}",
+                        descriptor
+                            .name
+                            .chars()
+                            .map(|ch| if ch.is_ascii_alphanumeric()
+                                || ch == '_'
+                                || ch == '-'
+                            {
+                                ch
+                            } else {
+                                '_'
+                            })
+                            .collect::<String>()
+                    );
+                    let published = match editor.runtime_mut().eval_str(&format!(
+                        "(reactive-value (bind \"SEQ\" \"{field}\"))"
+                    )) {
+                        Ok(Some(Value::Number(value))) => value,
+                        other => panic!("SEQ.{field} must eval to a number, got {other:?}"),
+                    };
+                    assert!(
+                        (published as f32 - after_dest).abs() <= 1e-2,
+                        "SEQ.{field} must publish the destination instance's value: {published} vs {after_dest}"
+                    );
+                    eprintln!(
+                        "[{probe_prefix}-param-isolation] param={} idx={param_idx} track-{plain_a}={after_source} track-{plain_b}={after_dest}",
+                        descriptor.name
+                    );
+                }
+            } else {
             let rack_suffix = track_select_suffix(rack_track);
             run_transition(
                 "group-to-rack-track",
@@ -8429,6 +10716,7 @@
                 &rack_suffix,
                 Some(rack_track),
                 None,
+                "",
                 &mut editor,
                 &mut app,
                 &mut frame_diff,
@@ -8441,6 +10729,7 @@
                 &group_select_suffix,
                 None,
                 Some(group_bus_idx),
+                "",
                 &mut editor,
                 &mut app,
                 &mut frame_diff,
@@ -8453,6 +10742,7 @@
                 &track_select_suffix(sampler_track),
                 Some(sampler_track),
                 None,
+                "",
                 &mut editor,
                 &mut app,
                 &mut frame_diff,
@@ -8465,12 +10755,14 @@
                 &track_select_suffix(plain_b),
                 Some(plain_b),
                 None,
+                "",
                 &mut editor,
                 &mut app,
                 &mut frame_diff,
                 &mut tile_retained,
                 &mut scenario_reports,
             );
+            }
 
             eprintln!(
                 "[{probe_prefix}-comparison] {}",
@@ -8503,6 +10795,24 @@
                     "[{probe_prefix}-{}] ceilings skipped",
                     if smoke { "smoke-mode" } else { "baseline-mode" }
                 );
+                return;
+            }
+            if drift_switch {
+                for report in &scenario_reports {
+                    let ceiling_ms = DRIFT_SWITCH_CEILINGS_MS
+                        .iter()
+                        .find(|(label, _)| *label == report.label)
+                        .map(|(_, ceiling)| *ceiling)
+                        .unwrap_or_else(|| {
+                            panic!("unknown drift-switch scenario {}", report.label)
+                        });
+                    assert!(
+                        report.median_ms < ceiling_ms,
+                        "{}: track-switch median {:.3}ms exceeded the {ceiling_ms:.0}ms ceiling",
+                        report.label,
+                        report.median_ms,
+                    );
+                }
                 return;
             }
             for report in &scenario_reports {
@@ -8680,8 +10990,8 @@
             struct TileRetained {
                 buffer_name: String,
                 viewport: eseqlisp::widget_render::WidgetViewport,
-                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
-                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
             }
             let mut tile_retained: Vec<TileRetained> = Vec::new();
             for tile in &initial_frame.tiles {
@@ -8702,13 +11012,13 @@
                     scroll_left: tile.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     layout,
                     viewport,
                     viewport.scroll_top,
                     vp_rows,
                 );
-                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                 tile_retained.push(TileRetained {
                     buffer_name: tile.frame.buffer_name.clone(),
                     viewport,
@@ -8747,7 +11057,7 @@
                     .filter(|primitive| {
                         matches!(
                             eseqlisp::widget_render::innermost_primitive(primitive),
-                            eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                            eseqlisp::widget_render::GpuPrimitive::WidgetInstance {
                                 widget_type,
                                 instance,
                                 ..
@@ -8844,7 +11154,7 @@
                     });
                     let tile_started = Instant::now();
                     let (_, stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
@@ -8872,14 +11182,14 @@
                         // scene in full (metal_backend.rs,
                         // refresh_widget_run_scene_for_dirty_layout). That
                         // real cost stays inside the timed region.
-                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
                             vp_rows,
                         );
                         entry.indices =
-                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                         entry.runs = runs;
                     }
                     tile_stats.push((
@@ -9204,14 +11514,14 @@
                 scroll_left: initial_seq_frame.frame.widget_layout_scroll_left,
                 inherited_hover: false,
             };
-            let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+            let (mut retained_runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                 initial_layout,
                 viewport,
                 viewport.scroll_top,
                 70,
             );
             let retained_run_indices =
-                eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+                eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
             let step_clipboard = Arc::new(Mutex::new(None));
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
             let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
@@ -9367,7 +11677,7 @@
                     .expect("sequencer layout after benchmark action");
                 let frame_done = Instant::now();
                 let (_, stats) =
-                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                    eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                         layout,
                         viewport,
                         viewport.scroll_top,
@@ -9852,14 +12162,14 @@
                     scroll_left: initial_fx_frame.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (mut retained_runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     initial_fx_layout,
                     initial_viewport,
                     initial_viewport.scroll_top,
                     70,
                 );
                 let retained_run_indices =
-                    eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+                    eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
 
                 let mut samples = RackMacroPerfSamples {
                     total: Vec::with_capacity(SAMPLES),
@@ -9961,7 +12271,7 @@
                         inherited_hover: false,
                     };
                     let (_, retained_stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             fx_layout,
                             viewport,
                             viewport.scroll_top,
@@ -10107,14 +12417,14 @@
                 inherited_hover: false,
             };
             let (mut direct_retained_runs, _) =
-                eseqlisp::widget_render::collect_metal_primitive_runs(
+                eseqlisp::widget_render::collect_gpu_primitive_runs(
                     initial_fx_layout,
                     initial_viewport,
                     initial_viewport.scroll_top,
                     70,
                 );
             let direct_retained_indices =
-                eseqlisp::widget_render::build_metal_primitive_run_index(&direct_retained_runs);
+                eseqlisp::widget_render::build_gpu_primitive_run_index(&direct_retained_runs);
             let mut direct_samples = RackMacroPerfSamples {
                 total: Vec::with_capacity(SAMPLES),
                 host: Vec::with_capacity(SAMPLES),
@@ -10237,7 +12547,7 @@
                     inherited_hover: false,
                 };
                 let (_, retained_stats) =
-                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                    eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                         fx_layout,
                         viewport,
                         viewport.scroll_top,
@@ -10423,14 +12733,14 @@
                     scroll_left: sequencer_frame.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (mut retained_runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     selected_layout,
                     viewport,
                     viewport.scroll_top,
                     70,
                 );
                 let retained_run_indices =
-                    eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+                    eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
                 let selected_step_frame = frame
                     .tiles
                     .iter()
@@ -10514,7 +12824,7 @@
                     .as_ref()
                     .expect("visible sequencer layout after Escape");
                 let (_, retained_stats) =
-                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                    eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                         deselected_layout,
                         viewport,
                         viewport.scroll_top,
@@ -10542,7 +12852,7 @@
                     .as_ref()
                     .expect("visible step layout after Escape");
                 let (deselected_step_runs, _) =
-                    eseqlisp::widget_render::collect_metal_primitive_runs(
+                    eseqlisp::widget_render::collect_gpu_primitive_runs(
                         deselected_step_layout,
                         step_viewport,
                         step_viewport.scroll_top,
@@ -10558,7 +12868,7 @@
                     .filter(|primitive| {
                         matches!(
                             eseqlisp::widget_render::innermost_primitive(primitive),
-                            eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                            eseqlisp::widget_render::GpuPrimitive::WidgetInstance {
                                 widget_type,
                                 instance,
                                 ..
@@ -11196,14 +13506,14 @@
             scroll_left: initial_arr_frame.frame.widget_layout_scroll_left,
             inherited_hover: false,
         };
-        let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+        let (mut retained_runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
             initial_layout,
             viewport,
             viewport.scroll_top,
             VIEW_H as u16,
         );
         let retained_run_indices =
-            eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+            eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
         // The arrangement tile's screen origin: widget layouts are
         // tile-content-local, while handle_mouse_precise takes screen cells.
         let tile_origin = (
@@ -11317,7 +13627,7 @@
                 .expect("arrangement layout after benchmark action");
             let frame_done = Instant::now();
             let (_, stats) =
-                eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                     layout,
                     viewport,
                     viewport.scroll_top,

@@ -29,16 +29,6 @@ impl Editor {
             (KeyCode::Char('w'), KeyModifiers::ALT, "copy-region"),
             (KeyCode::Char('y'), KeyModifiers::CONTROL, "yank"),
             (
-                KeyCode::Char('c'),
-                KeyModifiers::SUPER,
-                "copy-selection-to-clipboard",
-            ),
-            (
-                KeyCode::Char('v'),
-                KeyModifiers::SUPER,
-                "paste-from-clipboard",
-            ),
-            (
                 KeyCode::Char('k'),
                 KeyModifiers::CONTROL,
                 "delete-to-line-end",
@@ -68,6 +58,19 @@ impl Editor {
         for (code, mods, cmd) in binds {
             self.builtins
                 .insert(KeyEvent::new(*code, *mods), cmd.to_string());
+        }
+        for modifiers in crate::ui::platform::primary_clipboard_key_modifiers() {
+            for (code, command) in [
+                (KeyCode::Char('c'), "copy-selection-to-clipboard"),
+                (KeyCode::Char('v'), "paste-from-clipboard"),
+            ] {
+                let key = KeyEvent::new(code, modifiers);
+                self.builtins.insert(key, command.to_string());
+                // Linux uses Ctrl-Shift-C/V so conventional C-c chords remain
+                // available. Direct clipboard bindings still outrank prefixes.
+                self.default_lisp_bindings
+                    .insert(key_str(key), command.to_string());
+            }
         }
 
         // Tiling keybindings (C-x chords, registered as Lisp bindings)
@@ -321,23 +324,28 @@ impl Editor {
 }
 
 pub(super) fn key_str(key: KeyEvent) -> String {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let prefix = match (ctrl, alt) {
-        (true, true) => "C-M-",
-        (true, false) => "C-",
-        (false, true) => "M-",
-        (false, false) => "",
-    };
-    match key.code {
-        KeyCode::Char(c) => format!("{prefix}{}", c.to_ascii_lowercase()),
-        KeyCode::Enter => format!("{prefix}RET"),
-        KeyCode::Backspace => format!("{prefix}BS"),
+    let mut prefix = String::new();
+    for (modifier, name) in [
+        (KeyModifiers::CONTROL, "C-"),
+        (KeyModifiers::ALT, "M-"),
+        (KeyModifiers::SHIFT, "S-"),
+        (KeyModifiers::SUPER, "s-"),
+    ] {
+        if key.modifiers.contains(modifier) {
+            prefix.push_str(name);
+        }
+    }
+
+    let key_name = match key.code {
+        KeyCode::Char(c) => c.to_ascii_lowercase().to_string(),
+        KeyCode::Enter => "RET".to_string(),
+        KeyCode::Backspace => "BS".to_string(),
         KeyCode::Esc => "ESC".to_string(),
         KeyCode::Up => "UP".to_string(),
         KeyCode::Down => "DOWN".to_string(),
         KeyCode::Left => "LEFT".to_string(),
         KeyCode::Right => "RIGHT".to_string(),
         _ => format!("{:?}", key.code),
-    }
+    };
+    format!("{prefix}{key_name}")
 }

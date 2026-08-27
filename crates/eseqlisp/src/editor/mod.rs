@@ -5,9 +5,7 @@ pub(crate) mod widget_focus;
 mod widget_interaction;
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -97,7 +95,7 @@ fn metal_tile_content_viewport(
     let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
     let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
     let border_inset_px = if show_border {
-        border_width_px
+        crate::widget_render::ui_design_px(border_width_px)
             .max(0.0)
             .min(tile_width_px * 0.5)
             .min(tile_height_px * 0.5)
@@ -121,7 +119,7 @@ fn metal_tile_content_viewport_height_exact(
     let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
     let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
     let border_inset_px = if show_border {
-        border_width_px
+        crate::widget_render::ui_design_px(border_width_px)
             .max(0.0)
             .min(tile_width_px * 0.5)
             .min(tile_height_px * 0.5)
@@ -1121,7 +1119,8 @@ impl Editor {
     pub fn update_tile_rects(&mut self, total_width: u16, total_height: u16) {
         self.cached_tiled_frame_size = Some((total_width as f32, total_height as f32));
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
-        let horizontal_margin = (self.tile_outer_gap.max(0.0) * TILE_GAP_PX_PER_UNIT
+        let horizontal_margin = (self.tile_outer_gap.max(0.0)
+            * crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT)
             / cell_w.max(1.0))
         .min(total_width as f32 * 0.5);
         let area = Rect {
@@ -1134,9 +1133,12 @@ impl Editor {
         // Enforce min-size constraints before computing rects
         Self::enforce_min_sizes_node(&mut self.tile_root, area, cell_w, cell_h);
         let old_rects = std::mem::take(&mut self.cached_tile_rects);
-        self.cached_tile_rects =
-            self.tile_root
-                .compute_rects(area, TILE_GAP_PX_PER_UNIT, cell_w, cell_h);
+        self.cached_tile_rects = self.tile_root.compute_rects(
+            area,
+            crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT),
+            cell_w,
+            cell_h,
+        );
         let viewport_sizes: Vec<(TileId, f32, f32)> = self
             .cached_tile_rects
             .iter()
@@ -1936,7 +1938,13 @@ impl Editor {
             }
         }
         let gap =
-            crate::tile::gap_to_cells(split.dir, split.gap, TILE_GAP_PX_PER_UNIT, cell_w, cell_h);
+            crate::tile::gap_to_cells(
+                split.dir,
+                split.gap,
+                crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT),
+                cell_w,
+                cell_h,
+            );
         let (a_rect, b_rect) = crate::tile::split_rect(area, split.dir, split.ratio, gap);
         Self::enforce_min_sizes_node(&mut split.a, a_rect, cell_w, cell_h);
         Self::enforce_min_sizes_node(&mut split.b, b_rect, cell_w, cell_h);
@@ -2807,8 +2815,10 @@ impl Editor {
             return (0.0, 0.0);
         }
         (
-            leaf.border_width_px.max(0.0) / cell_w.max(1.0),
-            leaf.border_width_px.max(0.0) / cell_h.max(1.0),
+            crate::widget_render::ui_design_px(leaf.border_width_px.max(0.0))
+                / cell_w.max(1.0),
+            crate::widget_render::ui_design_px(leaf.border_width_px.max(0.0))
+                / cell_h.max(1.0),
         )
     }
 
@@ -3020,7 +3030,10 @@ impl Editor {
         if switched {
             self.switch_active_tile_with_viewport(tile_id, target_viewport);
         } else if let Some((width, height)) = target_viewport {
-            self.set_layout_viewport_exact(width, height);
+            // Deferring: this runs once per raw event, and settling a pending
+            // invalidation here would rebuild the whole layout for every event
+            // in a scroll burst (eseq-pzp).
+            self.set_layout_viewport_exact_deferring(width, height);
         }
 
         let result = f(self);
@@ -3076,7 +3089,7 @@ impl Editor {
             precise_col,
             precise_row,
             tolerance,
-            TILE_GAP_PX_PER_UNIT,
+            crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT),
             cell_w,
             cell_h,
         ) else {
@@ -3176,7 +3189,7 @@ impl Editor {
             precise_col,
             precise_row,
             tolerance,
-            TILE_GAP_PX_PER_UNIT,
+            crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT),
             cell_w,
             cell_h,
         )
@@ -3329,6 +3342,14 @@ impl Editor {
 
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    /// Quit immediately, matching the macOS behavior when the window closes.
+    /// Used by the app shell when the window system requests a close.
+    pub fn request_quit(&mut self) {
+        self.completion = None;
+        self.should_quit = true;
+        self.last_exit = EditorExit::Closed;
     }
 
     pub fn clear_quit_request(&mut self) {
@@ -4262,6 +4283,18 @@ impl Editor {
     }
 
     pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
+        self.set_layout_viewport_exact_inner(cols, rows, true);
+    }
+
+    /// `set_layout_viewport_exact` that leaves a pending deferred layout
+    /// invalidation pending (see
+    /// `Runtime::set_layout_viewport_exact_deferring`). Used by input routing,
+    /// which runs once per raw event.
+    pub fn set_layout_viewport_exact_deferring(&mut self, cols: f32, rows: f32) {
+        self.set_layout_viewport_exact_inner(cols, rows, false);
+    }
+
+    fn set_layout_viewport_exact_inner(&mut self, cols: f32, rows: f32, settle_deferred: bool) {
         let cols = cols.max(1.0);
         let rows = rows.max(1.0);
         let runtime_viewport_matches = self.runtime.current_layout.is_some()
@@ -4292,7 +4325,11 @@ impl Editor {
             self.sync_layout_to_active_leaf();
             return;
         }
-        self.runtime.set_layout_viewport_exact(cols, rows);
+        if settle_deferred {
+            self.runtime.set_layout_viewport_exact(cols, rows);
+        } else {
+            self.runtime.set_layout_viewport_exact_deferring(cols, rows);
+        }
         self.position_inline_widget_layout(cols);
         self.sync_layout_to_active_leaf();
     }
@@ -4331,6 +4368,21 @@ impl Editor {
 
     pub fn layout_cell_dims(&self) -> (f32, f32) {
         self.runtime.layout_cell_dims()
+    }
+
+    pub fn set_layout_cell_dimensions(&mut self, cell_w: f32, cell_h: f32) {
+        if !cell_w.is_finite() || !cell_h.is_finite() || cell_w <= 0.0 || cell_h <= 0.0 {
+            return;
+        }
+        let old_dims = self.runtime.layout_cell_dims();
+        if (old_dims.0 - cell_w).abs() < f32::EPSILON
+            && (old_dims.1 - cell_h).abs() < f32::EPSILON
+        {
+            return;
+        }
+        self.runtime.set_layout_cell_dimensions(cell_w, cell_h);
+        self.sync_layout_to_active_leaf();
+        self.refresh_all_inactive_tile_layouts();
     }
 
     pub fn set_text_measurer(
@@ -8851,6 +8903,13 @@ impl Editor {
             self.mark_needs_redraw();
         }
 
+        // Generation-guarded: no-op unless the theme changed since the last
+        // pass. Catches every path that bumps the theme generation (apply-theme
+        // above, direct reactive THEME.* writes), not just the drain.
+        if crate::runtime::recompile_theme_dependent_sdf_shaders() {
+            self.mark_needs_redraw();
+        }
+
         if self.runtime.take_pending_cycle_view_mode() {
             self.toggle_active_buffer_view_mode();
         }
@@ -9376,25 +9435,7 @@ impl Editor {
             return Ok(());
         }
 
-        let mut child = Command::new("pbcopy")
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("failed to start pbcopy: {error}"))?;
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "failed to open pbcopy stdin".to_string())?;
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|error| format!("failed to write to pbcopy: {error}"))?;
-        let status = child
-            .wait()
-            .map_err(|error| format!("failed to wait for pbcopy: {error}"))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("pbcopy exited with {status}"))
-        }
+        crate::clipboard::write(text)
     }
 
     fn read_system_clipboard(&mut self) -> Result<String, String> {
@@ -9403,14 +9444,7 @@ impl Editor {
             return Ok(text.clone());
         }
 
-        let output = Command::new("pbpaste")
-            .output()
-            .map_err(|error| format!("failed to start pbpaste: {error}"))?;
-        if !output.status.success() {
-            return Err(format!("pbpaste exited with {}", output.status));
-        }
-        String::from_utf8(output.stdout)
-            .map_err(|error| format!("clipboard did not contain UTF-8 text: {error}"))
+        crate::clipboard::read()
     }
 
     #[cfg(test)]

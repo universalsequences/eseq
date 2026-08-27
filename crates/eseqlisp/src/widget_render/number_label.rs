@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{
-    CellBuffer, MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive,
+    CellBuffer, GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive,
     WidgetDefinition, get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -180,13 +180,12 @@ impl WidgetDefinition for NumberLabelWidget {
         tui_render(props, rect, buf);
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &crate::layout::LayoutNode,
         viewport: super::WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let fg = resolve_color(&node.props);
         let bg = if viewport.focused_branch {
             theme::WIDGET_FOCUS_BG()
@@ -196,13 +195,13 @@ impl WidgetDefinition for NumberLabelWidget {
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
         let mut prims = Vec::new();
         if !bg_is_transparent(&node.props) {
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: node.rect,
                 color: bg,
             }));
         }
-        prims.push(MetalPrimitive::ProportionalText(
-            MetalProportionalTextPrimitive {
+        prims.push(GpuPrimitive::ProportionalText(
+            GpuProportionalTextPrimitive {
                 row: text_row(&node.props, node.rect),
                 col: node.rect.col,
                 align_width: node.rect.width,

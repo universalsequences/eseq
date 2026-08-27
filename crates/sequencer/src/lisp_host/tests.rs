@@ -4520,6 +4520,48 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
     }
 
+    const DGEN_ABI_SECTION_START: &str = "typedef void *DGenFFTSetupV1;";
+    const DGEN_ABI_SECTION_END: &str =
+        "DGEN_EXPORT void dgen_set_param_value_v1(int32_t cell_id, float value);";
+
+    fn dgen_abi_section(header: &str) -> Result<&str, &'static str> {
+        let start = header
+            .find(DGEN_ABI_SECTION_START)
+            .ok_or("ABI section start marker is missing")?;
+        let end = header[start..]
+            .find(DGEN_ABI_SECTION_END)
+            .map(|offset| start + offset + DGEN_ABI_SECTION_END.len())
+            .ok_or("ABI section end marker is missing after its start marker")?;
+        Ok(&header[start..end])
+    }
+
+    #[test]
+    fn dgen_abi_section_hash_ignores_target_specific_intrinsics() {
+        use sha2::{Digest, Sha256};
+
+        let abi = format!(
+            "{DGEN_ABI_SECTION_START}\ntypedef struct {{ uint32_t size; }} DGenExampleV1;\n\
+             {DGEN_ABI_SECTION_END}"
+        );
+        let mac_header = format!("#include <arm_neon.h>\n{abi}\n#define DGEN_BARRIER()\n");
+        let linux_header = format!(
+            "#include \"dgen_simd_compat.h\"\n{abi}\n#define DGEN_BARRIER() asm volatile(\"\")\n"
+        );
+
+        let mac_section = dgen_abi_section(&mac_header).expect("mac ABI section");
+        let linux_section = dgen_abi_section(&linux_header).expect("Linux ABI section");
+        assert_eq!(Sha256::digest(mac_section), Sha256::digest(linux_section));
+
+        let changed_abi_header = linux_header.replace("uint32_t size", "uint64_t size");
+        let changed_section =
+            dgen_abi_section(&changed_abi_header).expect("changed ABI section");
+        assert_ne!(
+            Sha256::digest(linux_section),
+            Sha256::digest(changed_section),
+            "changes inside the vendored ABI must still be detected"
+        );
+    }
+
     #[test]
     fn vendored_dgen_abi_header_matches_staged_toolchain_header() {
         use sha2::{Digest, Sha256};
@@ -4537,19 +4579,32 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let staged_path = crate::app_paths::app_paths()
             .dgen_toolchain_root()
             .join("include/dgen_runtime.h");
-        let staged = std::fs::read(&staged_path).unwrap_or_else(|e| {
+        let staged = std::fs::read_to_string(&staged_path).unwrap_or_else(|e| {
             panic!(
                 "read staged toolchain header {}: {e} (run rebuild_dgenlisp_tool.sh \
                  to stage the vendored toolchain)",
                 staged_path.display()
             )
         });
-        let staged_sha = format!("{:x}", Sha256::digest(&staged));
+
+        // Hash only the ABI section dgen_abi_v1.h actually vendors, not the
+        // whole upstream header: its math/intrinsics section is per-target
+        // (arm_neon.h on the mac stage, dgen_simd_compat.h on the Linux one)
+        // and one whole-file hash cannot satisfy both pins.
+        let staged_section = dgen_abi_section(&staged).unwrap_or_else(|error| {
+            panic!(
+                "staged header {} cannot identify its vendored ABI section: \
+                 {error}; re-vendor audiograph/dgen_abi_v1.h and update its \
+                 section markers and Source-sha256 comment",
+                staged_path.display()
+            )
+        });
+        let staged_sha = format!("{:x}", Sha256::digest(staged_section.as_bytes()));
         assert_eq!(
             staged_sha, recorded_sha,
-            "staged include/dgen_runtime.h drifted from the recorded hash — \
-             re-vendor audiograph/dgen_abi_v1.h from the staged header's ABI \
-             section and update its Source-sha256 comment"
+            "the staged include/dgen_runtime.h ABI section drifted from the \
+             recorded hash — re-vendor audiograph/dgen_abi_v1.h from the staged \
+             header's ABI section and update its Source-sha256 comment"
         );
     }
 
@@ -13687,6 +13742,200 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
         assert_eq!(first.peak, second.peak);
         assert_eq!(first.rms, second.rms);
+    }
+
+    /// Numeric end-to-end pin for the FFT backend generated spectral code runs
+    /// on (eseq-linux.40).
+    ///
+    /// `dgen_host_services_tests` pins each of the four host callbacks against
+    /// an f64 reference DFT, and
+    /// `spectral_effect_renders_finite_nonzero_audio_through_host_services`
+    /// proves a real generated `.so` renders finite, nonzero, repeatable audio.
+    /// Neither sees a scaling or bin-ordering error that only exists once
+    /// generated code *composes* those callbacks: one lazily created setup per
+    /// call site, hop-gated overlap-add, the partitioned complex MAC, and the
+    /// gain compensation codegen bakes in against vDSP's unscaled convention.
+    /// That composition is what changes when the backend does — vDSP on Apple,
+    /// rustfft elsewhere (eseq-linux.78) — and it fails as wrong gain or a
+    /// wrong spectrum, not as a crash. So this asserts the samples, against a
+    /// reference that is neither backend: a closed form evaluated in f64.
+    #[test]
+    fn spectral_partitioned_convolution_matches_closed_form() {
+        const N: usize = 16;
+        const HOP: usize = 8;
+        const GAIN: f64 = 0.5;
+        /// One IR tap per partition, each at its partition's first sample. That
+        /// is what collapses the STFT into the closed form below: every tap
+        /// shifts a frame by a whole hop, so the analysis and synthesis windows
+        /// stay aligned and factor out of the sum.
+        const PARTITION_WEIGHTS: [f64; 4] = [1.0, 0.35, 0.15, 0.05];
+        /// Algorithmic delay of the operator, measured from its own output and
+        /// pinned here: a backend swap that moved the whole result in time
+        /// would leave every individual sample's magnitude untouched.
+        const LATENCY: usize = N - 1;
+        const SAMPLE_RATE: u32 = 48_000;
+        /// A whole multiple of @hop, so every block boundary is a hop boundary
+        /// and the wet arm is never gated off (eseq-linux.73).
+        const BLOCK: usize = 128;
+        const FRAMES: usize = 4096;
+        /// The tolerance the dgen fixtures use. Measured on x86_64 Linux
+        /// 2026-08-26 (rustfft backend): worst error 5.2e-8, ~390x inside it.
+        /// The `misaligned` guard below keeps that from being vacuous — one
+        /// frame of slip costs 1.0e-2, five orders of magnitude more.
+        const TOLERANCE: f64 = 2.0e-5;
+
+        let source = r#"
+            (def dry_l (in 1 @name Left))
+            (def dry_r (in 2 @name Right))
+            (def impulse (tensor @shape [32] @data [
+              1 0 0 0 0 0 0 0
+              0.35 0 0 0 0 0 0 0
+              0.15 0 0 0 0 0 0 0
+              0.05 0 0 0 0 0 0 0]))
+            (out (partitioned-convolve dry_l impulse @N 16 @hop 8 @gain 0.5) 1 @name Left)
+            (out (partitioned-convolve dry_r impulse @N 16 @hop 8 @gain 0.5) 2 @name Right)
+        "#;
+
+        let options = super::EffectRenderOptions {
+            sample_rate: SAMPLE_RATE,
+            block_size: BLOCK,
+            frames: FRAMES,
+            param_overrides: Vec::new(),
+            param_events: Vec::new(),
+            input_tones: Vec::new(),
+            tensor_overrides: Vec::new(),
+            input_overrides: Vec::new(),
+        };
+
+        // Each generated image owns function-local, lazily initialized FFT
+        // setups. Compile distinct images so neither one can inherit a setup
+        // created by the other table during load-time prewarming.
+        let shipped = super::compile_and_load(source, SAMPLE_RATE)
+            .expect("spectral effect should compile against the shipped table");
+        let shipped_report = super::render_loaded_effect_for_test(
+            &shipped.manifest,
+            &shipped.lib,
+            &options,
+        )
+        .expect("spectral effect should render against the shipped table");
+
+        let portable_table = super::dgen_portable_host_services_v1();
+        let portable = super::compile_and_load_uncached_with_host_services(
+            source,
+            SAMPLE_RATE,
+            None,
+            portable_table,
+        )
+        .expect("spectral effect should compile against the portable table");
+        let portable_report = super::render_loaded_effect_for_test_with_host_services(
+            &portable.manifest,
+            &portable.lib,
+            &options,
+            portable_table,
+        )
+        .expect("spectral effect should render against the portable table");
+
+        let reports = [
+            ("shipped", shipped_report),
+            ("portable C", portable_report),
+        ];
+
+        // The probe signal `render_effect_source_for_test` feeds when no tones
+        // or overrides are set, recomputed in the same f32 arithmetic so the
+        // reference differs from the render only by the convolution. With no
+        // param events every block starts at its own frame index, so the
+        // harness's per-block `t` is just `frame / sample_rate`.
+        let probe = |frame: usize| -> (f32, f32) {
+            let t = frame as f32 / SAMPLE_RATE as f32;
+            let impulse = if frame == 0 { 0.45 } else { 0.0 };
+            let burst_env = (1.0 - (t * 4.0)).max(0.0);
+            let left = impulse
+                + 0.18
+                    * burst_env
+                    * ((2.0 * std::f32::consts::PI * 220.0 * t).sin()
+                        + 0.5 * (2.0 * std::f32::consts::PI * 997.0 * t).sin());
+            let right = 0.12
+                * burst_env
+                * ((2.0 * std::f32::consts::PI * 330.0 * t).sin()
+                    + 0.5 * (2.0 * std::f32::consts::PI * 1409.0 * t).sin());
+            (left, right)
+        };
+
+        // Overlap-add envelope: the operator windows each frame on both
+        // analysis and synthesis, and hann^2 at 50% overlap does *not* sum to
+        // unity, so the steady-state gain is periodic in `HOP` rather than
+        // flat. Building it from the window definition rather than from
+        // measured numbers is what makes this a reference and not a snapshot.
+        let hann = |t: usize| -> f64 {
+            0.5 * (1.0 - (2.0 * std::f64::consts::PI * t as f64 / N as f64).cos())
+        };
+        let envelope: Vec<f64> = (0..HOP)
+            .map(|phase| {
+                (phase..N)
+                    .step_by(HOP)
+                    .map(|t| hann(t) * hann(t))
+                    .sum::<f64>()
+            })
+            .collect();
+
+        // Each tap sits at the head of its own partition, so the windows factor
+        // out and the whole chain reduces to
+        //   y[n] = gain * envelope[n % hop] * sum_k w_k * x[n - k*hop - latency]
+        let reference = |frame: usize, channel: usize, latency: usize| -> f64 {
+            let mut acc = 0.0f64;
+            for (partition, weight) in PARTITION_WEIGHTS.iter().enumerate() {
+                // `first_steady` below keeps every tap in range; underflowing
+                // here would mean the skip is wrong, so let it panic rather
+                // than fold a NaN into a `max` that would quietly drop it.
+                let source_frame = frame - (partition * HOP + latency);
+                let (left, right) = probe(source_frame);
+                acc += weight * if channel == 0 { left } else { right } as f64;
+            }
+            GAIN * envelope[frame % HOP] * acc
+        };
+
+        // Worst absolute error over the steady region, skipping the ramp-in
+        // where the partition history is still filling.
+        let worst_error = |report: &super::EffectRenderReport, latency: usize| -> f64 {
+            let first_steady = (PARTITION_WEIGHTS.len() - 1) * HOP + latency + N;
+            let mut worst = 0.0f64;
+            for frame in first_steady..FRAMES {
+                for channel in 0..2 {
+                    let rendered = report.samples[frame * 2 + channel] as f64;
+                    worst = worst.max((rendered - reference(frame, channel, latency)).abs());
+                }
+            }
+            worst
+        };
+
+        for (backend, report) in &reports {
+            let error = worst_error(report, LATENCY);
+            assert!(
+                error <= TOLERANCE,
+                "{backend} partitioned convolution disagrees with its closed form by {error:e} \
+                 (tolerance {TOLERANCE:e}); peak={}, rms={}",
+                report.peak,
+                report.rms,
+            );
+
+            // The tolerance only means something if it is tight enough to
+            // reject a wrong alignment, which is how a bin-ordering error
+            // surfaces.
+            let misaligned = worst_error(report, LATENCY + 1)
+                .min(worst_error(report, LATENCY - 1));
+            assert!(
+                misaligned > TOLERANCE * 100.0,
+                "a one-frame {backend} misalignment must land far outside the tolerance, \
+                 got {misaligned:e}"
+            );
+
+            // And only on audio that is actually there.
+            assert!(
+                report.peak > 0.1,
+                "{backend} spectral output must carry the convolved probe, peak={}",
+                report.peak
+            );
+        }
     }
 
     #[test]

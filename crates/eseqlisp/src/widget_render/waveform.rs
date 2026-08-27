@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-#[cfg(target_os = "macos")]
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
@@ -11,10 +10,9 @@ use super::{
     resolve_named_color, styled_cell,
     time_view::{TimeRuler, TimeRulerMode, TimeViewport},
 };
-#[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive,
-    MetalTrianglePrimitive, MetalWaveformPrimitive,
+    GpuPrimitive, GpuProportionalTextPrimitive, GpuQuadPrimitive, GpuRectPrimitive,
+    GpuTrianglePrimitive, GpuWaveformPrimitive,
 };
 use crate::audio::sample::{
     MinMaxPair as WaveformBucket, SampleBuffer, WaveformMipLevel as WaveformLevel,
@@ -493,19 +491,17 @@ impl WidgetDefinition for WaveformWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: super::WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
-        build_metal_primitives(node)
+    ) -> Vec<GpuPrimitive> {
+        build_primitives(node)
     }
 }
 
-#[cfg(target_os = "macos")]
-fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
+fn build_primitives(node: &LayoutNode) -> Vec<GpuPrimitive> {
     if node.widget_type != "waveform" {
         return Vec::new();
     }
@@ -519,7 +515,7 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
     }
 
     let mut primitives = Vec::new();
-    primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+    primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
         rect,
         color: theme::BG(),
     }));
@@ -537,13 +533,13 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
     );
     let bg_color = super::resolve_named_color(&node.props, "bg", theme::BG());
 
-    primitives[0] = MetalPrimitive::Rect(MetalRectPrimitive {
+    primitives[0] = GpuPrimitive::Rect(GpuRectPrimitive {
         rect,
         color: bg_color,
     });
 
     if view.header_height > 0.0 {
-        primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+        primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
             rect: Rect {
                 row: rect.row,
                 col: rect.col,
@@ -556,7 +552,7 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             .time_viewport()
             .metal_grid_lines(view.time_ruler.as_ref())
         {
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: x - 0.0625,
                 y: rect.row,
                 width: 0.125,
@@ -569,8 +565,8 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             }));
         }
         for (absolute_col, label) in view.time_ruler_labels() {
-            primitives.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            primitives.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: metal_header_text_row(rect, view.header_height),
                     col: absolute_col as f32 + 0.5,
                     align_width: 0.0,
@@ -589,7 +585,7 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         .time_viewport()
         .metal_grid_lines(view.time_ruler.as_ref())
     {
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
             x: x - 0.0625,
             y: content.row,
             width: 0.125,
@@ -608,7 +604,7 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         if end > start {
             let mut color = active_marker_color(&node.props);
             color.a *= 0.14;
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: view.x_for_time(start),
                 y: content.row,
                 width: (view.x_for_time(end) - view.x_for_time(start)).max(0.0),
@@ -626,7 +622,7 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         let has_selection = view.selection_range().is_some();
         let playhead = view.normalized_playhead();
         let level = view.best_level(buffer);
-        primitives.push(MetalPrimitive::Waveform(MetalWaveformPrimitive {
+        primitives.push(GpuPrimitive::Waveform(GpuWaveformPrimitive {
             rect: waveform_rect,
             sample_key: buffer.sample.cache_key(),
             sample_start: (view.view_start / buffer.sample.duration_seconds).clamp(0.0, 1.0) as f32,
@@ -661,7 +657,7 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             marker_color(&node.props)
         };
         let x = view.x_for_time(time);
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
             x: x - 0.0625,
             y: content.row,
             width: 0.125,
@@ -669,7 +665,7 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             color,
         }));
         let flag_height = SLICE_FLAG_HEIGHT.min(content.height);
-        primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+        primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
             points: [
                 [x - SLICE_FLAG_HALF_WIDTH, content.row],
                 [x + SLICE_FLAG_HALF_WIDTH, content.row],
@@ -682,7 +678,6 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
     primitives
 }
 
-#[cfg(target_os = "macos")]
 fn metal_header_text_row(rect: Rect, header_height: f32) -> f32 {
     let usable_header_height = header_height.min(rect.height).max(0.0);
     rect.row + ((usable_header_height - 1.0) / 2.0).max(0.0)
@@ -1378,7 +1373,6 @@ impl WaveformView {
         Some(self.waveform_rows(min, max))
     }
 
-    #[cfg(target_os = "macos")]
     fn normalized_selection(&self) -> Option<(f32, f32)> {
         let (start, end) = self.selection_range()?;
         let view_end = self.view_start + self.view_duration;
@@ -1390,7 +1384,6 @@ impl WaveformView {
         Some((norm(start.min(end)), norm(start.max(end))))
     }
 
-    #[cfg(target_os = "macos")]
     fn normalized_playhead(&self) -> Option<f32> {
         let time = self.playhead_time.or(self.cursor_time)?;
         if time < self.view_start || time > self.view_start + self.view_duration {

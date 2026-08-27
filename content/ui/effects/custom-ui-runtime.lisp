@@ -65,13 +65,13 @@
 ;; codegen writes (the custom-ui-sections precedent).
 
 (def inst-param (inst name)
-  (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
+  (find-by-key (get inst :synth) :name name))
 
 (def inst-tensor-param (inst name)
-  (nth (filter |p| (= (get p :name) name) (get inst :tensors)) 0))
+  (find-by-key (get inst :tensors) :name name))
 
 (def inst-base-note-param (inst)
-  (nth (filter |p| (= (get p :control) "base-note") (get inst :synth)) 0))
+  (find-by-key (get inst :synth) :control "base-note"))
 
 (def inst-param-row (inst name key)
   (let ((p (inst-param inst name)))

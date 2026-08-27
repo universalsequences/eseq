@@ -2,12 +2,19 @@
 #include "graph_edit.h"
 #include "graph_nodes.h"
 #include <assert.h>
+#include <errno.h>
 #include <math.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
+#if defined(__x86_64__) || defined(__i386__)
+#include <pmmintrin.h>
+#endif
 
 // On Apple platforms, enable QoS hints for worker threads to reduce jitter.
 #ifdef __APPLE__
@@ -68,6 +75,13 @@ _Atomic uint64_t g_block_event_push_fail_count = 0;
 #define AUDIOGRAPH_WORKER_WAIT_TIMEOUT_US 50
 #endif
 
+// RealtimeKit requires RLIMIT_RTTIME and Linux kills the entire process when an
+// SCHED_RR thread consumes that much CPU without a blocking syscall. Keep the
+// checkpoint far below RealtimeKit's usual 200 ms ceiling.
+#ifndef AUDIOGRAPH_RTKIT_CHECKPOINT_INTERVAL_NS
+#define AUDIOGRAPH_RTKIT_CHECKPOINT_INTERVAL_NS 1000000ull
+#endif
+
 // Watchlist snapshots are useful for UI polling, but copying all watched node
 // state every audio callback can be expensive. Direct process_live_block()
 // callers still update every call; process_next_block() throttles snapshots.
@@ -80,6 +94,48 @@ _Atomic uint64_t g_block_event_push_fail_count = 0;
 #endif
 
 static _Atomic int g_active_job_count = 0;
+#ifdef __linux__
+static EngineRtKitWorkerHook g_rtkit_worker_hook = NULL;
+static EngineRtKitCallbackHook g_rtkit_callback_hook = NULL;
+static _Atomic int g_rt_permission_warning_logged = 0;
+static __thread uint64_t g_last_rtkit_checkpoint_ns = 0;
+
+static inline int base_linux_scheduling_policy(int policy) {
+#ifdef SCHED_RESET_ON_FORK
+  return policy & ~SCHED_RESET_ON_FORK;
+#else
+  return policy;
+#endif
+}
+
+static inline void checkpoint_rtkit_cpu_budget(int policy) {
+  if (base_linux_scheduling_policy(policy) != SCHED_RR)
+    return;
+
+  uint64_t now_ns = nsec_now();
+  if (g_last_rtkit_checkpoint_ns == 0) {
+    g_last_rtkit_checkpoint_ns = now_ns;
+    return;
+  }
+  if (now_ns - g_last_rtkit_checkpoint_ns <
+      AUDIOGRAPH_RTKIT_CHECKPOINT_INTERVAL_NS) {
+    return;
+  }
+
+  // A positive nanosleep is a blocking syscall even at this deliberately tiny
+  // duration. Besides yielding to the other graph threads, it resets Linux's
+  // RLIMIT_RTTIME accounting. This is only used for RealtimeKit's SCHED_RR;
+  // direct SCHED_FIFO scheduling retains its existing hot path.
+  struct timespec request = {.tv_sec = 0, .tv_nsec = 1};
+  struct timespec remaining;
+  int result;
+  while ((result = nanosleep(&request, &remaining)) != 0 && errno == EINTR) {
+    request = remaining;
+  }
+  if (result == 0)
+    g_last_rtkit_checkpoint_ns = nsec_now();
+}
+#endif
 static _Atomic uint64_t g_stall_recovery_count = 0;
 static _Atomic uint64_t g_graph_trace_block_counter = 0;
 static _Atomic uint32_t g_graph_trace_silent_streak = 0;
@@ -203,7 +259,15 @@ void initialize_engine(int block_Size, int sample_rate) {
   atomic_store_explicit(&g_engine.oswg_join_pending, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.oswg_join_remaining, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.oswg_version, 0, memory_order_relaxed);
-  atomic_store_explicit(&g_engine.rt_time_constraint, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.rt_scheduling, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.rt_priority, 20, memory_order_relaxed);
+  g_engine.workerPolicies = NULL;
+  g_engine.workerPriorities = NULL;
+  atomic_store_explicit(&g_engine.workerStartupCount, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPolicy, ENGINE_SCHED_POLICY_UNKNOWN,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPriority, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackReported, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.graph_log, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.activeWorkerLimit, 0, memory_order_relaxed);
   atomic_store_explicit(&g_active_job_count, 0, memory_order_relaxed);
@@ -537,13 +601,203 @@ static void wait_for_block_start_or_shutdown(void) {
   pthread_mutex_unlock(&g_engine.sess_mtx);
 }
 
+#ifdef __linux__
+// Shared SCHED_FIFO promotion for the graph workers and the audio callback
+// thread that drives them. `priority_boost` is added to the configured base
+// priority before clamping to the platform range: workers use 0, the callback
+// thread uses +1 so the thread that publishes each block (and helps drain the
+// graph in process_next_block) is never preempted by its own helpers.
+// Returns true only when direct promotion was permission-denied and the
+// caller should ask the Rust RealtimeKit helper for SCHED_RR instead.
+static bool promote_current_linux_thread_to_fifo(int priority_boost,
+                                                 const char *role,
+                                                 int *requested_priority) {
+  if (!atomic_load_explicit(&g_engine.rt_scheduling, memory_order_acquire)) {
+    return false;
+  }
+
+  int min_priority = sched_get_priority_min(SCHED_FIFO);
+  int max_priority = sched_get_priority_max(SCHED_FIFO);
+  if (min_priority < 0 || max_priority < 0) {
+    int err = errno;
+    fprintf(stderr,
+            "[audiograph] WARN: cannot query SCHED_FIFO priority range: %s "
+            "(%s remains normal priority)\n",
+            strerror(err), role);
+    return false;
+  }
+
+  int requested =
+      atomic_load_explicit(&g_engine.rt_priority, memory_order_acquire) +
+      priority_boost;
+  int priority = requested;
+  if (priority < min_priority)
+    priority = min_priority;
+  if (priority > max_priority)
+    priority = max_priority;
+
+  struct sched_param policy = {.sched_priority = priority};
+  *requested_priority = priority;
+  int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &policy);
+  if (rc != 0) {
+    if (rc == EPERM || rc == EACCES) {
+      return true;
+    } else {
+      fprintf(stderr,
+              "[audiograph] WARN: pthread_setschedparam(SCHED_FIFO, %d) "
+              "failed: %s (%s remains normal priority)\n",
+              priority, strerror(rc), role);
+    }
+    return false;
+  }
+
+  if (atomic_load_explicit(&g_engine.rt_log, memory_order_relaxed)) {
+    fprintf(stderr,
+            "[audiograph] %s %p set SCHED_FIFO priority %d%s\n",
+            role, (void *)pthread_self(), priority,
+            priority == requested ? "" : " (clamped to platform range)");
+  }
+  return false;
+}
+
+static void read_current_linux_scheduling(int *policy, int *priority,
+                                          const char *role) {
+  struct sched_param param = {.sched_priority = 0};
+  int observed_policy = SCHED_OTHER;
+  int rc = pthread_getschedparam(pthread_self(), &observed_policy, &param);
+  if (rc != 0) {
+    fprintf(stderr,
+            "[audiograph] WARN: cannot read achieved scheduling for %s: %s\n",
+            role, strerror(rc));
+    *policy = ENGINE_SCHED_POLICY_UNKNOWN;
+    *priority = 0;
+    return;
+  }
+  *policy = base_linux_scheduling_policy(observed_policy);
+  *priority = param.sched_priority;
+}
+
+void engine_set_rtkit_hooks(EngineRtKitWorkerHook worker_hook,
+                            EngineRtKitCallbackHook callback_hook) {
+  // Registered by the control thread before workers or the callback can run.
+  g_rtkit_worker_hook = worker_hook;
+  g_rtkit_callback_hook = callback_hook;
+}
+
+static void warn_realtime_unavailable_without_host(void) {
+  int expected = 0;
+  if (atomic_compare_exchange_strong_explicit(
+          &g_rt_permission_warning_logged, &expected, 1, memory_order_acq_rel,
+          memory_order_relaxed)) {
+    fprintf(stderr,
+            "[audiograph] WARN: direct SCHED_FIFO promotion was denied and "
+            "no host RealtimeKit fallback is registered; audio continues at "
+            "normal priority\n");
+  }
+}
+
+void engine_record_rtkit_callback_result(pid_t tid) {
+  struct sched_param param = {.sched_priority = 0};
+  int policy = sched_getscheduler(tid);
+  if (policy < 0 || sched_getparam(tid, &param) != 0) {
+    policy = ENGINE_SCHED_POLICY_UNKNOWN;
+    param.sched_priority = 0;
+  } else {
+    policy = base_linux_scheduling_policy(policy);
+  }
+  atomic_store_explicit(&g_engine.callbackPolicy, policy, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPriority, param.sched_priority,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackReported, 1, memory_order_release);
+}
+
+static void promote_linux_worker_to_realtime(void) {
+  int requested_priority = 0;
+  if (promote_current_linux_thread_to_fifo(0, "worker", &requested_priority)) {
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    if (g_rtkit_worker_hook)
+      (void)g_rtkit_worker_hook(tid, requested_priority);
+    else
+      warn_realtime_unavailable_without_host();
+  }
+}
+#endif
+
+void engine_promote_current_thread_rt(void) {
+#ifdef __linux__
+  // cpal's ALSA backend spawns the callback thread with default scheduling
+  // and no thread-spawn hook, so the callback promotes itself on first entry.
+  // Without this the workers run SCHED_FIFO while the thread that drives the
+  // block stays SCHED_OTHER — priority inversion in the audio path.
+  int requested_priority = 0;
+  bool rtkit_needed = promote_current_linux_thread_to_fifo(
+      1, "audio callback thread", &requested_priority);
+  if (rtkit_needed) {
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    if (g_rtkit_callback_hook) {
+      // Mark the result pending BEFORE handing the TID to the helper. This
+      // thread is still SCHED_OTHER here, so it can be preempted between the
+      // hook call and any later store for longer than the helper's poll plus
+      // D-Bus round trip; a store after the hook could then clobber the
+      // helper's recorded result into a permanently-pending status.
+      atomic_store_explicit(&g_engine.callbackReported, 0,
+                            memory_order_release);
+      if (g_rtkit_callback_hook(tid, requested_priority))
+        return;
+    } else {
+      warn_realtime_unavailable_without_host();
+    }
+  }
+  int policy = ENGINE_SCHED_POLICY_UNKNOWN;
+  int priority = 0;
+  read_current_linux_scheduling(&policy, &priority, "audio callback thread");
+  atomic_store_explicit(&g_engine.callbackPolicy, policy, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPriority, priority,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackReported, 1, memory_order_release);
+#endif
+  // On Apple this is deliberately a no-op: CoreAudio already delivers the
+  // callback on a THREAD_TIME_CONSTRAINT_POLICY realtime thread.
+}
+
+// Recursive DSP state decays into the subnormal float range during silence,
+// and x86 resolves subnormal operands in microcode at a 50-150 cycle penalty
+// per op — a silent graph becomes more expensive than a loud one. FTZ/DAZ are
+// per-thread MXCSR state, so every thread that executes graph nodes must set
+// them; the Rust audio callback applies the same mode to itself on first
+// entry. AArch64 handles subnormals at full speed and is left unchanged.
+static void flush_denormals_to_zero(void) {
+#if defined(__x86_64__) || defined(__i386__)
+  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+}
+
 static void *worker_main(void *arg) {
   intptr_t worker_slot = (intptr_t)arg;
   int worker_index = (int)worker_slot - 1;
+  flush_denormals_to_zero();
 #if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
   g_current_execution_slot = (int)worker_slot;
 #endif
-  // Elevate worker thread QoS on Apple platforms for better scheduling.
+  // Elevate worker scheduling before it begins participating in graph work.
+#ifdef __linux__
+  promote_linux_worker_to_realtime();
+  int policy = ENGINE_SCHED_POLICY_UNKNOWN;
+  int priority = 0;
+  read_current_linux_scheduling(&policy, &priority, "worker");
+  atomic_store_explicit(&g_engine.workerPolicies[worker_index], policy,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_engine.workerPriorities[worker_index], priority,
+                        memory_order_relaxed);
+#endif
+  // Starting workers is synchronous with respect to this initialization point,
+  // so the host can truthfully report the achieved policy before continuing.
+  pthread_mutex_lock(&g_engine.workerStartupMtx);
+  atomic_fetch_add_explicit(&g_engine.workerStartupCount, 1,
+                            memory_order_release);
+  pthread_cond_broadcast(&g_engine.workerStartupCv);
+  pthread_mutex_unlock(&g_engine.workerStartupMtx);
 #ifdef __APPLE__
 #ifdef QOS_CLASS_USER_INTERACTIVE
   (void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
@@ -552,8 +806,7 @@ static void *worker_main(void *arg) {
 
 #ifdef HAVE_MACH_RT
   // Optionally promote to Mach time-constraint scheduling
-  if (atomic_load_explicit(&g_engine.rt_time_constraint,
-                           memory_order_acquire)) {
+  if (atomic_load_explicit(&g_engine.rt_scheduling, memory_order_acquire)) {
     // Compute period from engine config
     double sr =
         (g_engine.sampleRate > 0) ? (double)g_engine.sampleRate : 48000.0;
@@ -713,7 +966,13 @@ static void *worker_main(void *arg) {
       if (nf <= 0 || nf > lg->block_size) {
         nf = lg->block_size; // Clamp to graph's internal block size for safety
       }
-      (void)try_execute_ready_node(lg, nid, nf);
+      if (try_execute_ready_node(lg, nid, nf)) {
+#ifdef __linux__
+        // Check after every node: DSP costs vary enough that an operation-count
+        // interval cannot safely bound uninterrupted realtime CPU usage.
+        checkpoint_rtkit_cpu_budget(policy);
+#endif
+      }
     }
 
     // Loop back: will go to sleep on sess_cv until next block
@@ -733,12 +992,42 @@ static void *worker_main(void *arg) {
 // ===================== Worker Pool Management =====================
 
 void engine_start_workers(int workers) {
-  g_engine.workerCount = workers;
-  g_engine.threads = (pthread_t *)calloc(workers, sizeof(pthread_t));
+  if (workers < 0)
+    workers = 0;
+  g_engine.workerCount = 0;
+  g_engine.threads = (pthread_t *)calloc((size_t)workers, sizeof(pthread_t));
+  g_engine.workerPolicies =
+      (_Atomic int *)calloc((size_t)workers, sizeof(_Atomic int));
+  g_engine.workerPriorities =
+      (_Atomic int *)calloc((size_t)workers, sizeof(_Atomic int));
+  if (workers > 0 && (!g_engine.threads || !g_engine.workerPolicies ||
+                      !g_engine.workerPriorities)) {
+    fprintf(stderr,
+            "[audiograph] WARN: cannot allocate worker pool for %d workers\n",
+            workers);
+    free(g_engine.threads);
+    free(g_engine.workerPolicies);
+    free(g_engine.workerPriorities);
+    g_engine.threads = NULL;
+    g_engine.workerPolicies = NULL;
+    g_engine.workerPriorities = NULL;
+    workers = 0;
+  }
+  for (int i = 0; i < workers; i++) {
+    atomic_init(&g_engine.workerPolicies[i], ENGINE_SCHED_POLICY_UNKNOWN);
+    atomic_init(&g_engine.workerPriorities[i], 0);
+  }
+  atomic_store_explicit(&g_engine.workerStartupCount, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPolicy, ENGINE_SCHED_POLICY_UNKNOWN,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPriority, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackReported, 0, memory_order_relaxed);
 
-  // Initialize mutex and condition variable for block-start wake
+  // Initialize mutexes and condition variables before any worker can signal.
   pthread_mutex_init(&g_engine.sess_mtx, NULL);
   pthread_cond_init(&g_engine.sess_cv, NULL);
+  pthread_mutex_init(&g_engine.workerStartupMtx, NULL);
+  pthread_cond_init(&g_engine.workerStartupCv, NULL);
 
   atomic_store(&g_engine.runFlag, 1);
   for (int i = 0; i < workers; i++) {
@@ -750,10 +1039,23 @@ void engine_start_workers(int workers) {
     (void)pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
 #endif
-    pthread_create(&g_engine.threads[i], &attr, worker_main,
-                   (void *)(intptr_t)(i + 1));
+    int rc = pthread_create(&g_engine.threads[i], &attr, worker_main,
+                            (void *)(intptr_t)(i + 1));
     pthread_attr_destroy(&attr);
+    if (rc != 0) {
+      fprintf(stderr, "[audiograph] WARN: cannot start worker %d: %s\n", i,
+              strerror(rc));
+      break;
+    }
+    g_engine.workerCount++;
   }
+
+  pthread_mutex_lock(&g_engine.workerStartupMtx);
+  while (atomic_load_explicit(&g_engine.workerStartupCount,
+                              memory_order_acquire) < g_engine.workerCount) {
+    pthread_cond_wait(&g_engine.workerStartupCv, &g_engine.workerStartupMtx);
+  }
+  pthread_mutex_unlock(&g_engine.workerStartupMtx);
 }
 
 void engine_set_os_workgroup(void *oswg_ptr) {
@@ -833,9 +1135,46 @@ void engine_enable_graph_logging(int enable) {
   atomic_store_explicit(&g_engine.graph_log, enable ? 1 : 0, memory_order_release);
 }
 
-void engine_enable_rt_time_constraint(int enable) {
-  atomic_store_explicit(&g_engine.rt_time_constraint, enable ? 1 : 0,
+void engine_enable_rt_scheduling(int enable) {
+  atomic_store_explicit(&g_engine.rt_scheduling, enable ? 1 : 0,
                         memory_order_release);
+}
+
+void engine_set_rt_priority(int priority) {
+  atomic_store_explicit(&g_engine.rt_priority, priority, memory_order_release);
+}
+
+void engine_get_rt_status(EngineRtStatus *status) {
+  if (!status)
+    return;
+
+  status->worker_count = g_engine.workerCount;
+  status->workers_reported = atomic_load_explicit(&g_engine.workerStartupCount,
+                                                  memory_order_acquire);
+  status->worker_policy = ENGINE_SCHED_POLICY_UNKNOWN;
+  status->worker_priority = 0;
+  for (int i = 0; i < status->workers_reported && i < g_engine.workerCount; i++) {
+    int policy = atomic_load_explicit(&g_engine.workerPolicies[i],
+                                      memory_order_relaxed);
+    int priority = atomic_load_explicit(&g_engine.workerPriorities[i],
+                                        memory_order_relaxed);
+    if (i == 0) {
+      status->worker_policy = policy;
+      status->worker_priority = priority;
+    } else {
+      if (status->worker_policy != policy)
+        status->worker_policy = ENGINE_SCHED_POLICY_MIXED;
+      if (status->worker_priority != priority)
+        status->worker_priority = ENGINE_SCHED_PRIORITY_MIXED;
+    }
+  }
+
+  status->callback_reported = atomic_load_explicit(&g_engine.callbackReported,
+                                                   memory_order_acquire);
+  status->callback_policy = atomic_load_explicit(&g_engine.callbackPolicy,
+                                                 memory_order_relaxed);
+  status->callback_priority = atomic_load_explicit(&g_engine.callbackPriority,
+                                                   memory_order_relaxed);
 }
 
 void engine_stop_workers(void) {
@@ -857,9 +1196,15 @@ void engine_stop_workers(void) {
   // Clean up synchronization primitives
   pthread_mutex_destroy(&g_engine.sess_mtx);
   pthread_cond_destroy(&g_engine.sess_cv);
+  pthread_mutex_destroy(&g_engine.workerStartupMtx);
+  pthread_cond_destroy(&g_engine.workerStartupCv);
 
   free(g_engine.threads);
+  free(g_engine.workerPolicies);
+  free(g_engine.workerPriorities);
   g_engine.threads = NULL;
+  g_engine.workerPolicies = NULL;
+  g_engine.workerPriorities = NULL;
   g_engine.workerCount = 0;
 }
 
@@ -1866,6 +2211,11 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
         }
         empty_spins = 0; // Reset on successful work
         stalled_empty_since_ns = 0;
+#ifdef __linux__
+        int callback_policy = atomic_load_explicit(
+            &g_engine.callbackPolicy, memory_order_relaxed);
+        checkpoint_rtkit_cpu_budget(callback_policy);
+#endif
       } else {
         // Queue empty but work in flight - workers processing
         // Check again if work completed (avoids unnecessary spins)
@@ -1876,6 +2226,11 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
         // lightly until workers publish more ready jobs or finish.
         if (++empty_spins > 4096) {
           empty_spins = 0;
+#ifdef __linux__
+          int callback_policy = atomic_load_explicit(
+              &g_engine.callbackPolicy, memory_order_relaxed);
+          checkpoint_rtkit_cpu_budget(callback_policy);
+#endif
           int active_jobs =
               atomic_load_explicit(&g_active_job_count, memory_order_acquire);
           if (active_jobs > 0) {

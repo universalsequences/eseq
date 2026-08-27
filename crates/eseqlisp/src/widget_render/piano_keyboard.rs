@@ -15,8 +15,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use super::{CellBuffer, WidgetDefinition, styled_cell};
-#[cfg(target_os = "macos")]
-use super::{MetalPrimitive, MetalRectPrimitive, WidgetViewport};
+use super::{GpuPrimitive, GpuRectPrimitive, WidgetViewport};
 use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
@@ -360,7 +359,6 @@ fn pressed_key_rect(rect: Rect, press_depth: f32, press_strength: f32) -> Rect {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug)]
 struct PianoKeyGeometry {
     note: u8,
@@ -368,7 +366,6 @@ struct PianoKeyGeometry {
     black: bool,
 }
 
-#[cfg(target_os = "macos")]
 fn key_geometry(
     rect: Rect,
     start_note: u8,
@@ -420,7 +417,6 @@ fn key_geometry(
     keys
 }
 
-#[cfg(target_os = "macos")]
 fn mix_with(color: Color, other: Color, amount: f32) -> Color {
     let t = amount.clamp(0.0, 1.0);
     Color::rgba(
@@ -503,13 +499,12 @@ impl WidgetDefinition for PianoKeyboardWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let (start_note, key_count) = prop_note_range(&node.props);
         let active = active_note_sources(&node.props);
         let mode = overlap_mode(&node.props);
@@ -519,7 +514,7 @@ impl WidgetDefinition for PianoKeyboardWidget {
         let white = Color::rgba(0.88, 0.89, 0.91, 1.0);
         let black = Color::rgba(0.055, 0.058, 0.065, 1.0);
         let chassis = Color::rgba(0.018, 0.020, 0.024, 1.0);
-        let mut primitives = vec![MetalPrimitive::Rect(MetalRectPrimitive {
+        let mut primitives = vec![GpuPrimitive::Rect(GpuRectPrimitive {
             rect: node.rect,
             color: chassis,
         })];
@@ -528,7 +523,7 @@ impl WidgetDefinition for PianoKeyboardWidget {
             for key in keys.iter().filter(|key| key.black == black_pass) {
                 let key_rect =
                     pressed_key_rect(key.rect, press_depths[key.note as usize], press_strength);
-                primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                     rect: key_rect,
                     color: if key.black { black } else { white },
                 }));
@@ -541,7 +536,7 @@ impl WidgetDefinition for PianoKeyboardWidget {
                         mix_with(source.color, Color::rgba(1.0, 1.0, 1.0, 1.0), 0.12)
                     };
                     color.a = source.velocity;
-                    primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                    primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                         rect: Rect {
                             row: key_rect.row,
                             col: key_rect.col + segment_width * index as f32,
@@ -808,7 +803,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn eighty_key_geometry_is_finite_and_uses_real_black_key_overlay() {
         let viewport = WidgetViewport {
@@ -844,7 +838,6 @@ mod tests {
         assert!(black.rect.height < white.rect.height);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn loudest_metal_render_uses_velocity_as_color_opacity_without_stripes() {
         let mut props = props_with_activity();
@@ -884,11 +877,11 @@ mod tests {
             inherited_hover: false,
         };
         let primitives =
-            PIANO_KEYBOARD_WIDGET.build_metal_primitives("piano-keyboard", &node, viewport);
+            PIANO_KEYBOARD_WIDGET.build_primitives("piano-keyboard", &node, viewport);
         let mut activity_alphas: Vec<f32> = primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                MetalPrimitive::Rect(rect) if rect.color.a < 1.0 => Some(rect.color.a),
+                GpuPrimitive::Rect(rect) if rect.color.a < 1.0 => Some(rect.color.a),
                 _ => None,
             })
             .collect();

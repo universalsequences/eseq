@@ -192,7 +192,8 @@ ESeq.app/Contents/
   MacOS/
     metal_seq          <- CFBundleExecutable
     eseq               <- CLI
-    DGenLisp           <- from crates/sequencer/tools/DGenLisp
+    DGenLisp-macos-arm64
+                       <- from crates/sequencer/tools/DGenLisp-macos-arm64
   Resources/
     AppIcon.icns
     dgen-toolchain/    <- from crates/sequencer/tools/dgen-toolchain (~140 MB)
