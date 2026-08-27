@@ -113,8 +113,9 @@
   (let ((amount (clamp push 0.0 1.0))
         (count (max scene-count 1.0))
         ;; Layout geometry in cells: 0.2 outer padding, 2.5-wide scene pills,
-        ;; and 0.1 gaps. The trailing spacer/+/- controls account for 5.4 cells.
-        (total-cells (+ (* count 2.6) 5.8))
+        ;; and 0.1 gaps. The trailing spacer, +/- controls, and bank selector
+        ;; account for 9.7 cells.
+        (total-cells (+ (* count 2.6) 10.1))
         (target-center (+ 0.2 1.25 (* (clamp push-target 0.0 (- count 1.0)) 2.6)))
         (target-x (* aspect (- (* 2.0 (/ target-center total-cells)) 1.0)))
         (base (sdf/rounded-rect width height 0.7))
@@ -279,6 +280,15 @@
                 (* 0.72 amount)))))
         (rgba 0 0 0 0)))))
 
+
+(defwidget scene-bank-playing-indicator
+  :width 0.45 :height 0.45
+  :paint-margin 0.15
+  :animates true
+  :shader
+  (let ((pulse (+ 0.58 (* 0.42 (cos (* itime 4.8))))))
+    (sdf/fill (sdf/circle (* 0.34 (+ 0.82 (* 0.18 pulse))))
+      (material :color (rgba 0.20 0.52 1.0 pulse)))))
 
 (defwidget pattern-pill-btn-bg
  :width 1 :height 1
@@ -613,11 +623,129 @@
   (host-command "switch-pattern"
     (dict :idx idx :quantize (or SEQ.scene-launch-quantize "off"))))
 
+;; UI source evaluation can precede the first song-state publication. Keep the
+;; strip renderable during that interval; the reactive SEQ.scene-banks read
+;; replaces this model-consistent single-bank value as soon as sync arrives.
+(def scene-banks ()
+  (if (> (len SEQ.scene-banks) 0)
+    SEQ.scene-banks
+    (list (dict :id 0 :label "A" :len SEQ.num-patterns :offset 0))))
+
+(def scene-bank-index-containing (scene)
+  (let ((banks (scene-banks)))
+    (let ((matches (filter
+            (lambda (i)
+              (let ((bank (nth banks i)))
+                (and (>= scene (get bank :offset))
+                  (< scene (+ (get bank :offset) (get bank :len))))))
+            (range 0 (len banks)))))
+      (if (> (len matches) 0) (nth matches 0) 0))))
+
+;; Pure presentation state: switching this index never calls the host. The -1
+;; sentinel initializes the first rendered view to the bank containing the
+;; current scene. Structural edits clamp a stale index to the nearest survivor.
+(defstate viewed-scene-bank-index -1)
+(defstate viewed-scene-bank-pending-new false)
+
+(def scene-viewed-bank-index ()
+  (let ((count (len (scene-banks))))
+    (if (= count 0)
+      0
+      (if viewed-scene-bank-pending-new
+        (if (< viewed-scene-bank-index count)
+          (do
+            (set! viewed-scene-bank-pending-new false)
+            viewed-scene-bank-index)
+          ;; The host has not published the appended bank yet. Keep the pending
+          ;; index intact while rendering the old last bank in the meantime.
+          (- count 1))
+        (let ((index (if (< viewed-scene-bank-index 0)
+                (scene-bank-index-containing SEQ.current-pattern)
+                (min viewed-scene-bank-index (- count 1)))))
+          (do
+            (if (not (= viewed-scene-bank-index index))
+              (set! viewed-scene-bank-index index)
+              nil)
+            index))))))
+
+(def scene-viewed-bank ()
+  (nth (scene-banks) (scene-viewed-bank-index)))
+
+(def scene-bank-labels ()
+  (reduce |labels bank|
+    (append labels (list (get bank :label)))
+    (list)
+    (scene-banks)))
+
+(def scene-bank-index-for-label (label)
+  (let ((banks (scene-banks)))
+    (let ((matches (filter
+            (lambda (i) (= (get (nth banks i) :label) label))
+            (range 0 (len banks)))))
+      (if (> (len matches) 0) (nth matches 0) -1))))
+
+(def select-scene-bank (label)
+  (if (= label "New bank")
+    (do
+      ;; create-scene-bank appends. Keep the pending index unclamped until the
+      ;; host publishes the new SEQ.scene-banks entry, then the view lands on it.
+      (set! viewed-scene-bank-index (len (scene-banks)))
+      (set! viewed-scene-bank-pending-new true)
+      (host-command "create-scene-bank" (dict)))
+    (let ((index (scene-bank-index-for-label label)))
+      (if (>= index 0)
+        (do
+          (set! viewed-scene-bank-pending-new false)
+          (set! viewed-scene-bank-index index))
+        nil))))
+
+(def scene-playing-in-other-bank? ()
+  (not (= (scene-bank-index-containing SEQ.current-pattern)
+    (scene-viewed-bank-index))))
+
 (def seq-clone-pattern ()
-  (host-command "clone-pattern" (dict)))
+  (let ((bank (scene-viewed-bank)))
+    (host-command "clone-pattern"
+      (dict :bank-id (get bank :id)
+        :insert-position (+ (get bank :offset) (get bank :len))))))
 
 (def seq-delete-pattern ()
   (host-command "delete-pattern" (dict)))
+
+(defstate scene-bank-menu-open false)
+(defstate scene-bank-menu-col 0)
+(defstate scene-bank-menu-row 0)
+(defstate scene-bank-menu-scene -1)
+
+(def open-scene-bank-menu (event scene)
+  (do
+    (set! scene-bank-menu-scene scene)
+    (set! scene-bank-menu-col (get event :col))
+    (set! scene-bank-menu-row (get event :row))
+    (set! scene-bank-menu-open true)))
+
+(def scene-bank-is-source? (bank)
+  (= (scene-bank-index-containing scene-bank-menu-scene)
+    (scene-bank-index-for-label (get bank :label))))
+
+(def move-scene-to-scene-bank (bank)
+  (if (or (scene-bank-is-source? bank) (>= (get bank :len) 24))
+    nil
+    (do
+      (set! scene-bank-menu-open false)
+      (host-command "move-scene-to-scene-bank"
+        (dict :scene scene-bank-menu-scene :bank-id (get bank :id))))))
+
+(def scene-bank-context-menu ()
+  (context-menu :is-open scene-bank-menu-open
+    :anchor-col scene-bank-menu-col
+    :anchor-row scene-bank-menu-row
+    :on-close (lambda () (set! scene-bank-menu-open false))
+    (each (scene-banks) |bank|
+      (menu-item (str "Move to bank " (get bank :label))
+        :key (str "scene-bank-move-" (get bank :id))
+        :disabled (or (scene-bank-is-source? bank) (>= (get bank :len) 24))
+        :on-select (lambda (event) (move-scene-to-scene-bank bank))))))
 
 (def seq-reorder-scene-drop (event)
   (let ((source (get (get event :payload) :scene))
@@ -881,68 +1009,102 @@
               :color :gray
               :bg :transparent)))))
     
-    ;; Pattern pills in their own subtree: current-pattern/num-patterns changes
-    ;; (every scene switch) rerun just this bar, not the whole transport.
+    ;; Pattern pills in their own subtree: scene/bank changes rerun just this
+    ;; bar, not the whole transport. Widget children stay in `each`; the bank
+    ;; offset is applied before every launch, drag, and context-menu command.
     (subtree :key "transport-pattern-pills"
-      (box :background "transport-scene-strip-bg" 
-        :corner-radius 64
-        :key "transport-scene-strip"
-        :debug-name "transport-scene-strip"
-        :push scene-push-value
-        :push-target scene-push-target
-        :scene-count SEQ.num-patterns
-        :padding 0.2 :height 1.4
-        (h-stack :gap 0.1 :align :center
-          (each (range 0 SEQ.num-patterns) |i|
-            (box :key (str "transport-scene-pill-" i)
-              :width 2.5 :height 1.1
-              :background (if (= i SEQ.queued-scene)
-                "queued-scene-pill-bg"
-                "pattern-pill-bg")
-              :active (if (= i SEQ.current-pattern) 1 0)
-              :push scene-push-value
-              :push-target scene-push-target
-              :scene i
-              :style pattern-control-style
-              :capture-pointer true
-              :drag-type "transport-scene"
-              :drag-modifier :none
-              :drag-payload (dict :scene i)
-              :drop-types (list "transport-scene")
-              :drop-meta (dict :scene i)
-              :drop-hover-border-color :mixer-strip-selected-border
-              :on-drop seq-reorder-scene-drop
-              :on-mouse-down (lambda (event) (scene-push-begin i event))
-              :on-drag (lambda (event) (scene-push-drag i event))
-              :on-mouse-up (lambda (event) (scene-push-end i event))
-              (v-stack :align :center
-                (label (fmt " {} " (+ i 1))
-                  :font-size 11
-                  :color (if (or (= i SEQ.current-pattern) (= i SEQ.queued-scene))
-                    :white
-                    :gray)
-                  :hover-color :white
-                  :bg :transparent))))
-          (label "" :width 0.2 :bg :transparent)
-          (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-            :style pattern-control-style
-            :on-click |x y r| (seq-clone-pattern)
-            (v-stack :align :center
-              (label "+"
-                :font-size 12
-                
-                :color :white
-                :bg :transparent)))
-          
-          (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-            :style (if (> SEQ.num-patterns 1) pattern-control-style nil)
-            :on-click |x y r| (if (> SEQ.num-patterns 1) (seq-delete-pattern) nil)
-            (v-stack :align :center
-              (label "-"
-                :font-size 12
-                
-                :color (if (> SEQ.num-patterns 1) :white :dark-gray)
-                :bg :transparent))))))
+      (let ((bank (scene-viewed-bank)))
+        (let ((bank-offset (get bank :offset))
+              (bank-len (get bank :len))
+              (current-in-bank (= (scene-bank-index-containing SEQ.current-pattern)
+                (scene-viewed-bank-index))))
+          (box :background "transport-scene-strip-bg"
+            :corner-radius 64
+            :key "transport-scene-strip"
+            :debug-name "transport-scene-strip"
+            :push scene-push-value
+            :push-target (if (and (>= scene-push-target bank-offset)
+                (< scene-push-target (+ bank-offset bank-len)))
+              (- scene-push-target bank-offset)
+              -1)
+            :scene-count bank-len
+            :padding 0.2 :height 1.4
+            (h-stack :gap 0.1 :align :center
+              (each (range 0 bank-len) |i|
+                (let ((scene (+ bank-offset i)))
+                  (box :key (str "transport-scene-pill-" scene)
+                    :width 2.5 :height 1.1
+                    :background (if (= scene SEQ.queued-scene)
+                      "queued-scene-pill-bg"
+                      "pattern-pill-bg")
+                    :active (if (= scene SEQ.current-pattern) 1 0)
+                    :push scene-push-value
+                    :push-target scene-push-target
+                    :scene scene
+                    :style pattern-control-style
+                    :capture-pointer true
+                    :drag-type "transport-scene"
+                    :drag-modifier :none
+                    :drag-payload (dict :scene scene)
+                    :drop-types (list "transport-scene")
+                    :drop-meta (dict :scene scene)
+                    :drop-hover-border-color :mixer-strip-selected-border
+                    :on-drop seq-reorder-scene-drop
+                    :on-right-click (lambda (event) (open-scene-bank-menu event scene))
+                    :on-mouse-down (lambda (event) (scene-push-begin scene event))
+                    :on-drag (lambda (event) (scene-push-drag scene event))
+                    :on-mouse-up (lambda (event) (scene-push-end scene event))
+                    (v-stack :align :center
+                      (label (fmt " {} " (+ i 1))
+                        :font-size 11
+                        :color (if (or (= scene SEQ.current-pattern) (= scene SEQ.queued-scene))
+                          :white
+                          :gray)
+                        :hover-color :white
+                        :bg :transparent)))))
+              (label "" :width 0.2 :bg :transparent)
+              (box :key "scene-bank-add" :background "pattern-pill-btn-bg"
+                :width 2.5 :height 1.1 :active true
+                :style (if (< bank-len 24) pattern-control-style nil)
+                :on-click |x y r|
+                  (if (< bank-len 24)
+                    (seq-clone-pattern)
+                    (status "This scene bank is full (24 scenes maximum)"))
+                (v-stack :align :center
+                  (label "+"
+                    :font-size 12
+                    :color (if (< bank-len 24) :white :dark-gray)
+                    :bg :transparent)))
+              (box :key "scene-bank-delete" :background "pattern-pill-btn-bg"
+                :width 2.5 :height 1.1 :active true
+                :style (if (and (> SEQ.num-patterns 1) current-in-bank)
+                  pattern-control-style
+                  nil)
+                :on-click |x y r|
+                  (if (and (> SEQ.num-patterns 1) current-in-bank)
+                    (seq-delete-pattern)
+                    nil)
+                (v-stack :align :center
+                  (label "-"
+                    :font-size 12
+                    :color (if (and (> SEQ.num-patterns 1) current-in-bank)
+                      :white
+                      :dark-gray)
+                    :bg :transparent)))
+              (h-stack :gap 0.12 :align :center
+                (dropdown :key "scene-bank-dropdown"
+                  :value (get bank :label)
+                  :options (append (scene-bank-labels) (list "New bank"))
+                  :on-change select-scene-bank
+                  :bg-color :mixer-strip-bg
+                  :border-color :mixer-strip-border
+                  :badge-color :transparent
+                  :width 4.2 :height 1.1 :font-size 10)
+                (if (scene-playing-in-other-bank?)
+                  (scene-bank-playing-indicator
+                    :debug-name "scene-bank-playing-other-indicator")
+                  (box :width 0.45 :height 0.45 :bg :transparent)))
+            (scene-bank-context-menu))))))
     
     ;; Session and arrangement are app views, not tabs in the main buffer.
     ;; This spacer keeps the view pair against the transport's right edge.

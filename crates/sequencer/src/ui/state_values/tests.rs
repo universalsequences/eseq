@@ -14825,6 +14825,15 @@
                 ("current-project-name", Value::String("test".to_string())),
                 ("current-pattern", Value::Number(0.0)),
                 ("num-patterns", Value::Number(1.0)),
+                (
+                    "scene-banks",
+                    test_list(vec![map_value([
+                        ("id", Value::Number(1.0)),
+                        ("label", Value::String("A".to_string())),
+                        ("len", Value::Number(1.0)),
+                        ("offset", Value::Number(0.0)),
+                    ])]),
+                ),
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
                 ("editor-error", Value::String(String::new())),
@@ -22565,6 +22574,18 @@
         editor
             .runtime_mut()
             .set_reactive("SEQ", "num-patterns", Value::Number(3.0));
+        let scene_banks = editor
+            .runtime_mut()
+            .eval_str("(list (dict :id 1 :label \"A\" :len 3 :offset 0))")
+            .expect("evaluate scene bank fixture")
+            .expect("scene bank fixture value");
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "scene-banks", scene_banks);
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.transport/viewed-scene-bank-index 0)")
+            .expect("select fixture scene bank");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor
@@ -22676,6 +22697,188 @@
             }
             other => panic!("expected reorder-scene host command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn metal_seq_transport_scene_bank_ui_filters_and_routes_global_scenes() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let scene_banks = editor
+            .runtime_mut()
+            .eval_str(
+                "(list (dict :id 11 :label \"A\" :len 2 :offset 0) \
+                       (dict :id 22 :label \"B\" :len 2 :offset 2))",
+            )
+            .expect("evaluate scene bank fixture")
+            .expect("scene bank fixture value");
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "scene-banks", scene_banks);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-patterns", Value::Number(4.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-pattern", Value::Number(2.0));
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.transport/viewed-scene-bank-index -1)")
+            .expect("reset viewed bank initialization");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("bank B transport layout");
+        let dropdown = find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-dropdown")
+            .expect("scene bank dropdown");
+        assert_finite_nonzero_rect(dropdown, "scene bank dropdown");
+        assert!(matches!(
+            dropdown.props.get("value"),
+            Some(Value::String(value)) if value == "B"
+        ));
+        assert!(matches!(
+            dropdown.props.get("options"),
+            Some(Value::List(options))
+                if options.iter().any(|value| matches!(&*value.borrow(), Value::String(label) if label == "New bank"))
+        ));
+        for scene in 2..4 {
+            let key = format!("/transport-scene-pill-{scene}");
+            let pill = find_layout_node_by_stable_key_suffix(&layout, &key)
+                .unwrap_or_else(|| panic!("missing bank B scene {scene}"));
+            assert_eq!(layout_prop_number(pill, "scene"), Some(scene as f64));
+            assert!(pill.props.contains_key("on-right-click"));
+        }
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/transport-scene-pill-0").is_none(),
+            "bank B must not render bank A's scenes"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "scene-bank-playing-other-indicator").is_none(),
+            "the indicator must stay absent while playback is in the viewed bank"
+        );
+
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.transport/select-scene-bank \"A\")")
+            .expect("view bank A");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "switching the viewed bank must be pure UI state"
+        );
+        let layout = editor.widget_layout().expect("bank A transport layout");
+        for scene in 0..2 {
+            let key = format!("/transport-scene-pill-{scene}");
+            assert!(find_layout_node_by_stable_key_suffix(&layout, &key).is_some());
+        }
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/transport-scene-pill-2").is_none()
+        );
+        let delete = find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-delete")
+            .expect("scene delete control");
+        assert!(
+            matches!(delete.props.get("style"), None | Some(Value::Nil)),
+            "delete must be disabled while the current scene is outside the viewed bank"
+        );
+        let indicator = find_layout_node_by_debug_name(
+            &layout,
+            "scene-bank-playing-other-indicator",
+        )
+        .expect("other-bank playing indicator");
+        assert!(eseqlisp::widget_render::layout_wants_animation_frames(indicator));
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.transport/seq-clone-pattern)")
+            .expect("clone into viewed bank");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "clone-pattern");
+                assert_eq!(extract_usize_from_payload(payload, "bank-id"), Some(11));
+                assert_eq!(
+                    extract_usize_from_payload(payload, "insert-position"),
+                    Some(2)
+                );
+            }
+            other => panic!("expected scoped clone-pattern command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.transport/open-scene-bank-menu (dict :col 4 :row 5) 0)")
+            .expect("open scene bank menu");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("open scene bank menu layout");
+        let target = find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-move-22")
+            .expect("move-to-bank-B action");
+        assert_finite_nonzero_rect(target, "move-to-bank-B action");
+        assert_eq!(layout_prop_bool(target, "disabled"), Some(false));
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.transport/move-scene-to-scene-bank (nth SEQ.scene-banks 1))")
+            .expect("move scene to bank B");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "move-scene-to-scene-bank");
+                assert_eq!(extract_usize_from_payload(payload, "scene"), Some(0));
+                assert_eq!(extract_usize_from_payload(payload, "bank-id"), Some(22));
+            }
+            other => panic!("expected move-scene-to-scene-bank command, got {other:?}"),
+        }
+
+        let full_bank_fixture = editor
+            .runtime_mut()
+            .eval_str(
+                "(list (dict :id 11 :label \"A\" :len 24 :offset 0) \
+                       (dict :id 22 :label \"B\" :len 2 :offset 24))",
+            )
+            .expect("evaluate full bank fixture")
+            .expect("full bank fixture value");
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "scene-banks", full_bank_fixture);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-patterns", Value::Number(26.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("full scene bank layout");
+        let add = find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-add")
+            .expect("scene add control");
+        assert!(
+            matches!(add.props.get("style"), None | Some(Value::Nil)),
+            "the add control must be disabled at the 24-scene bank capacity"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.transport/select-scene-bank \"New bank\")")
+            .expect("create a new scene bank");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            &commands[0],
+            eseqlisp::host::HostCommand::Custom { name, .. } if name == "create-scene-bank"
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.transport/viewed-scene-bank-index")
+                .expect("read pending viewed bank"),
+            Some(Value::Number(2.0)),
+            "New bank must select the appended bank's pending index"
+        );
     }
 
     /// Back to Arrangement button (unified-transport spec; Ableton
