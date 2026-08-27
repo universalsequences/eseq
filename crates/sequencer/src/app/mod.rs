@@ -41,6 +41,7 @@ mod effects;
 mod fx_chain;
 mod graph;
 mod hooks;
+pub mod mixer_controls;
 mod params;
 mod projects;
 pub mod pending_capture;
@@ -907,6 +908,9 @@ pub struct App {
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
+    /// Engaged sequenced mute/solo holds keyed by resolved target
+    /// (docs/jaki-mixer-control-routes-spec.md §3); values are release samples.
+    pub(crate) mixer_control_holds: HashMap<mixer_controls::MixerControlHoldKey, u64>,
     pub sampler_paths: Vec<Option<PathBuf>>,
     pub rack_selected_slots: Vec<usize>,
     pub sample_path_registry: HashMap<String, PathBuf>,
@@ -2355,6 +2359,7 @@ impl App {
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
             groups: Vec::new(),
+            mixer_control_holds: HashMap::new(),
             sampler_paths: Vec::new(),
             rack_selected_slots: Vec::new(),
             sample_path_registry: HashMap::new(),

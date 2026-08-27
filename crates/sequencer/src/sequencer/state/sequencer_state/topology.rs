@@ -537,6 +537,10 @@ impl SequencerState {
             scene.mod_connections = references.mod_connections.clone();
             scene.neural_networks = references.neural_networks.clone();
             scene.graph_overrides = references.graph_overrides.clone();
+            // Scene slots are deliberately absent here. They are
+            // track-agnostic, so a lane restore has nothing to remap — and
+            // round-tripping them through this snapshot would revert slot
+            // writes made after the topology edge was captured.
         }
         for saved in &snapshot.sidechains {
             let Some(patch) = scenes.track_pools.get_mut(saved.owner_track)

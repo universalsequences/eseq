@@ -54,6 +54,7 @@ pub enum EditPatch {
     TrackCreation(TrackCreationPatch),
     TrackDeletion(TrackDeletionPatch),
     TrackPresentation(TrackPresentationPatch),
+    SceneSlot(SceneSlotPatch),
     SceneStructure(SceneStructurePatch),
     Arrangement(ArrangementStructurePatch),
     BusGroupStructure(BusGroupStructurePatch),
@@ -160,6 +161,23 @@ impl TrackPresentationPatch {
             + self.changes.iter()
                 .map(|change| change.before.name.capacity() + change.after.name.capacity())
                 .sum::<usize>()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SceneSlotPatch {
+    pub scene: SceneId,
+    pub name: String,
+    pub before: Option<crate::process::ProcessLiteral>,
+    pub after: Option<crate::process::ProcessLiteral>,
+}
+
+impl SceneSlotPatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.name.capacity()
+            + self.before.as_ref().map_or(0, crate::process::ProcessLiteral::retained_bytes)
+            + self.after.as_ref().map_or(0, crate::process::ProcessLiteral::retained_bytes)
     }
 }
 

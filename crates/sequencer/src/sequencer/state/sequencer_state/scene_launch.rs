@@ -264,6 +264,7 @@ impl SequencerState {
             profile.update_pattern_atoms = started.elapsed();
 
             let metadata = scenes.current_scene_metadata();
+            let scene_slots = scenes.current_scene_slots();
             let project_process_chain = scenes.current_project_process_chain();
             let snapshot_source = launched
                 .into_iter()
@@ -274,6 +275,7 @@ impl SequencerState {
                         metadata.0,
                         metadata.1,
                         metadata.2,
+                        scene_slots,
                         project_process_chain,
                     )
                 });
@@ -291,6 +293,7 @@ impl SequencerState {
             mod_connections,
             neural_networks,
             graph_overrides,
+            scene_slots,
             project_process_chain,
         )) = snapshot_source
         {
@@ -299,6 +302,7 @@ impl SequencerState {
                 mod_connections,
                 neural_networks,
                 graph_overrides,
+                scene_slots,
                 project_process_chain,
             );
         } else {
@@ -549,17 +553,26 @@ impl SequencerState {
                 scene.mod_connections.clone(),
                 scene.neural_networks.clone(),
                 scene.graph_overrides.clone(),
+                scene.scene_slots.clone(),
                 scene.project_process_chain.clone(),
             )
         };
-        let (track_data, silenced, mod_connections, neural_networks, graph_overrides, chain) =
-            staged;
+        let (
+            track_data,
+            silenced,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+            scene_slots,
+            chain,
+        ) = staged;
         let mut snapshot = SequencerSnapshot::capture_from_track_pattern_data(
             self,
             &track_data,
             mod_connections,
             neural_networks,
             graph_overrides,
+            scene_slots,
             chain,
         );
         // Only ever scheduled while the transport is playing; stamp it so
@@ -1271,7 +1284,7 @@ impl SequencerState {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let cur = self.current_scene_index();
             let current_metadata = scenes.current_scene_metadata();
-            let current_snapshot = PatternSnapshot::capture_with_mod_connections(
+            let mut current_snapshot = PatternSnapshot::capture_with_mod_connections(
                 self,
                 num_tracks,
                 buffer_ids,
@@ -1282,6 +1295,7 @@ impl SequencerState {
                 current_metadata.1,
                 current_metadata.2,
             );
+            current_snapshot.scene_slots = scenes.current_scene_slots();
             let save_masks = self.masked_save_masks();
             scenes.save_scene_snapshot_masked(cur, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             let new_idx = scenes.new_scene();
@@ -1360,7 +1374,7 @@ impl SequencerState {
             }
             let cur = self.current_scene_index();
             let current_metadata = scenes.current_scene_metadata();
-            let current_snapshot = PatternSnapshot::capture_with_mod_connections(
+            let mut current_snapshot = PatternSnapshot::capture_with_mod_connections(
                 self,
                 num_tracks,
                 buffer_ids,
@@ -1371,6 +1385,7 @@ impl SequencerState {
                 current_metadata.1,
                 current_metadata.2,
             );
+            current_snapshot.scene_slots = scenes.current_scene_slots();
             let save_masks = self.masked_save_masks();
             scenes.save_scene_snapshot_masked(cur, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             let new_idx = scenes
@@ -1432,7 +1447,7 @@ impl SequencerState {
             return false;
         }
         let current_metadata = scenes.current_scene_metadata();
-        let current_snapshot = PatternSnapshot::capture_with_mod_connections(
+        let mut current_snapshot = PatternSnapshot::capture_with_mod_connections(
             self,
             num_tracks,
             buffer_ids,
@@ -1443,6 +1458,7 @@ impl SequencerState {
             current_metadata.1,
             current_metadata.2,
         );
+        current_snapshot.scene_slots = scenes.current_scene_slots();
         let save_masks = self.masked_save_masks();
         scenes.save_scene_snapshot_masked(cur, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
         let Some(source) = scenes.scene_snapshot(cur) else {

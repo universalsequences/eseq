@@ -49,6 +49,7 @@ impl SequencerState {
                 }
             }
         }
+        snapshot.scene_slots = self.current_scene_slots();
         snapshot.project_process_chain = self.project_process_chain();
         let effect_descriptors = self.scratch_effect_descriptors.lock().unwrap().clone();
         let instrument_descriptors = self.scratch_instrument_descriptors.lock().unwrap().clone();
@@ -280,6 +281,7 @@ impl SequencerState {
             graph_control_commands: Mutex::new(Vec::new()),
             roll_commands: Mutex::new(Vec::new()),
             roll_recorded_hits: Mutex::new(Vec::new()),
+            live_trigger_stamps: crate::sequencer::LiveTriggerStampRing::default(),
             step_print_override: StepPrintOverride::default(),
             track_output_events: Mutex::new(Vec::new()),
             track_output_current_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
@@ -302,6 +304,8 @@ impl SequencerState {
             scratch_source_version: AtomicU64::new(0),
             published_sequencers: Mutex::new(Vec::new()),
             published_sequencers_version: AtomicU64::new(0),
+            published_scene_slot_declarations: Mutex::new(std::collections::BTreeMap::new()),
+            generator_tick_errors: Mutex::new(Vec::new()),
             published_process_authoring: Mutex::new(
                 crate::process::PublishedProcessAuthoringSnapshot::default(),
             ),
@@ -317,6 +321,7 @@ impl SequencerState {
             pending_accumulator_reset_all: AtomicBool::new(false),
             pending_accumulator_reset_tracks: std::array::from_fn(|_| AtomicBool::new(false)),
             quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox::default(),
+            scheduled_mixer_controls: crate::mixer_control::MixerControlMailbox::default(),
             song_playback: SongPlaybackMailbox::default(),
             song_manual_latch: AtomicU64::new(0),
             song_scene_latch: AtomicBool::new(false),
@@ -337,6 +342,10 @@ impl SequencerState {
 
     pub fn quantized_launches(&self) -> &crate::quantized_launch::QuantizedLaunchMailbox {
         &self.quantized_launches
+    }
+
+    pub fn scheduled_mixer_controls(&self) -> &crate::mixer_control::MixerControlMailbox {
+        &self.scheduled_mixer_controls
     }
 
     pub fn schedule_quantized_pattern_launch(
@@ -395,7 +404,7 @@ impl SequencerState {
         self.current_pattern_index()
     }
 
-    pub(crate) fn current_scene_id(&self) -> Option<SceneId> {
+    pub fn current_scene_id(&self) -> Option<SceneId> {
         self.pattern
             .scenes
             .lock()

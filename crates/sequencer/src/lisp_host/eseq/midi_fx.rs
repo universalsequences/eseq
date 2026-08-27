@@ -858,11 +858,8 @@ pub(in crate::lisp_host) fn set_effect_param_raw(
     {
         existing.value = value;
     } else {
-        eval.effect_params.push(ScheduledEffectParam {
-            logical_id,
-            idx,
-            value,
-        });
+        eval.effect_params
+            .push(ScheduledEffectParam::fixed(logical_id, idx, value));
     }
     Ok(())
 }

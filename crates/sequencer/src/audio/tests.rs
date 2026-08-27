@@ -2190,20 +2190,21 @@ fn live_keyboard_transpose_quantizes_after_transpose_ramp_offset() {
 }
 
 #[test]
-fn scheduled_triggers_respect_track_mute() {
+fn scheduled_triggers_fire_while_track_is_gain_muted() {
     let state = SequencerState::new(2, Vec::new());
     state.pattern.track_params[1].set_mute(true);
 
     assert!(track_accepts_scheduled_trigger(&state, 0));
-    assert!(!track_accepts_scheduled_trigger(&state, 1));
+    assert!(track_accepts_scheduled_trigger(&state, 1));
+    assert!(!track_accepts_scheduled_trigger(&state, 2));
 }
 
 #[test]
-fn scheduled_triggers_respect_solo_mutes() {
+fn scheduled_triggers_fire_while_track_is_muted_by_solo() {
     let state = SequencerState::new(3, Vec::new());
     state.pattern.track_params[0].set_solo(true);
 
     assert!(track_accepts_scheduled_trigger(&state, 0));
-    assert!(!track_accepts_scheduled_trigger(&state, 1));
-    assert!(!track_accepts_scheduled_trigger(&state, 2));
+    assert!(track_accepts_scheduled_trigger(&state, 1));
+    assert!(track_accepts_scheduled_trigger(&state, 2));
 }

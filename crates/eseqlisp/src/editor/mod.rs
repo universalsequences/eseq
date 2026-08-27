@@ -20,7 +20,7 @@ use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::{LayoutNode, Rect};
 use crate::mode::{
     BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match,
-    has_completion_prefix, highlight_lines,
+    has_completion_prefix, has_import_module_prefix, highlight_lines,
 };
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
@@ -6063,6 +6063,10 @@ impl Editor {
                         self.vim_delete_words(count);
                         true
                     }
+                    ('d', KeyCode::Char('$')) => {
+                        self.vim_delete_to_line_end(count);
+                        true
+                    }
                     ('y', KeyCode::Char('w')) => {
                         self.vim_yank_words(count);
                         true
@@ -6223,6 +6227,32 @@ impl Editor {
         }
         let start = self.active_buffer().cursor;
         let end = self.vim_word_forward_position(start, count);
+        if end == start {
+            return;
+        }
+        self.record_undo_snapshot();
+        let text = self.active_buffer().slice_range(start, end);
+        self.kill_ring.push(text);
+        self.vim_linewise_yank = None;
+        self.active_buffer_mut().delete_range(start, end);
+        self.sync_text_horizontal_scroll_to_viewport();
+        self.sync_runtime_context();
+        self.refresh_completion();
+    }
+
+    fn vim_delete_to_line_end(&mut self, count: usize) {
+        if self.guard_read_only() {
+            return;
+        }
+        let start = self.active_buffer().cursor;
+        let end_row = start
+            .0
+            .saturating_add(count.saturating_sub(1))
+            .min(self.active_buffer().lines.len().saturating_sub(1));
+        let end = (
+            end_row,
+            self.active_buffer().lines[end_row].chars().count(),
+        );
         if end == start {
             return;
         }
@@ -7918,6 +7948,11 @@ impl Editor {
         }
         let symbols = self.runtime.completion_symbols();
         let metadata = self.runtime.completion_metadata();
+        let module_names = if has_import_module_prefix(self.active_buffer()) {
+            self.runtime.module_completions()
+        } else {
+            Vec::new()
+        };
         if Self::trace_completion_enabled() {
             eprintln!(
                 "{} runtime_symbols={} metadata={}",
@@ -7936,6 +7971,7 @@ impl Editor {
             self.active_buffer(),
             &symbols,
             &metadata,
+            &module_names,
         )
         .map(
             |CompletionMatch {

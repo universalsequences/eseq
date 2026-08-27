@@ -8,6 +8,157 @@
     use crate::process::{ParamTarget, ProcessInstanceId, TrackProcessSlot};
     use crate::sequencer::ModDestination;
 
+    /// A song row schedules from a snapshot frozen at preflight, so the
+    /// published snapshot has to carry EVERY scene's live overrides, not just
+    /// the capturing scene's. Without this table a slot written while a song
+    /// plays is silently inert: the row's preflight copy wins and the reader
+    /// falls back to the declaration default.
+    #[test]
+    fn published_snapshots_carry_live_scene_slots_for_every_scene() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        state.replace_pattern_repository(
+            vec![
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state
+            .set_scene_slot_override(
+                crate::sequencer::SceneId(2),
+                "rate",
+                Some(crate::process::ProcessLiteral::Number(7.0)),
+            )
+            .expect("override the scene the transport is not sitting on");
+
+        let snapshot = state.latest_scheduler_snapshot();
+        assert_eq!(
+            snapshot.scene_slot_table.len(),
+            2,
+            "every scene needs an entry, not just the current one"
+        );
+        assert_eq!(
+            snapshot.scene_slot_table[1].get("rate"),
+            Some(&crate::process::ProcessLiteral::Number(7.0))
+        );
+        assert_eq!(
+            snapshot.scene_slot_table[0].get("rate"),
+            None,
+            "a scene without an override must stay on its declaration default"
+        );
+    }
+
+    #[test]
+    fn scene_slot_write_publishes_value_and_epoch_to_scheduler_snapshot() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        let default = crate::process::ProcessLiteral::Number(1.0);
+
+        assert_eq!(
+            state.resolve_current_scene_slot("rate", &default),
+            (default.clone(), 0, false)
+        );
+        let first_epoch = state
+            .write_current_scene_slot(
+                "rate",
+                crate::process::ProcessLiteral::Number(2.0),
+            )
+            .unwrap();
+        let second_epoch = state
+            .write_current_scene_slot(
+                "rate",
+                crate::process::ProcessLiteral::Number(2.0),
+            )
+            .unwrap();
+        assert!(
+            second_epoch > first_epoch,
+            "an equal authored write must still invalidate consumers"
+        );
+
+        let snapshot = state.latest_scheduler_snapshot();
+        let resolved = snapshot.scene_slots.resolve("rate", &default);
+        assert_eq!(resolved.value, &crate::process::ProcessLiteral::Number(2.0));
+        assert_eq!(resolved.epoch, second_epoch);
+        assert!(resolved.overridden);
+    }
+
+    #[test]
+    fn scene_slot_overrides_survive_a_scene_switch_round_trip() {
+        let state = make_state_with_tracks(1);
+        let first = PatternSnapshot::new_default(1, &[]);
+        let second = PatternSnapshot::new_default(1, &[]);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+
+        let default = crate::process::ProcessLiteral::Number(1.0);
+        let epoch = state
+            .write_current_scene_slot("rate", crate::process::ProcessLiteral::Number(2.0))
+            .unwrap();
+
+        state
+            .launch_scene(1, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .unwrap();
+        assert_eq!(
+            state.resolve_current_scene_slot("rate", &default),
+            (default.clone(), 0, false),
+            "a sibling scene must fall back to the declaration default"
+        );
+
+        state
+            .launch_scene(0, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .unwrap();
+        assert_eq!(
+            state.resolve_current_scene_slot("rate", &default),
+            (crate::process::ProcessLiteral::Number(2.0), epoch, true),
+            "switching away and back must not wipe the pattern's slot overrides"
+        );
+    }
+
+    #[test]
+    fn scene_slot_values_duplicate_with_scene_and_ignore_track_remap() {
+        let mut first = PatternSnapshot::new_default(2, &[]);
+        first
+            .scene_slots
+            .write_literal("figures", crate::process::ProcessLiteral::Number(3.0))
+            .unwrap();
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first], 0);
+        let duplicate = scenes.new_scene();
+        let before_delete = scenes.scenes[duplicate].scene_slots.clone();
+
+        let mut snapshot = scenes.scene_snapshot(duplicate).unwrap();
+        snapshot.remove_track(0);
+        assert_eq!(snapshot.scene_slots, before_delete);
+        assert_eq!(
+            snapshot.scene_slots.get("figures"),
+            Some(&crate::process::ProcessLiteral::Number(3.0))
+        );
+    }
+
+    #[test]
+    fn track_lane_restore_leaves_later_scene_slot_writes_intact() {
+        let state = SequencerState::new(2, vec![vec![], vec![]]);
+        let captured = state
+            .capture_track_pattern_lane_state(1, &[Vec::new(), Vec::new()])
+            .expect("capture the trailing track lane");
+
+        // A slot written AFTER the topology edge was captured is not part of
+        // that edge: scene slots are track-agnostic, so restoring the lane
+        // must not roll the write back.
+        state
+            .write_current_scene_slot("figures", crate::process::ProcessLiteral::Number(7.0))
+            .expect("write a scene slot");
+
+        state
+            .move_appended_track_pattern_lane_to(0, &captured)
+            .expect("restore the captured lane");
+
+        assert_eq!(
+            state.current_scene_slots().get("figures"),
+            Some(&crate::process::ProcessLiteral::Number(7.0)),
+            "a track-topology restore must not revert scene-slot writes"
+        );
+    }
+
     #[test]
     fn record_position_uses_the_track_timebase_not_global_sixteenths() {
         let state = SequencerState::new(1, vec![vec![]]);
@@ -409,6 +560,7 @@
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
+            scene_slots: SceneSlotStore::default(),
             rack_tracks: vec![None; num_tracks],
             process_chains: vec![crate::process::TrackProcessChain::default(); num_tracks],
             project_process_lane_overrides: vec![Default::default(); num_tracks],
@@ -2664,6 +2816,7 @@
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
+            scene_slots: SceneSlotStore::default(),
             rack_tracks: vec![None; 4],
             process_chains: vec![crate::process::TrackProcessChain::default(); 4],
             project_process_lane_overrides: vec![Default::default(); 4],

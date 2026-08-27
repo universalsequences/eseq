@@ -59,7 +59,9 @@ use crate::track_color::TrackColor;
 //       be empty and its first event may start off beat 0 (the prefix is
 //       unscened). Files of any version with no `arrangement` load the empty
 //       one. Older builds reject v8 files (they demand a scene event at 0).
-const PROJECT_FILE_VERSION: u32 = 8;
+//   9 — pattern-scoped `defscene` slot overrides. Older files load with an
+//       empty store, so every declaration resolves to its authored default.
+const PROJECT_FILE_VERSION: u32 = 9;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -1614,6 +1616,8 @@ pub struct ProjectPattern {
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     #[serde(default)]
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    #[serde(default)]
+    pub scene_slots: std::collections::BTreeMap<String, crate::process::ProcessLiteral>,
     pub instrument_types: Vec<ProjectInstrumentType>,
     #[serde(default)]
     pub instrument_run_modes: Vec<ProjectCustomInstrumentRunMode>,
@@ -1982,6 +1986,7 @@ impl ProjectPattern {
                 .collect(),
             neural_networks: snapshot.neural_networks.clone(),
             graph_overrides: snapshot.graph_overrides.clone(),
+            scene_slots: snapshot.scene_slots.values().clone(),
             instrument_types: snapshot
                 .instrument_types
                 .iter()
@@ -3792,6 +3797,7 @@ mod tests {
                     group_coupling: None,
                     group_trace_decay: None,
                 }],
+                scene_slots: std::collections::BTreeMap::new(),
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
                 rack_tracks: vec![None, None],
@@ -4991,6 +4997,38 @@ mod tests {
         let overrides: ProjectGraphOverrides =
             serde_json::from_str(json).expect("deserialize legacy graph overrides");
         assert_eq!(overrides.node_count, None);
+    }
+
+    #[test]
+    fn scene_slots_roundtrip_and_default_empty_for_older_projects() {
+        let mut project = sample_project();
+        let value = crate::process::ProcessLiteral::Map(std::collections::BTreeMap::from([
+            (
+                "shape".to_string(),
+                crate::process::ProcessLiteral::List(vec![
+                    crate::process::ProcessLiteral::Keyword("hit".to_string()),
+                    crate::process::ProcessLiteral::Number(0.75),
+                ]),
+            ),
+        ]));
+        project.patterns[0]
+            .scene_slots
+            .insert("figures".to_string(), value.clone());
+
+        let json = serde_json::to_value(&project).expect("serialize scene slots");
+        let restored: ProjectFile =
+            serde_json::from_value(json.clone()).expect("deserialize scene slots");
+        assert_eq!(restored.patterns[0].scene_slots.get("figures"), Some(&value));
+
+        let mut legacy = json;
+        legacy["version"] = serde_json::json!(8);
+        legacy["patterns"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("scene_slots");
+        let restored: ProjectFile =
+            serde_json::from_value(legacy).expect("load project without scene slots");
+        assert!(restored.patterns[0].scene_slots.is_empty());
     }
 
     #[test]

@@ -917,11 +917,36 @@ pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
 
 pub struct NativeContext {
     shared: SharedBridgeState,
+    reactive_reads: Vec<ReactiveFieldKey>,
+    reactive_invalidations: Vec<(ReactiveFieldKey, Value)>,
 }
 
 impl NativeContext {
     pub(crate) fn new(shared: SharedBridgeState) -> Self {
-        Self { shared }
+        Self {
+            shared,
+            reactive_reads: Vec::new(),
+            reactive_invalidations: Vec::new(),
+        }
+    }
+
+    /// Inject a reactive dependency for the currently rendering effect.
+    /// Calls made outside reactive rendering are intentionally inert.
+    pub fn track_reactive_read(&mut self, namespace: impl Into<String>, field: impl Into<String>) {
+        self.reactive_reads
+            .push(ReactiveFieldKey::new(namespace, field));
+    }
+
+    /// Dirty effects which previously tracked this host-owned reactive source.
+    /// `generation` must change for each semantic invalidation.
+    pub fn invalidate_reactive_source(
+        &mut self,
+        namespace: impl Into<String>,
+        field: impl Into<String>,
+        generation: Value,
+    ) {
+        self.reactive_invalidations
+            .push((ReactiveFieldKey::new(namespace, field), generation));
     }
 
     pub fn current_buffer_id(&self) -> Option<BufferId> {
@@ -1273,7 +1298,10 @@ pub struct Runtime {
     symbol_revision: u64,
     cached_completion_symbols: Option<Vec<String>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
+    module_completion_roots: Vec<crate::hot_reload::ModuleLoadRoot>,
+    cached_module_completions: Option<Vec<String>>,
     pub reactive_registry: ReactiveRegistry,
+    pending_injected_reactive_invalidations: HashMap<ReactiveFieldKey, Value>,
     #[cfg(test)]
     rendered_layouts: Vec<Vec<String>>,
     pub current_layout: Option<Arc<LayoutNode>>,
@@ -1309,7 +1337,9 @@ struct RuntimeStateSnapshot {
     symbol_revision: u64,
     cached_completion_symbols: Option<Vec<String>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
+    cached_module_completions: Option<Vec<String>>,
     reactive_registry: ReactiveRegistry,
+    pending_injected_reactive_invalidations: HashMap<ReactiveFieldKey, Value>,
     current_layout: Option<Arc<LayoutNode>>,
     layout_revision: u64,
     dirty_widget_ids: Vec<u64>,
@@ -1343,7 +1373,10 @@ impl Runtime {
             symbol_revision: 0,
             cached_completion_symbols: None,
             cached_completion_metadata: None,
+            module_completion_roots: Vec::new(),
+            cached_module_completions: None,
             reactive_registry,
+            pending_injected_reactive_invalidations: HashMap::new(),
             #[cfg(test)]
             rendered_layouts: Vec::new(),
             current_layout: None,
@@ -1960,7 +1993,19 @@ impl Runtime {
                 (module != crate::modules::IMPLICIT_MODULE).then(|| module.to_string());
             let mut ctx = NativeContext::new(shared.clone());
             match f(args, &mut ctx) {
-                Ok(value) => value,
+                Ok(value) => {
+                    for field in ctx.reactive_reads {
+                        vm.inject_reactive_read(&field.namespace, &field.field);
+                    }
+                    for (field, generation) in ctx.reactive_invalidations {
+                        vm.invalidate_injected_reactive_source(
+                            &field.namespace,
+                            &field.field,
+                            generation,
+                        );
+                    }
+                    value
+                }
                 Err(error) => {
                     ctx.set_status(format!("Error: {error}"));
                     Value::Bool(false)
@@ -2005,7 +2050,11 @@ impl Runtime {
             symbol_revision: self.symbol_revision,
             cached_completion_symbols: self.cached_completion_symbols.clone(),
             cached_completion_metadata: self.cached_completion_metadata.clone(),
+            cached_module_completions: self.cached_module_completions.clone(),
             reactive_registry: self.reactive_registry.clone(),
+            pending_injected_reactive_invalidations: self
+                .pending_injected_reactive_invalidations
+                .clone(),
             current_layout: self.current_layout.clone(),
             layout_revision: self.layout_revision,
             dirty_widget_ids: self.dirty_widget_ids.clone(),
@@ -2025,7 +2074,10 @@ impl Runtime {
         self.symbol_revision = snapshot.symbol_revision;
         self.cached_completion_symbols = snapshot.cached_completion_symbols;
         self.cached_completion_metadata = snapshot.cached_completion_metadata;
+        self.cached_module_completions = snapshot.cached_module_completions;
         self.reactive_registry = snapshot.reactive_registry;
+        self.pending_injected_reactive_invalidations =
+            snapshot.pending_injected_reactive_invalidations;
         self.current_layout = snapshot.current_layout;
         self.layout_revision = snapshot.layout_revision;
         self.dirty_widget_ids = snapshot.dirty_widget_ids;
@@ -2047,15 +2099,34 @@ impl Runtime {
     /// Configure ordered module import roots. This is separate from the raw
     /// `(load …)` root so user modules can shadow package and factory modules
     /// without changing relative loads inside any source file.
+    /// Drain module/source load errors accumulated by `(import …)` /
+    /// `(load …)` evaluated through `eval_str`, which (unlike the
+    /// path-based eval entry points) does not consume them itself. Callers
+    /// that programmatically import modules use this to fail loudly and to
+    /// keep a stale entry from poisoning a later path-based eval.
+    pub fn take_source_load_errors(&mut self) -> Vec<String> {
+        self.vm.take_source_load_errors()
+    }
+
     pub fn set_module_load_path(&mut self, roots: Vec<std::path::PathBuf>) {
-        self.vm.source_manager.set_module_load_roots(roots);
+        self.set_scoped_module_load_path(
+            roots
+                .into_iter()
+                .map(|path| crate::hot_reload::ModuleLoadRoot {
+                    path,
+                    module_prefix: None,
+                })
+                .collect(),
+        );
     }
 
     pub fn set_scoped_module_load_path(
         &mut self,
         roots: Vec<crate::hot_reload::ModuleLoadRoot>,
     ) {
-        self.vm.source_manager.set_scoped_module_load_roots(roots);
+        self.vm.source_manager.set_scoped_module_load_roots(roots.clone());
+        self.module_completion_roots = roots;
+        self.invalidate_symbol_cache();
     }
 
     pub fn exclude_module_alias_scan_root(&mut self, root: std::path::PathBuf) {
@@ -2508,6 +2579,46 @@ impl Runtime {
         self.invalidate_symbol_cache();
     }
 
+    /// Advance a host-owned reactive source previously injected by a native
+    /// and immediately process the targeted dirty effects. Injected sources
+    /// live directly in the VM DAG rather than the ordinary reactive registry,
+    /// so they do not participate in `run_reactive_cycle` batching.
+    pub fn invalidate_reactive_source(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        generation: Value,
+    ) -> Result<(), crate::vm::VMError> {
+        self.vm
+            .invalidate_injected_reactive_source(namespace, field, generation);
+        self.vm.process_dirty_reactive()?;
+        self.flush_vm_reactive_sets();
+        if self.sync_theme_to_global {
+            self.sync_theme_from_vm();
+        }
+        self.flush_widget_trees();
+        Ok(())
+    }
+
+    /// Queue fresh generations for every subscribed host-owned field in a
+    /// namespace. The invalidations join the next ordinary reactive cycle, so
+    /// effects observe all reactive registry writes from that cycle before
+    /// they re-render. Repeated calls before the cycle retain only the newest
+    /// generation for each field.
+    pub fn queue_reactive_namespace_invalidation(
+        &mut self,
+        namespace: &str,
+        mut generation_for_field: impl FnMut(&str) -> Value,
+    ) {
+        for field in self.vm.subscribed_injected_reactive_fields(namespace) {
+            let generation = generation_for_field(&field);
+            self.pending_injected_reactive_invalidations.insert(
+                ReactiveFieldKey::new(namespace, field),
+                generation,
+            );
+        }
+    }
+
     /// Update one reactive field.
     ///
     /// `#[track_caller]` makes filtered UI traces identify the host write site,
@@ -2907,23 +3018,36 @@ impl Runtime {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_context(current_buffer_id);
         let dirty = self.reactive_registry.drain_dirty();
+        let injected = std::mem::take(&mut self.pending_injected_reactive_invalidations);
         // Deferred effects for hidden buffers stay in the DAG's dirty set
         // indefinitely, so `process_dirty_reactive` would pay a full
         // `topo_sort_dirty` every idle cycle to produce no work. Skip that
         // unless a deferred effect's target has become visible, which is the
-        // only reason an empty-dirty cycle has anything to do.
-        if dirty.is_empty() && !self.vm.has_visible_deferred_effects() {
+        // only other reason an empty-dirty cycle has anything to do.
+        if dirty.is_empty() && injected.is_empty() && !self.vm.has_visible_deferred_effects() {
             if trace_ui_enabled() {
                 eprintln!("[ui-trace][reactive-cycle] dirty=[] no-op");
             }
             return;
         }
 
-        let dirty_len = dirty.len();
-        let dirty_fields = dirty
+        let dirty_len = dirty.len() + injected.len();
+        let mut dirty_fields = dirty
             .iter()
             .map(|(namespace, field, _)| format!("{namespace}.{field}"))
             .collect::<Vec<_>>();
+        dirty_fields.extend(
+            injected
+                .keys()
+                .map(|field| format!("{}.{}", field.namespace, field.field)),
+        );
+        for (field, generation) in injected {
+            self.vm.invalidate_injected_reactive_source(
+                &field.namespace,
+                &field.field,
+                generation,
+            );
+        }
         let apply_started = Instant::now();
         let apply_result = if dirty.is_empty() {
             self.vm.process_visible_dirty_effects()
@@ -3069,6 +3193,16 @@ impl Runtime {
         symbols.dedup();
         self.cached_completion_symbols = Some(symbols.clone());
         symbols
+    }
+
+    pub fn module_completions(&mut self) -> Vec<String> {
+        if let Some(modules) = &self.cached_module_completions {
+            return modules.clone();
+        }
+
+        let modules = discover_module_completions(&self.module_completion_roots);
+        self.cached_module_completions = Some(modules.clone());
+        modules
     }
 
     pub fn completion_metadata(&mut self) -> HashMap<String, SymbolMetadata> {
@@ -4253,6 +4387,73 @@ impl Runtime {
         self.symbol_revision = self.symbol_revision.wrapping_add(1);
         self.cached_completion_symbols = None;
         self.cached_completion_metadata = None;
+        self.cached_module_completions = None;
+    }
+}
+
+fn discover_module_completions(roots: &[crate::hot_reload::ModuleLoadRoot]) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for root in roots {
+        if let Some(prefix) = &root.module_prefix {
+            names.insert(prefix.clone());
+        }
+
+        let mut files = Vec::new();
+        collect_module_source_files(&root.path, &mut HashSet::new(), &mut files);
+        for path in files {
+            let Ok(relative) = path.strip_prefix(&root.path) else {
+                continue;
+            };
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok((Some(module), _)) = crate::modules::inspect_exports(&source) else {
+                continue;
+            };
+            let relative_module = match &root.module_prefix {
+                Some(prefix) => {
+                    let Some(suffix) = module
+                        .strip_prefix(prefix)
+                        .and_then(|suffix| suffix.strip_prefix('.'))
+                    else {
+                        continue;
+                    };
+                    suffix
+                }
+                None => module.as_str(),
+            };
+            if crate::modules::module_relative_file_candidates(relative_module)
+                .iter()
+                .any(|candidate| candidate == relative)
+            {
+                names.insert(module);
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn collect_module_source_files(
+    root: &std::path::Path,
+    visited_directories: &mut HashSet<PathBuf>,
+    files: &mut Vec<PathBuf>,
+) {
+    let Ok(canonical_root) = root.canonicalize() else {
+        return;
+    };
+    if !visited_directories.insert(canonical_root) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_module_source_files(&path, visited_directories, files);
+        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "lisp") {
+            files.push(path);
+        }
     }
 }
 

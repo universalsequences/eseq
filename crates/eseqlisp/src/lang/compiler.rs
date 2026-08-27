@@ -179,6 +179,10 @@ pub struct Compiler<'a> {
     reactive_namespaces: HashSet<String>,
     derived_bindings: HashMap<String, u32>,
     state_bindings: HashMap<String, u32>,
+    /// Qualified declaration names registered by `defscene`. Unlike
+    /// `defstate`, these have no reactive node id: reads and writes lower to
+    /// host calls that resolve the current pattern at execution time.
+    scene_bindings: HashSet<String>,
     next_node_id: u32,
     next_temp_id: u32,
     source_file: Option<PathBuf>,
@@ -263,6 +267,32 @@ fn extract_function_definition(
             Some((None, args.clone(), list[2..].to_vec()))
         }
         _ => None,
+    }
+}
+
+/// Forms whose second element is the name being defined rather than a value
+/// read, for the shipped-body scene lowering.
+const DEFINITION_NAME_FORMS: &[&str] = &[
+    "def",
+    "def-accumulator",
+    "def-node",
+    "def-process",
+    "defchan",
+    "defcustom",
+    "defmacro",
+    "defscene",
+    "defstate",
+];
+
+fn collect_pattern_symbols(pattern: &Expression, symbols: &mut Vec<String>) {
+    match pattern {
+        Expression::Symbol(name) => symbols.push(name.clone()),
+        Expression::List(items) => {
+            for item in items {
+                collect_pattern_symbols(item, symbols);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -404,6 +434,7 @@ impl<'a> Compiler<'a> {
             reactive_namespaces: HashSet::new(),
             derived_bindings: HashMap::new(),
             state_bindings: HashMap::new(),
+            scene_bindings: HashSet::new(),
             next_node_id: 0,
             next_temp_id: 0,
             source_file: None,
@@ -434,6 +465,7 @@ impl<'a> Compiler<'a> {
         reactive_namespaces: HashSet<String>,
         derived_bindings: HashMap<String, u32>,
         state_bindings: HashMap<String, u32>,
+        scene_bindings: HashSet<String>,
         next_node_id: u32,
         macros: HashMap<String, MacroDef>,
         source_file: Option<PathBuf>,
@@ -448,6 +480,7 @@ impl<'a> Compiler<'a> {
             reactive_namespaces,
             derived_bindings,
             state_bindings,
+            scene_bindings,
             next_node_id,
             next_temp_id: 0,
             source_file,
@@ -780,6 +813,233 @@ impl<'a> Compiler<'a> {
         self.compile_quoted_expression_preserving_quotes(&residue)
     }
 
+    /// Expand a scheduler-bound body and lower free `defscene` references to
+    /// explicit by-name reads before quoting it as source data. The scheduler
+    /// compiler has its own declaration environment, so retaining a bare
+    /// authoring symbol here would either capture the declaration default or
+    /// fail to resolve after the body crosses the VM boundary.
+    fn compile_expanded_shipped_expression(
+        &mut self,
+        expression: &Expression,
+        preserve_quotes: bool,
+    ) -> Result<(), CompilerError> {
+        let expanded = self.expand_macros(expression, 0)?;
+        let residue = strip_source_origin_wrappers(expanded);
+        // Nothing to lower until a `defscene` is in scope, and the vast
+        // majority of shipped bodies are in that state; skip the rebuild.
+        let lowered = if self.scene_bindings.is_empty() {
+            residue
+        } else {
+            self.lower_scene_references_for_shipping(&residue, &[])
+        };
+        if preserve_quotes {
+            self.compile_quoted_expression_preserving_quotes(&lowered)
+        } else {
+            self.compile_quoted_expression(&lowered)
+        }
+    }
+
+    fn lower_scene_references_for_shipping(
+        &self,
+        expression: &Expression,
+        bound: &[String],
+    ) -> Expression {
+        let lower = |expression: &Expression, bound: &[String]| {
+            self.lower_scene_references_for_shipping(expression, bound)
+        };
+        match expression {
+            Expression::Symbol(name) if !bound.iter().any(|local| local == name) => {
+                match self.scene_binding_for(name) {
+                    Some(key) => Expression::List(vec![
+                        Expression::Symbol("__defscene-resolve".to_string()),
+                        Expression::String(key),
+                    ]),
+                    None => expression.clone(),
+                }
+            }
+            // Quoted symbols are literal data, not free reads. This includes
+            // explicit quote forms produced by macros as well as parser quote
+            // variants.
+            Expression::List(items)
+                if matches!(items.first(), Some(Expression::Symbol(name)) if name == "quote") =>
+            {
+                expression.clone()
+            }
+            // The list spelling of `` ` ``: its template is data, but its
+            // unquoted holes are still free reads that must lower.
+            Expression::List(items)
+                if items.len() == 2
+                    && matches!(items.first(), Some(Expression::Symbol(name)) if name == "quasiquote") =>
+            {
+                Expression::List(vec![
+                    items[0].clone(),
+                    self.lower_scene_references_inside_quasiquote(&items[1], bound, 1),
+                ])
+            }
+            Expression::List(items)
+                if matches!(items.first(), Some(Expression::Symbol(name)) if name == "lambda")
+                    && matches!(items.get(1), Some(Expression::List(_))) =>
+            {
+                let Expression::List(params) = &items[1] else {
+                    unreachable!()
+                };
+                let mut body_bound = bound.to_vec();
+                for param in params {
+                    collect_pattern_symbols(param, &mut body_bound);
+                }
+                let mut lowered = vec![items[0].clone(), items[1].clone()];
+                lowered.extend(items[2..].iter().map(|body| lower(body, &body_bound)));
+                Expression::List(lowered)
+            }
+            // `let` is sequential (let*): each initializer can see the
+            // preceding bindings, while the body sees all of them.
+            Expression::List(items)
+                if matches!(items.first(), Some(Expression::Symbol(name)) if name == "let")
+                    && matches!(items.get(1), Some(Expression::List(_))) =>
+            {
+                let Expression::List(bindings) = &items[1] else {
+                    unreachable!()
+                };
+                let mut body_bound = bound.to_vec();
+                let lowered_bindings = bindings
+                    .iter()
+                    .map(|binding| match binding {
+                        Expression::List(pair) if pair.len() == 2 => {
+                            let lowered_value = lower(&pair[1], &body_bound);
+                            collect_pattern_symbols(&pair[0], &mut body_bound);
+                            Expression::List(vec![pair[0].clone(), lowered_value])
+                        }
+                        _ => lower(binding, &body_bound),
+                    })
+                    .collect();
+                let mut lowered = vec![items[0].clone(), Expression::List(lowered_bindings)];
+                lowered.extend(items[2..].iter().map(|body| lower(body, &body_bound)));
+                Expression::List(lowered)
+            }
+            // `(def f (args...) body...)` is the language's named-function
+            // form. Its argument names shadow scene declarations just like
+            // lambda parameters do.
+            Expression::List(items)
+                if matches!(items.first(), Some(Expression::Symbol(name)) if name == "def")
+                    && matches!(items.get(1), Some(Expression::Symbol(_)))
+                    && matches!(items.get(2), Some(Expression::List(_))) =>
+            {
+                let Expression::List(params) = &items[2] else {
+                    unreachable!()
+                };
+                let mut body_bound = bound.to_vec();
+                for param in params {
+                    collect_pattern_symbols(param, &mut body_bound);
+                }
+                let mut lowered = items[..3].to_vec();
+                lowered.extend(items[3..].iter().map(|body| lower(body, &body_bound)));
+                Expression::List(lowered)
+            }
+            // A scene write ships as the by-name setter. Lowering the target
+            // as a read would emit `(set! (__defscene-resolve …) …)`, which is
+            // not an assignment target the scheduler compiler accepts.
+            Expression::List(items)
+                if items.len() == 3
+                    && matches!(items.first(), Some(Expression::Symbol(name)) if name == "set!") =>
+            {
+                let value = lower(&items[2], bound);
+                match &items[1] {
+                    Expression::Symbol(name) if !bound.iter().any(|local| local == name) => {
+                        match self.scene_binding_for(name) {
+                            Some(key) => Expression::List(vec![
+                                Expression::Symbol("__defscene-set".to_string()),
+                                Expression::String(key),
+                                value,
+                            ]),
+                            None => {
+                                Expression::List(vec![items[0].clone(), items[1].clone(), value])
+                            }
+                        }
+                    }
+                    target => Expression::List(vec![items[0].clone(), lower(target, bound), value]),
+                }
+            }
+            // Definition forms name what they define; that symbol is a binding
+            // occurrence, not a free read. (The `def` arm above already covers
+            // the named-function shape, which additionally binds parameters.)
+            Expression::List(items)
+                if items.len() >= 2
+                    && matches!(items.first(), Some(Expression::Symbol(name))
+                        if DEFINITION_NAME_FORMS.contains(&name.as_str()))
+                    && matches!(items.get(1), Some(Expression::Symbol(_))) =>
+            {
+                let mut lowered = items[..2].to_vec();
+                lowered.extend(items[2..].iter().map(|item| lower(item, bound)));
+                Expression::List(lowered)
+            }
+            Expression::List(items) => {
+                Expression::List(items.iter().map(|item| lower(item, bound)).collect())
+            }
+            Expression::QuoteList(_) | Expression::QuoteSymbol(_) => expression.clone(),
+            Expression::Quasiquote(inner) => Expression::Quasiquote(Box::new(
+                self.lower_scene_references_inside_quasiquote(inner, bound, 1),
+            )),
+            Expression::Unquote(inner) => Expression::Unquote(Box::new(lower(inner, bound))),
+            Expression::UnquoteSplicing(inner) => {
+                Expression::UnquoteSplicing(Box::new(lower(inner, bound)))
+            }
+            _ => expression.clone(),
+        }
+    }
+
+    /// Descend a quasiquoted template: its symbols are data, so only the
+    /// unquoted holes lower. `depth` tracks quasiquote nesting so an inner
+    /// `` ` `` consumes its own unquote before the outer template's holes are
+    /// reached.
+    fn lower_scene_references_inside_quasiquote(
+        &self,
+        expression: &Expression,
+        bound: &[String],
+        depth: usize,
+    ) -> Expression {
+        let descend = |expression: &Expression, depth: usize| {
+            self.lower_scene_references_inside_quasiquote(expression, bound, depth)
+        };
+        let unquote_hole = |inner: &Expression| {
+            if depth == 1 {
+                self.lower_scene_references_for_shipping(inner, bound)
+            } else {
+                self.lower_scene_references_inside_quasiquote(inner, bound, depth - 1)
+            }
+        };
+        match expression {
+            Expression::Quasiquote(inner) => {
+                Expression::Quasiquote(Box::new(descend(inner, depth + 1)))
+            }
+            Expression::Unquote(inner) => Expression::Unquote(Box::new(unquote_hole(inner))),
+            Expression::UnquoteSplicing(inner) => {
+                Expression::UnquoteSplicing(Box::new(unquote_hole(inner)))
+            }
+            // Macros can emit the list spellings of these forms rather than
+            // the parser's dedicated variants; both reach the shipped tick.
+            Expression::List(items) | Expression::QuoteList(items) => {
+                let head = match items.first() {
+                    Some(Expression::Symbol(name)) if items.len() == 2 => Some(name.as_str()),
+                    _ => None,
+                };
+                let lowered = match head {
+                    Some("quasiquote") => {
+                        vec![items[0].clone(), descend(&items[1], depth + 1)]
+                    }
+                    Some("unquote") | Some("unquote-splicing") => {
+                        vec![items[0].clone(), unquote_hole(&items[1])]
+                    }
+                    _ => items.iter().map(|item| descend(item, depth)).collect(),
+                };
+                match expression {
+                    Expression::QuoteList(_) => Expression::QuoteList(lowered),
+                    _ => Expression::List(lowered),
+                }
+            }
+            _ => expression.clone(),
+        }
+    }
+
     /// Quote a form that ships as data without expanding it (`def-song` rows,
     /// `def-accumulator` bodies, `:shader`/`:doc`-style auto-quoted values). Expansion is
     /// deliberately not run here, but the authoring VM's source-origin wrappers must still be
@@ -910,6 +1170,10 @@ impl<'a> Compiler<'a> {
         std::mem::take(&mut self.state_bindings)
     }
 
+    pub fn take_scene_bindings(&mut self) -> HashSet<String> {
+        std::mem::take(&mut self.scene_bindings)
+    }
+
     pub fn take_macros(&mut self) -> HashMap<String, MacroDef> {
         std::mem::take(&mut self.macros)
     }
@@ -1015,6 +1279,30 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    fn compile_named_scene_definition(
+        &mut self,
+        name: &str,
+        default: &Expression,
+    ) -> Result<(), CompilerError> {
+        let key = self.qualify_registration_name(name);
+        self.scene_bindings.insert(key.clone());
+
+        let name_idx = self.use_string_constant(&key);
+        self.emit(OpCode::PushStr(name_idx));
+        self.compile_expression(default)?;
+        self.emit_symbol_load("__defscene-register");
+        self.emit(OpCode::Call(2));
+
+        // Intern a real global definition so module export/visibility and the
+        // ordinary symbol-resolution ladder treat defscene exactly like
+        // defstate. Reads never use this fallback cell while the declaration
+        // remains registered; they lower through `__defscene-resolve` below.
+        let global_idx = self.use_global_for_definition(name);
+        self.emit(OpCode::StoreGlobal(global_idx));
+        self.emit(OpCode::PushNil);
+        Ok(())
+    }
+
     fn compile_custom_definition(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
         let Expression::Symbol(name) = list.get(1).ok_or(CompilerError::InvalidArg)? else {
             return Err(CompilerError::InvalidArg);
@@ -1072,6 +1360,17 @@ impl<'a> Compiler<'a> {
     ) -> Result<(), CompilerError> {
         match target {
             Expression::Symbol(name) => {
+                if let Some(key) = self.scene_binding_for(name)
+                    && matches!(self.resolve_symbol(name), SymbolResolution::Global(_))
+                {
+                    let name_idx = self.use_string_constant(&key);
+                    self.emit(OpCode::PushStr(name_idx));
+                    self.compile_expression(value)?;
+                    self.emit_symbol_load("__defscene-set");
+                    self.emit(OpCode::Call(2));
+                    return Ok(());
+                }
+
                 let parts = if super::modules::is_qualified(name) {
                     vec![name.as_str()]
                 } else {
@@ -1704,6 +2003,40 @@ impl<'a> Compiler<'a> {
         super::modules::qualify(&self.current_module, name)
     }
 
+    /// Scene-binding lookup mirroring the §3 resolution ladder over the
+    /// qualified declaration keyspace. Returns the canonical registration
+    /// name passed across the host boundary.
+    fn scene_binding_for(&self, name: &str) -> Option<String> {
+        if self.scene_bindings.contains(name) {
+            return Some(name.to_string());
+        }
+        if let Some((ns, base)) = super::modules::split_qualified(name) {
+            let full_ns = self
+                .import_aliases
+                .get(ns)
+                .map(String::as_str)
+                .unwrap_or(ns);
+            let key = if full_ns == super::modules::IMPLICIT_MODULE {
+                base.to_string()
+            } else {
+                super::modules::qualify(full_ns, base)
+            };
+            return self.scene_bindings.contains(&key).then_some(key);
+        }
+        if self.declared_module().is_some() {
+            let key = super::modules::qualify(&self.current_module, name);
+            if self.scene_bindings.contains(&key) {
+                return Some(key);
+            }
+        }
+        if let Some(key) = self.refers.get(name)
+            && self.scene_bindings.contains(key)
+        {
+            return Some(key.clone());
+        }
+        None
+    }
+
     /// State-binding lookup mirroring the §3 resolution ladder over the
     /// (possibly qualified) `state_bindings` keyspace: exact key →
     /// current-module key → `:refer` target.
@@ -1786,10 +2119,19 @@ impl<'a> Compiler<'a> {
 
     fn emit_symbol_load(&mut self, name: &str) {
         match self.resolve_symbol(name) {
-            SymbolResolution::Global(idx) => match self.state_binding_for(name) {
-                Some(node_id) => self.emit(OpCode::LoadState(node_id)),
-                None => self.emit(OpCode::LoadGlobal(idx)),
-            },
+            SymbolResolution::Global(idx) => {
+                if let Some(key) = self.scene_binding_for(name) {
+                    let name_idx = self.use_string_constant(&key);
+                    self.emit(OpCode::PushStr(name_idx));
+                    self.emit_symbol_load("__defscene-resolve");
+                    self.emit(OpCode::Call(1));
+                } else {
+                    match self.state_binding_for(name) {
+                        Some(node_id) => self.emit(OpCode::LoadState(node_id)),
+                        None => self.emit(OpCode::LoadGlobal(idx)),
+                    }
+                }
+            }
             SymbolResolution::Local(idx) => self.emit(OpCode::LoadLocal(idx)),
             SymbolResolution::Upvalue(idx) => self.emit(OpCode::LoadUpvalue(idx)),
         }
@@ -2704,6 +3046,12 @@ impl<'a> Compiler<'a> {
                 };
                 return self.compile_named_state_definition(name, &list[2]);
             }
+            if s == "defscene" && list.len() == 3 {
+                let Expression::Symbol(name) = &list[1] else {
+                    return Err(CompilerError::InvalidArg);
+                };
+                return self.compile_named_scene_definition(name, &list[2]);
+            }
             if s == "defcustom" {
                 return self.compile_custom_definition(list);
             }
@@ -2776,7 +3124,16 @@ impl<'a> Compiler<'a> {
                 }
                 if quote_next {
                     if expand_quote_next {
-                        if quote_next_preserving {
+                        let ships_executable_body = is_def_sequencer
+                            || (is_def_process
+                                && matches!(list.get(i), Some(Expression::Keyword(key))
+                                    if key == "run" || key == "init" || key.starts_with("on-")));
+                        if ships_executable_body {
+                            self.compile_expanded_shipped_expression(
+                                elem,
+                                quote_next_preserving,
+                            )?;
+                        } else if quote_next_preserving {
                             self.compile_expanded_quoted_expression_preserving_quotes(elem)?;
                         } else {
                             self.compile_expanded_quoted_expression(elem)?;
@@ -2800,7 +3157,13 @@ impl<'a> Compiler<'a> {
                     // `def-process`'s `:every`/`:listen` clauses: the native
                     // parses it structurally in *this* VM, so leaving a macro
                     // call unexpanded there fails to parse rather than working.
-                    self.compile_expanded_quoted_expression(elem)?;
+                    // Remaining arguments are executable scheduler bodies and
+                    // therefore lower free scene references by name.
+                    if i == 0 {
+                        self.compile_expanded_quoted_expression(elem)?;
+                    } else {
+                        self.compile_expanded_shipped_expression(elem, false)?;
+                    }
                     continue;
                 }
                 if is_def_song {
@@ -2853,6 +3216,12 @@ impl<'a> Compiler<'a> {
                             quote_next = true;
                             quote_next_preserving = true;
                             expand_quote_next = true;
+                        }
+                        // `:requires (module …)` is a list of module *names* for
+                        // the scheduler VM to import before compiling the shipped
+                        // tick — data, never a call.
+                        if is_def_sequencer && k == "requires" {
+                            quote_next = true;
                         }
                         if is_def_process
                             && (k == "in"

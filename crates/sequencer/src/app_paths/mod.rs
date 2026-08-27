@@ -455,6 +455,33 @@ impl AppPaths {
     pub fn sample_facts_path(&self) -> PathBuf {
         self.user_data_root().join("samples.jsonl")
     }
+
+    /// Resolve the portable sample identity persisted in projects and browser
+    /// rows against this layout's sample store.
+    ///
+    /// `samples/<sha256>.wav` is an identity, not a path relative to the
+    /// process working directory. Resolve that shape unconditionally so an
+    /// obsolete checkout-local `samples/` directory can never shadow the
+    /// configured store, and so diagnostics for missing samples name the
+    /// location that was actually expected. Absolute and other relative paths
+    /// remain available for imported files and fixtures.
+    pub fn resolve_sample_ref(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            return path.to_path_buf();
+        }
+
+        if let Ok(relative) = path.strip_prefix("samples") {
+            let mut components = relative.components();
+            if let (Some(std::path::Component::Normal(name)), None) =
+                (components.next(), components.next())
+            {
+                return self.samples_dir().join(name);
+            }
+        }
+
+        path.to_path_buf()
+    }
+
     pub fn sounds_dir(&self) -> PathBuf {
         self.user_data_root().join("sounds")
     }
@@ -637,23 +664,10 @@ fn dev_toolchain_override_from_env() -> Option<PathBuf> {
     Some(root)
 }
 
-/// Resolve a possibly-relative, content-addressed sample reference
-/// (`samples/<sha256>.wav`, per docs/content-tiers-spec.md §5) against the
-/// sample store: strip the directory prefix and look the file name up under
-/// [`AppPaths::samples_dir`]. Absolute paths and paths that already exist
-/// from the current working directory pass through untouched, so external
-/// files and test fixtures are unaffected.
+/// Resolve a possibly-relative, content-addressed sample reference through
+/// the process-wide filesystem layout.
 pub fn resolve_sample_ref(path: &std::path::Path) -> PathBuf {
-    if path.is_absolute() || path.exists() {
-        return path.to_path_buf();
-    }
-    if let Some(name) = path.file_name() {
-        let candidate = app_paths().samples_dir().join(name);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    path.to_path_buf()
+    app_paths().resolve_sample_ref(path)
 }
 
 static APP_PATHS: OnceLock<AppPaths> = OnceLock::new();
@@ -791,6 +805,30 @@ mod tests {
                 )
             });
         }
+    }
+
+    #[test]
+    fn content_addressed_sample_refs_resolve_only_against_the_sample_store() {
+        let paths = AppPaths::release(
+            PathBuf::from("/App/Contents/MacOS"),
+            PathBuf::from("/App/Contents/Resources"),
+            PathBuf::from("/configured/user-data"),
+            PathBuf::from("/Caches"),
+            PathBuf::from("/home/test/.eseq.d"),
+        );
+
+        assert_eq!(
+            paths.resolve_sample_ref(Path::new("samples/abc123.wav")),
+            PathBuf::from("/configured/user-data/samples/abc123.wav")
+        );
+        assert_eq!(
+            paths.resolve_sample_ref(Path::new("fixtures/abc123.wav")),
+            PathBuf::from("fixtures/abc123.wav")
+        );
+        assert_eq!(
+            paths.resolve_sample_ref(Path::new("/external/abc123.wav")),
+            PathBuf::from("/external/abc123.wav")
+        );
     }
 
     #[test]

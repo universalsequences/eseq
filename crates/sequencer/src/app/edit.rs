@@ -20,7 +20,7 @@ use super::history::{
     MidiFxChainState, MidiFxInstanceState, PatternGeometryPatch,
     RackContainerSlotState, RackEffectChainPatch, RackEffectChainState, RackSlotStructureEdit,
     RackSlotStructurePatch, StepCellDelta, StepCellsPatch,
-    SceneStructurePatch,
+    SceneSlotPatch, SceneStructurePatch,
     TrackInstrumentSource, TrackInstrumentState,
     TrackCreationPatch, TrackDeletionPatch, TrackParamsBatchPatch, TrackParamsPatch,
     TrackPresentationChange, TrackPresentationPatch, TrackPresentationState,
@@ -711,6 +711,43 @@ impl App {
         result: crate::lisp_host::CompileResult,
     ) -> Result<(), String> {
         let source = self.retained_effect_source_for_name(name)?;
+        self.apply_compiled_bus_effect_to_slot_recorded_with_retained(
+            bus_idx, slot, name, result, source,
+        )
+    }
+
+    /// Bus twin of [`Self::apply_compiled_effect_to_slot_recorded_with_source`]
+    /// (eseq-u2h): edit sessions retain the source they compiled rather than
+    /// re-reading the effects library by name.
+    pub fn apply_compiled_bus_effect_to_slot_recorded_with_source(
+        &mut self,
+        bus_idx: usize,
+        slot: usize,
+        name: &str,
+        result: crate::lisp_host::CompileResult,
+        source: &str,
+        asset_base: Option<std::path::PathBuf>,
+        origin: crate::lisp_host::DGenSourceOrigin,
+    ) -> Result<(), String> {
+        let source = RetainedEffectSource::Compiled {
+            name: name.to_string(),
+            source: source.to_string(),
+            asset_base,
+            origin,
+        };
+        self.apply_compiled_bus_effect_to_slot_recorded_with_retained(
+            bus_idx, slot, name, result, source,
+        )
+    }
+
+    fn apply_compiled_bus_effect_to_slot_recorded_with_retained(
+        &mut self,
+        bus_idx: usize,
+        slot: usize,
+        name: &str,
+        result: crate::lisp_host::CompileResult,
+        source: RetainedEffectSource,
+    ) -> Result<(), String> {
         let bus_id = self.buses.get(bus_idx)
             .map(|bus| bus.id)
             .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
@@ -1327,6 +1364,42 @@ impl App {
         track: usize,
     ) -> Result<(), String> {
         let source = self.retained_effect_source_for_name(name)?;
+        self.apply_compiled_effect_to_slot_recorded_with_retained(result, name, slot, track, source)
+    }
+
+    /// Edit-session variant of [`Self::apply_compiled_effect_to_slot_recorded`]:
+    /// retains the exact source that was compiled instead of re-reading the
+    /// effects library by name. Draft sessions (new-effect / fork drafts)
+    /// compile out of a temp directory under a name the library does not hold,
+    /// so the name-based lookup fails with a bare missing-file error
+    /// (eseq-u2h).
+    pub fn apply_compiled_effect_to_slot_recorded_with_source(
+        &mut self,
+        result: crate::lisp_host::CompileResult,
+        name: &str,
+        slot: usize,
+        track: usize,
+        source: &str,
+        asset_base: Option<std::path::PathBuf>,
+        origin: crate::lisp_host::DGenSourceOrigin,
+    ) -> Result<(), String> {
+        let source = RetainedEffectSource::Compiled {
+            name: name.to_string(),
+            source: source.to_string(),
+            asset_base,
+            origin,
+        };
+        self.apply_compiled_effect_to_slot_recorded_with_retained(result, name, slot, track, source)
+    }
+
+    fn apply_compiled_effect_to_slot_recorded_with_retained(
+        &mut self,
+        result: crate::lisp_host::CompileResult,
+        name: &str,
+        slot: usize,
+        track: usize,
+        source: RetainedEffectSource,
+    ) -> Result<(), String> {
         self.apply_recorded_track_effect_chain_mutation(
             track,
             "Replace audio effect",
@@ -1816,6 +1889,57 @@ impl App {
             retained_bytes,
         );
         Ok(())
+    }
+
+    /// Record a scene-slot write that the UI VM has already applied. Repeated
+    /// writes to the same stable pattern/name pair stage one gesture patch;
+    /// pointer/key release commits it through `finish_active_gesture`.
+    pub fn record_applied_scene_slot_write(
+        &mut self,
+        scene: crate::sequencer::SceneId,
+        name: String,
+        before: Option<crate::process::ProcessLiteral>,
+        after: crate::process::ProcessLiteral,
+    ) -> Result<EditOutcome, EditError> {
+        let merge_key = MergeKey::new(format!("scene-slot:{}:{}", scene.0, name));
+        if self.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(&merge_key) {
+            finish_active_gesture(self);
+        }
+        let entry_before = self
+            .history
+            .active_gesture_patch(&merge_key)
+            .and_then(|patch| match patch {
+                EditPatch::SceneSlot(patch) if patch.scene == scene && patch.name == name => {
+                    Some(patch.before.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or(before);
+        let after = Some(after);
+        if entry_before == after {
+            if self.history.discard_active_gesture_entry(&merge_key) {
+                return Ok(EditOutcome::NoOp);
+            }
+            return Ok(EditOutcome::NoOp);
+        }
+        let patch = SceneSlotPatch {
+            scene,
+            name,
+            before: entry_before,
+            after,
+        };
+        let retained_bytes = patch.retained_bytes();
+        ensure_coalescing_gesture(self, &merge_key);
+        let history_move = self
+            .history
+            .stage_active_gesture(
+                "Edit scene slot",
+                &merge_key,
+                EditPatch::SceneSlot(patch),
+                retained_bytes,
+            )
+            .ok_or(EditError::UnsupportedCommand)?;
+        Ok(EditOutcome::Applied(history_move))
     }
 
     pub fn apply_recorded_scene_structure_mutation<T>(
@@ -9182,6 +9306,21 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
         EditPatch::TrackPresentation(patch) => app
             .restore_track_presentation(patch, mode)
             .map_err(EditError::ReplayFailed),
+        EditPatch::SceneSlot(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => patch.before.clone(),
+                ApplyMode::Redo => patch.after.clone(),
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "scene-slot replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.state
+                .set_scene_slot_override(patch.scene, patch.name.clone(), target)
+                .map(|_| ())
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::SceneStructure(patch) => {
             let target = match mode {
                 ApplyMode::Undo => &patch.before,
@@ -9299,6 +9438,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackCreation(_) => true,
         EditPatch::TrackDeletion(_) => true,
         EditPatch::TrackPresentation(_) => false,
+        EditPatch::SceneSlot(_) => true,
         EditPatch::SceneStructure(_) => true,
         // The arrangement's compiled song has no scheduler runtime.
         EditPatch::Arrangement(_) => false,
@@ -9394,6 +9534,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::TrackCreation(patch) => patch.retained_bytes(),
         EditPatch::TrackDeletion(patch) => patch.retained_bytes(),
         EditPatch::TrackPresentation(patch) => patch.retained_bytes(),
+        EditPatch::SceneSlot(patch) => patch.retained_bytes(),
         EditPatch::SceneStructure(patch) => patch.retained_bytes(),
         EditPatch::Arrangement(patch) => patch.retained_bytes(),
         EditPatch::BusGroupStructure(patch) => patch.retained_bytes(),
@@ -9532,6 +9673,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::TrackPresentation(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
+        EditPatch::SceneSlot(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
         EditPatch::SceneStructure(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
@@ -9636,6 +9780,67 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app
+    }
+
+    #[test]
+    fn scene_slot_drag_coalesces_and_undo_restores_declaration_fallback() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let mut app = test_app(state);
+        let scene = app.state.current_scene_id().expect("current scene identity");
+        let mut runtime = eseqlisp::Runtime::new();
+        crate::lisp_host::register_scene_slot_natives(&mut runtime, Arc::clone(&app.state));
+        runtime
+            .eval_str(
+                r#"(defscene amount 0.0)
+                   (effect-buffer "*slot-history*"
+                     (subtree :key "amount" (label (str amount))))"#,
+            )
+            .expect("render scene-slot reader");
+        runtime.take_pending_buffer_widget_trees();
+        let first = crate::process::ProcessLiteral::Number(0.25);
+        let second = crate::process::ProcessLiteral::Number(0.75);
+
+        app.state
+            .write_current_scene_slot("amount", first.clone())
+            .expect("preview first write");
+        app.record_applied_scene_slot_write(scene, "amount".to_string(), None, first.clone())
+            .expect("stage first write");
+        app.state
+            .write_current_scene_slot("amount", second.clone())
+            .expect("preview second write");
+        app.record_applied_scene_slot_write(
+            scene,
+            "amount".to_string(),
+            Some(first),
+            second.clone(),
+        )
+        .expect("coalesce second write");
+
+        assert_eq!(app.history.undo_len(), 0, "gesture is pending until release");
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 1, "the drag commits one entry");
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(
+            app.state.current_scene_slots().get("amount"),
+            None,
+            "undo must remove the override rather than storing the old default"
+        );
+        runtime
+            .invalidate_reactive_source(
+                crate::lisp_host::SCENE_SLOT_REACTIVE_NAMESPACE,
+                "amount",
+                eseqlisp::vm::Value::String(
+                    app.state.current_scene_slots().epoch("amount").to_string(),
+                ),
+            )
+            .expect("process targeted undo invalidation");
+        assert!(matches!(
+            runtime.take_pending_buffer_widget_trees().as_slice(),
+            [eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { .. }]
+        ), "undo must re-dirty only the slot reader subtree");
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.current_scene_slots().get("amount"), Some(&second));
     }
 
     /// Regression: a newly added track has a pattern only in the scene it

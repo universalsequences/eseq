@@ -73,7 +73,50 @@
     }
 
     #[test]
-    fn scheduler_events_apply_track_send_plock_then_restore_zero_baseline() {
+    fn queued_track_send_events_restore_the_latest_live_baseline() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        let destination = crate::sequencer::BusId::DEFAULT_A;
+        state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination,
+            amount: 0.2,
+        }]);
+        state.pattern.track_send_plocks[0].set(3, destination, 0.85);
+        state.set_track_send_runtime_targets(0, vec![crate::sequencer::TrackSendRuntimeTarget {
+            destination,
+            left_id: 700,
+            right_id: 701,
+        }]);
+        let stale_snapshot = state.publish_scheduler_snapshot();
+
+        // These model an already queued locked step followed by its baseline
+        // restoration. No scheduler snapshot is published for the mixer edit.
+        let locked = resolve_track_send_params(&stale_snapshot, 0, 3);
+        let restored = resolve_track_send_params(&stale_snapshot, 0, 4);
+        state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination,
+            amount: 0.65,
+        }]);
+
+        assert!(locked.iter().all(|param| param.current_value() == 0.85));
+        assert!(restored.iter().all(|param| param.current_value() == 0.65));
+
+        // Publishing an unrelated track mutation must neither be required for
+        // correctness nor detach queued restorations from the live authority.
+        state.toggle_step_and_clear_plocks(1, 0);
+        let _unrelated_snapshot = state.publish_scheduler_snapshot();
+        state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination,
+            amount: 0.4,
+        }]);
+        assert!(locked.iter().all(|param| param.current_value() == 0.85));
+        assert!(restored.iter().all(|param| param.current_value() == 0.4));
+    }
+
+    #[test]
+    fn scheduler_events_apply_track_send_plock_then_restore_latest_live_baseline() {
         // schedule_playing_lookahead needs the scheduler thread's stack budget.
         run_with_scheduler_stack(|| {
             let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -121,18 +164,26 @@
                 false,
             );
 
+            // Reproduce the command race after lookahead has queued all three
+            // events. This is the state mutation performed by SetTrackSends;
+            // it deliberately does not publish another scheduler snapshot.
+            state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+                destination,
+                amount: 0.35,
+            }]);
+
             let mut values = Vec::new();
             while let Some(event) = queue.pop() {
                 if let ScheduledEventKind::ResolvedTrigger { step, effect_params, .. } = event.kind {
                     let value = effect_params.iter()
                         .find(|param| param.logical_id == 700)
-                        .map(|param| param.value);
+                        .map(ScheduledEffectParam::current_value);
                     values.push((step, value));
                 }
             }
-            assert!(values.contains(&(0, Some(0.0))), "step 0 baseline missing: {values:?}");
+            assert!(values.contains(&(0, Some(0.35))), "step 0 live baseline missing: {values:?}");
             assert!(values.contains(&(1, Some(0.8))), "step 1 send p-lock missing: {values:?}");
-            assert!(values.contains(&(2, Some(0.0))), "step 2 baseline restore missing: {values:?}");
+            assert!(values.contains(&(2, Some(0.35))), "step 2 latest restore missing: {values:?}");
         });
     }
 
@@ -2292,6 +2343,81 @@
             )
         });
         out
+    }
+
+    /// docs/jaki-mixer-control-routes-spec.md §2: control holds emitted from
+    /// a generator tick ride the production lookahead into the mixer-control
+    /// mailbox with absolute engage/release sample times.
+    #[test]
+    fn sequenced_mixer_controls_reach_the_mailbox_with_sample_times() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"(__register-sequencer "mute-gate"
+                         :resolution :4
+                         :tick (lambda ()
+                           (do
+                             (seq-emit-control :op "mute" :track 0 :at 0 :dur 0.25)
+                             (seq-emit-control :op "solo" :group "Drums" :at 0.125 :dur 0.5))))"#,
+                )
+                .expect("register control generator");
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler
+                .generator_runtime
+                .sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<32>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                24_000,
+                48_000,
+                6_000,
+                24_000.0,
+                0,
+                false,
+                false,
+            );
+
+            // One :4 boundary (beat 1.0 → sample 24000) fires inside the
+            // horizon; both holds land in the mailbox stamped from it.
+            let due = state.scheduled_mixer_controls().drain_due(u64::MAX);
+            assert_eq!(due.len(), 2, "{due:?}");
+            assert_eq!(due[0].op, crate::mixer_control::MixerControlOp::Mute);
+            assert_eq!(
+                due[0].target,
+                crate::mixer_control::MixerControlTarget::Track(0)
+            );
+            assert_eq!(due[0].engage_sample, 24_000);
+            assert_eq!(due[0].release_sample, 30_000);
+            assert_eq!(due[1].op, crate::mixer_control::MixerControlOp::Solo);
+            assert_eq!(
+                due[1].target,
+                crate::mixer_control::MixerControlTarget::Group("Drums".to_string())
+            );
+            assert_eq!(due[1].engage_sample, 27_000);
+            assert_eq!(due[1].release_sample, 39_000);
+        });
     }
 
     /// docs/jaki-live-channel-widgets-spec.md 7 and 8.1: control-thread
@@ -4956,16 +5082,12 @@
         assert_eq!(
             params,
             vec![
-                ScheduledEffectParam {
-                    logical_id: 42,
-                    idx: 12,
-                    value: 0.75,
-                },
-                ScheduledEffectParam {
-                    logical_id: 77,
-                    idx: crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
-                    value: 1.0,
-                },
+                ScheduledEffectParam::fixed(42, 12, 0.75),
+                ScheduledEffectParam::fixed(
+                    77,
+                    crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
+                    1.0,
+                ),
             ]
         );
     }
@@ -5189,11 +5311,11 @@
 
         assert_eq!(
             event.effect_params,
-            vec![ScheduledEffectParam {
-                logical_id: 77,
-                idx: crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
-                value: 1.0,
-            }]
+            vec![ScheduledEffectParam::fixed(
+                77,
+                crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
+                1.0,
+            )]
         );
 
         let mut stale_snapshot = snapshot.clone();
@@ -5349,11 +5471,11 @@
                 assert_eq!(track, 1);
                 assert_eq!(
                     effect_params,
-                    vec![ScheduledEffectParam {
-                        logical_id: 42,
-                        idx: filter_node_param_idx as u64,
-                        value: 640.0,
-                    }]
+                    vec![ScheduledEffectParam::fixed(
+                        42,
+                        filter_node_param_idx as u64,
+                        640.0,
+                    )]
                 );
             }
             other => panic!("expected effect params, got {other:?}"),
@@ -5449,11 +5571,11 @@
                 assert_eq!(track, 1);
                 assert_eq!(
                     effect_params,
-                    vec![ScheduledEffectParam {
-                        logical_id: 42,
-                        idx: filter_node_param_idx as u64,
-                        value: 900.0,
-                    }]
+                    vec![ScheduledEffectParam::fixed(
+                        42,
+                        filter_node_param_idx as u64,
+                        900.0,
+                    )]
                 );
             }
             other => panic!("expected cross-track effect params, got {other:?}"),
@@ -8965,3 +9087,154 @@
         assert_eq!(resumed.first().map(|trigger| trigger.step), Some(3));
         assert!(resumed.iter().any(|trigger| trigger.step == 4));
     }
+
+/// The bug this pins: a song row schedules from a snapshot prebuilt at
+/// preflight. A slot overridden after that preflight lives only in live state,
+/// so scheduling the row's frozen `scene_slots` pushed an EMPTY store at the
+/// generator runtime every chunk and every shipped tick fell back to its
+/// declaration default — the override looked inert with no error anywhere.
+#[test]
+fn a_prebuilt_chunk_reads_live_scene_slots_not_its_preflight_copy() {
+    use crate::sequencer::{SceneSlotStore, SequencerSnapshot};
+    use std::sync::Arc;
+
+    let overridden = {
+        let mut slots = SceneSlotStore::default();
+        slots
+            .write_literal("ds-vel", crate::process::ProcessLiteral::Number(0.1))
+            .expect("portable value");
+        slots
+    };
+    let mut base = SequencerSnapshot::empty();
+    base.transport.current_pattern = 0;
+    base.scene_slot_table = Arc::new(vec![
+        Arc::new(SceneSlotStore::default()),
+        Arc::new(overridden.clone()),
+    ]);
+
+    // The row was preflighted before the write: it plays scene 1 and carries
+    // an empty slot store.
+    let mut row = SequencerSnapshot::empty();
+    row.transport.current_pattern = 1;
+    assert_eq!(row.scene_slots.get("ds-vel"), None);
+
+    assert_eq!(
+        super::lookahead::scene_slots_for_chunk(&base, &row).get("ds-vel"),
+        Some(&crate::process::ProcessLiteral::Number(0.1)),
+        "a prebuilt chunk must resolve its scene against live state"
+    );
+
+    // The chunk still chooses WHICH scene plays: scene 0 has no override.
+    let mut other_row = SequencerSnapshot::empty();
+    other_row.transport.current_pattern = 0;
+    assert_eq!(
+        super::lookahead::scene_slots_for_chunk(&base, &other_row).get("ds-vel"),
+        None
+    );
+
+    // A scene index the live table no longer has falls back to the frozen copy
+    // rather than silently dropping every override.
+    let mut deleted_scene = SequencerSnapshot::empty();
+    deleted_scene.transport.current_pattern = 9;
+    deleted_scene.scene_slots = overridden;
+    assert_eq!(
+        super::lookahead::scene_slots_for_chunk(&base, &deleted_scene).get("ds-vel"),
+        Some(&crate::process::ProcessLiteral::Number(0.1))
+    );
+}
+
+
+/// A scene switch mid-playback must be audible to a scratch generator without
+/// stopping the transport: the chunk selects the scene, and the shipped tick
+/// resolves its `defscene` slots against that scene's live overrides.
+#[test]
+fn scratch_generator_follows_a_mid_playback_scene_switch() {
+    use crate::sequencer::{SceneSlotStore, SequencerSnapshot};
+    use std::sync::Arc;
+    run_with_scheduler_stack(|| {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.toggle_play();
+        let source = r#"
+(defscene ds-pattern '(1 0 0 0 1 0 0 0 1 0 0 0 1 0 0 0))
+(defscene ds-vel 0.9)
+(def-sequencer "defscene-probe"
+  :resolution :16
+  :tick
+  (if (= 1 (nth ds-pattern (mod (gen-tick) 16)))
+    (seq-emit :track 0 :vel ds-vel)
+    nil))
+"#;
+        let scratch_runtime =
+            super::lookahead::build_scheduler_scratch_runtime(Arc::clone(&state), source, false)
+                .expect("scratch runtime for the generator source");
+        let generator_defs = scratch_runtime.sequencer_defs();
+        let mut scratch_runtime = Some(scratch_runtime);
+
+        let published = state.publish_scheduler_snapshot();
+        let overridden = {
+            let mut slots = SceneSlotStore::default();
+            slots
+                .write_literal("ds-vel", crate::process::ProcessLiteral::Number(0.1))
+                .expect("portable value");
+            slots
+        };
+        // Scene 0 overrides the velocity; scene 1 falls back to the declaration.
+        let table = Arc::new(vec![Arc::new(overridden), Arc::new(SceneSlotStore::default())]);
+
+        // One scheduler state across both chunks: the transport never stops.
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        scheduler
+            .generator_runtime
+            .sync_definitions(&generator_defs, 0.0);
+        let mut scheduled_until_sample = 0u64;
+        let mut rendered = 0u64;
+
+        let mut velocities_for_scene = |scene: usize| -> Vec<f32> {
+            let mut snapshot: SequencerSnapshot = (*published).clone();
+            snapshot.transport.current_pattern = scene;
+            snapshot.scene_slot_table = Arc::clone(&table);
+            let snapshot = Arc::new(snapshot);
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+            let result = schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                rendered,
+                48_000,
+                24_000,
+                12_000,
+                samples_per_quarter,
+                scheduled_until_sample,
+                false,
+                false,
+            );
+            scheduled_until_sample = result.scheduled_until_sample;
+            rendered += 48_000;
+            let mut velocities = Vec::new();
+            while let Some(event) = queue.pop() {
+                if let ScheduledEventKind::NetworkTrigger { resolved, .. } = &event.kind {
+                    velocities.push(resolved.velocity);
+                }
+            }
+            velocities
+        };
+
+        let scene_0 = velocities_for_scene(0);
+        assert!(
+            !scene_0.is_empty() && scene_0.iter().all(|velocity| (velocity - 0.1).abs() < 1e-6),
+            "scene 0 must play its override: {scene_0:?}"
+        );
+        let scene_1 = velocities_for_scene(1);
+        assert!(
+            !scene_1.is_empty() && scene_1.iter().all(|velocity| (velocity - 0.9).abs() < 1e-6),
+            "the switch must be audible without restarting the transport: {scene_1:?}"
+        );
+    });
+}

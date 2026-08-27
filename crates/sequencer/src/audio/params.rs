@@ -24,19 +24,10 @@ pub(super) fn custom_pitch_midi_note(transpose: f32, base_note_offset: f32) -> u
 }
 
 pub(super) fn track_accepts_scheduled_trigger(state: &SequencerState, track_idx: usize) -> bool {
-    let Some(track_params) = state.pattern.track_params.get(track_idx) else {
-        return false;
-    };
-    if track_params.is_muted() {
-        return false;
-    }
-    let has_solo = state
-        .pattern
-        .track_params
-        .iter()
-        .take(state.active_track_count())
-        .any(|params| params.is_solo());
-    !has_solo || track_params.is_solo()
+    // Mute and solo are post-FX gain controls. Internal triggers must keep
+    // advancing voices, envelopes, accumulators, and choke arbitration while
+    // their output is inaudible; only an invalid track is rejected here.
+    track_idx < state.active_track_count()
 }
 
 pub(super) fn resolve_live_keyboard_transpose(

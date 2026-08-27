@@ -2399,6 +2399,36 @@ fn register_track_selection_natives(
     });
 }
 
+fn load_browser_sample_waveform(
+    path: &std::path::Path,
+    paths: &sequencer::app_paths::AppPaths,
+) -> Result<Value, String> {
+    if let Some(sample) =
+        eseqlisp::audio::sample::get_registered_sample(&path.to_string_lossy())
+    {
+        return Ok(sample.to_value());
+    }
+
+    let resolved = paths.resolve_sample_ref(path);
+    if resolved != path {
+        if let Some(sample) =
+            eseqlisp::audio::sample::get_registered_sample(&resolved.to_string_lossy())
+        {
+            return Ok(sample.to_value());
+        }
+    }
+
+    eseqlisp::audio::sample::SampleBuffer::load_wav(&resolved)
+        .map(|sample| sample.register().to_value())
+        .map_err(|error| {
+            format!(
+                "failed to load browser waveform for {} (resolved to {}): {error}",
+                path.display(),
+                resolved.display()
+            )
+        })
+}
+
 pub(crate) fn init_runtime(
     app: &app::App,
     state: Arc<SequencerState>,
@@ -2437,6 +2467,13 @@ pub(crate) fn init_runtime(
         Arc::clone(&selected_neural_neurons),
     );
     sequencer::lisp_host::register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+    // `defscene` reads and writes lower to host calls; the UI VM is where
+    // panels read slots and handlers `set!` them, so it needs the same
+    // lowering targets the scratch/scheduler runtimes get.
+    sequencer::lisp_host::register_scene_slot_authoring_natives(
+        &mut runtime,
+        Arc::clone(&state),
+    );
     let process_authoring_natives =
         sequencer::lisp_host::register_published_process_authoring_natives(
             &mut runtime,
@@ -6287,21 +6324,21 @@ pub(crate) fn init_runtime(
             .map_err(|error| format!("failed to query sample tags for {hash}: {error}"))?;
         Ok(build_string_list(&tags))
     });
-    // Tolerant waveform loader for the browser preview strip: reuses an
-    // already-registered sample instead of re-decoding (unlike
-    // `sample-load-wav`), and answers `false` instead of erroring so a
-    // missing/undecodable file on tree-cursor moves never aborts the handler.
+    // Tolerant waveform loader for the browser preview strip: resolve the
+    // same portable sample identity as audio preview, reuse a registered
+    // sample when possible, and answer `false` instead of aborting a cursor
+    // handler when the configured-store file is missing or corrupt.
     runtime.register_native("seq-sample-waveform", move |args, _ctx| {
         let Some(Value::String(path)) = args.first() else {
             return Ok(Value::Bool(false));
         };
-        if let Some(sample) = eseqlisp::audio::sample::get_registered_sample(path) {
-            return Ok(sample.to_value());
-        }
-        match eseqlisp::audio::sample::SampleBuffer::load_wav(std::path::Path::new(path)) {
-            Ok(sample) => Ok(sample.register().to_value()),
+        match load_browser_sample_waveform(
+            std::path::Path::new(path),
+            sequencer::app_paths::app_paths(),
+        ) {
+            Ok(sample) => Ok(sample),
             Err(error) => {
-                eprintln!("browser preview: failed to load waveform for {path}: {error}");
+                eprintln!("browser preview: {error}");
                 Ok(Value::Bool(false))
             }
         }
@@ -8077,6 +8114,76 @@ mod tests {
             saved,
             "empty recording should not create another WAV"
         );
+    }
+
+    #[test]
+    fn browser_waveform_uses_the_same_configured_sample_store_as_audio_preview() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("eseq-browser-waveform-{unique}"));
+        let paths = sequencer::app_paths::AppPaths::release(
+            root.join("app/bin"),
+            root.join("app/resources"),
+            root.join("user-data"),
+            root.join("caches"),
+            root.join("config"),
+        );
+        let logical = std::path::PathBuf::from(format!("samples/{unique}.wav"));
+        assert!(
+            !logical.exists(),
+            "fixture must not be reachable relative to the working directory"
+        );
+        let stored = paths.resolve_sample_ref(&logical);
+        std::fs::create_dir_all(stored.parent().expect("sample store parent"))
+            .expect("create configured sample store");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 8_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&stored, spec).expect("create sample fixture");
+        writer.write_sample(1_000_i16).expect("write sample frame");
+        writer.finalize().expect("finalize sample fixture");
+
+        let waveform = load_browser_sample_waveform(&logical, &paths)
+            .expect("load waveform through configured sample store");
+        let Value::Map(waveform) = waveform else {
+            panic!("waveform native should return a sample-buffer map");
+        };
+        assert_eq!(
+            waveform.get("path").map(|value| value.borrow().clone()),
+            Some(Value::String(stored.to_string_lossy().into_owned()))
+        );
+        assert_eq!(
+            paths.resolve_sample_ref(&logical),
+            stored,
+            "waveform and audio preview must share canonical resolution"
+        );
+
+        let missing_logical = std::path::PathBuf::from(format!("samples/{unique}-missing.wav"));
+        let missing_stored = paths.resolve_sample_ref(&missing_logical);
+        let error = load_browser_sample_waveform(&missing_logical, &paths)
+            .expect_err("missing waveform should return a diagnostic");
+        assert!(
+            error.contains(&missing_stored.to_string_lossy().into_owned()),
+            "missing-sample diagnostic should name the configured store: {error}"
+        );
+
+        let corrupt_logical = std::path::PathBuf::from(format!("samples/{unique}-corrupt.wav"));
+        let corrupt_stored = paths.resolve_sample_ref(&corrupt_logical);
+        std::fs::write(&corrupt_stored, b"not a wav").expect("write corrupt sample fixture");
+        let error = load_browser_sample_waveform(&corrupt_logical, &paths)
+            .expect_err("corrupt waveform should return a diagnostic");
+        assert!(error.contains("failed to load browser waveform"), "{error}");
+        assert!(
+            error.contains(&corrupt_stored.to_string_lossy().into_owned()),
+            "corrupt-sample diagnostic should name the configured store: {error}"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove browser waveform fixtures");
     }
 
     #[test]

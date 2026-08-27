@@ -12,6 +12,7 @@ mod routing;
 mod samples;
 mod sampler_slices;
 mod scenes;
+mod scene_slots;
 mod scripts;
 mod song;
 mod step_history;

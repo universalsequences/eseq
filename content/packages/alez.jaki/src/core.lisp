@@ -638,6 +638,16 @@
     (map (lambda (e) (merge e :gate (r-min (get e :gate) (rat 1 4))))
          (get res :events))))
 
+;; gate scale as a post op: multiply every gate by s (resolved per cycle,
+;; rationalized over 96, clamped at 0). Route words `(gate s)` / `(dur s)`
+;; land here, in authored word order like stac — `left (gate 0.5)` scales the
+;; filter-extended gates, `(gate 0.5) left` scales before the extension.
+(def apply-gate-scale (res s)
+  (let ((scale (rat (round-int (* (max 0 s) 96)) 96)))
+    (merge res :events
+      (map (lambda (e) (merge e :gate (r* (get e :gate) scale)))
+           (get res :events)))))
+
 (def apply-post-one (res op cycle)
   (let ((h (first op)))
     (match h
@@ -645,6 +655,7 @@
       :shift (apply-shift res (round-int (resolve-arg (nth op 1) cycle)))
       :for-hand (apply-for-hand res (nth op 1) (nth op 2) cycle)
       :stac (apply-stac res)
+      :gate (apply-gate-scale res (resolve-arg (nth op 1) cycle))
       :quant (apply-quant res (nth op 1))
       :every (if (every-active? (round-int (resolve-arg (nth op 1) cycle)) cycle)
                  (apply-post-one res (nth op 2) cycle)
@@ -868,6 +879,15 @@
 ;;   (shift n) (rot n) (trunc n) (every n t) (for-hand h t)
 ;;   (fast n) (slow n) — n may be (cyc …) for conditional retiming
 ;;   (vel s) (note n)
+;;   (gate s) / (dur s) — multiply every gate by s (per-cycle arg: number,
+;;   (cyc …), (chan …)); applies in authored word order like stac
+;; A route containing a (mute T) or (solo T) form — T a track number or
+;; (group "name") — is a CONTROL route: events become timed mute/solo holds
+;; instead of notes, and the route word `inv` complements the windows
+;; (docs/jaki-mixer-control-routes-spec.md). The control form may sit
+;; anywhere in the segment. Targets are per-cycle argument data like every
+;; other route arg: (mute (cyc 1 2)) and (solo (group (cyc "Drums" "Synths")))
+;; rotate the destination per cycle.
 ;; Multi-voice: when the first body element is a list containing a top-level
 ;; `->`, every element is one voice line with its own pattern and routes.
 
@@ -885,6 +905,8 @@
   (let ((h (raw-head w)) (args (raw-args w)))
     (match h
       'stac   (list :stac)
+      'gate   (list :gate (nth args 0))
+      'dur    (list :gate (nth args 0))
       'quant  (list :quant (quant-units (nth args 0)))
       'shift  (list :shift (nth args 0))
       'left   (list :filter '(:hand :left))
@@ -919,6 +941,10 @@
       'shift  (merge acc :p (shift (get acc :p) (nth args 0)))
       'fast   (merge acc :p (fast (get acc :p) (nth args 0)))
       'slow   (merge acc :p (slow (get acc :p) (nth args 0)))
+      'gate   (merge acc :p (add-post (get acc :p) (list :gate (nth args 0))
+                                      (str "gate:" (source (nth args 0)))))
+      'dur    (merge acc :p (add-post (get acc :p) (list :gate (nth args 0))
+                                      (str "gate:" (source (nth args 0)))))
       'quant  (let ((q (quant-units (nth args 0))))
                 (merge acc :p (add-post (get acc :p) (list :quant q)
                                         (str "quant:" (source q)))))
@@ -932,18 +958,142 @@
       'for-hand (merge acc :p (for-hand (get acc :p) (nth args 0) (nth args 1)))
       'vel    (merge acc :opts (merge (get acc :opts) :vel-scale (nth args 0)))
       'note   (merge acc :opts (merge (get acc :opts) :note (nth args 0)))
+      'inv    (merge acc :inv true)
       _ acc)))
 
 (def run-route (p seg)
   (let ((r (reduce route-step (dict :p p :opts (dict)) (rest seg))))
     (emit* (get r :p) (first seg) (get r :opts))))
 
+;; ── control routes: -> (mute T) / (solo T) — sequenced mixer holds ─────────
+;; (docs/jaki-mixer-control-routes-spec.md). Events become gate windows
+;; (union of [off, off+gate)); `inv` complements them within the cycle; each
+;; window starting in this tick's unit window is emitted as one
+;; seq-emit-control hold. All pattern-transforming route words compose;
+;; filters extend gates legato-style, so `left stac` gives short punches.
+
+(def control-route-head? (x)
+  (let ((h (raw-head x))) (or (= h 'mute) (= h 'solo))))
+
+;; (mute 3) / (solo (group "Drums")) → (dict :op :kind :track-raw|:name-raw).
+;; Targets stay RAW per-cycle argument data — a number/string, (cyc …), or an
+;; expression — resolved by resolve-arg once the tick's cycle is located, so
+;; (mute (cyc 1 2)) and (group (cyc "Drums" "Synths")) rotate per cycle.
+(def parse-control-target (form)
+  (let ((op (if (= (raw-head form) 'mute) "mute" "solo"))
+        (tgt (nth form 1)))
+    (if (= (raw-head tgt) 'group)
+        (dict :op op :kind :group :name-raw (nth tgt 1))
+        (dict :op op :kind :track :track-raw tgt))))
+
+(def resolve-control-spec (spec c)
+  (if (= (get spec :kind) :group)
+      (merge spec :name (resolve-arg (get spec :name-raw) c))
+      (merge spec :track (round-int (resolve-arg (get spec :track-raw) c)))))
+
+;; sorted [start end) rational intervals → union-merged intervals
+(def merge-windows (ivs)
+  (reduce
+    (lambda (acc iv)
+      (if (empty? acc)
+          (list iv)
+          (let ((prev (last* acc)))
+            (if (r<= (first iv) (nth prev 1))
+                (append (take* (- (len acc) 1) acc)
+                        (list (list (first prev)
+                                    (if (r< (nth prev 1) (nth iv 1))
+                                        (nth iv 1)
+                                        (nth prev 1)))))
+                (append acc (list iv))))))
+    (list) ivs))
+
+;; evaluated (sorted) events → merged gate windows, clamped to [0, total)
+(def event-windows (evs total)
+  (merge-windows
+    (map (lambda (e)
+           (let ((end (r+ (get e :off) (get e :gate))))
+             (list (get e :off) (if (r< total end) total end))))
+         evs)))
+
+(def invert-walk (wins cursor total acc)
+  (if (empty? wins)
+      (if (r< cursor total) (append acc (list (list cursor total))) acc)
+      (let ((w (first wins)))
+        (invert-walk (rest wins)
+                     (if (r< cursor (nth w 1)) (nth w 1) cursor)
+                     total
+                     (if (r< cursor (first w))
+                         (append acc (list (list cursor (first w))))
+                         acc)))))
+
+;; complement of the merged windows within [0, total)
+(def invert-windows (wins total) (invert-walk wins (r-int 0) total (list)))
+
+(def emit-control-one (w u unit spec)
+  (let ((at (* (r->f (r- (first w) (r-int u))) unit))
+        (dur (* (r->f (r- (nth w 1) (first w))) unit)))
+    (if (= (get spec :kind) :group)
+        (seq-emit-control :op (get spec :op) :group (get spec :name)
+                          :at at :dur dur)
+        (seq-emit-control :op (get spec :op) :track (get spec :track)
+                          :at at :dur dur))))
+
+;; emit every window whose START falls in this tick's unit window [u, u+1);
+;; the hold carries its full duration even when it extends past the window
+(def emit-window-controls (wins u spec)
+  (let ((unit (state-get "jaki-unit" 0.25)))
+    (reduce
+      (lambda (n w)
+        (if (and (r<= (r-int u) (first w))
+                 (r< (first w) (r-int (+ u 1)))
+                 (r< (first w) (nth w 1)))
+            (do (emit-control-one w u unit spec) (+ n 1))
+            n))
+      0 wins)))
+
+(def run-control-route (p0 target-form words)
+  (let ((spec (parse-control-target target-form))
+        (r (reduce route-step (dict :p p0 :opts (dict)) words)))
+    (let ((p (get r :p))
+          (tick (gen-tick)))
+      (let ((loc (locate p tick)))
+        (let ((c (first loc)) (cstart (nth loc 1)))
+          (do (ensure-state p c)
+              (let ((res (eval-cycle p c (n->hand (state-get (cell p "jaki-hand") 0))
+                                     (load-state p))))
+                (let ((wins0 (event-windows (get res :events) (get res :len))))
+                  (emit-window-controls
+                    (if (get r :inv)
+                        (invert-windows wins0 (get res :len))
+                        wins0)
+                    (- tick cstart) (resolve-control-spec spec c))))))))))
+
+;; A (mute …)/(solo …) form is unambiguous, so it may sit anywhere in the
+;; segment — `-> (shift 2) (mute 9) left` and `-> (mute 9) (shift 2) left`
+;; are the same route. The first control form is the target; everything else
+;; is route words. Note routes keep destination-first (a bare number is only
+;; a destination in that position).
+(def split-control-seg (seg)
+  (reduce
+    (lambda (acc x)
+      (if (and (= (get acc :target) nil) (control-route-head? x))
+          (merge acc :target x)
+          (merge acc :words (append (get acc :words) (list x)))))
+    (dict :target nil :words (list))
+    seg))
+
+(def run-seg (p seg)
+  (let ((split (split-control-seg seg)))
+    (if (= (get split :target) nil)
+        (run-route p seg)
+        (run-control-route p (get split :target) (get split :words)))))
+
 (def run-voice (l)
   (let ((segs (split-arrows l (list) (list))))
     (let ((p (from-list (first segs))))
       (if (empty? (rest segs))
           (emit p 0)
-          (sum* (map (lambda (seg) (run-route p seg)) (rest segs)))))))
+          (sum* (map (lambda (seg) (run-seg p seg)) (rest segs)))))))
 
 ;; a voice line is a list whose own top level contains a `->`
 (def voice-line? (x)

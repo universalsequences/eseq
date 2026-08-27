@@ -90,12 +90,23 @@ unit behaves as `defstate` would).
 ### Seam 2: reactive dependency injection
 
 Scene-switch repaint in the graph demo works because `bind-graph` reads
-through `current-pattern`. Bare-symbol scene reads must inject the same
-dependency edge invisibly: a read during widget rendering registers
-"(current-pattern, slot-name)" so that
+through `current-pattern`. Bare-symbol scene reads inject an equivalent
+dependency invisibly, but qualified per slot: a read during widget rendering
+registers `(__scene-slot, slot-name)`, whose generation is the slot's write
+epoch. Two writers advance it:
 
-- a scene/pattern switch dirties exactly the widgets that read any slot, and
-- a `set!` dirties exactly the widgets that read *this* slot, nothing else.
+- a `set!` (and its undo/redo replay) advances *this* slot, dirtying exactly
+  the widgets that read it and nothing else, and
+- a pattern sync sweeps the whole `__scene-slot` namespace, handing every
+  subscribed slot the newly-current scene's epoch, so the live pattern
+  changing dirties exactly the widgets that read any slot.
+
+The sweep is deliberately not an edge on `current-pattern`: that field is the
+scene *index*, so it cannot see a pattern whose contents are replaced in place
+at the same index (loading a project), which left readers stale. Epochs come
+from a process-global counter, so they distinguish two scenes' writes to the
+same slot and are re-seeded on load — the sweep therefore repaints on exactly
+the resolutions that changed.
 
 No `ui_epoch` bumps; this follows the targeted-invalidation playbook
 (undo-drag/glyph-tick lessons). Getting this wrong yields either stale panels
@@ -116,6 +127,18 @@ resolved current-pattern snapshot:
 The same source text means the right thing in both VMs. Scheduler-side reads
 are snapshot reads at tick boundaries — processes and ticks never see a
 half-written value.
+
+**Declarations cross by publication (eseq-85a.2).** Each VM keeps a local
+declaration table for the `defscene` forms it evaluated itself, but a
+scheduler runtime compiling a shipped tick never evaluates the authoring
+source. `__defscene-register` therefore also publishes the `(name, default)`
+pair into a shared table on `SequencerState`, and `__defscene-resolve` /
+`__defscene-set` fall back to that table when the local one misses. The
+default cannot ride the shipped read itself because it is an arbitrary
+expression whose *value* only exists after authoring-side evaluation. One
+consequence: deleting a `defscene` from the authoring file leaves its
+published default behind until restart — defaults only, values still resolve
+through the scene-slot snapshot.
 
 ## Storage, resolution, serialization
 
@@ -199,17 +222,26 @@ scheduler picks it up at the next tick boundary.
 - A separate getter/setter API (`scene-slot`, `slot-set!`) — the symbol is the
   API; a parallel functional surface would fork idioms.
 
-## Open questions
+## Introspection and operational limits
 
-- Whether reads outside widget rendering (plain script code in the UI VM)
-  should also be reactive-context-aware or always resolve immediately.
-  Leaning: immediate resolve; only render-context reads register deps.
-- Whether `(ps)`-style introspection should list declared slots and which
-  patterns override them (useful for debugging "why does scene 3 sound
-  different"). Leaning yes, as a `(scenes)` native.
-- Slot value size limits. Serialized per pattern; a pathological slot (a huge
-  list) bloats every scene that overrides it. Probably a soft cap with a
-  diagnostic rather than a hard limit.
-- Interaction with take capture/splice: takes snapshot pattern state — slots
-  presumably ride along, but the take lifecycle (release-time stamping) needs
-  an explicit pass.
+Reads resolve immediately everywhere; dependency tracking is inert outside a
+reactive render, so plain UI-VM script reads do not acquire a subscription.
+
+`(scenes)` returns one dict per project pattern in presentation order. Each
+contains `:pattern` (zero-based index), stable string `:id`, `:name`, `:current`,
+and a `:slots` list. Every declared slot appears in every pattern with
+`:name`, `:default`, resolved `:value`, `:overridden`, and string `:epoch`.
+This makes fallback explicit while directly answering which patterns carry an
+override. Slot and pattern ordering is deterministic.
+
+A slot value larger than 64 KiB in its serialized `ProcessLiteral` form is
+accepted but produces an authoring status diagnostic naming the slot, measured
+size, and cap. This is deliberately soft: a live performance edit must not fail
+because its data crossed an arbitrary threshold, while the warning makes clear
+that every overriding pattern stores another copy.
+
+Take punch-in chunks contain track data only; scene slots remain on the project
+pattern. The take stop-commit captures scene structure at release, after pending
+script edits have landed. Both sides of the take's undo patch therefore carry
+the release-time slot state: undoing or redoing a take never rolls a slot back
+to its punch-in value.

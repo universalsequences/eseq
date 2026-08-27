@@ -8,10 +8,11 @@ use crate::macro_engine::MacroParamKey;
 use crate::neural::ProjectNeuralNetwork;
 
 use super::data::{
-    CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution, Timebase,
-    TrackParamsSnapshot, TrackSendRuntimeTarget, TrackSendSnapshot, MAX_STEPS, NUM_PARAMS,
+    BusId, CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution,
+    Timebase, TrackParamsSnapshot, TrackSendBaseline, TrackSendRuntimeTarget, TrackSendSnapshot,
+    MAX_STEPS, NUM_PARAMS,
 };
-use super::state::{RackTrackSnapshot, SequencerState, TrackPatternData};
+use super::state::{RackTrackSnapshot, SceneSlotStore, SequencerState, TrackPatternData};
 
 #[derive(Clone, Debug)]
 pub struct SequencerTransportSnapshot {
@@ -86,6 +87,9 @@ pub struct SequencerTrackSnapshot {
     pub instrument_descriptor: EffectDescriptor,
     pub instrument_slot: EffectSlotSnapshot,
     pub track_send_runtime_targets: Vec<TrackSendRuntimeTarget>,
+    /// Live mixer baselines paired with the immutable runtime targets above.
+    /// The cells outlive queued events and update without snapshot publication.
+    pub track_send_live_baselines: Vec<(BusId, Arc<TrackSendBaseline>)>,
     pub steps: Vec<SequencerStepSnapshot>,
 }
 
@@ -96,6 +100,21 @@ pub struct SequencerSnapshot {
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    pub scene_slots: SceneSlotStore,
+    /// Live scene-slot overrides for EVERY scene, indexed by scene position.
+    ///
+    /// `scene_slots` above is only the capturing scene's store. A chunk that
+    /// schedules from a prebuilt snapshot — a song row, or a quantized launch
+    /// awaiting its mirror — froze its slots at preflight, so a slot written
+    /// while that song plays would never reach the tick. Readers resolve
+    /// through this table (see `scene_slots_for_chunk`) so the frozen copy is
+    /// never the value a generator observes. Shared by `Arc` so the
+    /// copy-on-write single-track publish carries it forward untouched.
+    ///
+    /// Each entry is itself shared: the scheduler selects one per chunk
+    /// boundary, and a refcount bump keeps that off the audio thread's
+    /// allocation path.
+    pub scene_slot_table: Arc<Vec<Arc<SceneSlotStore>>>,
     pub process_trace: bool,
 }
 
@@ -114,6 +133,8 @@ impl SequencerSnapshot {
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
+            scene_slots: SceneSlotStore::default(),
+            scene_slot_table: Arc::new(Vec::new()),
             process_trace: false,
         }
     }
@@ -157,6 +178,8 @@ impl SequencerSnapshot {
         apply_macro_overrides(&mut tracks, &state.live_macro_overrides());
         let tracks = tracks.into_iter().map(Arc::new).collect();
         let (mod_connections, neural_networks, graph_overrides) = state.current_scene_metadata();
+        let scene_slots = state.current_scene_slots();
+        let scene_slot_table = Arc::new(state.scene_slot_table());
 
         Self {
             transport,
@@ -164,6 +187,8 @@ impl SequencerSnapshot {
             mod_connections,
             neural_networks,
             graph_overrides,
+            scene_slots,
+            scene_slot_table,
             process_trace: state.process_trace_enabled(),
         }
     }
@@ -205,6 +230,7 @@ impl SequencerSnapshot {
         mod_connections: Vec<ModConnection>,
         neural_networks: Vec<ProjectNeuralNetwork>,
         graph_overrides: Vec<ProjectGraphOverrides>,
+        scene_slots: SceneSlotStore,
         project_process_chain: crate::process::TrackProcessChain,
     ) -> Self {
         let num_tracks = tracks.len();
@@ -246,6 +272,14 @@ impl SequencerSnapshot {
                 .get(track_idx)
                 .cloned()
                 .unwrap_or_default();
+            track.track_send_live_baselines = track.track_send_runtime_targets
+                .iter()
+                .filter_map(|target| {
+                    state.pattern.track_params[track_idx]
+                        .send_baseline(target.destination)
+                        .map(|baseline| (target.destination, baseline))
+                })
+                .collect();
             state.sync_rack_macro_runtime_track(track_idx, track.rack_track.as_ref());
             if let Some(rack) = track.rack_track.as_mut() {
                 rack.attach_runtime_macro_values(state.rack_macro_runtime_values(), track_idx);
@@ -261,6 +295,11 @@ impl SequencerSnapshot {
             mod_connections,
             neural_networks,
             graph_overrides,
+            scene_slots,
+            // Prebuilt row snapshots are frozen at preflight; the table is
+            // rebuilt from live state on every full publish, so readers take
+            // their slots from there rather than from this stale copy.
+            scene_slot_table: Arc::new(state.scene_slot_table()),
             process_trace: state.process_trace_enabled(),
         }
     }
@@ -345,6 +384,21 @@ fn capture_live_track(
     if let Some(rack) = rack_track.as_mut() {
         rack.attach_runtime_macro_values(state.rack_macro_runtime_values(), track);
     }
+    let track_send_runtime_targets = state
+        .pattern
+        .track_send_runtime_targets
+        .lock()
+        .unwrap()
+        .get(track)
+        .cloned()
+        .unwrap_or_default();
+    let track_send_live_baselines = track_send_runtime_targets
+        .iter()
+        .filter_map(|target| {
+            tp.send_baseline(target.destination)
+                .map(|baseline| (target.destination, baseline))
+        })
+        .collect();
     SequencerTrackSnapshot {
         params,
         scene_silenced: state.is_scene_silenced(track),
@@ -359,10 +413,8 @@ fn capture_live_track(
         midi_fx_slots,
         instrument_descriptor,
         instrument_slot,
-        track_send_runtime_targets: state.pattern.track_send_runtime_targets.lock().unwrap()
-            .get(track)
-            .cloned()
-            .unwrap_or_default(),
+        track_send_runtime_targets,
+        track_send_live_baselines,
         steps,
     }
 }
@@ -510,6 +562,7 @@ fn track_snapshot_from_pattern_data(
         instrument_descriptor,
         instrument_slot: data.instrument_slot.clone(),
         track_send_runtime_targets: Vec::new(),
+        track_send_live_baselines: Vec::new(),
         steps,
     }
 }

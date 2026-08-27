@@ -58,6 +58,8 @@ mod step_snapshot;
 pub use step_snapshot::*;
 mod pattern_snapshot;
 pub use pattern_snapshot::*;
+mod scene_slots;
+pub use scene_slots::*;
 mod track_pattern_data;
 pub use track_pattern_data::*;
 mod sound_entities;

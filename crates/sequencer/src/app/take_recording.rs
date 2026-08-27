@@ -138,10 +138,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::app::edit::undo;
+    use crate::app::edit::{redo, undo};
     use crate::app::song_edit::SongRowSpec;
     use crate::app::AudioBuses;
     use crate::audiograph::LiveGraphPtr;
+    use crate::process::ProcessLiteral;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
         default_empty_effect_chain, SequencerState,
@@ -1084,6 +1085,44 @@ mod tests {
             .rows
             .iter()
             .all(|row| row.overrides.iter().all(|over| over.take_id.is_none())));
+    }
+
+    #[test]
+    fn take_commit_stamps_scene_slots_at_release_for_undo() {
+        let (mut app, anchor) = capture_app();
+        assert!(app.take_record_note(0, press_at_beats(anchor, 12.1), 60.0, 2.0));
+
+        // Scene slots are project-pattern state, not part of the detached
+        // punch-in chunk. A write made while the take is in flight must be in
+        // the release-time scene snapshot on both sides of the take's history
+        // patch, or undoing the take would incorrectly revert the slot.
+        let release_value = ProcessLiteral::List(vec![
+            ProcessLiteral::Number(3.0),
+            ProcessLiteral::Number(5.0),
+        ]);
+        app.state
+            .write_current_scene_slot("figures", release_value.clone())
+            .expect("write slot while take is pending");
+
+        app.song_transport_mode = SongTransportMode::Stopped;
+        app.finish_song_capture_take(40.0).expect("commit succeeds");
+        assert_eq!(app.state.current_scene_slots().get("figures"), Some(&release_value));
+
+        undo(&mut app);
+        assert!(app.state.track_takes(0).is_empty(), "take itself is undone");
+        assert_eq!(
+            app.state.current_scene_slots().get("figures"),
+            Some(&release_value),
+            "take undo must preserve pattern state stamped at release"
+        );
+
+        redo(&mut app);
+        assert_eq!(app.state.track_takes(0).len(), 1, "take itself is redone");
+        assert_eq!(
+            app.state.current_scene_slots().get("figures"),
+            Some(&release_value),
+            "take redo must preserve pattern state stamped at release"
+        );
     }
 
     /// §17.3 "take record → share": punch-in stores the bound cell's refs,

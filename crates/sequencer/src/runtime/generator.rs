@@ -77,6 +77,9 @@ pub struct GeneratorTickInput {
 #[derive(Clone, Debug, Default)]
 pub struct GeneratorTickResult {
     pub emitted: Vec<EmittedAccumulatorEvent>,
+    /// Mixer-control holds emitted via `seq-emit-control`
+    /// (docs/jaki-mixer-control-routes-spec.md).
+    pub controls: Vec<crate::mixer_control::EmittedMixerControl>,
     pub random_state: u64,
     pub state: HashMap<String, f64>,
 }
@@ -88,6 +91,16 @@ pub struct GeneratorEmission {
     pub sample_time: u64,
     pub generator_index: usize,
     pub event: EmittedAccumulatorEvent,
+}
+
+/// A mixer-control hold resolved to absolute engage/release samples, ready
+/// for the scheduler to push into the mixer-control mailbox.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MixerControlEmission {
+    pub engage_sample: u64,
+    pub release_sample: u64,
+    pub generator_index: usize,
+    pub control: crate::mixer_control::EmittedMixerControl,
 }
 
 #[derive(Clone, Debug)]
@@ -173,8 +186,35 @@ impl GeneratorRuntime {
         end_beats: f64,
         block_start_sample: u64,
         samples_per_quarter: f64,
+        tick_fn: F,
+        out: &mut Vec<GeneratorEmission>,
+    ) where
+        F: FnMut(GeneratorTickInput) -> GeneratorTickResult,
+    {
+        let mut discarded_controls = Vec::new();
+        self.process_block_with_controls(
+            start_beats,
+            end_beats,
+            block_start_sample,
+            samples_per_quarter,
+            tick_fn,
+            out,
+            &mut discarded_controls,
+        );
+    }
+
+    /// [`Self::process_block`] plus mixer-control resolution: control holds
+    /// emitted by ticks land in `control_out` with absolute engage/release
+    /// samples (docs/jaki-mixer-control-routes-spec.md).
+    pub fn process_block_with_controls<F>(
+        &mut self,
+        start_beats: f64,
+        end_beats: f64,
+        block_start_sample: u64,
+        samples_per_quarter: f64,
         mut tick_fn: F,
         out: &mut Vec<GeneratorEmission>,
+        control_out: &mut Vec<MixerControlEmission>,
     ) where
         F: FnMut(GeneratorTickInput) -> GeneratorTickResult,
     {
@@ -182,6 +222,7 @@ impl GeneratorRuntime {
             return;
         }
         let appended_from = out.len();
+        let controls_appended_from = control_out.len();
         for generator_index in 0..self.instances.len() {
             let id = self.instances[generator_index].id;
             let mut clock = self.instances[generator_index].clock;
@@ -218,6 +259,22 @@ impl GeneratorRuntime {
                             event,
                         });
                     }
+                    for control in result.controls {
+                        let offset_samples = (control.offset_beats as f64 * samples_per_quarter)
+                            .round()
+                            .max(0.0) as u64;
+                        let duration_samples = (control.duration_beats as f64
+                            * samples_per_quarter)
+                            .round()
+                            .max(0.0) as u64;
+                        let engage_sample = boundary_sample.saturating_add(offset_samples);
+                        control_out.push(MixerControlEmission {
+                            engage_sample,
+                            release_sample: engage_sample.saturating_add(duration_samples),
+                            generator_index,
+                            control,
+                        });
+                    }
                     tick_count = tick_count.saturating_add(1);
                 },
             );
@@ -228,6 +285,8 @@ impl GeneratorRuntime {
         }
         out[appended_from..]
             .sort_by_key(|emission| (emission.sample_time, emission.generator_index));
+        control_out[controls_appended_from..]
+            .sort_by_key(|emission| (emission.engage_sample, emission.generator_index));
     }
 
     #[cfg(test)]
@@ -279,6 +338,7 @@ mod tests {
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
             }],
+            controls: Vec::new(),
             random_state: 0,
             state: HashMap::new(),
         }
@@ -326,6 +386,7 @@ mod tests {
                 seen.push(input.tick_index);
                 GeneratorTickResult {
                     emitted: Vec::new(),
+                    controls: Vec::new(),
                     random_state: input.random_state,
                     state: input.state,
                 }
@@ -384,6 +445,7 @@ mod tests {
                 event.offset_beats = 0.25;
                 GeneratorTickResult {
                     emitted: vec![event],
+                    controls: Vec::new(),
                     random_state: input.random_state,
                     state: input.state,
                 }
@@ -409,6 +471,7 @@ mod tests {
             48_000.0,
             |input| GeneratorTickResult {
                 emitted: Vec::new(),
+                controls: Vec::new(),
                 random_state: input.random_state,
                 state: input.state,
             },
@@ -436,6 +499,7 @@ mod tests {
             48_000.0,
             |input| GeneratorTickResult {
                 emitted: vec![],
+                controls: Vec::new(),
                 random_state: input.random_state,
                 state: input.state,
             },

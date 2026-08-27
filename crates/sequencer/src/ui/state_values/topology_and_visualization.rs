@@ -220,6 +220,16 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "track-event-current-beat",
         build_track_output_current_beat_value(state),
     );
+
+    // `defscene` values are not ordinary SEQ fields: each reader injects a
+    // qualified host-owned dependency. Queue every currently subscribed slot
+    // with the newly-current scene's epoch so the repaint joins this pattern
+    // sync's reactive cycle and observes all of the fields staged above.
+    let scene_slots = state.current_scene_slots();
+    rt.queue_reactive_namespace_invalidation(
+        sequencer::lisp_host::SCENE_SLOT_REACTIVE_NAMESPACE,
+        |name| Value::String(scene_slots.epoch(name).to_string()),
+    );
 }
 
 pub(crate) fn build_neural_networks_value(state: &Arc<SequencerState>) -> Value {

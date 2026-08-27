@@ -58,6 +58,18 @@ impl SequencerState {
         std::mem::take(&mut *self.roll_recorded_hits.lock().unwrap())
     }
 
+    /// Realtime-safe: called from the audio callback for every live note-on
+    /// it consumes while the transport plays (bead eseq-2awi).
+    pub fn push_live_trigger_stamp(&self, track: usize, transpose: f32, beat: f64) {
+        self.live_trigger_stamps.push(track, transpose, beat);
+    }
+
+    /// Control-thread consumer of the live note-on stamps; see
+    /// [`crate::sequencer::LiveTriggerStampRing`].
+    pub fn drain_live_trigger_stamps(&self, consume: impl FnMut(crate::sequencer::LiveTriggerStamp)) {
+        self.live_trigger_stamps.drain(consume);
+    }
+
     pub fn append_track_output_events(&self, events: impl IntoIterator<Item = TrackOutputEvent>) {
         let mut history = self.track_output_events.lock().unwrap();
         history.extend(events);
@@ -92,6 +104,12 @@ impl SequencerState {
     /// taking a lock on the realtime thread.
     pub fn set_audio_rendered_sample(&self, sample: u64) {
         self.audio_rendered_sample.store(sample, Ordering::Release);
+    }
+
+    /// The audio clock published above — the "now" that due-ness of sequenced
+    /// mixer controls is measured against on the app thread.
+    pub fn audio_rendered_sample(&self) -> u64 {
+        self.audio_rendered_sample.load(Ordering::Acquire)
     }
 
     /// Publish the scheduler's rendered-beat clock (the `rendered_beats`
@@ -376,6 +394,7 @@ impl SequencerState {
         mod_connections: Vec<ModConnection>,
         neural_networks: Vec<ProjectNeuralNetwork>,
         graph_overrides: Vec<ProjectGraphOverrides>,
+        scene_slots: SceneSlotStore,
         project_process_chain: crate::process::TrackProcessChain,
     ) -> Arc<SequencerSnapshot> {
         self.publish_scheduler_snapshot_arc(Arc::new(
@@ -385,6 +404,7 @@ impl SequencerState {
                 mod_connections,
                 neural_networks,
                 graph_overrides,
+                scene_slots,
                 project_process_chain,
             ),
         ))
