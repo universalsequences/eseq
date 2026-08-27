@@ -472,6 +472,11 @@ pub struct WgpuAppBackend {
     pending_move: Option<Event>,
     pending_magnify: VecDeque<(f64, (f32, f32))>,
     pending_scroll: VecDeque<((f32, f32), (f32, f32))>,
+    /// Set when the compositor reports the end of a finger-scroll gesture
+    /// (Wayland `axis_stop`); winit surfaces it as `TouchPhase::Ended`.
+    /// Consumers use it to start inertial scrolling — Linux compositors leave
+    /// momentum to applications. Mouse wheels never report an end phase.
+    scroll_phase_ended: bool,
     pending_file_drops: VecDeque<Vec<PathBuf>>,
     pending_resize: bool,
     /// Scale factor delivered by `WindowEvent::ScaleFactorChanged`, applied
@@ -559,6 +564,7 @@ impl WgpuAppBackend {
             pending_move: None,
             pending_magnify: VecDeque::new(),
             pending_scroll: VecDeque::new(),
+            scroll_phase_ended: false,
             pending_file_drops: VecDeque::new(),
             pending_resize: false,
             pending_scale_factor: None,
@@ -641,6 +647,12 @@ impl WgpuAppBackend {
 
     pub fn take_pending_scroll(&mut self) -> Option<((f32, f32), (f32, f32))> {
         self.pending_scroll.pop_front()
+    }
+
+    /// True once per finger-scroll gesture, after the fingers lift. Drain
+    /// `take_pending_scroll` first: the end marker follows the last delta.
+    pub fn take_scroll_phase_ended(&mut self) -> bool {
+        std::mem::take(&mut self.scroll_phase_ended)
     }
 
     pub fn set_widget_cursor(&self, cursor: widget_render::WidgetCursor) {
@@ -2926,6 +2938,7 @@ impl Backend for WgpuAppBackend {
         let pending_move = &mut self.pending_move;
         let pending_magnify = &mut self.pending_magnify;
         let pending_scroll = &mut self.pending_scroll;
+        let scroll_phase_ended = &mut self.scroll_phase_ended;
         let pending_resize = &mut self.pending_resize;
         let pending_scale_factor = &mut self.pending_scale_factor;
         let close_requested = &mut self.close_requested;
@@ -3056,6 +3069,7 @@ impl Backend for WgpuAppBackend {
                 }
                 WindowEvent::MouseWheel { delta, phase, .. } => {
                     if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        *scroll_phase_ended = true;
                         return;
                     }
                     if let Some(until) = *suppress_scroll_until {

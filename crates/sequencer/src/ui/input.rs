@@ -339,6 +339,28 @@ fn focus_samples_browser_search(editor: &mut Editor) -> bool {
         || editor.focus_widget_by_stable_key(LEGACY_BROWSER_SEARCH_INPUT_KEY, Some("text-input"))
 }
 
+/// `ui/transport.lisp` is `(module eseq.transport)`, so its widget `:key`s
+/// auto-qualify (module spec §10 hazard a) and the BPM picker hashes as
+/// `eseq.transport/transport-bpm`. The bare spelling is tried second so a
+/// headerless eval of the transport UI (tests, scratch) still resolves.
+const TRANSPORT_BPM_PICKER_KEY: &str = "eseq.transport/transport-bpm";
+const BARE_TRANSPORT_BPM_PICKER_KEY: &str = "transport-bpm";
+
+fn focus_transport_bpm(editor: &mut Editor) -> bool {
+    if !editor.switch_active_tile_to_buffer_named("*transport*") {
+        let _ = editor
+            .runtime_mut()
+            .eval_str(r#"(switch-to-buffer "*transport*")"#);
+        editor.refresh_runtime_side_effects();
+    }
+    editor.refresh_visible_layouts_for_buffer_named("*transport*");
+    if editor.active_buffer().name != "*transport*" {
+        return false;
+    }
+    editor.focus_widget_by_stable_key(TRANSPORT_BPM_PICKER_KEY, Some("number-picker"))
+        || editor.focus_widget_by_stable_key(BARE_TRANSPORT_BPM_PICKER_KEY, Some("number-picker"))
+}
+
 fn sample_browser_active_tree_key(editor: &mut Editor) -> Option<String> {
     match editor.runtime_mut().eval_str("(eseq.browser/active-tree-key)") {
         Ok(Some(Value::String(key))) => Some(key),
@@ -426,6 +448,26 @@ fn is_trigger_recording_shortcut(key: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::KeyCode;
 
     key.code == KeyCode::Char(',') && is_exact_primary_shortcut_modifier(key.modifiers)
+}
+
+/// Cmd+B (macOS) / Ctrl+B (elsewhere) — jump to the transport BPM picker.
+/// Only claims the platform-primary chord: text-editing Ctrl+B (move-left,
+/// and the custom-UI reload piggybacked on it) is preserved by the TextOnly
+/// gate at the dispatch site.
+fn is_focus_bpm_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    matches!(
+        key.code,
+        crossterm::event::KeyCode::Char('b') | crossterm::event::KeyCode::Char('B')
+    ) && is_exact_primary_shortcut_modifier(key.modifiers)
+}
+
+/// Cmd+R (macOS) / Ctrl+R (elsewhere) — arm the current track exclusively
+/// (disarming every other track); pressing again disarms it.
+fn is_exclusive_arm_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    matches!(
+        key.code,
+        crossterm::event::KeyCode::Char('r') | crossterm::event::KeyCode::Char('R')
+    ) && is_exact_primary_shortcut_modifier(key.modifiers)
 }
 
 fn is_new_instrument_shortcut(key: &crossterm::event::KeyEvent) -> bool {
@@ -1281,6 +1323,20 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && is_trigger_recording_shortcut(key)
     {
         let _ = editor.runtime_mut().eval_str("(seq-toggle-record)");
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+        return true;
+    }
+
+    if shortcut_context_allows_sequencer_tab_switch(editor) && is_focus_bpm_shortcut(key) {
+        return focus_transport_bpm(editor);
+    }
+
+    if shortcut_context_allows_sequencer_tab_switch(editor) && is_exclusive_arm_shortcut(key) {
+        let track = current_track.load(Ordering::Relaxed);
+        let _ = editor
+            .runtime_mut()
+            .eval_str(&format!("(seq-arm-track-exclusive {track})"));
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
         return true;
@@ -3337,6 +3393,112 @@ mod live_keyboard_tests {
             ),
             linux_select_all,
         );
+    }
+
+    #[test]
+    fn platform_primary_r_arms_current_track_exclusively_only_outside_text_editing() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*source*", "");
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def armed-with (state -1))
+                (def seq-arm-track-exclusive (track)
+                  (set! armed-with track))
+                "#,
+            )
+            .expect("install exclusive-arm hook");
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+        current_track.store(3, Ordering::Relaxed);
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('r'), primary_shortcut_modifier()),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("armed-with").unwrap(),
+            Some(Value::Number(3.0)),
+            "the shortcut must arm the current track"
+        );
+
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain r stays a live-keyboard note"
+        );
+
+        // Text editing keeps the platform chord (Ctrl+R search-backward on
+        // Linux).
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('r'), primary_shortcut_modifier()),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+    }
+
+    #[test]
+    fn platform_primary_b_focuses_the_transport_bpm_picker() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*transport*", "");
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect
+                  (v-stack :width 30 :height 4
+                    (number-picker :key "transport-bpm" :value 120
+                      :min 20 :max 300 :width 7 :height 1.2)))
+                "#,
+            )
+            .expect("build transport bpm fixture");
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(40, 10);
+        editor.refresh_runtime_side_effects();
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('b'), primary_shortcut_modifier()),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        let focused = editor
+            .focused_widget_node()
+            .expect("bpm picker must be focused");
+        assert_eq!(focused.widget_type, "number-picker");
+        assert_eq!(focused.stable_key.as_deref(), Some("transport-bpm"));
+
+        // In a text-editing buffer the chord is left alone (Ctrl+B move-left
+        // and the custom-UI reload piggybacked on it).
+        editor.open_scratch_buffer("*source*", "");
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('b'), primary_shortcut_modifier()),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
     }
 
     #[test]

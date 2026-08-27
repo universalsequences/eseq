@@ -74,6 +74,63 @@ fn flush_pending_pointer_drag(
     true
 }
 
+/// Route one touchpad scroll delta (pixels, at a precise cursor position) to
+/// the editor: widgets first, then smooth sub-cell UI scrolling, then
+/// accumulated line-scroll events. Shared by real input and the synthetic
+/// deltas of an inertial fling so momentum behaves exactly like fingers.
+fn apply_touchpad_scroll_delta(
+    editor: &mut Editor,
+    line_px: f32,
+    scroll_accum_x: &mut f32,
+    scroll_accum_y: &mut f32,
+    (delta_x, delta_y): (f32, f32),
+    (precise_col, precise_row): (f32, f32),
+) {
+    let widget_handled =
+        editor.handle_tiled_touchpad_scroll(precise_col, precise_row, 0, delta_x, delta_y);
+    if widget_handled {
+        return;
+    }
+
+    // In UI mode, apply pixel deltas directly for smooth sub-cell scrolling.
+    if editor.is_ui_scroll_mode() {
+        let scroll_speed = 0.05; // cells per pixel-delta
+        let delta_cells_y = delta_y * scroll_speed;
+        let delta_cells_x = delta_x * scroll_speed;
+        editor.apply_smooth_widget_scroll(delta_cells_x, delta_cells_y);
+        return;
+    }
+
+    let threshold = line_px.max(20.0);
+    let mut emit = |kind: crossterm::event::MouseEventKind| {
+        let mouse = crossterm::event::MouseEvent {
+            kind,
+            column: precise_col as u16,
+            row: precise_row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+    };
+    *scroll_accum_y += delta_y;
+    while *scroll_accum_y > threshold {
+        *scroll_accum_y -= threshold;
+        emit(crossterm::event::MouseEventKind::ScrollUp);
+    }
+    while *scroll_accum_y < -threshold {
+        *scroll_accum_y += threshold;
+        emit(crossterm::event::MouseEventKind::ScrollDown);
+    }
+    *scroll_accum_x += delta_x;
+    while *scroll_accum_x > threshold {
+        *scroll_accum_x -= threshold;
+        emit(crossterm::event::MouseEventKind::ScrollLeft);
+    }
+    while *scroll_accum_x < -threshold {
+        *scroll_accum_x += threshold;
+        emit(crossterm::event::MouseEventKind::ScrollRight);
+    }
+}
+
 /// The metal_seq event loop: input polling, gestures, async polling, and
 /// host-command dispatch, ending each iteration in the reactive tick.
 #[allow(clippy::too_many_lines)]
@@ -105,6 +162,7 @@ pub(crate) fn run_event_loop(
         rack_control_snapshot_dirty: false,
         piano_roll_history_gesture: None,
         preview_plock_variant: None,
+        scroll_inertia: Default::default(),
     };
 
     // Inline editor session state (instrument/effect creation/editing)
@@ -507,7 +565,8 @@ pub(crate) fn run_event_loop(
             viewport_size,
             backend.agent_instrument_stub_animation_visible(),
         );
-        let widget_animation_active = editor.visible_widgets_animating();
+        let widget_animation_active =
+            editor.visible_widgets_animating() || gesture.scroll_inertia.fling_active();
         let learn_ui_active = sessions.pending_learn_job.is_some();
         let frame_interval =
             if stub_animation_active || widget_animation_active || learn_ui_active {
@@ -595,6 +654,11 @@ pub(crate) fn run_event_loop(
                     }
                 }
                 BackendEvent::Terminal(Event::Key(raw_key)) => {
+                    if raw_key.kind == crossterm::event::KeyEventKind::Press {
+                        // A key press means the view under the momentum scroll
+                        // may be acted on; stop moving it.
+                        gesture.scroll_inertia.cancel();
+                    }
                     if raw_key.kind == crossterm::event::KeyEventKind::Release {
                         app::edit::finish_active_gesture(&mut app);
                     }
@@ -1044,6 +1108,7 @@ pub(crate) fn run_event_loop(
                 BackendEvent::Terminal(Event::Mouse(mouse)) => {
                     if matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_)) {
                         pointer_is_down = true;
+                        gesture.scroll_inertia.cancel();
                     }
                     let (precise_col, precise_row) = backend
                         .take_last_precise_mouse()
@@ -1086,71 +1151,46 @@ pub(crate) fn run_event_loop(
 
         // Touchpad gestures
         let gestures_started = Instant::now();
+        let mut magnified = false;
         while let Some((delta, (precise_col, precise_row))) = backend.take_pending_magnify() {
             editor.handle_tiled_touchpad_magnify(precise_col, precise_row, 0, delta);
+            magnified = true;
         }
+        if magnified {
+            gesture.scroll_inertia.cancel();
+        }
+        let line_px = backend.viewport_size().1.max(1) as f32 / (rows.max(1) as f32);
         while let Some(((delta_x, delta_y), (precise_col, precise_row))) =
             backend.take_pending_scroll()
         {
-            let widget_handled =
-                editor.handle_tiled_touchpad_scroll(precise_col, precise_row, 0, delta_x, delta_y);
-            if widget_handled {
-                continue;
-            }
-
-            // In UI mode, apply pixel deltas directly for smooth sub-cell scrolling.
-            if editor.is_ui_scroll_mode() {
-                let scroll_speed = 0.05; // cells per pixel-delta
-                let delta_cells_y = delta_y * scroll_speed;
-                let delta_cells_x = delta_x * scroll_speed;
-                editor.apply_smooth_widget_scroll(delta_cells_x, delta_cells_y);
-                continue;
-            }
-
-            scroll_accum_y += delta_y;
-            let line_px = backend.viewport_size().1.max(1) as f32 / (rows.max(1) as f32);
-            let threshold = line_px.max(20.0);
-            while scroll_accum_y > threshold {
-                scroll_accum_y -= threshold;
-                let mouse = crossterm::event::MouseEvent {
-                    kind: crossterm::event::MouseEventKind::ScrollUp,
-                    column: precise_col as u16,
-                    row: precise_row as u16,
-                    modifiers: crossterm::event::KeyModifiers::NONE,
-                };
-                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-            }
-            while scroll_accum_y < -threshold {
-                scroll_accum_y += threshold;
-                let mouse = crossterm::event::MouseEvent {
-                    kind: crossterm::event::MouseEventKind::ScrollDown,
-                    column: precise_col as u16,
-                    row: precise_row as u16,
-                    modifiers: crossterm::event::KeyModifiers::NONE,
-                };
-                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-            }
-            scroll_accum_x += delta_x;
-            while scroll_accum_x > threshold {
-                scroll_accum_x -= threshold;
-                let mouse = crossterm::event::MouseEvent {
-                    kind: crossterm::event::MouseEventKind::ScrollLeft,
-                    column: precise_col as u16,
-                    row: precise_row as u16,
-                    modifiers: crossterm::event::KeyModifiers::NONE,
-                };
-                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-            }
-            while scroll_accum_x < -threshold {
-                scroll_accum_x += threshold;
-                let mouse = crossterm::event::MouseEvent {
-                    kind: crossterm::event::MouseEventKind::ScrollRight,
-                    column: precise_col as u16,
-                    row: precise_row as u16,
-                    modifiers: crossterm::event::KeyModifiers::NONE,
-                };
-                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-            }
+            gesture.scroll_inertia.note_scroll(
+                Instant::now(),
+                (delta_x, delta_y),
+                (precise_col, precise_row),
+            );
+            apply_touchpad_scroll_delta(
+                &mut editor,
+                line_px,
+                &mut scroll_accum_x,
+                &mut scroll_accum_y,
+                (delta_x, delta_y),
+                (precise_col, precise_row),
+            );
+        }
+        if backend.take_scroll_phase_ended() {
+            gesture.scroll_inertia.note_phase_ended(Instant::now());
+        }
+        // Momentum after the fingers lift: one synthetic delta per frame,
+        // through the same path as real input.
+        if let Some((delta, pos)) = gesture.scroll_inertia.tick(Instant::now()) {
+            apply_touchpad_scroll_delta(
+                &mut editor,
+                line_px,
+                &mut scroll_accum_x,
+                &mut scroll_accum_y,
+                delta,
+                pos,
+            );
         }
 
         // Flush the latest coalesced drag every loop iteration. Waiting for the

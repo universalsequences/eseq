@@ -64,6 +64,26 @@ impl Editor {
         }
     }
 
+    /// Drop widget focus on every tile, firing the active tile's `:on-blur`.
+    ///
+    /// Hosts call this when the transport starts or stops: a click leaves a
+    /// widget focused, and the play/record shortcut pressed seconds later
+    /// must not keep typing into it. While a modal is open focus is trapped
+    /// inside it deliberately, so it is left alone.
+    pub fn blur_all_widget_focus(&mut self) {
+        if self.modal_is_open() {
+            return;
+        }
+        if self.active_leaf().focused_widget_id.is_some() {
+            self.blur_focused_widget();
+            self.mark_needs_redraw();
+        }
+        // Non-active tiles can hold stale focus that becomes live again when
+        // their tile is re-activated; clear those too (no on-blur: their
+        // widgets are not receiving input).
+        self.clear_focus_on_other_tiles();
+    }
+
     pub fn focused_widget_node(&self) -> Option<LayoutNode> {
         let focused_id = self.active_leaf().focused_widget_id?;
         if let Some(layout) = self.active_leaf().cached_layout.as_ref()
@@ -1229,6 +1249,79 @@ mod tests {
         editor
             .focused_widget_node()
             .and_then(|node| node.stable_key.clone())
+    }
+
+    #[test]
+    fn blur_all_widget_focus_clears_focus_and_fires_on_blur() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def blurred (state false))
+                (effect
+                  (v-stack :width 30 :height 8
+                    (text-input :key "field" :width 10 :value "Track"
+                      :on-blur (lambda () (set! blurred true)))))
+                "#,
+            )
+            .expect("build blur fixture");
+        editor.refresh_runtime_side_effects();
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor.set_layout_viewport(40, 10);
+        editor.refresh_runtime_side_effects();
+
+        assert!(
+            editor.focus_widget_by_stable_key("field", Some("text-input")),
+            "focus the input"
+        );
+
+        editor.blur_all_widget_focus();
+
+        assert_eq!(editor.focused_widget_id(), None, "focus must be cleared");
+        assert_eq!(
+            editor.runtime_mut().eval_str("blurred"),
+            Ok(Some(Value::Bool(true))),
+            ":on-blur must fire on the host-driven blur"
+        );
+    }
+
+    #[test]
+    fn blur_all_widget_focus_leaves_modal_trapped_focus_alone() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def modal-open (state true))
+                (effect
+                  (v-stack :width 30 :height 10
+                    (text-input :key "behind" :width 10 :value "x")
+                    (modal :is-open modal-open
+                      (v-stack
+                        (text-input :key "inside" :width 10 :value "y")))))
+                "#,
+            )
+            .expect("build modal fixture");
+        editor.refresh_runtime_side_effects();
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor.set_layout_viewport(40, 12);
+        editor.refresh_runtime_side_effects();
+
+        assert!(editor.modal_is_open(), "precondition: modal is open");
+        assert_eq!(
+            stable_key_of_focused(&editor).as_deref(),
+            Some("inside"),
+            "precondition: focus trapped in the modal"
+        );
+
+        editor.blur_all_widget_focus();
+
+        assert_eq!(
+            stable_key_of_focused(&editor).as_deref(),
+            Some("inside"),
+            "modal focus trap must survive a transport-driven blur"
+        );
     }
 
     #[test]

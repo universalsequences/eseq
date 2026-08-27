@@ -2,6 +2,7 @@ use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
     "set-record-quantize",
+    "set-scroll-inertia",
     "toggle-metronome",
     "toggle-roll-mode",
 ];
@@ -66,6 +67,18 @@ pub(super) fn handle(
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.mark_needs_redraw();
+        }
+        "set-scroll-inertia" => {
+            // App-side scroll momentum, for compositors that provide none
+            // (Wayland). Opt-in from init.lisp:
+            //   (host-command "set-scroll-inertia" true)
+            let Value::Bool(enabled) = payload else {
+                editor.handle_host_event(HostEvent::Error(
+                    "set-scroll-inertia expects true or false".to_string(),
+                ));
+                return;
+            };
+            ctx.gesture.scroll_inertia.set_enabled(enabled);
         }
         "toggle-roll-mode" => {
             toggle_roll_mode(&state, editor);

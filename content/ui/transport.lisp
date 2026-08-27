@@ -773,6 +773,7 @@
               :bg :transparent)
             (label "" :width 1 :bg :transparent)
             (number-picker :value SEQ.bpm :min 20 :max 300 :decimals 1
+              :key "transport-bpm"
               :noui true
               :font-size 15
               :text-color (rgba 0.85 0.85 0.85 1)

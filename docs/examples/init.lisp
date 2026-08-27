@@ -36,3 +36,10 @@
 
 ;; Evaluate this to return to stock immediately:
 ;; (remove-override eseq.mixer/patch-mixer-strip)
+
+;; 5. Linux/Wayland: inertial (momentum) scrolling. Wayland compositors leave
+;; scroll momentum to applications, so touchpad flicks stop dead the moment
+;; the fingers lift; this makes them coast and decay like macOS. Off by
+;; default; macOS ignores it (AppKit already provides momentum). Mouse wheels
+;; are unaffected either way.
+;; (host-command "set-scroll-inertia" true)

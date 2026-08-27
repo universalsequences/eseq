@@ -2218,6 +2218,44 @@ pub(crate) fn toggle_track_record_arm(
     Some(armed)
 }
 
+/// Arms exactly one track for live input, disarming every other track. A
+/// second call on a track that is already the sole armed one disarms it, so
+/// the shortcut toggles. Rack exclusivity matches `toggle_track_record_arm`:
+/// arming a member of the pad-armed rack hands the keyboard back to chromatic
+/// play, so that rack disarms; a non-member arm leaves pad play alone.
+/// Returns the track's new arm state, or `None` when the index is out of
+/// range.
+pub(crate) fn arm_track_exclusive(
+    record_armed: &mut [bool],
+    armed_rack: &mut Option<u64>,
+    groups: &[sequencer::project::ProjectTrackGroup],
+    track: usize,
+) -> Option<bool> {
+    if track >= record_armed.len() {
+        return None;
+    }
+    let already_sole_armed = record_armed
+        .iter()
+        .enumerate()
+        .all(|(i, &armed)| armed == (i == track));
+    if already_sole_armed {
+        record_armed[track] = false;
+        return Some(false);
+    }
+    for (i, flag) in record_armed.iter_mut().enumerate() {
+        *flag = i == track;
+    }
+    if let Some(rack_id) = *armed_rack {
+        let is_member = groups
+            .iter()
+            .any(|group| group.id == rack_id && group.members.contains(&track));
+        if is_member {
+            *armed_rack = None;
+        }
+    }
+    Some(true)
+}
+
 /// Toggles a drum rack's pad arm. Only one rack answers the keyboard at a
 /// time, and arming one disarms its own member tracks so a member never
 /// responds to a key both as a pad and chromatically. Returns the new state.
@@ -6212,6 +6250,33 @@ pub(crate) fn init_runtime(
         }
     });
 
+    // seq-arm-track-exclusive — arm one track and disarm every other track
+    // (the Cmd/Ctrl+R "arm current track" shortcut). Calling it on the sole
+    // armed track disarms it, so the shortcut toggles.
+    let ra = record_armed.clone();
+    let ar = armed_rack.clone();
+    let groups_state = track_groups.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-arm-track-exclusive", move |args, _ctx| {
+        let Some(Value::Number(track_idx)) = args.first() else {
+            return Err("seq-arm-track-exclusive: expected track index".into());
+        };
+        let track = *track_idx as usize;
+        let armed = arm_track_exclusive(
+            &mut ra.lock().unwrap(),
+            &mut ar.lock().unwrap(),
+            &groups_state.lock().unwrap(),
+            track,
+        );
+        match armed {
+            Some(armed) => {
+                ui_ep.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::Bool(armed))
+            }
+            None => Ok(Value::Bool(false)),
+        }
+    });
+
     // seq-toggle-rack-arm — (seq-toggle-rack-arm group-id)
     // Arms a drum rack for pad play: the live keyboard stops playing tracks
     // chromatically and starts hitting this kit's pads. Only one rack is armed
@@ -7618,6 +7683,63 @@ mod tests {
             None,
             "an out-of-range track toggles nothing"
         );
+    }
+
+    #[test]
+    fn exclusive_arm_arms_one_track_and_disarms_the_rest() {
+        let groups = [arm_test_rack()];
+        let mut record_armed = vec![true, false, true, false];
+        let mut armed_rack = None;
+
+        assert_eq!(
+            arm_track_exclusive(&mut record_armed, &mut armed_rack, &groups, 3),
+            Some(true)
+        );
+        assert_eq!(record_armed, vec![false, false, false, true]);
+
+        // A second press on the sole armed track disarms it (toggle).
+        assert_eq!(
+            arm_track_exclusive(&mut record_armed, &mut armed_rack, &groups, 3),
+            Some(false)
+        );
+        assert_eq!(record_armed, vec![false; 4]);
+
+        // From all-disarmed, the same press arms again.
+        assert_eq!(
+            arm_track_exclusive(&mut record_armed, &mut armed_rack, &groups, 3),
+            Some(true)
+        );
+        assert_eq!(record_armed, vec![false, false, false, true]);
+
+        assert_eq!(
+            arm_track_exclusive(&mut record_armed, &mut armed_rack, &groups, 9),
+            None,
+            "an out-of-range track arms nothing"
+        );
+        assert_eq!(record_armed, vec![false, false, false, true]);
+    }
+
+    #[test]
+    fn exclusive_arm_matches_toggle_rack_exclusivity() {
+        let groups = [arm_test_rack()];
+        let mut record_armed = vec![false; 4];
+
+        // Arming a member of the pad-armed rack disarms that rack.
+        let mut armed_rack = Some(7);
+        assert_eq!(
+            arm_track_exclusive(&mut record_armed, &mut armed_rack, &groups, 2),
+            Some(true)
+        );
+        assert_eq!(armed_rack, None);
+
+        // A track outside the rack leaves pad play alone.
+        record_armed = vec![false; 4];
+        armed_rack = Some(7);
+        assert_eq!(
+            arm_track_exclusive(&mut record_armed, &mut armed_rack, &groups, 3),
+            Some(true)
+        );
+        assert_eq!(armed_rack, Some(7));
     }
 
     /// A plain (non-rack) group with the same id shape as `arm_test_rack`,

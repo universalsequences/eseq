@@ -560,6 +560,10 @@ pub(crate) fn reactive_tick_and_render(
         }
 
         if playing != ctx.frame.prev_playing {
+            // A transport flip means the user is playing/recording now: drop
+            // any widget focus left by an earlier click, so global shortcuts
+            // (record, live keys) stop landing in that widget.
+            editor.blur_all_widget_focus();
             let param_sync_revision =
                 capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
             let rt = editor.runtime_mut();

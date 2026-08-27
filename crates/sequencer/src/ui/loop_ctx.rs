@@ -167,6 +167,9 @@ pub(crate) struct GestureState {
     pub(crate) rack_control_snapshot_dirty: bool,
     pub(crate) piano_roll_history_gesture: Option<ActivePianoRollHistoryGesture>,
     pub(crate) preview_plock_variant: Option<(usize, String)>,
+    /// App-side scroll momentum (Wayland has none); host commands toggle it,
+    /// the event loop drives it.
+    pub(crate) scroll_inertia: crate::scroll_inertia::ScrollInertia,
 }
 
 /// Shared handles threaded between the event loop, lisp natives, and the

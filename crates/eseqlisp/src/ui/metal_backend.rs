@@ -3634,6 +3634,13 @@ fragment float4 live_spectrogram_frag(
             self.pending_scroll.pop_front()
         }
 
+        /// AppKit applies scroll momentum itself and folds it into the
+        /// ordinary delta stream, so this backend never reports a gesture
+        /// end for app-side inertia to act on.
+        pub fn take_scroll_phase_ended(&mut self) -> bool {
+            false
+        }
+
         pub fn set_widget_cursor(&self, cursor: crate::widget_render::WidgetCursor) {
             let Some(window) = &self.window else {
                 return;

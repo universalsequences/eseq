@@ -82,6 +82,7 @@ mod edit_sessions;
 mod history_commands;
 mod event_loop;
 mod loop_ctx;
+mod scroll_inertia;
 mod reactive_tick;
 mod reactive_sync;
 
