@@ -2518,6 +2518,9 @@ impl App {
             graph.apply_track_output_routing(track);
             graph.apply_track_bus_sends(track);
         }
+        // Bus solos and the routing both changed above; re-derive the solo
+        // mute gains for tracks and buses against the restored topology.
+        self.push_solo_mutes();
         self.publish_bus_effect_runtime();
         self.publish_rack_choke_runtime();
         self.state.publish_scheduler_snapshot();
@@ -2706,7 +2709,7 @@ impl App {
         bus.output = output;
         self.graph_controller().apply_bus_output_routing(rack_bus);
         // The audible set under solo follows the chain, so re-derive it.
-        self.push_bus_solo_mutes();
+        self.push_solo_mutes();
         Ok(())
     }
 
@@ -7443,6 +7446,9 @@ fn apply_live_track_param_effects(
     }
     if before.output != after.output {
         app.graph_controller().apply_track_output_routing(track);
+        // Solo audibility follows the routing: moving a track in or out of a
+        // soloed group changes whether it is muted by that solo.
+        app.push_solo_mutes();
     }
     let sends_changed = before.sends.len() != after.sends.len()
         || before.sends.iter().zip(&after.sends).any(|(left, right)| {
@@ -7514,7 +7520,7 @@ fn rollback_track_params_edit(
         app.push_track_pan(track);
         app.push_send_gain(track);
         app.push_track_mute(track);
-        app.push_track_solo_mutes();
+        app.push_solo_mutes();
         app.graph_controller().apply_track_output_routing(track);
         app.graph_controller().apply_track_bus_sends(track);
         app.state.request_accumulator_reset(track);
@@ -7567,7 +7573,7 @@ fn rollback_track_params_batch_edit(
             app.push_track_pan(*track);
             app.push_send_gain(*track);
             app.push_track_mute(*track);
-            app.push_track_solo_mutes();
+            app.push_solo_mutes();
             app.graph_controller().apply_track_output_routing(*track);
             app.graph_controller().apply_track_bus_sends(*track);
             app.state.request_accumulator_reset(*track);
@@ -9024,7 +9030,7 @@ fn replay_bus_mixer_patch(
         app.push_bus_mute(patch.target);
     }
     if before.solo != target.solo {
-        app.push_bus_solo_mutes();
+        app.push_solo_mutes();
     }
     Ok(())
 }

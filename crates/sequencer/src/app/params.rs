@@ -12,6 +12,32 @@ const TIMEBASE_LABELS: [&str; Timebase::COUNT] = Timebase::LABELS;
 const SWING_RESOLUTION_LABELS: [&str; SwingResolution::COUNT] = SwingResolution::LABELS;
 const TOOLS_ROW_COUNT: usize = TP_LAST + AC_LAST + 2;
 
+/// Unified solo audibility across tracks and buses. Built by
+/// [`App::solo_audibility`]; consumed by the audio-graph pushes and by the UI
+/// mute/dim bindings so both always agree.
+pub struct SoloAudibility {
+    /// Any solo — track or bus — is engaged somewhere in the mixer.
+    pub active: bool,
+    /// Buses whose member tracks stay audible: the soloed buses plus the
+    /// feeder walk into them (see [`App::solo_member_buses`]). Empty when no
+    /// bus is soloed.
+    member_buses: Vec<BusId>,
+}
+
+impl SoloAudibility {
+    /// Whether this track is silenced by someone else's solo: a solo is active
+    /// and the track is neither soloed itself nor a member of a soloed group.
+    pub fn track_is_muted(&self, params: &crate::sequencer::TrackParams) -> bool {
+        if !self.active || params.is_solo() {
+            return false;
+        }
+        !matches!(
+            params.output(),
+            crate::sequencer::TrackOutput::Bus(id) if self.member_buses.contains(&id)
+        )
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolRow {
     Track(usize),
@@ -221,13 +247,13 @@ impl App {
     }
 
     pub(super) fn push_track_solo_mutes(&self) {
-        let has_solo = (0..self.state.active_track_count())
-            .any(|track| self.state.pattern.track_params[track].is_solo());
+        let audibility = self.solo_audibility();
         for track in 0..self.state.active_track_count() {
             let Some(node) = self.graph.track_node_ids.get(track) else {
                 continue;
             };
-            let muted_by_solo = has_solo && !self.state.pattern.track_params[track].is_solo();
+            let muted_by_solo =
+                audibility.track_is_muted(&self.state.pattern.track_params[track]);
             unsafe {
                 crate::audiograph::params_push_wrapper(
                     self.graph.lg.0,
@@ -295,10 +321,38 @@ impl App {
             self.buses.iter().filter(|bus| bus.solo).map(|bus| bus.id).collect();
         let mut audible = soloed.clone();
 
-        // Destination walk: from each soloed bus down the chain toward the mix,
-        // so every bus that carries its audio stays open.
-        let mut seen = soloed.clone();
-        let mut queue = soloed.clone();
+        // Carrier seeds from soloed *tracks*: a track the user soloed directly
+        // must keep its output bus and send destinations open even while a bus
+        // solo mutes the rest of the mixer, or engaging a group solo would
+        // silence a track that is itself soloed. Seeds join the destination
+        // walk (their downstream chain carries the track's audio) but never
+        // the feeder walk (a carrier bus's other members stay muted).
+        let mut destination_seeds = soloed.clone();
+        for track in 0..self.state.active_track_count() {
+            let tp = &self.state.pattern.track_params[track];
+            if !tp.is_solo() {
+                continue;
+            }
+            let mut seed = |id: crate::sequencer::BusId| {
+                if !destination_seeds.contains(&id) {
+                    destination_seeds.push(id);
+                }
+                if !audible.contains(&id) {
+                    audible.push(id);
+                }
+            };
+            if let crate::sequencer::TrackOutput::Bus(id) = tp.output() {
+                seed(id);
+            }
+            for send in tp.sends() {
+                seed(send.destination);
+            }
+        }
+
+        // Destination walk: from each seed down the chain toward the mix, so
+        // every bus that carries its audio stays open.
+        let mut seen = destination_seeds.clone();
+        let mut queue = destination_seeds;
         let mut cursor = 0;
         while cursor < queue.len() {
             let current = queue[cursor];
@@ -322,7 +376,25 @@ impl App {
 
         // Feeder walk: from each soloed bus up into the buses that feed it, so
         // soloing a group keeps its members audible.
-        let mut seen = soloed.clone();
+        for id in self.solo_member_buses() {
+            if !audible.contains(&id) {
+                audible.push(id);
+            }
+        }
+
+        audible
+    }
+
+    /// Buses whose member tracks stay audible under the current bus solos: the
+    /// soloed buses plus everything feeding them, transitively (a nested
+    /// group's rack buses when the parent group is soloed). This is the feeder
+    /// half of `solo_audible_buses`, kept separate because *track* audibility
+    /// follows only membership — a bus that is merely downstream of a soloed
+    /// bus carries its audio, but that bus's own member tracks stay muted.
+    pub fn solo_member_buses(&self) -> Vec<crate::sequencer::BusId> {
+        let soloed: Vec<crate::sequencer::BusId> =
+            self.buses.iter().filter(|bus| bus.solo).map(|bus| bus.id).collect();
+        let mut member = soloed.clone();
         let mut queue = soloed;
         let mut cursor = 0;
         while cursor < queue.len() {
@@ -334,17 +406,39 @@ impl App {
                 .filter(|bus| bus.output.destination() == Some(current.0))
                 .map(|bus| bus.id);
             for id in feeders {
-                if !seen.contains(&id) {
-                    seen.push(id);
+                if !member.contains(&id) {
+                    member.push(id);
                     queue.push(id);
-                    if !audible.contains(&id) {
-                        audible.push(id);
-                    }
                 }
             }
         }
+        member
+    }
 
-        audible
+    /// Snapshot of solo state across the whole mixer — tracks and buses are
+    /// one solo system: soloing a group mutes tracks routed straight to the
+    /// mix, and a track's own solo keeps it audible through any group solo.
+    pub fn solo_audibility(&self) -> SoloAudibility {
+        let track_solo = (0..self.state.active_track_count())
+            .any(|track| self.state.pattern.track_params[track].is_solo());
+        let bus_solo = self.buses.iter().any(|bus| bus.solo);
+        let member_buses = if bus_solo {
+            self.solo_member_buses()
+        } else {
+            Vec::new()
+        };
+        SoloAudibility {
+            active: track_solo || bus_solo,
+            member_buses,
+        }
+    }
+
+    /// Solo state on either side of the track/bus split changes audibility on
+    /// the other (a bus solo mutes mix-routed tracks; a soloed track holds its
+    /// carrier buses open), so solo pushes travel in pairs.
+    pub(super) fn push_solo_mutes(&self) {
+        self.push_track_solo_mutes();
+        self.push_bus_solo_mutes();
     }
 
     pub(super) fn push_bus_solo_mutes(&self) {

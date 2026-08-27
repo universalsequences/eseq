@@ -264,7 +264,7 @@ pub(super) fn sync_after_rack_structure_change(
         &ctx.shared.active_delete_target_version,
         &app.groups,
     );
-    push_solo_mutes(ctx.shared.lg_raw, &state);
+    push_solo_mutes(ctx.shared.lg_raw, app, &state);
     ctx.meters.cached_track_peak_levels =
         read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
     ctx.meters.cached_bus_peak_levels =

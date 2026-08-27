@@ -56,6 +56,7 @@ pub mod song_transport;
 mod synth;
 
 pub use browser::BrowserNode;
+pub use params::SoloAudibility;
 #[allow(unused_imports)]
 pub use command::{apply_command, AppCommand};
 pub use edit::try_apply_command;

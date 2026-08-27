@@ -23,12 +23,13 @@ pub(crate) fn push_panner_bool(
 
 pub(crate) fn push_solo_mutes(
     lg_raw: *mut sequencer::audiograph::LiveGraph,
+    app: &app::App,
     state: &Arc<SequencerState>,
 ) {
     let count = state.active_track_count();
-    let has_solo = (0..count).any(|track| state.pattern.track_params[track].is_solo());
+    let audibility = app.solo_audibility();
     for track in 0..count {
-        let muted_by_solo = has_solo && !state.pattern.track_params[track].is_solo();
+        let muted_by_solo = audibility.track_is_muted(&state.pattern.track_params[track]);
         let fader_id = state.runtime.delay_lids[track].load(Ordering::Acquire);
         push_panner_bool(
             lg_raw,

@@ -59,7 +59,7 @@ pub(super) fn sync_after_instrument_track_apply_with_selection(
         if pan_ids.len() < app.graph.track_node_ids.len() {
             pan_ids.push(app.graph.track_node_ids[track_index].pan_id);
         }
-        push_solo_mutes(lg_raw, state);
+        push_solo_mutes(lg_raw, app, state);
     }
     if record_armed.lock().unwrap().len() < app.tracks.len() {
         record_armed.lock().unwrap().push(false);
@@ -2066,6 +2066,14 @@ pub(super) fn apply_ui_invalidations(
                     needs_reactive_cycle |= rt
                         .set_reactive("SEQ", "track-outputs", build_track_outputs(app, state))
                         .effects_dirty;
+                    // Routing decides whether a bus solo mutes this track.
+                    needs_reactive_cycle |= sync_track_mute_visual_binding_fields(
+                        rt,
+                        app,
+                        state,
+                        std::iter::once(track),
+                        true,
+                    );
                 }
                 TrackMixerInvalidation::Collapsed => {
                     let collapsed = track_collapsed.lock().unwrap().clone();
@@ -2095,6 +2103,15 @@ pub(super) fn apply_ui_invalidations(
                         }
                         BusMixerInvalidation::Solo => {
                             sync_bus_mixer_control_state(rt, app);
+                            // Bus solos mute tracks outside the soloed group,
+                            // so the per-track dim state follows them too.
+                            sync_track_mute_visual_binding_fields(
+                                rt,
+                                app,
+                                state,
+                                0..active_track_count,
+                                true,
+                            );
                             needs_reactive_cycle = true;
                         }
                         BusMixerInvalidation::Steps | BusMixerInvalidation::Timing => {

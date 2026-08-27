@@ -2861,7 +2861,7 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
 
         AppCommand::ToggleTrackSolo { track } => {
             app.state.pattern.track_params[track].toggle_solo();
-            app.push_track_solo_mutes();
+            app.push_solo_mutes();
         }
 
         AppCommand::AdjustTrackMaxPolyphony { track, delta } => {
@@ -3007,6 +3007,9 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
         AppCommand::SetTrackOutput { track, output } => {
             app.state.pattern.track_params[track].set_output(output);
             app.graph_controller().apply_track_output_routing(track);
+            // Solo audibility follows the routing: moving a track in or out of
+            // a soloed group changes whether it is muted by that solo.
+            app.push_solo_mutes();
         }
 
         AppCommand::SetTrackSends { track, sends } => {
@@ -3043,7 +3046,7 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
         AppCommand::ToggleBusSolo { bus } => {
             if let Some(channel) = app.buses.iter_mut().find(|channel| channel.id == bus) {
                 channel.solo = !channel.solo;
-                app.push_bus_solo_mutes();
+                app.push_solo_mutes();
             }
         }
 

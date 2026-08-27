@@ -63,7 +63,7 @@ impl GraphController<'_> {
         self.app.push_all_restored_defaults();
         // The solo bits shifted with their tracks in `remove_track`; recompute
         // the solo-derived mute gains against the compacted lane order.
-        self.app.push_track_solo_mutes();
+        self.app.push_solo_mutes();
 
         let new_selected = track_idx.min(self.app.tracks.len().saturating_sub(1));
         self.app.ui.cursor_track = new_selected;

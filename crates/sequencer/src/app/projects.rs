@@ -4820,7 +4820,7 @@ impl App {
                 }
             }
         }
-        self.push_track_solo_mutes();
+        self.push_solo_mutes();
         self.push_all_restored_instrument_defaults();
         self.state.publish_scheduler_snapshot();
     }

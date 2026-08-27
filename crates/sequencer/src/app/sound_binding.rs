@@ -935,7 +935,7 @@ impl App {
                 self.send_effective_slot_param(track, slot_idx, param_idx);
             }
         }
-        self.push_track_solo_mutes();
+        self.push_solo_mutes();
         // Same sampler exemption as `push_all_restored_defaults`: sampler
         // voices get their params stamped per note (including p-locks), so
         // pushing slot DEFAULTS onto live voices would stomp a sounding

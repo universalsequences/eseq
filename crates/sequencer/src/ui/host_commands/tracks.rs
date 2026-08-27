@@ -72,7 +72,7 @@ fn sync_after_track_topology_delete(
         .iter()
         .map(|ids| ids.pan_id)
         .collect();
-    push_solo_mutes(ctx.shared.lg_raw, &state);
+    push_solo_mutes(ctx.shared.lg_raw, app, &state);
     ctx.meters.cached_track_peak_levels =
         read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
     ctx.meters.cached_bus_peak_levels =
@@ -257,7 +257,7 @@ pub(super) fn handle(
                 {
                     let mut pan_ids = track_pan_ids.lock().unwrap();
                     pan_ids.push(app.graph.track_node_ids[idx].pan_id);
-                    push_solo_mutes(lg_raw, &state);
+                    push_solo_mutes(lg_raw, app, &state);
                 }
                 record_armed.lock().unwrap().push(false);
                 let rt = editor.runtime_mut();
@@ -564,7 +564,7 @@ pub(super) fn handle(
                         {
                             let mut pan_ids = track_pan_ids.lock().unwrap();
                             pan_ids.push(app.graph.track_node_ids[idx].pan_id);
-                            push_solo_mutes(lg_raw, &state);
+                            push_solo_mutes(lg_raw, app, &state);
                         }
                         // Extend record_armed for new track
                         record_armed.lock().unwrap().push(false);

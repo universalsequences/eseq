@@ -9114,8 +9114,8 @@
         runtime.register_reactive(
             "SEQ",
             vec![
-                ("track-muted-by-solo", build_track_muted_by_solo(&state)),
-                ("track-muted-effective", build_track_muted_effective(&state)),
+                ("track-muted-by-solo", build_track_muted_by_solo(&app, &state)),
+                ("track-muted-effective", build_track_muted_effective(&app, &state)),
                 (
                     "track-color-r-effective",
                     build_track_color_channel_effective(&app, &state, 0),

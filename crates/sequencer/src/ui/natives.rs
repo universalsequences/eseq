@@ -2823,7 +2823,7 @@ pub(crate) fn init_runtime(
                 ("mod-routes", build_mod_routes(&state)),
                 ("track-mutes", build_track_mutes(&state)),
                 ("track-solos", build_track_solos(&state)),
-                ("track-muted-by-solo", build_track_muted_by_solo(&state)),
+                ("track-muted-by-solo", build_track_muted_by_solo(&app, &state)),
                 (
                     "bus-ids",
                     Value::List(

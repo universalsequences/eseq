@@ -7542,6 +7542,92 @@ mod tests {
         graph.process_block();
     }
 
+    /// Track and bus solo are one system: soloing a group must mute tracks
+    /// routed straight to the mix, keep the group's member tracks audible, and
+    /// never silence a track the user soloed directly.
+    #[test]
+    fn group_solo_mutes_mix_routed_tracks_and_respects_track_solos() {
+        let graph = TestLiveGraph::new("group-solo-track-audibility-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let bass = app.graph_controller().add_blank_sampler_track().expect("bass track");
+        let lead = app.graph_controller().add_blank_sampler_track().expect("lead track");
+        let loose = app.graph_controller().add_blank_sampler_track().expect("loose track");
+        let group_bus = app.group_tracks_recorded(vec![bass, lead]).expect("tracks should group");
+
+        let audibility = app.solo_audibility();
+        assert!(!audibility.active, "no solo anywhere");
+        assert!(!audibility.track_is_muted(&app.state.pattern.track_params[loose]));
+
+        let index = app.buses.iter().position(|channel| channel.id == group_bus).expect("bus");
+        app.buses[index].solo = true;
+        app.push_solo_mutes();
+        let audibility = app.solo_audibility();
+        assert!(audibility.active);
+        assert!(
+            !audibility.track_is_muted(&app.state.pattern.track_params[bass]),
+            "a member track stays audible under its group's solo",
+        );
+        assert!(!audibility.track_is_muted(&app.state.pattern.track_params[lead]));
+        assert!(
+            audibility.track_is_muted(&app.state.pattern.track_params[loose]),
+            "a track routed straight to the mix is muted by a group solo",
+        );
+
+        // A track soloed directly stays audible through the group solo.
+        app.state.pattern.track_params[loose].set_solo(true);
+        app.push_solo_mutes();
+        let audibility = app.solo_audibility();
+        assert!(!audibility.track_is_muted(&app.state.pattern.track_params[loose]));
+        assert!(!audibility.track_is_muted(&app.state.pattern.track_params[bass]));
+
+        // Releasing the group solo leaves only the track solo: the group's
+        // members are now the ones muted, and the manual solo is untouched.
+        app.buses[index].solo = false;
+        app.push_solo_mutes();
+        let audibility = app.solo_audibility();
+        assert!(app.state.pattern.track_params[loose].is_solo());
+        assert!(!audibility.track_is_muted(&app.state.pattern.track_params[loose]));
+        assert!(audibility.track_is_muted(&app.state.pattern.track_params[bass]));
+        graph.process_block();
+    }
+
+    /// A soloed track routed into a non-soloed group must hold that group's
+    /// bus open while another bus solo is engaged, or the track the user
+    /// explicitly soloed would be inaudible — while the carrier group's other
+    /// members stay muted.
+    #[test]
+    fn soloed_track_holds_its_carrier_bus_open_under_a_bus_solo() {
+        let graph = TestLiveGraph::new("carrier-bus-solo-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let a0 = app.graph_controller().add_blank_sampler_track().expect("track a0");
+        let a1 = app.graph_controller().add_blank_sampler_track().expect("track a1");
+        let b0 = app.graph_controller().add_blank_sampler_track().expect("track b0");
+        let b1 = app.graph_controller().add_blank_sampler_track().expect("track b1");
+        let bus_a = app.group_tracks_recorded(vec![a0, a1]).expect("group A");
+        let bus_b = app.group_tracks_recorded(vec![b0, b1]).expect("group B");
+
+        let index = app.buses.iter().position(|channel| channel.id == bus_a).expect("bus A");
+        app.buses[index].solo = true;
+        app.state.pattern.track_params[b0].set_solo(true);
+        app.push_solo_mutes();
+
+        let audible = app.solo_audible_buses();
+        assert!(audible.contains(&bus_a));
+        assert!(
+            audible.contains(&bus_b),
+            "the soloed track's carrier bus stays open under the other group's solo",
+        );
+
+        let audibility = app.solo_audibility();
+        assert!(!audibility.track_is_muted(&app.state.pattern.track_params[b0]));
+        assert!(
+            audibility.track_is_muted(&app.state.pattern.track_params[b1]),
+            "the carrier group's other members stay muted",
+        );
+        assert!(!audibility.track_is_muted(&app.state.pattern.track_params[a0]));
+        graph.process_block();
+    }
+
     #[test]
     fn recorded_group_delete_restores_backing_bus_fx_and_all_scene_routing() {
         let graph = TestLiveGraph::new("recorded-group-delete-test", 64, 44_100, 2);

@@ -174,7 +174,7 @@ impl App {
                     }
                     MixerControlOp::Solo => {
                         self.state.pattern.track_params[track].set_solo(engaged);
-                        self.push_track_solo_mutes();
+                        self.push_solo_mutes();
                         outcome.applied.push(MixerControlApplied::TrackSolo { track });
                     }
                 }
@@ -197,7 +197,7 @@ impl App {
                     }
                     MixerControlOp::Solo => {
                         self.buses[bus_index].solo = engaged;
-                        self.push_bus_solo_mutes();
+                        self.push_solo_mutes();
                         outcome
                             .applied
                             .push(MixerControlApplied::BusSolo { bus_index });

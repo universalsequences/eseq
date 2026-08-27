@@ -416,41 +416,45 @@ pub(crate) fn build_track_solos(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
-pub(crate) fn build_track_muted_by_solo(state: &Arc<SequencerState>) -> Value {
+pub(crate) fn build_track_muted_by_solo(app: &app::App, state: &Arc<SequencerState>) -> Value {
     let count = state.active_track_count();
-    let has_solo = any_track_solo(state);
+    let solo = app.solo_audibility();
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
         .map(|t| {
             Rc::new(RefCell::new(Value::Bool(track_muted_by_solo(
-                state, t, has_solo,
+                state, t, &solo,
             ))))
         })
         .collect();
     Value::List(items)
 }
 
-pub(super) fn track_effectively_muted(state: &Arc<SequencerState>, track: usize, has_solo: bool) -> bool {
+pub(super) fn track_effectively_muted(
+    state: &Arc<SequencerState>,
+    track: usize,
+    solo: &app::SoloAudibility,
+) -> bool {
     let params = &state.pattern.track_params[track];
-    params.is_muted() || (has_solo && !params.is_solo())
+    params.is_muted() || solo.track_is_muted(params)
 }
 
-pub(super) fn any_track_solo(state: &Arc<SequencerState>) -> bool {
-    (0..state.active_track_count()).any(|t| state.pattern.track_params[t].is_solo())
-}
-
-pub(super) fn track_muted_by_solo(state: &Arc<SequencerState>, track: usize, has_solo: bool) -> bool {
-    has_solo && !state.pattern.track_params[track].is_solo()
+pub(super) fn track_muted_by_solo(
+    state: &Arc<SequencerState>,
+    track: usize,
+    solo: &app::SoloAudibility,
+) -> bool {
+    solo.track_is_muted(&state.pattern.track_params[track])
 }
 
 /// Per-track "effectively muted" (explicit mute OR muted by another track's
 /// solo) as 0/1 numbers, for widget bindings via `bind-seq-nth`. Lets row
 /// `:muted` props update without rerunning the row's subtree.
-pub(crate) fn build_track_muted_effective(state: &Arc<SequencerState>) -> Value {
+pub(crate) fn build_track_muted_effective(app: &app::App, state: &Arc<SequencerState>) -> Value {
     let count = state.active_track_count();
-    let has_solo = any_track_solo(state);
+    let solo = app.solo_audibility();
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
         .map(|t| {
-            let muted = track_effectively_muted(state, t, has_solo);
+            let muted = track_effectively_muted(state, t, &solo);
             Rc::new(RefCell::new(Value::Number(if muted { 1.0 } else { 0.0 })))
         })
         .collect();
@@ -465,10 +469,10 @@ pub(crate) fn build_track_color_channel_effective(
     channel: usize,
 ) -> Value {
     let count = state.active_track_count();
-    let has_solo = any_track_solo(state);
+    let solo = app.solo_audibility();
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
         .map(|track| {
-            let muted = track_effectively_muted(state, track, has_solo);
+            let muted = track_effectively_muted(state, track, &solo);
             let value = track_color_channel_effective_value(app, track, channel, muted);
             Rc::new(RefCell::new(Value::Number(value)))
         })
@@ -544,7 +548,7 @@ pub(crate) fn sync_track_mute_visual_binding_fields(
     sync_muted_by_solo: bool,
 ) -> bool {
     let count = state.active_track_count();
-    let has_solo = any_track_solo(state);
+    let solo = app.solo_audibility();
     let take_states = super::song_state::song_take_lane_states(app);
     let mut effects_dirty = false;
 
@@ -558,12 +562,12 @@ pub(crate) fn sync_track_mute_visual_binding_fields(
                     "SEQ",
                     "track-muted-by-solo",
                     track,
-                    Value::Bool(track_muted_by_solo(state, track, has_solo)),
+                    Value::Bool(track_muted_by_solo(state, track, &solo)),
                 )
                 .effects_dirty;
         }
 
-        let muted = track_effectively_muted(state, track, has_solo);
+        let muted = track_effectively_muted(state, track, &solo);
         effects_dirty |= rt
             .set_reactive_list_index(
                 "SEQ",
@@ -650,12 +654,12 @@ pub(crate) fn sync_track_mixer_state(
     rt.set_reactive(
         "SEQ",
         "track-muted-by-solo",
-        build_track_muted_by_solo(state),
+        build_track_muted_by_solo(app, state),
     );
     rt.set_reactive(
         "SEQ",
         "track-muted-effective",
-        build_track_muted_effective(state),
+        build_track_muted_effective(app, state),
     );
     rt.set_reactive(
         "SEQ",
