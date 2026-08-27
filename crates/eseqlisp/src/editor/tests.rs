@@ -5,6 +5,25 @@ fn ctrl_char_keys_are_normalized_to_lowercase() {
 }
 
 #[test]
+fn key_names_distinguish_shifted_control_and_super_shortcuts() {
+    assert_eq!(
+        key_str(KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )),
+        "C-S-c"
+    );
+    assert_eq!(
+        key_str(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SUPER)),
+        "s-c"
+    );
+    assert_eq!(
+        key_str(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)),
+        "S-UP"
+    );
+}
+
+#[test]
 fn ctrl_c_ctrl_c_binding_enqueues_host_command() {
     let init = r#"
             (def compile-current ()

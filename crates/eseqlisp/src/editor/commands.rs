@@ -324,23 +324,28 @@ impl Editor {
 }
 
 pub(super) fn key_str(key: KeyEvent) -> String {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let prefix = match (ctrl, alt) {
-        (true, true) => "C-M-",
-        (true, false) => "C-",
-        (false, true) => "M-",
-        (false, false) => "",
-    };
-    match key.code {
-        KeyCode::Char(c) => format!("{prefix}{}", c.to_ascii_lowercase()),
-        KeyCode::Enter => format!("{prefix}RET"),
-        KeyCode::Backspace => format!("{prefix}BS"),
+    let mut prefix = String::new();
+    for (modifier, name) in [
+        (KeyModifiers::CONTROL, "C-"),
+        (KeyModifiers::ALT, "M-"),
+        (KeyModifiers::SHIFT, "S-"),
+        (KeyModifiers::SUPER, "s-"),
+    ] {
+        if key.modifiers.contains(modifier) {
+            prefix.push_str(name);
+        }
+    }
+
+    let key_name = match key.code {
+        KeyCode::Char(c) => c.to_ascii_lowercase().to_string(),
+        KeyCode::Enter => "RET".to_string(),
+        KeyCode::Backspace => "BS".to_string(),
         KeyCode::Esc => "ESC".to_string(),
         KeyCode::Up => "UP".to_string(),
         KeyCode::Down => "DOWN".to_string(),
         KeyCode::Left => "LEFT".to_string(),
         KeyCode::Right => "RIGHT".to_string(),
         _ => format!("{:?}", key.code),
-    }
+    };
+    format!("{prefix}{key_name}")
 }
