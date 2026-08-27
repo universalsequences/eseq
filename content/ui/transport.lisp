@@ -630,7 +630,7 @@
 (def scene-banks ()
   (if (> (len SEQ.scene-banks) 0)
     SEQ.scene-banks
-    (list (dict :id 0 :label "A" :len SEQ.num-patterns :offset 0))))
+    (list (dict :id 0 :label "A" :name nil :len SEQ.num-patterns :offset 0))))
 
 (def scene-bank-index-containing (scene)
   (let ((banks (scene-banks)))
@@ -703,6 +703,96 @@
 (def scene-playing-in-other-bank? ()
   (not (= (scene-bank-index-containing SEQ.current-pattern)
     (scene-viewed-bank-index))))
+
+(defstate scene-bank-ops-menu-open false)
+(defstate scene-bank-ops-menu-col 0)
+(defstate scene-bank-ops-menu-row 0)
+(defstate scene-bank-renaming false)
+(defstate scene-bank-rename-id 0)
+(defstate scene-bank-rename-draft "")
+
+(def open-scene-bank-ops-menu (event)
+  (do
+    (set! scene-bank-ops-menu-col (get event :col))
+    (set! scene-bank-ops-menu-row (get event :row))
+    (set! scene-bank-ops-menu-open true)))
+
+(def begin-scene-bank-rename ()
+  (let ((bank (scene-viewed-bank)))
+    (do
+      (set! scene-bank-ops-menu-open false)
+      (set! scene-bank-rename-id (get bank :id))
+      (set! scene-bank-rename-draft (or (get bank :name) ""))
+      (set! scene-bank-renaming true))))
+
+(def finish-scene-bank-rename (commit)
+  (if scene-bank-renaming
+    (do
+      (if commit
+        (host-command "rename-scene-bank"
+          (dict :bank-id scene-bank-rename-id :name scene-bank-rename-draft))
+        nil)
+      (set! scene-bank-renaming false)
+      (set! scene-bank-rename-id 0)
+      (set! scene-bank-rename-draft ""))
+    nil))
+
+(def scene-viewed-bank-deletable? ()
+  (let ((banks (scene-banks))
+        (index (scene-viewed-bank-index)))
+    (if (<= (len banks) 1)
+      false
+      (let ((target-index (if (= index 0) 1 (- index 1))))
+        (<= (+ (get (nth banks index) :len)
+            (get (nth banks target-index) :len))
+          24)))))
+
+(def delete-viewed-scene-bank ()
+  (if (scene-viewed-bank-deletable?)
+    (let ((bank (scene-viewed-bank))
+          (fallback-index (max 0 (- (scene-viewed-bank-index) 1))))
+      (do
+        (set! scene-bank-ops-menu-open false)
+        (set! viewed-scene-bank-pending-new false)
+        (set! viewed-scene-bank-index fallback-index)
+        (host-command "delete-scene-bank" (dict :bank-id (get bank :id)))))
+    nil))
+
+(def scene-bank-ops-context-menu ()
+  (context-menu :is-open scene-bank-ops-menu-open
+    :anchor-col scene-bank-ops-menu-col
+    :anchor-row scene-bank-ops-menu-row
+    :on-close (lambda () (set! scene-bank-ops-menu-open false))
+    (menu-item "Rename bank"
+      :key "scene-bank-rename-action"
+      :on-select (lambda (event) (begin-scene-bank-rename)))
+    (menu-item "Delete bank"
+      :key "scene-bank-delete-action"
+      :disabled (not (scene-viewed-bank-deletable?))
+      :on-select (lambda (event) (delete-viewed-scene-bank)))))
+
+(def scene-bank-selector (bank)
+  (box :key "scene-bank-selector"
+    :width 4.2 :height 1.1
+    :on-right-click (lambda (event) (open-scene-bank-ops-menu event))
+    (if scene-bank-renaming
+      (text-input :key "scene-bank-rename-input"
+        :width 4.2 :height 1.1 :font-size 10
+        :value scene-bank-rename-draft
+        :auto-focus true
+        :select-all-on-focus true
+        :on-change (lambda (name) (set! scene-bank-rename-draft name))
+        :on-submit (lambda () (finish-scene-bank-rename true))
+        :on-cancel (lambda () (finish-scene-bank-rename false))
+        :on-blur (lambda () (finish-scene-bank-rename true)))
+      (dropdown :key "scene-bank-dropdown"
+        :value (get bank :label)
+        :options (append (scene-bank-labels) (list "New bank"))
+        :on-change select-scene-bank
+        :bg-color :mixer-strip-bg
+        :border-color :mixer-strip-border
+        :badge-color :transparent
+        :width 4.2 :height 1.1 :font-size 10))))
 
 (def seq-clone-pattern ()
   (let ((bank (scene-viewed-bank)))
@@ -1093,19 +1183,13 @@
                       :dark-gray)
                     :bg :transparent)))
               (h-stack :gap 0.12 :align :center
-                (dropdown :key "scene-bank-dropdown"
-                  :value (get bank :label)
-                  :options (append (scene-bank-labels) (list "New bank"))
-                  :on-change select-scene-bank
-                  :bg-color :mixer-strip-bg
-                  :border-color :mixer-strip-border
-                  :badge-color :transparent
-                  :width 4.2 :height 1.1 :font-size 10)
+                (scene-bank-selector bank)
                 (if (scene-playing-in-other-bank?)
                   (scene-bank-playing-indicator
                     :debug-name "scene-bank-playing-other-indicator")
                   (box :width 0.45 :height 0.45 :bg :transparent)))
-            (scene-bank-context-menu))))))
+            (scene-bank-context-menu)
+            (scene-bank-ops-context-menu))))))
     
     ;; Session and arrangement are app views, not tabs in the main buffer.
     ;; This spacer keeps the view pair against the transport's right edge.

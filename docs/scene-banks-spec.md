@@ -106,7 +106,11 @@ subtree `"transport-pattern-pills"`).
 - **A dropdown sits after the `+` and `-` buttons** showing the current bank
   letter (styled like the existing preset dropdown, e.g. the sampler-panel
   `main ▾` selector). Opening it lists all banks plus a "New bank" entry;
-  selecting an entry switches the viewed bank.
+  selecting an entry switches the viewed bank. Right-clicking the selector
+  opens operations for the viewed bank: **Rename bank** enters an inline,
+  submit/cancel rename field, and **Delete bank** merges it according to §7.
+  Delete is disabled when only one bank remains or the merge target would
+  exceed 24 scenes.
 - **Viewed bank is pure UI state** (Lisp `defstate` in transport.lisp), not
   engine state and not persisted; on load it initializes to the bank containing
   the current scene. Switching it re-renders the strip and nothing else — no
@@ -122,7 +126,7 @@ subtree `"transport-pattern-pills"`).
   you can't see).
 
 Rust → Lisp feed: a new reactive value `SEQ.scene-banks` — list of
-`(dict :id :label :len :offset)` — published from
+`(dict :id :label :name :len :offset)` — published from
 `ui/state_values/song_state.rs` next to `SEQ.scene-names` (`:858`), with the
 same epoch-cached pattern. `SEQ.current-pattern` (global index) plus this
 table is enough for the Lisp side to derive the viewed-bank slice, local
@@ -172,9 +176,11 @@ whole-object memento: banks live inside `ProjectScenes`, so
 | Add scene (scoped `+`) | existing `clone-pattern`, gains an insert position | New scene is inserted **at the end of the viewed bank** and that bank's `len` grows. Needs an insert-at-index path in `new_scene` (`scenes.rs:1046` can only append today) with the same downstream remapping as reorder. Disabled at 24. |
 | Delete scene (scoped `-`) | existing `delete-pattern` | Deletes the current scene as today; the owning bank's `len` shrinks, and an emptied bank simply stays empty. The button is disabled when the current scene is outside the viewed bank. |
 
-**v1 UI ships only bank switching + "New bank" + "Move to bank".**
-`rename-scene-bank` and `delete-scene-bank` exist as host commands (and are
-undoable) but get UI surfaces in a follow-up bead.
+The initial UI shipped bank switching + "New bank" + "Move to bank". The
+follow-up UI exposes `rename-scene-bank` and `delete-scene-bank` from a context
+menu on the current bank selector. Both commands continue through the same
+scene-structure history transaction, so rename, rename-clear, and delete are
+undoable.
 
 Existing scene reorder (drag within the strip) stays within-bank: drag
 source/target are both local indices mapped to global before the existing
@@ -190,28 +196,27 @@ Bank switching is a Lisp-state change re-rendering ~24 pills. The
 
 ## 9. Built status and deviations
 
-The implementation follows the agreed rev 1 model and interaction contract.
-The acceptance sweep covers global-index quantized launch into another bank,
-index-neutral non-empty bank deletion, arrangement and scene-macro reference
-identity, mixed bank/scene undo and redo, legacy load defaults, serialization
-of names and boundaries, and the bank-filtered transport UI.
+The implementation follows the agreed rev 1 model and interaction contract,
+plus the completed rename/delete UI follow-up. The acceptance sweep covers
+global-index quantized launch into another bank, index-neutral non-empty bank
+deletion, arrangement and scene-macro reference identity, mixed bank/scene undo
+and redo, legacy load defaults, serialization of names and boundaries, the
+bank-filtered transport UI, and inline rename/delete command routing from the
+bank selector context menu.
 
 One contradiction in rev 1 was resolved during implementation: the original
 serialization section said every missing/invalid bank table became one bank A,
 while the model requires every bank to contain at most 24 scenes. As clarified
 in §3, projects with more than 24 scenes are chunked into unnamed A/B/… banks;
 projects of 24 scenes or fewer still load entirely into A. There are no other
-known deviations from the agreed v1 scope. In particular, the deferred UI and
-input surfaces below remain intentionally out of scope rather than partially
-implemented.
+known deviations from the agreed v1 scope. Keyboard bank switching remains
+intentionally deferred rather than partially implemented.
 
 ## 10. Out of scope
 
 - Persisting scene names / durable `SceneId` (known gap, unchanged).
 - Auto-follow of the viewed bank on launch (indicator only in v1).
-- Keyboard/pad access for bank switching (mouse-only dropdown in v1).
-- UI surfaces for rename/delete bank (host commands only in v1; follow-up
-  bead).
+- Keyboard/pad access for bank switching (mouse-only dropdown).
 - Cross-bank drag of pills, bank reordering UI, per-bank colors.
 - Any per-track clip-grid (mixer.lisp) banking — this spec covers the scene
   strip only.

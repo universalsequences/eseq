@@ -846,6 +846,13 @@ fn build_scene_banks_value(banks: &[SceneBank]) -> Value {
                     "label".to_string(),
                     Rc::new(RefCell::new(Value::String(label))),
                 );
+                map.insert(
+                    "name".to_string(),
+                    Rc::new(RefCell::new(match bank.name.as_ref() {
+                        Some(name) => Value::String(name.clone()),
+                        None => Value::Nil,
+                    })),
+                );
                 number_field(&mut map, "len", bank.len as f64);
                 number_field(&mut map, "offset", offset as f64);
                 offset += bank.len;

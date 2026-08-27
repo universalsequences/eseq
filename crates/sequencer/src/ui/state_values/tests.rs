@@ -22705,8 +22705,8 @@
         let scene_banks = editor
             .runtime_mut()
             .eval_str(
-                "(list (dict :id 11 :label \"A\" :len 2 :offset 0) \
-                       (dict :id 22 :label \"B\" :len 2 :offset 2))",
+                "(list (dict :id 11 :label \"A\" :name nil :len 2 :offset 0) \
+                       (dict :id 22 :label \"B\" :name \"Peak\" :len 2 :offset 2))",
             )
             .expect("evaluate scene bank fixture")
             .expect("scene bank fixture value");
@@ -22759,8 +22759,86 @@
             find_layout_node_by_debug_name(&layout, "scene-bank-playing-other-indicator").is_none(),
             "the indicator must stay absent while playback is in the viewed bank"
         );
+        let selector = find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-selector")
+            .expect("scene bank selector context-menu surface");
+        assert!(selector.props.contains_key("on-right-click"));
 
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.transport/open-scene-bank-ops-menu (dict :col 7 :row 3))")
+            .expect("open scene bank operations menu");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("open bank operations menu layout");
+        let rename_action =
+            find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-rename-action")
+                .expect("rename bank action");
+        let delete_action =
+            find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-delete-action")
+                .expect("delete bank action");
+        assert_finite_nonzero_rect(rename_action, "rename bank action");
+        assert_finite_nonzero_rect(delete_action, "delete bank action");
+        assert_eq!(layout_prop_bool(delete_action, "disabled"), Some(false));
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.transport/begin-scene-bank-rename)")
+            .expect("begin bank rename");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("scene bank rename layout");
+        let rename_input =
+            find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-rename-input")
+                .expect("inline scene bank rename input");
+        assert_finite_nonzero_rect(rename_input, "inline scene bank rename input");
+        assert!(matches!(
+            rename_input.props.get("value"),
+            Some(Value::String(value)) if value == "Peak"
+        ));
         let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do (set! eseq.transport/scene-bank-rename-draft \"Build\") \
+                     (eseq.transport/finish-scene-bank-rename true))",
+            )
+            .expect("edit and submit bank rename");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "rename-scene-bank");
+                assert_eq!(extract_usize_from_payload(payload, "bank-id"), Some(22));
+                assert_eq!(
+                    extract_string_from_payload(payload, "name").as_deref(),
+                    Some("Build")
+                );
+            }
+            other => panic!("expected rename-scene-bank host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.transport/delete-viewed-scene-bank)")
+            .expect("delete viewed scene bank");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "delete-scene-bank");
+                assert_eq!(extract_usize_from_payload(payload, "bank-id"), Some(22));
+            }
+            other => panic!("expected delete-scene-bank host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.transport/viewed-scene-bank-index")
+                .expect("read delete fallback bank"),
+            Some(Value::Number(0.0)),
+            "deleting a viewed bank must fall back to the previous bank"
+        );
+
         editor
             .runtime_mut()
             .eval_str("(eseq.transport/select-scene-bank \"A\")")
@@ -22861,8 +22939,8 @@
         let full_bank_fixture = editor
             .runtime_mut()
             .eval_str(
-                "(list (dict :id 11 :label \"A\" :len 24 :offset 0) \
-                       (dict :id 22 :label \"B\" :len 2 :offset 24))",
+                "(list (dict :id 11 :label \"A\" :name nil :len 24 :offset 0) \
+                       (dict :id 22 :label \"B\" :name nil :len 2 :offset 24))",
             )
             .expect("evaluate full bank fixture")
             .expect("full bank fixture value");
@@ -23945,6 +24023,10 @@
             Value::String("A".to_string())
         );
         assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 0) :name)"),
+            Value::Nil
+        );
+        assert_eq!(
             read(&mut editor, "(get (nth SEQ.scene-banks 0) :len)"),
             Value::Number(3.0)
         );
@@ -24013,6 +24095,10 @@
         assert_eq!(
             read(&mut editor, "(get (nth SEQ.scene-banks 1) :label)"),
             Value::String("B — Peak".to_string())
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 1) :name)"),
+            Value::String("Peak".to_string())
         );
 
         test_app
