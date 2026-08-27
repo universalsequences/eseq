@@ -2420,6 +2420,163 @@
         });
     }
 
+    /// takes spec 10 × defscene: a scene-latched manual launch suspends the
+    /// song's scene-level authority, so shipped ticks must resolve scene
+    /// slots against the SESSION's current scene — not the governing row's.
+    /// Regression: the latched merge swapped lane content but kept the row's
+    /// `current_pattern`, so a performer's launched scene kept playing the
+    /// row's slot values (and live slot writes looked inert) until stop.
+    #[test]
+    fn scene_latched_launch_resolves_scene_slots_from_the_session_scene() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            // Per-scene slot values: scene 0 → 0.25, scene 1 → 0.75.
+            state.publish_scene_slot_declaration(
+                "vel".to_string(),
+                crate::process::ProcessLiteral::Number(0.1),
+            );
+            let (scene0_id, scene1_id) = state.with_scenes_mut(|scenes| {
+                (scenes.scenes[0].id, scenes.scenes[1].id)
+            });
+            state
+                .set_scene_slot_override(
+                    scene0_id,
+                    "vel",
+                    Some(crate::process::ProcessLiteral::Number(0.25)),
+                )
+                .expect("write scene 0 slot");
+            state
+                .set_scene_slot_override(
+                    scene1_id,
+                    "vel",
+                    Some(crate::process::ProcessLiteral::Number(0.75)),
+                )
+                .expect("write scene 1 slot");
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new_scheduler(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"(__register-sequencer "slot-reader"
+                         :resolution :4
+                         :tick (lambda ()
+                           (seq-emit :track 0 :at :now
+                                     :vel (__defscene-resolve "vel"))))"#,
+                )
+                .expect("register slot-reading generator");
+
+            // A song whose single row plays scene 0.
+            song_mode_commit(
+                &state,
+                vec![song_mode_row(10, 0.0, 0, Vec::new())],
+                16.0,
+                false,
+            );
+            let song = state.preflight_runtime_song().expect("preflight song");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut base = state.publish_scheduler_snapshot();
+            let samples_per_quarter = 48_000.0 * 60.0 / base.transport.bpm as f64;
+            let queue = Box::new(ScheduledEventQueue::<128>::new());
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.song = Some(
+                crate::sequencer::SongPlaybackRuntime::new(song, 0.0, samples_per_quarter)
+                    .expect("song playback runtime"),
+            );
+            scheduler
+                .generator_runtime
+                .sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+
+            let block = 4_800_usize;
+            let mut scheduled_until = 0_u64;
+            let mut rendered = 0_u64;
+            let mut velocities: Vec<(u64, f32)> = Vec::new();
+            let switch_at = (2.0 * samples_per_quarter) as u64;
+            let end_sample = (4.0 * samples_per_quarter) as u64;
+            let mut switched = false;
+
+            while rendered < end_sample {
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &base,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    base.transport.pattern_epoch,
+                    rendered,
+                    (block * 4) as u64,
+                    48_000,
+                    block,
+                    samples_per_quarter,
+                    scheduled_until,
+                    false,
+                    false,
+                );
+                scheduled_until = result.scheduled_until_sample;
+                while let Some(event) = queue.pop() {
+                    if let ScheduledEventKind::NetworkTrigger { resolved, .. } = event.kind {
+                        velocities.push((event.sample_time, resolved.velocity));
+                    }
+                }
+                rendered += block as u64;
+
+                if !switched && rendered >= switch_at {
+                    // Manual scene launch to scene 1 mid-song, as the app
+                    // mirrors it: track + scene latches engage, the session's
+                    // current scene moves, and the base snapshot republishes
+                    // (no epoch bump).
+                    state.latch_song_manual_override_all(2);
+                    state.latch_song_scene_override();
+                    let names = vec!["a".to_string(), "b".to_string()];
+                    let instrument_types =
+                        vec![
+                        crate::sequencer::InstrumentType::Sampler,
+                        crate::sequencer::InstrumentType::Sampler,
+                    ];
+                    state
+                        .switch_pattern(1, 2, &[-1, -1], &[48_000, 48_000], &names, &instrument_types)
+                        .expect("live scene switch");
+                    base = state.latest_scheduler_snapshot();
+                    switched = true;
+                }
+            }
+
+            velocities.sort_by_key(|(sample, _)| *sample);
+            assert!(
+                velocities.len() >= 3,
+                "expected boundaries on both sides of the switch: {velocities:?}"
+            );
+            let horizon = switch_at + (block * 4) as u64;
+            let before: Vec<f32> = velocities
+                .iter()
+                .filter(|(sample, _)| *sample < switch_at)
+                .map(|(_, vel)| *vel)
+                .collect();
+            let after: Vec<f32> = velocities
+                .iter()
+                .filter(|(sample, _)| *sample > horizon)
+                .map(|(_, vel)| *vel)
+                .collect();
+            assert!(
+                before.iter().all(|vel| (vel - 0.25).abs() < 1e-6),
+                "row scene 0 slots before the launch: {velocities:?}"
+            );
+            assert!(
+                !after.is_empty()
+                    && after.iter().all(|vel| (vel - 0.75).abs() < 1e-6),
+                "scene-latched launch must resolve the session scene's slots: {velocities:?}"
+            );
+        });
+    }
+
     /// docs/jaki-live-channel-widgets-spec.md 7 and 8.1: control-thread
     /// channel writes reach `chan-get` on the next chunk, while a process write
     /// is mirrored back through the same channel handle for inline UI polling.

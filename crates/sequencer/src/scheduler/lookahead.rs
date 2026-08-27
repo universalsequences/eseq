@@ -483,6 +483,23 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
             }
         }
+        // Scene-latched manual launch (takes spec 10): the scene latch
+        // suspends the song's SCENE-LEVEL authority, so scene-keyed reads —
+        // the defscene slot store this chunk's shipped ticks resolve against
+        // via `scene_slots_for_chunk` — must follow the SESSION's current
+        // scene, not the governing row's. Without this, a performer's
+        // launched scene keeps playing the row's slot values (and live slot
+        // writes look inert) until the transport stops.
+        if state.song_scene_latch() {
+            if let Some(row) = song_row_snapshot.as_deref() {
+                if row.transport.current_pattern != base_snapshot.transport.current_pattern {
+                    let mut adjusted = row.clone();
+                    adjusted.transport.current_pattern =
+                        base_snapshot.transport.current_pattern;
+                    song_row_snapshot = Some(Arc::new(adjusted));
+                }
+            }
+        }
         let snapshot: &SequencerSnapshot = song_row_snapshot
             .as_deref()
             .or(session_launch_snapshot.as_deref())
