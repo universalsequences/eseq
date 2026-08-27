@@ -955,6 +955,10 @@ mod tests {
             .iter()
             .position(|buffer| buffer.name == "*custom-ui-hot-reload-test*")
             .expect("effect buffer should exist");
+        // Hidden named buffers defer reactive reruns (eseq-md1n.4); present
+        // the target so the reload keeps its live-rerender contract.
+        let buffer_id = editor.buffers[buffer_idx].id;
+        editor.set_active_buffer(buffer_id);
         let tree = editor.buffers[buffer_idx]
             .widget_tree
             .as_ref()

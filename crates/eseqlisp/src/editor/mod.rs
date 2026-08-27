@@ -697,6 +697,7 @@ pub struct Editor {
     text_cell_width_scale: f32,
     text_cell_height_scale: f32,
     last_layout_refresh_timings: Vec<LayoutRefreshTiming>,
+    deferred_effect_resume_depth: u8,
     inspect_mode: bool,
     inspect_hover_tile_id: Option<TileId>,
     inspect_hover_widget_id: Option<u64>,
@@ -853,6 +854,7 @@ impl Editor {
             text_cell_width_scale: DEFAULT_TEXT_ZOOM,
             text_cell_height_scale: DEFAULT_TEXT_ZOOM,
             last_layout_refresh_timings: Vec::new(),
+            deferred_effect_resume_depth: 0,
             inspect_mode: false,
             inspect_hover_tile_id: None,
             inspect_hover_widget_id: None,
@@ -1412,6 +1414,7 @@ impl Editor {
             viewport,
             layout_revision,
         );
+        self.resume_deferred_effects_for_presentation();
         self.mark_needs_redraw();
     }
 
@@ -1426,6 +1429,7 @@ impl Editor {
         {
             self.refresh_inactive_tile_layouts_for_buffer(new_buffer_idx);
             self.sync_visible_effect_buffers();
+            self.resume_deferred_effects_for_presentation();
             self.mark_needs_redraw();
             Some(new_tile_id)
         } else {
@@ -1869,6 +1873,7 @@ impl Editor {
                 layout_revision,
             );
         }
+        self.resume_deferred_effects_for_presentation();
         self.mark_needs_redraw();
     }
 
@@ -4870,6 +4875,7 @@ impl Editor {
                     self.refresh_inactive_tile_layouts_for_buffer(new);
                     self.sync_visible_effect_buffers();
                 }
+                self.resume_deferred_effects_for_presentation();
                 self.mark_needs_redraw();
                 return true;
             }
@@ -5031,6 +5037,7 @@ impl Editor {
             self.completion = None;
             self.clear_mark();
             self.restore_buffer_widget_tree();
+            self.resume_deferred_effects_for_presentation();
         }
     }
 
@@ -7330,9 +7337,43 @@ impl Editor {
             .into_iter()
             .filter_map(|tile_id| self.tile_root.find_leaf(tile_id))
             .filter_map(|leaf| self.buffers.get(leaf.buffer_idx))
+            .map(|buffer| buffer.name.as_str())
+            .collect::<HashSet<_>>();
+        // Only presentation buffers (a committed widget tree) can defer:
+        // inert nil-returning projections like *sel-sync* exist purely for
+        // their reactive-set side effects and must keep running while hidden.
+        let hidden_names = self
+            .buffers
+            .iter()
+            .filter(|buffer| !visible_names.contains(buffer.name.as_str()))
+            .filter(|buffer| {
+                buffer
+                    .widget_tree
+                    .as_ref()
+                    .is_some_and(|tree| !matches!(tree, Value::Nil))
+            })
             .map(|buffer| buffer.name.clone())
             .collect::<HashSet<_>>();
-        self.runtime.set_visible_effect_buffer_names(visible_names);
+        self.runtime.set_hidden_effect_buffer_names(hidden_names);
+    }
+
+    /// Run effects that deferred while their target buffer was hidden and
+    /// whose target is now visible, so a newly presented buffer is current in
+    /// the frame it appears rather than one reactive tick late. Call this
+    /// only after a presentation change has fully completed (never from
+    /// inside a tile mutation): the refresh it triggers re-enters editor
+    /// state. Depth-guarded; each pass either clears the deferred work or
+    /// leaves it hidden again.
+    fn resume_deferred_effects_for_presentation(&mut self) {
+        if self.deferred_effect_resume_depth >= 3
+            || !self.runtime.has_resumable_hidden_effect_work()
+        {
+            return;
+        }
+        self.deferred_effect_resume_depth += 1;
+        self.runtime.run_reactive_cycle();
+        self.refresh_runtime_side_effects();
+        self.deferred_effect_resume_depth -= 1;
     }
 
     fn sync_runtime_source_context(&mut self) {
@@ -8979,6 +9020,12 @@ impl Editor {
         }
 
         self.sync_layout_to_active_leaf();
+        // A tile op above (set-layout, window-buffer swap, split) may have
+        // revealed a buffer whose effect deferred while hidden; re-sync the
+        // hidden set and resume any newly visible deferred work.
+        self.sync_visible_effect_buffers();
+        self.resume_deferred_effects_for_presentation();
+
         if scene_trace {
             eprintln!(
                 "[side-effects-trace] total={:.3}ms",

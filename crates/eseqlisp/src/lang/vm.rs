@@ -2418,11 +2418,12 @@ pub struct VM {
     last_reactive_error_detail: Option<String>,
     current_effect_source_buffer_id: Option<BufferId>,
     current_effect_target: EffectTarget,
-    /// Named effect-buffer targets currently presented by an editor tile.
-    /// `None` keeps standalone Runtime users eager; an Editor installs the
-    /// authoritative visible set and hidden named effects remain dirty until
-    /// their target is presented again.
-    visible_effect_buffer_names: Option<HashSet<String>>,
+    /// Named effect-buffer targets that hold a committed widget tree but are
+    /// not presented by any editor tile. Effects targeting these stay dirty
+    /// instead of rerendering; everything else (visible buffers, inert
+    /// nil-returning projections like `*sel-sync*`, standalone Runtimes with
+    /// no editor) runs eagerly. The Editor owns this set.
+    hidden_effect_buffer_names: HashSet<String>,
     current_effect_reactive_reads: Option<HashSet<ReactiveFieldKey>>,
     current_effect_symbol_reads: Option<HashSet<String>>,
     current_subtree_capture_stack: Vec<SubtreeCaptureContext>,
@@ -4197,7 +4198,7 @@ impl VM {
             last_reactive_error_detail: None,
             current_effect_source_buffer_id: None,
             current_effect_target: EffectTarget::BufferId(None),
-            visible_effect_buffer_names: None,
+            hidden_effect_buffer_names: HashSet::new(),
             current_effect_reactive_reads: None,
             current_effect_symbol_reads: None,
             current_subtree_capture_stack: Vec::new(),
@@ -6794,24 +6795,46 @@ impl VM {
     }
 
     fn effect_target_is_visible(&self, node_id: NodeId) -> bool {
-        let Some(visible_names) = self.visible_effect_buffer_names.as_ref() else {
+        if self.hidden_effect_buffer_names.is_empty() {
             return true;
-        };
+        }
         match self.dag.nodes.get(&node_id) {
             Some(ReactiveNode::Effect {
                 target: EffectTarget::BufferName(name),
                 ..
-            }) => visible_names.contains(name),
+            }) => !self.hidden_effect_buffer_names.contains(name),
             _ => true,
         }
     }
 
-    pub(crate) fn set_visible_effect_buffer_names(&mut self, names: HashSet<String>) {
-        self.visible_effect_buffer_names = Some(names);
+    pub(crate) fn set_hidden_effect_buffer_names(&mut self, names: HashSet<String>) {
+        self.hidden_effect_buffer_names = names;
     }
 
     pub(crate) fn process_visible_dirty_effects(&mut self) -> Result<(), VMError> {
         self.process_dirty_reactive()
+    }
+
+    /// True when a named effect deferred while its buffer was hidden now
+    /// targets a visible buffer, so a reactive cycle would resume real work.
+    pub(crate) fn has_visible_deferred_effects(&self) -> bool {
+        // Mid-cycle the dirty set is live working state, not deferred work;
+        // resuming from inside an effect run would reorder the cycle.
+        if self.processing_reactive {
+            return false;
+        }
+        self.dag.dirty_nodes.iter().any(|node_id| {
+            if self.dag.is_detached_subtree_effect(*node_id) {
+                return false;
+            }
+            matches!(
+                self.dag.nodes.get(node_id),
+                Some(ReactiveNode::Effect {
+                    target: EffectTarget::BufferName(name),
+                    ..
+                }) if !self.hidden_effect_buffer_names.contains(name)
+            )
+        })
     }
 
     fn process_dirty_reactive(&mut self) -> Result<(), VMError> {

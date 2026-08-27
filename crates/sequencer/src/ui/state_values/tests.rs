@@ -2380,6 +2380,15 @@
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("browser lisp status after refresh: {status}");
         }
+        // Hidden named buffers defer reactive reruns (eseq-md1n.4); present
+        // the browser as production does so tab switches rerender live.
+        let samples_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer")
+            .id;
+        editor.set_active_buffer(samples_id);
         editor
     }
 
@@ -3647,6 +3656,15 @@
     #[test]
     fn metal_seq_browser_explicit_refresh_updates_inactive_samples_editor_panel() {
         let mut editor = browser_editor_on_instrument_tab();
+        // The shared helper presents *samples*; this test specifically covers
+        // the explicit refresh of an inactive browser, so switch away again.
+        let other_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name != "*samples*")
+            .expect("a non-browser buffer")
+            .id;
+        editor.set_active_buffer(other_id);
         let browser_idx = editor
             .buffers
             .iter()
@@ -14718,6 +14736,15 @@
         let accent = eseqlisp::theme::ACCENT();
         assert!((accent.r - 0.95).abs() < 0.001 && (accent.g - 0.25).abs() < 0.001);
 
+        // Hidden named buffers defer reactive reruns (eseq-md1n.4); present
+        // the patch mixer so the override's rerender lands in its tree.
+        let patch_mixer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*patch-mixer*")
+            .expect("patch mixer buffer")
+            .id;
+        editor.set_active_buffer(patch_mixer_id);
         let payoff_layout = |editor: &eseqlisp::Editor| {
             let tree = editor
                 .buffers
@@ -34005,6 +34032,10 @@
             tree,
             "Drop Audio or MIDI Effect Here"
         ));
+        // Hidden named buffers defer reactive reruns (eseq-md1n.4); present
+        // the fx panel as production does so the owner switch rerenders live.
+        let fx_id = fx.id;
+        editor.set_active_buffer(fx_id);
         editor
             .runtime_mut()
             .eval_str("(set! eseq.seq-core-state/selected-bus 1)")

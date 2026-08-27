@@ -2888,11 +2888,18 @@ impl Runtime {
         self.invoke(callable, args)
     }
 
-    /// Install the editor's authoritative set of presented named buffers.
-    /// Hidden effects remain dirty in the VM; `run_reactive_cycle` resumes
-    /// them as soon as their target enters this set.
-    pub fn set_visible_effect_buffer_names(&mut self, names: HashSet<String>) {
-        self.vm.set_visible_effect_buffer_names(names);
+    /// Install the editor's authoritative set of named buffers that hold a
+    /// committed widget tree but are not presented by any tile. Effects
+    /// targeting them stay dirty in the VM; `run_reactive_cycle` resumes them
+    /// as soon as their target leaves this set.
+    pub fn set_hidden_effect_buffer_names(&mut self, names: HashSet<String>) {
+        self.vm.set_hidden_effect_buffer_names(names);
+    }
+
+    /// True when an effect deferred while its target buffer was hidden is now
+    /// visible and waiting for a reactive cycle to resume it.
+    pub fn has_resumable_hidden_effect_work(&self) -> bool {
+        self.vm.has_visible_deferred_effects()
     }
 
     pub fn run_reactive_cycle(&mut self) {

@@ -956,6 +956,15 @@ fn hot_reload_effect_buffer_keeps_reactive_dependencies_after_body_reload() {
     );
     editor.process_lisp_reload_report(report);
 
+    // Hidden named buffers defer reactive reruns (eseq-md1n.4); present the
+    // target in a second tile so the reload keeps its live-update contract.
+    let hot_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*hot-reactive*")
+        .expect("hot-reactive buffer");
+    editor.split_active_tile(SplitDir::Vertical, hot_idx);
+
     let outcome = editor
         .runtime_mut()
         .set_reactive("APP", "count", Value::Number(2.0));
@@ -1046,6 +1055,15 @@ fn hot_reload_effect_buffer_keeps_subtree_reactive_dependencies_after_body_reloa
         report.diagnostics
     );
     editor.process_lisp_reload_report(report);
+
+    // Hidden named buffers defer reactive reruns (eseq-md1n.4); present the
+    // target in a second tile so the reload keeps its live-update contract.
+    let hot_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*hot-subtree-reactive*")
+        .expect("hot-subtree-reactive buffer");
+    editor.split_active_tile(SplitDir::Vertical, hot_idx);
 
     let outcome = editor
         .runtime_mut()
@@ -9146,6 +9164,9 @@ fn named_effect_buffer_nested_subtree_updates_when_inactive() {
         .iter()
         .position(|buffer| buffer.name == "*controls*")
         .unwrap();
+    // Hidden named buffers defer reactive reruns (eseq-md1n.4); "inactive"
+    // here means presented in a non-active tile, so split one off for it.
+    editor.split_active_tile(SplitDir::Vertical, controls_idx);
     let initial_tree = editor.buffers[controls_idx]
         .widget_tree
         .clone()
@@ -9305,12 +9326,15 @@ fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
         .unwrap();
     editor.refresh_runtime_side_effects();
 
-    let controls = editor
+    let controls_idx = editor
         .buffers
         .iter()
-        .find(|buffer| buffer.name == "*controls*")
+        .position(|buffer| buffer.name == "*controls*")
         .unwrap();
-    let committed_root_id = controls
+    // Hidden named buffers defer reactive reruns (eseq-md1n.4); present the
+    // target in a second tile so the rerun emits its subtree replacement.
+    editor.split_active_tile(SplitDir::Vertical, controls_idx);
+    let committed_root_id = editor.buffers[controls_idx]
         .committed_ui_snapshot
         .as_ref()
         .and_then(|snapshot| {
