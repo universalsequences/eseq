@@ -7,7 +7,7 @@ use super::*;
 use sequencer::app::song_transport::SongTransportMode;
 use sequencer::sequencer::{
     arrangement_scene_spans, state_at_beat, ArrClip, ProjectScenes, ProjectSong, ProjectSongRow,
-    SceneSpan, StepParam,
+    SceneBank, SceneSpan, StepParam,
 };
 
 /// Scalar song bindings published to `SEQ.*`, snapshotted per frame so each
@@ -69,8 +69,8 @@ pub(crate) struct SongBindingsSnapshot {
 /// arrangement are cached and re-read only when `committed_song_revision`
 /// changes (`set_committed_arrangement` bumps it). The lane surfaces
 /// (`song-lanes`, `scene-spans`) are functions of the arrangement alone, so
-/// they follow the revision; `scene-names` depends on the live scenes, which
-/// have no revision counter, so it diffs by value.
+/// they follow the revision; `scene-names` and `scene-banks` depend on the live
+/// scenes, which have no revision counter, so they diff by value.
 #[derive(Default)]
 pub(crate) struct SongFrameState {
     pub(crate) revision: Option<u64>,
@@ -81,6 +81,7 @@ pub(crate) struct SongFrameState {
     pub(crate) cached_lanes: Option<Vec<Vec<ArrClip>>>,
     pub(crate) cached_scene_spans: Option<Vec<SceneSpan>>,
     pub(crate) cached_scene_names: Option<Vec<String>>,
+    pub(crate) cached_scene_banks: Option<Vec<SceneBank>>,
     /// Pattern-pool event snapshots for the patterns the lane projection
     /// references (`song-lane-events`), rekeyed when the projection or the
     /// pattern epoch changes — not per frame.
@@ -814,11 +815,51 @@ fn build_scene_names_value(names: &[String]) -> Value {
     )
 }
 
+pub(crate) fn scene_bank_auto_label(mut index: usize) -> String {
+    let mut reversed = Vec::new();
+    loop {
+        reversed.push(b'A' + (index % 26) as u8);
+        if index < 26 {
+            break;
+        }
+        index = index / 26 - 1;
+    }
+    reversed.reverse();
+    String::from_utf8(reversed).expect("scene bank labels contain only ASCII letters")
+}
+
+fn build_scene_banks_value(banks: &[SceneBank]) -> Value {
+    let mut offset = 0usize;
+    Value::List(
+        banks
+            .iter()
+            .enumerate()
+            .map(|(index, bank)| {
+                let auto_label = scene_bank_auto_label(index);
+                let label = match bank.name.as_deref() {
+                    Some(name) => format!("{auto_label} — {name}"),
+                    None => auto_label,
+                };
+                let mut map = HashMap::new();
+                number_field(&mut map, "id", bank.id.0 as f64);
+                map.insert(
+                    "label".to_string(),
+                    Rc::new(RefCell::new(Value::String(label))),
+                );
+                number_field(&mut map, "len", bank.len as f64);
+                number_field(&mut map, "offset", offset as f64);
+                offset += bank.len;
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect(),
+    )
+}
+
 /// Per-frame publish of the song bindings (spec 12). The committed song and
 /// arrangement are re-read only when the committed-song revision changes; the
-/// scene names diff by value (the scenes side has no revision counter);
-/// scalars publish on change; the render-rate `song-position-beats` publishes
-/// only while a panel that renders it (transport or arrangement) is visible.
+/// scene names and banks diff by value (the scenes side has no revision
+/// counter); scalars publish on change; the render-rate `song-position-beats`
+/// publishes only while a panel that renders it (transport or arrangement) is visible.
 /// Returns true when a reactive cycle is needed.
 pub(crate) fn sync_song_state(
     rt: &mut Runtime,
@@ -855,16 +896,26 @@ pub(crate) fn sync_song_state(
         frame.revision = Some(revision);
         dirty = true;
     }
-    let scene_names = app.state.with_project_scenes(|scenes| {
-        scenes
+    let (scene_names, scene_banks) = app.state.with_project_scenes(|scenes| {
+        let names = scenes
             .scenes
             .iter()
             .map(|scene| scene.name.clone())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (names, scenes.scene_banks().to_vec())
     });
     if frame.cached_scene_names.as_ref() != Some(&scene_names) {
         rt.set_reactive("SEQ", "scene-names", build_scene_names_value(&scene_names));
         frame.cached_scene_names = Some(scene_names);
+        dirty = true;
+    }
+    if frame.cached_scene_banks.as_ref() != Some(&scene_banks) {
+        rt.set_reactive(
+            "SEQ",
+            "scene-banks",
+            build_scene_banks_value(&scene_banks),
+        );
+        frame.cached_scene_banks = Some(scene_banks);
         dirty = true;
     }
     // Preview events for the patterns the projection references: re-snapshot

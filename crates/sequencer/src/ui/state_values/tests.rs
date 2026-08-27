@@ -23624,11 +23624,12 @@
     /// Lane-projection read surface for the arrangement timeline
     /// (docs/arrangement-timeline-ui-spec.md; song-mode-spec 5.5): `song-lanes`
     /// publishes the per-track clip spans derived from the committed song plus
-    /// the live scenes, `scene-names` publishes the scene display names, and
-    /// both diff by value — an unchanged frame publishes nothing, a scene
-    /// rename republishes names, a song edit republishes lanes.
+    /// the live scenes, while `scene-names` and `scene-banks` publish scene
+    /// structure. All three diff by value — an unchanged frame publishes
+    /// nothing, structural edits (including undo) republish scene metadata,
+    /// and a song edit republishes lanes.
     #[test]
-    fn metal_seq_song_lanes_and_scene_names_publish_on_change() {
+    fn metal_seq_song_lanes_and_scene_metadata_publish_on_change() {
         let mut editor = full_grid_editor_for_scroll_tests();
 
         let state = sequencer::sequencer::SequencerState::new(
@@ -23714,6 +23715,19 @@
             read(&mut editor, "(len SEQ.scene-names)"),
             Value::Number(3.0)
         );
+        assert_eq!(read(&mut editor, "(len SEQ.scene-banks)"), Value::Number(1.0));
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 0) :label)"),
+            Value::String("A".to_string())
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 0) :len)"),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 0) :offset)"),
+            Value::Number(0.0)
+        );
 
         // The lane-event read surface publishes one entry per referenced
         // pool pattern (three scenes -> three patterns on the one track).
@@ -23737,8 +23751,95 @@
         // Value diffing: an unchanged frame publishes nothing.
         assert!(
             !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
-            "an unchanged frame must not republish lanes or names"
+            "an unchanged frame must not republish lanes or scene metadata"
         );
+
+        // Spreadsheet-style auto labels continue after Z.
+        assert_eq!(scene_bank_auto_label(25), "Z");
+        assert_eq!(scene_bank_auto_label(26), "AA");
+        assert_eq!(scene_bank_auto_label(27), "AB");
+
+        // Bank structure has no song revision of its own. Value diffing still
+        // publishes every mutation, and does not publish on intervening frames.
+        let created_bank = test_app
+            .apply_recorded_scene_structure_mutation("Create scene bank", |app| {
+                app.state.create_scene_bank()
+            })
+            .expect("scene bank created");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "(len SEQ.scene-banks)"), Value::Number(2.0));
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 1) :label)"),
+            Value::String("B".to_string())
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 1) :offset)"),
+            Value::Number(3.0)
+        );
+        assert!(!sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+
+        test_app
+            .apply_recorded_scene_structure_mutation("Rename scene bank", |app| {
+                app.state.rename_scene_bank(created_bank, Some("Peak".to_string()))
+            })
+            .expect("scene bank renamed");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 1) :label)"),
+            Value::String("B — Peak".to_string())
+        );
+
+        test_app
+            .apply_recorded_scene_structure_mutation("Move scene to scene bank", |app| {
+                let destination = app.state.move_scene_to_scene_bank(0, created_bank)?;
+                app.handle_scene_reordered(0, destination);
+                Ok(destination)
+            })
+            .expect("scene moved into bank");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 0) :len)"),
+            Value::Number(2.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 1) :len)"),
+            Value::Number(1.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 1) :offset)"),
+            Value::Number(2.0)
+        );
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut test_app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 0) :len)"),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 1) :len)"),
+            Value::Number(0.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-banks 1) :offset)"),
+            Value::Number(3.0)
+        );
+
+        test_app
+            .apply_recorded_scene_structure_mutation("Delete scene bank", |app| {
+                app.state.delete_scene_bank(created_bank)
+            })
+            .expect("empty scene bank deleted");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "(len SEQ.scene-banks)"), Value::Number(1.0));
 
         // A scenes-side change (no song revision bump) republishes names.
         assert!(test_app.state.rename_scene(1, "Drop".to_string()));
