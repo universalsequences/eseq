@@ -2418,6 +2418,11 @@ pub struct VM {
     last_reactive_error_detail: Option<String>,
     current_effect_source_buffer_id: Option<BufferId>,
     current_effect_target: EffectTarget,
+    /// Named effect-buffer targets currently presented by an editor tile.
+    /// `None` keeps standalone Runtime users eager; an Editor installs the
+    /// authoritative visible set and hidden named effects remain dirty until
+    /// their target is presented again.
+    visible_effect_buffer_names: Option<HashSet<String>>,
     current_effect_reactive_reads: Option<HashSet<ReactiveFieldKey>>,
     current_effect_symbol_reads: Option<HashSet<String>>,
     current_subtree_capture_stack: Vec<SubtreeCaptureContext>,
@@ -4192,6 +4197,7 @@ impl VM {
             last_reactive_error_detail: None,
             current_effect_source_buffer_id: None,
             current_effect_target: EffectTarget::BufferId(None),
+            visible_effect_buffer_names: None,
             current_effect_reactive_reads: None,
             current_effect_symbol_reads: None,
             current_subtree_capture_stack: Vec::new(),
@@ -6787,6 +6793,27 @@ impl VM {
         self.mark_source_dependents_dirty(source_id, current);
     }
 
+    fn effect_target_is_visible(&self, node_id: NodeId) -> bool {
+        let Some(visible_names) = self.visible_effect_buffer_names.as_ref() else {
+            return true;
+        };
+        match self.dag.nodes.get(&node_id) {
+            Some(ReactiveNode::Effect {
+                target: EffectTarget::BufferName(name),
+                ..
+            }) => visible_names.contains(name),
+            _ => true,
+        }
+    }
+
+    pub(crate) fn set_visible_effect_buffer_names(&mut self, names: HashSet<String>) {
+        self.visible_effect_buffer_names = Some(names);
+    }
+
+    pub(crate) fn process_visible_dirty_effects(&mut self) -> Result<(), VMError> {
+        self.process_dirty_reactive()
+    }
+
     fn process_dirty_reactive(&mut self) -> Result<(), VMError> {
         if self.processing_reactive {
             return Ok(());
@@ -6828,6 +6855,14 @@ impl VM {
                     // detached this subtree (its panel left the tree); leave
                     // it dirty for a future re-registration to see.
                     if self.dag.is_detached_subtree_effect(node_id) {
+                        continue;
+                    }
+                    // Keep hidden named buffers dirty rather than spending the
+                    // frame rebuilding a tree no tile can present. Visibility
+                    // changes resume these nodes before the newly visible tile
+                    // is rendered, so the cached tree never becomes canonical
+                    // stale state.
+                    if !self.effect_target_is_visible(node_id) {
                         continue;
                     }
                     let Some(chunk_idx) = self.dag.chunk_idx(node_id) else {

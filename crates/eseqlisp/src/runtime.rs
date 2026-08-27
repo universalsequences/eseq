@@ -2888,17 +2888,18 @@ impl Runtime {
         self.invoke(callable, args)
     }
 
+    /// Install the editor's authoritative set of presented named buffers.
+    /// Hidden effects remain dirty in the VM; `run_reactive_cycle` resumes
+    /// them as soon as their target enters this set.
+    pub fn set_visible_effect_buffer_names(&mut self, names: HashSet<String>) {
+        self.vm.set_visible_effect_buffer_names(names);
+    }
+
     pub fn run_reactive_cycle(&mut self) {
         let total_started = Instant::now();
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_context(current_buffer_id);
         let dirty = self.reactive_registry.drain_dirty();
-        if dirty.is_empty() {
-            if trace_ui_enabled() {
-                eprintln!("[ui-trace][reactive-cycle] dirty=[] no-op");
-            }
-            return;
-        }
 
         let dirty_len = dirty.len();
         let dirty_fields = dirty
@@ -2906,12 +2907,22 @@ impl Runtime {
             .map(|(namespace, field, _)| format!("{namespace}.{field}"))
             .collect::<Vec<_>>();
         let apply_started = Instant::now();
-        let apply_result = self.vm.apply_reactive_changes(dirty);
+        let apply_result = if dirty.is_empty() {
+            self.vm.process_visible_dirty_effects()
+        } else {
+            self.vm.apply_reactive_changes(dirty)
+        };
         match apply_result {
             Ok(()) => {
                 let apply_elapsed = apply_started.elapsed();
                 let exec_timings = self.vm.take_reactive_exec_timings();
                 let function_profiles = self.vm.take_reactive_function_profiles();
+                if dirty_len == 0 && exec_timings.is_empty() {
+                    if trace_ui_enabled() {
+                        eprintln!("[ui-trace][reactive-cycle] dirty=[] no-op");
+                    }
+                    return;
+                }
                 self.flush_vm_reactive_sets();
                 if self.sync_theme_to_global {
                     self.sync_theme_from_vm();

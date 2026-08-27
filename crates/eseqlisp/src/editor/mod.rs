@@ -1425,6 +1425,7 @@ impl Editor {
             .split_leaf(target, split_id, new_tile_id, new_buffer_idx, dir)
         {
             self.refresh_inactive_tile_layouts_for_buffer(new_buffer_idx);
+            self.sync_visible_effect_buffers();
             self.mark_needs_redraw();
             Some(new_tile_id)
         } else {
@@ -1516,6 +1517,7 @@ impl Editor {
         let new_id = self.alloc_tile_id();
         self.tile_root.collapse_to_single(new_id, buffer_idx);
         self.active_tile = new_id;
+        self.sync_visible_effect_buffers();
         self.mark_needs_redraw();
     }
 
@@ -4866,6 +4868,7 @@ impl Editor {
                     self.restore_buffer_widget_tree();
                 } else {
                     self.refresh_inactive_tile_layouts_for_buffer(new);
+                    self.sync_visible_effect_buffers();
                 }
                 self.mark_needs_redraw();
                 return true;
@@ -7304,17 +7307,32 @@ impl Editor {
             .unwrap_or_default();
         let current_view_mode = active.view_mode.label().to_string();
         let buffer_names = self.buffer_names_by_recency();
-        let mut shared = self.runtime.shared.borrow_mut();
-        shared.current_buffer_id = Some(current_buffer_id);
-        shared.current_buffer_name = current_buffer_name;
-        shared.current_buffer_path = current_buffer_path;
-        shared.current_buffer_read_only = current_buffer_read_only;
-        shared.current_buffer_mode = current_buffer_mode;
-        shared.current_line_number = current_line_number;
-        shared.current_line_text = current_line_text;
-        shared.buffer_names = buffer_names;
-        shared.current_view_mode = current_view_mode;
-        shared.current_text_zoom = self.text_zoom as f64;
+        {
+            let mut shared = self.runtime.shared.borrow_mut();
+            shared.current_buffer_id = Some(current_buffer_id);
+            shared.current_buffer_name = current_buffer_name;
+            shared.current_buffer_path = current_buffer_path;
+            shared.current_buffer_read_only = current_buffer_read_only;
+            shared.current_buffer_mode = current_buffer_mode;
+            shared.current_line_number = current_line_number;
+            shared.current_line_text = current_line_text;
+            shared.buffer_names = buffer_names;
+            shared.current_view_mode = current_view_mode;
+            shared.current_text_zoom = self.text_zoom as f64;
+        }
+        self.sync_visible_effect_buffers();
+    }
+
+    fn sync_visible_effect_buffers(&mut self) {
+        let visible_names = self
+            .tile_root
+            .leaf_ids()
+            .into_iter()
+            .filter_map(|tile_id| self.tile_root.find_leaf(tile_id))
+            .filter_map(|leaf| self.buffers.get(leaf.buffer_idx))
+            .map(|buffer| buffer.name.clone())
+            .collect::<HashSet<_>>();
+        self.runtime.set_visible_effect_buffer_names(visible_names);
     }
 
     fn sync_runtime_source_context(&mut self) {

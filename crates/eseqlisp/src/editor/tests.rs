@@ -8940,6 +8940,65 @@ fn unpresented_tiled_frame_requeues_inactive_tile_widget_dirtiness() {
 }
 
 #[test]
+fn hidden_effect_buffer_defers_rerender_until_the_target_becomes_visible() {
+    let mut runtime = Runtime::new();
+    runtime.register_reactive("APP", vec![("count", Value::Number(1.0))], true);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*controls*"
+              (label (fmt "count:{}" APP.count)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let controls_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*controls*")
+        .expect("effect-buffer should create its target")
+        .id;
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "count", Value::Number(7.0));
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let hidden_tree = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.id == controls_id)
+        .and_then(|buffer| buffer.widget_tree.as_ref())
+        .expect("hidden target should retain its last committed tree");
+    let hidden_rendered = crate::vm::format_lisp_value(hidden_tree);
+    assert!(
+        hidden_rendered.contains("count:1"),
+        "hidden effect must not rerender eagerly: {hidden_rendered}"
+    );
+
+    editor.set_active_buffer(controls_id);
+    // This is the reactive phase of the same frame that presents the buffer.
+    // It must resume deferred work even though no new reactive field changed.
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let visible_tree = editor
+        .runtime
+        .current_widget_tree()
+        .expect("newly visible target should have a current tree");
+    let visible_rendered = crate::vm::format_lisp_value(&visible_tree);
+    assert!(
+        visible_rendered.contains("count:7"),
+        "newly visible target must be current in its first frame: {visible_rendered}"
+    );
+}
+
+#[test]
 fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
