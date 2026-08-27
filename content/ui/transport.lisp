@@ -725,10 +725,21 @@
       (set! scene-bank-rename-draft (or (get bank :name) ""))
       (set! scene-bank-renaming true))))
 
+(def scene-bank-rename-changed? ()
+  (let ((matches (filter
+          (lambda (bank) (= (get bank :id) scene-bank-rename-id))
+          (scene-banks))))
+    (if (> (len matches) 0)
+      ;; Stored names are trimmed host-side, so compare against the trimmed
+      ;; draft; a no-op commit would otherwise surface a host error status.
+      (not (= (string-trim scene-bank-rename-draft)
+          (or (get (nth matches 0) :name) "")))
+      false)))
+
 (def finish-scene-bank-rename (commit)
   (if scene-bank-renaming
     (do
-      (if commit
+      (if (and commit (scene-bank-rename-changed?))
         (host-command "rename-scene-bank"
           (dict :bank-id scene-bank-rename-id :name scene-bank-rename-draft))
         nil)

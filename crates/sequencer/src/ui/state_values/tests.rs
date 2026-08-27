@@ -22819,6 +22819,18 @@
 
         editor
             .runtime_mut()
+            .eval_str(
+                "(do (eseq.transport/begin-scene-bank-rename) \
+                     (eseq.transport/finish-scene-bank-rename true))",
+            )
+            .expect("submit unchanged bank rename");
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "committing an unchanged bank name must not send a host command"
+        );
+
+        editor
+            .runtime_mut()
             .eval_str("(eseq.transport/delete-viewed-scene-bank)")
             .expect("delete viewed scene bank");
         let commands = editor.drain_host_commands();
