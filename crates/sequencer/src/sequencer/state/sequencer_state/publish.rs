@@ -58,6 +58,18 @@ impl SequencerState {
         std::mem::take(&mut *self.roll_recorded_hits.lock().unwrap())
     }
 
+    /// Realtime-safe: called from the audio callback for every live note-on
+    /// it consumes while the transport plays (bead eseq-2awi).
+    pub fn push_live_trigger_stamp(&self, track: usize, transpose: f32, beat: f64) {
+        self.live_trigger_stamps.push(track, transpose, beat);
+    }
+
+    /// Control-thread consumer of the live note-on stamps; see
+    /// [`crate::sequencer::LiveTriggerStampRing`].
+    pub fn drain_live_trigger_stamps(&self, consume: impl FnMut(crate::sequencer::LiveTriggerStamp)) {
+        self.live_trigger_stamps.drain(consume);
+    }
+
     pub fn append_track_output_events(&self, events: impl IntoIterator<Item = TrackOutputEvent>) {
         let mut history = self.track_output_events.lock().unwrap();
         history.extend(events);

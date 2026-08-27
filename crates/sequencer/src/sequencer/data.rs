@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::audio::MAX_VOICES;
@@ -1528,6 +1528,84 @@ pub struct RollHitRecorded {
     pub beat: f64,
 }
 
+/// Audio-callback → control-thread feedback for one live keyboard/pad note-on
+/// (bead eseq-2awi): the render-timeline beat of the block that actually
+/// sounded the trigger. Live recording repositions the pressed note from this
+/// instead of the wall-clock press estimate — the same record-as-heard
+/// principle as [`RollHitRecorded`], with no input-delivery latency, no
+/// device-latency guess, and no PDC term involved: the recorded step replays
+/// on the identical render timeline the live hit sounded on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiveTriggerStamp {
+    pub track: usize,
+    /// The transpose the UI sent in the [`KeyboardTrigger`], bit-exact — the
+    /// consumer matches held-note targets on `(track, transpose)` bits.
+    pub transpose: f32,
+    /// Absolute transport beat of the block start the note-on sounds in.
+    pub beat: f64,
+}
+
+const LIVE_TRIGGER_STAMP_CAPACITY: usize = 256;
+
+/// Fixed-capacity single-producer/single-consumer ring for
+/// [`LiveTriggerStamp`]s. The producer is the audio callback (push must stay
+/// realtime-safe: no locks, no allocation, drop-on-full), the consumer is the
+/// UI thread's per-frame drain plus the note-release handler — both on the
+/// one control thread.
+pub struct LiveTriggerStampRing {
+    tracks: [AtomicU32; LIVE_TRIGGER_STAMP_CAPACITY],
+    transpose_bits: [AtomicU32; LIVE_TRIGGER_STAMP_CAPACITY],
+    beat_bits: [AtomicU64; LIVE_TRIGGER_STAMP_CAPACITY],
+    /// Consumer cursor; only `drain` advances it.
+    head: AtomicUsize,
+    /// Producer cursor; only `push` advances it.
+    tail: AtomicUsize,
+}
+
+impl Default for LiveTriggerStampRing {
+    fn default() -> Self {
+        Self {
+            tracks: std::array::from_fn(|_| AtomicU32::new(0)),
+            transpose_bits: std::array::from_fn(|_| AtomicU32::new(0)),
+            beat_bits: std::array::from_fn(|_| AtomicU64::new(0)),
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl LiveTriggerStampRing {
+    /// Realtime-safe producer side; a full ring drops the stamp (the consumer
+    /// falls back to its wall-clock press position).
+    pub fn push(&self, track: usize, transpose: f32, beat: f64) {
+        let head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Relaxed);
+        if tail.wrapping_sub(head) >= LIVE_TRIGGER_STAMP_CAPACITY {
+            return;
+        }
+        let slot = tail % LIVE_TRIGGER_STAMP_CAPACITY;
+        self.tracks[slot].store(track as u32, Ordering::Relaxed);
+        self.transpose_bits[slot].store(transpose.to_bits(), Ordering::Relaxed);
+        self.beat_bits[slot].store(beat.to_bits(), Ordering::Relaxed);
+        self.tail.store(tail.wrapping_add(1), Ordering::Release);
+    }
+
+    pub fn drain(&self, mut consume: impl FnMut(LiveTriggerStamp)) {
+        let tail = self.tail.load(Ordering::Acquire);
+        let mut head = self.head.load(Ordering::Relaxed);
+        while head != tail {
+            let slot = head % LIVE_TRIGGER_STAMP_CAPACITY;
+            consume(LiveTriggerStamp {
+                track: self.tracks[slot].load(Ordering::Relaxed) as usize,
+                transpose: f32::from_bits(self.transpose_bits[slot].load(Ordering::Relaxed)),
+                beat: f64::from_bits(self.beat_bits[slot].load(Ordering::Relaxed)),
+            });
+            head = head.wrapping_add(1);
+        }
+        self.head.store(head, Ordering::Release);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KeyboardTrigger {
     pub track: usize,
@@ -1704,13 +1782,53 @@ impl SwingResolutionPLockData {
 
 #[cfg(test)]
 mod tests {
-    use super::{PatternStepGeometry, StepParam, Timebase};
+    use super::{LiveTriggerStampRing, PatternStepGeometry, StepParam, Timebase};
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
             (actual - expected).abs() < 0.0001,
             "expected {expected}, got {actual}"
         );
+    }
+
+    #[test]
+    fn live_trigger_stamp_ring_drains_in_push_order() {
+        let ring = LiveTriggerStampRing::default();
+        ring.push(2, 12.0, 4.25);
+        ring.push(0, -3.0, 4.5);
+        let mut drained = Vec::new();
+        ring.drain(|stamp| drained.push(stamp));
+        assert_eq!(drained.len(), 2);
+        assert_eq!(
+            (drained[0].track, drained[0].transpose, drained[0].beat),
+            (2, 12.0, 4.25)
+        );
+        assert_eq!(
+            (drained[1].track, drained[1].transpose, drained[1].beat),
+            (0, -3.0, 4.5)
+        );
+        drained.clear();
+        ring.drain(|stamp| drained.push(stamp));
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn live_trigger_stamp_ring_drops_when_full_and_recovers_after_drain() {
+        let ring = LiveTriggerStampRing::default();
+        for i in 0..300 {
+            ring.push(i, 0.0, i as f64);
+        }
+        let mut drained = Vec::new();
+        ring.drain(|stamp| drained.push(stamp));
+        // Capacity is 256; the overflow was dropped, the survivors kept order.
+        assert_eq!(drained.len(), 256);
+        assert_eq!(drained[0].track, 0);
+        assert_eq!(drained[255].track, 255);
+        ring.push(7, 1.0, 99.0);
+        drained.clear();
+        ring.drain(|stamp| drained.push(stamp));
+        assert_eq!(drained.len(), 1);
+        assert_eq!((drained[0].track, drained[0].beat), (7, 99.0));
     }
 
     #[test]

@@ -194,6 +194,13 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 }
             }
         } else {
+            if transport_playing {
+                // Stamp the render-timeline beat this live note-on sounds at
+                // (bead eseq-2awi): live recording repositions the pressed
+                // note from this instead of its wall-clock press estimate.
+                data.state
+                    .push_live_trigger_stamp(kt.track, kt.transpose, data.transport_beats);
+            }
             // Note-on: allocate voice and trigger
             enforce_mute_group_for_winning_track(data, kt.track, block_start_sample, 0);
             release_rack_choke_group_track_voices(data, kt.track, block_start_sample, 0);

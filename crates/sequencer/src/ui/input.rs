@@ -33,6 +33,10 @@ pub(crate) struct LiveNoteTarget {
     track: usize,
     transpose: f32,
     position: sequencer::sequencer::RecordPosition,
+    /// True once `position` has been replaced by the audio thread's
+    /// record-as-heard stamp for this trigger (bead eseq-2awi); until then it
+    /// holds the wall-clock press estimate as a fallback.
+    stamped: bool,
 }
 
 pub(crate) fn layout_node_by_id(
@@ -1712,6 +1716,77 @@ fn press_record_position(
         })
 }
 
+/// Reposition held live-note targets from the audio thread's note-on stamps
+/// (bead eseq-2awi, record-as-heard). Each stamp carries the render-timeline
+/// beat the trigger actually sounded at; resolving it through the same
+/// track-local geometry the scheduler replays it with replaces the target's
+/// wall-clock press estimate — killing input-delivery jitter and the
+/// device/PDC latency guesswork in one move. Called from the per-frame
+/// reactive tick and again at note release, so the stamp has normally landed
+/// before the release writes the step; a trigger whose stamp has not arrived
+/// yet (a sub-block tap) keeps its press-estimate fallback.
+pub(crate) fn apply_live_trigger_stamps(
+    state: &Arc<SequencerState>,
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+) {
+    let debug = record_stamp_debug();
+    let mut held = held_notes.lock().unwrap();
+    state.drain_live_trigger_stamps(|stamp| {
+        let Some(position) = state.record_position_at_beat(stamp.track, stamp.beat) else {
+            return;
+        };
+        // First unstamped match wins: MIDI-FX repeats (arps) can emit later
+        // note-ons for the same (track, transpose) — only the first audible
+        // hit positions the recorded note.
+        if let Some(target) = held
+            .iter_mut()
+            .flat_map(|note| note.targets.iter_mut())
+            .find(|target| {
+                !target.stamped
+                    && target.track == stamp.track
+                    && target.transpose.to_bits() == stamp.transpose.to_bits()
+            })
+        {
+            if debug {
+                eprintln!(
+                    "[record-stamp] stamp track={} transpose={} beat={:.4} -> step={} phase={:.3} (press estimate was step={} phase={:.3})",
+                    stamp.track,
+                    stamp.transpose,
+                    stamp.beat,
+                    position.step,
+                    position.phase,
+                    target.position.step,
+                    target.position.phase,
+                );
+            }
+            target.position = position;
+            target.stamped = true;
+        } else if debug {
+            eprintln!(
+                "[record-stamp] stamp track={} transpose={} beat={:.4} UNMATCHED (no held unstamped target)",
+                stamp.track, stamp.transpose, stamp.beat,
+            );
+        }
+    });
+}
+
+/// `ESEQ_DEBUG_RECORD_STAMP=1` traces every live-recording stamp decision
+/// (bead eseq-2awi): stamped positions as they drain, fallbacks at release,
+/// and the final written step, so a note the performer hears misplaced can be
+/// tied to the exact resolution path that produced it.
+fn record_stamp_debug() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("ESEQ_DEBUG_RECORD_STAMP").is_ok_and(|value| value == "1"))
+}
+
+/// How long after its press a still-unstamped target may be restamped at the
+/// render frontier on release: beyond a couple of audio blocks the trigger
+/// has certainly been consumed, so a missing stamp means the note never went
+/// through the audio callback at all (MIDI-FX-routed track) and sounded near
+/// its PRESS — the frontier at release would be arbitrarily late.
+const FRONTIER_FALLBACK_WINDOW: std::time::Duration = std::time::Duration::from_millis(35);
+
 /// Member track the armed rack's pad for `note` plays, if any. This is the
 /// whole of live pad routing (docs/drum-rack-v2-spec.md): the note selects a
 /// pad by `pad_note`, the pad names a member track, and that track is
@@ -1883,6 +1958,7 @@ pub(crate) fn handle_recording_key(
                             track,
                             transpose,
                             position: press_record_position(state, track, press_time),
+                            stamped: false,
                         });
                     }
                 }
@@ -1899,6 +1975,7 @@ pub(crate) fn handle_recording_key(
                         track,
                         transpose: 0.0,
                         position: press_record_position(state, track, press_time),
+                        stamped: false,
                     });
                 }
             }
@@ -1940,6 +2017,9 @@ pub(crate) fn handle_recording_key(
             RecordingKeyOutcome::Consumed
         }
         KeyEventKind::Release => {
+            // Catch any note-on stamp that landed since the last frame drain
+            // before the write below reads the target positions.
+            apply_live_trigger_stamps(state, held_notes);
             // Find and remove the held note
             let held_entry = {
                 let mut held = held_notes.lock().unwrap();
@@ -1948,7 +2028,44 @@ pub(crate) fn handle_recording_key(
             };
 
             // Record into pattern if recording + playing
-            if let Some(note) = held_entry {
+            if let Some(mut note) = held_entry {
+                // A tap so short its audio-thread stamp has not landed yet:
+                // the trigger is still in flight and will sound at the render
+                // frontier, so restamp there instead of keeping the
+                // latency-subtracted press estimate. Older unstamped targets
+                // (MIDI-FX-routed tracks) sounded near their press — the
+                // frontier at release would be wrong for them, so they keep
+                // the press estimate.
+                if note.press_time.elapsed() < FRONTIER_FALLBACK_WINDOW
+                    && note.targets.iter().any(|target| !target.stamped)
+                {
+                    if let Some(frontier) =
+                        state.record_frontier_beats_at_instant(Instant::now())
+                    {
+                        for target in &mut note.targets {
+                            if target.stamped {
+                                continue;
+                            }
+                            if let Some(position) =
+                                state.record_position_at_beat(target.track, frontier)
+                            {
+                                if record_stamp_debug() {
+                                    eprintln!(
+                                        "[record-stamp] frontier fallback track={} beat={:.4} -> step={} phase={:.3} (press estimate was step={} phase={:.3})",
+                                        target.track,
+                                        frontier,
+                                        position.step,
+                                        position.phase,
+                                        target.position.step,
+                                        target.position.phase,
+                                    );
+                                }
+                                target.position = position;
+                            }
+                        }
+                    }
+                }
+                let note = note;
                 for target in &note.targets {
                     if roll_mode {
                         // Cancels every roll hit not yet inside the lookahead
@@ -2005,6 +2122,7 @@ pub(crate) fn handle_recording_key(
                         track,
                         transpose,
                         position,
+                        stamped,
                     } in &note.targets
                     {
                         // Song-mode take recording (takes spec 8.4): while
@@ -2054,6 +2172,12 @@ pub(crate) fn handle_recording_key(
                             state.pattern.track_params[track].get_timebase(),
                             quantize,
                         );
+                        if record_stamp_debug() {
+                            eprintln!(
+                                "[record-stamp] write track={} stamped={} step={} delay={:.3} (from step={} phase={:.3}, quantize={:?})",
+                                track, stamped, local_step, delay, position.step, position.phase, quantize,
+                            );
+                        }
                         if !state.pattern.patterns[track].is_active(local_step) {
                             state.pattern.patterns[track].toggle_step(local_step);
                         }
@@ -2140,6 +2264,7 @@ pub(crate) fn handle_recording_key(
 #[cfg(test)]
 mod live_keyboard_tests {
     use super::{
+        apply_live_trigger_stamps,
         armed_rack_pad_track, build_selection_value, current_step_param_number_picker_id,
         handle_metal_command_shortcut, handle_metal_soft_step_param_key,
         handle_number_picker_edit_key_for_widget,
@@ -2262,11 +2387,59 @@ mod live_keyboard_tests {
                     step: 0,
                     phase: 0.0,
                 },
+                stamped: false,
             }],
         }]));
         let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
 
         assert!(held_note_for_key(&held, &key));
+    }
+
+    #[test]
+    fn live_trigger_stamps_reposition_only_the_matching_unstamped_target() {
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
+            key: 'a',
+            sequence_roll_code: None,
+            transpose: 5.0,
+            press_time: Instant::now(),
+            targets: vec![
+                LiveNoteTarget {
+                    track: 0,
+                    transpose: 5.0,
+                    position: RecordPosition { step: 9, phase: 0.9 },
+                    stamped: false,
+                },
+                LiveNoteTarget {
+                    track: 1,
+                    transpose: 5.0,
+                    position: RecordPosition { step: 9, phase: 0.9 },
+                    stamped: false,
+                },
+            ],
+        }]));
+
+        // Beat 0.375 on a default 16-step sixteenth track: step 1, phase 0.5.
+        state.push_live_trigger_stamp(0, 5.0, 0.375);
+        // Wrong transpose: matches no target, must be dropped harmlessly.
+        state.push_live_trigger_stamp(1, 7.0, 2.0);
+        apply_live_trigger_stamps(&state, &held);
+        {
+            let held = held.lock().unwrap();
+            let stamped = held[0].targets[0];
+            assert!(stamped.stamped);
+            assert_eq!(stamped.position.step, 1);
+            assert!((stamped.position.phase - 0.5).abs() < 1e-4);
+            let untouched = held[0].targets[1];
+            assert!(!untouched.stamped);
+            assert_eq!(untouched.position.step, 9);
+        }
+
+        // A later note-on for the same (track, transpose) — a MIDI-FX repeat —
+        // must not move an already-stamped target.
+        state.push_live_trigger_stamp(0, 5.0, 1.0);
+        apply_live_trigger_stamps(&state, &held);
+        assert_eq!(held.lock().unwrap()[0].targets[0].position.step, 1);
     }
 
     #[test]

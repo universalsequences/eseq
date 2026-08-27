@@ -153,6 +153,11 @@ pub(crate) fn reactive_tick_and_render(
     // Change-detecting: writes to the graph only when the pad set differs.
     app.refresh_latency_compensation();
 
+    // Live note-on stamps (bead eseq-2awi): reposition held live-note targets
+    // onto the render-timeline beat the audio callback actually sounded them
+    // at, ahead of the release that writes them into the pattern.
+    apply_live_trigger_stamps(&ctx.shared.state, &ctx.shared.held_notes);
+
     // Rolled-hit recording (docs/rolling-core-spec.md 6): drain the
     // scheduler's per-hit feedback and flush released keys' batches into the
     // pattern (or the pending take), then republish the step grid exactly

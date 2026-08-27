@@ -393,6 +393,12 @@ pub struct SequencerState {
     /// reactive tick and written back on note release
     /// (docs/rolling-core-spec.md 6).
     pub(super) roll_recorded_hits: Mutex<Vec<crate::sequencer::RollHitRecorded>>,
+    /// Audio-callback → control-thread live note-on stamps (bead eseq-2awi):
+    /// the render-timeline beat each live keyboard/pad trigger actually
+    /// sounded at, drained in the UI reactive tick and at note release to
+    /// reposition the recorded step (record-as-heard for unquantized live
+    /// recording). Realtime-safe SPSC ring — the callback never locks.
+    pub(super) live_trigger_stamps: crate::sequencer::LiveTriggerStampRing,
     pub(super) track_output_events: Mutex<Vec<TrackOutputEvent>>,
     pub(super) track_output_current_beat_bits: AtomicU64,
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,
