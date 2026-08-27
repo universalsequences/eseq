@@ -528,6 +528,31 @@ pub fn format_song_row_positions(positions: &[usize]) -> String {
         .join(", ")
 }
 
+/// Remap an index after one element moves from `source` to `target`.
+///
+/// The moved element takes `target`; every element crossed by the move shifts
+/// one position in the opposite direction.
+pub fn remap_scene_index_after_move(index: usize, source: usize, target: usize) -> usize {
+    if index == source {
+        target
+    } else if source < index && index <= target {
+        index - 1
+    } else if target <= index && index < source {
+        index + 1
+    } else {
+        index
+    }
+}
+
+/// Keep compiled song rows attached to the same scene after a scene move.
+pub fn remap_song_after_scene_move(song: &mut ProjectSong, source: usize, target: usize) {
+    for row in &mut song.rows {
+        if let Some(scene) = row.scene.as_mut() {
+            *scene = remap_scene_index_after_move(*scene, source, target);
+        }
+    }
+}
+
 /// Decrement scene references above a deleted scene index. The caller must
 /// already have rejected the deletion when any row references the deleted
 /// scene itself (spec 5.4).

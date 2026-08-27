@@ -1892,6 +1892,19 @@ impl App {
         }
     }
 
+    pub fn handle_scene_reordered(&mut self, source: usize, target: usize) {
+        if source == target {
+            return;
+        }
+        let _ = self.state.quantized_launches().cancel_all();
+        self.scene_macro_runtime.clear();
+        let mut touched = self.macro_engine.release_all_scene_macros();
+        touched.extend(self.macro_engine.end_scene_push());
+        self.macro_engine
+            .remap_scene_targets_after_move(source, target);
+        self.send_macro_targets(touched);
+    }
+
     pub fn handle_scene_deleted(&mut self, deleted: usize) {
         let _ = self.state.quantized_launches().cancel_all();
         self.scene_macro_runtime.clear();

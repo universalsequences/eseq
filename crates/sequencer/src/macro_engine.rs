@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::neural::ParamNodeId;
 use crate::process::ParamTarget;
-use crate::sequencer::BusId;
+use crate::sequencer::{remap_scene_index_after_move, BusId};
 
 pub type MacroId = u32;
 
@@ -1226,6 +1226,16 @@ impl MacroEngine {
         touched
     }
 
+    pub fn remap_scene_targets_after_move(&mut self, source: usize, target: usize) {
+        for definition in &mut self.macros {
+            let MacroKind::Scene(config) = &mut definition.kind else {
+                continue;
+            };
+            config.target_scene =
+                remap_scene_index_after_move(config.target_scene, source, target);
+        }
+    }
+
     pub fn remap_scene_targets_after_delete(&mut self, deleted: usize, scene_count: usize) {
         let last = scene_count.saturating_sub(1);
         for definition in &mut self.macros {
@@ -1607,6 +1617,35 @@ mod tests {
         engine.release(id);
         assert!(engine.macro_definition(id).unwrap().mappings.is_empty());
         assert_eq!(engine.override_value(&effect_key(88)), None);
+    }
+
+    #[test]
+    fn scene_move_remaps_scene_macro_targets_by_identity() {
+        let mut engine = MacroEngine::default();
+        for target_scene in [0, 1, 2, 3] {
+            engine
+                .create_macro(
+                    format!("scene {target_scene}"),
+                    MacroKind::Scene(SceneMacroConfig {
+                        target_scene,
+                        morph_params: true,
+                        steal_patterns: false,
+                        quantize: StealQuantize::Bar,
+                        track_mask: None,
+                    }),
+                )
+                .unwrap();
+        }
+        engine.remap_scene_targets_after_move(0, 2);
+        let targets = engine
+            .macros()
+            .iter()
+            .map(|definition| match &definition.kind {
+                MacroKind::Scene(config) => config.target_scene,
+                MacroKind::Mapped => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(targets, vec![2, 0, 1, 3]);
     }
 
     #[test]

@@ -2275,6 +2275,39 @@ mod tests {
     }
 
     #[test]
+    fn scene_reorder_seam_remaps_macro_targets_by_scene_identity() {
+        let mut app = test_app_with_effect_descriptor(effect_mod_test_descriptor());
+        app.state.clone_pattern(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        );
+        let macro_id = app
+            .macro_engine
+            .create_macro(
+                "original scene",
+                MacroKind::Scene(crate::macro_engine::SceneMacroConfig {
+                    target_scene: 0,
+                    morph_params: true,
+                    steal_patterns: false,
+                    quantize: crate::macro_engine::StealQuantize::Off,
+                    track_mask: None,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(app.state.reorder_scene(0, 1), Some(0));
+        app.handle_scene_reordered(0, 1);
+
+        assert_eq!(
+            app.macro_engine.scene_config(macro_id).unwrap().target_scene,
+            1
+        );
+    }
+
+    #[test]
     fn scene_macro_diffs_live_scene_values_and_restores_base_on_release() {
         let desc = effect_mod_test_descriptor();
         let mut app = test_app_with_effect_descriptor(desc);

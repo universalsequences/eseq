@@ -160,6 +160,19 @@ pub(super) fn remap_arrangement_after_track_move(
     arrangement.track_lanes.insert(to, lane);
 }
 
+/// Keep authored arrangement events attached to the same scene after a scene
+/// move. The compiled song is remapped with the same permutation by
+/// `remap_song_after_scene_move`.
+pub(super) fn remap_arrangement_after_scene_move(
+    arrangement: &mut ProjectArrangement,
+    source: usize,
+    target: usize,
+) {
+    for event in &mut arrangement.scene_lane {
+        event.scene = remap_scene_index_after_move(event.scene, source, target);
+    }
+}
+
 /// Arrangement sibling of `remap_song_after_scene_delete`: decrement scene
 /// references above the deleted scene. The caller must already have rejected
 /// the deletion when the scene is still referenced (spec 11); the compiled

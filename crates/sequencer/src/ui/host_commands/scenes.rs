@@ -1020,8 +1020,12 @@ pub(super) fn handle(
                 (Some(source), Some(target)) => {
                     let reordered = app.apply_recorded_scene_structure_mutation(
                         "Reorder scene",
-                        |app| app.state.reorder_scene(source, target)
-                            .ok_or_else(|| "Scene index is out of range".to_string()),
+                        |app| {
+                            let current = app.state.reorder_scene(source, target)
+                                .ok_or_else(|| "Scene index is out of range".to_string())?;
+                            app.handle_scene_reordered(source, target);
+                            Ok(current)
+                        },
                     );
                     if reordered.is_ok() {
                         let rt = editor.runtime_mut();

@@ -4257,7 +4257,22 @@
         let third = snapshot_with_active_step(1, 0, 11);
         let state = make_state_with_tracks(1);
         state.replace_pattern_repository(vec![first, second, third], 1);
+        let mut arrangement = ProjectArrangement::new(1, 16.0);
+        arrangement.scene_lane = vec![
+            SceneEvent { start_beat: 0.0, scene: 0 },
+            SceneEvent { start_beat: 4.0, scene: 1 },
+            SceneEvent { start_beat: 8.0, scene: 2 },
+        ];
+        state.set_committed_arrangement(Some(arrangement)).unwrap();
 
+        let scene_references = || {
+            let arrangement = state.committed_arrangement().unwrap();
+            let song = state.committed_song().unwrap();
+            (
+                arrangement.scene_lane.iter().map(|event| event.scene).collect::<Vec<_>>(),
+                song.rows.iter().map(|row| row.scene.unwrap()).collect::<Vec<_>>(),
+            )
+        };
         let original_scene_ids = (0..3)
             .map(|scene| state.scene_track_pattern_id(scene, 0).unwrap())
             .collect::<Vec<_>>();
@@ -4278,6 +4293,7 @@
 
         assert_eq!(state.reorder_scene(0, 2), Some(0));
         assert_eq!(state.current_scene_index(), 0);
+        assert_eq!(scene_references(), (vec![2, 0, 1], vec![2, 0, 1]));
         assert_eq!(
             state.pattern.scenes.lock().unwrap().scenes
                 .iter()
@@ -4318,6 +4334,7 @@
 
         assert_eq!(state.reorder_scene(2, 0), Some(1));
         assert_eq!(state.current_scene_index(), 1);
+        assert_eq!(scene_references(), (vec![0, 1, 2], vec![0, 1, 2]));
         assert_eq!(
             state.pattern.scenes.lock().unwrap().scenes
                 .iter()

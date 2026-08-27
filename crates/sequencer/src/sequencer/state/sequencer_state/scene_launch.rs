@@ -1313,12 +1313,31 @@ impl SequencerState {
     }
 
     /// Reorder scenes while keeping the currently playing scene active and
-    /// leaving all per-track pattern pools untouched.
+    /// leaving all per-track pattern pools untouched. Arrangement and compiled
+    /// song references move with scene identity; queued quantized launches are
+    /// canceled because their prebuilt snapshots use the old dense indices.
     pub fn reorder_scene(&self, source: usize, target: usize) -> Option<usize> {
-        let _ = self.quantized_launches.cancel_all();
         let current_scene = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
-            scenes.reorder_scene(source, target)?
+            if source >= scenes.scene_count() || target >= scenes.scene_count() {
+                return None;
+            }
+            if source == target {
+                return Some(scenes.current_scene);
+            }
+            let _ = self.quantized_launches.cancel_all();
+            let current_scene = scenes.reorder_scene(source, target)?;
+            self.with_committed_song_mut(|song| {
+                if let Some(song) = song {
+                    remap_song_after_scene_move(song, source, target);
+                }
+            });
+            self.with_committed_arrangement_mut(|arrangement| {
+                if let Some(arrangement) = arrangement {
+                    remap_arrangement_after_scene_move(arrangement, source, target);
+                }
+            });
+            current_scene
         };
         self.pattern
             .current_pattern
