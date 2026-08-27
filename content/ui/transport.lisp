@@ -113,9 +113,10 @@
   (let ((amount (clamp push 0.0 1.0))
         (count (max scene-count 1.0))
         ;; Layout geometry in cells: 0.2 outer padding, 2.5-wide scene pills,
-        ;; and 0.1 gaps. The trailing spacer, +/- controls, and bank selector
-        ;; account for 9.7 cells.
-        (total-cells (+ (* count 2.6) 10.1))
+        ;; and 0.1 gaps. The trailing spacer (0.2), +/- controls (2.5 each),
+        ;; bank selector group (4.2 + 0.12 + 0.45), their 3 gaps, and both
+        ;; paddings account for 10.67 cells.
+        (total-cells (+ (* count 2.6) 10.67))
         (target-center (+ 0.2 1.25 (* (clamp push-target 0.0 (- count 1.0)) 2.6)))
         (target-x (* aspect (- (* 2.0 (/ target-center total-cells)) 1.0)))
         (base (sdf/rounded-rect width height 0.7))
