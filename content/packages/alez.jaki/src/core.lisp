@@ -881,12 +881,13 @@
 ;;   (vel s) (note n)
 ;;   (gate s) / (dur s) — multiply every gate by s (per-cycle arg: number,
 ;;   (cyc …), (chan …)); applies in authored word order like stac
-;; A route whose destination is (mute T) or (solo T) — T a track number or
+;; A route containing a (mute T) or (solo T) form — T a track number or
 ;; (group "name") — is a CONTROL route: events become timed mute/solo holds
 ;; instead of notes, and the route word `inv` complements the windows
-;; (docs/jaki-mixer-control-routes-spec.md). Targets are per-cycle argument
-;; data like every other route arg: (mute (cyc 1 2)) and
-;; (solo (group (cyc "Drums" "Synths"))) rotate the destination per cycle.
+;; (docs/jaki-mixer-control-routes-spec.md). The control form may sit
+;; anywhere in the segment. Targets are per-cycle argument data like every
+;; other route arg: (mute (cyc 1 2)) and (solo (group (cyc "Drums" "Synths")))
+;; rotate the destination per cycle.
 ;; Multi-voice: when the first body element is a list containing a top-level
 ;; `->`, every element is one voice line with its own pattern and routes.
 
@@ -1050,9 +1051,9 @@
             n))
       0 wins)))
 
-(def run-control-route (p0 seg)
-  (let ((spec (parse-control-target (first seg)))
-        (r (reduce route-step (dict :p p0 :opts (dict)) (rest seg))))
+(def run-control-route (p0 target-form words)
+  (let ((spec (parse-control-target target-form))
+        (r (reduce route-step (dict :p p0 :opts (dict)) words)))
     (let ((p (get r :p))
           (tick (gen-tick)))
       (let ((loc (locate p tick)))
@@ -1067,10 +1068,25 @@
                         wins0)
                     (- tick cstart) (resolve-control-spec spec c))))))))))
 
+;; A (mute …)/(solo …) form is unambiguous, so it may sit anywhere in the
+;; segment — `-> (shift 2) (mute 9) left` and `-> (mute 9) (shift 2) left`
+;; are the same route. The first control form is the target; everything else
+;; is route words. Note routes keep destination-first (a bare number is only
+;; a destination in that position).
+(def split-control-seg (seg)
+  (reduce
+    (lambda (acc x)
+      (if (and (= (get acc :target) nil) (control-route-head? x))
+          (merge acc :target x)
+          (merge acc :words (append (get acc :words) (list x)))))
+    (dict :target nil :words (list))
+    seg))
+
 (def run-seg (p seg)
-  (if (control-route-head? (first seg))
-      (run-control-route p seg)
-      (run-route p seg)))
+  (let ((split (split-control-seg seg)))
+    (if (= (get split :target) nil)
+        (run-route p seg)
+        (run-control-route p (get split :target) (get split :words)))))
 
 (def run-voice (l)
   (let ((segs (split-arrows l (list) (list))))

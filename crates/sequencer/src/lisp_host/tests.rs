@@ -8894,6 +8894,52 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_control_form_may_sit_anywhere_in_the_route() {
+        // `-> (shift 2) (mute 9) left` and `-> (mute 9) (shift 2) left` are
+        // the same route: the first (mute …)/(solo …) form is the target,
+        // everything else is route words, in either order.
+        let controls_for = |routes: &str| -> Vec<(u64, u64)> {
+            let mut rt = jaki_runtime();
+            rt.eval(&format!(
+                r#"(import alez.jaki.surface :refer (jak))
+                   (jak "gate5" :16
+                     . . - .
+                     {routes})"#
+            ))
+            .expect("jak with control route");
+            let mut generators = crate::generator::GeneratorRuntime::default();
+            generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+            let mut out = Vec::new();
+            let mut controls = Vec::new();
+            generators.process_block_with_controls(
+                0.0,
+                1.25,
+                0,
+                48_000.0,
+                |input| {
+                    rt.invoke_sequencer_tick(input.generator_index, input).expect("tick")
+                },
+                &mut out,
+                &mut controls,
+            );
+            assert!(
+                controls.iter().all(|c| c.control.target
+                    == crate::mixer_control::MixerControlTarget::Track(9)),
+                "{controls:?}"
+            );
+            controls
+                .iter()
+                .map(|c| (c.engage_sample, c.release_sample))
+                .collect()
+        };
+
+        let words_first = controls_for("-> (shift 2) (mute 9) left");
+        let target_first = controls_for("-> (mute 9) (shift 2) left");
+        assert!(!words_first.is_empty());
+        assert_eq!(words_first, target_first);
+    }
+
+    #[test]
     fn jaki_seq_emit_control_validates_argument_shape() {
         // Native errors follow the seq-emit contract: report a status and
         // return false with nothing emitted. The tick encodes each call's

@@ -10,7 +10,11 @@ arrangement — authored as a pattern instead of played by hand.
 
 ## 1. Surface DSL
 
-Control routes reuse the `->` route grammar of `jak`. The destination is a
+Control routes reuse the `->` route grammar of `jak`. Because the
+`(mute …)`/`(solo …)` form is unambiguous, it may sit anywhere in the
+segment — `-> (shift 2) (mute 9) left` equals `-> (mute 9) (shift 2) left`;
+the first control form is the target and every other item is a route word
+(note routes keep destination-first). The destination is a
 list headed by `mute` or `solo` instead of a bare track number:
 
 ```lisp
