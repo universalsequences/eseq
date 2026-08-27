@@ -458,47 +458,83 @@ fn instrument_preset_path_with_paths(
     Ok(resolved)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PresetBankFingerprint {
-    len: u64,
-    modified: Option<std::time::SystemTime>,
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PresetBankCacheKey {
+    user_instruments_dir: PathBuf,
+    instrument_name: String,
 }
 
-#[derive(Clone)]
-struct CachedPresetBank {
-    fingerprint: Option<PresetBankFingerprint>,
-    presets: std::sync::Arc<Vec<InstrumentPreset>>,
+#[derive(Default)]
+struct PresetBankCache {
+    resolved_paths: std::collections::HashMap<PresetBankCacheKey, PathBuf>,
+    banks: std::collections::HashMap<PathBuf, std::sync::Arc<Vec<InstrumentPreset>>>,
 }
 
-fn preset_bank_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, CachedPresetBank>> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<PathBuf, CachedPresetBank>>,
-    > = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-fn preset_bank_fingerprint(path: &Path) -> io::Result<Option<PresetBankFingerprint>> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(Some(PresetBankFingerprint {
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-        })),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+impl PresetBankCache {
+    fn get(&self, key: &PresetBankCacheKey) -> Option<std::sync::Arc<Vec<InstrumentPreset>>> {
+        self.resolved_paths
+            .get(key)
+            .and_then(|path| self.banks.get(path))
+            .cloned()
     }
-}
 
-fn cached_instrument_presets(name: &str) -> io::Result<std::sync::Arc<Vec<InstrumentPreset>>> {
-    let path = instrument_preset_path(name)?;
-    let fingerprint = preset_bank_fingerprint(&path)?;
-    let mut cache = preset_bank_cache().lock().unwrap();
-    if let Some(cached) = cache.get(&path) {
-        if cached.fingerprint == fingerprint {
-            return Ok(cached.presets.clone());
+    fn insert(
+        &mut self,
+        key: PresetBankCacheKey,
+        path: PathBuf,
+        presets: std::sync::Arc<Vec<InstrumentPreset>>,
+    ) {
+        self.resolved_paths.insert(key, path.clone());
+        self.banks.insert(path, presets);
+    }
+
+    fn invalidate_key_and_path(&mut self, key: &PresetBankCacheKey, path: Option<&Path>) {
+        let mut invalidated_paths = Vec::with_capacity(2);
+        if let Some(resolved) = self.resolved_paths.remove(key) {
+            invalidated_paths.push(resolved);
         }
+        if let Some(path) = path {
+            if !invalidated_paths.iter().any(|resolved| resolved == path) {
+                invalidated_paths.push(path.to_path_buf());
+            }
+        }
+        for path in &invalidated_paths {
+            self.banks.remove(path);
+        }
+        self.resolved_paths
+            .retain(|_, resolved| !invalidated_paths.contains(resolved));
+    }
+}
+
+fn preset_bank_cache() -> &'static std::sync::Mutex<PresetBankCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<PresetBankCache>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(PresetBankCache::default()))
+}
+
+fn preset_bank_cache_key(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> PresetBankCacheKey {
+    PresetBankCacheKey {
+        user_instruments_dir: paths.user_instruments_dir(),
+        instrument_name: name.to_string(),
+    }
+}
+
+fn cached_instrument_presets_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<std::sync::Arc<Vec<InstrumentPreset>>> {
+    let key = preset_bank_cache_key(paths, name);
+    let mut cache = preset_bank_cache().lock().unwrap();
+    if let Some(presets) = cache.get(&key) {
+        return Ok(presets);
     }
 
+    // Resolve and read while holding the cache lock so a concurrent save cannot
+    // publish a new bank and then have this load install stale contents over it.
+    let path = instrument_preset_path_with_paths(paths, name)?;
     let presets = match std::fs::read_to_string(&path) {
         Ok(src) => {
             let bank: InstrumentPresetBank = serde_json::from_str(&src).map_err(|e| {
@@ -513,14 +549,12 @@ fn cached_instrument_presets(name: &str) -> io::Result<std::sync::Arc<Vec<Instru
         Err(e) => return Err(e),
     };
     let presets = std::sync::Arc::new(presets);
-    cache.insert(
-        path,
-        CachedPresetBank {
-            fingerprint,
-            presets: presets.clone(),
-        },
-    );
+    cache.insert(key, path, presets.clone());
     Ok(presets)
+}
+
+fn cached_instrument_presets(name: &str) -> io::Result<std::sync::Arc<Vec<InstrumentPreset>>> {
+    cached_instrument_presets_with_paths(crate::app_paths::app_paths(), name)
 }
 
 pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> {
@@ -534,6 +568,14 @@ pub fn load_instrument_preset_names(name: &str) -> io::Result<Vec<String>> {
         .collect())
 }
 
+fn preset_path_for_writable_instrument_source(source: &Path) -> PathBuf {
+    if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
+        source.parent().unwrap_or(source).with_extension("presets")
+    } else {
+        source.with_extension("presets")
+    }
+}
+
 fn instrument_preset_save_path_with_paths(
     paths: &crate::app_paths::AppPaths,
     name: &str,
@@ -542,15 +584,16 @@ fn instrument_preset_save_path_with_paths(
         return Ok(user_tier_preset_path(paths, logical_name));
     }
     let source = writable_instrument_source_path_with_paths(paths, name)?;
-    if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
-        Ok(source.parent().unwrap_or(&source).with_extension("presets"))
-    } else {
-        Ok(source.with_extension("presets"))
-    }
+    Ok(preset_path_for_writable_instrument_source(&source))
 }
 
-pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::Result<()> {
-    let path = instrument_preset_save_path_with_paths(crate::app_paths::app_paths(), name)?;
+fn save_instrument_presets_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+    presets: &[InstrumentPreset],
+) -> io::Result<()> {
+    let path = instrument_preset_save_path_with_paths(paths, name)?;
+    let key = preset_bank_cache_key(paths, name);
     let mut cache = preset_bank_cache().lock().unwrap();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -568,8 +611,12 @@ pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::
         )
     })?;
     std::fs::write(&path, json)?;
-    cache.remove(&path);
+    cache.invalidate_key_and_path(&key, Some(&path));
     Ok(())
+}
+
+pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::Result<()> {
+    save_instrument_presets_with_paths(crate::app_paths::app_paths(), name, presets)
 }
 
 pub(in crate::lisp_host) const INSTRUMENT_REGISTRY_SIZE: usize = MAX_INSTRUMENT_ENGINES * MAX_VOICES;
@@ -823,12 +870,25 @@ fn writable_instrument_source_path_with_paths(
     }
 }
 
-pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
-    let path = writable_instrument_source_path(name)?;
+fn save_instrument_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+    source: &str,
+) -> io::Result<()> {
+    let path = writable_instrument_source_path_with_paths(paths, name)?;
+    let preset_path = preset_path_for_writable_instrument_source(&path);
+    let key = preset_bank_cache_key(paths, name);
+    let mut cache = preset_bank_cache().lock().unwrap();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, source)
+    std::fs::write(&path, source)?;
+    cache.invalidate_key_and_path(&key, Some(&preset_path));
+    Ok(())
+}
+
+pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
+    save_instrument_with_paths(crate::app_paths::app_paths(), name, source)
 }
 
 pub fn save_instrument_ui(name: &str, source: &str) -> io::Result<()> {
@@ -949,6 +1009,13 @@ pub fn move_saved_instrument(name: &str, target_folder: &str) -> io::Result<Stri
             format!("instrument '{name}' does not exist"),
         ));
     }
+
+    let key = preset_bank_cache_key(crate::app_paths::app_paths(), name);
+    let preset_path = preset_path_for_writable_instrument_source(&source);
+    preset_bank_cache()
+        .lock()
+        .unwrap()
+        .invalidate_key_and_path(&key, Some(&preset_path));
 
     let target_dir = root.join(validate_instrument_relative_dir(target_folder)?);
     if !target_dir.exists() || !target_dir.is_dir() {
@@ -1075,6 +1142,108 @@ mod tier_id_tests {
         let dir = root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("dsp.lisp"), marker).unwrap();
+    }
+
+    fn preset(name: &str) -> InstrumentPreset {
+        InstrumentPreset {
+            id: name.to_lowercase(),
+            name: name.to_string(),
+            base_note_offset: 0.0,
+            params: std::collections::BTreeMap::new(),
+            key_locks: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn write_preset_bank(path: &Path, instrument_name: &str, names: &[&str]) {
+        let bank = InstrumentPresetBank {
+            version: 1,
+            engine_name: instrument_name.to_string(),
+            source_file: format!("instruments/{instrument_name}.lisp"),
+            presets: names.iter().map(|name| preset(name)).collect(),
+        };
+        std::fs::write(path, serde_json::to_string_pretty(&bank).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn warm_preset_name_cache_does_not_touch_the_filesystem() {
+        let (paths, root) = test_paths("warm-preset-cache");
+        let instrument_name = "user:cache/warm";
+        write_folder_instrument(&paths.user_instruments_dir(), "cache/warm", "initial");
+        save_instrument_presets_with_paths(&paths, instrument_name, &[preset("Warm")]).unwrap();
+
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name)
+                .unwrap()
+                .iter()
+                .map(|preset| preset.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Warm"]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name)
+                .unwrap()
+                .iter()
+                .map(|preset| preset.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Warm"],
+            "a warm lookup must not resolve, stat, or read the bank again"
+        );
+
+        let key = preset_bank_cache_key(&paths, instrument_name);
+        preset_bank_cache()
+            .lock()
+            .unwrap()
+            .invalidate_key_and_path(&key, None);
+    }
+
+    #[test]
+    fn preset_cache_is_invalidated_by_preset_and_instrument_source_saves() {
+        let (paths, root) = test_paths("preset-cache-invalidation");
+        let instrument_name = "user:cache/invalidation";
+        write_folder_instrument(
+            &paths.user_instruments_dir(),
+            "cache/invalidation",
+            "initial",
+        );
+        save_instrument_presets_with_paths(&paths, instrument_name, &[preset("First")]).unwrap();
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name)
+                .unwrap()[0]
+                .name,
+            "First"
+        );
+
+        let bank_path = instrument_preset_path_with_paths(&paths, instrument_name).unwrap();
+        write_preset_bank(&bank_path, instrument_name, &["External"]);
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name)
+                .unwrap()[0]
+                .name,
+            "First",
+            "external changes remain isolated until the instrument is reloaded"
+        );
+
+        save_instrument_with_paths(&paths, instrument_name, "updated").unwrap();
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name)
+                .unwrap()[0]
+                .name,
+            "External",
+            "saving the instrument source must invalidate its preset bank"
+        );
+
+        save_instrument_presets_with_paths(&paths, instrument_name, &[preset("Saved")]).unwrap();
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name)
+                .unwrap()[0]
+                .name,
+            "Saved",
+            "saving presets must be visible without restarting"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
