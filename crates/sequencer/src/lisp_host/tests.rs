@@ -9325,6 +9325,98 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_register_defscene_body_drives_control_routes_per_scene() {
+        // The scene-varying mute sequencer: `alez.jaki.surface/register`
+        // publishes once with a defscene slot as its body; each scene's
+        // stored value — including mute/solo control routes — becomes the
+        // tick body at the scheduler boundary, no republish.
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = jaki_authoring_runtime(Arc::clone(&state));
+        super::register_scene_slot_natives(&mut authoring, Arc::clone(&state));
+        authoring
+            .eval_str(
+                r#"(import alez.jaki.surface)
+                   (defscene gate-body '(. . -> (mute 3)))
+                   (alez.jaki.surface/register "muter" :16 gate-body)"#,
+            )
+            .expect("publish scene-driven jaki sequencer");
+
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        for definition in state.published_sequencers() {
+            scheduler
+                .register_published_sequencer(
+                    definition.id,
+                    definition.name.clone(),
+                    Timebase::from_index(definition.resolution as u32),
+                    definition.tick_source.clone(),
+                    &definition.requires,
+                )
+                .expect("compile published sequencer");
+        }
+        let invoke = |scheduler: &mut ScratchControlRuntime, tick_index: u64| {
+            let definitions = scheduler.sequencer_defs();
+            scheduler
+                .invoke_sequencer_tick(
+                    0,
+                    crate::generator::GeneratorTickInput {
+                        id: definitions[0].id,
+                        generator_index: 0,
+                        tick_index,
+                        beat: tick_index as f64 * 0.25,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: HashMap::new(),
+                    },
+                )
+                .expect("invoke tick")
+        };
+
+        let first = invoke(&mut scheduler, 0);
+        assert!(first.emitted.is_empty(), "control-only body emits no notes");
+        assert_eq!(first.controls.len(), 1);
+        assert_eq!(
+            first.controls[0].target,
+            crate::mixer_control::MixerControlTarget::Track(3)
+        );
+        assert_eq!(first.controls[0].op, crate::mixer_control::MixerControlOp::Mute);
+
+        // A slot write (what a scene edit stores) swaps the body — the next
+        // published boundary snapshot resolves the new value without any
+        // republish of the sequencer definition.
+        authoring
+            .eval_str(r#"(set! gate-body '(. . -> (solo (group "Drums")) inv))"#)
+            .expect("store a new scene body");
+        scheduler.set_scene_slot_snapshot(Arc::new(
+            state.latest_scheduler_snapshot().scene_slots.clone(),
+        ));
+        let second = invoke(&mut scheduler, 1);
+        assert_eq!(second.controls.len(), 1, "{:?}", second.controls);
+        assert_eq!(
+            second.controls[0].target,
+            crate::mixer_control::MixerControlTarget::Group("Drums".to_string())
+        );
+        assert_eq!(second.controls[0].op, crate::mixer_control::MixerControlOp::Solo);
+
+        // An empty body is the "off" scene: no notes, no controls.
+        authoring
+            .eval_str("(set! gate-body '())")
+            .expect("store the silent body");
+        scheduler.set_scene_slot_snapshot(Arc::new(
+            state.latest_scheduler_snapshot().scene_slots.clone(),
+        ));
+        let third = invoke(&mut scheduler, 2);
+        assert!(third.emitted.is_empty());
+        assert!(third.controls.is_empty());
+    }
+
+    #[test]
     fn jaki_seq_emit_control_validates_argument_shape() {
         // Native errors follow the seq-emit contract: report a status and
         // return false with nothing emitted. The tick encodes each call's
