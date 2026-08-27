@@ -463,6 +463,28 @@ the slowest effect bodies the reactive cycle actually re-ran (from
 | frame construction | 1.3 ms | 1.3 ms |
 | retained primitive refresh | 2.6 ms | 2.8 ms |
 
+### eseq-md1n.2: destination-only track publication
+
+The track-switch publisher now updates only surfaces whose inputs depend on
+its destination track. Project topology, track names, pattern topology, mixer,
+meter, modulator, and accumulator snapshots retain their existing publication.
+The selecting native's already-pending structural fx revision owns the effects,
+MIDI effects, instrument panel, step p-lock flags, and bus effects, instead of
+rebuilding them once in the track branch and again in the fx-epoch branch.
+
+Instrument preset banks are cached by resolved path plus file size/mtime. The
+sidebar's names-only query therefore stats and clones names from the cached bank
+instead of reading and parsing Drift's 132 KB JSON bank on every switch; saves
+invalidate the cache explicitly.
+
+Available-host release validation (Apple M1 Max, 2026-08-26) measured
+`track_switch_ms` at **1.61-1.78 ms** and `epoch_sync_ms` at **1.52-1.76 ms**
+across all four scenarios. The always-run smoke probe and the release probe both
+kept the destination owner, highlight, binding-identity, panel-identity, and
+parameter-isolation assertions green. Linux absolute follow-up remains the
+reviewer's machine check; these host numbers are not substituted into the Linux
+total-latency table above.
+
 Work counts are unchanged and are the point: one track switch re-runs 5
 buffer roots and dirties 10 reactive fields, and `subtree_reruns` stays 0.
 The `*fx*` root re-runs because the destination track's panel really is

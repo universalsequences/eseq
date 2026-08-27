@@ -458,9 +458,48 @@ fn instrument_preset_path_with_paths(
     Ok(resolved)
 }
 
-pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PresetBankFingerprint {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+#[derive(Clone)]
+struct CachedPresetBank {
+    fingerprint: Option<PresetBankFingerprint>,
+    presets: std::sync::Arc<Vec<InstrumentPreset>>,
+}
+
+fn preset_bank_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, CachedPresetBank>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, CachedPresetBank>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn preset_bank_fingerprint(path: &Path) -> io::Result<Option<PresetBankFingerprint>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(PresetBankFingerprint {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn cached_instrument_presets(name: &str) -> io::Result<std::sync::Arc<Vec<InstrumentPreset>>> {
     let path = instrument_preset_path(name)?;
-    match std::fs::read_to_string(&path) {
+    let fingerprint = preset_bank_fingerprint(&path)?;
+    let mut cache = preset_bank_cache().lock().unwrap();
+    if let Some(cached) = cache.get(&path) {
+        if cached.fingerprint == fingerprint {
+            return Ok(cached.presets.clone());
+        }
+    }
+
+    let presets = match std::fs::read_to_string(&path) {
         Ok(src) => {
             let bank: InstrumentPresetBank = serde_json::from_str(&src).map_err(|e| {
                 io::Error::new(
@@ -468,11 +507,31 @@ pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> 
                     format!("Failed to parse preset bank '{}': {e}", path.display()),
                 )
             })?;
-            Ok(bank.presets)
+            bank.presets
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e),
-    }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    let presets = std::sync::Arc::new(presets);
+    cache.insert(
+        path,
+        CachedPresetBank {
+            fingerprint,
+            presets: presets.clone(),
+        },
+    );
+    Ok(presets)
+}
+
+pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> {
+    Ok(cached_instrument_presets(name)?.as_ref().clone())
+}
+
+pub fn load_instrument_preset_names(name: &str) -> io::Result<Vec<String>> {
+    Ok(cached_instrument_presets(name)?
+        .iter()
+        .map(|preset| preset.name.clone())
+        .collect())
 }
 
 fn instrument_preset_save_path_with_paths(
@@ -492,6 +551,7 @@ fn instrument_preset_save_path_with_paths(
 
 pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::Result<()> {
     let path = instrument_preset_save_path_with_paths(crate::app_paths::app_paths(), name)?;
+    let mut cache = preset_bank_cache().lock().unwrap();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -507,7 +567,9 @@ pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::
             format!("Failed to serialize preset bank '{}': {e}", path.display()),
         )
     })?;
-    std::fs::write(path, json)
+    std::fs::write(&path, json)?;
+    cache.remove(&path);
+    Ok(())
 }
 
 pub(in crate::lisp_host) const INSTRUMENT_REGISTRY_SIZE: usize = MAX_INSTRUMENT_ENGINES * MAX_VOICES;

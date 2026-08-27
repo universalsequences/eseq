@@ -45,10 +45,10 @@
     /// VM profiler) and a quieter CI host would both let this become a real
     /// gate.
     const DRIFT_SWITCH_CEILINGS_MS: &[(&str, f64)] = &[
-        ("drift-a-to-b", 260.0),
-        ("drift-b-to-a", 275.0),
-        ("synthid-a-to-b", 185.0),
-        ("synthid-b-to-a", 130.0),
+        ("drift-a-to-b", 245.0),
+        ("drift-b-to-a", 260.0),
+        ("synthid-a-to-b", 170.0),
+        ("synthid-b-to-a", 115.0),
     ];
 
     fn perf_probe_project_fixture(name: &str) -> PathBuf {
@@ -9540,40 +9540,10 @@
                     reset_sampler_waveform_view(editor);
                     let revision = build_revision(&state, app);
                     let rt = editor.runtime_mut();
-                    sync_shared_track_collapsed(&track_collapsed, app);
-                    sync_track_name_state(rt, &mut track_names, app);
-                    sync_pattern_state(rt, &state);
                     set_current_track_reactive(rt, app.tracks.len(), ct);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                     sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
                     sync_step_param_lists(rt, &state, ct);
-                    sync_track_mixer_state(rt, app, &state);
-                    sync_bus_mixer_state(rt, app);
-                    sync_track_peak_fields(rt, &cached_track_peak_levels);
-                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
-                    sync_modulator_phase_fields(rt, &cached_modulator_phases);
-                    sync_modulator_level_fields(rt, &cached_modulator_levels);
-                    rt.set_reactive(
-                        "SEQ",
-                        "effects",
-                        build_effects_value(
-                            &state,
-                            ct,
-                            &app.graph.effect_descriptors,
-                            &selected_steps,
-                        ),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "midi-effects",
-                        build_midi_effects_value(&state, ct, &selected_steps),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "instrument-panel",
-                        build_instrument_panel_value(app, ct, &selected_steps),
-                    );
-                    *accumulator_names.lock().unwrap() = build_accumulator_names(app);
                     if super::reactive_tick::claim_param_sync_revision(
                         &mut frame.track_param_sync_revision,
                         &revision,
@@ -9600,11 +9570,6 @@
                             Some(&neural),
                         );
                     }
-                    rt.set_reactive(
-                        "SEQ",
-                        "step-has-plocks",
-                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-                    );
                     sync_sidebar_browser(rt, app, ct);
                     frame.prev_current_track = ct;
                     frame.prev_pattern_epoch =

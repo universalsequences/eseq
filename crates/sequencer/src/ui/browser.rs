@@ -1170,11 +1170,8 @@ pub(crate) fn visible_preset_items_for_track(app: &app::App, track: usize) -> Ve
     let Some(name) = current_custom_instrument_name(app, track) else {
         return Vec::new();
     };
-    let mut items: Vec<String> = sequencer::lisp_host::load_instrument_presets(&name)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|preset| preset.name)
-        .collect();
+    let mut items = sequencer::lisp_host::load_instrument_preset_names(&name)
+        .unwrap_or_default();
     items.sort();
     items
 }
