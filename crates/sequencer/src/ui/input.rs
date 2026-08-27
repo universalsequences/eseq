@@ -1,8 +1,8 @@
 use super::*;
 use eseqlisp::ui::platform::{
-    has_primary_shortcut_modifier, has_primary_shortcut_modifier_for,
-    has_sequencer_shortcut_modifier, is_exact_primary_shortcut_modifier,
-    is_exact_primary_shortcut_modifier_for,
+    clipboard_shortcut_modifier_for, has_primary_shortcut_modifier,
+    has_primary_shortcut_modifier_for, has_sequencer_shortcut_modifier,
+    is_exact_primary_shortcut_modifier, is_exact_primary_shortcut_modifier_for,
     ShortcutPlatform, CURRENT_SHORTCUT_PLATFORM,
 };
 use eseqlisp::widget_render::number_picker::{
@@ -1177,7 +1177,7 @@ fn handle_arrangement_region_shortcut_for(
     }
     match (key.code, key.modifiers) {
         (KeyCode::Char('c') | KeyCode::Char('C'), modifiers)
-            if has_primary_shortcut_modifier_for(modifiers, platform) =>
+            if modifiers == clipboard_shortcut_modifier_for(platform) =>
         {
             if !published_value_is_set(editor, "SEQ.song-region") {
                 return false;
@@ -1186,7 +1186,7 @@ fn handle_arrangement_region_shortcut_for(
             true
         }
         (KeyCode::Char('v') | KeyCode::Char('V'), modifiers)
-            if has_primary_shortcut_modifier_for(modifiers, platform) =>
+            if modifiers == clipboard_shortcut_modifier_for(platform) =>
         {
             // No payload: the command pastes at the mirrored arrangement
             // cursor, floored to the clipboard's own grid. An empty clipboard
@@ -1607,7 +1607,7 @@ fn step_clipboard_shortcut_for(
 ) -> Option<StepClipboardShortcut> {
     use crossterm::event::KeyCode;
 
-    if !has_primary_shortcut_modifier_for(key.modifiers, platform) {
+    if key.modifiers != clipboard_shortcut_modifier_for(platform) {
         return None;
     }
     match key.code {
@@ -2141,8 +2141,8 @@ pub(crate) fn handle_recording_key(
 mod live_keyboard_tests {
     use super::{
         armed_rack_pad_track, build_selection_value, current_step_param_number_picker_id,
-        handle_arrangement_region_shortcut, handle_metal_command_shortcut,
-        handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
+        handle_metal_command_shortcut, handle_metal_soft_step_param_key,
+        handle_number_picker_edit_key_for_widget,
         handle_recording_key, held_note_for_key,
         is_active_roll_rate_key, is_duplicate_shortcut_for, is_new_instrument_shortcut_for,
         normalize_command_shortcuts, normalize_command_shortcuts_for, note_from_key,
@@ -2154,6 +2154,8 @@ mod live_keyboard_tests {
         SequencerHistoryShortcut, SoftStepParamEdit, StepClipboardShortcut,
         UiInvalidationQueue, PROCESS_LANE_MODE_OFFSET, step_clipboard_shortcut_for,
     };
+    #[cfg(not(target_os = "macos"))]
+    use super::handle_arrangement_region_shortcut;
     use crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -2973,7 +2975,7 @@ mod live_keyboard_tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn linux_step_copy_and_paste_accept_control_with_optional_shift() {
+    fn linux_step_copy_and_paste_require_shifted_control() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         editor
@@ -2987,57 +2989,74 @@ mod live_keyboard_tests {
         let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
             Arc::new(Mutex::new(None));
 
-        for modifiers in [
-            KeyModifiers::CONTROL,
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        ] {
-            *step_clipboard.lock().unwrap() = None;
-            assert!(handle_metal_command_shortcut(
-                &mut editor,
-                &KeyEvent::new(KeyCode::Char('c'), modifiers),
-                &state,
-                &current_track,
-                &selected_steps,
-                &step_clipboard,
-            ));
-            assert!(step_clipboard.lock().unwrap().is_some());
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
 
-            assert!(handle_metal_command_shortcut(
-                &mut editor,
-                &KeyEvent::new(KeyCode::Char('v'), modifiers),
-                &state,
-                &current_track,
-                &selected_steps,
-                &step_clipboard,
-            ));
-            assert!(editor.drain_host_commands().iter().any(|command| matches!(
-                command,
-                HostCommand::Custom { name, .. } if name == "paste-steps"
-            )));
-        }
+        let clipboard_modifiers = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('c'), clipboard_modifiers),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(step_clipboard.lock().unwrap().is_some());
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('v'), clipboard_modifiers),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(
+            command,
+            HostCommand::Custom { name, .. } if name == "paste-steps"
+        )));
     }
 
     #[test]
-    fn macos_shaped_step_copy_requires_command_not_control() {
-        assert_eq!(
-            step_clipboard_shortcut_for(
-                &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    fn step_copy_uses_the_platform_clipboard_modifier() {
+        for (platform, accepted, rejected) in [
+            (
                 ShortcutPlatform::MacOS,
+                KeyModifiers::SUPER,
+                KeyModifiers::CONTROL,
             ),
-            None,
-        );
-        assert_eq!(
-            step_clipboard_shortcut_for(
-                &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
-                ShortcutPlatform::MacOS,
+            (
+                ShortcutPlatform::Other,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                KeyModifiers::CONTROL,
             ),
-            Some(StepClipboardShortcut::Copy),
-        );
+        ] {
+            assert_eq!(
+                step_clipboard_shortcut_for(
+                    &KeyEvent::new(KeyCode::Char('c'), rejected),
+                    platform,
+                ),
+                None,
+            );
+            assert_eq!(
+                step_clipboard_shortcut_for(
+                    &KeyEvent::new(KeyCode::Char('c'), accepted),
+                    platform,
+                ),
+                Some(StepClipboardShortcut::Copy),
+            );
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn linux_arrangement_copy_paste_and_duplicate_accept_control_with_optional_shift() {
+    fn linux_arrangement_clipboard_requires_shift_but_duplicate_does_not() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.open_scratch_buffer("*arrangement*", "");
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
@@ -3046,25 +3065,33 @@ mod live_keyboard_tests {
             .eval_str("(def SEQ (dict :song-region '(0 1) :song-bound-clip nil))")
             .expect("install arrangement region fixture");
 
-        for modifiers in [
-            KeyModifiers::CONTROL,
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        ] {
-            for (key, expected) in [
-                ('c', "song-region-copy"),
-                ('v', "song-region-paste"),
-                ('d', "song-region-duplicate"),
-            ] {
-                assert!(handle_arrangement_region_shortcut(
-                    &mut editor,
-                    &KeyEvent::new(KeyCode::Char(key), modifiers),
-                ));
-                assert!(matches!(
-                    editor.drain_host_commands().as_slice(),
-                    [HostCommand::Custom { name, .. }] if name == expected
-                ));
-            }
+        for key in ['c', 'v'] {
+            assert!(!handle_arrangement_region_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL),
+            ));
         }
+
+        let clipboard_modifiers = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        for (key, expected) in [('c', "song-region-copy"), ('v', "song-region-paste")] {
+            assert!(handle_arrangement_region_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Char(key), clipboard_modifiers),
+            ));
+            assert!(matches!(
+                editor.drain_host_commands().as_slice(),
+                [HostCommand::Custom { name, .. }] if name == expected
+            ));
+        }
+
+        assert!(handle_arrangement_region_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        ));
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [HostCommand::Custom { name, .. }] if name == "song-region-duplicate"
+        ));
     }
 
     #[test]

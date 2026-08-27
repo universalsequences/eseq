@@ -20693,7 +20693,10 @@
 
     #[test]
     fn metal_seq_copy_paste_step_shortcuts_work_outside_grid_buffers() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crossterm::event::{KeyCode, KeyEvent};
+        use eseqlisp::ui::platform::{
+            clipboard_shortcut_modifier_for, CURRENT_SHORTCUT_PLATFORM,
+        };
 
         let mut editor = full_grid_editor_for_scroll_tests();
         let state = Arc::new(SequencerState::new(1, vec![]));
@@ -20716,9 +20719,11 @@
         editor.refresh_runtime_side_effects();
         editor.drain_host_commands();
 
+        let clipboard_modifiers =
+            clipboard_shortcut_modifier_for(CURRENT_SHORTCUT_PLATFORM);
         assert!(handle_metal_command_shortcut_with_ui_epoch(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('c'), clipboard_modifiers),
             &state,
             &current_track,
             &selected_steps,
@@ -20738,7 +20743,7 @@
             .expect("move cursor");
         assert!(handle_metal_command_shortcut_with_ui_epoch(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('v'), clipboard_modifiers),
             &state,
             &current_track,
             &selected_steps,
@@ -20778,7 +20783,7 @@
         editor.refresh_runtime_side_effects();
         assert!(handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('c'), clipboard_modifiers),
             &state,
             &current_track,
             &selected_steps,
@@ -20788,7 +20793,7 @@
         editor.open_scratch_buffer("*editable*", "");
         assert!(!handle_metal_command_shortcut(
             &mut editor,
-            &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+            &KeyEvent::new(KeyCode::Char('v'), clipboard_modifiers),
             &state,
             &current_track,
             &selected_steps,
