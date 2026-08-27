@@ -539,12 +539,17 @@
       (bind-seq (get p :value-field))
       (get p :value)))))
 
+;; `fx-param-value-for` returns a reactive binding for bound params, and `nth`
+;; treats a binding index as nil — deref with `reactive-value` before indexing.
+;; The mods-open depth branch must not leak into the label, so bound params
+;; read their field directly.
 (def fx-param-text-value-for (fx p)
   (if (get p :options)
-    (if (or (get p :value-field)
-            (and (not fx) (instrument-keys-active?)))
-      (nth (get p :options) (fx-param-value-for fx p))
-      (get p :text-value))
+    (if (and (not fx) (instrument-keys-active?))
+      (nth (get p :options) (round (reactive-value (fx-param-value-for fx p))))
+      (if (get p :value-field)
+        (nth (get p :options) (round (reactive-value (bind-seq (get p :value-field)))))
+        (get p :text-value)))
     (get p :text-value)))
 
 (def param-plock-row-target (fx)

@@ -7989,6 +7989,92 @@
         }
     }
 
+    /// eseq-md1n.1: bound enum params carry `:value-field` and no longer
+    /// carry `:text-value`, so the dropdown label helper must dereference
+    /// the reactive binding (`nth` treats a raw binding index as nil), and
+    /// must keep reading the param's own field while the mods editor is
+    /// open — the generic value path returns the mod depth there.
+    #[test]
+    fn fx_param_text_value_dereferences_bound_fields() {
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+                ("track-plocks", test_list(vec![])),
+                ("track-plock-variants", test_list(vec![])),
+                ("fx-instrument-param-0-mode", Value::Number(1.0)),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.seq-core-state/cool-off-follow () false)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate eseq.seq-core-state/selected-bus -1)
+                "#,
+            )
+            .expect("install fx lisp test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+
+        let bound_param = r#"(dict :name "mode" :idx 0
+                   :options (list "lowpass" "highpass" "bandpass")
+                   :value-field "fx-instrument-param-0-mode")"#;
+        let label = editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(eseq.effects.param-controls/fx-param-text-value-for false {bound_param})"
+            ))
+            .expect("read bound enum label");
+        assert_eq!(label, Some(Value::String("highpass".to_string())));
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.effects.state/instrument-mods-open true)")
+            .expect("open the mods editor");
+        let modulatable_param = r#"(dict :name "mode" :idx 0 :modulatable true
+                   :options (list "lowpass" "highpass" "bandpass")
+                   :mod-targets (list (dict :depth-idx 1 :depth 2 :source-slot 1))
+                   :value-field "fx-instrument-param-0-mode")"#;
+        let label = editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(eseq.effects.param-controls/fx-param-text-value-for false {modulatable_param})"
+            ))
+            .expect("read bound enum label with mods open");
+        assert_eq!(
+            label,
+            Some(Value::String("highpass".to_string())),
+            "the mods-open depth must not leak into the dropdown label"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.effects.state/instrument-mods-open false)")
+            .expect("close the mods editor");
+    }
+
     fn test_sampler_instrument_map(
         track: usize,
     ) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
