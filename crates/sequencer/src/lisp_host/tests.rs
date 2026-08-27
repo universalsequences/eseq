@@ -9340,6 +9340,49 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_routes_share_one_length_table_and_first_tick_stays_cheap() {
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "hello" :16
+                 . . - (minvel 0.01) (dashdecay 0.1) (every 4 rev) (* (1 3 1 2 9)) (every 3 swap)
+                 -> 0 (left right none) (note (1 -5))
+                 -> 1 (quant :4) (dur 4)
+                 -> 2 (shift 2) (quant :16) (right none))"#,
+        )
+        .expect("jak");
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let started = std::time::Instant::now();
+        generators.process_block(
+            0.0,
+            0.25,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+        let first = started.elapsed();
+        let started = std::time::Instant::now();
+        generators.process_block(
+            0.25,
+            0.5,
+            12_000,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+        let second = started.elapsed();
+        eprintln!("[timing] first tick {first:?} second tick {second:?}");
+        // Post-only routes share the base pattern's :len-id, so the pd-cycle
+        // pat-lens warm-up runs ONCE, not once per route — the fix for the
+        // audible re-eval pause. One entry despite three routes.
+        let lens_entries = jaki_eval_nums(&mut rt, "(list (len jaki/lens-memo))");
+        assert_eq!(lens_entries, vec![1.0]);
+    }
+
+    #[test]
     fn jaki_rest_word_silences_its_cycle() {
         // `rest`/`none` drop every event while keeping the cycle's length:
         // (left left rest) plays the left hand twice, then a silent cycle;

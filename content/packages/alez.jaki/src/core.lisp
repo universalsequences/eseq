@@ -177,8 +177,13 @@
 
 (def fig-form? (x) (= (raw-head x) 'fig))
 
+;; :id keys the full-evaluation memo; :len-id keys the cycle-length memos and
+;; only changes with the FIGURES (xform/retime), never with post ops — every
+;; route derived from one pattern by filters/shift/quant/gate shares one
+;; length table instead of rebuilding pat-lens per route.
 (def from-list (body)
   (dict :id (source body)
+        :len-id (source body)
         :figs (if (fig-form? (first body))
                   (map (lambda (f) (parse-fig (rest f))) body)
                   (list (parse-fig body)))
@@ -194,14 +199,16 @@
   (merge p
     :figs (map (lambda (f) (merge f :xf (append (get f :xf) (list (norm-xf t)))))
                (get p :figs))
-    :id (str (get p :id) "|xf:" (source t))))
+    :id (str (get p :id) "|xf:" (source t))
+    :len-id (str (get p :len-id) "|xf:" (source t))))
 
 ;; retime every figure: (fast p 2), (slow p (cyc 1 2)) — n is raw per-cycle
 ;; argument data, same as a figure's own (* n)/(/ n) time-mod
 (def retime (p mode n)
   (merge p
     :figs (map (lambda (f) (merge f :tm (list mode n))) (get p :figs))
-    :id (str (get p :id) "|tm:" (source (list mode n)))))
+    :id (str (get p :id) "|tm:" (source (list mode n)))
+    :len-id (str (get p :len-id) "|tm:" (source (list mode n)))))
 (def fast (p n) (retime p :fast n))
 (def slow (p n) (retime p :slow n))
 
@@ -741,12 +748,42 @@
                 r))
           hit))))
 
+;; length-only figure evaluation: cycle length depends on the symbolic-event
+;; transforms, the time-mod, and alignment — never on hands, velocities, or
+;; post ops. Skipping the full fold makes the pat-lens warm-up (pd cycles per
+;; pattern, on the scheduler thread after a re-eval) cheap instead of an
+;; audible pause. MUST stay in lockstep with eval-fig's duration math:
+;; :fast expansion multiplies units by exactly m, so eff reduces to the
+;; pre-expansion unit count.
+(def fig-len (fig cycle off)
+  (let ((evs1 (apply-xf-events (get fig :events) (get fig :xf) cycle))
+        (tm (get fig :tm)))
+    (let ((kind (if (= tm nil) nil (nth tm 0)))
+          (m (if (= tm nil) 1 (max 1 (round-int (resolve-arg (nth tm 1) cycle))))))
+      (let ((raw (units evs1)))
+        (let ((eff (match kind
+                     :fit (r-int m)
+                     :fast (r-int raw)
+                     :slow (r-int (* raw m))
+                     _ (r-int raw))))
+          (let ((al (get fig :align)))
+            (if (= al nil)
+                eff
+                (let ((n (max 1 (round-int (resolve-arg (nth al 0) cycle))))
+                      (total (r+ off eff)))
+                  (r- (r-int (* n (iceil-div (r-ceil total) n))) off)))))))))
+
+(def cycle-len-figs (figs cycle off)
+  (if (empty? figs)
+      off
+      (cycle-len-figs (rest figs) cycle (r+ off (fig-len (first figs) cycle off)))))
+
 ;; integer length in units of one cycle (state-independent)
 (def cycle-length (p k)
-  (let ((key (list (get p :id) k)))
+  (let ((key (list (get p :len-id) k)))
     (let ((hit (memo-find len-memo key)))
       (if (= hit nil)
-          (let ((l (r->f (get (eval-cycle p k :left default-state) :len))))
+          (let ((l (r->f (cycle-len-figs (get p :figs) k (r-int 0)))))
             (do (set! len-memo (cons (list key l) (take* 31 len-memo)))
                 l))
           hit))))
@@ -799,13 +836,13 @@
 (def lens-memo (list))
 
 (def pat-lens (p)
-  (let ((hit (memo-find lens-memo (get p :id))))
+  (let ((hit (memo-find lens-memo (get p :len-id))))
     (if (= hit nil)
         (let ((pd (pat-period p)))
           (let ((lens (map (lambda (k) (cycle-length p k)) (range 0 pd))))
             (let ((entry (list lens (sum* lens) pd)))
               (do (set! lens-memo
-                        (cons (list (get p :id) entry) (take* 23 lens-memo)))
+                        (cons (list (get p :len-id) entry) (take* 23 lens-memo)))
                   entry))))
         hit)))
 
