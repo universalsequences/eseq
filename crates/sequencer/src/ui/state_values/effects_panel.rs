@@ -51,6 +51,26 @@ fn filter_table_editor_value(node_id: i32) -> Option<Value> {
     Some(Value::Map(map))
 }
 
+/// Reactive field names carrying the Filter Table's effective (post-host-
+/// modulation) response values (eseq-dtx.13). The panel binds the spectrum
+/// curve to these instead of reading the knob's base value, so an LFO on
+/// frame/cutoff/resonance animates the drawn response. The fields always hold
+/// a value — the base one when nothing is modulating — so nothing about the
+/// unmodulated render changes.
+fn insert_filter_table_response_fields(
+    slot_map: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    node_id: i32,
+) {
+    for param in ["frame", "cutoff", "resonance"] {
+        slot_map.insert(
+            format!("response-{param}-field"),
+            Rc::new(RefCell::new(Value::String(filter_table_response_field(
+                node_id, param,
+            )))),
+        );
+    }
+}
+
 /// Build a Lisp Value::List of effect slot maps for a track.
 /// Each slot is a map: {:name "Filter" :params ({:name "cutoff" :value 1000 :min 20 :max 20000} ...)}
 pub(crate) fn build_effects_value(
@@ -249,6 +269,7 @@ pub(crate) fn build_effects_value(
                         ))),
                     );
                 }
+                insert_filter_table_response_fields(&mut slot_map, node_id);
                 if let Some(editor) = filter_table_editor_value(node_id) {
                     slot_map.insert("editor".to_string(), Rc::new(RefCell::new(editor)));
                 }
@@ -902,6 +923,7 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                 ))),
                             );
                         }
+                        insert_filter_table_response_fields(&mut slot_map, node_id);
                         if let Some(editor) = filter_table_editor_value(node_id) {
                             slot_map
                                 .insert("editor".to_string(), Rc::new(RefCell::new(editor)));

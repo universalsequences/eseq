@@ -80,7 +80,38 @@ pub const PARAM_TRANSPORT_BAR_PHASE: usize = PARAM_BPM + 1;
 pub const PARAM_TRANSPORT_BAR_PHASE_INC: usize = PARAM_TRANSPORT_BAR_PHASE + 1;
 pub const PARAM_RESET_COUNTER: usize = PARAM_TRANSPORT_BAR_PHASE_INC + 1;
 
-pub const STATE_SIZE: usize = PARAM_RESET_COUNTER + 1;
+/// Display tail (eseq-dtx.13). `voice_modulator_process` stores the block's
+/// last output value per slot here so a UI-thread poller can read the live
+/// modulation signal back off the audiograph watchlist and render effective
+/// (post-modulation) parameter values. Four plain `f32` stores per block on
+/// the audio thread — no allocation, no locking, no atomics needed because
+/// the watchlist snapshot is taken between blocks, and a torn read would at
+/// worst show one stale display value.
+pub const STATE_DISPLAY_SLOT_VALUE: usize = PARAM_RESET_COUNTER + 1;
+
+pub const STATE_SIZE: usize = STATE_DISPLAY_SLOT_VALUE + SLOT_COUNT;
+
+/// The `@mod-mode additive` contract that `(mod name)` compiles to inside the
+/// DGen engine (and that the hand-written Rust built-ins implement inline):
+/// the base cell plus, when the destination's `__dgen_mod_active__` flag is
+/// set, the sum of every depth lane scaled by its modulator slot's 0..1
+/// output. Dual-maintained with the DGenLisp compiler's `mod` expansion; the
+/// UI reuses it to draw the effective value without touching the engine.
+pub fn additive_modulated_value(
+    base: f32,
+    active: bool,
+    depths: &[f32; SLOT_COUNT],
+    slot_values: &[f32; SLOT_COUNT],
+) -> f32 {
+    if !active {
+        return base;
+    }
+    let mut value = base;
+    for slot in 0..SLOT_COUNT {
+        value += depths[slot] * slot_values[slot].clamp(0.0, 1.0);
+    }
+    value
+}
 const UNBOUND_CUSTOM_ENGINE: f32 = -1.0;
 const TRANSPORT_CLOCK_SOURCE_PARAMS: f32 = 0.0;
 const TRANSPORT_CLOCK_SOURCE_INPUT: f32 = 1.0;
@@ -986,6 +1017,24 @@ unsafe fn clear_output_slot(out: *const *mut f32, slot: usize, nf: usize) {
     }
 }
 
+/// Copy the block's last output frame into the display tail
+/// (`STATE_DISPLAY_SLOT_VALUE`). Bounded, allocation-free, lock-free; see the
+/// constant's docs.
+unsafe fn publish_slot_display_values(s: *mut f32, out: *const *mut f32, nf: usize) {
+    if out.is_null() || nf == 0 {
+        return;
+    }
+    for slot in 0..NUM_OUTPUTS {
+        let out_slot = *out.add(slot);
+        let value = if out_slot.is_null() {
+            0.0
+        } else {
+            *out_slot.add(nf - 1)
+        };
+        *s.add(STATE_DISPLAY_SLOT_VALUE + slot) = value;
+    }
+}
+
 unsafe fn clear_output_frame(out: *const *mut f32, frame: usize) {
     if out.is_null() {
         return;
@@ -1310,6 +1359,7 @@ unsafe extern "C" fn voice_modulator_process(
         if voice_idx >= enabled {
             record_disabled_custom_skip(engine_id, nf);
             clear_outputs(out, nf);
+            publish_slot_display_values(s, out, nf);
             return;
         }
     }
@@ -1333,6 +1383,7 @@ unsafe extern "C" fn voice_modulator_process(
         if !sampler_active && !gate_timeline_has_activity(gate_in, trigger_in, nf, prev_gate) {
             record_disabled_sampler_skip(track_idx, nf);
             clear_outputs(out, nf);
+            publish_slot_display_values(s, out, nf);
             return;
         }
     }
@@ -1368,6 +1419,11 @@ unsafe extern "C" fn voice_modulator_process(
     if slot_sources.iter().all(|source| *source == SOURCE_OFF) {
         record_all_slots_off(nf);
         clear_outputs(out, nf);
+        // The depth lanes and `__dgen_mod_active__` stay set when a source is
+        // switched to Off, so the host keeps reading the display tail. Publish
+        // the just-zeroed outputs or the visualizer freezes at the last
+        // pre-Off value while the DSP renders the base (eseq-dtx.13).
+        publish_slot_display_values(s, out, nf);
         if nf > 0 && !gate_in.is_null() {
             *s.add(IDX_PREV_GATE) = (*gate_in.add(nf - 1)).clamp(0.0, 1.0);
         }
@@ -1439,6 +1495,7 @@ unsafe extern "C" fn voice_modulator_process(
 
     *s.add(IDX_PREV_GATE) = prev_gate;
     *s.add(IDX_LAST_RESET_COUNTER) = last_reset_counter;
+    publish_slot_display_values(s, out, nf);
 }
 
 pub fn voice_modulator_vtable() -> NodeVTable {
@@ -1641,6 +1698,64 @@ mod tests {
 
         assert!((outputs[0][0] - 0.5).abs() <= 0.00001);
         assert!((state[slot_state_idx(0, IDX_LFO_PHASE)] - 0.5).abs() <= 0.00001);
+    }
+
+    /// eseq-dtx.13: the block's last output frame per slot lands in the
+    /// display tail so a UI poller can read the live modulation signal back
+    /// off the watchlist. The Filter Table spectrum visualizer is the first
+    /// consumer.
+    #[test]
+    fn process_publishes_last_frame_slot_values_to_the_display_tail() {
+        let mut state = init_state();
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(SyncDivision::Quarter);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[PARAM_TRANSPORT_BAR_PHASE] = 0.0;
+        state[PARAM_TRANSPORT_BAR_PHASE_INC] = 0.0625;
+        // A stale display value must be overwritten, not left behind.
+        for slot in 0..SLOT_COUNT {
+            state[STATE_DISPLAY_SLOT_VALUE + slot] = -7.0;
+        }
+
+        let outputs = render_voice_modulator(&mut state, 4, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!(
+            (state[STATE_DISPLAY_SLOT_VALUE] - outputs[0][3]).abs() <= 0.00001,
+            "display tail should carry the block's last frame, got {} vs {}",
+            state[STATE_DISPLAY_SLOT_VALUE],
+            outputs[0][3],
+        );
+        assert!(
+            outputs[0][3] > outputs[0][0],
+            "the synced saw should have advanced across the block",
+        );
+        for slot in 1..SLOT_COUNT {
+            assert!(
+                (state[STATE_DISPLAY_SLOT_VALUE + slot] - outputs[slot][3]).abs() <= 0.00001,
+                "slot {slot} display tail should mirror its own last frame",
+            );
+        }
+    }
+
+    #[test]
+    fn additive_modulation_sums_every_assigned_depth_lane() {
+        let depths = [0.25, -0.5, 0.0, 0.0];
+        let slot_values = [1.0, 0.5, 1.0, 1.0];
+        // Inactive destinations render the base value untouched.
+        assert_eq!(
+            additive_modulated_value(0.4, false, &depths, &slot_values),
+            0.4
+        );
+        // Two simultaneous mods both land (requirement (d)).
+        let value = additive_modulated_value(0.4, true, &depths, &slot_values);
+        assert!((value - (0.4 + 0.25 - 0.25)).abs() <= 0.000001, "got {value}");
+        // A modulator resting at zero is exactly the base value, which is what
+        // makes the display settle back when modulation stops.
+        assert_eq!(
+            additive_modulated_value(0.4, true, &depths, &[0.0; SLOT_COUNT]),
+            0.4
+        );
     }
 
     #[test]
@@ -1913,6 +2028,31 @@ mod tests {
         assert_eq!(state[slot_state_idx(3, IDX_DRIFT)], before_drift);
         assert_eq!(state[IDX_PREV_GATE], 1.0);
         assert_eq!(state[IDX_LAST_RESET_COUNTER], 1.0);
+    }
+
+    /// eseq-dtx.13: switching every slot source to Off leaves the destination's
+    /// depth lanes and `__dgen_mod_active__` flag set, so the UI keeps reading
+    /// the display tail. The all-off early return therefore has to publish the
+    /// zeroed outputs; otherwise the visualizer freezes at the last pre-Off
+    /// offset while the DSP renders the base value.
+    #[test]
+    fn all_off_slots_publish_zero_display_values() {
+        let mut state = init_state();
+        for slot in 0..SLOT_COUNT {
+            state[slot_source_param_idx(slot)] = SOURCE_OFF as f32;
+            // A stale pre-Off value must not survive the early return.
+            state[STATE_DISPLAY_SLOT_VALUE + slot] = 0.75;
+        }
+
+        let _ = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        for slot in 0..SLOT_COUNT {
+            assert_eq!(
+                state[STATE_DISPLAY_SLOT_VALUE + slot],
+                0.0,
+                "slot {slot} display tail should settle to zero when the source is Off",
+            );
+        }
     }
 
     #[test]

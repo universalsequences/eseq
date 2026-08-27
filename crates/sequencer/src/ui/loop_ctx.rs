@@ -38,6 +38,16 @@ pub(crate) struct MeterCache {
     pub(crate) cached_bus_peak_levels: Vec<f64>,
     pub(crate) cached_modulator_phases: Vec<f64>,
     pub(crate) cached_modulator_levels: Vec<f64>,
+    /// Effective (post-modulation) Filter Table response values, polled at
+    /// meter rate off the effect modulator nodes (eseq-dtx.13).
+    pub(crate) cached_filter_table_responses: Vec<FilterTableResponse>,
+    /// Effect modulator nodes this poller currently holds on the audiograph
+    /// watchlist. Only modulated, visible Filter Tables appear here.
+    pub(crate) watched_filter_table_modulators: HashSet<i32>,
+    /// `fx_epoch` the Filter Table responses were last sampled at. A change
+    /// forces an off-cadence poll so a newly built panel is seeded with its
+    /// base response instead of flashing an unpublished 0.0 field.
+    pub(crate) filter_table_poll_fx_epoch: usize,
     pub(crate) cached_cpu_load_bits: u32,
     pub(crate) last_meter_poll_at: Instant,
     pub(crate) last_cpu_ui_poll_at: Instant,
@@ -108,6 +118,7 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_bus_peak_levels: Vec<f64>,
     pub(crate) prev_modulator_phases: Vec<f64>,
     pub(crate) prev_modulator_levels: Vec<f64>,
+    pub(crate) prev_filter_table_responses: Vec<FilterTableResponse>,
     /// Drum-rack pad lights (eseq-4b5.16): the published flag per track, plus
     /// the instant each rack member last triggered, which is what the light
     /// decays from.

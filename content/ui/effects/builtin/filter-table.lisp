@@ -48,6 +48,19 @@
 (def freq-knob (fx label-text p)
   (parameter-knob fx label-text p 0 1 "log"))
 
+;; Effective (post-modulation) response values (eseq-dtx.13). The host samples
+;; the effect's modulator node at meter rate and publishes `base + depth * mod`
+;; into these SEQ fields; binding the widget props to them makes the spectrum
+;; curve follow an LFO on frame/cutoff/resonance instead of freezing at the
+;; knob's base value. The field always carries the base value when nothing is
+;; modulating, so an unmodulated panel renders exactly as before. Rack slots
+;; get no field and fall back to the base knob value.
+(def response-value (fx p field-key)
+  (let ((field (get fx field-key)))
+    (if field
+      (bind-seq field)
+      (pc/instrument-param-base-value p))))
+
 (def spectrum-source (fx)
   (if (get fx :rack-fx)
     (dict :kind :rack-effect :index (get fx :track-idx)
@@ -296,7 +309,7 @@
                 :waves-per-set 64 :set 0
                 :wave (if (get fx :editor)
                   (get (get fx :editor) :selected-frame-normalized)
-                  (pc/instrument-param-base-value frame-p))
+                  (response-value fx frame-p :response-frame-field))
                 :wave-normalized true
                 :wave-color (if (get fx :editor)
                   (rgba 1.0 0.62 0.25 1.0)
@@ -315,9 +328,9 @@
             :freq-min 20 :freq-max 20000
             :response-min-db -48 :response-max-db 8
             :response-data-key table-key
-            :response-frame (pc/instrument-param-base-value frame-p)
-            :response-cutoff (pc/instrument-param-base-value cutoff-p)
-            :response-resonance (pc/instrument-param-base-value res-p)
+            :response-frame (response-value fx frame-p :response-frame-field)
+            :response-cutoff (response-value fx cutoff-p :response-cutoff-field)
+            :response-resonance (response-value fx res-p :response-resonance-field)
             :background-color (rgba 0.045 0.055 0.070 1.0)
             :curve-color (rgba 0.78 0.84 0.92 0.96)
             :spectrum-color (rgba 0.18 0.38 0.64 0.30)

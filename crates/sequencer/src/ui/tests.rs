@@ -5301,6 +5301,9 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
+                cached_filter_table_responses: Vec::new(),
+                watched_filter_table_modulators: std::collections::HashSet::new(),
+                filter_table_poll_fx_epoch: usize::MAX,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -6318,6 +6321,9 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
+                cached_filter_table_responses: Vec::new(),
+                watched_filter_table_modulators: std::collections::HashSet::new(),
+                filter_table_poll_fx_epoch: usize::MAX,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -6944,6 +6950,9 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
+                cached_filter_table_responses: Vec::new(),
+                watched_filter_table_modulators: std::collections::HashSet::new(),
+                filter_table_poll_fx_epoch: usize::MAX,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -7981,6 +7990,9 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
+                cached_filter_table_responses: Vec::new(),
+                watched_filter_table_modulators: std::collections::HashSet::new(),
+                filter_table_poll_fx_epoch: usize::MAX,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -9338,6 +9350,9 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: cached_modulator_phases.clone(),
                 cached_modulator_levels: cached_modulator_levels.clone(),
+                cached_filter_table_responses: Vec::new(),
+                watched_filter_table_modulators: std::collections::HashSet::new(),
+                filter_table_poll_fx_epoch: usize::MAX,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -14091,5 +14106,384 @@
         assert!(
             super::event_loop::scene_slot_replay_targets(&unrelated()).is_empty(),
             "an unrelated entry keeps the ordinary refresh path"
+        );
+    }
+
+    // ── Filter Table effective-response plumbing (eseq-dtx.13) ────────────
+
+    /// The shape `append_dgen_modulation_target_params` synthesizes for the
+    /// Filter Table's `@mod true` params: a base cell, a hidden
+    /// `__dgen_mod_active__` flag, and one depth lane per modulator slot.
+    fn filter_table_mod_descriptor() -> sequencer::effects::EffectDescriptor {
+        use sequencer::effects::{
+            EffectDescriptor, InstrumentModulationTarget, ParamDescriptor, ParamKind, ParamScaling,
+        };
+        let param = |name: &str, min: f32, max: f32, default: f32, kind: ParamKind| {
+            ParamDescriptor {
+                name: name.to_string(),
+                min,
+                max,
+                default,
+                kind,
+                scaling: ParamScaling::Linear,
+                node_param_idx: 0,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        };
+        let continuous = || ParamKind::Continuous { unit: None };
+        let params = vec![
+            param("frame", 0.0, 1.0, 0.2, continuous()),
+            param(
+                sequencer::effects::filter_table::PARAM_CUTOFF,
+                40.0,
+                18_000.0,
+                1_000.0,
+                continuous(),
+            ),
+            param("resonance", 0.0, 1.0, 0.1, continuous()),
+            param("__dgen_mod_active__frame", 0.0, 1.0, 0.0, ParamKind::Boolean),
+            param("mod frame slot 1 amt", -1.0, 1.0, 0.0, continuous()),
+            param(
+                "__dgen_mod_active__cutoff",
+                0.0,
+                1.0,
+                0.0,
+                ParamKind::Boolean,
+            ),
+            param("mod cutoff slot 2 amt", -18_000.0, 18_000.0, 0.0, continuous()),
+        ];
+        let target = |base_param_idx, modulator_slot, depth_param_idx, active_param_idx| {
+            InstrumentModulationTarget {
+                base_param_idx,
+                source_param_idx: None,
+                modulator_slot,
+                depth_param_idx,
+                active_param_idx: Some(active_param_idx),
+                depth_min: -1.0,
+                depth_max: 1.0,
+                depth_unit: None,
+            }
+        };
+        EffectDescriptor {
+            name: sequencer::effects::filter_table::NAME.to_string(),
+            params,
+            tensor_params: Vec::new(),
+            input_channels: 6,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: vec![target(0, 1, 4, 3), target(1, 2, 6, 5)],
+        }
+    }
+
+    /// End of the eseq-dtx.13 chain: modulator-node slot values (what the
+    /// audio thread parks in `voice_modulator::STATE_DISPLAY_SLOT_VALUE`) are
+    /// combined with the slot's base/depth/active params and published into
+    /// the SEQ fields the Filter Table panel binds its spectrum curve to.
+    #[test]
+    fn filter_table_response_fields_follow_modulator_slot_values() {
+        use sequencer::instruments::voice_modulator::SLOT_COUNT;
+        let desc = filter_table_mod_descriptor();
+        let node_id = 77;
+
+        // Base values: no mod active, no depth. Two independent destinations
+        // are wired but idle.
+        let mut values: Vec<f32> = desc.params.iter().map(|p| p.default).collect();
+        let base_of = |values: &Vec<f32>| {
+            let values = values.clone();
+            move |idx: usize| values.get(idx).copied().unwrap_or(0.0)
+        };
+
+        let unmodulated = super::filter_table_response_from_slot_values(
+            &desc,
+            node_id,
+            &base_of(&values),
+            &[0.75_f32; SLOT_COUNT],
+        );
+        assert!(
+            (unmodulated.frame - 0.2).abs() < 1.0e-3,
+            "an inactive destination must render the base frame, got {}",
+            unmodulated.frame
+        );
+        assert!(
+            (unmodulated.cutoff - 1_000.0).abs() < 1.0,
+            "an inactive destination must render the base cutoff, got {}",
+            unmodulated.cutoff
+        );
+
+        // Requirement (d): frame and cutoff modulated at once, from two
+        // different modulator slots, both reflected.
+        values[3] = 1.0; // __dgen_mod_active__frame
+        values[4] = 0.5; // mod frame slot 1 amt
+        values[5] = 1.0; // __dgen_mod_active__cutoff
+        values[6] = 4_000.0; // mod cutoff slot 2 amt
+        let mut slot_values = [0.0_f32; SLOT_COUNT];
+        slot_values[0] = 1.0; // slot 1 modulator at full
+        slot_values[1] = 0.5; // slot 2 modulator at half
+        let modulated = super::filter_table_response_from_slot_values(
+            &desc,
+            node_id,
+            &base_of(&values),
+            &slot_values,
+        );
+        assert!(
+            (modulated.frame - 0.7).abs() < 1.0e-2,
+            "frame should be base + depth * slot-1, got {}",
+            modulated.frame
+        );
+        assert!(
+            (modulated.cutoff - 3_000.0).abs() < 30.0,
+            "cutoff should be base + depth * slot-2, got {}",
+            modulated.cutoff
+        );
+
+        // Modulation past the declared range is clipped exactly like the DSP.
+        slot_values[0] = 1.0;
+        values[4] = 5.0;
+        let clipped = super::filter_table_response_from_slot_values(
+            &desc,
+            node_id,
+            &base_of(&values),
+            &slot_values,
+        );
+        assert!((clipped.frame - 1.0).abs() < 1.0e-6, "got {}", clipped.frame);
+        values[4] = 0.5;
+
+        // Requirement (b): modulators resting at zero settle back to base.
+        let settled = super::filter_table_response_from_slot_values(
+            &desc,
+            node_id,
+            &base_of(&values),
+            &[0.0_f32; SLOT_COUNT],
+        );
+        assert!(
+            (settled.frame - unmodulated.frame).abs() < 1.0e-2,
+            "a modulator at rest is the base frame, got {} vs {}",
+            settled.frame,
+            unmodulated.frame
+        );
+        assert!(
+            (settled.cutoff - unmodulated.cutoff).abs() < 1.0,
+            "a modulator at rest is the base cutoff, got {} vs {}",
+            settled.cutoff,
+            unmodulated.cutoff
+        );
+
+        // Widget end: the delta sync writes the SEQ fields the panel binds.
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", Vec::new(), true);
+        let (_, published) =
+            super::sync_filter_table_response_field_delta(&mut runtime, &[], &[modulated]);
+        assert_eq!(published, 3, "a first sample publishes all three fields");
+        let frame_field = super::filter_table_response_field(node_id, "frame");
+        let cutoff_field = super::filter_table_response_field(node_id, "cutoff");
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", &frame_field),
+            Some(&Value::Number(modulated.frame))
+        );
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", &cutoff_field),
+            Some(&Value::Number(modulated.cutoff))
+        );
+
+        // Re-publishing an unchanged sample writes nothing: an idle modulated
+        // panel does not dirty the widget every tick (requirement (e)).
+        let (_, republished) = super::sync_filter_table_response_field_delta(
+            &mut runtime,
+            &[modulated],
+            &[modulated],
+        );
+        assert_eq!(republished, 0, "an unchanged sample must write nothing");
+
+        // ... and a settled sample puts the base spectrum back on the wire.
+        let (_, settled_published) = super::sync_filter_table_response_field_delta(
+            &mut runtime,
+            &[modulated],
+            &[settled],
+        );
+        assert!(settled_published > 0, "settling back must republish");
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", &frame_field),
+            Some(&Value::Number(settled.frame))
+        );
+    }
+
+    /// eseq-dtx.13, the sampler's *front* half against a real Filter Table.
+    /// The pure-arithmetic test above builds a synthetic descriptor, so it
+    /// cannot catch the things that actually break here: `frame` / `cutoff` /
+    /// `resonance` resolving to the wrong indices in the compiled param list,
+    /// the base value diverging from what the knob shows (the curve must
+    /// follow a p-lock passing under the playhead, exactly like
+    /// `sync_track_effect_param_value_field`), and the watchlist gate leaking
+    /// a per-block state snapshot for an unmodulated or hidden panel.
+    #[test]
+    fn read_filter_table_responses_tracks_real_descriptor_params_and_gates_the_watchlist() {
+        use sequencer::app;
+        use sequencer::audio::engine;
+        use sequencer::effects::filter_table;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+        if !sequencer::lisp_host::dgenlisp_tool_path().exists() {
+            eprintln!("skipping: DGenLisp tool not found");
+            return;
+        }
+        let _dir = SequencerDirGuard::enter();
+        let eng = engine::init_headless_engine(44_100, 2).expect("initialize headless app graph");
+        let lg_ptr = eng.lg_ptr;
+        let _engine_guard = TestEngineGuard { lg_raw: lg_ptr.0 };
+        let state = Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut app = app::App::new(
+            state.clone(),
+            lg_ptr,
+            eng.sample_rate,
+            eng.buses,
+            eng.master_recorder.clone(),
+            eng.keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app.graph.track_node_ids = vec![sequencer::app::TrackNodeIds {
+            sampler_ids: Vec::new(),
+            pdc_id: 0,
+            sampler_gatepitch_ids: Vec::new(),
+            sampler_modulator_ids: Vec::new(),
+            voice_sum_id: 0,
+            voice_sum_r_id: 0,
+            pan_id: 0,
+            filter_id: 0,
+            delay_id: 0,
+            send_id: 0,
+            mod_out_id: 0,
+            mod_in_clip_ids: [0; sequencer::sequencer::EXT_MOD_INPUT_COUNT],
+            mod_env_id: 0,
+            bus_send_ids: Vec::new(),
+            rack_slots: Vec::new(),
+            rack_signature: None,
+        }];
+        app.graph.effect_descriptors =
+            vec![sequencer::effects::EffectDescriptor::default_full_chain()];
+        app.graph.instrument_descriptors =
+            vec![sequencer::effects::EffectDescriptor::builtin_sampler()];
+        let slot_idx = app
+            .add_builtin_effect_sync(0, filter_table::NAME)
+            .expect("add Filter Table");
+
+        // Real name -> index resolution against the compiled param list.
+        let desc = app.graph.effect_descriptors[0][slot_idx].clone();
+        let idx_of = |name: &str| {
+            desc.params
+                .iter()
+                .position(|param| param.name == name)
+                .unwrap_or_else(|| panic!("Filter Table should expose `{name}`"))
+        };
+        let frame_idx = idx_of("frame");
+        let cutoff_idx = idx_of(filter_table::PARAM_CUTOFF);
+        let resonance_idx = idx_of("resonance");
+        assert!(
+            frame_idx != cutoff_idx && cutoff_idx != resonance_idx,
+            "the three response params must resolve to distinct indices",
+        );
+
+        let slot = &state.pattern.effect_chains[0][slot_idx];
+        let modulator_node_id = slot.modulator_node_id.load(Ordering::Relaxed) as i32;
+        assert!(
+            modulator_node_id > 0,
+            "a Filter Table with mod destinations gets a modulator node",
+        );
+        slot.defaults.set(frame_idx, 0.25);
+        slot.defaults.set(cutoff_idx, 2_000.0);
+        slot.defaults.set(resonance_idx, 0.5);
+
+        let mut watched: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let sample = |app: &app::App,
+                      watched: &mut std::collections::HashSet<i32>,
+                      selected_step: Option<usize>,
+                      live: bool| {
+            let responses =
+                super::read_filter_table_responses(lg_ptr, app, &state, selected_step, live, watched);
+            assert_eq!(responses.len(), 1, "one Filter Table instance");
+            responses[0]
+        };
+
+        // Unmodulated: the base values land on the right fields, and nothing
+        // joins the watchlist (an idle panel costs the audio thread nothing).
+        let base = sample(&app, &mut watched, None, true);
+        assert!((base.frame - 0.25).abs() < 1.0e-6, "got {}", base.frame);
+        assert!((base.cutoff - 2_000.0).abs() < 1.0e-3, "got {}", base.cutoff);
+        assert!(
+            (base.resonance - 0.5).abs() < 1.0e-6,
+            "got {}",
+            base.resonance
+        );
+        assert!(
+            watched.is_empty(),
+            "an unmodulated Filter Table must not be watched",
+        );
+
+        // The base must follow `displayed_plock_step`, not just the selection:
+        // during playback with nothing selected, the p-lock under the playhead
+        // is what the knob shows, so it is what the curve has to draw.
+        slot.set_plock(3, cutoff_idx, 600.0);
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state.transport.track_playheads[0].store(3, Ordering::Relaxed);
+        let played = sample(&app, &mut watched, None, true);
+        assert!(
+            (played.cutoff - 600.0).abs() < 1.0e-3,
+            "a p-locked step under the playhead must move the curve, got {}",
+            played.cutoff,
+        );
+        // An explicit selection still wins over the playhead.
+        let selected = sample(&app, &mut watched, Some(0), true);
+        assert!(
+            (selected.cutoff - 2_000.0).abs() < 1.0e-3,
+            "the selected step has no cutoff p-lock, got {}",
+            selected.cutoff,
+        );
+        state.transport.playing.store(false, Ordering::Relaxed);
+
+        // Assigning a depth lane flips the gate: now the modulator node is
+        // watched so its display tail can be sampled.
+        let target = desc
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| target.base_param_idx == cutoff_idx)
+            .expect("cutoff should be a mod destination")
+            .clone();
+        slot.defaults.set(
+            target.active_param_idx.expect("host mod active flag"),
+            1.0,
+        );
+        slot.defaults.set(target.depth_param_idx, 3_000.0);
+        let modulated = sample(&app, &mut watched, None, true);
+        assert_eq!(
+            watched.iter().copied().collect::<Vec<_>>(),
+            vec![modulator_node_id],
+            "a modulated Filter Table joins the watchlist",
+        );
+        // The node has not rendered, so its display tail is still zero and the
+        // effective value is the base one — the settle-to-base contract.
+        assert!(
+            (modulated.cutoff - 2_000.0).abs() < 2.0,
+            "a modulator at rest renders the base cutoff, got {}",
+            modulated.cutoff,
+        );
+
+        // Hiding the FX panel drops the watchlist entry again.
+        let hidden = sample(&app, &mut watched, None, false);
+        assert!(
+            watched.is_empty(),
+            "a hidden panel must release its watchlist entries",
+        );
+        // (Within a cent: a modulated destination is quantized on the log
+        // frequency axis even while the sample itself is at rest.)
+        assert!(
+            (hidden.cutoff - 2_000.0).abs() < 2.0,
+            "a hidden panel reports base values, got {}",
+            hidden.cutoff,
         );
     }
