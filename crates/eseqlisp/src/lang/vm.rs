@@ -318,6 +318,22 @@ pub struct ReactiveExecTiming {
     pub subtree_root_id: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct LispFunctionTiming {
+    pub function: String,
+    pub calls: u64,
+    pub self_time: Duration,
+    pub inclusive_time: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReactiveFunctionProfile {
+    pub target: EffectTarget,
+    pub subtree_root_id: Option<u64>,
+    pub elapsed: Duration,
+    pub functions: Vec<LispFunctionTiming>,
+}
+
 impl ReactiveExecTiming {
     pub fn profile_label(&self) -> String {
         let owner = self
@@ -2147,6 +2163,81 @@ struct Frame {
     chunk_idx: usize,
 }
 
+struct ActiveProfileCall {
+    function: String,
+    started: Instant,
+    child_time: Duration,
+}
+
+#[derive(Default)]
+struct FunctionTimingAccumulator {
+    calls: u64,
+    self_time: Duration,
+    inclusive_time: Duration,
+}
+
+struct FunctionProfiler {
+    started: Instant,
+    calls: Vec<ActiveProfileCall>,
+    timings: HashMap<String, FunctionTimingAccumulator>,
+}
+
+impl FunctionProfiler {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            calls: Vec::new(),
+            timings: HashMap::new(),
+        }
+    }
+
+    fn enter(&mut self, function: String) {
+        self.calls.push(ActiveProfileCall {
+            function,
+            started: Instant::now(),
+            child_time: Duration::ZERO,
+        });
+    }
+
+    fn exit(&mut self) {
+        let Some(call) = self.calls.pop() else {
+            return;
+        };
+        let inclusive_time = call.started.elapsed();
+        let self_time = inclusive_time.saturating_sub(call.child_time);
+        let timing = self.timings.entry(call.function).or_default();
+        timing.calls += 1;
+        timing.self_time += self_time;
+        timing.inclusive_time += inclusive_time;
+        if let Some(parent) = self.calls.last_mut() {
+            parent.child_time += inclusive_time;
+        }
+    }
+
+    fn finish(mut self) -> (Duration, Vec<LispFunctionTiming>) {
+        while !self.calls.is_empty() {
+            self.exit();
+        }
+        let elapsed = self.started.elapsed();
+        let mut functions = self
+            .timings
+            .into_iter()
+            .map(|(function, timing)| LispFunctionTiming {
+                function,
+                calls: timing.calls,
+                self_time: timing.self_time,
+                inclusive_time: timing.inclusive_time,
+            })
+            .collect::<Vec<_>>();
+        functions.sort_by(|a, b| {
+            b.self_time
+                .cmp(&a.self_time)
+                .then_with(|| a.function.cmp(&b.function))
+        });
+        (elapsed, functions)
+    }
+}
+
 pub struct VM {
     pub chunks: Vec<Chunk>,
     current_chunk: usize,
@@ -2173,6 +2264,9 @@ pub struct VM {
     execution_depth: usize,
     processing_reactive: bool,
     reactive_exec_timings: Vec<ReactiveExecTiming>,
+    function_profile_filter: Option<String>,
+    active_function_profiler: Option<FunctionProfiler>,
+    reactive_function_profiles: Vec<ReactiveFunctionProfile>,
     last_reactive_error_context: Option<String>,
     last_reactive_error_detail: Option<String>,
     current_effect_source_buffer_id: Option<BufferId>,
@@ -3941,6 +4035,12 @@ impl VM {
             execution_depth: 0,
             processing_reactive: false,
             reactive_exec_timings: Vec::new(),
+            function_profile_filter: std::env::var("ESEQLISP_PROFILE_LISP")
+                .ok()
+                .filter(|value| !value.is_empty() && value != "0")
+                .map(|value| if value == "1" { "*fx*".to_string() } else { value }),
+            active_function_profiler: None,
+            reactive_function_profiles: Vec::new(),
             last_reactive_error_context: None,
             last_reactive_error_detail: None,
             current_effect_source_buffer_id: None,
@@ -5639,6 +5739,115 @@ impl VM {
         std::mem::take(&mut self.reactive_exec_timings)
     }
 
+    pub fn take_reactive_function_profiles(&mut self) -> Vec<ReactiveFunctionProfile> {
+        std::mem::take(&mut self.reactive_function_profiles)
+    }
+
+    fn effect_target_profile_name(target: &EffectTarget) -> String {
+        match target {
+            EffectTarget::BufferId(Some(id)) => format!("buf#{id}"),
+            EffectTarget::BufferId(None) => "active-buffer".to_string(),
+            EffectTarget::BufferName(name) => name.clone(),
+        }
+    }
+
+    fn begin_function_profile(&mut self) -> bool {
+        let Some(filter) = self.function_profile_filter.as_deref() else {
+            return false;
+        };
+        if self.active_function_profiler.is_some() {
+            return false;
+        }
+        let target = Self::effect_target_profile_name(&self.current_effect_target);
+        if filter != "all" && filter != target {
+            return false;
+        }
+        self.active_function_profiler = Some(FunctionProfiler::new());
+        true
+    }
+
+    fn finish_function_profile(&mut self, started: bool, subtree_root_id: Option<u64>) {
+        if !started {
+            return;
+        }
+        let Some(profiler) = self.active_function_profiler.take() else {
+            return;
+        };
+        let (elapsed, functions) = profiler.finish();
+        let target = Self::effect_target_profile_name(&self.current_effect_target);
+        let ranked = functions
+            .iter()
+            .take(15)
+            .enumerate()
+            .map(|(index, timing)| {
+                format!(
+                    "{}:{} self={:.3}ms incl={:.3}ms calls={}",
+                    index + 1,
+                    timing.function,
+                    timing.self_time.as_secs_f64() * 1000.0,
+                    timing.inclusive_time.as_secs_f64() * 1000.0,
+                    timing.calls,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "[lisp-profile] target={target} root={} total={:.3}ms ranked=[{ranked}]",
+            subtree_root_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            elapsed.as_secs_f64() * 1000.0,
+        );
+        self.reactive_function_profiles.push(ReactiveFunctionProfile {
+            target: self.current_effect_target.clone(),
+            subtree_root_id,
+            elapsed,
+            functions,
+        });
+    }
+
+    fn profile_chunk_name(&self, chunk_idx: usize) -> String {
+        let Some(chunk) = self.chunks.get(chunk_idx) else {
+            return format!("<chunk:{chunk_idx}>");
+        };
+        if let Some(symbol) = chunk.source_symbol.as_ref() {
+            return symbol.clone();
+        }
+        let source = chunk
+            .source_file
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("repl");
+        format!("<anonymous:{source}#{chunk_idx}>")
+    }
+
+    fn profile_enter_chunk(&mut self, chunk_idx: usize) {
+        let function = self.profile_chunk_name(chunk_idx);
+        if let Some(profiler) = self.active_function_profiler.as_mut() {
+            profiler.enter(function);
+        }
+    }
+
+    fn profile_exit_chunk(&mut self) {
+        if let Some(profiler) = self.active_function_profiler.as_mut() {
+            profiler.exit();
+        }
+    }
+
+    fn profile_stack_depth(&self) -> usize {
+        self.active_function_profiler
+            .as_ref()
+            .map(|profiler| profiler.calls.len())
+            .unwrap_or(0)
+    }
+
+    fn unwind_profile_stack(&mut self, depth: usize) {
+        while self.profile_stack_depth() > depth {
+            self.profile_exit_chunk();
+        }
+    }
+
     pub fn take_last_reactive_error_context(&mut self) -> Option<String> {
         self.last_reactive_error_context.take()
     }
@@ -6526,9 +6735,11 @@ impl VM {
                             self.current_effect_symbol_reads = Some(HashSet::new());
                             let label = self.reactive_node_label(node_id);
                             let started = Instant::now();
+                            let profile_started = self.begin_function_profile();
                             self.tracking_stack.push(node_id);
                             let render_result = self.render_registered_subtree_owner(&owner);
                             let _ = self.tracking_stack.pop();
+                            self.finish_function_profile(profile_started, Some(root_id));
                             let rendered_tree = render_result.map_err(|error| {
                                 self.last_reactive_error_context =
                                     label.clone().or_else(|| Some(format!("node:{node_id}")));
@@ -6641,7 +6852,15 @@ impl VM {
                     }
                     let label = self.reactive_node_label(node_id);
                     let started = Instant::now();
+                    let profile_started = self.begin_function_profile();
                     let execute_result = self.execute_from(chunk_idx);
+                    self.finish_function_profile(
+                        profile_started,
+                        self.dag.nodes.get(&node_id).and_then(|node| match node {
+                            ReactiveNode::Effect { subtree_root_id, .. } => *subtree_root_id,
+                            _ => None,
+                        }),
+                    );
                     if capturing_effect_reads {
                         let _ = self.tracking_stack.pop();
                     }
@@ -6767,7 +6986,24 @@ impl VM {
         self.execute_with_frames(vec![self.new_frame()])
     }
 
-    fn execute_with_frames(&mut self, mut frames: Vec<Frame>) -> Result<Option<Value>, VMError> {
+    fn execute_with_frames(&mut self, frames: Vec<Frame>) -> Result<Option<Value>, VMError> {
+        if self.active_function_profiler.is_some() {
+            let profile_depth = self.profile_stack_depth();
+            for frame in &frames {
+                self.profile_enter_chunk(frame.chunk_idx);
+            }
+            let result = self.execute_with_frames_impl::<true>(frames);
+            self.unwind_profile_stack(profile_depth);
+            result
+        } else {
+            self.execute_with_frames_impl::<false>(frames)
+        }
+    }
+
+    fn execute_with_frames_impl<const PROFILE: bool>(
+        &mut self,
+        mut frames: Vec<Frame>,
+    ) -> Result<Option<Value>, VMError> {
         let mut stack: Vec<Rc<RefCell<Value>>> = vec![];
 
         while frames.last().unwrap().pc < self.chunks[self.current_chunk].ops.len() {
@@ -7531,6 +7767,9 @@ impl VM {
                                     *slot = stack.pop();
                                 }
                                 frames.last_mut().unwrap().pc += 1;
+                                if PROFILE {
+                                    self.profile_enter_chunk(chunk_idx);
+                                }
                                 frames.push(frame);
                             }
                             Value::NativeFunction(native) => {
@@ -7687,6 +7926,9 @@ impl VM {
                 },
                 OpCode::Return => match stack.pop() {
                     Some(return_value) => {
+                        if PROFILE {
+                            self.profile_exit_chunk();
+                        }
                         frames.pop();
                         if let Some(caller_frame) = frames.last() {
                             self.current_chunk = caller_frame.chunk_idx;
@@ -7723,6 +7965,47 @@ mod tests {
         SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, STABLE_KEY_PROP, VM,
         VMError, Value, debug_assert_cell_not_frozen, freeze_widget_tree,
     };
+
+    #[test]
+    fn lisp_function_profiler_attributes_nested_calls_by_chunk_name() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.eval_str(
+            "(def profile-inner (x) (+ x 1))\n\
+             (def profile-outer (x) (profile-inner (profile-inner x)))",
+        )
+        .expect("compile profile fixture");
+        vm.function_profile_filter = Some("*fx*".to_string());
+        vm.current_effect_target = EffectTarget::BufferName("*fx*".to_string());
+
+        assert!(vm.begin_function_profile());
+        let callable = vm.global_value("profile-outer").expect("profile-outer");
+        assert_eq!(
+            vm.invoke(callable, vec![Value::Number(1.0)])
+                .expect("invoke profile fixture"),
+            Some(Value::Number(3.0)),
+        );
+        vm.finish_function_profile(true, None);
+
+        let profiles = vm.take_reactive_function_profiles();
+        assert_eq!(profiles.len(), 1);
+        let profile = &profiles[0];
+        assert_eq!(profile.target, EffectTarget::BufferName("*fx*".to_string()));
+        let outer = profile
+            .functions
+            .iter()
+            .find(|timing| timing.function.ends_with("profile-outer"))
+            .expect("outer attribution");
+        let inner = profile
+            .functions
+            .iter()
+            .find(|timing| timing.function.ends_with("profile-inner"))
+            .expect("inner attribution");
+        assert_eq!(outer.calls, 1);
+        assert_eq!(inner.calls, 2);
+        assert!(outer.inclusive_time >= outer.self_time);
+        assert!(inner.inclusive_time >= inner.self_time);
+    }
 
     fn hook_test_vm() -> (VM, Rc<RefCell<Vec<f64>>>) {
         let mut vm = VM::new(Vec::new());

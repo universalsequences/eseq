@@ -80,6 +80,42 @@ dirty widgets, relayouts, and primitive runs rebuilt. Counts often expose the
 root cause more clearly than elapsed time. Remove noisy ad hoc logging when the
 investigation is complete, or turn generally useful data into a compact trace.
 
+### Built-in profiling switches
+
+The profiling switches are independent and may be combined:
+
+- `ESEQLISP_PROFILE_UI=1` prints one-second runtime/render aggregates and hot
+  reactive effects.
+- `ESEQLISP_TRACE_UI=1` prints individual reactive cycles;
+  `ESEQLISP_TRACE_UI_FILTER` limits the dirty fields shown.
+- `ESEQLISP_PROFILE_CLONES=1` prints the VM's clone counters once per second.
+- `ESEQLISP_PROFILE_LISP=1` instruments Lisp calls made by the `*fx*` reactive
+  root and prints the 15 functions with the most exclusive (self) time after
+  each rerun. Set the value to another buffer name, such as `*sequencer*`, to
+  profile that root, or to `all` to profile every reactive target.
+
+A Lisp profile record has this form:
+
+```text
+[lisp-profile] target=*fx* root=- total=14.972ms ranked=[1:custom-ui-lego-knob self=3.181ms incl=4.925ms calls=52, ...]
+```
+
+`self` excludes time in called Lisp functions; `incl` includes it. Native work
+is charged to the Lisp function that invoked the native. Anonymous closures are
+reported as `<anonymous:file#chunk>`, while named chunks use their Lisp function
+name. The profiler is call instrumentation rather than a statistical OS CPU
+sampler, so enabled timings include profiler overhead and should be used for
+attribution, not latency baselines. When the switch is unset, the VM selects an
+uninstrumented execution-loop specialization once per execution entry: it does
+not read the clock, allocate profile state, or branch per opcode or Lisp call.
+Run the release drift probe with attribution using:
+
+```sh
+ESEQLISP_PROFILE_LISP=1 cargo nextest run -p sequencer --release \
+  --run-ignored only --no-capture \
+  -E 'test(=tests::drift_same_instrument_track_switch_end_to_end_perf)'
+```
+
 ## 5. Fix the unnecessary work at its owner
 
 Optimize the earliest architectural cause, not the slow fixture. Typical fixes

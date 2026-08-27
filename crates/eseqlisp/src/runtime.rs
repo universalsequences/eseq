@@ -88,6 +88,7 @@ pub struct UiInvalidationTrace {
     pub reactive_flush_duration: Duration,
     pub reactive_cycle_duration: Duration,
     pub reactive_exec_timings: Vec<(String, Duration)>,
+    pub reactive_function_profiles: Vec<crate::vm::ReactiveFunctionProfile>,
     pub relayout_mode: Option<String>,
     pub relayout_duration: Duration,
     pub relayout_failure_reason: Option<String>,
@@ -2910,6 +2911,7 @@ impl Runtime {
             Ok(()) => {
                 let apply_elapsed = apply_started.elapsed();
                 let exec_timings = self.vm.take_reactive_exec_timings();
+                let function_profiles = self.vm.take_reactive_function_profiles();
                 self.flush_vm_reactive_sets();
                 if self.sync_theme_to_global {
                     self.sync_theme_from_vm();
@@ -2921,6 +2923,7 @@ impl Runtime {
                         .iter()
                         .map(|timing| (timing.profile_label(), timing.elapsed))
                         .collect(),
+                    reactive_function_profiles: function_profiles,
                     ..UiInvalidationTrace::default()
                 });
                 let flush_started = Instant::now();
