@@ -2907,6 +2907,17 @@ impl Runtime {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_context(current_buffer_id);
         let dirty = self.reactive_registry.drain_dirty();
+        // Deferred effects for hidden buffers stay in the DAG's dirty set
+        // indefinitely, so `process_dirty_reactive` would pay a full
+        // `topo_sort_dirty` every idle cycle to produce no work. Skip that
+        // unless a deferred effect's target has become visible, which is the
+        // only reason an empty-dirty cycle has anything to do.
+        if dirty.is_empty() && !self.vm.has_visible_deferred_effects() {
+            if trace_ui_enabled() {
+                eprintln!("[ui-trace][reactive-cycle] dirty=[] no-op");
+            }
+            return;
+        }
 
         let dirty_len = dirty.len();
         let dirty_fields = dirty

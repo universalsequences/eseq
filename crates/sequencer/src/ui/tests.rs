@@ -4687,6 +4687,7 @@
                                         selection: &neural_selection,
                                         expanded_step_projection: &expanded_step_projection,
                                         track: TRACK,
+                                        current_track_idx: TRACK,
                                         param_idx,
                                         display_step,
                                         sync_plock_list: plock && !plock_row_existed,

@@ -631,6 +631,16 @@ thread_local! {
         RefCell::new(HashMap::new());
     static SEALED_ANNOTATION_PRUNE_THRESHOLD: std::cell::Cell<usize> =
         const { std::cell::Cell::new(4096) };
+    /// Registry size, mirrored in a `Cell` so the per-write guard can skip the
+    /// `RefCell` borrow and the hash lookup entirely while nothing is sealed
+    /// (the guard runs on every reactive/field write, including knob drags).
+    static SEALED_ANNOTATION_INPUT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// Set when a release build *tolerated* a write into a sealed render
+    /// (debug builds panic instead). The identity memo behind the annotation
+    /// cache is no longer trustworthy, so the VM drops its cached renders.
+    static SEALED_ANNOTATION_VIOLATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// Register every list/map cell reachable from `tree` as frozen. Idempotent
@@ -703,6 +713,7 @@ fn seal_widget_tree_annotation_input(tree: &Value) {
             }
         });
         seal_annotation_value_cells(tree, &mut cells);
+        SEALED_ANNOTATION_INPUT_COUNT.with(|count| count.set(cells.len()));
     });
 }
 
@@ -740,21 +751,48 @@ fn seal_annotation_cell(
     seal_annotation_value_cells(&cell.borrow(), cells);
 }
 
-fn panic_if_sealed_annotation_input(cell: &Rc<RefCell<Value>>, context: &'static str) {
-    SEALED_ANNOTATION_INPUT_CELLS.with(|cells| {
+/// Report a write into a sealed annotation-cache input.
+///
+/// Debug builds panic: engine code must deep-clone before mutating a cached
+/// render. Release builds must not abort the app over user/third-party Lisp
+/// that mutates a map handed to it inside a cached `(subtree :key ...)` render
+/// — that was silently tolerated before the render cache existed. Instead the
+/// cell is unsealed and a violation is recorded so the VM drops its cached
+/// renders (the identity memo they are keyed by is no longer trustworthy).
+#[inline]
+fn check_sealed_annotation_input(cell: &Rc<RefCell<Value>>, context: &'static str) {
+    // Hot path: nothing sealed, so no borrow and no hash lookup.
+    if SEALED_ANNOTATION_INPUT_COUNT.with(|count| count.get()) == 0 {
+        return;
+    }
+    let sealed = SEALED_ANNOTATION_INPUT_CELLS.with(|cells| {
         let mut cells = cells.borrow_mut();
         let ptr = Rc::as_ptr(cell) as usize;
-        match cells.get(&ptr) {
-            Some(sealed) if sealed.strong_count() > 0 => panic!(
-                "widget-tree annotation cache violation: {context} mutating a sealed \
-                 subtree render; render-cache values are immutable"
-            ),
-            Some(_) => {
-                cells.remove(&ptr);
-            }
-            None => {}
-        }
+        // Drop the entry either way: a live one is now knowingly mutated, and a
+        // dead one is a stale address that a new allocation reused.
+        let removed = cells.remove(&ptr);
+        SEALED_ANNOTATION_INPUT_COUNT.with(|count| count.set(cells.len()));
+        removed.is_some_and(|sealed| sealed.strong_count() > 0)
     });
+    if !sealed {
+        return;
+    }
+    #[cfg(debug_assertions)]
+    panic!(
+        "widget-tree annotation cache violation: {context} mutating a sealed \
+         subtree render; render-cache values are immutable"
+    );
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = context;
+        SEALED_ANNOTATION_VIOLATION.with(|flag| flag.set(true));
+    }
+}
+
+/// Take (and clear) the "a sealed render was mutated" flag set by release
+/// builds in [`check_sealed_annotation_input`].
+fn take_sealed_annotation_violation() -> bool {
+    SEALED_ANNOTATION_VIOLATION.with(|flag| flag.replace(false))
 }
 
 /// Panic (debug builds only) if `cell` belongs to a frozen widget tree.
@@ -762,7 +800,7 @@ fn panic_if_sealed_annotation_input(cell: &Rc<RefCell<Value>>, context: &'static
 /// scoped to the subtree it modifies (spec §3.2).
 #[inline]
 pub fn debug_assert_cell_not_frozen(cell: &Rc<RefCell<Value>>, context: &'static str) {
-    panic_if_sealed_annotation_input(cell, context);
+    check_sealed_annotation_input(cell, context);
     #[cfg(debug_assertions)]
     FROZEN_TREE_CELLS.with(|cells| {
         let mut cells = cells.borrow_mut();
@@ -6176,6 +6214,7 @@ impl VM {
         parent_root_id: Option<u64>,
         callable: &Value,
     ) -> Option<Value> {
+        self.drop_render_caches_after_sealed_violation();
         let node_id = self.dag.effect_id_for_subtree_root(root_id)?;
         if self.dag.is_dirty(node_id) {
             return None;
@@ -6233,6 +6272,15 @@ impl VM {
             symbols
         });
         result.map(|value| (value, captured_reactive_reads, captured_symbol_reads))
+    }
+
+    /// Release builds tolerate a write into a sealed render instead of
+    /// aborting; the cached renders are keyed by the cell identity that write
+    /// just invalidated, so drop them all before anything reuses one.
+    fn drop_render_caches_after_sealed_violation(&mut self) {
+        if take_sealed_annotation_violation() {
+            self.subtree_render_cache.clear();
+        }
     }
 
     fn store_subtree_render_cache(
@@ -6973,6 +7021,7 @@ impl VM {
                             // Ancestors' cached trees now embed a stale copy
                             // of this subtree; they must re-render if reused.
                             self.invalidate_ancestor_subtree_render_caches(root_id);
+                            self.drop_render_caches_after_sealed_violation();
                             let mut path = Vec::new();
                             let annotated_tree = annotate_widget_tree_stable_ids(
                                 &rendered_tree,
@@ -8092,6 +8141,7 @@ impl VM {
                 }
                 OpCode::EmitTree => match stack.pop() {
                     Some(tree) => {
+                        self.drop_render_caches_after_sealed_violation();
                         let mut path = Vec::new();
                         let annotated_tree = annotate_widget_tree_stable_ids(
                             &tree.borrow(),
@@ -11087,14 +11137,55 @@ counter
         debug_assert_cell_not_frozen(&label_cell, "test mutation");
     }
 
+    #[cfg(debug_assertions)]
     #[test]
-    fn sealed_annotation_input_rejects_mutation_in_every_build() {
+    #[should_panic(expected = "widget-tree annotation cache violation")]
+    fn sealed_annotation_input_panics_on_mutation_in_debug() {
         let (tree, label_cell) = tree_with_label("sealed");
         super::seal_widget_tree_annotation_input(&tree);
+        debug_assert_cell_not_frozen(&label_cell, "test sealed mutation");
+    }
+
+    /// Release builds must not abort the app over Lisp that mutates a value
+    /// handed to it inside a cached subtree render; they record a violation so
+    /// the VM drops its (now untrustworthy) cached renders instead.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn sealed_annotation_input_mutation_is_tolerated_in_release() {
+        let (tree, label_cell) = tree_with_label("sealed");
+        super::seal_widget_tree_annotation_input(&tree);
+        assert!(!super::take_sealed_annotation_violation());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             debug_assert_cell_not_frozen(&label_cell, "test sealed mutation");
         }));
-        assert!(result.is_err(), "sealed render-cache input must be immutable");
+        assert!(result.is_ok(), "release builds must tolerate the write");
+        assert!(
+            super::take_sealed_annotation_violation(),
+            "the violation must be recorded so cached renders are dropped"
+        );
+        assert!(
+            !super::take_sealed_annotation_violation(),
+            "taking the violation clears it"
+        );
+    }
+
+    /// The guard runs on every reactive/field write, so the sealed-cell count
+    /// must gate it: with nothing sealed there is no registry work at all, and
+    /// an unsealed cell never disturbs the registry.
+    #[test]
+    fn unsealed_cell_mutation_leaves_the_sealed_registry_alone() {
+        let count = || super::SEALED_ANNOTATION_INPUT_COUNT.with(|count| count.get());
+        let (_unsealed_tree, unsealed_cell) = tree_with_label("unsealed");
+        assert_eq!(count(), 0, "nothing is sealed on a fresh thread");
+        debug_assert_cell_not_frozen(&unsealed_cell, "test mutation");
+        assert_eq!(count(), 0);
+
+        let (sealed_tree, _sealed_cell) = tree_with_label("sealed");
+        super::seal_widget_tree_annotation_input(&sealed_tree);
+        let sealed_count = count();
+        assert!(sealed_count > 0);
+        debug_assert_cell_not_frozen(&unsealed_cell, "test mutation");
+        assert_eq!(count(), sealed_count, "an unsealed cell is not registered");
     }
 
     #[test]

@@ -1775,6 +1775,7 @@ pub(super) fn handle(
                             &selected_steps,
                             &neural_selection,
                             track,
+                            current_track.load(Ordering::Relaxed),
                             &param_indices,
                             display_step,
                             plocks_changed,

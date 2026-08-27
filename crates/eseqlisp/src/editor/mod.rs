@@ -2982,9 +2982,16 @@ impl Editor {
                 self.buffers[new_buffer_idx].view_mode = ViewMode::UiOnly;
             }
             self.record_buffer_access_by_idx(new_buffer_idx);
+            // Re-syncs the hidden-effect buffer set for the new selection.
             self.sync_runtime_context();
             self.restore_buffer_widget_tree();
             self.refresh_inactive_tile_layouts_for_buffer(new_buffer_idx);
+            // A cross-tile click already resumed inside
+            // `switch_active_tile_with_viewport`, but that ran before
+            // `leaf.buffer_idx` moved to the clicked tab, so it could not see
+            // this buffer. Resume here, after the swap is complete, like every
+            // other presentation path.
+            self.resume_deferred_effects_for_presentation();
         } else {
             self.active_leaf_mut().selected_tab = Some(tab_index);
         }

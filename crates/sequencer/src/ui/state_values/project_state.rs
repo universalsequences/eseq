@@ -408,11 +408,12 @@ pub(crate) fn load_instrument_preset_into_track(
 ) -> Result<(), String> {
     let instrument_name = current_custom_instrument_name(app, track)
         .ok_or_else(|| "Current track is not a custom instrument".to_string())?;
-    let presets = sequencer::lisp_host::load_instrument_presets(&instrument_name)
+    let presets = sequencer::lisp_host::load_instrument_presets_shared(&instrument_name)
         .map_err(|e| e.to_string())?;
     let preset = presets
-        .into_iter()
+        .iter()
         .find(|preset| preset.name == preset_name)
+        .cloned()
         .ok_or_else(|| format!("Preset '{preset_name}' not found"))?;
     let desc = app
         .graph

@@ -114,6 +114,38 @@ fn sync_fx_param_bindings_delta(
     dirty
 }
 
+/// The slice of fx panel publication that buffers other than `*fx*` read:
+/// `*samples*` and `*macro-mappings*` read `SEQ.instrument-panel`
+/// (content/ui/browser.lisp `rack-panel-open?`, content/ui/macros.lisp), and
+/// `*metal*` reads `SEQ.step-has-plocks` (content/ui/step-grid.lisp). These
+/// must stay current for the selected track even while `*fx*` is hidden.
+pub(super) fn sync_shared_panel_state(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: Option<usize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    structural: bool,
+) {
+    let instrument_panel = track.map_or_else(
+        || Value::List(vec![]),
+        |track| build_instrument_panel_value(app, track, selected_steps),
+    );
+    if structural {
+        rt.set_reactive("SEQ", "instrument-panel", instrument_panel);
+    } else {
+        rt.set_reactive_value_patch("SEQ", "instrument-panel", instrument_panel);
+    }
+    rt.set_reactive(
+        "SEQ",
+        "step-has-plocks",
+        track.map_or_else(
+            || Value::List(vec![]),
+            |track| build_step_has_plocks(state, track, &app.graph.effect_descriptors),
+        ),
+    );
+}
+
 pub(super) fn sync_fx_panel_state(
     rt: &mut Runtime,
     app: &app::App,
@@ -145,22 +177,7 @@ pub(super) fn sync_fx_panel_state(
             |track| build_midi_effects_value(state, track, selected_steps),
         ),
     );
-    publish(
-        rt,
-        "instrument-panel",
-        track.map_or_else(
-            || Value::List(vec![]),
-            |track| build_instrument_panel_value(app, track, selected_steps),
-        ),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "step-has-plocks",
-        track.map_or_else(
-            || Value::List(vec![]),
-            |track| build_step_has_plocks(state, track, &app.graph.effect_descriptors),
-        ),
-    );
+    sync_shared_panel_state(rt, app, state, track, selected_steps, structural);
     publish(
         rt,
         "bus-effects",
@@ -459,14 +476,34 @@ pub(crate) fn reactive_tick_and_render(
                     &ctx.shared.selected_steps,
                     true,
                 );
-            } else if fx_ep == ctx.frame.prev_fx_epoch {
-                // No structural fx revision is pending, yet the panel was not
-                // rebuilt above — either *fx* is hidden, or only a value
-                // revision is pending (a value patch cannot carry the new
-                // owner's panel STRUCTURE). Bump fx_epoch so the fx-epoch
-                // branch rebuilds structurally: this frame if visible, else
-                // on the first frame *fx* is shown again.
-                ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+            } else {
+                if !fx_visible {
+                    // Both this frame's publication and the fx-epoch catch-up
+                    // branch below are gated on *fx* visibility, so nothing
+                    // else refreshes the panel state that non-*fx* buffers
+                    // read (*samples* / *macro-mappings* read
+                    // SEQ.instrument-panel, *metal* reads
+                    // SEQ.step-has-plocks). Publish that slice for the new
+                    // track now; the heavier *fx*-only lists still wait for
+                    // *fx* to be shown.
+                    sync_shared_panel_state(
+                        rt,
+                        &app,
+                        &ctx.shared.state,
+                        Some(ct),
+                        &ctx.shared.selected_steps,
+                        true,
+                    );
+                }
+                if fx_ep == ctx.frame.prev_fx_epoch {
+                    // No structural fx revision is pending, yet the panel was
+                    // not rebuilt above — either *fx* is hidden, or only a
+                    // value revision is pending (a value patch cannot carry
+                    // the new owner's panel STRUCTURE). Bump fx_epoch so the
+                    // fx-epoch branch rebuilds structurally: this frame if
+                    // visible, else on the first frame *fx* is shown again.
+                    ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+                }
             }
             sync_sidebar_browser(rt, &app, ct);
             ctx.frame.prev_current_track = ct;

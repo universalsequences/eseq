@@ -464,6 +464,16 @@ struct PresetBankCacheKey {
     instrument_name: String,
 }
 
+/// Preset banks keyed by resolved path, with no freshness check on a warm hit:
+/// a hit costs one hash lookup and an `Arc` clone, never a `stat`. Staleness is
+/// therefore handled by *explicit* invalidation — every write path in this
+/// process (preset saves, instrument-source saves, instrument moves, and the
+/// patch-fork bank materialization via
+/// [`invalidate_instrument_preset_bank_cache_at`]) drops the affected entry.
+/// Edits made by another process to a bank this process has already read are
+/// not observed until something invalidates it. Missing banks are deliberately
+/// *not* cached, so a bank that appears later (a fork, an external copy) is
+/// picked up without an invalidation hook.
 #[derive(Default)]
 struct PresetBankCache {
     resolved_paths: std::collections::HashMap<PresetBankCacheKey, PathBuf>,
@@ -486,6 +496,11 @@ impl PresetBankCache {
     ) {
         self.resolved_paths.insert(key, path.clone());
         self.banks.insert(path, presets);
+    }
+
+    fn invalidate_path(&mut self, path: &Path) {
+        self.banks.remove(path);
+        self.resolved_paths.retain(|_, resolved| resolved != path);
     }
 
     fn invalidate_key_and_path(&mut self, key: &PresetBankCacheKey, path: Option<&Path>) {
@@ -545,7 +560,12 @@ fn cached_instrument_presets_with_paths(
             })?;
             bank.presets
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        // An absent bank is not cached: there is no entry to invalidate later,
+        // so caching it would make "this instrument has no presets" permanent
+        // for the life of the process even after a bank appears on disk.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(std::sync::Arc::new(Vec::new()));
+        }
         Err(e) => return Err(e),
     };
     let presets = std::sync::Arc::new(presets);
@@ -557,8 +577,27 @@ fn cached_instrument_presets(name: &str) -> io::Result<std::sync::Arc<Vec<Instru
     cached_instrument_presets_with_paths(crate::app_paths::app_paths(), name)
 }
 
+/// Shared, read-only view of an instrument's preset bank. Prefer this over
+/// [`load_instrument_presets`] wherever the bank is only read: a warm call is an
+/// `Arc` clone instead of a deep clone of every preset's parameter maps.
+pub fn load_instrument_presets_shared(
+    name: &str,
+) -> io::Result<std::sync::Arc<Vec<InstrumentPreset>>> {
+    cached_instrument_presets(name)
+}
+
+/// Owned copy of an instrument's preset bank, for callers that mutate it before
+/// saving it back. Read-only callers want [`load_instrument_presets_shared`].
 pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> {
     Ok(cached_instrument_presets(name)?.as_ref().clone())
+}
+
+/// Drop any cached preset bank read from `path`. Write paths that bypass
+/// [`save_instrument_presets`] (the patch-fork bank materialization) must call
+/// this after writing, so cache correctness does not depend on some other call
+/// in the same sequence happening to invalidate the same key first.
+pub fn invalidate_instrument_preset_bank_cache_at(path: &Path) {
+    preset_bank_cache().lock().unwrap().invalidate_path(path);
 }
 
 pub fn load_instrument_preset_names(name: &str) -> io::Result<Vec<String>> {
@@ -1196,6 +1235,67 @@ mod tier_id_tests {
             .lock()
             .unwrap()
             .invalidate_key_and_path(&key, None);
+    }
+
+    #[test]
+    fn a_missing_preset_bank_is_not_cached_as_a_permanent_empty_bank() {
+        let (paths, root) = test_paths("missing-preset-bank");
+        let instrument_name = "user:cache/missing";
+        write_folder_instrument(&paths.user_instruments_dir(), "cache/missing", "initial");
+
+        assert!(
+            cached_instrument_presets_with_paths(&paths, instrument_name)
+                .unwrap()
+                .is_empty(),
+            "an instrument with no bank on disk reads as empty"
+        );
+
+        let bank_path = instrument_preset_path_with_paths(&paths, instrument_name).unwrap();
+        std::fs::create_dir_all(bank_path.parent().unwrap()).unwrap();
+        write_preset_bank(&bank_path, instrument_name, &["Appeared"]);
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name).unwrap()[0].name,
+            "Appeared",
+            "a bank that appears after a miss must be picked up without an explicit invalidation"
+        );
+
+        let key = preset_bank_cache_key(&paths, instrument_name);
+        preset_bank_cache()
+            .lock()
+            .unwrap()
+            .invalidate_key_and_path(&key, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalidating_a_bank_path_drops_the_warm_entry_for_out_of_band_writers() {
+        let (paths, root) = test_paths("invalidate-bank-path");
+        let instrument_name = "user:cache/out-of-band";
+        write_folder_instrument(&paths.user_instruments_dir(), "cache/out-of-band", "initial");
+        save_instrument_presets_with_paths(&paths, instrument_name, &[preset("Before")]).unwrap();
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name).unwrap()[0].name,
+            "Before"
+        );
+
+        // Stand in for patch_fork::finalize, which writes a fork's bank with a
+        // raw fs::write and then invalidates the path it wrote.
+        let bank_path = instrument_preset_path_with_paths(&paths, instrument_name).unwrap();
+        write_preset_bank(&bank_path, instrument_name, &["After"]);
+        invalidate_instrument_preset_bank_cache_at(&bank_path);
+
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name).unwrap()[0].name,
+            "After",
+            "invalidating the written path must drop the warm bank"
+        );
+
+        let key = preset_bank_cache_key(&paths, instrument_name);
+        preset_bank_cache()
+            .lock()
+            .unwrap()
+            .invalidate_key_and_path(&key, None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -508,10 +508,17 @@ The selecting native's already-pending structural fx revision owns the effects,
 MIDI effects, instrument panel, step p-lock flags, and bus effects, instead of
 rebuilding them once in the track branch and again in the fx-epoch branch.
 
-Instrument preset banks are cached by resolved path plus file size/mtime. The
-sidebar's names-only query therefore stats and clones names from the cached bank
-instead of reading and parsing Drift's 132 KB JSON bank on every switch; saves
-invalidate the cache explicitly.
+Instrument preset banks are cached by resolved path, with no freshness check on
+a warm hit: a hit is a hash lookup plus an `Arc` clone, never a `stat`. Cache
+correctness comes from explicit invalidation instead — preset saves, instrument
+source saves, instrument moves, and the patch-fork bank materialization all drop
+the affected entry, and a bank that is missing at read time is not cached at all
+so one that appears later is still picked up. Edits made to a bank by another
+process, after this process has read it, are not observed until something
+invalidates it. The sidebar's names-only query therefore clones just the names
+out of the cached bank instead of reading and parsing Drift's 132 KB JSON bank
+on every switch, and read-only callers take the shared `Arc`
+(`load_instrument_presets_shared`) rather than deep-cloning the bank.
 
 Same-machine before/after (Apple M1 Max, 2026-08-26, medians at 832f073a vs
 this change): `track_switch_ms` fell from **4.20/4.08/3.19/3.09 ms** to

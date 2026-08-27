@@ -1430,9 +1430,8 @@ pub(super) fn metal_agent_instrument_preset_schema(
     let instrument_name = instrument_name?;
     let desc = app.graph.instrument_descriptors.get(track)?;
     let slot = app.state.pattern.instrument_slots.get(track)?;
-    let existing_presets = sequencer::lisp_host::load_instrument_presets(instrument_name)
-        .map(|presets| presets.into_iter().map(|preset| preset.name).collect())
-        .unwrap_or_default();
+    let existing_presets =
+        sequencer::lisp_host::load_instrument_preset_names(instrument_name).unwrap_or_default();
 
     let mut params = Vec::new();
     for (idx, param) in desc.params.iter().enumerate() {

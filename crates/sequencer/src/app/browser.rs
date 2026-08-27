@@ -227,11 +227,7 @@ impl App {
             let Some(name) = self.current_custom_instrument_name() else {
                 return Vec::new();
             };
-            lisp_host::load_instrument_presets(name)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|preset| preset.name)
-                .collect::<Vec<_>>()
+            lisp_host::load_instrument_preset_names(name).unwrap_or_default()
         };
         items.sort();
         if self.preset_browser.filter.is_empty() {

@@ -8091,6 +8091,29 @@
             .runtime_mut()
             .eval_str("(set! eseq.effects.state/instrument-mods-open false)")
             .expect("close the mods editor");
+
+        // A stored value can be far outside the options list (a synced Delay
+        // time keeps milliseconds while its options list holds divisions).
+        // `nth` past the end returns nil and the dropdown renders "nil", so the
+        // index must be clamped like the old Rust builder clamped it.
+        for (stored, expected) in [(250.0, "bandpass"), (-4.0, "lowpass")] {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "fx-instrument-param-0-mode",
+                Value::Number(stored),
+            );
+            let label = editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(eseq.effects.param-controls/fx-param-text-value-for false {bound_param})"
+                ))
+                .expect("read out-of-range enum label");
+            assert_eq!(
+                label,
+                Some(Value::String(expected.to_string())),
+                "stored value {stored} must clamp into the options list"
+            );
+        }
     }
 
     fn test_sampler_instrument_map(
@@ -10090,8 +10113,20 @@
     }
 
     fn test_app_with_instrument_descriptor(desc: sequencer::effects::EffectDescriptor) -> app::App {
-        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
-        state.pattern.instrument_slots[0].apply_descriptor(&desc, 0);
+        test_app_with_instrument_descriptor_on_tracks(desc, 1)
+    }
+
+    fn test_app_with_instrument_descriptor_on_tracks(
+        desc: sequencer::effects::EffectDescriptor,
+        track_count: usize,
+    ) -> app::App {
+        let state = Arc::new(SequencerState::new(
+            track_count,
+            (0..track_count).map(|_| Vec::new()).collect(),
+        ));
+        for track in 0..track_count {
+            state.pattern.instrument_slots[track].apply_descriptor(&desc, 0);
+        }
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = app::App::new(
             state,
@@ -10108,11 +10143,160 @@
             Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
             keyboard_tx,
         );
-        app.tracks = vec!["Track 1".to_string()];
+        app.tracks = (0..track_count)
+            .map(|track| format!("Track {}", track + 1))
+            .collect();
         app.track_registry =
-            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-        app.graph.instrument_descriptors = vec![desc];
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(track_count).unwrap();
+        app.graph.instrument_descriptors = vec![desc; track_count];
         app
+    }
+
+    /// A parameter batch names its own track (the host command reads it off
+    /// the payload), which need not be the track the *fx* panel is showing.
+    /// The current-track-relative `fx-instrument-param-*` fields belong to the
+    /// visible panel, so a batch for another track must leave them alone —
+    /// otherwise the visible knobs snap to the other track's values. Mirrors
+    /// the `track == current_track_idx` guard in `apply_ui_invalidations`.
+    #[test]
+    fn instrument_param_batch_display_skips_fx_fields_for_a_non_current_track() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let cutoff_name = desc.params[cutoff_idx].name.clone();
+        let app = test_app_with_instrument_descriptor_on_tracks(desc, 2);
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(cutoff_idx, 5000.0);
+        app.state.pattern.instrument_slots[1]
+            .defaults
+            .set(cutoff_idx, 1234.0);
+        let state = app.state.clone();
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let selection = std::collections::BTreeSet::new();
+        let fx_field = fx_instrument_param_value_field(cutoff_idx, &cutoff_name);
+        let track_1_field = instrument_param_value_field(1, cutoff_idx, &cutoff_name);
+        let mut editor =
+            eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+
+        reactive_sync::sync_instrument_param_batch_display(
+            &mut editor,
+            &app,
+            &state,
+            &selected_steps,
+            &selection,
+            1,
+            0,
+            &[cutoff_idx],
+            None,
+            false,
+        );
+        assert_eq!(
+            reactive_number(editor.runtime(), "SEQ", &track_1_field),
+            Some(1234.0),
+            "the track-addressed field always publishes"
+        );
+        assert_eq!(
+            reactive_number(editor.runtime(), "SEQ", &fx_field),
+            None,
+            "track 1's value must not reach the panel showing track 0"
+        );
+
+        reactive_sync::sync_instrument_param_batch_display(
+            &mut editor,
+            &app,
+            &state,
+            &selected_steps,
+            &selection,
+            1,
+            1,
+            &[cutoff_idx],
+            None,
+            false,
+        );
+        assert_eq!(
+            reactive_number(editor.runtime(), "SEQ", &fx_field),
+            Some(1234.0),
+            "the panel showing track 1 does get the fx-relative field"
+        );
+    }
+
+    fn reactive_field(runtime: &Runtime, namespace: &str, field: &str) -> Option<Value> {
+        let Some(Value::Map(map)) = runtime.global_value(namespace) else {
+            return None;
+        };
+        map.get(field).map(|value| value.borrow().clone())
+    }
+
+    /// Buffers other than `*fx*` read a slice of the fx panel publication:
+    /// `*samples*` and `*macro-mappings*` read `SEQ.instrument-panel`,
+    /// `*metal*` reads `SEQ.step-has-plocks`. The track-switch path publishes
+    /// that slice even while `*fx*` is hidden, so it must be exactly this
+    /// helper — and the full fx sync must still cover the same two fields.
+    #[test]
+    fn shared_panel_state_publishes_only_what_non_fx_buffers_read() {
+        let app = test_app_with_instrument_descriptor(
+            sequencer::effects::EffectDescriptor::builtin_filter(),
+        );
+        app.state.pattern.track_params[0].set_num_steps(16);
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], true);
+
+        super::super::reactive_tick::sync_shared_panel_state(
+            &mut runtime,
+            &app,
+            &app.state,
+            Some(0),
+            &selected_steps,
+            true,
+        );
+
+        let panel = reactive_field(&runtime, "SEQ", "instrument-panel")
+            .expect("the sidebars' instrument panel must be published while *fx* is hidden");
+        assert!(
+            matches!(&panel, Value::List(items) if !items.is_empty()),
+            "instrument-panel should carry the track's instrument: {panel:?}"
+        );
+        let plocks = reactive_field(&runtime, "SEQ", "step-has-plocks")
+            .expect("the step grid's p-lock flags must be published while *fx* is hidden");
+        assert!(
+            matches!(&plocks, Value::List(items) if items.len() >= 16),
+            "step-has-plocks should cover the track's steps: {plocks:?}"
+        );
+        for fx_only in ["effects", "midi-effects", "bus-effects"] {
+            assert!(
+                reactive_field(&runtime, "SEQ", fx_only).is_none(),
+                "{fx_only} is read only by *fx*, so the shared slice must skip it"
+            );
+        }
+
+        // Parity: the full sync is still a superset of the shared slice.
+        let mut fx_runtime = Runtime::new();
+        fx_runtime.register_reactive("SEQ", vec![], true);
+        super::super::reactive_tick::sync_fx_panel_state(
+            &mut fx_runtime,
+            &app,
+            &app.state,
+            Some(0),
+            &selected_steps,
+            true,
+        );
+        for field in [
+            "instrument-panel",
+            "step-has-plocks",
+            "effects",
+            "midi-effects",
+            "bus-effects",
+        ] {
+            assert!(
+                reactive_field(&fx_runtime, "SEQ", field).is_some(),
+                "the fx sync must still publish {field}"
+            );
+        }
     }
 
     #[test]
