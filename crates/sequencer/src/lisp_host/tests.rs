@@ -8847,6 +8847,53 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_gate_route_word_scales_note_and_control_durations() {
+        // (gate s) multiplies every event gate by s as a post op: note
+        // durations shrink, and control-route hold windows shrink with them.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "gate4" :16
+                 . .
+                 -> 0 (gate 0.5)
+                 -> 1 (dur 0.25)
+                 -> (mute 3) (gate 0.5))"#,
+        )
+        .expect("jak with gate route word");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        generators.process_block_with_controls(
+            0.0,
+            0.5,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+            &mut controls,
+        );
+
+        // base gate is 4/5 unit = 0.2 beats; (gate 0.5) halves it, the `dur`
+        // alias quarters it
+        let durs = |track: usize| -> Vec<f64> {
+            out.iter()
+                .filter(|e| e.event.track == Some(track))
+                .map(|e| e.event.resolved.duration as f64)
+                .collect()
+        };
+        assert_close(&durs(0), &[0.1, 0.1]);
+        assert_close(&durs(1), &[0.05, 0.05]);
+
+        // the mute holds shrink identically: 0.1 beats = 4800 samples
+        assert_eq!(controls.len(), 2);
+        for control in &controls {
+            assert_eq!(control.release_sample, control.engage_sample + 4_800);
+        }
+    }
+
+    #[test]
     fn jaki_seq_emit_control_validates_argument_shape() {
         // Native errors follow the seq-emit contract: report a status and
         // return false with nothing emitted. The tick encodes each call's

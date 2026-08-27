@@ -638,6 +638,16 @@
     (map (lambda (e) (merge e :gate (r-min (get e :gate) (rat 1 4))))
          (get res :events))))
 
+;; gate scale as a post op: multiply every gate by s (resolved per cycle,
+;; rationalized over 96, clamped at 0). Route words `(gate s)` / `(dur s)`
+;; land here, in authored word order like stac — `left (gate 0.5)` scales the
+;; filter-extended gates, `(gate 0.5) left` scales before the extension.
+(def apply-gate-scale (res s)
+  (let ((scale (rat (round-int (* (max 0 s) 96)) 96)))
+    (merge res :events
+      (map (lambda (e) (merge e :gate (r* (get e :gate) scale)))
+           (get res :events)))))
+
 (def apply-post-one (res op cycle)
   (let ((h (first op)))
     (match h
@@ -645,6 +655,7 @@
       :shift (apply-shift res (round-int (resolve-arg (nth op 1) cycle)))
       :for-hand (apply-for-hand res (nth op 1) (nth op 2) cycle)
       :stac (apply-stac res)
+      :gate (apply-gate-scale res (resolve-arg (nth op 1) cycle))
       :quant (apply-quant res (nth op 1))
       :every (if (every-active? (round-int (resolve-arg (nth op 1) cycle)) cycle)
                  (apply-post-one res (nth op 2) cycle)
@@ -868,6 +879,8 @@
 ;;   (shift n) (rot n) (trunc n) (every n t) (for-hand h t)
 ;;   (fast n) (slow n) — n may be (cyc …) for conditional retiming
 ;;   (vel s) (note n)
+;;   (gate s) / (dur s) — multiply every gate by s (per-cycle arg: number,
+;;   (cyc …), (chan …)); applies in authored word order like stac
 ;; A route whose destination is (mute T) or (solo T) — T a track number or
 ;; (group "name") — is a CONTROL route: events become timed mute/solo holds
 ;; instead of notes, and the route word `inv` complements the windows
@@ -891,6 +904,8 @@
   (let ((h (raw-head w)) (args (raw-args w)))
     (match h
       'stac   (list :stac)
+      'gate   (list :gate (nth args 0))
+      'dur    (list :gate (nth args 0))
       'quant  (list :quant (quant-units (nth args 0)))
       'shift  (list :shift (nth args 0))
       'left   (list :filter '(:hand :left))
@@ -925,6 +940,10 @@
       'shift  (merge acc :p (shift (get acc :p) (nth args 0)))
       'fast   (merge acc :p (fast (get acc :p) (nth args 0)))
       'slow   (merge acc :p (slow (get acc :p) (nth args 0)))
+      'gate   (merge acc :p (add-post (get acc :p) (list :gate (nth args 0))
+                                      (str "gate:" (source (nth args 0)))))
+      'dur    (merge acc :p (add-post (get acc :p) (list :gate (nth args 0))
+                                      (str "gate:" (source (nth args 0)))))
       'quant  (let ((q (quant-units (nth args 0))))
                 (merge acc :p (add-post (get acc :p) (list :quant q)
                                         (str "quant:" (source q)))))
