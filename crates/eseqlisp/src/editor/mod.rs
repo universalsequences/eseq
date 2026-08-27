@@ -20,7 +20,7 @@ use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::{LayoutNode, Rect};
 use crate::mode::{
     BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match,
-    has_completion_prefix, highlight_lines,
+    has_completion_prefix, has_import_module_prefix, highlight_lines,
 };
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
@@ -7835,6 +7835,11 @@ impl Editor {
         }
         let symbols = self.runtime.completion_symbols();
         let metadata = self.runtime.completion_metadata();
+        let module_names = if has_import_module_prefix(self.active_buffer()) {
+            self.runtime.module_completions()
+        } else {
+            Vec::new()
+        };
         if Self::trace_completion_enabled() {
             eprintln!(
                 "{} runtime_symbols={} metadata={}",
@@ -7853,6 +7858,7 @@ impl Editor {
             self.active_buffer(),
             &symbols,
             &metadata,
+            &module_names,
         )
         .map(
             |CompletionMatch {

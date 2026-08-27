@@ -2821,6 +2821,85 @@ fn tab_accepts_completion_from_runtime_symbols() {
 }
 
 #[test]
+fn import_completion_discovers_all_configured_roots_and_accepts_dotted_names() {
+    let dir = hot_reload_temp_dir("eseqlisp-import-completion");
+    let user = dir.join("user");
+    let package = dir.join("package");
+    let factory = dir.join("factory");
+    std::fs::create_dir_all(user.join("local")).unwrap();
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::create_dir_all(factory.join("ui")).unwrap();
+    std::fs::write(
+        user.join("local/tools.lisp"),
+        "(module local.tools)\n(export tool)\n(def tool 1)",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("core.lisp"),
+        "(module alez.jaki.core)\n(export core)\n(def core 1)",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("surface.lisp"),
+        "(module alez.jaki.surface)\n(export surface)\n(def surface 1)",
+    )
+    .unwrap();
+    std::fs::write(
+        factory.join("ui/mixer.lisp"),
+        "(module eseq.mixer)\n(export mixer)\n(def mixer 1)",
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new();
+    runtime.set_scoped_module_load_path(vec![
+        crate::ModuleLoadRoot { path: user, module_prefix: None },
+        crate::ModuleLoadRoot {
+            path: package.clone(),
+            module_prefix: Some("alez.jaki".to_string()),
+        },
+        crate::ModuleLoadRoot { path: factory, module_prefix: None },
+    ]);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "(import");
+    editor.active_buffer_mut().cursor = (0, "(import".len());
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    let labels = editor
+        .completion_state()
+        .expect("empty import completion")
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&"alez.jaki"));
+    assert!(labels.contains(&"alez.jaki.core"));
+    assert!(labels.contains(&"alez.jaki.surface"));
+    assert!(labels.contains(&"local.tools"));
+    assert!(labels.contains(&"eseq.mixer"));
+
+    // The filesystem walk is cached: changing the root does not alter the
+    // popup on each subsequent keystroke.
+    std::fs::remove_file(package.join("core.lisp")).unwrap();
+    editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(
+        editor
+            .completion_state()
+            .expect("cached package completion")
+            .items
+            .iter()
+            .any(|item| item.label == "alez.jaki.core")
+    );
+
+    editor.open_scratch_buffer("*accept*", "(import alez.jaki.c");
+    editor.active_buffer_mut().cursor = (0, "(import alez.jaki.c".len());
+    editor.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), "(import alez.jaki.core");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn tab_accepts_contextual_box_keyword_completion() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

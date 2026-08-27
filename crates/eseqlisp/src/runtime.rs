@@ -1272,6 +1272,8 @@ pub struct Runtime {
     symbol_revision: u64,
     cached_completion_symbols: Option<Vec<String>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
+    module_completion_roots: Vec<crate::hot_reload::ModuleLoadRoot>,
+    cached_module_completions: Option<Vec<String>>,
     pub reactive_registry: ReactiveRegistry,
     #[cfg(test)]
     rendered_layouts: Vec<Vec<String>>,
@@ -1308,6 +1310,7 @@ struct RuntimeStateSnapshot {
     symbol_revision: u64,
     cached_completion_symbols: Option<Vec<String>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
+    cached_module_completions: Option<Vec<String>>,
     reactive_registry: ReactiveRegistry,
     current_layout: Option<Arc<LayoutNode>>,
     layout_revision: u64,
@@ -1342,6 +1345,8 @@ impl Runtime {
             symbol_revision: 0,
             cached_completion_symbols: None,
             cached_completion_metadata: None,
+            module_completion_roots: Vec::new(),
+            cached_module_completions: None,
             reactive_registry,
             #[cfg(test)]
             rendered_layouts: Vec::new(),
@@ -2004,6 +2009,7 @@ impl Runtime {
             symbol_revision: self.symbol_revision,
             cached_completion_symbols: self.cached_completion_symbols.clone(),
             cached_completion_metadata: self.cached_completion_metadata.clone(),
+            cached_module_completions: self.cached_module_completions.clone(),
             reactive_registry: self.reactive_registry.clone(),
             current_layout: self.current_layout.clone(),
             layout_revision: self.layout_revision,
@@ -2024,6 +2030,7 @@ impl Runtime {
         self.symbol_revision = snapshot.symbol_revision;
         self.cached_completion_symbols = snapshot.cached_completion_symbols;
         self.cached_completion_metadata = snapshot.cached_completion_metadata;
+        self.cached_module_completions = snapshot.cached_module_completions;
         self.reactive_registry = snapshot.reactive_registry;
         self.current_layout = snapshot.current_layout;
         self.layout_revision = snapshot.layout_revision;
@@ -2047,14 +2054,24 @@ impl Runtime {
     /// `(load …)` root so user modules can shadow package and factory modules
     /// without changing relative loads inside any source file.
     pub fn set_module_load_path(&mut self, roots: Vec<std::path::PathBuf>) {
-        self.vm.source_manager.set_module_load_roots(roots);
+        self.set_scoped_module_load_path(
+            roots
+                .into_iter()
+                .map(|path| crate::hot_reload::ModuleLoadRoot {
+                    path,
+                    module_prefix: None,
+                })
+                .collect(),
+        );
     }
 
     pub fn set_scoped_module_load_path(
         &mut self,
         roots: Vec<crate::hot_reload::ModuleLoadRoot>,
     ) {
-        self.vm.source_manager.set_scoped_module_load_roots(roots);
+        self.vm.source_manager.set_scoped_module_load_roots(roots.clone());
+        self.module_completion_roots = roots;
+        self.invalidate_symbol_cache();
     }
 
     pub fn exclude_module_alias_scan_root(&mut self, root: std::path::PathBuf) {
@@ -3037,6 +3054,16 @@ impl Runtime {
         symbols.dedup();
         self.cached_completion_symbols = Some(symbols.clone());
         symbols
+    }
+
+    pub fn module_completions(&mut self) -> Vec<String> {
+        if let Some(modules) = &self.cached_module_completions {
+            return modules.clone();
+        }
+
+        let modules = discover_module_completions(&self.module_completion_roots);
+        self.cached_module_completions = Some(modules.clone());
+        modules
     }
 
     pub fn completion_metadata(&mut self) -> HashMap<String, SymbolMetadata> {
@@ -4189,6 +4216,73 @@ impl Runtime {
         self.symbol_revision = self.symbol_revision.wrapping_add(1);
         self.cached_completion_symbols = None;
         self.cached_completion_metadata = None;
+        self.cached_module_completions = None;
+    }
+}
+
+fn discover_module_completions(roots: &[crate::hot_reload::ModuleLoadRoot]) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for root in roots {
+        if let Some(prefix) = &root.module_prefix {
+            names.insert(prefix.clone());
+        }
+
+        let mut files = Vec::new();
+        collect_module_source_files(&root.path, &mut HashSet::new(), &mut files);
+        for path in files {
+            let Ok(relative) = path.strip_prefix(&root.path) else {
+                continue;
+            };
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok((Some(module), _)) = crate::modules::inspect_exports(&source) else {
+                continue;
+            };
+            let relative_module = match &root.module_prefix {
+                Some(prefix) => {
+                    let Some(suffix) = module
+                        .strip_prefix(prefix)
+                        .and_then(|suffix| suffix.strip_prefix('.'))
+                    else {
+                        continue;
+                    };
+                    suffix
+                }
+                None => module.as_str(),
+            };
+            if crate::modules::module_relative_file_candidates(relative_module)
+                .iter()
+                .any(|candidate| candidate == relative)
+            {
+                names.insert(module);
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn collect_module_source_files(
+    root: &std::path::Path,
+    visited_directories: &mut HashSet<PathBuf>,
+    files: &mut Vec<PathBuf>,
+) {
+    let Ok(canonical_root) = root.canonicalize() else {
+        return;
+    };
+    if !visited_directories.insert(canonical_root) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_module_source_files(&path, visited_directories, files);
+        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "lisp") {
+            files.push(path);
+        }
     }
 }
 
