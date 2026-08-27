@@ -133,28 +133,26 @@
              (and (not (= x '.)) (not (= x '-)))))
       false))
 
+;; Quasiquote unquotes only resolve inside defmacro bodies here, so both
+;; expansions stay in the macro; only the shape test is a helper.
 (defmacro jak (name res &rest body)
   (if (alez.jaki.surface/expression-body? body)
       `(alez.jaki.surface/register ,name ,res ,(nth body 0))
-      (jak-literal name res body)))
-
-;; the quoted-body expansion `jak` has always had, split out so the macro can
-;; branch on body shape at expansion time
-(def jak-literal (name res body)
-  (let ((walked (channel-walk-list body name 0)))
-    (let ((decls (list 'quote (get walked :decls)))
-          (bindings (list 'quote (get walked :bindings)))
-          (forms (list 'quote (get walked :forms))))
-      ;; Declarations and editor bindings remain runtime authoring operations;
-      ;; the pure walk that computes their data runs during macro expansion.
-      ;; A failed declaration must not bind widgets or publish the sequencer.
-      `(if (__jaki-declare-value-channels ,decls)
-           (if (alez.jaki.surface/bind-channel-widgets ,bindings)
-               (def-sequencer ,name
-                 :resolution ,res
-                 :requires (alez.jaki.core)
-                 :tick (do
-                   (alez.jaki.core/init ,res)
-                   (alez.jaki.core/run ,forms)))
-               false)
-           false))))
+      (let ((walked (channel-walk-list body name 0)))
+        (let ((decls (list 'quote (get walked :decls)))
+              (bindings (list 'quote (get walked :bindings)))
+              (forms (list 'quote (get walked :forms))))
+          ;; Declarations and editor bindings remain runtime authoring
+          ;; operations; the pure walk that computes their data runs during
+          ;; macro expansion. A failed declaration must not bind widgets or
+          ;; publish the sequencer.
+          `(if (__jaki-declare-value-channels ,decls)
+               (if (alez.jaki.surface/bind-channel-widgets ,bindings)
+                   (def-sequencer ,name
+                     :resolution ,res
+                     :requires (alez.jaki.core)
+                     :tick (do
+                       (alez.jaki.core/init ,res)
+                       (alez.jaki.core/run ,forms)))
+                   false)
+               false)))))
