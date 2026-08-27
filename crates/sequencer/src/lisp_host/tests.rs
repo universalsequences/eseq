@@ -9257,6 +9257,88 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_word_alternation_picks_one_modifier_per_cycle() {
+        // (right right right left): three cycles of the right hand, then one
+        // of the left — the modifier twin of implicit cyc.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "alt" :16
+                 . . - .
+                 -> 0 (right right right left))"#,
+        )
+        .expect("jak with word alternation");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            5.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        // `. . - .` (5 units) has 2 right-hand hits and 3 left-hand hits per
+        // cycle; four cycles over 20 boundaries
+        let spq = 48_000.0_f64;
+        let cycle_len = (5.0 * 0.25 * spq) as u64;
+        let counts: Vec<usize> = (0..4)
+            .map(|cycle| {
+                let start = cycle * cycle_len;
+                let end = start + cycle_len;
+                out.iter()
+                    .filter(|e| e.sample_time > start && e.sample_time <= end)
+                    .count()
+            })
+            .collect();
+        assert_eq!(counts, vec![2, 2, 2, 3], "{out:?}");
+    }
+
+    #[test]
+    fn jaki_word_alternation_covers_xf_words_and_id() {
+        // Parameterized/xf members alternate too: ((rot 1) id) rotates the
+        // figure on even cycles only, so the per-cycle velocity contour
+        // alternates with period 2.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "alt2" :16
+                 . . -
+                 -> 0 ((rot 1) id))"#,
+        )
+        .expect("jak with xf alternation");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            3.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        let spq = 48_000.0_f64;
+        let cycle_len = (4.0 * 0.25 * spq) as u64;
+        let vels = |cycle: u64| -> Vec<f32> {
+            let start = cycle * cycle_len;
+            let end = start + cycle_len;
+            out.iter()
+                .filter(|e| e.sample_time > start && e.sample_time <= end)
+                .map(|e| e.event.resolved.velocity)
+                .collect()
+        };
+        assert_ne!(vels(0), vels(1), "rotation must alternate: {out:?}");
+        assert_eq!(vels(0).len(), 4);
+        assert_eq!(vels(1).len(), 4);
+    }
+
+    #[test]
     fn jaki_control_route_targets_cycle_with_cyc() {
         // Targets are per-cycle argument data: (mute (cyc 1 2)) and
         // (group (cyc "Drums" "Synths")) rotate the destination each cycle.

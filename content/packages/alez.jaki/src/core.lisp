@@ -108,20 +108,45 @@
     'basevel :basevel  'dotdecay :dotdecay  'dashdecay :dashdecay
     'minvel :minvel  'maxvel :maxvel
     'L :L  'R :R
+    'id :id
     _ nil))
 
 (def norm-target (t) (match t 'first :first 'last :last 'all :all _ t))
 
 ;; normalize a transform (symbol or list) to a keyword-headed list; unknown → nil
+;; ── word alternation: (right right right left) = one word per cycle ────────
+;; A LIST in word position whose head is a zero-arg word (or itself a list)
+;; can never be a parameterized word, so it reads as a per-cycle alternation
+;; over its elements — the modifier twin of implicit cyc. (cyc w1 w2 …) is
+;; the explicit spelling. `id` is the no-op member: (stac stac id).
+
+(def zero-word? (w)
+  (member? w '(left right accent rev stac ghost swap id)))
+
+(def alt-word? (w)
+  (if (= (nth w 0) nil)
+      false
+      (let ((h (raw-head w)))
+        (or (= h 'cyc)
+            (or (not (= (nth h 0) nil))
+                (and (zero-word? h) (> (len w) 1)))))))
+
+(def alt-members (w) (if (= (raw-head w) 'cyc) (rest w) w))
+
+(def alt-pick (ws cycle) (nth ws (imod cycle (max 1 (len ws)))))
+
 (def norm-xf (f)
-  (let ((h (head-kw (raw-head f))) (args (raw-args f)))
-    (match h
-      :every (list :every (nth args 0) (norm-xf (nth args 1)))
-      :L (list :L (norm-xf (nth args 0)))
-      :R (list :R (norm-xf (nth args 0)))
-      :split (list :split (norm-target (nth args 0)))
-      :merge (list :merge (norm-target (nth args 0)))
-      _ (if (= h nil) nil (cons h args)))))
+  (if (alt-word? f)
+      (let ((xs (map norm-xf (alt-members f))))
+        (if (member? nil xs) nil (cons :alt xs)))
+      (let ((h (head-kw (raw-head f))) (args (raw-args f)))
+        (match h
+          :every (list :every (nth args 0) (norm-xf (nth args 1)))
+          :L (list :L (norm-xf (nth args 0)))
+          :R (list :R (norm-xf (nth args 0)))
+          :split (list :split (norm-target (nth args 0)))
+          :merge (list :merge (norm-target (nth args 0)))
+          _ (if (= h nil) nil (cons h args))))))
 
 (def event-sym? (x) (or (= x '.) (= x '-)))
 (def event-kw (x) (if (= x '-) :dash :dot))
@@ -295,6 +320,7 @@
       :every (if (every-active? (round-int (resolve-arg (nth f 1) cycle)) cycle)
                  (apply-one-xf evs (nth f 2) cycle)
                  evs)
+      :alt (apply-one-xf evs (alt-pick (rest f) cycle) cycle)
       :split (split-events evs (nth f 1))
       :merge (merge-events evs (nth f 1))
       _ evs)))
@@ -327,7 +353,9 @@
                 (if (= h :every)
                     (and (every-active? (round-int (resolve-arg (nth f 1) cycle)) cycle)
                          (flag-active? (list (nth f 2)) kw cycle))
-                    false)))))
+                    (if (= h :alt)
+                        (flag-active? (list (alt-pick (rest f) cycle)) kw cycle)
+                        false))))))
     false xfs))
 
 ;; ── velocity model (Swift JakiVelocityState port) ───────────────────────────
@@ -364,6 +392,7 @@
           :every (if (every-active? (round-int (resolve-arg (nth f 1) cycle)) cycle)
                      (ov-merge acc (vel-overrides (list (nth f 2)) cycle))
                      acc)
+          :alt (ov-merge acc (vel-overrides (list (alt-pick (rest f) cycle)) cycle))
           _ acc)))
     (dict) xfs))
 
@@ -672,6 +701,7 @@
       :every (if (every-active? (round-int (resolve-arg (nth op 1) cycle)) cycle)
                  (apply-post-one res (nth op 2) cycle)
                  res)
+      :alt (apply-post-one res (alt-pick (rest op) cycle) cycle)
       _ res)))
 
 ;; evaluate a pattern for one cycle with explicit threading state
@@ -736,6 +766,8 @@
     (match h
       :every (lcm* (max 1 (round-int (resolve-arg (nth f 1) 0)))
                    (lcm* (arg-period (nth f 1)) (xf-period (nth f 2))))
+      :alt (reduce (lambda (a x) (lcm* a (xf-period x)))
+                   (max 1 (len (rest f))) (rest f))
       :L (xf-period (nth f 1))
       :R (xf-period (nth f 1))
       _ (reduce (lambda (a x) (lcm* a (arg-period x))) 1 (rest f)))))
@@ -898,6 +930,9 @@
 ;;   (fast n) (slow n) — n may be (cyc …) for conditional retiming
 ;;   Any per-cycle arg also reads Tidal-style implicit cyc: a list headed by
 ;;   a value is (cyc …) recursively — (1 2 (1 3)) = (cyc 1 2 (cyc 1 3))
+;;   Whole WORDS alternate the same way: (right right right left) picks one
+;;   modifier per cycle ((cyc w…) is the explicit spelling, `id` the no-op);
+;;   members must all be post-lowerable or all figure transforms
 ;;   (vel s) (note n)
 ;;   (gate s) / (dur s) — multiply every gate by s (per-cycle arg: number,
 ;;   (cyc …), (chan …)); applies in authored word order like stac
@@ -920,23 +955,29 @@
     (rat (round-int (* (/ (beats tb) u) 96)) 96)))
 
 ;; route words that lower to post ops, so `(every n w)` can wrap them
-;; cycle-gated while staying in authored word order; nil for xf-able words
+;; cycle-gated while staying in authored word order; nil for xf-able words.
+;; An alternation lowers to (:alt post…) only when EVERY member lowers, so a
+;; mixed alternation can still fall back to the xf path as a whole.
 (def route-post-op (w)
-  (let ((h (raw-head w)) (args (raw-args w)))
-    (match h
-      'stac   (list :stac)
-      'gate   (list :gate (nth args 0))
-      'dur    (list :gate (nth args 0))
-      'quant  (list :quant (quant-units (nth args 0)))
-      'shift  (list :shift (nth args 0))
-      'left   (list :filter '(:hand :left))
-      'right  (list :filter '(:hand :right))
-      'accent (list :filter '(:accent true))
-      'every  (let ((inner (route-post-op (nth args 1))))
-                (if (= inner nil)
-                    nil
-                    (list :every (nth args 0) inner)))
-      _ nil)))
+  (if (alt-word? w)
+      (let ((posts (map route-post-op (alt-members w))))
+        (if (member? nil posts) nil (cons :alt posts)))
+      (let ((h (raw-head w)) (args (raw-args w)))
+        (match h
+          'stac   (list :stac)
+          'id     (list :id)
+          'gate   (list :gate (nth args 0))
+          'dur    (list :gate (nth args 0))
+          'quant  (list :quant (quant-units (nth args 0)))
+          'shift  (list :shift (nth args 0))
+          'left   (list :filter '(:hand :left))
+          'right  (list :filter '(:hand :right))
+          'accent (list :filter '(:accent true))
+          'every  (let ((inner (route-post-op (nth args 1))))
+                    (if (= inner nil)
+                        nil
+                        (list :every (nth args 0) inner)))
+          _ nil))))
 
 (def split-arrows (l cur acc)
   (if (empty? l)
@@ -945,8 +986,23 @@
           (split-arrows (rest l) (list) (append acc (list cur)))
           (split-arrows (rest l) (append cur (list (first l))) acc))))
 
-;; acc = (dict :p pattern :opts emit-opts); w is one route word (data)
+;; acc = (dict :p pattern :opts emit-opts); w is one route word (data).
+;; An alternation list picks one member per cycle: post-lowerable members
+;; become an (:alt post…) op in authored word order; otherwise the whole
+;; alternation lowers to an (:alt xf…) figure transform. Members must all be
+;; one kind — a mix of post-only and xf-only words is ignored like any
+;; unknown word.
 (def route-step (acc w)
+  (if (alt-word? w)
+      (let ((post (route-post-op w)))
+        (if (not (= post nil))
+            (merge acc :p (add-post (get acc :p) post (str "alt:" (source w))))
+            (if (= (norm-xf w) nil)
+                acc
+                (merge acc :p (xform (get acc :p) w)))))
+      (route-step-word acc w)))
+
+(def route-step-word (acc w)
   (let ((h (raw-head w)) (args (raw-args w)))
     (match h
       'left   (merge acc :p (filter (get acc :p) '(:hand :left)))
