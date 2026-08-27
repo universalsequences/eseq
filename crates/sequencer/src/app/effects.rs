@@ -1442,6 +1442,101 @@ impl App {
         Ok(slot_idx)
     }
 
+    pub fn move_effect_slot_between_tracks_sync(
+        &mut self,
+        source_track: usize,
+        source_slot: usize,
+        target_track: usize,
+        target_slot: Option<usize>,
+    ) -> Result<usize, String> {
+        if source_track == target_track {
+            return self.move_effect_slot_sync(source_track, source_slot, target_slot);
+        }
+        if source_track >= self.tracks.len() || target_track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        if source_slot < BUILTIN_SLOT_COUNT {
+            return Err("Cannot move a built-in effect slot".to_string());
+        }
+        if target_slot.is_some_and(|slot| slot < BUILTIN_SLOT_COUNT) {
+            return Err("Cannot move before a built-in effect slot".to_string());
+        }
+
+        let mut source_entries = self.custom_effect_entries(source_track);
+        let source_offset = source_slot - BUILTIN_SLOT_COUNT;
+        if source_offset >= source_entries.len() {
+            return Err("Invalid source effect slot".to_string());
+        }
+        let mut target_entries = self.custom_effect_entries(target_track);
+        if target_entries.len() >= MAX_CUSTOM_FX {
+            return Err("No free effect slots available".to_string());
+        }
+        let target_offset = target_slot
+            .map(|slot| slot - BUILTIN_SLOT_COUNT)
+            .unwrap_or(target_entries.len())
+            .min(target_entries.len());
+        let destination_slot = BUILTIN_SLOT_COUNT + target_offset;
+
+        let source_track_id = self.track_registry.id_at(source_track)
+            .ok_or_else(|| format!("Track {} has no stable identity", source_track + 1))?;
+        let target_track_id = self.track_registry.id_at(target_track)
+            .ok_or_else(|| format!("Track {} has no stable identity", target_track + 1))?;
+        let mut source_ids = self.device_registry.audio_effect_chain(
+            source_track_id,
+            BUILTIN_SLOT_COUNT..BUILTIN_SLOT_COUNT + source_entries.len(),
+        );
+        let moved_id = source_ids.remove(source_offset);
+        let mut target_ids = self.device_registry.audio_effect_chain(
+            target_track_id,
+            BUILTIN_SLOT_COUNT..BUILTIN_SLOT_COUNT + target_entries.len(),
+        );
+        target_ids.insert(target_offset, moved_id);
+
+        let source_host_before = self.fx_chain_host(FxChainLocator::Track(source_track))?;
+        let target_host_before = self.fx_chain_host(FxChainLocator::Track(target_track))?;
+        let mut moved = source_entries.remove(source_offset);
+        moved.snapshot.plocks.iter_mut().for_each(|step| step.fill(None));
+        moved.snapshot.plock_param_ids.iter_mut().for_each(|step| step.fill(None));
+        moved.snapshot.key_locks.clear();
+        moved.snapshot.key_lock_param_ids.clear();
+        for tensor in &mut moved.snapshot.tensor_params {
+            tensor.plocks.fill(None);
+        }
+        let target_pattern_slot = moved.snapshot.clone();
+        target_entries.insert(target_offset, moved);
+        self.state.insert_initialized_effect_slot_in_other_track_patterns(
+            target_track, destination_slot, &target_pattern_slot,
+        );
+        self.write_custom_effect_entries(source_track, &source_entries);
+        self.write_custom_effect_entries(target_track, &target_entries);
+        self.state.copy_current_effect_values_to_all_track_patterns(
+            target_track, destination_slot,
+        );
+        // Save the already-shifted live source chain, then scrub every other
+        // source pattern. Saving before the shift would preserve stale slots
+        // in the effective pattern.
+        self.state.remove_effect_slot_from_track_patterns(source_track, source_slot);
+        let source_host_after = self.fx_chain_host(FxChainLocator::Track(source_track))?;
+        let target_host_after = self.fx_chain_host(FxChainLocator::Track(target_track))?;
+        {
+            let _batch = FxGraphEditBatch::new(self.graph.lg.0);
+            rewire_fx_chain(self.graph.lg.0, &source_host_before, &source_host_after);
+            rewire_fx_chain(self.graph.lg.0, &target_host_before, &target_host_after);
+            self.editor.effect_chain_leases.transfer_slot(
+                FxChainLocator::Track(source_track), source_slot,
+                FxChainLocator::Track(target_track), destination_slot,
+            )?;
+        }
+        self.device_registry.bind_audio_effect_chain(
+            source_track_id, BUILTIN_SLOT_COUNT, &source_ids,
+        )?;
+        self.device_registry.bind_audio_effect_chain(
+            target_track_id, BUILTIN_SLOT_COUNT, &target_ids,
+        )?;
+        self.publish_effect_reorder();
+        Ok(destination_slot)
+    }
+
     pub fn insert_midi_fx_before_slot_sync(
         &mut self,
         track: usize,
@@ -1520,6 +1615,80 @@ impl App {
             .move_midi_effect_identity(track_id, source_slot, target_idx, chain_len)?;
         self.publish_effect_reorder();
         Ok(target_idx)
+    }
+
+    pub fn move_midi_fx_slot_between_tracks_sync(
+        &mut self,
+        source_track: usize,
+        source_slot: usize,
+        target_track: usize,
+        target_slot: Option<usize>,
+    ) -> Result<usize, String> {
+        if source_track == target_track {
+            return self.move_midi_fx_slot_sync(source_track, source_slot, target_slot);
+        }
+        if source_track >= self.tracks.len() || target_track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        let mut source_chain = self.state.pattern.track_params[source_track].midi_fx_chain();
+        let mut target_chain = self.state.pattern.track_params[target_track].midi_fx_chain();
+        if source_slot >= source_chain.len() {
+            return Err("Invalid source MIDI FX slot".to_string());
+        }
+        if target_chain.len() >= MAX_MIDI_FX_SLOTS {
+            return Err("No free MIDI FX slots available".to_string());
+        }
+        let destination_slot = target_slot.unwrap_or(target_chain.len()).min(target_chain.len());
+        let descriptor = lisp_host::load_midi_fx_descriptor(&source_chain[source_slot])
+            .ok_or_else(|| "Unknown source MIDI FX".to_string())?;
+        let mut source_snapshot = EffectSlotSnapshot::capture(
+            &self.state.pattern.midi_fx_slots[source_track][source_slot],
+        );
+        source_snapshot.plocks.iter_mut().for_each(|step| step.fill(None));
+        source_snapshot.plock_param_ids.iter_mut().for_each(|step| step.fill(None));
+        source_snapshot.key_locks.clear();
+        source_snapshot.key_lock_param_ids.clear();
+        for tensor in &mut source_snapshot.tensor_params {
+            tensor.plocks.fill(None);
+        }
+        let source_track_id = self.track_registry.id_at(source_track)
+            .ok_or_else(|| format!("Track {} has no stable identity", source_track + 1))?;
+        let target_track_id = self.track_registry.id_at(target_track)
+            .ok_or_else(|| format!("Track {} has no stable identity", target_track + 1))?;
+        let mut source_ids = self.device_registry.midi_effect_chain(source_track_id, source_chain.len());
+        let moved_id = source_ids.remove(source_slot);
+        let mut target_ids = self.device_registry.midi_effect_chain(target_track_id, target_chain.len());
+        target_ids.insert(destination_slot, moved_id);
+
+        self.state.insert_midi_fx_slot_in_other_track_patterns(
+            target_track, destination_slot, descriptor.name.clone(), &descriptor,
+        );
+        let name = source_chain.remove(source_slot);
+        target_chain.insert(destination_slot, name);
+        let source_slots = &self.state.pattern.midi_fx_slots[source_track];
+        for index in source_slot..source_chain.len() {
+            source_slots[index].copy_from(&source_slots[index + 1]);
+        }
+        if let Some(last) = source_slots.last() {
+            last.clear();
+        }
+        let target_slots = &self.state.pattern.midi_fx_slots[target_track];
+        for index in (destination_slot + 1..=target_chain.len()).rev() {
+            if index < target_slots.len() {
+                target_slots[index].copy_from(&target_slots[index - 1]);
+            }
+        }
+        source_snapshot.restore(&target_slots[destination_slot]);
+        self.state.copy_current_midi_fx_values_to_all_track_patterns(
+            target_track, destination_slot,
+        );
+        self.state.pattern.track_params[source_track].set_midi_fx_chain(source_chain);
+        self.state.pattern.track_params[target_track].set_midi_fx_chain(target_chain);
+        self.state.remove_midi_fx_slot_from_track_patterns(source_track, source_slot);
+        self.device_registry.bind_midi_effect_chain(source_track_id, &source_ids)?;
+        self.device_registry.bind_midi_effect_chain(target_track_id, &target_ids)?;
+        self.publish_effect_reorder();
+        Ok(destination_slot)
     }
 
     fn resolve_custom_slot_wiring(
@@ -8171,6 +8340,74 @@ mod tests {
             .expect("adding MIDI FX should not block on pattern_bank");
         assert_eq!(result.unwrap(), 0);
         assert_eq!(published_chain, vec!["arp".to_string()]);
+    }
+
+    #[test]
+    fn cross_track_audio_effect_move_preserves_identity_values_and_is_one_undo_step() {
+        let graph = TestLiveGraph::new("cross-track-audio-fx-move-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let slot = app.add_builtin_effect_sync(0, "Filter").unwrap();
+        let source_track_id = app.track_registry.id_at(0).unwrap();
+        let target_track_id = app.track_registry.id_at(1).unwrap();
+        let instance = app.device_registry.audio_effect(source_track_id, slot);
+        app.state.pattern.effect_chains[0][slot].defaults.set(0, 0.37);
+        app.state.pattern.effect_chains[0][slot].plocks.set(0, 0, 0.81);
+
+        let moved_slot = app
+            .move_effect_slot_between_tracks_recorded(0, slot, 1, None)
+            .unwrap();
+        assert_eq!(moved_slot, BUILTIN_SLOT_COUNT);
+        assert_eq!(app.history.undo_len(), 1, "both chains must share one history entry");
+        assert_eq!(app.device_registry.audio_effect_location(instance), Some((target_track_id, moved_slot)));
+        assert_eq!(app.state.pattern.effect_chains[1][moved_slot].defaults.get(0), 0.37);
+        assert_eq!(app.state.pattern.effect_chains[1][moved_slot].plocks.get(0, 0), None);
+        assert_eq!(app.state.pattern.effect_chains[0][slot].node_id.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.device_registry.audio_effect_location(instance), Some((source_track_id, slot)));
+        assert_eq!(app.state.pattern.effect_chains[0][slot].defaults.get(0), 0.37);
+        let replay = crate::app::edit::redo(&mut app);
+        assert!(matches!(replay, crate::app::history::HistoryReplay::Applied(_)), "{replay:?}");
+        assert_eq!(app.device_registry.audio_effect_location(instance), Some((target_track_id, moved_slot)));
+        graph.process_block();
+    }
+
+    #[test]
+    fn cross_track_midi_fx_move_preserves_identity_values_and_drops_source_plocks() {
+        let graph = TestLiveGraph::new("cross-track-midi-fx-move-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let slot = app.add_midi_fx_to_track_sync(0, "arp").unwrap();
+        let source_track_id = app.track_registry.id_at(0).unwrap();
+        let target_track_id = app.track_registry.id_at(1).unwrap();
+        let instance = app.device_registry.midi_effect(source_track_id, slot);
+        app.state.pattern.midi_fx_slots[0][slot].defaults.set(0, 0.42);
+        app.state.pattern.midi_fx_slots[0][slot].plocks.set(0, 0, 0.75);
+
+        let moved_slot = app
+            .move_midi_fx_slot_between_tracks_recorded(0, slot, 1, None)
+            .unwrap();
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(app.device_registry.midi_effect_location(instance), Some((target_track_id, moved_slot)));
+        assert_eq!(app.state.pattern.midi_fx_slots[1][moved_slot].defaults.get(0), 0.42);
+        assert_eq!(app.state.pattern.midi_fx_slots[1][moved_slot].plocks.get(0, 0), None);
+        assert!(app.state.pattern.track_params[0].midi_fx_chain().is_empty());
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.device_registry.midi_effect_location(instance), Some((source_track_id, slot)));
+        assert_eq!(app.state.pattern.midi_fx_slots[0][slot].defaults.get(0), 0.42);
+        let replay = crate::app::edit::redo(&mut app);
+        assert!(matches!(replay, crate::app::history::HistoryReplay::Applied(_)), "{replay:?}");
+        assert_eq!(app.device_registry.midi_effect_location(instance), Some((target_track_id, moved_slot)));
+        graph.process_block();
     }
 
     #[test]

@@ -241,6 +241,31 @@ impl FxChainLeaseStore {
         Ok(())
     }
 
+    pub fn transfer_slot(
+        &mut self,
+        source_locator: FxChainLocator,
+        source_slot: usize,
+        target_locator: FxChainLocator,
+        target_slot: usize,
+    ) -> Result<(), String> {
+        if source_locator == target_locator {
+            return self.move_slot(source_locator, source_slot, target_slot);
+        }
+        let source_slot = Self::row_slot(source_locator, source_slot)?;
+        let target_slot = Self::row_slot(target_locator, target_slot)?;
+        if source_slot >= lisp_host::MAX_CUSTOM_FX || target_slot >= lisp_host::MAX_CUSTOM_FX {
+            return Err("FX lease transfer is out of range".to_string());
+        }
+
+        let lease = remove_slot(self.row_mut(source_locator), source_slot);
+        let source = remove_slot(self.source_row_mut(source_locator), source_slot);
+        insert_empty_slot(self.row_mut(target_locator), target_slot);
+        insert_empty_slot(self.source_row_mut(target_locator), target_slot);
+        self.row_mut(target_locator)[target_slot] = lease;
+        self.source_row_mut(target_locator)[target_slot] = source;
+        Ok(())
+    }
+
     pub fn remap_slots(
         &mut self,
         locator: FxChainLocator,

@@ -25,6 +25,18 @@ impl SequencerState {
         scenes.edit_other_track_patterns(track, |data| data.insert_empty_effect_slot(slot_idx));
     }
 
+    pub fn insert_initialized_effect_slot_in_other_track_patterns(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        snapshot: &EffectSlotSnapshot,
+    ) {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        scenes.edit_other_track_patterns(track, |data| {
+            data.insert_effect_slot(slot_idx, snapshot.clone());
+        });
+    }
+
     pub fn move_effect_slot_in_other_track_patterns(
         &self,
         track: usize,
@@ -41,6 +53,15 @@ impl SequencerState {
         self.save_current_track_effect_snapshot(track);
         let mut scenes = self.pattern.scenes.lock().unwrap();
         scenes.edit_other_track_patterns(track, |data| data.remove_effect_slot(slot_idx));
+        let track_sound = scenes.track_sound_pattern(track);
+        let effective_patch = scenes.effective_pattern_id(track)
+            .and_then(|effective| scenes.track_pools.get(track)?.refs(effective))
+            .map(|refs| refs.patch);
+        if let (Some(id), Some(pool)) = (track_sound, scenes.track_pools.get_mut(track)) {
+            if pool.refs(id).map(|refs| refs.patch) != effective_patch {
+                pool.edit(id, |data| data.remove_effect_slot(slot_idx));
+            }
+        }
     }
 
     pub fn insert_midi_fx_slot_in_other_track_patterns(
@@ -154,6 +175,15 @@ impl SequencerState {
         self.save_current_track_midi_fx_snapshot(track);
         let mut scenes = self.pattern.scenes.lock().unwrap();
         scenes.edit_other_track_patterns(track, |data| data.remove_midi_fx_slot(slot_idx));
+        let track_sound = scenes.track_sound_pattern(track);
+        let effective_patch = scenes.effective_pattern_id(track)
+            .and_then(|effective| scenes.track_pools.get(track)?.refs(effective))
+            .map(|refs| refs.patch);
+        if let (Some(id), Some(pool)) = (track_sound, scenes.track_pools.get_mut(track)) {
+            if pool.refs(id).map(|refs| refs.patch) != effective_patch {
+                pool.edit(id, |data| data.remove_midi_fx_slot(slot_idx));
+            }
+        }
     }
 
     pub fn remove_bus_references_from_all_track_patterns(&self, bus_id: BusId) {

@@ -1998,22 +1998,13 @@ pub(super) fn handle(
             if let (Some(source_track), Some(source_slot), Some(target_track)) =
                 (source_track, source_slot, target_track)
             {
-                if source_track != target_track {
-                    editor.handle_host_event(HostEvent::Status(
-                        "Move audio effects within the same track for now".to_string(),
-                    ));
-                    return;
-                }
                 current_track.store(target_track, Ordering::Relaxed);
                 app.ui.cursor_track = target_track;
-                match app.apply_recorded_track_effect_chain_mutation(
+                match app.move_effect_slot_between_tracks_recorded(
+                    source_track,
+                    source_slot,
                     target_track,
-                    "Move audio effect",
-                    |app| app.move_effect_slot_sync(
-                        target_track,
-                        source_slot,
-                        target_slot,
-                    ),
+                    target_slot,
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();
@@ -2086,22 +2077,13 @@ pub(super) fn handle(
             if let (Some(source_track), Some(source_slot), Some(target_track)) =
                 (source_track, source_slot, target_track)
             {
-                if source_track != target_track {
-                    editor.handle_host_event(HostEvent::Status(
-                        "Move MIDI effects within the same track for now".to_string(),
-                    ));
-                    return;
-                }
                 current_track.store(target_track, Ordering::Relaxed);
                 app.ui.cursor_track = target_track;
-                match app.apply_recorded_track_midi_fx_chain_mutation(
+                match app.move_midi_fx_slot_between_tracks_recorded(
+                    source_track,
+                    source_slot,
                     target_track,
-                    "Move MIDI FX",
-                    |app| app.move_midi_fx_slot_sync(
-                        target_track,
-                        source_slot,
-                        target_slot,
-                    ),
+                    target_slot,
                 ) {
                     Ok(slot_idx) => {
                         let rt = editor.runtime_mut();

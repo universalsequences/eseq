@@ -918,13 +918,21 @@ impl TrackPatternData {
     }
 
     pub(super) fn insert_empty_effect_slot(&mut self, slot_idx: usize) {
+        self.insert_effect_slot(slot_idx, EffectSlotSnapshot::new_empty());
+    }
+
+    pub(super) fn insert_effect_slot(
+        &mut self,
+        slot_idx: usize,
+        snapshot: EffectSlotSnapshot,
+    ) {
         if slot_idx >= self.effect_slots.len() {
             return;
         }
         for idx in (slot_idx + 1..self.effect_slots.len()).rev() {
             self.effect_slots[idx] = self.effect_slots[idx - 1].clone();
         }
-        self.effect_slots[slot_idx].clear();
+        self.effect_slots[slot_idx] = snapshot;
     }
 
     pub(super) fn move_effect_slot_to(&mut self, source_slot: usize, target_slot: usize) {

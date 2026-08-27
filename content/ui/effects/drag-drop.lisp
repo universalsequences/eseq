@@ -57,13 +57,19 @@
         (target-bus (get target :bus))
         (target-slot (get target :slot)))
     (if (and (= kind "audio-effect-instance") (= source-chain "audio")
-             (or (= target-chain "audio") (= target-chain "append")))
+             (or (= target-chain "audio")
+                 (and (= target-chain "append")
+                      (or (= target-bus nil) (< target-bus 0))
+                      (= (get target :rack-slot) nil))))
       (host-command "move-effect-slot"
         (dict :source-track source-track :source-slot source-slot
               :target-track target-track :target-slot target-slot
               :position target-chain))
       (if (and (= kind "midi-effect-instance") (= source-chain "midi")
-               (or (= target-chain "midi") (= target-chain "append")))
+               (or (= target-chain "midi")
+                   (and (= target-chain "append")
+                        (or (= target-bus nil) (< target-bus 0))
+                        (= (get target :rack-slot) nil))))
         (host-command "move-midi-fx-slot"
           (dict :source-track source-track :source-slot source-slot
                 :target-track target-track :target-slot target-slot

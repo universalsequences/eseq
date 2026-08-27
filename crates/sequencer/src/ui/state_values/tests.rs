@@ -47350,6 +47350,41 @@
             .eval_str(
                 r#"(eseq.mixer/drop-on-track
                     (dict
+                      :drag-type "effect-instance"
+                      :payload (dict :kind "audio-effect-instance"
+                                     :chain "audio" :track 0 :slot 2)
+                      :target (dict :kind "track" :track 1)))"#,
+            )
+            .expect("move existing effect onto another mixer track");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "move-effect-slot");
+                let Value::Map(payload) = payload else {
+                    panic!("move-effect-slot payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("source-track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("target-track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("position").map(|value| value.borrow().clone()),
+                    Some(Value::String("append".to_string()))
+                );
+            }
+            other => panic!("expected move-effect-slot host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.mixer/drop-on-track
+                    (dict
                       :drag-type "audio-effect"
                       :payload (dict :kind "custom-audio-effect" :name "delayz")
                       :target (dict :kind "track" :track 1)))"#,

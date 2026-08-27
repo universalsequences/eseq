@@ -989,11 +989,18 @@ impl App {
                 Ok(MidiFxInstanceState { id, name, descriptor })
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let active_slots = instances.len();
+        let empty_values = EffectSlotSnapshot::new_empty().authoring_values();
         let pattern_slots = self
             .state
             .capture_track_midi_fx_chain_values(track)?
             .into_iter()
-            .map(|(pattern, values)| EffectPatternSlots { pattern, values })
+            .map(|(pattern, mut values)| {
+                for value in values.iter_mut().skip(active_slots) {
+                    *value = empty_values.clone();
+                }
+                EffectPatternSlots { pattern, values }
+            })
             .collect();
         Ok(MidiFxChainState {
             instances,
@@ -1058,6 +1065,89 @@ impl App {
         self.history
             .commit(label, None, EditPatch::MidiFxChain(patch), retained_bytes);
         Ok(result)
+    }
+
+    pub fn move_midi_fx_slot_between_tracks_recorded(
+        &mut self,
+        source_track: usize,
+        source_slot: usize,
+        target_track: usize,
+        target_slot: Option<usize>,
+    ) -> Result<usize, String> {
+        if source_track == target_track {
+            return self.apply_recorded_track_midi_fx_chain_mutation(
+                source_track,
+                "Move MIDI FX",
+                |app| app.move_midi_fx_slot_sync(source_track, source_slot, target_slot),
+            );
+        }
+        finish_active_gesture(self);
+        let source_id = self.track_registry.id_at(source_track)
+            .ok_or_else(|| format!("Track {} has no stable identity", source_track + 1))?;
+        let target_id = self.track_registry.id_at(target_track)
+            .ok_or_else(|| format!("Track {} has no stable identity", target_track + 1))?;
+        let source_before = self.capture_track_midi_fx_chain_state(source_track)?;
+        let target_before = self.capture_track_midi_fx_chain_state(target_track)?;
+        let destination_slot = match self.move_midi_fx_slot_between_tracks_sync(
+            source_track, source_slot, target_track, target_slot,
+        ) {
+            Ok(slot) => slot,
+            Err(error) => {
+                let rollback = self.restore_track_midi_fx_chain_state(target_track, &target_before)
+                    .and_then(|()| self.restore_track_midi_fx_chain_state(source_track, &source_before));
+                return match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(format!(
+                        "Cross-track MIDI-FX move failed ({error}); restoring both chains also failed ({rollback})"
+                    )),
+                };
+            }
+        };
+        let source_after_move = self.capture_track_midi_fx_chain_state(source_track)?;
+        let target_after_move = self.capture_track_midi_fx_chain_state(target_track)?;
+        let remap_result = (|| {
+            for (track, before, after) in [
+                (source_track, &source_before, &source_after_move),
+                (target_track, &target_before, &target_after_move),
+            ] {
+                let mut old_to_new = vec![None; crate::lisp_host::MAX_MIDI_FX_SLOTS];
+                for (old_slot, old) in before.instances.iter().enumerate() {
+                    old_to_new[old_slot] = after.instances.iter()
+                        .position(|candidate| candidate.id == old.id && candidate.name == old.name);
+                }
+                self.macro_engine.remap_midi_fx_mappings_for_track(track, &old_to_new);
+                self.state.remap_track_midi_fx_references(track, &old_to_new)?;
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(error) = remap_result {
+            self.restore_track_midi_fx_chain_state(target_track, &target_before)?;
+            self.restore_track_midi_fx_chain_state(source_track, &source_before)?;
+            return Err(error);
+        }
+        self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
+        self.sync_scratch_runtime_descriptors();
+        self.state.publish_scheduler_snapshot();
+        let source_after = self.capture_track_midi_fx_chain_state(source_track)?;
+        let target_after = self.capture_track_midi_fx_chain_state(target_track)?;
+        let source_patch = MidiFxChainPatch {
+            track: source_id, before: source_before, after: source_after,
+        };
+        let target_patch = MidiFxChainPatch {
+            track: target_id, before: target_before, after: target_after,
+        };
+        let retained_bytes = std::mem::size_of::<Vec<EditPatch>>()
+            + source_patch.retained_bytes() + target_patch.retained_bytes();
+        self.history.commit(
+            "Move MIDI FX between tracks",
+            None,
+            EditPatch::Composite(vec![
+                EditPatch::MidiFxChain(source_patch),
+                EditPatch::MidiFxChain(target_patch),
+            ]),
+            retained_bytes,
+        );
+        Ok(destination_slot)
     }
 
     fn restore_track_midi_fx_chain_state(
@@ -1188,6 +1278,122 @@ impl App {
             macro_mappings: self.macro_engine.capture_effect_mappings_for_track(track),
             bindings: self.state.capture_track_effect_binding_state(track)?,
         })
+    }
+
+    fn remap_recorded_track_effect_edit(
+        &mut self,
+        track: usize,
+        before: &EffectChainState,
+        after: &EffectChainState,
+    ) -> Result<(), String> {
+        let chain_len = self.graph.effect_descriptors[track].len();
+        let mut old_to_new = (0..chain_len).map(Some).collect::<Vec<_>>();
+        let mut drop_neural_slots = vec![false; chain_len];
+        for (old_offset, old) in before.instances.iter().enumerate() {
+            let old_slot = BUILTIN_SLOT_COUNT + old_offset;
+            let new = after.instances.iter().enumerate()
+                .find(|(_, candidate)| candidate.id == old.id);
+            old_to_new[old_slot] = new.map(|(offset, _)| BUILTIN_SLOT_COUNT + offset);
+            drop_neural_slots[old_slot] = new
+                .map(|(_, candidate)| candidate.source != old.source)
+                .unwrap_or(true);
+        }
+        self.macro_engine.remap_effect_mappings_for_track(track, &old_to_new);
+        self.state.remap_track_effect_references(
+            track,
+            &old_to_new,
+            &drop_neural_slots,
+            &self.graph.effect_descriptors[track],
+        )
+    }
+
+    pub fn move_effect_slot_between_tracks_recorded(
+        &mut self,
+        source_track: usize,
+        source_slot: usize,
+        target_track: usize,
+        target_slot: Option<usize>,
+    ) -> Result<usize, String> {
+        if source_track == target_track {
+            return self.apply_recorded_track_effect_chain_mutation(
+                source_track,
+                "Move audio effect",
+                |app| app.move_effect_slot_sync(source_track, source_slot, target_slot),
+            );
+        }
+        finish_active_gesture(self);
+        let source_id = self.track_registry.id_at(source_track)
+            .ok_or_else(|| format!("Track {} has no stable identity", source_track + 1))?;
+        let target_id = self.track_registry.id_at(target_track)
+            .ok_or_else(|| format!("Track {} has no stable identity", target_track + 1))?;
+        let source_before = self.capture_track_effect_chain_state(source_track, None)?;
+        let target_before = self.capture_track_effect_chain_state(target_track, None)?;
+
+        let result = self.move_effect_slot_between_tracks_sync(
+            source_track, source_slot, target_track, target_slot,
+        );
+        let destination_slot = match result {
+            Ok(slot) => slot,
+            Err(error) => {
+                let rollback = (|| {
+                    let current = self.capture_track_effect_chain_state(target_track, None)?;
+                    self.restore_track_effect_chain_state(target_track, &current, &target_before)?;
+                    let current = self.capture_track_effect_chain_state(source_track, None)?;
+                    self.restore_track_effect_chain_state(source_track, &current, &source_before)
+                })();
+                return match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(format!(
+                        "Cross-track effect move failed ({error}); restoring both chains also failed ({rollback})"
+                    )),
+                };
+            }
+        };
+
+        let source_after_move = self.capture_track_effect_chain_state(source_track, None)?;
+        let target_after_move = self.capture_track_effect_chain_state(target_track, None)?;
+        if let Err(error) = self.remap_recorded_track_effect_edit(
+            source_track, &source_before, &source_after_move,
+        ).and_then(|()| self.remap_recorded_track_effect_edit(
+            target_track, &target_before, &target_after_move,
+        )) {
+            let current = self.capture_track_effect_chain_state(target_track, None)?;
+            self.restore_track_effect_chain_state(target_track, &current, &target_before)?;
+            let current = self.capture_track_effect_chain_state(source_track, None)?;
+            self.restore_track_effect_chain_state(source_track, &current, &source_before)?;
+            return Err(error);
+        }
+        let state = std::sync::Arc::clone(&self.state);
+        let effect_descriptors = &self.graph.effect_descriptors;
+        let instrument_descriptors = &self.graph.instrument_descriptors;
+        let buses = &self.buses;
+        self.macro_engine.revalidate_mappings(|scope, target| {
+            super::projects::resolve_live_macro_target(
+                &state, effect_descriptors, instrument_descriptors, buses, scope, target,
+            )
+        });
+        self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
+        self.state.publish_scheduler_snapshot();
+        let source_after = self.capture_track_effect_chain_state(source_track, None)?;
+        let target_after = self.capture_track_effect_chain_state(target_track, None)?;
+        let source_patch = EffectChainPatch {
+            track: source_id, before: source_before, after: source_after,
+        };
+        let target_patch = EffectChainPatch {
+            track: target_id, before: target_before, after: target_after,
+        };
+        let retained_bytes = std::mem::size_of::<Vec<EditPatch>>()
+            + source_patch.retained_bytes() + target_patch.retained_bytes();
+        self.history.commit(
+            "Move audio effect between tracks",
+            None,
+            EditPatch::Composite(vec![
+                EditPatch::EffectChain(source_patch),
+                EditPatch::EffectChain(target_patch),
+            ]),
+            retained_bytes,
+        );
+        Ok(destination_slot)
     }
 
     pub fn apply_recorded_track_effect_chain_mutation<T>(
@@ -9168,7 +9374,9 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
                 }
             };
             app.restore_track_effect_chain_state(track, current, target)
-                .map_err(EditError::ReplayFailed)
+                .map_err(|error| EditError::ReplayFailed(format!(
+                    "track {} effect-chain replay failed: {error}", track + 1
+                )))
         }
         EditPatch::BusEffectChain(patch) => {
             let bus_idx = app.buses.iter().position(|bus| bus.id == patch.bus)
@@ -9224,7 +9432,9 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
                 }
             };
             app.restore_track_midi_fx_chain_state(track, target)
-                .map_err(EditError::ReplayFailed)
+                .map_err(|error| EditError::ReplayFailed(format!(
+                    "track {} MIDI-FX chain replay failed: {error}", track + 1
+                )))
         }
         EditPatch::RackSlotStructure(patch) => {
             let track = app

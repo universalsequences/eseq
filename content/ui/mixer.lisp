@@ -15,6 +15,7 @@
 
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
+(import eseq.effects.drag-drop :as effect-dd)
 
 (export muted?
         track-color-r
@@ -309,16 +310,21 @@
         (eseq.browser/drop-instrument-on-track event)
         (if (= drag-type "sample")
           (drop-sample-on-track event)
-          (if (or (= drag-type "audio-effect") (= drag-type "midi-effect"))
-            (drop-effect-on-track event)
-            (status "Unsupported drop")))))))
+          (if (= drag-type "effect-instance")
+            (let ((target (get event :target)))
+              (effect-dd/drop-existing-effect
+                (get event :payload)
+                (dict :chain "append" :track (get target :track) :bus -1 :slot -1)))
+            (if (or (= drag-type "audio-effect") (= drag-type "midi-effect"))
+              (drop-effect-on-track event)
+              (status "Unsupported drop"))))))))
 
 (def track-drop-types (i)
   (if (eseq.track-collapse/replaceable-instrument? i)
-    (list "sample" "instrument" "sound" "audio-effect" "midi-effect")
+    (list "sample" "instrument" "sound" "audio-effect" "midi-effect" "effect-instance")
     (if (eseq.track-collapse/sound-replaceable? i)
-      (list "sample" "sound" "audio-effect" "midi-effect")
-      (list "sample" "audio-effect" "midi-effect"))))
+      (list "sample" "sound" "audio-effect" "midi-effect" "effect-instance")
+      (list "sample" "audio-effect" "midi-effect" "effect-instance"))))
 
 (def drop-effect-on-bus (event)
   (let ((payload (get event :payload))
