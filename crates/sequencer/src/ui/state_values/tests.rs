@@ -40327,14 +40327,14 @@
                 &mut editor,
                 &crossterm::event::KeyEvent::new(
                     crossterm::event::KeyCode::Char('m'),
-                    crossterm::event::KeyModifiers::SUPER,
+                    eseqlisp::ui::platform::primary_shortcut_modifier(),
                 ),
                 &state,
                 &current_track,
                 &selected_steps,
                 &step_clipboard,
             ),
-            "Cmd+M should invoke the mods toggle action and refresh the visible FX layout"
+            "the platform-primary M shortcut should invoke the mods toggle action and refresh the visible FX layout"
         );
         assert_eq!(
             editor
