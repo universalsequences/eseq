@@ -37497,8 +37497,9 @@
                 {
                     // eseq-hpc: resonance is also a published modulation
                     // destination, so its knob and the spectrum curve read the
-                    // host's effective-value field instead of the base one.
-                    // frame/cutoff deliberately keep no field, covering the
+                    // host's published fields instead of the base value: the
+                    // curve binds the absolute value, the knob dot the offset.
+                    // frame/cutoff deliberately keep no fields, covering the
                     // fallback-to-base path in the same panel.
                     let Value::Map(mut param) = mod_param("resonance", 2, 0.0, 0.0, 1.0, 22.0)
                     else {
@@ -37508,6 +37509,12 @@
                         "mod-value-field".to_string(),
                         Rc::new(RefCell::new(Value::String(
                             "fx-mod-value-77-2".to_string(),
+                        ))),
+                    );
+                    param.insert(
+                        "mod-offset-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(
+                            "fx-mod-offset-77-2".to_string(),
                         ))),
                     );
                     Value::Map(param)
@@ -37555,6 +37562,7 @@
                 ("filter-table-live-1", Value::Number(1000.0)),
                 ("filter-table-live-2", Value::Number(0.0)),
                 ("fx-mod-value-77-2", Value::Number(0.0)),
+                ("fx-mod-offset-77-2", Value::Number(0.0)),
                 ("filter-table-live-3", Value::Number(0.7)),
                 ("available-effects", test_list(vec![])),
                 (
@@ -37653,24 +37661,25 @@
             find_knob_by_label(&layout, "resonance").expect("resonance knob-number");
         assert!(
             matches!(
-                resonance_knob.props.get("modulated-value"),
+                resonance_knob.props.get("mod-offset"),
                 Some(Value::ReactiveRef { .. })
             ),
-            "a modulated destination's knob binds its live dot to the same field",
+            "a modulated destination's knob binds its live dot to the offset field",
         );
         let frame_knob = find_knob_by_label(&layout, "frame").expect("frame knob-number");
         assert!(
             !matches!(
-                frame_knob.props.get("modulated-value"),
+                frame_knob.props.get("mod-offset"),
                 Some(Value::ReactiveRef { .. })
             ),
-            "a param with no published effective value must draw no live dot",
+            "a param with no published modulation must draw no live dot",
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "fx-mod-value-77-2",
-            Value::Number(0.8),
-        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "fx-mod-value-77-2", Value::Number(0.8));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "fx-mod-offset-77-2", Value::Number(0.8));
         assert_eq!(
             eseqlisp::widget_render::get_f32_prop(
                 &spectrum_viewer.props,
@@ -37678,10 +37687,12 @@
                 -1.0,
             ),
             0.8,
+            "the curve binds the absolute effective value",
         );
         assert_eq!(
-            eseqlisp::widget_render::get_f32_prop(&resonance_knob.props, "modulated-value", -1.0),
+            eseqlisp::widget_render::get_f32_prop(&resonance_knob.props, "mod-offset", -1.0),
             0.8,
+            "the knob binds the displacement, not the absolute value",
         );
         assert_eq!(
             eseqlisp::widget_render::get_f32_prop(&resonance_knob.props, "value", -1.0),
@@ -41185,11 +41196,11 @@
         );
 
         // eseq-6mva: cutoff is a published modulation destination, so its knob
-        // reads the host's effective-value field for the live dot.
+        // reads the host's modulation-offset field for the live dot.
         cutoff.insert(
-            "mod-value-field".to_string(),
+            "mod-offset-field".to_string(),
             Rc::new(RefCell::new(Value::String(
-                "fx-instrument-mod-value-0".to_string(),
+                "fx-instrument-mod-offset-0".to_string(),
             ))),
         );
 
@@ -41341,7 +41352,7 @@
                 ("test-lfo-sync", Value::Number(1.0)),
                 ("test-mod-source-12", Value::Number(0.0)),
                 ("test-mod-depth-13", Value::Number(0.0)),
-                ("fx-instrument-mod-value-0", Value::Number(0.5)),
+                ("fx-instrument-mod-offset-0", Value::Number(0.0)),
                 ("bus-effects", test_list(vec![])),
             ],
             true,
@@ -41400,22 +41411,23 @@
         // knob's own (base) value — the drag target.
         assert!(
             matches!(
-                synth_knob.props.get("modulated-value"),
+                synth_knob.props.get("mod-offset"),
                 Some(Value::ReactiveRef { .. })
             ),
             "custom instrument knob should bind its live dot: {:?}",
-            synth_knob.props.get("modulated-value")
+            synth_knob.props.get("mod-offset")
         );
         editor
             .runtime_mut()
-            .set_reactive("SEQ", "fx-instrument-mod-value-0", Value::Number(0.8));
+            .set_reactive("SEQ", "fx-instrument-mod-offset-0", Value::Number(0.3));
         assert_eq!(
-            eseqlisp::widget_render::get_f32_prop(&synth_knob.props, "modulated-value", -1.0),
-            0.8,
+            eseqlisp::widget_render::get_f32_prop(&synth_knob.props, "mod-offset", -1.0),
+            0.3,
         );
         assert_eq!(
             eseqlisp::widget_render::get_f32_prop(&synth_knob.props, "value", -1.0),
             0.5,
+            "the overlay must not disturb the knob's own (base) value",
         );
 
         editor

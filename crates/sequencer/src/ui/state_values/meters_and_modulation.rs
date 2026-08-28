@@ -274,22 +274,47 @@ pub(super) fn quantize_modulator_unit_value(value: f32) -> f64 {
 // Track and bus chains are covered; rack slots keep base values (they have no
 // modulation command target either).
 
-/// One effect instance's effective parameter values after host modulation,
-/// keyed by the effect's graph node id so track and bus instances share one
-/// field namespace.
+/// One modulation destination's live display values.
+///
+/// Two numbers, because the two consumers race differently against this
+/// meter-rate sampler:
+///
+/// * `offset` is what a *knob* draws its dot from. The base moves the instant
+///   a knob is dragged, so an absolute value would trail the drag by up to a
+///   tick and flash a dot beside a knob nothing is modulating. A displacement
+///   rides along with whatever base the widget is already showing, and is
+///   exactly `0.0` when nothing modulates the param.
+/// * `value` is the absolute effective value, for *curve visualizers*. They
+///   bind one reactive field straight into a widget prop rather than computing
+///   from two (a computed prop would not be re-evaluated when only the bound
+///   value field changes), so they need the sum published for them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ParamModValue {
+    pub param_idx: usize,
+    pub offset: f64,
+    pub value: f64,
+}
+
+/// One effect instance's live modulation display values, keyed by the effect's
+/// graph node id so track and bus instances share one field namespace.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EffectModValues {
     pub node_id: i32,
-    /// `(param index, effective value)` for every modulation destination the
-    /// descriptor declares, ascending by param index. An unmodulated
-    /// destination carries its base value bit-for-bit, which is what settles
-    /// the display back to base when modulation stops.
-    pub values: Vec<(usize, f64)>,
+    /// One entry per modulation destination the descriptor declares, ascending
+    /// by param index.
+    pub values: Vec<ParamModValue>,
 }
 
-/// Reactive field carrying one param's effective value. Sparse by
-/// construction: only declared modulation destinations of live effects ever
+/// Reactive field carrying one param's modulation *offset* — how far the live
+/// effective value sits from the param's base, in the base's own units. Sparse
+/// by construction: only declared modulation destinations of live effects ever
 /// get a field.
+pub(crate) fn effect_mod_offset_field(node_id: i32, param_idx: usize) -> String {
+    format!("fx-mod-offset-{node_id}-{param_idx}")
+}
+
+/// Reactive field carrying one param's absolute effective value, for curve
+/// visualizers. Same sparsity as the offset field.
 pub(crate) fn effect_mod_value_field(node_id: i32, param_idx: usize) -> String {
     format!("fx-mod-value-{node_id}-{param_idx}")
 }
@@ -397,9 +422,10 @@ pub(crate) fn effect_mod_destinations(desc: &sequencer::effects::EffectDescripto
 }
 
 /// Pure half of the sampler: apply the additive modulation contract to every
-/// declared destination for one already-sampled set of modulator slot values.
-/// All-zero `slot_values` reproduces the base values exactly, which is what an
-/// unmodulated (or hidden) panel publishes.
+/// declared destination for one already-sampled set of modulator slot values,
+/// reporting each as an offset from that destination's base. All-zero
+/// `slot_values` yields all-zero offsets, which is what an unmodulated (or
+/// hidden) panel publishes.
 pub(crate) fn effect_mod_values_from_slot_values(
     desc: &sequencer::effects::EffectDescriptor,
     node_id: i32,
@@ -431,10 +457,6 @@ fn effect_mod_values_for_destinations(
             continue;
         };
         let base = value_of(param_idx);
-        // Quantization only damps *modulated* churn. An unmodulated
-        // destination publishes its base value bit-for-bit, so a knob's dot
-        // sits exactly on its pointer (and stays hidden) and a curve renders
-        // exactly what the base value drew before this feature existed.
         let value = match effect_mod_lanes(desc, param_idx, value_of) {
             Some(depths) => {
                 let modulated = vm::additive_modulated_value(base, true, &depths, slot_values);
@@ -445,14 +467,21 @@ fn effect_mod_values_for_destinations(
                     // and a curve identical to the unmodulated one.
                     base as f64
                 } else {
-                    // The DSP clips each control to its declared range before
-                    // using it; the display has to see the same bounds.
+                    // Quantization damps audio-rate jitter below a pixel of
+                    // travel; the DSP clips each control to its declared range
+                    // before using it, so the display sees the same bounds.
                     quantize_effective_value(pdesc, modulated)
                 }
             }
             None => base as f64,
         };
-        values.push((param_idx, value));
+        // The offset is derived from the same sample, so an idle destination
+        // is exactly 0.0 rather than a rounding residue.
+        values.push(ParamModValue {
+            param_idx,
+            offset: value - base as f64,
+            value,
+        });
     }
     EffectModValues { node_id, values }
 }
@@ -626,20 +655,25 @@ pub(crate) fn read_mod_display_values(
     }
 }
 
-/// One instrument's effective parameter values after host modulation
-/// (eseq-6mva), in the *display* domain the instrument panel's own value
-/// fields use (`stored_to_user`), so a knob's dot and its pointer share one
-/// scale. Only the selected track is ever sampled: the FX-tile instrument
-/// panel's fields are not track-keyed.
+/// One instrument's live modulation offsets (eseq-6mva), in the *display*
+/// domain the instrument panel's own value fields use (`stored_to_user`), so a
+/// knob's dot and its pointer share one scale. Only the selected track is ever
+/// sampled: the FX-tile instrument panel's fields are not track-keyed.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InstrumentModValues {
     pub track: usize,
-    pub values: Vec<(usize, f64)>,
+    pub values: Vec<ParamModValue>,
 }
 
-/// Reactive field carrying one instrument param's effective value. Matches the
-/// `fx-instrument-param-*` naming: the FX-tile panel shows one instrument at a
-/// time, so these are relative to the selected track.
+/// Reactive field carrying one instrument param's modulation offset. Matches
+/// the `fx-instrument-param-*` naming: the FX-tile panel shows one instrument
+/// at a time, so these are relative to the selected track.
+pub(crate) fn fx_instrument_mod_offset_field(param_idx: usize) -> String {
+    format!("fx-instrument-mod-offset-{param_idx}")
+}
+
+/// Reactive field carrying one instrument param's absolute effective value,
+/// for curve visualizers.
 pub(crate) fn fx_instrument_mod_value_field(param_idx: usize) -> String {
     format!("fx-instrument-mod-value-{param_idx}")
 }
@@ -709,25 +743,33 @@ fn read_instrument_mod_values_for_track(
         [0.0_f32; SLOT_COUNT]
     };
     // The shared arithmetic works in the stored domain; the instrument panel
-    // publishes user-domain values (percent params are stored 0..1 and shown
-    // 0..100), so convert on the way out. The conversion is linear, so an
-    // unmodulated destination still lands bit-for-bit on the panel's own value.
+    // displays user-domain values (percent params are stored 0..1 and shown
+    // 0..100), so scale the offset on the way out. `stored_to_user` is linear,
+    // so scaling a difference is the same as differencing two scaled values,
+    // and a zero offset stays exactly zero.
     let stored = effect_mod_values_for_destinations(desc, 0, &value_of, &slot_values, &destinations);
     let values = stored
         .values
         .into_iter()
-        .filter_map(|(param_idx, value)| {
-            let pdesc = desc.params.get(param_idx)?;
-            Some((param_idx, pdesc.stored_to_user(value as f32) as f64))
+        .filter_map(|sampled| {
+            let pdesc = desc.params.get(sampled.param_idx)?;
+            Some(ParamModValue {
+                param_idx: sampled.param_idx,
+                // `stored_to_user` is linear through the origin, so scaling a
+                // displacement is the same as differencing two scaled values,
+                // and a zero offset stays exactly zero.
+                offset: pdesc.stored_to_user(sampled.offset as f32) as f64,
+                value: pdesc.stored_to_user(sampled.value as f32) as f64,
+            })
         })
         .collect();
     Some(InstrumentModValues { track, values })
 }
 
-/// Publish the changed instrument values. Same delta contract as the effect
+/// Publish the changed instrument offsets. Same delta contract as the effect
 /// half: zero writes while nothing moves, and a track change republishes every
 /// field so the panel never shows the previous instrument's modulation.
-pub(crate) fn sync_instrument_mod_value_field_delta(
+pub(crate) fn sync_instrument_mod_offset_field_delta(
     rt: &mut Runtime,
     previous: Option<&InstrumentModValues>,
     current: Option<&InstrumentModValues>,
@@ -738,33 +780,41 @@ pub(crate) fn sync_instrument_mod_value_field_delta(
         return (effects_dirty, published);
     };
     let previous = previous.filter(|previous| previous.track == current.track);
-    for (param_idx, value) in &current.values {
+    for sampled in &current.values {
         let was = previous.and_then(|previous| {
             previous
                 .values
                 .iter()
-                .find(|(idx, _)| idx == param_idx)
-                .map(|(_, value)| *value)
+                .find(|candidate| candidate.param_idx == sampled.param_idx)
+                .copied()
         });
-        if was == Some(*value) {
-            continue;
-        }
-        published += 1;
-        effects_dirty |= rt
-            .set_reactive(
-                "SEQ",
-                &fx_instrument_mod_value_field(*param_idx),
-                Value::Number(*value),
-            )
-            .effects_dirty;
+        let mut publish = |field: String, value: f64, was: Option<f64>| {
+            if was == Some(value) {
+                return;
+            }
+            published += 1;
+            effects_dirty |= rt
+                .set_reactive("SEQ", &field, Value::Number(value))
+                .effects_dirty;
+        };
+        publish(
+            fx_instrument_mod_offset_field(sampled.param_idx),
+            sampled.offset,
+            was.map(|was| was.offset),
+        );
+        publish(
+            fx_instrument_mod_value_field(sampled.param_idx),
+            sampled.value,
+            was.map(|was| was.value),
+        );
     }
     (effects_dirty, published)
 }
 
-/// Publish the changed effective values. Returns `(effects_dirty, published)`:
+/// Publish the changed offsets. Returns `(effects_dirty, published)`:
 /// `published` is zero whenever nothing moved, which is the check that an idle
 /// (or unmodulated) panel dirties no widget.
-pub(crate) fn sync_effect_mod_value_field_delta(
+pub(crate) fn sync_effect_mod_offset_field_delta(
     rt: &mut Runtime,
     previous: &[EffectModValues],
     current: &[EffectModValues],
@@ -775,24 +825,32 @@ pub(crate) fn sync_effect_mod_value_field_delta(
         let prev = previous
             .iter()
             .find(|candidate| candidate.node_id == response.node_id);
-        for (param_idx, value) in &response.values {
+        for sampled in &response.values {
             let was = prev.and_then(|prev| {
                 prev.values
                     .iter()
-                    .find(|(idx, _)| idx == param_idx)
-                    .map(|(_, value)| *value)
+                    .find(|candidate| candidate.param_idx == sampled.param_idx)
+                    .copied()
             });
-            if was == Some(*value) {
-                continue;
-            }
-            published += 1;
-            effects_dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &effect_mod_value_field(response.node_id, *param_idx),
-                    Value::Number(*value),
-                )
-                .effects_dirty;
+            let mut publish = |field: String, value: f64, was: Option<f64>| {
+                if was == Some(value) {
+                    return;
+                }
+                published += 1;
+                effects_dirty |= rt
+                    .set_reactive("SEQ", &field, Value::Number(value))
+                    .effects_dirty;
+            };
+            publish(
+                effect_mod_offset_field(response.node_id, sampled.param_idx),
+                sampled.offset,
+                was.map(|was| was.offset),
+            );
+            publish(
+                effect_mod_value_field(response.node_id, sampled.param_idx),
+                sampled.value,
+                was.map(|was| was.value),
+            );
         }
     }
     (effects_dirty, published)

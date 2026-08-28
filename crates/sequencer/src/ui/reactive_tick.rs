@@ -948,13 +948,13 @@ pub(crate) fn reactive_tick_and_render(
         // the FX panel is hidden, so this is what leaves the fields holding
         // base values for the next open, and it only writes on change.
         if ctx.meters.cached_mod_display_values != ctx.frame.prev_mod_display_values {
-            needs_reactive_cycle |= sync_effect_mod_value_field_delta(
+            needs_reactive_cycle |= sync_effect_mod_offset_field_delta(
                 editor.runtime_mut(),
                 &ctx.frame.prev_mod_display_values.effects,
                 &ctx.meters.cached_mod_display_values.effects,
             )
             .0;
-            needs_reactive_cycle |= sync_instrument_mod_value_field_delta(
+            needs_reactive_cycle |= sync_instrument_mod_offset_field_delta(
                 editor.runtime_mut(),
                 ctx.frame.prev_mod_display_values.instrument.as_ref(),
                 ctx.meters.cached_mod_display_values.instrument.as_ref(),

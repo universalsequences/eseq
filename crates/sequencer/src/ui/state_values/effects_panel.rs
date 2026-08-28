@@ -499,12 +499,18 @@ pub(crate) fn build_effects_value(
                     }
                     if let Some(targets) = modulation_targets.get(&param_idx) {
                         insert_mod_metadata(&mut pmap, targets);
-                        // Effective (post-modulation) value field (eseq-hpc):
-                        // read-only telemetry the knob draws its live dot from
-                        // and curve visualizers re-evaluate with. Only declared
-                        // modulation destinations get one, and it carries the
-                        // base value while nothing is modulating.
+                        // Modulated-value display fields (eseq-hpc), read-only
+                        // telemetry: the knob draws its dot from the *offset*
+                        // (so it cannot lag a drag), curve visualizers bind the
+                        // absolute value (one reactive ref straight into a
+                        // widget prop). Only declared modulation destinations
+                        // get them; an idle one holds 0.0 and the base value.
                         if node_id > 0 && mod_destinations.contains(&param_idx) {
+                            insert_string_prop(
+                                &mut pmap,
+                                "mod-offset-field",
+                                effect_mod_offset_field(node_id, param_idx),
+                            );
                             insert_string_prop(
                                 &mut pmap,
                                 "mod-value-field",
@@ -1141,6 +1147,11 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                 // Effective-value field (eseq-hpc); see the
                                 // track path for the contract.
                                 if node_id > 0 && mod_destinations.contains(&param_idx) {
+                                    insert_string_prop(
+                                        &mut pmap,
+                                        "mod-offset-field",
+                                        effect_mod_offset_field(node_id, param_idx),
+                                    );
                                     insert_string_prop(
                                         &mut pmap,
                                         "mod-value-field",

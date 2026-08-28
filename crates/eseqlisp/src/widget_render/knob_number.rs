@@ -649,12 +649,14 @@ mod tests {
         );
     }
 
-    /// eseq-hpc: the live modulated-value dot. It rides the base domain (so it
-    /// still tracks the base pointer while the mods tab retargets
-    /// value/min/max to a depth), it is suppressed when the effective value
-    /// equals the base one, and it is a pure primitive — no interaction state.
+    /// eseq-hpc: the live modulation dot. It is placed at an *offset* from the
+    /// widget's own base — which is what keeps it glued to a knob being
+    /// dragged instead of trailing the host's meter-rate sampler — it rides
+    /// the base domain (so it still tracks the base while the mods tab
+    /// retargets value/min/max to a depth), a zero offset draws nothing, and
+    /// it is a pure primitive with no interaction state.
     #[test]
-    fn modulated_value_emits_a_live_dot_only_when_it_differs_from_base() {
+    fn mod_offset_emits_a_live_dot_only_when_modulation_displaces_the_base() {
         let dots = |props: HashMap<String, Value>| {
             let node = test_knob_node(props);
             KNOB_NUMBER_WIDGET
@@ -681,29 +683,43 @@ mod tests {
 
         assert!(
             dots(base_props()).is_empty(),
-            "no `modulated-value` prop must cost no primitive at all"
+            "no `mod-offset` prop must cost no primitive at all"
         );
 
         let mut settled = base_props();
-        settled.insert("modulated-value".to_string(), Value::Number(0.0));
+        settled.insert("mod-offset".to_string(), Value::Number(0.0));
         assert!(
             dots(settled).is_empty(),
-            "an effective value equal to the base one hides the dot"
+            "an unmodulated param's zero offset draws no dot"
         );
 
         let mut modulated = base_props();
-        modulated.insert("modulated-value".to_string(), Value::Number(0.5));
+        modulated.insert("mod-offset".to_string(), Value::Number(0.5));
         let live = dots(modulated);
         assert_eq!(live.len(), 1);
         assert!(
             (live[0].uniform_b[0] - 0.75).abs() < 0.000_01,
-            "the dot sits at the effective value's arc position: {:?}",
+            "the dot sits at base + offset on the arc: {:?}",
             live[0].uniform_b
         );
         assert_eq!(live[0].uniform_b[1], MOD_DOT_RING_RADIUS);
         assert_eq!(
             live[0].uniform_b[2], MOD_DOT_RADIUS,
             "the dot's size is Rust-owned, not baked into the shader",
+        );
+
+        // Dragging the knob moves the base; the *same* stale offset has to
+        // ride along with it rather than staying where the sampler last saw
+        // it, which is what stops a dot flashing beside a moving knob.
+        let mut dragged = base_props();
+        dragged.insert("value".to_string(), Value::Number(0.5));
+        dragged.insert("mod-offset".to_string(), Value::Number(0.5));
+        let live = dots(dragged);
+        assert_eq!(live.len(), 1);
+        assert!(
+            (live[0].uniform_b[0] - 1.0).abs() < 0.000_01,
+            "the dot follows the dragged base: {:?}",
+            live[0].uniform_b
         );
 
         // Mods tab open: value/min/max carry the depth, base-* carry the base
@@ -715,7 +731,7 @@ mod tests {
         depth_edit.insert("base-value".to_string(), Value::Number(1_000.0));
         depth_edit.insert("base-min".to_string(), Value::Number(0.0));
         depth_edit.insert("base-max".to_string(), Value::Number(2_000.0));
-        depth_edit.insert("modulated-value".to_string(), Value::Number(1_500.0));
+        depth_edit.insert("mod-offset".to_string(), Value::Number(500.0));
         let live = dots(depth_edit);
         assert_eq!(live.len(), 1);
         assert!(
@@ -1024,7 +1040,7 @@ fn mod_slot_color(slot: i32, selected: bool) -> Color {
     color
 }
 
-/// Radius the live modulated-value dot rides, matching the knob shader's own
+/// Radius the live modulation dot rides, matching the knob shader's own
 /// ring so the dot reads as a marker on the same arc as the base pointer. Keep
 /// in sync with `knobRadius` in the knob shaders below.
 const MOD_DOT_RING_RADIUS: f32 = 0.58;
@@ -1040,7 +1056,7 @@ const MOD_DOT_MIN_TRAVEL: f32 = 0.002;
 /// for the pointer.
 const MOD_DOT_RADIUS: f32 = 0.084;
 
-/// Colour of the live modulated-value dot. Theme-controlled by default
+/// Colour of the live modulation dot. Theme-controlled by default
 /// (`widget-knob-mod-dot`, tweakable in `content/core/themes.lisp` like any
 /// other widget colour) so the accent can be tuned globally; a panel can still
 /// override one knob with an explicit `mod-dot-color` prop. Deliberately *not*
@@ -1462,7 +1478,7 @@ impl WidgetDefinition for KnobNumberWidget {
             "base-min",
             "base-max",
             "selected-mod-slot",
-            "modulated-value",
+            "mod-offset",
             "mod-range-0-slot",
             "mod-range-0-depth",
             "mod-range-1-slot",
@@ -1996,19 +2012,26 @@ impl WidgetDefinition for KnobNumberWidget {
             }
         }
 
-        // Live modulated-value dot (eseq-hpc). Purely read-only telemetry: the
-        // host publishes the effective (post-modulation) value into the bound
-        // field, and it is drawn as a thin marker riding the same ring as the
-        // base pointer. It is never hit-tested and never written back into
-        // widget state, so the solid base pointer stays the drag target and a
-        // drag on a modulated knob still edits the base value. The mods-tab
-        // range arcs above are untouched.
-        if let Some(modulated) = node.props.get("modulated-value").and_then(value_as_f32)
+        // Live modulation dot (eseq-hpc). Purely read-only telemetry: the host
+        // publishes how far modulation currently pushes the param from its
+        // base, and the dot is drawn at that displacement from *this* widget's
+        // own base — a thin marker riding the same ring as the base pointer.
+        // It is never hit-tested and never written back into widget state, so
+        // the solid base pointer stays the drag target and a drag on a
+        // modulated knob still edits the base value. The mods-tab range arcs
+        // above are untouched.
+        //
+        // The prop is an offset rather than an absolute value on purpose: the
+        // host samples modulation at meter rate, so an absolute value would
+        // trail a drag by up to a tick and flash a dot beside a knob nothing
+        // is modulating. An offset rides along with the base instead, and an
+        // unmodulated param's offset is exactly zero.
+        if let Some(offset) = node.props.get("mod-offset").and_then(value_as_f32)
             && base_range.abs() > 0.000_001
-            && modulated.is_finite()
+            && offset != 0.0
         {
             let base_t = taper_normalize(taper, base_min, base_max, base_value);
-            let mod_t = taper_normalize(taper, base_min, base_max, modulated);
+            let mod_t = taper_normalize(taper, base_min, base_max, base_value + offset);
             if (mod_t - base_t).abs() > MOD_DOT_MIN_TRAVEL {
                 let color = mod_dot_color(&node.props);
                 prims.push(GpuPrimitive::WidgetInstance {
@@ -2184,7 +2207,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 }
 "#, super::wgsl::KNOB_NUMBER_SHADER);
 
-/// Live modulated-value marker (eseq-hpc): one small dot on the knob's ring at
+/// Live modulation marker (eseq-hpc): one small dot on the knob's ring at
 /// the effective value's arc position. `uniform_b.x` is the normalized value,
 /// `uniform_b.y` the ring radius (kept equal to the knob shader's `knobRadius`
 /// so the dot rides the same arc as the base pointer).

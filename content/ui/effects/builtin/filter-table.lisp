@@ -19,7 +19,7 @@
         :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
         :value-scale value-scale :decimals decimals
         :base-value (pc/param-base-value-prop fx p)
-        :modulated-value (pc/param-modulated-value p)
+        :mod-offset (pc/param-mod-offset p)
         :base-min (pc/param-base-min-prop fx p) :base-max (pc/param-base-max-prop fx p)
         :mod-range-0-slot (pc/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (pc/param-knob-mod-depth-prop fx p 0)
         :mod-range-1-slot (pc/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (pc/param-knob-mod-depth-prop fx p 1)

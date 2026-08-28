@@ -53,7 +53,7 @@
         param-knob-mod-slot-prop
         param-knob-mod-depth-prop
         param-base-value-prop
-        param-modulated-value
+        param-mod-offset
         param-effective-value
         param-base-min-prop
         param-base-max-prop
@@ -829,20 +829,31 @@
   (let ((target (param-knob-mod-target fx p idx)))
     (if target (instrument-mod-target-depth target) false)))
 
-;; Effective (post-modulation) parameter value (eseq-hpc). The host samples the
-;; effect's modulator node at meter rate and publishes `base + sum(depth * mod)`
-;; into this field for every declared modulation destination; knobs draw their
-;; live dot at it and curve visualizers re-evaluate their curve with it. This is
-;; read-only telemetry — nothing here writes back into widget state, so dragging
-;; a modulated knob still edits the base value. `false` when the param is not a
-;; modulation destination (no field published), which is what makes the knob
-;; overlay cost nothing on unmodulatable params and on rack slots.
-(def param-modulated-value (p)
-  (let ((field (get p :mod-value-field)))
+;; Live modulation offset for a param (eseq-hpc): how far modulation currently
+;; pushes it from its base, in the base's own units. The host samples the
+;; modulator node at meter rate and publishes `sum(depth * mod)` for every
+;; declared modulation destination; knobs draw their live dot at that
+;; displacement from the base they are already showing.
+;;
+;; An offset rather than the absolute effective value on purpose. The base moves
+;; the instant a knob is dragged while the sampler only runs at meter rate, so
+;; an absolute value trails the drag and flashes a dot beside a knob nothing is
+;; modulating; an offset rides along with the base instead, and an unmodulated
+;; param's offset is exactly 0. Read-only telemetry either way — nothing here
+;; writes back into widget state, so dragging a modulated knob still edits the
+;; base value. `false` when the param is not a modulation destination (no field
+;; published), which is what makes the overlay cost nothing on unmodulatable
+;; params and on rack slots.
+(def param-mod-offset (p)
+  (let ((field (get p :mod-offset-field)))
     (if field (bind-seq field) false)))
 
-;; Same value, but falling back to the base value so curve visualizers — which
-;; need a number either way — can read one accessor.
+;; The absolute effective value, for curve visualizers. They bind one reactive
+;; field straight into a widget prop — a computed `base + offset` expression
+;; would not be re-evaluated when only the bound value field changes, so the
+;; curve would freeze until the panel rebuilt — which is why the host publishes
+;; the sum alongside the offset. Falls back to the base value for params with no
+;; published field (rack slots, non-destinations).
 (def param-effective-value (p)
   (let ((field (get p :mod-value-field)))
     (if field (bind-seq field) (instrument-param-base-value p))))

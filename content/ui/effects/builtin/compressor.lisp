@@ -43,7 +43,7 @@
   (knob-number :label label-text
     :value (eseq.effects.param-controls/fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals
-    :modulated-value (eseq.effects.param-controls/param-modulated-value p)
+    :mod-offset (eseq.effects.param-controls/param-mod-offset p)
     :font-size 9.5 :label-font-size 9.5
     :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)

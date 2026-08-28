@@ -14188,7 +14188,7 @@
     /// slot's base/depth/active params and published into the per-param SEQ
     /// fields panels bind their knob dots and curve visualizers to.
     #[test]
-    fn effect_mod_value_fields_follow_modulator_slot_values() {
+    fn effect_mod_offset_fields_follow_modulator_slot_values() {
         use sequencer::instruments::voice_modulator::SLOT_COUNT;
         let desc = filter_table_mod_descriptor();
         let node_id = 77;
@@ -14197,9 +14197,9 @@
             sample
                 .values
                 .iter()
-                .find(|(idx, _)| *idx == param_idx)
+                .find(|candidate| candidate.param_idx == param_idx)
                 .unwrap_or_else(|| panic!("param {param_idx} should be published: {sample:?}"))
-                .1
+                .value
         };
         const FRAME: usize = 0;
         const CUTOFF: usize = 1;
@@ -14296,12 +14296,39 @@
             at(&unmodulated, CUTOFF)
         );
 
-        // Widget end: the delta sync writes the SEQ fields the panel binds.
+        // The offset half is what knobs draw from: an idle destination is
+        // *exactly* zero (no dot, and nothing that can lag a drag), a live one
+        // is the displacement from the base.
+        let offset_at = |sample: &super::EffectModValues, param_idx: usize| -> f64 {
+            sample
+                .values
+                .iter()
+                .find(|candidate| candidate.param_idx == param_idx)
+                .unwrap_or_else(|| panic!("param {param_idx} should be published: {sample:?}"))
+                .offset
+        };
+        assert_eq!(
+            offset_at(&unmodulated, FRAME),
+            0.0,
+            "an inactive destination must displace the base by exactly zero"
+        );
+        assert_eq!(offset_at(&settled, FRAME), 0.0, "so must a resting one");
+        assert!(
+            (offset_at(&modulated, FRAME) - 0.5).abs() < 1.0e-2,
+            "a live destination publishes depth * slot value, got {}",
+            offset_at(&modulated, FRAME)
+        );
+
+        // Widget end: the delta sync writes the SEQ fields the panel binds —
+        // an offset for the knob dot and the absolute value for curves.
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", Vec::new(), true);
         let (_, published) =
-            super::sync_effect_mod_value_field_delta(&mut runtime, &[], &[modulated.clone()]);
-        assert_eq!(published, 2, "a first sample publishes both destinations");
+            super::sync_effect_mod_offset_field_delta(&mut runtime, &[], &[modulated.clone()]);
+        assert_eq!(
+            published, 4,
+            "a first sample publishes both fields of both destinations"
+        );
         let frame_field = super::effect_mod_value_field(node_id, FRAME);
         let cutoff_field = super::effect_mod_value_field(node_id, CUTOFF);
         assert_eq!(
@@ -14312,10 +14339,14 @@
             runtime.reactive_field_value("SEQ", &cutoff_field),
             Some(&Value::Number(at(&modulated, CUTOFF)))
         );
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", &super::effect_mod_offset_field(node_id, FRAME)),
+            Some(&Value::Number(offset_at(&modulated, FRAME)))
+        );
 
         // Re-publishing an unchanged sample writes nothing: an idle modulated
         // panel does not dirty the widget every tick (requirement (e)).
-        let (_, republished) = super::sync_effect_mod_value_field_delta(
+        let (_, republished) = super::sync_effect_mod_offset_field_delta(
             &mut runtime,
             std::slice::from_ref(&modulated),
             std::slice::from_ref(&modulated),
@@ -14323,7 +14354,7 @@
         assert_eq!(republished, 0, "an unchanged sample must write nothing");
 
         // ... and a settled sample puts the base values back on the wire.
-        let (_, settled_published) = super::sync_effect_mod_value_field_delta(
+        let (_, settled_published) = super::sync_effect_mod_offset_field_delta(
             &mut runtime,
             std::slice::from_ref(&modulated),
             std::slice::from_ref(&settled),
@@ -14448,9 +14479,9 @@
             sample
                 .values
                 .iter()
-                .find(|(idx, _)| *idx == param_idx)
+                .find(|candidate| candidate.param_idx == param_idx)
                 .unwrap_or_else(|| panic!("param {param_idx} should be published: {sample:?}"))
-                .1
+                .value
         };
 
         // Unmodulated: the base values land on the right fields, and nothing
@@ -14575,9 +14606,9 @@
             sample
                 .values
                 .iter()
-                .find(|(idx, _)| *idx == param_idx)
+                .find(|candidate| candidate.param_idx == param_idx)
                 .unwrap_or_else(|| panic!("param {param_idx} should be published: {sample:?}"))
-                .1
+                .value
         };
         let modulator_node_id = 4_321;
         let mut instrument_watched: std::collections::HashSet<i32> =
