@@ -1064,11 +1064,17 @@ fn binding_base_for_node(node: &PatchNode) -> String {
     // Params are named first, so they win the name before anything else can
     // claim it. The rename is invisible to the editor: the graph payload keys
     // nodes by model id, and the source is only a build artifact.
+    //
+    // A grouped param's canonical identity carries the group dot
+    // (`fm.harmonicity`), which is exactly the spelling the accessor and every
+    // other reference emit — so the dot survives sanitizing here. Folding it to
+    // `fm-harmonicity` made the binding stop matching the declared name, the
+    // wrapper stayed, and `(mod fm.harmonicity)` lost its declaration.
     if node.kind == NodeKind::Param
         && let Some(param) = node.param.as_ref()
         && param.modulatable
     {
-        let name = sanitize_binding(&param.name);
+        let name = sanitize_param_identity_binding(&param.name);
         if !name.is_empty() {
             return name;
         }
@@ -1308,6 +1314,19 @@ fn op_word(op: &str) -> Option<&'static str> {
         "!=" => Some("neq"),
         _ => None,
     }
+}
+
+/// `sanitize_binding` for a param's canonical identity, which is `group.name`
+/// since eseq-gg6e. The group separator is the one `.` a binding may keep: it
+/// is part of the identity the DGenLisp param namespace resolves, not a
+/// character to fold away. Each side is sanitized on its own.
+fn sanitize_param_identity_binding(raw: &str) -> String {
+    let sanitized = raw
+        .split('.')
+        .map(sanitize_binding)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    sanitized.join(".")
 }
 
 /// Deterministically map a model node id to a valid, compilable binding

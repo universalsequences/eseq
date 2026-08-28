@@ -260,6 +260,7 @@ fn materialize_symbol_ref_connections(patch: &mut Patch) {
                 presentation: InputPresentation::Cable,
                 presentation_override: None,
                 source: None,
+                authored_reference: None,
             })
         })
         .collect::<Vec<_>>();
@@ -415,6 +416,7 @@ fn patch_connection(entry: &ConnectionEntry) -> PatchConnection {
         presentation: entry.presentation,
         presentation_override: None,
         source: None,
+        authored_reference: None,
     }
 }
 

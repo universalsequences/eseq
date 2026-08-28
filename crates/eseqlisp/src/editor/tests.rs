@@ -9964,7 +9964,11 @@ fn buffer_list_mode_shows_previous_buffer_first() {
     editor.refresh_runtime_side_effects();
 
     assert_eq!(editor.active_buffer().name, "*buffers*");
-    assert_eq!(editor.active_buffer().lines[1], "> *grid*");
+    assert!(
+        editor.active_buffer().lines[1].starts_with("> *grid* "),
+        "previous buffer should be listed first with the source marker, got {:?}",
+        editor.active_buffer().lines[1]
+    );
     assert!(
         !editor
             .active_buffer()
@@ -9973,6 +9977,72 @@ fn buffer_list_mode_shows_previous_buffer_first() {
             .any(|line| line.contains("*buffers*")),
         "buffer-list mode should not offer the buffer-list buffer itself"
     );
+}
+
+#[test]
+fn buffer_list_mode_excludes_buffers_shown_in_other_tiles() {
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
+    let runtime = Runtime::with_init_source(&init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init),
+            ..EditorConfig::default()
+        },
+    );
+
+    let grid_id = editor.open_scratch_buffer("*grid*", "");
+    editor.open_scratch_buffer("*gain*", "");
+    editor.set_active_buffer(grid_id);
+
+    // Present *gain* in a second tile; the active tile keeps *grid*.
+    let gain_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*gain*")
+        .expect("gain buffer");
+    editor.split_active_tile(SplitDir::Vertical, gain_idx);
+
+    editor.runtime_mut().eval_str("(buffer-list-here)").unwrap();
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(editor.active_buffer().name, "*buffers*");
+    assert!(
+        !editor
+            .active_buffer()
+            .lines
+            .iter()
+            .any(|line| line.contains("*gain*")),
+        "buffer shown in another tile should be excluded"
+    );
+    assert!(
+        editor.active_buffer().lines[1].starts_with("> *grid* "),
+        "the source buffer stays listed even though its tile was visible, got {:?}",
+        editor.active_buffer().lines[1]
+    );
+}
+
+#[test]
+fn buflist_count_label_compacts_thousands() {
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
+    let runtime = Runtime::with_init_source(&init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init),
+            ..EditorConfig::default()
+        },
+    );
+
+    let value = editor
+        .runtime_mut()
+        .eval_str(
+            r#"(str (buflist-count-label 985) " "
+                    (buflist-count-label 5712) " "
+                    (buflist-count-label 55000))"#,
+        )
+        .unwrap();
+    assert_eq!(value, Some(Value::String("985 5.7k 55k".to_string())));
 }
 
 #[test]

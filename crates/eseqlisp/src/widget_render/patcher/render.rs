@@ -1301,6 +1301,7 @@ fn draw_patch_with_view_key(
             presentation: InputPresentation::Cable,
             presentation_override: None,
             source: None,
+            authored_reference: None,
         };
         push_cable_handles(&mut cable_prims, &preview_connection, start, end, zoom);
         push_z_layered(prims, cable_handle_z, cable_prims);
@@ -2079,6 +2080,7 @@ fn push_preview_cable(
         presentation: InputPresentation::Cable,
         presentation_override: None,
         source: None,
+        authored_reference: None,
     };
     push_cable(prims, start, end, &connection, 0.0, zoom, selected);
 }

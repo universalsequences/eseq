@@ -1,9 +1,14 @@
 # Scripts are modules — retiring the Scripts tab
 
-Rev 2 (2026-08-25). Rev 1 proposed a `use-package` attachment form, entry
+Rev 3 (2026-08-27). Rev 1 proposed a `use-package` attachment form, entry
 hooks, and a browser Packages tab as one unit; review simplified it: the
 attachment mechanism is plain `(import …)` typed in *scratch*, and the
 Packages tab is deferred to v0.2 as sugar over that same mechanism.
+Rev 3 replaces rev 2's "retarget the new-script draft flow" affordance
+with the unified *packages* view (§5): the draft/save-script flow is
+deleted, not retargeted — it never had real users (every historical
+script was an agent-written file), and creation, browsing, editing, and
+attaching become one dired-like text surface.
 Extends `docs/module-system-spec.md` (rev 3, S0–S5 built).
 
 ## 1. Problem
@@ -56,13 +61,11 @@ affordances, both v0.1:
    `(import …)` against everything resolvable on the load path — user
    modules, installed packages, factory modules — is the discovery story.
    It becomes load-bearing here and should rise to P1.
-2. **A "new script" affordance**: one command that creates
-   `~/.eseq.d/modules/<name>.lisp` from a template (module header +
-   commented example), opens it as a file-backed source tab, and leaves
-   the user one `(import <name>)` away from attaching it. The existing
+2. **The *packages* view** (§5): one dired-like text surface for
+   creating, browsing, editing, and attaching packages. It replaces the
    new-script draft session flow (`ui/host_commands/scripts.rs`,
-   `ui/edit_sessions.rs:848`) is the code to retarget; its template loses
-   the seven-name contract and gains a module header.
+   `ui/edit_sessions.rs:848`), which is deleted with the Scripts tab —
+   not retargeted; it never had real users.
 
 ## 3. Naming note
 
@@ -85,15 +88,70 @@ Enforcement stays policy, not code.
 - The Scripts tab, the script picker's load flow, and the seven
   `eseq.vanilla/script-*` contract defs are deleted once the keepers are
   migrated. The two Rust emitters of the contract template
-  (`ui/edit_sessions.rs:848`, `ui/host_commands/scripts.rs:178`) migrate
-  with the new-script template.
+  (`ui/edit_sessions.rs:848`, `ui/host_commands/scripts.rs:178`) are
+  deleted with the draft flow (§5); the *packages* view's create verb is
+  the replacement.
 
-## 5. Deferred to v0.2: the Packages tab
+## 5. The *packages* view (v0.1, eseq-mods.16)
 
-A browser tab listing everything importable on the load path (user
-modules, installed packages with their manifests, factory modules), where
-"attach" inserts the `(import …)` line into scratch and "detach" removes
-it — pure sugar over the same textual record, never a parallel mechanism.
+A text-only, dired-like mode that takes over the *sequencer* buffer
+(the largest tile) as a direct line to `~/.eseq.d/modules/`. Entered via
+a shortcut / `M-x packages`; exiting (`q`, Esc) restores the previous
+tab. Four verbs on one surface:
+
+- **Browse**: walk the modules tree dired-style. Each file row shows the
+  filename plus the `(module …)` name read from its header, so the exact
+  import spelling is always visible.
+- **Edit**: `RET` on a file is plain find-file — opens it as a
+  file-backed buffer and dismisses the view.
+- **Create**: a name field at the top; `RET` on a name that resolves to
+  no existing file creates it (find-file-on-missing semantics). Dotted
+  names create intermediate directories per the load-root mapping
+  (`my.euclid.sparse` → `my/euclid/sparse.lisp`), and the file is born
+  with the correct `(module my.euclid.sparse)` header plus commented
+  guidance (see template note below). A preview line under the field
+  shows the resolved path and header before the file exists.
+- **Attach**: a shortcut on a row inserts that module's
+  `(import <name>)` line into *scratch* ("load into this project"). A
+  second shortcut inserts it into `~/.eseq.d/init.lisp` instead
+  ("attach to every session" — the home for §6.1 `override` /
+  look-and-feel packages; a companion jump-to-init.lisp command makes
+  the config file itself one keystroke away).
+
+**Attach invariant** (unchanged from rev 2): attach only ever inserts
+the textual `(import …)` line; the scratch/init replay does the actual
+loading. Never a parallel mechanism. Consequences fall out for free:
+
+- The listing's attached-state markers (✓ for *scratch*, a distinct
+  mark for init.lisp) are *derived* by scanning those buffers' text for
+  import lines, not stored anywhere. Attach on an already-attached row
+  is a no-op / jump-to-line; v0.2 detach is "remove the line".
+- Idempotent under the scheduler's full-scratch re-eval, like any
+  import.
+
+**Single focus model**: the name field and the listing share one focus —
+typing filters the listing incrementally *and* stands ready to be a new
+name when nothing matches (the dired/ido hybrid). Browse and create are
+one gesture: type until you find it or until it doesn't exist, then RET.
+
+**Template**: the created file opens with the module header, short
+comments explaining both attachment destinations (*scratch* via the
+view's attach shortcut; init.lisp for per-session config), a commented
+example of registering UI from the module's own namespace, and an empty
+`(export )`. No seven-name contract.
+
+**Deleted with this**: the new-script draft session flow —
+`script_draft_session`, `sbrowser-script-save-mode`, the
+`new-script`/`save-new-script`/`cancel-new-script` host commands, and
+the two Rust template emitters (`ui/edit_sessions.rs:848`,
+`ui/host_commands/scripts.rs:178`).
+
+## 5b. Deferred to v0.2: widening the view (eseq-mods.18)
+
+Not a separate browser tab — the same surface widened: factory modules
+and installed packages (with their manifests) join the listing, and
+"detach" (remove the import line) joins the verbs. Rows and actions in
+v0.1 should be designed so this widening is additive.
 Also deferred with it: single-file synthesized-manifest packages,
 `use-package`/entry evaluation, `on-attach`/`on-detach` hooks, git-install
 UI (`src/package_install.rs` stays eval/CLI-level), and any "promoted

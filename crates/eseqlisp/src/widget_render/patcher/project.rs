@@ -630,6 +630,7 @@ impl Projector {
                 presentation: InputPresentation::Cable,
                 presentation_override: None,
                 source: None,
+                authored_reference: None,
             });
         }
     }
@@ -791,6 +792,7 @@ impl Projector {
                 to_arg: value_arg.clone(),
                 previous_arg: self.source_arg_value(value, &value_arg),
             }),
+            authored_reference: None,
         });
         Some((from_node, from_output))
     }
@@ -900,6 +902,7 @@ impl Projector {
                                     resolved_binding,
                                 },
                             }),
+                            authored_reference: None,
                         });
                         arg_slots[idx] = Some(ArgValue::SymbolRef(name.clone()));
                     } else if dgenlisp_constant_names().contains(name) {
@@ -942,6 +945,7 @@ impl Projector {
                                     arg_source.expr.clone(),
                                 ),
                             }),
+                            authored_reference: None,
                         });
                         arg_slots[idx] = Some(ArgValue::ConnectedExpr);
                     } else {
@@ -1021,6 +1025,7 @@ impl Projector {
                     to_arg: arg_source.clone(),
                     previous_arg: SourceArgValue::Literal(arg_source.expr.clone()),
                 }),
+                authored_reference: None,
             });
             arg_slots[arg_source.semantic_index] = Some(ArgValue::ConnectedExpr);
         }

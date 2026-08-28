@@ -1733,6 +1733,7 @@ pub(super) fn patch_with_interaction_state(
                 presentation: InputPresentation::Cable,
                 presentation_override: Some(InputPresentation::Cable),
                 source: None,
+                authored_reference: None,
             }),
     );
     infer_modulatable_params(&mut patch);
@@ -2051,6 +2052,9 @@ fn desugar_editor_mod_suffix_args(patch: &mut Patch) {
                 presentation: InputPresentation::Cable,
                 presentation_override: None,
                 source: None,
+                // The inlet echoes what was typed: `fm.harmonicity~` must not
+                // re-render as `harmonicity~`, and vice versa.
+                authored_reference: Some(name.clone()),
             });
             cables.push(PatchConnection {
                 from_node: accessor_id,
@@ -2062,6 +2066,7 @@ fn desugar_editor_mod_suffix_args(patch: &mut Patch) {
                 presentation: InputPresentation::InlineModParam,
                 presentation_override: None,
                 source: None,
+                authored_reference: None,
             });
         }
     }

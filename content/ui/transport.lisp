@@ -757,11 +757,11 @@
 
 (def scene-bank-selector (bank)
   (box :key "scene-bank-selector"
-    :width 4.2 :height 1.1
+    :width 4.2 :height 0.8
     :on-right-click (lambda (event) (open-scene-bank-ops-menu event))
     (if scene-bank-renaming
       (text-input :key "scene-bank-rename-input"
-        :width 4.2 :height 1.1 :font-size 10
+        :width 4.2 :height 0.8 :font-size 8
         :value scene-bank-rename-draft
         :auto-focus true
         :select-all-on-focus true
@@ -776,7 +776,7 @@
         :bg-color :mixer-strip-bg
         :border-color :mixer-strip-border
         :badge-color :transparent
-        :width 4.2 :height 1.1 :font-size 10))))
+        :width 4.2 :height 0.5 :font-size 10))))
 
 (def seq-clone-pattern ()
   (let ((bank (scene-viewed-bank)))
@@ -1090,8 +1090,8 @@
     (subtree :key "transport-pattern-pills"
       (let ((bank (scene-viewed-bank)))
         (let ((bank-offset (get bank :offset))
-              (bank-len (get bank :len))
-              (current-in-bank (= (scene-bank-index-containing SEQ.current-pattern)
+            (bank-len (get bank :len))
+            (current-in-bank (= (scene-bank-index-containing SEQ.current-pattern)
                 (scene-viewed-bank-index))))
           (box :background "transport-scene-strip-bg"
             :corner-radius 64
@@ -1142,9 +1142,9 @@
                 :width 2.5 :height 1.1 :active true
                 :style (if (< bank-len 24) pattern-control-style nil)
                 :on-click |x y r|
-                  (if (< bank-len 24)
-                    (seq-clone-pattern)
-                    (status "This scene bank is full (24 scenes maximum)"))
+                (if (< bank-len 24)
+                  (seq-clone-pattern)
+                  (status "This scene bank is full (24 scenes maximum)"))
                 (v-stack :align :center
                   (label "+"
                     :font-size 12
@@ -1156,9 +1156,9 @@
                   pattern-control-style
                   nil)
                 :on-click |x y r|
-                  (if (and (> SEQ.num-patterns 1) current-in-bank)
-                    (seq-delete-pattern)
-                    nil)
+                (if (and (> SEQ.num-patterns 1) current-in-bank)
+                  (seq-delete-pattern)
+                  nil)
                 (v-stack :align :center
                   (label "-"
                     :font-size 12
@@ -1167,13 +1167,14 @@
                       :dark-gray)
                     :bg :transparent)))
               (h-stack :gap 0.12 :align :center
+                (box :width 0.5)
                 (scene-bank-selector bank)
                 (if (scene-playing-in-other-bank?)
                   (scene-bank-playing-indicator
                     :debug-name "scene-bank-playing-other-indicator")
                   (box :width 0.45 :height 0.45 :bg :transparent)))
-            (scene-bank-context-menu)
-            (scene-bank-ops-context-menu))))))
+              (scene-bank-context-menu)
+              (scene-bank-ops-context-menu))))))
     
     ;; Session and arrangement are app views, not tabs in the main buffer.
     ;; This spacer keeps the view pair against the transport's right edge.

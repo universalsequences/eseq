@@ -243,6 +243,17 @@ pub struct PatchConnection {
     pub presentation: InputPresentation,
     pub presentation_override: Option<InputPresentation>,
     pub source: Option<ConnectionSource>,
+    /// The spelling the author used to name the param this cable carries, when
+    /// the cable has no `source` to read it from.
+    ///
+    /// A param reference typed as `name~` sugar is desugared in the model
+    /// (`desugar_editor_mod_suffix_args`), which replaces the argument with a
+    /// synthesized accessor and a pair of fresh cables — none of which point at
+    /// a source expression. Without this, an inlet had nothing authored to echo
+    /// and fell back to the shortest unambiguous spelling, so a typed
+    /// `fm.harmonicity~` re-rendered as `harmonicity~`. Only the desugar sets
+    /// it; a cable backed by real source text carries its spelling in `source`.
+    pub authored_reference: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,6 +415,9 @@ fn inline_mod_param(patch: &Patch, connection: &PatchConnection) -> Option<Inlin
 }
 
 fn authored_symbol(connection: &PatchConnection) -> Option<&str> {
+    if let Some(authored) = connection.authored_reference.as_deref() {
+        return Some(authored);
+    }
     match &connection.source.as_ref()?.previous_arg {
         SourceArgValue::SymbolReference { symbol, .. } => Some(symbol.as_str()),
         _ => None,

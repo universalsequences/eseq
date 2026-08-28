@@ -404,6 +404,51 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "buffer-info-list",
+        "(buffer-info-list)",
+        "Return a dict per buffer (:name :mode :path :lines :dirty :read-only), ordered from most to least recently selected.",
+        |_args, ctx| {
+            let cell = |v: Value| Rc::new(RefCell::new(v));
+            Ok(Value::List(
+                ctx.buffer_infos()
+                    .into_iter()
+                    .map(|info| {
+                        let mut map = std::collections::HashMap::new();
+                        map.insert("name".to_string(), cell(Value::String(info.name)));
+                        map.insert("mode".to_string(), cell(Value::String(info.mode)));
+                        map.insert(
+                            "path".to_string(),
+                            cell(info.path.map(Value::String).unwrap_or(Value::Nil)),
+                        );
+                        map.insert(
+                            "lines".to_string(),
+                            cell(Value::Number(info.line_count as f64)),
+                        );
+                        map.insert("dirty".to_string(), cell(Value::Bool(info.dirty)));
+                        map.insert("read-only".to_string(), cell(Value::Bool(info.read_only)));
+                        cell(Value::Map(map))
+                    })
+                    .collect(),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "visible-buffer-list",
+        "(visible-buffer-list)",
+        "Return the names of buffers currently shown in a tile, sorted by name.",
+        |_args, ctx| {
+            let names = ctx.visible_buffer_names();
+            Ok(Value::List(
+                names
+                    .into_iter()
+                    .map(|n| Rc::new(RefCell::new(Value::String(n))))
+                    .collect(),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "set-buffer-text",
         "(set-buffer-text text)",
         "Replace the active buffer's contents.",

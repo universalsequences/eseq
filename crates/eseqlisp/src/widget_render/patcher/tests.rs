@@ -6895,6 +6895,7 @@ fn debug_emit_uses_macro_parameter_names_for_edited_connections() {
         presentation: InputPresentation::Cable,
         presentation_override: None,
         source: None,
+        authored_reference: None,
     });
     macro_patch.connections.push(PatchConnection {
         from_node: "created-mul".to_string(),
@@ -6906,6 +6907,7 @@ fn debug_emit_uses_macro_parameter_names_for_edited_connections() {
         presentation: InputPresentation::Cable,
         presentation_override: None,
         source: None,
+        authored_reference: None,
     });
 
     assert_eq!(
@@ -23651,6 +23653,7 @@ fn patch_with_summed_inlet() -> Patch {
         presentation: InputPresentation::Cable,
         presentation_override: None,
         source: None,
+        authored_reference: None,
     });
     patch
 }
@@ -23707,6 +23710,7 @@ fn two_cables_on_an_out_inlet_emit_a_sum() {
         presentation: InputPresentation::Cable,
         presentation_override: None,
         source: None,
+        authored_reference: None,
     });
     let generated =
         generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
@@ -24081,6 +24085,124 @@ fn typing_a_mod_suffix_over_an_unrelated_cable_replaces_it() {
         "the generated call must read the param, not the replaced cable:\n{}",
         generated.source
     );
+}
+
+/// The same rule reaches a *grouped* param, whose canonical identity carries a
+/// dot (`fm.harmonicity`) that no `def` binding can spell. Sanitizing the
+/// identity into a binding produced `fm-harmonicity`, which no longer matched
+/// the declared name, so the wrapper survived and `(mod fm.harmonicity)` — the
+/// only spelling the accessor emits — failed to compile with "parameter
+/// reference 'fm.harmonicity' does not match a declared group.name identity".
+#[test]
+fn modulating_a_grouped_param_emits_a_bare_param_form() {
+    let source = "(def mod1 (in 6 @name mod1 @modulator 1))\n\
+                  (def pitch (in 2 @name pitch))\n\
+                  (def fm-harmonicity (param harmonicity @group fm @min 1 @max 8))\n\
+                  (def mul (* pitch fm.harmonicity))\n\
+                  (out mul 1 @name audio)";
+    let patch = parse(source);
+    let node = patch.nodes.iter().find(|node| node.id == "mul").unwrap();
+    let base = node_display_label(node);
+
+    let mut state = PatcherInteractionState::default();
+    set_node_edit_position(&mut state, "root", node, node.position, base.clone());
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "mul"))
+        .unwrap()
+        .text = "* fm.harmonicity~".to_string();
+    let applied = patch_with_interaction_state(patch.clone(), &state, "root");
+
+    let generated = generate::generate_patch_source(&applied, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(param harmonicity @group fm"),
+        "the modulatable grouped param is emitted bare, not def-wrapped:\n{}",
+        generated.source
+    );
+    assert!(
+        !generated.source.contains("(def fm-harmonicity (param"),
+        "the `def fm-harmonicity` wrapper must not survive:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(mod fm.harmonicity)"),
+        "and the accessor names the canonical param identity:\n{}",
+        generated.source
+    );
+    compile_patch_source_with_dgenlisp(&generated.source)
+        .expect("the regenerated patch must compile");
+}
+
+/// A typed `name~` is authored text, so the inlet echoes the spelling that was
+/// typed — the qualified `fm.harmonicity~` stays qualified, and a bare
+/// `harmonicity~` stays bare. Both resolve to the same param; silently
+/// rewriting one into the other made the box disagree with what was entered.
+#[test]
+fn a_typed_mod_suffix_keeps_the_spelling_the_author_used() {
+    let source = "(def mod1 (in 6 @name mod1 @modulator 1))\n\
+                  (def pitch (in 2 @name pitch))\n\
+                  (def fm-harmonicity (param harmonicity @group fm @min 1 @max 8))\n\
+                  (def mul (* pitch fm.harmonicity))\n\
+                  (out mul 1 @name audio)";
+    for typed in ["* fm.harmonicity~", "* harmonicity~"] {
+        let patch = parse(source);
+        let node = patch.nodes.iter().find(|node| node.id == "mul").unwrap();
+        let base = node_display_label(node);
+
+        let mut state = PatcherInteractionState::default();
+        set_node_edit_position(&mut state, "root", node, node.position, base);
+        state
+            .edit_state
+            .nodes
+            .get_mut(&node_edit_key("root", "mul"))
+            .unwrap()
+            .text = typed.to_string();
+        let applied = patch_with_interaction_state(patch.clone(), &state, "root");
+
+        let rendered = applied
+            .nodes
+            .iter()
+            .find(|node| node.id == "mul")
+            .map(node_display_label)
+            .unwrap();
+        assert_eq!(
+            rendered, typed,
+            "the box must render the spelling that was typed"
+        );
+
+        let generated =
+            generate::generate_patch_source(&applied, PatcherIntent::Instrument).unwrap();
+        assert!(
+            generated.source.contains("(mod fm.harmonicity)"),
+            "either spelling still emits the canonical identity:\n{}",
+            generated.source
+        );
+        compile_patch_source_with_dgenlisp(&generated.source)
+            .expect("both spellings must compile");
+    }
+}
+
+/// A patch already saved with the broken shape heals on its next regenerate:
+/// reparsing keeps `@mod true` on the def-wrapped grouped param, and the
+/// generator sheds the wrapper it should never have written.
+#[test]
+fn regenerating_a_def_wrapped_grouped_mod_param_repairs_the_source() {
+    let source = "(def mod1 (in 6 @name mod1 @modulator 1))\n\
+                  (def pitch (in 2 @name pitch))\n\
+                  (def fm-harmonicity (param harmonicity @group fm @min 1 @max 8 @mod true @mod-mode additive))\n\
+                  (def mul (* pitch (mod fm.harmonicity)))\n\
+                  (out mul 1 @name audio)";
+    let patch = parse(source);
+
+    let generated = generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("(def fm-harmonicity (param"),
+        "the wrapper must be shed on regenerate:\n{}",
+        generated.source
+    );
+    compile_patch_source_with_dgenlisp(&generated.source)
+        .expect("the repaired patch must compile");
 }
 
 /// `(mod X)` resolves only against a BARE top-level `(param X …)` form, so a

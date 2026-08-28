@@ -192,13 +192,47 @@
 (mode-bind-key "buffer-list-mode" "g" "buflist-refresh")
 (mode-bind-key "buffer-list-mode" "RET" "buflist-open-at-point")
 
+;; Column layout (character offsets into each entry line):
+;;   0-1   "> " source marker          30-32 read-only / modified flags
+;;   2-29  buffer name                 33-38 line count (right-aligned)
+;;   41-56 mode                        58-   file path (left-truncated)
+(def buflist-pad-right (s w)
+  (if (>= (len s) w) s (buflist-pad-right (str s " ") w)))
+
+(def buflist-pad-left (s w)
+  (if (>= (len s) w) s (buflist-pad-left (str " " s) w)))
+
+(def buflist-fit (s w)
+  (if (<= (len s) w)
+    (buflist-pad-right s w)
+    (str (substring s 0 (- w 1)) "…")))
+
+(def buflist-truncate-left (s w)
+  (if (<= (len s) w)
+    s
+    (str "…" (substring s (- (len s) (- w 1)) (len s)))))
+
+;; 985 → "985", 5712 → "5.7k", 55000 → "55k". Works on the decimal string:
+;; eseqlisp has no modulo/floor, and line counts are always whole numbers.
+(def buflist-count-label (n)
+  (let ((s (str n)))
+    (if (< (len s) 4)
+      s
+      (if (= (len s) 4)
+        (str (substring s 0 1) "." (substring s 1 2) "k")
+        (str (substring s 0 (- (len s) 3)) "k")))))
+
 (def buflist-entry-styles (bufs line)
   (if (empty? bufs)
     '()
     (append
       (list
         (style-fg line 0 1 :blue)
-        (style-bold-fg line 2 200 :fg))
+        (style-bold-fg line 2 30 :fg)
+        (style-fg line 30 33 :fg-muted)
+        (style-fg line 33 39 :syn-number)
+        (style-fg line 41 57 :blue)
+        (style-fg line 58 200 :fg-muted))
       (buflist-entry-styles (rest bufs) (+ line 1)))))
 
 (def buflist-styles ()
@@ -209,25 +243,44 @@
       (style-bg-current-line :comp-selected-bg))
     (buflist-entry-styles (buflist-visible-buffers) 1)))
 
-(def buflist-visible-buffers ()
-  (let ((bufs (buffer-list))
-        (query (string-downcase buflist-filter)))
-    (if (= query "")
-      (filter |name| (not (= name "*buffers*")) bufs)
-      (filter |name|
-        (and (not (= name "*buffers*"))
-             (string-contains? (string-downcase name) query))
-        bufs))))
+;; A buffer already presented in a tile is excluded: switching to it from
+;; here would just present the same buffer twice. The source buffer is
+;; exempt — its tile is the one *buffers* itself took over.
+(def buflist-shown-elsewhere? (name shown)
+  (and (not (= name buflist-source-buffer))
+       (> (len (filter |s| (= s name) shown)) 0)))
 
-(def buflist-format-entry (name)
-  (let ((is-current (= name buflist-source-buffer))
-        (prefix (if is-current "> " "  ")))
-    (str prefix name)))
+(def buflist-visible-buffers ()
+  (let ((bufs (buffer-info-list))
+        (shown (visible-buffer-list))
+        (query (string-downcase buflist-filter)))
+    (filter |info|
+      (let ((name (get info :name)))
+        (and (not (= name "*buffers*"))
+             (not (buflist-shown-elsewhere? name shown))
+             (or (= query "")
+                 (string-contains? (string-downcase name) query))))
+      bufs)))
+
+(def buflist-format-entry (info)
+  (let ((name (get info :name))
+        (prefix (if (= name buflist-source-buffer) "> " "  "))
+        (flags (str (if (get info :read-only) "%" "-")
+                    (if (get info :dirty) "*" "-")))
+        (path (get info :path)))
+    (str prefix
+         (buflist-fit name 27) " "
+         flags " "
+         (buflist-pad-left (buflist-count-label (get info :lines)) 6)
+         "  "
+         (buflist-fit (get info :mode) 16) " "
+         (if (= path nil) "" (buflist-truncate-left path 60)))))
 
 (def buflist-current-buffer-name ()
   (let ((line (current-line-number)))
     (if (>= line 2)
-      (nth (buflist-visible-buffers) (- line 2))
+      (let ((info (nth (buflist-visible-buffers) (- line 2))))
+        (if (= info nil) nil (get info :name)))
       nil)))
 
 (def buflist-refresh ()

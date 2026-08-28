@@ -1096,6 +1096,13 @@ impl Editor {
     }
 
     fn buffer_names_by_recency(&mut self) -> Vec<String> {
+        self.buffer_infos_by_recency()
+            .into_iter()
+            .map(|info| info.name)
+            .collect()
+    }
+
+    fn buffer_infos_by_recency(&mut self) -> Vec<crate::runtime::SharedBufferInfo> {
         let ids: std::collections::HashSet<BufferId> =
             self.buffers.iter().map(|buffer| buffer.id).collect();
         self.buffer_recency.retain(|id| ids.contains(id));
@@ -1112,7 +1119,14 @@ impl Editor {
                 self.buffers
                     .iter()
                     .find(|buffer| buffer.id == *id)
-                    .map(|buffer| buffer.name.clone())
+                    .map(|buffer| crate::runtime::SharedBufferInfo {
+                        name: buffer.name.clone(),
+                        mode: buffer.mode.name().to_string(),
+                        path: buffer.path.as_ref().map(|p| p.display().to_string()),
+                        line_count: buffer.lines.len(),
+                        dirty: buffer.dirty,
+                        read_only: buffer.read_only,
+                    })
             })
             .collect()
     }
@@ -7350,7 +7364,11 @@ impl Editor {
             .cloned()
             .unwrap_or_default();
         let current_view_mode = active.view_mode.label().to_string();
-        let buffer_names = self.buffer_names_by_recency();
+        let buffer_infos = self.buffer_infos_by_recency();
+        let buffer_names = buffer_infos
+            .iter()
+            .map(|info| info.name.clone())
+            .collect::<Vec<_>>();
         {
             let mut shared = self.runtime.shared.borrow_mut();
             shared.current_buffer_id = Some(current_buffer_id);
@@ -7361,6 +7379,7 @@ impl Editor {
             shared.current_line_number = current_line_number;
             shared.current_line_text = current_line_text;
             shared.buffer_names = buffer_names;
+            shared.buffer_infos = buffer_infos;
             shared.current_view_mode = current_view_mode;
             shared.current_text_zoom = self.text_zoom as f64;
         }
@@ -7376,6 +7395,14 @@ impl Editor {
             .filter_map(|leaf| self.buffers.get(leaf.buffer_idx))
             .map(|buffer| buffer.name.as_str())
             .collect::<HashSet<_>>();
+        {
+            let mut ordered = visible_names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>();
+            ordered.sort();
+            self.runtime.shared.borrow_mut().visible_buffer_names = ordered;
+        }
         // Only presentation buffers (a committed widget tree) can defer:
         // inert nil-returning projections like *sel-sync* exist purely for
         // their reactive-set side effects and must keep running while hidden.

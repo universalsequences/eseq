@@ -854,6 +854,17 @@ pub(crate) struct PendingModeDefinition {
     pub on_key: Option<String>,
 }
 
+/// Buffer metadata mirrored into the runtime for `buffer-info-list`.
+#[derive(Clone, Default)]
+pub struct SharedBufferInfo {
+    pub name: String,
+    pub mode: String,
+    pub path: Option<String>,
+    pub line_count: usize,
+    pub dirty: bool,
+    pub read_only: bool,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeBridgeState {
     /// The module of the chunk executing the current native call (None =
@@ -898,6 +909,11 @@ pub(crate) struct RuntimeBridgeState {
     pub current_line_number: usize,
     pub current_line_text: String,
     pub buffer_names: Vec<String>,
+    /// Per-buffer metadata mirrored for the buffer-list UI, same order as
+    /// `buffer_names` (most to least recently selected).
+    pub buffer_infos: Vec<SharedBufferInfo>,
+    /// Names of buffers currently presented in a tile, sorted by name.
+    pub visible_buffer_names: Vec<String>,
     pub pending_cycle_view_mode: bool,
     pub pending_set_view_mode: Option<String>,
     pub current_view_mode: String,
@@ -1150,6 +1166,14 @@ impl NativeContext {
 
     pub fn buffer_names(&self) -> Vec<String> {
         self.shared.borrow().buffer_names.clone()
+    }
+
+    pub fn visible_buffer_names(&self) -> Vec<String> {
+        self.shared.borrow().visible_buffer_names.clone()
+    }
+
+    pub fn buffer_infos(&self) -> Vec<SharedBufferInfo> {
+        self.shared.borrow().buffer_infos.clone()
     }
 
     pub fn set_buffer_text_for(&mut self, name: String, text: String) {
