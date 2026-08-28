@@ -525,6 +525,19 @@ playback whether or not recording:
   the latch clears automatically at punch-out/commit since the song now
   *contains* the performance.
 - The latch is transient transport state — never serialized.
+- **A scene launch claims EVERY lane, takes included** (rev 5, user-decided;
+  bead eseq-ut5j). Pressing a scene stops whatever take the arrangement was
+  playing on that lane and plays the scene, and the commit splices the scene
+  over the take for the punch region — the take is replaced there, not
+  layered underneath. Material before the launch beat (and after Stop) is
+  untouched: the claim starts at the launch. An earlier implementation
+  carved take lanes out of the capture-time claim; besides contradicting
+  "scene launch latches globally" above, it left the spared lane unlatched
+  and unborrowed while `launch_scene` had already repainted its mirror from
+  the scene's cells, so in arrangement context the lane read as track-owned
+  and the stop save-back persisted the scene cell's devices into the shared
+  track-sound entities — retuning every take that shares them
+  (track-sound spec §2.4.1/§2.8).
 
 This is what makes song playback and live jamming coexist, and it is a
 prerequisite for 9.3's "recording runs on top of playback".

@@ -1408,6 +1408,95 @@ pub(crate) mod tests {
         });
     }
 
+    /// eseq-ut5j: pressing a scene during arrangement capture must not
+    /// retune the takes that share the track sound.
+    ///
+    /// The launch repaints EVERY lane's mirror from the scene's cells. Under
+    /// the old take-lane carve-out the lane it declined to claim came out
+    /// unlatched, unborrowed and — in arrangement context — track-owned,
+    /// with the scene cell's devices in its mirror; the stop save-back then
+    /// persisted that into the shared track-sound entities and every take
+    /// referencing them retuned (§2.4.1 sharing turns one poisoned write
+    /// into a whole track's history changing sound). Claiming the lane
+    /// latches it out of `track_owned_lane_mask`, so the save-back is a
+    /// self-write into the pinned cell instead.
+    #[test]
+    fn a_capture_scene_launch_never_retunes_takes_sharing_the_track_sound() {
+        let (mut app, _take, _take_value, _carrier_value) = app_with_take_then_gap();
+        let carrier = app
+            .state
+            .track_sound_pattern_id(0)
+            .expect("the track sound resolves");
+        let carrier_refs = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_pools[0].refs(carrier))
+            .expect("carrier refs");
+        // A take that SHARES the track sound, like every take punch-in mints
+        // (takes spec §17.3 "record → share").
+        let chunk = app
+            .state
+            .with_project_scenes(|scenes| scenes.effective_track_pattern(0))
+            .expect("effective pattern");
+        let shared_take = app
+            .state
+            .register_track_take(0, None, vec![chunk], 300, Some(carrier_refs))
+            .expect("take registers sharing the carrier");
+        let shared_chunk = app.state.with_project_scenes(|scenes| {
+            scenes.take_pools[0].get(shared_take).expect("take").chunks[0]
+        });
+        let carrier_before = instrument_default(&app, carrier);
+        assert_eq!(
+            instrument_default(&app, shared_chunk),
+            carrier_before,
+            "the take and the track sound are one entity"
+        );
+
+        // The user dials a DIFFERENT sound into the scene cell from the Seq
+        // view — legitimately the cell's, never the track's.
+        app.set_arrangement_view_visible(false);
+        let cell_value = carrier_before - 0.25;
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: cell_value,
+            },
+        )
+        .expect("device edit applies");
+        crate::app::edit::finish_active_gesture(&mut app);
+        app.set_arrangement_view_visible(true);
+        assert_eq!(
+            instrument_default(&app, carrier),
+            carrier_before,
+            "the Seq-view edit stayed on the cell"
+        );
+
+        // Record, press the scene mid-pass, stop.
+        app.song_transport_play(true).expect("capture starts");
+        app.apply_pattern_launch(&crate::quantized_launch::PatternLaunchTarget::Scene {
+            scene: 0,
+        })
+        .expect("scene launches during capture");
+        assert_eq!(
+            app.state.song_manual_latch_mask() & 1,
+            1,
+            "the scene claims the take lane, so it leaves track_owned_lane_mask"
+        );
+        let _ = app.song_transport_stop();
+
+        assert_eq!(
+            instrument_default(&app, carrier),
+            carrier_before,
+            "the stop save-back must not write the scene cell's sound into the track sound"
+        );
+        assert_eq!(
+            instrument_default(&app, shared_chunk),
+            carrier_before,
+            "so the takes sharing it keep the sound they were recorded with"
+        );
+    }
+
     /// The value the LIVE mirror would hand the engine for track 0's first
     /// instrument parameter — what every `push_all_restored_defaults` reads.
     fn live_instrument_default(app: &App) -> f32 {

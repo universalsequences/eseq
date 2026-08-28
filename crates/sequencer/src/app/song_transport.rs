@@ -2866,11 +2866,12 @@ mod tests {
     }
 
     #[test]
-    fn capture_scene_launch_preserves_take_lanes() {
-        // Takes spec 10 refined: a scene launch during arrangement capture
-        // must NOT claim lanes that are playing takes — only an intentional
-        // clip launch does. The take lane neither latches audibly nor gets
-        // spliced over at commit.
+    fn capture_scene_launch_claims_take_lanes_and_spares_what_came_before() {
+        // Takes spec 10 rev 5 (eseq-ut5j): pressing a scene during capture
+        // STOPS whatever take the arrangement was playing and plays the
+        // scene — the launch claims every lane, take lanes included, and the
+        // commit splices the scene over the take. The claim starts at the
+        // launch beat: the part of the take BEFORE it is untouched.
         use crate::sequencer::{PatternSnapshot, ProjectSongTrackOverride, MAX_STEPS};
         let mut app = test_app_two_tracks();
         let mut chunk = PatternSnapshot::new_default(2, &[])
@@ -2910,27 +2911,49 @@ mod tests {
             .expect("scene launch");
         assert_eq!(
             app.state.song_manual_latch_mask(),
-            0b10,
-            "the scene launch latches the pattern lane but not the take lane"
+            0b11,
+            "the scene launch latches EVERY lane, the take lane included"
+        );
+        assert_eq!(
+            app.state.song_take_lane_mask(),
+            0,
+            "a claimed lane is no longer governed by its take"
         );
         app.state.set_scheduler_rendered_beats(8.0);
         app.song_transport_stop().expect("stop commits");
         let song = committed(&app);
+
+        // What came BEFORE the launch is untouched: the take still governs
+        // track 0 on every row starting before beat 4.
+        let before: Vec<_> = song
+            .rows
+            .iter()
+            .filter(|row| row.start_beat < 4.0)
+            .collect();
+        assert!(!before.is_empty(), "the pre-launch span survives the splice");
+        for row in &before {
+            let track0 = row
+                .overrides
+                .iter()
+                .find(|over| over.track == 0)
+                .unwrap_or_else(|| panic!("row at {} lost its take lane", row.start_beat));
+            assert_eq!(
+                track0.take_id,
+                Some(take_id.0),
+                "the take before the launch beat is intact"
+            );
+            assert_eq!(track0.offset_steps, 0.0, "and keeps its phase anchor");
+        }
+
+        // Inside the punch region [launch, Stop) the scene replaced the take
+        // outright — not layered underneath it. (Past Stop the pre-existing
+        // arrangement resumes, take included: that span was never captured.)
         let spliced = song
             .rows
             .iter()
             .find(|row| row.start_beat == 4.0)
             .expect("spliced row at the launch beat");
-        let track0 = spliced
-            .overrides
-            .iter()
-            .find(|over| over.track == 0)
-            .expect("take lane materialized in the spliced row");
-        assert_eq!(
-            track0.take_id,
-            Some(take_id.0),
-            "the take survives the scene-launch capture"
-        );
+        assert_eq!(spliced.scene, Some(1), "the launched scene governs the row");
         assert!(
             song.rows
                 .iter()
@@ -2938,8 +2961,8 @@ mod tests {
                 .all(|row| row
                     .overrides
                     .iter()
-                    .any(|over| over.track == 0 && over.take_id == Some(take_id.0))),
-            "no spliced row replaces the take with a scene pattern"
+                    .all(|over| over.track != 0 || over.take_id.is_none())),
+            "the scene replaced the take for the whole punch region"
         );
         app.state.set_scheduler_rendered_beats(0.0);
     }

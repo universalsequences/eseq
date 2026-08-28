@@ -1733,23 +1733,17 @@ impl App {
         {
             match target {
                 PatternLaunchTarget::Scene { .. } => {
-                    // During CAPTURE a scene launch claims every lane EXCEPT
-                    // those playing takes right now — a recorded scene
-                    // change must not steal the take the performer just
-                    // played (takes spec 10, refined; the capture stores the
-                    // same exclusion so the commit matches what was heard).
-                    // Outside capture a scene launch claims EVERY lane,
-                    // takes included: "everyone play this scene".
-                    let take_lanes = if self.song_transport_mode
-                        == song_transport::SongTransportMode::ArrangementCapture
-                    {
-                        self.state.song_take_lane_mask()
-                    } else {
-                        0
-                    };
-                    let claimed: Vec<usize> = (0..num_tracks.min(64))
-                        .filter(|track| take_lanes >> *track & 1 == 0)
-                        .collect();
+                    // A scene launch claims EVERY lane, takes included:
+                    // "everyone play this scene" (takes spec 10, rev 5).
+                    // Capture is no exception — the launch stops the take
+                    // and the commit splices the scene over it from the
+                    // launch beat onward, which is what the performer hears
+                    // and sees. The earlier capture-time carve-out for take
+                    // lanes left them unlatched but still repainted by
+                    // `launch_scene`, so a track-owned lane carried the
+                    // scene cell's devices into the stop save-back and
+                    // poisoned the shared track sound (eseq-ut5j).
+                    let claimed: Vec<usize> = (0..num_tracks.min(64)).collect();
                     self.state
                         .latch_song_manual_override(claimed.iter().copied());
                     // The scene identity (current scene, `current_pattern`

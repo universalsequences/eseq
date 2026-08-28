@@ -113,15 +113,13 @@ impl App {
         }
         for event in ordered {
             match &event.kind {
-                CaptureLaunchKind::Scene { scene, take_lanes } => {
+                CaptureLaunchKind::Scene { scene } => {
                     scene_events.push((event.beat, *scene));
+                    // A scene launch claims every lane, takes included
+                    // (song_capture.rs `consolidate`), so the provisional
+                    // overlay paints the scene over a take lane too — what
+                    // the performer hears from the launch beat onward.
                     for track in 0..self.tracks.len() {
-                        // A scene launch does NOT claim a lane playing a
-                        // take (song_capture.rs `consolidate`), so that lane
-                        // keeps showing what it is really playing.
-                        if track < 64 && take_lanes >> track & 1 == 1 {
-                            continue;
-                        }
                         if let Some(pattern) = self.state.scene_track_pattern_id(*scene, track) {
                             track_events.push((event.beat, track, pattern));
                         }
