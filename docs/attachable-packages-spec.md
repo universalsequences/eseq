@@ -77,6 +77,14 @@ user can rename). Enforcement stays policy, not code.
 
 ## 4. Migration / retirement (v0.1)
 
+Amended 2026-08-28 (eseq-mods.17.1): keepers stage through the *user*
+workspace first — they are converted into modules under
+`~/.eseq.d/packages/local/`, not moved straight under the factory root.
+Promotion of the best ones to factory packages is a later curation step
+(eseq-2k9p.8), and the names were chosen so that promotion is a pure file
+move. The name map and the conversion recipe are in
+`docs/script-module-migration-map.md`.
+
 - `content/scripts/**` (27 dev-era demos) gets curated as part of the
   v0.1 content pass. Keepers gain module headers and move under the
   factory root at module-shaped paths so they are importable; the rest
