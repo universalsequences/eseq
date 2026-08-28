@@ -492,11 +492,27 @@ pub fn compose_effective_process_chain(
 fn process_param_index_by_tag_or_name(
     descriptor: &EffectDescriptor,
     tag_or_name: &str,
-) -> Option<usize> {
-    descriptor
-        .params
-        .iter()
-        .position(|param| param.has_tag_or_name(tag_or_name))
+) -> Result<Option<usize>, Vec<String>> {
+    match descriptor.resolve_persisted_param_name(tag_or_name) {
+        crate::effects::PersistedParamNameResolution::Unique(index) => Ok(Some(index)),
+        crate::effects::PersistedParamNameResolution::Ambiguous(candidates) => Err(candidates),
+        crate::effects::PersistedParamNameResolution::Missing => {
+            let matches = descriptor
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(index, param)| param.has_tag_or_name(tag_or_name).then_some(index))
+                .collect::<Vec<_>>();
+            Ok((matches.len() == 1).then(|| matches[0]))
+        }
+    }
+}
+
+fn log_ambiguous_process_param(name: &str, candidates: &[String]) {
+    eprintln!(
+        "process binding load: dropped ambiguous legacy parameter '{name}' (candidates: {})",
+        candidates.join(", ")
+    );
 }
 
 fn slot_param_node_id(slot: &EffectSlotSnapshot, param_idx: usize) -> Option<ParamNodeId> {
@@ -507,26 +523,33 @@ fn slot_param_node_id(slot: &EffectSlotSnapshot, param_idx: usize) -> Option<Par
 fn refresh_effect_binding_param_id(
     slot_idx: usize,
     effect_name: &str,
-    param_name: &str,
+    param_name: &mut String,
     param_id: &mut Option<ParamNodeId>,
     effect_descriptors: &[EffectDescriptor],
     effect_slots: &[EffectSlotSnapshot],
-) {
+) -> bool {
     let Some(desc) = effect_descriptors.get(slot_idx) else {
-        return;
+        return true;
     };
     if !desc.name.eq_ignore_ascii_case(effect_name) {
-        return;
+        return true;
     }
-    let Some(param_idx) = process_param_index_by_tag_or_name(desc, param_name) else {
-        return;
+    let param_idx = match process_param_index_by_tag_or_name(desc, param_name) {
+        Ok(Some(index)) => index,
+        Ok(None) => return true,
+        Err(candidates) => {
+            log_ambiguous_process_param(param_name, &candidates);
+            return false;
+        }
     };
+    *param_name = desc.params[param_idx].name.clone();
     let Some(slot) = effect_slots.get(slot_idx) else {
-        return;
+        return true;
     };
     if let Some(updated) = slot_param_node_id(slot, param_idx) {
         *param_id = Some(updated);
     }
+    true
 }
 
 pub fn refresh_track_process_chain_binding_param_ids(
@@ -537,17 +560,28 @@ pub fn refresh_track_process_chain_binding_param_ids(
     effect_slots: &[EffectSlotSnapshot],
 ) {
     for slot in &mut chain.slots {
-        for binding in slot.bindings.values_mut().flatten() {
-            match binding {
+        for binding in slot.bindings.values_mut() {
+            let Some(target) = binding.as_mut() else {
+                continue;
+            };
+            let keep = match target {
                 ParamTarget::InstrumentParam { param, param_id } => {
                     let (Some(desc), Some(slot)) = (instrument_descriptor, instrument_slot) else {
                         continue;
                     };
-                    let Some(param_idx) = process_param_index_by_tag_or_name(desc, param) else {
-                        continue;
-                    };
-                    if let Some(updated) = slot_param_node_id(slot, param_idx) {
-                        *param_id = Some(updated);
+                    match process_param_index_by_tag_or_name(desc, param) {
+                        Ok(Some(param_idx)) => {
+                            *param = desc.params[param_idx].name.clone();
+                            if let Some(updated) = slot_param_node_id(slot, param_idx) {
+                                *param_id = Some(updated);
+                            }
+                            true
+                        }
+                        Ok(None) => true,
+                        Err(candidates) => {
+                            log_ambiguous_process_param(param, &candidates);
+                            false
+                        }
                     }
                 }
                 ParamTarget::EffectParam {
@@ -555,15 +589,20 @@ pub fn refresh_track_process_chain_binding_param_ids(
                     effect,
                     param,
                     param_id,
-                } => refresh_effect_binding_param_id(
-                    *slot,
-                    effect,
-                    param,
-                    param_id,
-                    effect_descriptors,
-                    effect_slots,
-                ),
-                _ => {}
+                } => {
+                    refresh_effect_binding_param_id(
+                        *slot,
+                        effect,
+                        param,
+                        param_id,
+                        effect_descriptors,
+                        effect_slots,
+                    )
+                }
+                _ => true,
+            };
+            if !keep {
+                *binding = None;
             }
         }
     }
@@ -586,10 +625,18 @@ pub fn rebind_track_process_chain_instrument_param_ids(
             let Some(ParamTarget::InstrumentParam { param, .. }) = binding.as_ref() else {
                 continue;
             };
-            let resolved = process_param_index_by_tag_or_name(instrument_descriptor, param)
-                .and_then(|param_idx| slot_param_node_id(instrument_slot, param_idx));
-            if let Some(param_id_value) = resolved {
-                if let Some(ParamTarget::InstrumentParam { param_id, .. }) = binding.as_mut() {
+            let resolved = match process_param_index_by_tag_or_name(instrument_descriptor, param) {
+                Ok(Some(param_idx)) => slot_param_node_id(instrument_slot, param_idx)
+                    .map(|param_id| (param_idx, param_id)),
+                Ok(None) => None,
+                Err(candidates) => {
+                    log_ambiguous_process_param(param, &candidates);
+                    None
+                }
+            };
+            if let Some((param_idx, param_id_value)) = resolved {
+                if let Some(ParamTarget::InstrumentParam { param, param_id }) = binding.as_mut() {
+                    *param = instrument_descriptor.params[param_idx].name.clone();
                     *param_id = Some(param_id_value);
                 }
             } else {
@@ -618,15 +665,24 @@ pub fn rebind_track_process_chain_effect_param_ids(
             else {
                 continue;
             };
-            let resolved = effect_descriptors
+            let descriptor = effect_descriptors
                 .get(*slot)
-                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect))
-                .and_then(|descriptor| process_param_index_by_tag_or_name(descriptor, param))
-                .and_then(|param_idx| effect_slots.get(*slot).and_then(|slot| {
-                    slot_param_node_id(slot, param_idx)
-                }));
-            if let Some(param_id_value) = resolved {
-                if let Some(ParamTarget::EffectParam { param_id, .. }) = binding.as_mut() {
+                .filter(|descriptor| descriptor.name.eq_ignore_ascii_case(effect));
+            let resolved = match descriptor
+                .map(|descriptor| process_param_index_by_tag_or_name(descriptor, param))
+            {
+                Some(Ok(Some(param_idx))) => effect_slots.get(*slot)
+                    .and_then(|slot| slot_param_node_id(slot, param_idx))
+                    .map(|param_id| (param_idx, param_id)),
+                Some(Err(candidates)) => {
+                    log_ambiguous_process_param(param, &candidates);
+                    None
+                }
+                Some(Ok(None)) | None => None,
+            };
+            if let (Some(descriptor), Some((param_idx, param_id_value))) = (descriptor, resolved) {
+                if let Some(ParamTarget::EffectParam { param, param_id, .. }) = binding.as_mut() {
+                    *param = descriptor.params[param_idx].name.clone();
                     *param_id = Some(param_id_value);
                 }
             } else {
@@ -661,9 +717,10 @@ pub fn refresh_track_process_chain_effect_binding_param_ids_for_slot(
             if !descriptor.name.eq_ignore_ascii_case(effect) {
                 continue;
             }
-            let Some(param_idx) = process_param_index_by_tag_or_name(descriptor, param) else {
+            let Ok(Some(param_idx)) = process_param_index_by_tag_or_name(descriptor, param) else {
                 continue;
             };
+            *param = descriptor.params[param_idx].name.clone();
             if let Some(updated) = slot_param_node_id(effect_slot, param_idx) {
                 *param_id = Some(updated);
             }
@@ -3270,6 +3327,68 @@ mod tests {
         let mut values = std::array::from_fn(|index| StepParam::ALL[index].default_value());
         values[StepParam::Transpose.index()] = transpose;
         values
+    }
+
+    #[test]
+    fn saved_process_bindings_alias_unique_names_and_drop_ambiguous_names() {
+        let dgen_param = |name: &str, display_name: &str, group: &str, cell_id: usize| {
+            crate::lisp_host::DGenParam {
+                name: name.to_string(),
+                display_name: display_name.to_string(),
+                cell_id,
+                cell_span: 1,
+                default: 0.0,
+                min: 0.0,
+                max: 1.0,
+                unit: None,
+                hidden: false,
+                group: Some(group.to_string()),
+                env: None,
+                role: None,
+            }
+        };
+        let descriptor = EffectDescriptor::from_lisp_manifest(
+            "namespaced",
+            &[
+                dgen_param("filter.cutoff", "cutoff", "filter", 0),
+                dgen_param("op1.index", "index", "op1", 1),
+                dgen_param("op2.index", "index", "op2", 2),
+            ],
+            0,
+            1,
+        );
+        let live_slot = crate::effects::EffectSlotState::new(&descriptor, 42);
+        let snapshot = EffectSlotSnapshot::capture(&live_slot);
+        let mut chain = TrackProcessChain {
+            slots: vec![TrackProcessSlot {
+                instance_id: ProcessInstanceId(1),
+                instance_name: None,
+                class_name: "test".to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: BTreeMap::new(),
+                lanes: BTreeMap::new(),
+                bindings: BTreeMap::from([
+                    ("unique".to_string(), Some(ParamTarget::InstrumentParam {
+                        param: "cutoff".to_string(), param_id: None,
+                    })),
+                    ("ambiguous".to_string(), Some(ParamTarget::InstrumentParam {
+                        param: "index".to_string(), param_id: None,
+                    })),
+                ]),
+            }],
+        };
+
+        refresh_track_process_chain_binding_param_ids(
+            &mut chain, Some(&descriptor), Some(&snapshot), &[], &[],
+        );
+
+        assert!(matches!(
+            chain.slots[0].bindings["unique"].as_ref(),
+            Some(ParamTarget::InstrumentParam { param, param_id: Some(_) })
+                if param == "filter.cutoff"
+        ));
+        assert_eq!(chain.slots[0].bindings["ambiguous"], None);
     }
 
     #[test]

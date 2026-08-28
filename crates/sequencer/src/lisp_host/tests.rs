@@ -4368,6 +4368,40 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn grouped_manifest_params_use_canonical_ids_and_resolve_legacy_declared_names() {
+        let manifest = parse_manifest(
+            r#"{
+                "processAbi": "dgen-host-abi-v1",
+                "params": [
+                    {"name":"amp.attack","displayName":"attack","group":"amp","cellId":0},
+                    {"name":"filter.attack","displayName":"filter.attack","group":"filter","cellId":1},
+                    {"name":"fm.attack","displayName":"fm.attack","group":"fm","cellId":2},
+                    {"name":"op1.index","displayName":"index","group":"op1","cellId":3},
+                    {"name":"op2.index","displayName":"index","group":"op2","cellId":4},
+                    {"name":"gain","displayName":"gain","cellId":5}
+                ]
+            }"#,
+        ).expect("manifest parses");
+        let descriptor = super::instrument_descriptor_from_manifest("namespaced", &manifest);
+
+        assert_eq!(descriptor.params[0].name, "amp.attack");
+        assert!(matches!(
+            descriptor.resolve_persisted_param_name("attack"),
+            crate::effects::PersistedParamNameResolution::Unique(0)
+        ));
+        assert!(matches!(
+            descriptor.resolve_persisted_param_name("filter.attack"),
+            crate::effects::PersistedParamNameResolution::Unique(1)
+        ));
+        assert_eq!(descriptor.params[5].name, "gain");
+        assert!(matches!(
+            descriptor.resolve_persisted_param_name("index"),
+            crate::effects::PersistedParamNameResolution::Ambiguous(ref ids)
+                if ids == &["op1.index".to_string(), "op2.index".to_string()]
+        ));
+    }
+
+    #[test]
     fn dgen_init_message_honors_param_span() {
         let manifest = super::DGenManifest {
             dylib_path: std::path::PathBuf::new(),
@@ -4377,6 +4411,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             params: vec![
                 DGenParam {
                     name: "scalar".to_string(),
+                    display_name: "scalar".to_string(),
                     cell_id: 4,
                     cell_span: 1,
                     default: 0.25,
@@ -4390,6 +4425,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 },
                 DGenParam {
                     name: "vector".to_string(),
+                    display_name: "vector".to_string(),
                     cell_id: 8,
                     cell_span: 4,
                     default: 0.5,
@@ -4437,6 +4473,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             total_memory_slots,
             params: vec![DGenParam {
                 name: "scalar".to_string(),
+                display_name: "scalar".to_string(),
                 cell_id: 4,
                 cell_span: 1,
                 default: 0.25,
@@ -4837,6 +4874,35 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .collect::<Vec<_>>(),
             vec![(1, 21), (2, 22)]
         );
+    }
+
+    #[test]
+    fn grouped_modulation_runtime_params_alias_their_legacy_flat_names() {
+        let manifest = parse_manifest(r#"{
+            "processAbi":"dgen-host-abi-v1",
+            "params":[
+                {"name":"filter.cutoff","displayName":"cutoff","group":"filter","cellId":10},
+                {"name":"active","cellId":20},
+                {"name":"depth","cellId":21,"min":-1,"max":1}
+            ],
+            "modDestinations":[{
+                "name":"filter.cutoff","paramCellId":10,"activeCellId":20,
+                "depthLanes":[{"slot":1,"depthCellId":21}],"mode":"additive"
+            }]
+        }"#).expect("manifest parses");
+        let descriptor = super::instrument_descriptor_from_manifest("namespaced", &manifest);
+
+        for (legacy, canonical) in [
+            ("__dgen_mod_active__cutoff", "__dgen_mod_active__filter.cutoff"),
+            ("mod cutoff slot 1 amt", "mod filter.cutoff slot 1 amt"),
+        ] {
+            let crate::effects::PersistedParamNameResolution::Unique(index) =
+                descriptor.resolve_persisted_param_name(legacy)
+            else {
+                panic!("legacy generated parameter '{legacy}' did not resolve uniquely");
+            };
+            assert_eq!(descriptor.params[index].name, canonical);
+        }
     }
 
     #[test]
@@ -6782,6 +6848,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "MINIMOOG",
             &[DGenParam {
                 name: "cutoff".to_string(),
+                display_name: "cutoff".to_string(),
                 cell_id: 0,
                 cell_span: 4,
                 default: 0.5,
@@ -6828,6 +6895,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "MODUM_DELAY",
             &[DGenParam {
                 name: "max1".to_string(),
+                display_name: "max1".to_string(),
                 cell_id: 0,
                 cell_span: 4,
                 default: 0.0,
@@ -6884,6 +6952,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "MINIMOOG",
             &[DGenParam {
                 name: "cutoff".to_string(),
+                display_name: "cutoff".to_string(),
                 cell_id: 0,
                 cell_span: 4,
                 default: 0.5,

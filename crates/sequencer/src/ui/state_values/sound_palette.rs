@@ -1490,6 +1490,7 @@ mod rack_glyph_tests {
     fn param(name: &str) -> DGenParam {
         DGenParam {
             name: name.to_string(),
+            display_name: name.to_string(),
             cell_id: 0,
             cell_span: 1,
             default: 0.25,

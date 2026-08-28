@@ -2756,6 +2756,7 @@
         let mut manifest = test_instrument_manifest();
         manifest.params.push(crate::lisp_host::DGenParam {
             name: "tone".to_string(),
+            display_name: "tone".to_string(),
             cell_id: 0,
             cell_span: 1,
             default: 0.25,

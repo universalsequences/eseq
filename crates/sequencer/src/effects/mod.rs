@@ -178,6 +178,9 @@ pub struct ParamUiMetadata {
     pub env: Option<String>,
     pub role: Option<String>,
     pub tags: Vec<String>,
+    /// The source-level name shown by DGenLisp. When it differs from the
+    /// canonical host id, it is also the migration alias for saved data.
+    pub display_name: Option<String>,
 }
 
 impl ParamUiMetadata {
@@ -200,6 +203,7 @@ impl ParamUiMetadata {
                 env,
                 role,
                 tags,
+                display_name: None,
             })
         }
     }
@@ -258,6 +262,13 @@ pub struct ParamDescriptor {
     pub ui_metadata: Option<ParamUiMetadata>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PersistedParamNameResolution {
+    Unique(usize),
+    Ambiguous(Vec<String>),
+    Missing,
+}
+
 impl ParamDescriptor {
     pub fn has_tag_or_name(&self, tag_or_name: &str) -> bool {
         let needle = tag_or_name.trim_start_matches(':').to_ascii_lowercase();
@@ -274,6 +285,13 @@ impl ParamDescriptor {
                     .iter()
                     .any(|tag| tag.eq_ignore_ascii_case(&needle))
         })
+    }
+
+    fn persisted_alias(&self) -> Option<&str> {
+        self.ui_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.display_name.as_deref())
+            .filter(|alias| *alias != self.name)
     }
 
     /// Step size for +/- adjustment.
@@ -1391,6 +1409,7 @@ mod tests {
             "custom",
             &[crate::lisp_host::DGenParam {
                 name: "cutoff".to_string(),
+                display_name: "cutoff".to_string(),
                 cell_id: 12,
                 cell_span: 4,
                 default: 1000.0,
@@ -1413,12 +1432,60 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_rebind_preserves_values_through_unique_legacy_param_alias() {
+        let old_desc = EffectDescriptor::from_lisp_manifest(
+            "custom",
+            &[crate::lisp_host::DGenParam {
+                name: "cutoff".to_string(),
+                display_name: "cutoff".to_string(),
+                cell_id: 0,
+                cell_span: 1,
+                default: 0.25,
+                min: 0.0,
+                max: 1.0,
+                unit: None,
+                hidden: false,
+                group: None,
+                env: None,
+                role: None,
+            }], 0, 1,
+        );
+        let new_desc = EffectDescriptor::from_lisp_manifest(
+            "custom",
+            &[crate::lisp_host::DGenParam {
+                name: "filter.cutoff".to_string(),
+                display_name: "cutoff".to_string(),
+                cell_id: 3,
+                cell_span: 1,
+                default: 0.1,
+                min: 0.0,
+                max: 1.0,
+                unit: None,
+                hidden: false,
+                group: Some("filter".to_string()),
+                env: None,
+                role: None,
+            }], 0, 1,
+        );
+        let slot = EffectSlotState::new(&old_desc, 100);
+        slot.defaults.set(0, 0.8);
+        slot.set_plock(7, 0, 0.6);
+
+        slot.sync_descriptor_by_param_name(&old_desc, &new_desc, 200);
+
+        assert_eq!(slot.defaults.get(0), 0.8);
+        assert_eq!(slot.plocks.get(7, 0), Some(0.6));
+        assert_eq!(slot.resolve_node_idx(0), crate::lisp_host::HEADER_SLOTS as u64 + 3);
+    }
+
+    #[test]
     fn lisp_manifest_params_preserve_visible_ui_metadata_only() {
         let desc = EffectDescriptor::from_lisp_manifest(
             "custom",
             &[
                 crate::lisp_host::DGenParam {
                     name: "amp_attack".to_string(),
+                    display_name: "amp_attack".to_string(),
                     cell_id: 2,
                     cell_span: 1,
                     default: 0.01,
@@ -1432,6 +1499,7 @@ mod tests {
                 },
                 crate::lisp_host::DGenParam {
                     name: "hidden_release".to_string(),
+                    display_name: "hidden_release".to_string(),
                     cell_id: 3,
                     cell_span: 1,
                     default: 0.1,
@@ -7582,6 +7650,29 @@ impl EffectDescriptor {
         }
     }
 
+    /// Resolves a serialized parameter identity against this descriptor.
+    /// Canonical ids always win. A pre-namespacing source/display name is
+    /// accepted only when exactly one parameter advertises it.
+    pub fn resolve_persisted_param_name(&self, saved_name: &str) -> PersistedParamNameResolution {
+        if let Some(index) = self.params.iter().position(|param| param.name == saved_name) {
+            return PersistedParamNameResolution::Unique(index);
+        }
+        let matches = self.params
+            .iter()
+            .enumerate()
+            .filter_map(|(index, param)| {
+                (param.persisted_alias() == Some(saved_name)).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [index] => PersistedParamNameResolution::Unique(*index),
+            [] => PersistedParamNameResolution::Missing,
+            _ => PersistedParamNameResolution::Ambiguous(
+                matches.into_iter().map(|index| self.params[index].name.clone()).collect(),
+            ),
+        }
+    }
+
     /// Construct from a lisp effect manifest.
     pub fn from_lisp_manifest(
         name: &str,
@@ -7604,11 +7695,25 @@ impl EffectDescriptor {
                 node_param_idx: (crate::lisp_host::HEADER_SLOTS + p.cell_id) as u32,
                 node_param_span: p.cell_span as u32,
                 host_control: None,
-                ui_metadata: crate::effects::ParamUiMetadata::new(
-                    p.group.clone(),
-                    p.env.clone(),
-                    p.role.clone(),
-                ),
+                ui_metadata: {
+                    let mut metadata = crate::effects::ParamUiMetadata::new(
+                        p.group.clone(),
+                        p.env.clone(),
+                        p.role.clone(),
+                    );
+                    if p.display_name != p.name {
+                        metadata
+                            .get_or_insert_with(|| ParamUiMetadata {
+                                group: None,
+                                env: None,
+                                role: None,
+                                tags: Vec::new(),
+                                display_name: None,
+                            })
+                            .display_name = Some(p.display_name.clone());
+                    }
+                    metadata
+                },
             })
             .collect();
         // Name-keyed builtin overrides (the `latency_samples` pattern): DGen
@@ -9083,9 +9188,22 @@ impl EffectSlotState {
         let old_tensor_params = self.tensor_params.capture();
 
         for (new_idx, new_param) in new_desc.params.iter().enumerate() {
-            let Some(old_idx) = unique_param_index_by_name(old_desc, &new_param.name) else {
+            let old_matches = old_desc
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(old_idx, old_param)| {
+                    matches!(
+                        new_desc.resolve_persisted_param_name(&old_param.name),
+                        PersistedParamNameResolution::Unique(index) if index == new_idx
+                    )
+                    .then_some(old_idx)
+                })
+                .collect::<Vec<_>>();
+            let [old_idx] = old_matches.as_slice() else {
                 continue;
             };
+            let old_idx = *old_idx;
             if unique_param_index_by_name(new_desc, &new_param.name) != Some(new_idx) {
                 continue;
             }

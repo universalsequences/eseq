@@ -51,7 +51,10 @@ pub struct DGenManifest {
 
 #[derive(Clone)]
 pub struct DGenParam {
+    /// Canonical host-facing identity (`group.name` for grouped params).
     pub name: String,
+    /// Literal declaration name emitted for UI and legacy saved-data aliasing.
+    pub display_name: String,
     pub cell_id: usize,
     pub cell_span: usize,
     pub default: f32,
@@ -221,18 +224,25 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
         .as_array()
         .map(|arr| {
             arr.iter()
-                .map(|p| DGenParam {
-                    name: p["name"].as_str().unwrap_or("").to_string(),
-                    cell_id: p["cellId"].as_u64().unwrap_or(0) as usize,
-                    cell_span: parse_dgen_param_span(p),
-                    default: p["default"].as_f64().unwrap_or(0.0) as f32,
-                    min: p["min"].as_f64().unwrap_or(0.0) as f32,
-                    max: p["max"].as_f64().unwrap_or(1.0) as f32,
-                    unit: p["unit"].as_str().map(|s| s.to_string()),
-                    hidden: p["hidden"].as_bool().unwrap_or(false),
-                    group: p["group"].as_str().map(|s| s.to_string()),
-                    env: p["env"].as_str().map(|s| s.to_string()),
-                    role: p["role"].as_str().map(|s| s.to_string()),
+                .map(|p| {
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    DGenParam {
+                        display_name: p["displayName"]
+                            .as_str()
+                            .unwrap_or(name.as_str())
+                            .to_string(),
+                        name,
+                        cell_id: p["cellId"].as_u64().unwrap_or(0) as usize,
+                        cell_span: parse_dgen_param_span(p),
+                        default: p["default"].as_f64().unwrap_or(0.0) as f32,
+                        min: p["min"].as_f64().unwrap_or(0.0) as f32,
+                        max: p["max"].as_f64().unwrap_or(1.0) as f32,
+                        unit: p["unit"].as_str().map(|s| s.to_string()),
+                        hidden: p["hidden"].as_bool().unwrap_or(false),
+                        group: p["group"].as_str().map(|s| s.to_string()),
+                        env: p["env"].as_str().map(|s| s.to_string()),
+                        role: p["role"].as_str().map(|s| s.to_string()),
+                    }
                 })
                 .collect()
         })
@@ -535,6 +545,10 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
             .iter()
             .position(|p| p.node_param_idx == (HEADER_SLOTS + dest.param_cell_id) as u32);
         let active_param_idx = desc.params.len();
+        let display_name = param_by_cell
+            .get(&dest.param_cell_id)
+            .map(|param| param.display_name.as_str())
+            .unwrap_or(dest.name.as_str());
         let active_default = param_by_cell
             .get(&dest.active_cell_id)
             .map(|p| p.default)
@@ -554,7 +568,13 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
             node_param_idx: (HEADER_SLOTS + dest.active_cell_id) as u32,
             node_param_span: active_span,
             host_control: None,
-            ui_metadata: None,
+            ui_metadata: (display_name != dest.name).then(|| crate::effects::ParamUiMetadata {
+                group: None,
+                env: None,
+                role: None,
+                tags: Vec::new(),
+                display_name: Some(format!("__dgen_mod_active__{display_name}")),
+            }),
         });
         for lane in &dest.depth_lanes {
             let depth_default = param_by_cell
@@ -591,7 +611,13 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
                 node_param_idx: (HEADER_SLOTS + lane.depth_cell_id) as u32,
                 node_param_span: depth_span,
                 host_control: None,
-                ui_metadata: None,
+                ui_metadata: (display_name != dest.name).then(|| crate::effects::ParamUiMetadata {
+                    group: None,
+                    env: None,
+                    role: None,
+                    tags: Vec::new(),
+                    display_name: Some(format!("mod {display_name} slot {} amt", lane.slot)),
+                }),
             });
             if let Some(base_param_idx) = base_param_idx {
                 desc.instrument_modulation_targets.push(

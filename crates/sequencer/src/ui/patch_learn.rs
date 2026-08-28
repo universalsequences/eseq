@@ -335,12 +335,20 @@ fn set_learn_param_preview(
         if !natural_value.is_finite() {
             return Err(format!("Trainer returned a non-finite value for {name}"));
         }
-        let (param_idx, param) = descriptor
-            .params
-            .iter()
-            .enumerate()
-            .find(|(_, param)| param.name == *name)
-            .ok_or_else(|| format!("Trainer returned unknown instrument parameter {name}"))?;
+        let param_idx = match descriptor.resolve_persisted_param_name(name) {
+            sequencer::effects::PersistedParamNameResolution::Unique(index) => index,
+            sequencer::effects::PersistedParamNameResolution::Ambiguous(candidates) => {
+                eprintln!(
+                    "patch-learn load: dropped ambiguous legacy parameter '{name}' (candidates: {})",
+                    candidates.join(", ")
+                );
+                continue;
+            }
+            sequencer::effects::PersistedParamNameResolution::Missing => {
+                return Err(format!("Trainer returned unknown instrument parameter {name}"));
+            }
+        };
+        let param = &descriptor.params[param_idx];
         let stored = param.clamp(param.user_input_to_stored(*natural_value as f32));
         resolved.push((param_idx, stored, param.name.clone()));
     }

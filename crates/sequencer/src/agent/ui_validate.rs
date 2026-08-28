@@ -583,6 +583,7 @@ mod tests {
                 .iter()
                 .map(|name| DGenParam {
                     name: name.to_string(),
+                    display_name: name.to_string(),
                     cell_id: 0,
                     cell_span: 4,
                     default: 0.0,

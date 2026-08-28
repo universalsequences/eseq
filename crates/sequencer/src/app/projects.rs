@@ -50,10 +50,12 @@ pub(super) fn resolve_live_macro_target(
         if !descriptor.name.eq_ignore_ascii_case(effect) {
             return None;
         }
-        let param_idx = descriptor
-            .params
-            .iter()
-            .position(|descriptor| descriptor.has_tag_or_name(param))?;
+        let param_idx = resolve_saved_param_index(
+            descriptor,
+            param,
+            "project macro mapping for bus effect",
+        )?;
+        let canonical_param = descriptor.params[param_idx].name.clone();
         let live_slot = bus.effect_slots.get(*slot)?;
         let raw_idx = live_slot.node_param_idx(param_idx)?;
         let param_id =
@@ -65,7 +67,7 @@ pub(super) fn resolve_live_macro_target(
             target: ParamTarget::EffectParam {
                 slot: *slot,
                 effect: effect.clone(),
-                param: param.clone(),
+                param: canonical_param,
                 param_id,
             },
             key: MacroParamKey::for_bus_effect(bus_id, *slot, param_idx, param_id),
@@ -85,10 +87,12 @@ pub(super) fn resolve_live_macro_target(
             if !descriptor.name.eq_ignore_ascii_case(effect) {
                 return None;
             }
-            let param_idx = descriptor
-                .params
-                .iter()
-                .position(|descriptor| descriptor.has_tag_or_name(param))?;
+            let param_idx = resolve_saved_param_index(
+                descriptor,
+                param,
+                "project macro mapping for track effect",
+            )?;
+            let canonical_param = descriptor.params[param_idx].name.clone();
             let live_slot = state.pattern.effect_chains.get(track)?.get(*slot)?;
             if param_idx >= live_slot.num_params.load(Ordering::Relaxed) as usize {
                 return None;
@@ -106,7 +110,7 @@ pub(super) fn resolve_live_macro_target(
                 target: ParamTarget::EffectParam {
                     slot: *slot,
                     effect: effect.clone(),
-                    param: param.clone(),
+                    param: canonical_param,
                     param_id,
                 },
                 key: MacroParamKey::for_effect(track, *slot, param_idx, param_id),
@@ -117,10 +121,12 @@ pub(super) fn resolve_live_macro_target(
             param_id: previous_param_id,
         } => {
             let descriptor = instrument_descriptors.get(track)?;
-            let param_idx = descriptor
-                .params
-                .iter()
-                .position(|descriptor| descriptor.has_tag_or_name(param))?;
+            let param_idx = resolve_saved_param_index(
+                descriptor,
+                param,
+                "project macro mapping for instrument",
+            )?;
+            let canonical_param = descriptor.params[param_idx].name.clone();
             let live_slot = state.pattern.instrument_slots.get(track)?;
             if param_idx >= live_slot.num_params.load(Ordering::Relaxed) as usize {
                 return None;
@@ -136,7 +142,7 @@ pub(super) fn resolve_live_macro_target(
             }
             Some(ResolvedMacroTarget {
                 target: ParamTarget::InstrumentParam {
-                    param: param.clone(),
+                    param: canonical_param,
                     param_id,
                 },
                 key: MacroParamKey::for_instrument(track, param_idx, param_id),
@@ -4367,6 +4373,42 @@ impl App {
                     rebound_slots.push(slot);
                 }
                 saved_rack.slots = rebound_slots;
+                let slots = &saved_rack.slots;
+                for rack_macro in &mut saved_rack.macros {
+                    rack_macro.mappings.retain_mut(|mapping| {
+                        let (descriptor, param, param_index) = match &mut mapping.target {
+                            crate::sequencer::RackMacroTarget::SlotParam { .. } => return true,
+                            crate::sequencer::RackMacroTarget::SlotInstrumentParam {
+                                slot, param, param_index,
+                            } => (
+                                slots.get(*slot)
+                                    .and_then(|slot| self.rack_slot_instrument_descriptor(slot)),
+                                param,
+                                param_index,
+                            ),
+                            crate::sequencer::RackMacroTarget::SlotEffectParam {
+                                slot, effect_slot, param, param_index,
+                            } => (
+                                slots.get(*slot)
+                                    .and_then(|slot| slot.effect_descriptors.get(*effect_slot))
+                                    .cloned(),
+                                param,
+                                param_index,
+                            ),
+                        };
+                        let Some(descriptor) = descriptor else { return false };
+                        let Some(index) = resolve_saved_param_index(
+                            &descriptor,
+                            param,
+                            "project rack macro mapping",
+                        ) else {
+                            return false;
+                        };
+                        *param = descriptor.params[index].name.clone();
+                        *param_index = index;
+                        true
+                    });
+                }
                 Some(saved_rack)
             })
             .collect()
@@ -4847,6 +4889,24 @@ impl App {
     }
 }
 
+fn resolve_saved_param_index(
+    descriptor: &crate::effects::EffectDescriptor,
+    saved_name: &str,
+    context: &str,
+) -> Option<usize> {
+    match descriptor.resolve_persisted_param_name(saved_name) {
+        crate::effects::PersistedParamNameResolution::Unique(index) => Some(index),
+        crate::effects::PersistedParamNameResolution::Ambiguous(candidates) => {
+            eprintln!(
+                "{context}: dropped ambiguous legacy parameter '{saved_name}' (candidates: {})",
+                candidates.join(", ")
+            );
+            None
+        }
+        crate::effects::PersistedParamNameResolution::Missing => None,
+    }
+}
+
 fn apply_instrument_preset_to_container_slot(
     slot: &mut crate::project::ProjectEffectSlot,
     base_note_offset: &mut f32,
@@ -4856,13 +4916,29 @@ fn apply_instrument_preset_to_container_slot(
     *base_note_offset = preset.base_note_offset;
     for (index, param) in descriptor.params.iter().enumerate() {
         if index < slot.defaults.len() {
-            slot.defaults[index] = param.clamp(
-                preset
-                    .params
-                    .get(&param.name)
-                    .copied()
-                    .unwrap_or(param.default),
-            );
+            slot.defaults[index] = param.default;
+        }
+    }
+    // Apply aliases first and canonical ids second, so a bank that happens to
+    // contain both always treats the canonical value as authoritative.
+    for canonical_pass in [false, true] {
+        for (saved_name, value) in &preset.params {
+            let is_canonical = descriptor.params.iter().any(|param| param.name == *saved_name);
+            if is_canonical != canonical_pass {
+                continue;
+            }
+            let Some(index) = resolve_saved_param_index(
+                descriptor,
+                saved_name,
+                &format!("instrument preset '{}'", preset.name),
+            ) else {
+                continue;
+            };
+            if let (Some(param), Some(target)) =
+                (descriptor.params.get(index), slot.defaults.get_mut(index))
+            {
+                *target = param.clamp(*value);
+            }
         }
     }
     slot.key_locks.clear();
@@ -4870,16 +4946,15 @@ fn apply_instrument_preset_to_container_slot(
     for (&note, locks) in &preset.key_locks {
         let mut row = vec![None; descriptor.params.len()];
         for (param_name, value) in locks {
-            let mut matches = descriptor
-                .params
-                .iter()
-                .enumerate()
-                .filter(|(_, param)| param.name == *param_name);
-            let Some((index, param)) = matches.next() else {
+            let Some(index) = resolve_saved_param_index(
+                descriptor,
+                param_name,
+                &format!("instrument preset '{}' key lock {note}", preset.name),
+            ) else {
                 continue;
             };
-            if matches.next().is_none() && value.is_finite() {
-                row[index] = Some(param.clamp(*value));
+            if value.is_finite() {
+                row[index] = Some(descriptor.params[index].clamp(*value));
             }
         }
         if row.iter().any(Option::is_some) {
@@ -5191,6 +5266,52 @@ mod tests {
             host_control: None,
             ui_metadata: None,
         }
+    }
+
+    #[test]
+    fn instrument_preset_load_aliases_unique_legacy_names_and_drops_ambiguous_ones() {
+        let mut descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        let namespaced = |name: &str, display_name: &str, node_param_idx: u32| {
+            let mut param = test_param(name, 0.1, node_param_idx);
+            param.ui_metadata = Some(crate::effects::ParamUiMetadata {
+                group: name.split_once('.').map(|(group, _)| group.to_string()),
+                env: None,
+                role: None,
+                tags: Vec::new(),
+                display_name: Some(display_name.to_string()),
+            });
+            param
+        };
+        descriptor.params = vec![
+            namespaced("amp.attack", "attack", 0),
+            namespaced("filter.cutoff", "cutoff", 1),
+            namespaced("op1.index", "index", 2),
+            namespaced("op2.index", "index", 3),
+        ];
+        let preset = crate::lisp_host::InstrumentPreset {
+            id: "legacy".to_string(),
+            name: "Legacy".to_string(),
+            base_note_offset: 0.0,
+            params: std::collections::BTreeMap::from([
+                ("attack".to_string(), 0.2),
+                ("cutoff".to_string(), 0.3),
+                ("filter.cutoff".to_string(), 0.4),
+                ("index".to_string(), 0.9),
+            ]),
+            key_locks: std::collections::BTreeMap::new(),
+        };
+        let mut slot = crate::project::ProjectEffectSlot {
+            num_params: 4,
+            defaults: vec![0.0; 4],
+            ..crate::project::ProjectEffectSlot::default()
+        };
+        let mut base_note_offset = 0.0;
+
+        apply_instrument_preset_to_container_slot(
+            &mut slot, &mut base_note_offset, &descriptor, &preset,
+        );
+
+        assert_eq!(slot.defaults, vec![0.2, 0.4, 0.1, 0.1]);
     }
 
     #[test]
