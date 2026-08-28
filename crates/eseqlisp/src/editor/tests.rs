@@ -14286,6 +14286,79 @@ fn module_mode_reference_falls_back_to_a_vanilla_mode() {
     assert!(buffer.read_only, "the vanilla mode's read-only must apply");
 }
 
+/// A mode's own binding must beat a global `bind-key` on the same key.
+/// Regression: the Packages view binds C-a to attach-to-scratch, but
+/// `ui/step-grid-interactions.lisp` binds C-a globally to select-all-steps,
+/// and the global keymap was consulted first — so C-a in the Packages view
+/// silently selected steps instead of attaching the module.
+#[test]
+fn mode_keybinding_shadows_a_global_binding_on_the_same_key() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*shadowed*", "");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+(def global-select-all () (host-command "global-select-all-ran" true))
+(def mode-attach () (host-command "mode-attach-ran" true))
+(bind-key "C-a" "global-select-all")
+(define-mode "shadow-mode")
+(mode-bind-key "shadow-mode" "C-a" "mode-attach")
+(set-buffer-mode-for "*shadowed*" "shadow-mode")
+"#,
+        )
+        .expect("install competing bindings");
+    editor.refresh_runtime_side_effects();
+    assert_eq!(
+        editor.active_buffer().mode,
+        BufferMode::Named("shadow-mode".to_string())
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "mode-attach-ran")),
+        "mode binding should win, got {commands:?}"
+    );
+    assert!(
+        !commands.iter().any(
+            |c| matches!(c, HostCommand::Custom { name, .. } if name == "global-select-all-ran")
+        ),
+        "global binding must not also run, got {commands:?}"
+    );
+}
+
+/// A globally bound key the active mode does NOT bind still reaches the
+/// global keymap.
+#[test]
+fn global_binding_still_runs_when_the_mode_does_not_bind_the_key() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*unshadowed*", "");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+(def global-select-all () (host-command "global-select-all-ran" true))
+(bind-key "C-a" "global-select-all")
+(define-mode "quiet-mode")
+(set-buffer-mode-for "*unshadowed*" "quiet-mode")
+"#,
+        )
+        .expect("install global binding");
+    editor.refresh_runtime_side_effects();
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands.iter().any(
+            |c| matches!(c, HostCommand::Custom { name, .. } if name == "global-select-all-ran")
+        ),
+        "global binding should still run, got {commands:?}"
+    );
+}
+
 /// Hazard (d), second thread: `mode_bind_key` qualifies its *handler* string
 /// unconditionally, and `ui/seq-grid-mode.lisp` binds seven handlers defined
 /// outside itself. End-to-end proof that the dispatch-side ladder

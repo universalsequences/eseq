@@ -5756,7 +5756,20 @@ impl Editor {
         let vim_insert_literal = key.modifiers == KeyModifiers::NONE
             && matches!(key.code, KeyCode::Char(_) | KeyCode::Tab)
             && self.active_vim_input_mode() == Some(VimInputMode::Insert);
-        if !vim_insert_literal && self.run_direct_lisp_binding(&key_str(key)) {
+        // A mode's own `mode-bind-key` entry shadows a global `bind-key` for
+        // the same key: the more specific binding wins. Only keys the global
+        // keymap would otherwise claim come through here, so every other key
+        // still reaches the mode in the usual order further down. Without
+        // this, a globally bound key is unreachable from a mode that binds it
+        // — the Packages view's C-a ran the global select-all-steps.
+        let ks = key_str(key);
+        if !vim_insert_literal
+            && self.lisp_bindings.contains_key(&ks)
+            && self.handle_mode_keybinding(&ks)
+        {
+            return;
+        }
+        if !vim_insert_literal && self.run_direct_lisp_binding(&ks) {
             return;
         }
 
@@ -5773,23 +5786,8 @@ impl Editor {
             return;
         }
 
-        // Check mode-specific keybindings
-        {
-            let ks = key_str(key);
-            let mode = &self.active_buffer().mode;
-            if let BufferMode::Named(mode_name) = mode {
-                if let Some(handler) = self
-                    .mode_registry
-                    .get(mode_name)
-                    .and_then(|mode| mode.keybindings.get(&ks))
-                    .cloned()
-                {
-                    if self.call_lisp_handler(&handler) {
-                        return;
-                    }
-                    self.clear_minibuffer_message();
-                }
-            }
+        if self.handle_mode_keybinding(&key_str(key)) {
+            return;
         }
 
         if let Some(cmd) = self.builtins.get(&key).cloned() {
@@ -5826,6 +5824,28 @@ impl Editor {
             }
             _ => {}
         }
+    }
+
+    /// Run the active named mode's `mode-bind-key` handler for `key`, if it
+    /// has one. A handler that answers `false` leaves the key unhandled so
+    /// dispatch continues.
+    fn handle_mode_keybinding(&mut self, key: &str) -> bool {
+        let BufferMode::Named(mode_name) = &self.active_buffer().mode else {
+            return false;
+        };
+        let Some(handler) = self
+            .mode_registry
+            .get(mode_name)
+            .and_then(|mode| mode.keybindings.get(key))
+            .cloned()
+        else {
+            return false;
+        };
+        if self.call_lisp_handler(&handler) {
+            return true;
+        }
+        self.clear_minibuffer_message();
+        false
     }
 
     fn run_direct_lisp_binding(&mut self, key: &str) -> bool {
