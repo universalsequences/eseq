@@ -31,7 +31,7 @@
 
 ;; Migration aliases (module spec §10) for the three names unconverted
 ;; callers still spell flat: the two mount sites (arrangement.lisp,
-;; effects/step-buffer.lisp), the `C-x p` bind-key handler string in
+;; effects/step-buffer.lisp), the `C-c p` bind-key handler string in
 ;; seq-panels.lisp — which is late-bound and resolves through this table at
 ;; dispatch — and the Rust state_values test that evals `(sound-palette-apply
 ;; …)`. `seq-toggle-sound-palette` is also the M-x-visible spelling.

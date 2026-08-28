@@ -22037,13 +22037,12 @@
         ])
     }
 
-    /// eseq-chk: since S4 retired the flat compat aliases, `C-x p` binds the
-    /// QUALIFIED handler string `eseq.sound-palette/toggle-open` — a flat
-    /// spelling that is not a def's base name dispatches to nothing. Prove
-    /// the chord reaches the palette-open native end to end, and pin the
-    /// defs the other requalified binding names (`C-h` collapse-all).
+    /// Since S4 retired the flat compat aliases, the sound-palette chord binds
+    /// the qualified handler string `eseq.sound-palette/toggle-open`. Prove it
+    /// reaches the palette-open native end to end, and pin the def named by the
+    /// other requalified binding (`C-h` collapse-all).
     #[test]
-    fn metal_seq_cx_p_chord_opens_the_sound_palette() {
+    fn metal_seq_cc_p_chord_opens_the_sound_palette() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut editor = full_grid_editor_for_scroll_tests();
         // The fixture loads the UI but never syncs runtime `bind-key`
@@ -22062,7 +22061,7 @@
                 Ok(Value::Bool(true))
             });
         editor.drain_host_commands();
-        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
         let commands = editor.drain_host_commands();
         assert!(
@@ -22070,13 +22069,34 @@
                 command,
                 eseqlisp::host::HostCommand::Custom { name, .. } if name == "palette-open-probe"
             )),
-            "C-x p should reach the seq-sound-palette-open native, got {commands:?}"
+            "C-c p should reach the seq-sound-palette-open native, got {commands:?}"
         );
         assert!(
             editor
                 .runtime()
                 .has_global("eseq.sequencer/collapse-all-tracks"),
             "the C-h mode binding names this def; renaming it orphans the key"
+        );
+    }
+
+    #[test]
+    fn metal_seq_cx_p_chord_opens_packages_view() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.refresh_runtime_side_effects();
+        editor.drain_host_commands();
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. }
+                    if name == "open-packages-view"
+            )),
+            "C-x p should open Packages view, got {commands:?}"
         );
     }
 

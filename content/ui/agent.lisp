@@ -366,6 +366,6 @@
 ;; Entry point. `C-g` used to open this panel, but Cmd/Ctrl+G is now the
 ;; track-group shortcut (eseq.mixer/seq-ctrl-g), so Agent Mode moves to the
 ;; `C-x <letter>` panel-toggle family alongside `C-x m` (patch macros),
-;; `C-x p` (sound palette) and `C-x s` (sample browser). The handler string
+;; `C-x p` (packages) and `C-x s` (sample browser). The handler string
 ;; qualifies against this module, which is where `agent-open` lives.
 (bind-key "C-x a" "agent-open")

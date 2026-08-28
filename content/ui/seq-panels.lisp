@@ -326,5 +326,5 @@
 ;; the current track's binding outside the timeline.
 ;; Qualified since S4 retired the compat aliases: the handler string is
 ;; late-bound, and `seq-toggle-sound-palette` no longer resolves flat.
-(bind-key "C-x p" "eseq.sound-palette/toggle-open")
+(bind-key "C-c p" "eseq.sound-palette/toggle-open")
 (bind-key "BackTab" "seq-toggle-main-or-piano-roll")
