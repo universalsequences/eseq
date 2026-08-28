@@ -106,34 +106,44 @@
 
 ;; ── Character section (dynamic color + lfo shape) ──
 
-(def option-button (fx p label-text)
+(def option-button (fx p current label-text)
   (button label-text
     :width 4.4 :height 0.95 :padding 0 :font-size 8.0
-    :background-color (if (= (get p :text-value) label-text) (cream) :mixer-control-bg)
-    :color (if (= (get p :text-value) label-text) :black :dim)
+    :background-color (if (= current label-text) (cream) :mixer-control-bg)
+    :color (if (= current label-text) :black :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :on-click |x y r| (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p label-text)))
 
+(def color-options (fx p)
+  (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "dimension-color")
+    (let ((current (eseq.effects.param-controls/fx-param-text-value-for fx p)))
+      (v-stack :gap 0.54 :align :center
+        (label "COLOR" :font-size 8.0 :width 4.6 :color :dim :bg :transparent)
+        (option-button fx p current "smooth")
+        (option-button fx p current "default")
+        (option-button fx p current "lf sat 1")
+        (option-button fx p current "lf sat 2")))))
+
+(def shape-options (fx p)
+  (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "dimension-shape")
+    (let ((current (eseq.effects.param-controls/fx-param-text-value-for fx p)))
+      (v-stack :gap 0.54 :align :center
+        (label "LFO SHAPE" :font-size 8.0 :width 4.6 :color :dim :bg :transparent)
+        (option-button fx p current "default")
+        (option-button fx p current "sine")
+        (option-button fx p current "ramp")
+        (option-button fx p current "square")
+        (option-button fx p current "triangle")))))
+
 (def character-box (fx color-p shape-p)
   (box :width 11.2 :height :fill :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (h-stack :width 5 :gap 0.40 :align :start
-      (v-stack :gap 0.54 :align :center
-        (label "COLOR" :font-size 8.0 :width 4.6 :color :dim :bg :transparent)
-        (option-button fx color-p "smooth")
-        (option-button fx color-p "default")
-        (option-button fx color-p "lf sat 1")
-        (option-button fx color-p "lf sat 2"))
-      (v-stack :gap 0.54 :align :center
-        (label "LFO SHAPE" :font-size 8.0 :width 4.6 :color :dim :bg :transparent)
-        (option-button fx shape-p "default")
-        (option-button fx shape-p "sine")
-        (option-button fx shape-p "ramp")
-        (option-button fx shape-p "square")
-        (option-button fx shape-p "triangle")))))
+      (color-options fx color-p)
+      (shape-options fx shape-p))))
 
 ;; ── Controls ──
 

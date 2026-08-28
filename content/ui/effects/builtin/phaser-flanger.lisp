@@ -216,12 +216,12 @@
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p)))
 
-(def div-button (fx p label-text)
+(def div-button (fx p current label-text)
   (button label-text
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
-    :background-color (if (= (get p :text-value) label-text) (orange) :mixer-control-bg)
+    :background-color (if (= current label-text) (orange) :mixer-control-bg)
     :border-color :transparent
-    :color (if (= (get p :text-value) label-text) :black :dim)
+    :color (if (= current label-text) :black :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -229,31 +229,33 @@
     :on-click |x y r| (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p label-text)))
 
 (def div-grid (fx p)
-  (v-stack :gap 0.11
-    (h-stack :gap 0.12
-      (div-button fx p "1/32")
-      (div-button fx p "1/16"))
-    (h-stack :gap 0.12
-      (div-button fx p "1/16t")
-      (div-button fx p "1/8"))
-    (h-stack :gap 0.12
-      (div-button fx p "1/8t")
-      (div-button fx p "1/8."))
-    (h-stack :gap 0.12
-      (div-button fx p "1/4")
-      (div-button fx p "1/4t"))
-    (h-stack :gap 0.12
-      (div-button fx p "1/4.")
-      (div-button fx p "1/2"))
-    (h-stack :gap 0.12
-      (div-button fx p "1")
-      (box :width 2.72 :height 0.82))))
+  (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "phaser-flanger-div")
+    (let ((current (eseq.effects.param-controls/fx-param-text-value-for fx p)))
+      (v-stack :gap 0.11
+        (h-stack :gap 0.12
+          (div-button fx p current "1/32")
+          (div-button fx p current "1/16"))
+        (h-stack :gap 0.12
+          (div-button fx p current "1/16t")
+          (div-button fx p current "1/8"))
+        (h-stack :gap 0.12
+          (div-button fx p current "1/8t")
+          (div-button fx p current "1/8."))
+        (h-stack :gap 0.12
+          (div-button fx p current "1/4")
+          (div-button fx p current "1/4t"))
+        (h-stack :gap 0.12
+          (div-button fx p current "1/4.")
+          (div-button fx p current "1/2"))
+        (h-stack :gap 0.12
+          (div-button fx p current "1")
+          (box :width 2.72 :height 0.82))))))
 
-(def shape-button (fx p label-text)
+(def shape-button (fx p current label-text)
   (button label-text
     :width 3.85 :height 0.92 :padding 0 :font-size 8.0
-    :background-color (if (= (get p :text-value) label-text) (cyan) :mixer-control-bg)
-    :color (if (= (get p :text-value) label-text) :black :dim)
+    :background-color (if (= current label-text) (cyan) :mixer-control-bg)
+    :color (if (= current label-text) :black :dim)
     :border-color :transparent
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -262,11 +264,13 @@
     :on-click |x y r| (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p label-text)))
 
 (def shape-column (fx p)
-  (v-stack :gap 0.11 :align :center
-    (shape-button fx p "sine")
-    (shape-button fx p "triangle")
-    (shape-button fx p "ramp")
-    (shape-button fx p "square")))
+  (subtree :key (eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key fx p "phaser-flanger-shape")
+    (let ((current (eseq.effects.param-controls/fx-param-text-value-for fx p)))
+      (v-stack :gap 0.11 :align :center
+        (shape-button fx p current "sine")
+        (shape-button fx p current "triangle")
+        (shape-button fx p current "ramp")
+        (shape-button fx p current "square")))))
 
 (def lfo-box (fx sync-p rate-p div-p shape-p)
   (box :width 10.6 :height 9.55 :padding 0.30
