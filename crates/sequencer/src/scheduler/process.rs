@@ -170,14 +170,19 @@ pub(super) fn process_apply_step_param_write(
     Some((param, next))
 }
 
+/// Resolves a process target's parameter reference against a live descriptor.
+/// Shares the host-wide identity rule (canonical id, then unique pre-namespacing
+/// source name, then legacy `:tag`/`@role`), so bindings and hints authored
+/// against flat names keep resolving after a param gains an `@group`. A legacy
+/// name that is ambiguous across groups resolves to nothing; the callers already
+/// trace the resulting skip.
 pub(super) fn process_param_index_by_tag_or_name(
     descriptor: &EffectDescriptor,
     tag_or_name: &str,
 ) -> Option<usize> {
     descriptor
-        .params
-        .iter()
-        .position(|param| param.has_tag_or_name(tag_or_name))
+        .resolve_param_index_by_tag_or_name(tag_or_name)
+        .unwrap_or(None)
 }
 
 pub(super) fn process_slot_param_identity(

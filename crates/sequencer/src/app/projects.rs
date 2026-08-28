@@ -50,7 +50,7 @@ pub(super) fn resolve_live_macro_target(
         if !descriptor.name.eq_ignore_ascii_case(effect) {
             return None;
         }
-        let param_idx = resolve_saved_param_index(
+        let param_idx = resolve_saved_macro_param_index(
             descriptor,
             param,
             "project macro mapping for bus effect",
@@ -87,7 +87,7 @@ pub(super) fn resolve_live_macro_target(
             if !descriptor.name.eq_ignore_ascii_case(effect) {
                 return None;
             }
-            let param_idx = resolve_saved_param_index(
+            let param_idx = resolve_saved_macro_param_index(
                 descriptor,
                 param,
                 "project macro mapping for track effect",
@@ -121,7 +121,7 @@ pub(super) fn resolve_live_macro_target(
             param_id: previous_param_id,
         } => {
             let descriptor = instrument_descriptors.get(track)?;
-            let param_idx = resolve_saved_param_index(
+            let param_idx = resolve_saved_macro_param_index(
                 descriptor,
                 param,
                 "project macro mapping for instrument",
@@ -4396,17 +4396,28 @@ impl App {
                                 param_index,
                             ),
                         };
-                        let Some(descriptor) = descriptor else { return false };
-                        let Some(index) = resolve_saved_param_index(
-                            &descriptor,
-                            param,
-                            "project rack macro mapping",
-                        ) else {
-                            return false;
-                        };
-                        *param = descriptor.params[index].name.clone();
-                        *param_index = index;
-                        true
+                        // Only a genuinely ambiguous legacy name is dropped.
+                        // A descriptor that is not loadable here (an engine that
+                        // failed to compile, a nested rack) keeps the saved
+                        // mapping untouched, exactly as before namespacing.
+                        let Some(descriptor) = descriptor else { return true };
+                        match descriptor.resolve_persisted_param_name(param) {
+                            crate::effects::PersistedParamNameResolution::Unique(index) => {
+                                *param = descriptor.params[index].name.clone();
+                                *param_index = index;
+                                true
+                            }
+                            crate::effects::PersistedParamNameResolution::Ambiguous(
+                                candidates,
+                            ) => {
+                                eprintln!(
+                                    "project rack macro mapping: dropped ambiguous legacy parameter '{param}' (candidates: {})",
+                                    candidates.join(", ")
+                                );
+                                false
+                            }
+                            crate::effects::PersistedParamNameResolution::Missing => true,
+                        }
                     });
                 }
                 Some(saved_rack)
@@ -4886,6 +4897,26 @@ impl App {
         self.push_solo_mutes();
         self.push_all_restored_instrument_defaults();
         self.state.publish_scheduler_snapshot();
+    }
+}
+
+/// Macro mappings historically stored either a parameter name or one of its
+/// `:tag`/`@role` aliases, so they keep the legacy tag fallback on top of the
+/// canonical-id/display-alias rule.
+fn resolve_saved_macro_param_index(
+    descriptor: &crate::effects::EffectDescriptor,
+    saved_name: &str,
+    context: &str,
+) -> Option<usize> {
+    match descriptor.resolve_param_index_by_tag_or_name(saved_name) {
+        Ok(index) => index,
+        Err(candidates) => {
+            eprintln!(
+                "{context}: dropped ambiguous legacy parameter '{saved_name}' (candidates: {})",
+                candidates.join(", ")
+            );
+            None
+        }
     }
 }
 

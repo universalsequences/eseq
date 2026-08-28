@@ -493,19 +493,7 @@ fn process_param_index_by_tag_or_name(
     descriptor: &EffectDescriptor,
     tag_or_name: &str,
 ) -> Result<Option<usize>, Vec<String>> {
-    match descriptor.resolve_persisted_param_name(tag_or_name) {
-        crate::effects::PersistedParamNameResolution::Unique(index) => Ok(Some(index)),
-        crate::effects::PersistedParamNameResolution::Ambiguous(candidates) => Err(candidates),
-        crate::effects::PersistedParamNameResolution::Missing => {
-            let matches = descriptor
-                .params
-                .iter()
-                .enumerate()
-                .filter_map(|(index, param)| param.has_tag_or_name(tag_or_name).then_some(index))
-                .collect::<Vec<_>>();
-            Ok((matches.len() == 1).then(|| matches[0]))
-        }
-    }
+    descriptor.resolve_param_index_by_tag_or_name(tag_or_name)
 }
 
 fn log_ambiguous_process_param(name: &str, candidates: &[String]) {

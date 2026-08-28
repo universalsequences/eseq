@@ -218,7 +218,23 @@ fn main() {
         };
         effective_midi_note += preset.base_note_offset;
         for param in &result.manifest.params {
-            if let Some(value) = preset.params.get(&param.name) {
+            // Canonical id first, then the pre-namespacing declared name a
+            // preset bank written before `@group` became a namespace still uses.
+            let alias_is_unique = || {
+                result
+                    .manifest
+                    .params
+                    .iter()
+                    .filter(|other| other.display_name == param.display_name)
+                    .count()
+                    == 1
+            };
+            let value = preset.params.get(&param.name).or_else(|| {
+                (param.display_name != param.name && alias_is_unique())
+                    .then(|| preset.params.get(&param.display_name))
+                    .flatten()
+            });
+            if let Some(value) = value {
                 merged_param_overrides
                     .push((param.name.clone(), value.clamp(param.min, param.max)));
             }

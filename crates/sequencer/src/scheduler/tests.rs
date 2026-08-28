@@ -9395,3 +9395,46 @@ fn scratch_generator_follows_a_mid_playback_scene_switch() {
         );
     });
 }
+
+#[test]
+fn scheduler_process_param_lookup_aliases_pre_namespacing_names(
+) {
+    let dgen_param = |name: &str, display_name: &str, group: &str, cell_id: usize| {
+        crate::lisp_host::DGenParam {
+            name: name.to_string(),
+            display_name: display_name.to_string(),
+            cell_id,
+            cell_span: 1,
+            default: 0.0,
+            min: 0.0,
+            max: 1.0,
+            unit: None,
+            hidden: false,
+            group: Some(group.to_string()),
+            env: None,
+            role: Some("attack".to_string()),
+        }
+    };
+    let descriptor = EffectDescriptor::from_lisp_manifest(
+        "namespaced",
+        &[
+            dgen_param("filter.cutoff", "cutoff", "filter", 0),
+            dgen_param("op1.index", "index", "op1", 1),
+            dgen_param("op2.index", "index", "op2", 2),
+        ],
+        0,
+        1,
+    );
+    let lookup = |name: &str| {
+        crate::scheduler::process::process_param_index_by_tag_or_name(&descriptor, name)
+    };
+
+    // Canonical id.
+    assert_eq!(lookup("filter.cutoff"), Some(0));
+    // Pre-namespacing declared name, unique across groups.
+    assert_eq!(lookup("cutoff"), Some(0));
+    // Ambiguous across groups: resolves to nothing rather than an arbitrary group.
+    assert_eq!(lookup("index"), None);
+    // Legacy `:tag`/`@role` references keep their first-match behavior.
+    assert_eq!(lookup(":attack"), Some(0));
+}

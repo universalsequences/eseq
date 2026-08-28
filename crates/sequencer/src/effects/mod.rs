@@ -7673,6 +7673,25 @@ impl EffectDescriptor {
         }
     }
 
+    /// Resolves a host-side parameter reference that may be a canonical id, a
+    /// pre-namespacing source name, or a `:tag`/`@role`. Canonical ids win,
+    /// then a unique display alias; only when neither matches does this fall
+    /// back to the legacy first-match tag/role scan. `Err` carries the
+    /// canonical candidates of a genuinely ambiguous legacy name.
+    pub fn resolve_param_index_by_tag_or_name(
+        &self,
+        tag_or_name: &str,
+    ) -> Result<Option<usize>, Vec<String>> {
+        match self.resolve_persisted_param_name(tag_or_name) {
+            PersistedParamNameResolution::Unique(index) => Ok(Some(index)),
+            PersistedParamNameResolution::Ambiguous(candidates) => Err(candidates),
+            PersistedParamNameResolution::Missing => Ok(self
+                .params
+                .iter()
+                .position(|param| param.has_tag_or_name(tag_or_name))),
+        }
+    }
+
     /// Construct from a lisp effect manifest.
     pub fn from_lisp_manifest(
         name: &str,
