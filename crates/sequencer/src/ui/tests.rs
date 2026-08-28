@@ -5301,9 +5301,10 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
-                cached_effect_mod_values: Vec::new(),
-                watched_effect_modulators: std::collections::HashSet::new(),
-                effect_mod_poll_fx_epoch: usize::MAX,
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -6321,9 +6322,10 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
-                cached_effect_mod_values: Vec::new(),
-                watched_effect_modulators: std::collections::HashSet::new(),
-                effect_mod_poll_fx_epoch: usize::MAX,
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -6950,9 +6952,10 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
-                cached_effect_mod_values: Vec::new(),
-                watched_effect_modulators: std::collections::HashSet::new(),
-                effect_mod_poll_fx_epoch: usize::MAX,
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -7990,9 +7993,10 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
-                cached_effect_mod_values: Vec::new(),
-                watched_effect_modulators: std::collections::HashSet::new(),
-                effect_mod_poll_fx_epoch: usize::MAX,
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -9350,9 +9354,10 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: cached_modulator_phases.clone(),
                 cached_modulator_levels: cached_modulator_levels.clone(),
-                cached_effect_mod_values: Vec::new(),
-                watched_effect_modulators: std::collections::HashSet::new(),
-                effect_mod_poll_fx_epoch: usize::MAX,
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -14339,7 +14344,7 @@
     /// `sync_track_effect_param_value_field`), and the watchlist gate leaking
     /// a per-block state snapshot for an unmodulated or hidden panel.
     #[test]
-    fn read_effect_mod_values_tracks_real_descriptor_params_and_gates_the_watchlist() {
+    fn read_mod_display_values_tracks_real_descriptor_params_and_gates_the_watchlist() {
         use sequencer::app;
         use sequencer::audio::engine;
         use sequencer::effects::filter_table;
@@ -14425,10 +14430,17 @@
                       watched: &mut std::collections::HashSet<i32>,
                       selected_step: Option<usize>,
                       live: bool| {
-            let responses =
-                super::read_effect_mod_values(lg_ptr, app, &state, selected_step, live, watched);
-            assert_eq!(responses.len(), 1, "one Filter Table instance");
-            responses[0].clone()
+            let sampled = super::read_mod_display_values(
+                lg_ptr,
+                app,
+                &state,
+                None,
+                selected_step,
+                live,
+                watched,
+            );
+            assert_eq!(sampled.effects.len(), 1, "one Filter Table instance");
+            sampled.effects[0].clone()
         };
         // Sparse publication: look one destination's effective value up by
         // param index, the way a panel's `mod-value-field` binding does.
@@ -14522,5 +14534,103 @@
             (at(&hidden, cutoff_idx) - 2_000.0).abs() < 2.0,
             "a hidden panel reports base values, got {}",
             at(&hidden, cutoff_idx),
+        );
+
+        // eseq-6mva: the same pass samples the selected track's instrument.
+        // The sampler's lanes carry a *dynamic* slot (a `mod <dest> src` param
+        // whose value picks the modulator), which is the shape the effect
+        // descriptors never exercise, and its panel publishes user-domain
+        // values.
+        let instrument_desc = app.graph.instrument_descriptors[0].clone();
+        let speed_idx = instrument_desc
+            .params
+            .iter()
+            .position(|param| param.name == "speed")
+            .expect("the sampler should expose `speed`");
+        let speed_target = instrument_desc
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| target.base_param_idx == speed_idx)
+            .expect("speed should be a sampler mod destination")
+            .clone();
+        let source_idx = speed_target
+            .source_param_idx
+            .expect("sampler lanes select their slot through a source param");
+        let instrument_slot = &state.pattern.instrument_slots[0];
+        // The headless app never ran the graph build that sizes the slot, and
+        // `slot_param_stored_value` ignores defaults past `num_params`.
+        instrument_slot
+            .num_params
+            .store(instrument_desc.params.len() as u32, Ordering::Relaxed);
+        instrument_slot.defaults.set(speed_idx, 1.5);
+        let sample_instrument = |app: &app::App,
+                                 watched: &mut std::collections::HashSet<i32>,
+                                 live: bool| {
+            super::read_mod_display_values(lg_ptr, app, &state, Some(0), None, live, watched)
+                .instrument
+                .expect("the sampler declares modulation destinations")
+        };
+
+        let inst_at = |sample: &super::InstrumentModValues, param_idx: usize| -> f64 {
+            sample
+                .values
+                .iter()
+                .find(|(idx, _)| *idx == param_idx)
+                .unwrap_or_else(|| panic!("param {param_idx} should be published: {sample:?}"))
+                .1
+        };
+        let modulator_node_id = 4_321;
+        let mut instrument_watched: std::collections::HashSet<i32> =
+            std::collections::HashSet::new();
+        let base = sample_instrument(&app, &mut instrument_watched, true);
+        assert_eq!(base.track, 0);
+        assert!(
+            (inst_at(&base, speed_idx) - 1.5).abs() < 1.0e-6,
+            "an unmodulated destination publishes its base value, got {}",
+            inst_at(&base, speed_idx),
+        );
+        assert!(
+            !instrument_watched.contains(&modulator_node_id),
+            "an unmodulated instrument must not be watched: {instrument_watched:?}",
+        );
+
+        // Arming a lane requires both the slot selector and a depth; the audio
+        // thread's published last-triggered voice is what gets watched.
+        instrument_slot.defaults.set(source_idx, 1.0);
+        instrument_slot.defaults.set(speed_target.depth_param_idx, 0.5);
+        state.transport.display_modulator_node_ids[0]
+            .store(modulator_node_id as u32, Ordering::Relaxed);
+        let modulated = sample_instrument(&app, &mut instrument_watched, true);
+        assert!(
+            instrument_watched.contains(&modulator_node_id),
+            "a modulated instrument watches the last-triggered voice's modulator: \
+             {instrument_watched:?}",
+        );
+        // That node does not exist in this headless graph, so the slot values
+        // read back as zero — the settle-to-base contract again.
+        assert!(
+            (inst_at(&modulated, speed_idx) - 1.5).abs() < 1.0e-6,
+            "a modulator at rest renders the base value, got {}",
+            inst_at(&modulated, speed_idx),
+        );
+
+        // Selecting the lane's `off` slot releases the watchlist entry, as
+        // does hiding the panel.
+        instrument_slot.defaults.set(source_idx, 0.0);
+        let _ = sample_instrument(&app, &mut instrument_watched, true);
+        assert!(
+            !instrument_watched.contains(&modulator_node_id),
+            "an `off` slot selector must release the watchlist entry: {instrument_watched:?}",
+        );
+        instrument_slot.defaults.set(source_idx, 1.0);
+        let _ = sample_instrument(&app, &mut instrument_watched, true);
+        assert!(
+            instrument_watched.contains(&modulator_node_id),
+            "a re-armed lane watches again: {instrument_watched:?}",
+        );
+        let _ = sample_instrument(&app, &mut instrument_watched, false);
+        assert!(
+            instrument_watched.is_empty(),
+            "a hidden panel must release every watchlist entry: {instrument_watched:?}",
         );
     }

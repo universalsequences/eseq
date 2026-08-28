@@ -30,6 +30,7 @@
         custom-ui-param-mod-wrapper
         custom-ui-param-control-key-mode
         custom-ui-param-base-value-prop
+        custom-ui-param-modulated-value
         custom-ui-param-base-min-prop
         custom-ui-param-base-max-prop
         custom-ui-param-plock-active?
@@ -215,6 +216,13 @@
 
 (def custom-ui-param-base-value-prop (p)
   (pc/param-base-value-prop (current-fx) p))
+
+;; Effective (post-modulation) value for a custom instrument's param
+;; (eseq-6mva). The host samples the most recently triggered voice's modulator
+;; and publishes `base + sum(depth * mod)`; the knob draws its live dot there.
+;; `false` for params with no published field, which draws no dot.
+(def custom-ui-param-modulated-value (p)
+  (pc/param-modulated-value p))
 
 (def custom-ui-param-base-min-prop (p)
   (pc/param-base-min-prop (current-fx) p))

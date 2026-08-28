@@ -41184,6 +41184,15 @@
             ]))),
         );
 
+        // eseq-6mva: cutoff is a published modulation destination, so its knob
+        // reads the host's effective-value field for the live dot.
+        cutoff.insert(
+            "mod-value-field".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                "fx-instrument-mod-value-0".to_string(),
+            ))),
+        );
+
         let mut inst = test_instrument_map();
         inst.insert(
             "synth".to_string(),
@@ -41332,6 +41341,7 @@
                 ("test-lfo-sync", Value::Number(1.0)),
                 ("test-mod-source-12", Value::Number(0.0)),
                 ("test-mod-depth-13", Value::Number(0.0)),
+                ("fx-instrument-mod-value-0", Value::Number(0.5)),
                 ("bus-effects", test_list(vec![])),
             ],
             true,
@@ -41383,6 +41393,29 @@
                 .any(|text| text == "cut"),
             "mods-closed knob should emit its label/value text primitives: {:?}",
             knob_proportional_texts(synth_knob)
+        );
+
+        // eseq-6mva: a custom instrument's knob binds its live dot to the
+        // host's effective-value field, and the overlay never disturbs the
+        // knob's own (base) value — the drag target.
+        assert!(
+            matches!(
+                synth_knob.props.get("modulated-value"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "custom instrument knob should bind its live dot: {:?}",
+            synth_knob.props.get("modulated-value")
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "fx-instrument-mod-value-0", Value::Number(0.8));
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(&synth_knob.props, "modulated-value", -1.0),
+            0.8,
+        );
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(&synth_knob.props, "value", -1.0),
+            0.5,
         );
 
         editor

@@ -803,6 +803,17 @@ pub(crate) fn build_instrument_panel_value(
                 "modulatable".to_string(),
                 Rc::new(RefCell::new(Value::Bool(true))),
             );
+            // Effective (post-modulation) value field (eseq-6mva): read-only
+            // telemetry the knob draws its live dot from, sampled off the most
+            // recently triggered voice's modulator. Only declared destinations
+            // get one, and it carries the base value while nothing modulates.
+            if let Some(param_idx) = idx {
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-value-field",
+                    fx_instrument_mod_value_field(param_idx),
+                );
+            }
             let target_values = targets
                 .iter()
                 .map(|meta| {

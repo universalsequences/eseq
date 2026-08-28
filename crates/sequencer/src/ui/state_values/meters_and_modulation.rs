@@ -360,7 +360,14 @@ fn effect_mod_lanes(
                 continue;
             }
         }
-        let slot = target.modulator_slot;
+        // Two lane shapes reach here. dgen effects and custom instruments bake
+        // the slot into the descriptor (`modulator_slot`, with a
+        // `__dgen_mod_active__` flag); the sampler's lanes instead carry a
+        // `mod <dest> src` param whose *value* picks the slot, with 0 = off.
+        let slot = match target.source_param_idx {
+            Some(source_idx) => value_of(source_idx).round().max(0.0) as usize,
+            None => target.modulator_slot,
+        };
         if slot == 0 || slot > SLOT_COUNT {
             continue;
         }
@@ -494,14 +501,15 @@ fn effect_mod_values_for_slot(
 /// `sync_track_effect_param_value_field`, which this deliberately mirrors —
 /// otherwise a macro driving cutoff, or a p-lock passing under the playhead,
 /// moves the knob but not the overlay.
-pub(crate) fn read_effect_mod_values(
+pub(crate) fn read_mod_display_values(
     lg: sequencer::audiograph::LiveGraphPtr,
     app: &app::App,
     state: &Arc<SequencerState>,
+    selected_track: Option<usize>,
     selected_step: Option<usize>,
     live: bool,
     watched: &mut HashSet<i32>,
-) -> Vec<EffectModValues> {
+) -> ModDisplayValues {
     let mut responses = Vec::new();
     let mut wanted: HashSet<i32> = HashSet::new();
 
@@ -578,8 +586,22 @@ pub(crate) fn read_effect_mod_values(
         }
     }
 
-    // Watchlist bookkeeping: only modulated, visible effects cost the audio
-    // thread a per-block state snapshot.
+    // The FX-tile instrument panel shows one instrument, so only the selected
+    // track is sampled — its fields are not track-keyed.
+    let instrument = selected_track.and_then(|track| {
+        read_instrument_mod_values_for_track(
+            lg,
+            app,
+            state,
+            track,
+            selected_step,
+            live,
+            &mut wanted,
+        )
+    });
+
+    // Watchlist bookkeeping: only modulated, visible effects and instruments
+    // cost the audio thread a per-block state snapshot.
     watched.retain(|node_id| {
         if wanted.contains(node_id) {
             return true;
@@ -598,7 +620,145 @@ pub(crate) fn read_effect_mod_values(
         }
     }
 
-    responses
+    ModDisplayValues {
+        effects: responses,
+        instrument,
+    }
+}
+
+/// One instrument's effective parameter values after host modulation
+/// (eseq-6mva), in the *display* domain the instrument panel's own value
+/// fields use (`stored_to_user`), so a knob's dot and its pointer share one
+/// scale. Only the selected track is ever sampled: the FX-tile instrument
+/// panel's fields are not track-keyed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct InstrumentModValues {
+    pub track: usize,
+    pub values: Vec<(usize, f64)>,
+}
+
+/// Reactive field carrying one instrument param's effective value. Matches the
+/// `fx-instrument-param-*` naming: the FX-tile panel shows one instrument at a
+/// time, so these are relative to the selected track.
+pub(crate) fn fx_instrument_mod_value_field(param_idx: usize) -> String {
+    format!("fx-instrument-mod-value-{param_idx}")
+}
+
+/// Everything the UI tick publishes for modulated-value display: per-effect
+/// values keyed by graph node, plus the selected track's instrument. They share
+/// one watchlist reconciliation, so a single pass owns which modulator nodes
+/// the audio thread snapshots.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ModDisplayValues {
+    pub effects: Vec<EffectModValues>,
+    pub instrument: Option<InstrumentModValues>,
+}
+
+/// Sample the selected track's instrument, if it declares any modulation
+/// destinations.
+///
+/// A poly instrument has one modulator node *per voice*, so unlike an effect
+/// there is no single node to read. The audio thread publishes the modulator of
+/// the most recently allocated voice into
+/// `transport.display_modulator_node_ids` (see `last_voice_modulator_node`),
+/// and the display follows that: the note you played last, exactly like a
+/// hardware mod indicator.
+fn read_instrument_mod_values_for_track(
+    lg: sequencer::audiograph::LiveGraphPtr,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_step: Option<usize>,
+    live: bool,
+    wanted: &mut HashSet<i32>,
+) -> Option<InstrumentModValues> {
+    use sequencer::instruments::voice_modulator::SLOT_COUNT;
+    let desc = app.graph.instrument_descriptors.get(track)?;
+    if desc.instrument_modulation_targets.is_empty() {
+        return None;
+    }
+    let slot = app.state.pattern.instrument_slots.get(track)?;
+    let display_step = displayed_plock_step(state, track, selected_step);
+    // Mirrors `instrument_param_display_value` (minus the neural selection,
+    // which is a step-editing overlay rather than a live value) so the dot and
+    // the knob pointer always agree about the base.
+    let value_of = |idx: usize| -> f32 {
+        let Some(pdesc) = desc.params.get(idx) else {
+            return 0.0;
+        };
+        display_step
+            .and_then(|step| slot.plocks.get(step, idx))
+            .or_else(|| app.effective_instrument_param_value(track, idx))
+            .unwrap_or_else(|| slot_param_stored_value(slot, pdesc, idx, display_step))
+    };
+
+    let destinations = effect_mod_destinations(desc);
+    if destinations.is_empty() {
+        return None;
+    }
+    let modulator_node_id = state.transport.display_modulator_node_ids[track].load(Ordering::Relaxed) as i32;
+    let modulated = live
+        && modulator_node_id > 0
+        && destinations
+            .iter()
+            .any(|&idx| effect_mod_lanes(desc, idx, &value_of).is_some());
+    let slot_values = if modulated {
+        wanted.insert(modulator_node_id);
+        read_effect_modulator_slot_values(lg, modulator_node_id)
+    } else {
+        [0.0_f32; SLOT_COUNT]
+    };
+    // The shared arithmetic works in the stored domain; the instrument panel
+    // publishes user-domain values (percent params are stored 0..1 and shown
+    // 0..100), so convert on the way out. The conversion is linear, so an
+    // unmodulated destination still lands bit-for-bit on the panel's own value.
+    let stored = effect_mod_values_for_destinations(desc, 0, &value_of, &slot_values, &destinations);
+    let values = stored
+        .values
+        .into_iter()
+        .filter_map(|(param_idx, value)| {
+            let pdesc = desc.params.get(param_idx)?;
+            Some((param_idx, pdesc.stored_to_user(value as f32) as f64))
+        })
+        .collect();
+    Some(InstrumentModValues { track, values })
+}
+
+/// Publish the changed instrument values. Same delta contract as the effect
+/// half: zero writes while nothing moves, and a track change republishes every
+/// field so the panel never shows the previous instrument's modulation.
+pub(crate) fn sync_instrument_mod_value_field_delta(
+    rt: &mut Runtime,
+    previous: Option<&InstrumentModValues>,
+    current: Option<&InstrumentModValues>,
+) -> (bool, usize) {
+    let mut effects_dirty = false;
+    let mut published = 0usize;
+    let Some(current) = current else {
+        return (effects_dirty, published);
+    };
+    let previous = previous.filter(|previous| previous.track == current.track);
+    for (param_idx, value) in &current.values {
+        let was = previous.and_then(|previous| {
+            previous
+                .values
+                .iter()
+                .find(|(idx, _)| idx == param_idx)
+                .map(|(_, value)| *value)
+        });
+        if was == Some(*value) {
+            continue;
+        }
+        published += 1;
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &fx_instrument_mod_value_field(*param_idx),
+                Value::Number(*value),
+            )
+            .effects_dirty;
+    }
+    (effects_dirty, published)
 }
 
 /// Publish the changed effective values. Returns `(effects_dirty, published)`:

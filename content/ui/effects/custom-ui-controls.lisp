@@ -28,6 +28,7 @@
             :value (rt/custom-ui-param-binding p)
             :min (rt/custom-ui-param-control-min p) :max (rt/custom-ui-param-control-max p) :decimals 2
             :base-value (rt/custom-ui-param-base-value-prop p)
+            :modulated-value (rt/custom-ui-param-modulated-value p)
             :base-min (rt/custom-ui-param-base-min-prop p) :base-max (rt/custom-ui-param-base-max-prop p)
             :mod-range-0-slot (rt/custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (rt/custom-ui-param-knob-mod-depth-prop p 0)
             :mod-range-1-slot (rt/custom-ui-param-knob-mod-slot-prop p 1) :mod-range-1-depth (rt/custom-ui-param-knob-mod-depth-prop p 1)
@@ -76,6 +77,7 @@
             :value (rt/custom-ui-param-binding p)
             :min (rt/custom-ui-param-control-min p) :max (rt/custom-ui-param-control-max p) :decimals 2
             :base-value (rt/custom-ui-param-base-value-prop p)
+            :modulated-value (rt/custom-ui-param-modulated-value p)
             :base-min (rt/custom-ui-param-base-min-prop p) :base-max (rt/custom-ui-param-base-max-prop p)
             :mod-range-0-slot (rt/custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (rt/custom-ui-param-knob-mod-depth-prop p 0)
             :mod-range-1-slot (rt/custom-ui-param-knob-mod-slot-prop p 1) :mod-range-1-depth (rt/custom-ui-param-knob-mod-depth-prop p 1)

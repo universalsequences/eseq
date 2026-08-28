@@ -901,6 +901,65 @@ pub(in crate::audio) fn reset_audio_runtime_for_track_topology(
     sync_rack_voice_pools(data, num_tracks);
 }
 
+/// Graph node id of the modulator belonging to the most recently allocated
+/// voice on `track`, or `0` when there is none (eseq-6mva).
+///
+/// Recency is `age`, the same counter the allocator uses to pick its victim,
+/// so this follows the note that played last and survives voice stealing.
+/// Active voices outrank released ones: while a chord is held the UI shows a
+/// sounding voice rather than a decaying tail, and once everything is released
+/// the last note's tail is still the right thing to display.
+///
+/// Rack tracks report `0` — their per-slot panels are not covered by the
+/// effective-value display, exactly like rack effect slots.
+fn last_voice_modulator_node(data: &AudioCallbackData, track: usize) -> u32 {
+    let better = |best: Option<(bool, u64)>, candidate: (bool, u64)| -> bool {
+        match best {
+            None => true,
+            Some(best) => candidate > best,
+        }
+    };
+    match InstrumentType::from_runtime_flag(
+        data.state.runtime.instrument_type_flags[track].load(Ordering::Relaxed),
+    ) {
+        InstrumentType::Custom => track_engine_id(&data.state, track)
+            .and_then(|engine_id| {
+                let pool = &data.custom_engine_pools[engine_id];
+                let mut best: Option<(bool, u64)> = None;
+                let mut best_idx = None;
+                for (idx, voice) in pool.voices[..pool.num_voices].iter().enumerate() {
+                    if voice.assigned_track != Some(track) {
+                        continue;
+                    }
+                    let candidate = (voice.active, voice.age);
+                    if better(best, candidate) {
+                        best = Some(candidate);
+                        best_idx = Some(idx);
+                    }
+                }
+                best_idx.map(|idx| {
+                    data.state.runtime.engine_modulator_node_ids[engine_id][idx]
+                        .load(Ordering::Relaxed)
+                })
+            })
+            .unwrap_or(0),
+        InstrumentType::Sampler | InstrumentType::Modulator => {
+            let pool = &data.voice_pools[track];
+            let mut best: Option<(bool, u64)> = None;
+            let mut best_modulator = 0;
+            for voice in pool.voices[..pool.num_voices].iter() {
+                let candidate = (voice.active, voice.age);
+                if better(best, candidate) {
+                    best = Some(candidate);
+                    best_modulator = voice.modulator_id.max(0) as u32;
+                }
+            }
+            best_modulator
+        }
+        InstrumentType::Rack => 0,
+    }
+}
+
 pub(in crate::audio) fn publish_active_voice_counts(data: &AudioCallbackData, num_tracks: usize) {
     for track in 0..MAX_TRACKS {
         let active = if track < num_tracks {
@@ -965,6 +1024,18 @@ pub(in crate::audio) fn publish_active_voice_counts(data: &AudioCallbackData, nu
             0
         };
         data.state.transport.active_voice_counts[track].store(active as u32, Ordering::Relaxed);
+        // eseq-6mva: the UI's effective-value sampler needs one voice's
+        // modulator to display a poly instrument's live modulation. Published
+        // here rather than at every note-on so the allocator's call sites stay
+        // untouched; it is one relaxed store per track per block, beside the
+        // voice count that already walks these pools.
+        let display_modulator = if track < num_tracks {
+            last_voice_modulator_node(data, track)
+        } else {
+            0
+        };
+        data.state.transport.display_modulator_node_ids[track]
+            .store(display_modulator, Ordering::Relaxed);
     }
 }
 

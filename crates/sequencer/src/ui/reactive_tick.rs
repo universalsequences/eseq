@@ -338,17 +338,28 @@ pub(crate) fn reactive_tick_and_render(
         // is built. Without that seed `bind-seq` vivifies 0.0 and e.g. a Filter
         // Table renders frame=0 / cutoff=0 Hz (off the 40..18000 log axis) for
         // up to a meter interval.
-        let effect_mod_epoch = ctx.shared.fx_epoch.load(Ordering::Relaxed);
-        if meter_polled || effect_mod_epoch != ctx.meters.effect_mod_poll_fx_epoch {
-            ctx.meters.effect_mod_poll_fx_epoch = effect_mod_epoch;
-            let effect_mod_selected_step = selected_plock_step(&ctx.shared.selected_steps);
-            ctx.meters.cached_effect_mod_values = read_effect_mod_values(
+        //
+        // The same pass samples the selected track's instrument (eseq-6mva),
+        // whose per-voice modulators are read through the audio thread's
+        // published last-triggered voice; the track is part of the poll gate so
+        // switching instruments republishes immediately rather than leaving the
+        // previous one's modulation on the panel.
+        let mod_display_epoch = ctx.shared.fx_epoch.load(Ordering::Relaxed);
+        if meter_polled
+            || mod_display_epoch != ctx.meters.mod_display_poll_fx_epoch
+            || Some(ct) != ctx.meters.mod_display_poll_track
+        {
+            ctx.meters.mod_display_poll_fx_epoch = mod_display_epoch;
+            ctx.meters.mod_display_poll_track = Some(ct);
+            let mod_display_selected_step = selected_plock_step(&ctx.shared.selected_steps);
+            ctx.meters.cached_mod_display_values = read_mod_display_values(
                 app.graph.lg,
                 &app,
                 &ctx.shared.state,
-                effect_mod_selected_step,
+                Some(ct),
+                mod_display_selected_step,
                 fx_visible,
-                &mut ctx.meters.watched_effect_modulators,
+                &mut ctx.meters.watched_display_modulators,
             );
         }
         let mut needs_reactive_cycle = false;
@@ -936,14 +947,20 @@ pub(crate) fn reactive_tick_and_render(
         // the panel visibility: the sampler already reports base values while
         // the FX panel is hidden, so this is what leaves the fields holding
         // base values for the next open, and it only writes on change.
-        if ctx.meters.cached_effect_mod_values != ctx.frame.prev_effect_mod_values {
+        if ctx.meters.cached_mod_display_values != ctx.frame.prev_mod_display_values {
             needs_reactive_cycle |= sync_effect_mod_value_field_delta(
                 editor.runtime_mut(),
-                &ctx.frame.prev_effect_mod_values,
-                &ctx.meters.cached_effect_mod_values,
+                &ctx.frame.prev_mod_display_values.effects,
+                &ctx.meters.cached_mod_display_values.effects,
             )
             .0;
-            ctx.frame.prev_effect_mod_values = ctx.meters.cached_effect_mod_values.clone();
+            needs_reactive_cycle |= sync_instrument_mod_value_field_delta(
+                editor.runtime_mut(),
+                ctx.frame.prev_mod_display_values.instrument.as_ref(),
+                ctx.meters.cached_mod_display_values.instrument.as_ref(),
+            )
+            .0;
+            ctx.frame.prev_mod_display_values = ctx.meters.cached_mod_display_values.clone();
         }
         if sequencer_visible {
             let previous_track_playheads = ctx.frame.prev_track_playheads.clone();
