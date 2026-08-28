@@ -55,6 +55,7 @@ pub const SCENES: &[&str] = &[
     "widget-roar-shaper",
     "widget-knob-number",
     "widget-knob-number-mod-range",
+    "widget-knob-number-mod-dot",
     "widget-roar-filter",
     "widget-number-picker-tri",
     "widget-tile-chrome",
@@ -543,6 +544,26 @@ pub fn widget_instances_for_scene(scene: &str) -> Vec<WidgetInstance> {
         "widget-knob-number-mod-range" => {
             for widget in &mut widgets {
                 widget.uniform_b = [0.82, 0.15, 0.75, 1.0];
+            }
+        }
+        // The dot fragment reads its whole geometry out of `uniform_b`, and
+        // the generic all-zero value clamps to the smallest legal ring and dot
+        // (0.10 and 0.005), which draws a couple of pixels at the arc's start
+        // angle. Spread the normalized value across the four instances so one
+        // capture covers the arc rather than one point on it, and keep
+        // `MOD_DOT_RING_RADIUS`'s 0.58 so the dot rides the arc the knob
+        // fragment draws.
+        //
+        // The dot radius is deliberately NOT the widget's `MOD_DOT_RADIUS`
+        // (0.084). That is a correct radius relative to a knob's own rect, but
+        // these instances are 128×80 and 304×72, so it renders as a ~10×3 px
+        // smear: too small to judge the edge falloff or the arc position by
+        // eye, and under the "the pipeline drew almost nothing" floor in
+        // `shader_capture`'s scene sweep. 0.34 is the same shape, drawn large
+        // enough to review.
+        "widget-knob-number-mod-dot" => {
+            for (index, widget) in widgets.iter_mut().enumerate() {
+                widget.uniform_b = [[0.15, 0.4, 0.62, 0.88][index], 0.58, 0.34, 0.0];
             }
         }
         _ => {}

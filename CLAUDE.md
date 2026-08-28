@@ -162,9 +162,16 @@ There are no known pre-existing failures in the validated platform baselines:
 - On x86_64 Linux as of 2026-08-24,
   `cargo nextest run -p eseqlisp --features wgpu` is green with 1,699 passed and
   3 skipped. Both shared-state tests that failed spuriously under plain
-  `cargo test` pass under nextest process isolation. A full Linux workspace
-  baseline has not yet been established; do not use the macOS workspace counts
-  as a Linux expectation.
+  `cargo test` pass under nextest process isolation.
+- On x86_64 Linux as of 2026-08-28, the full workspace is green under the
+  feature set CI runs:
+  `cargo nextest run --workspace --features eseqlisp/wgpu,eseqlisp/capture-harness`
+  is 4,754 passed / 40 skipped in 580s debug. That is the CI job's command, so a
+  green run here and a green `x86_64-unknown-linux-gnu` job mean the same thing.
+  Do not compare these counts against either of the other two baselines:
+  `capture-harness` compiles targets that plain `--features eseqlisp/wgpu` does
+  not (`docs/linux-validation.md` records 4,508 run / 33 skipped without it),
+  and macOS compiles more still.
 
 ## Architecture Overview
 
