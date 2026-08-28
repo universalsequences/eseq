@@ -701,6 +701,10 @@ mod tests {
             live[0].uniform_b
         );
         assert_eq!(live[0].uniform_b[1], MOD_DOT_RING_RADIUS);
+        assert_eq!(
+            live[0].uniform_b[2], MOD_DOT_RADIUS,
+            "the dot's size is Rust-owned, not baked into the shader",
+        );
 
         // Mods tab open: value/min/max carry the depth, base-* carry the base
         // domain, and the dot must follow the base domain.
@@ -1030,18 +1034,20 @@ const MOD_DOT_RING_RADIUS: f32 = 0.58;
 /// the dot would just sit under the base pointer.
 const MOD_DOT_MIN_TRAVEL: f32 = 0.002;
 
-fn mod_dot_color(props: &HashMap<String, Value>, selected_slot: i32) -> Color {
-    let fallback = if selected_slot > 0 {
-        mod_slot_color(selected_slot, true)
-    } else {
-        Color {
-            r: 0.42,
-            g: 0.78,
-            b: 1.0,
-            a: 0.95,
-        }
-    };
-    resolve_named_color(props, "mod-dot-color", fallback)
+/// Dot radius in the knob's local (-1..1) space, passed to the shader rather
+/// than baked into it. Slightly larger than the base pointer's own notch
+/// (0.070) so the live value reads at a glance without the eye mistaking it
+/// for the pointer.
+const MOD_DOT_RADIUS: f32 = 0.084;
+
+/// Colour of the live modulated-value dot. Theme-controlled by default
+/// (`widget-knob-mod-dot`, tweakable in `content/core/themes.lisp` like any
+/// other widget colour) so the accent can be tuned globally; a panel can still
+/// override one knob with an explicit `mod-dot-color` prop. Deliberately *not*
+/// the modulator slot colour: the dot reads as one consistent "live value"
+/// accent across every panel rather than shifting hue with the mods tab.
+fn mod_dot_color(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(props, "mod-dot-color", theme::WIDGET_KNOB_MOD_DOT())
 }
 
 fn mod_range_ring_half_width(selected: bool) -> f32 {
@@ -2004,7 +2010,7 @@ impl WidgetDefinition for KnobNumberWidget {
             let base_t = taper_normalize(taper, base_min, base_max, base_value);
             let mod_t = taper_normalize(taper, base_min, base_max, modulated);
             if (mod_t - base_t).abs() > MOD_DOT_MIN_TRAVEL {
-                let color = mod_dot_color(&node.props, selected_slot);
+                let color = mod_dot_color(&node.props);
                 prims.push(GpuPrimitive::WidgetInstance {
                     widget_type: "knob-number-mod-dot".to_string(),
                     instance: WidgetInstance {
@@ -2014,7 +2020,7 @@ impl WidgetDefinition for KnobNumberWidget {
                         orientation: 0.0,
                         itime: viewport.time_seconds,
                         uniform_a: [0.0; 4],
-                        uniform_b: [mod_t, MOD_DOT_RING_RADIUS, 0.0, 0.0],
+                        uniform_b: [mod_t, MOD_DOT_RING_RADIUS, MOD_DOT_RADIUS, 0.0],
                         uniform_c: [0.0; 4],
                         uniform_d: [0.0; 4],
                         color_a: [color.r, color.g, color.b, color.a],
@@ -2193,10 +2199,11 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float sweep = 4.71238898;
     float t = clamp(in.uniform_b.x, 0.0, 1.0);
     float ringRadius = clamp(in.uniform_b.y, 0.10, 1.0);
+    float dotRadius = clamp(in.uniform_b.z, 0.005, 0.40);
     float angle = start + sweep * t;
     float2 n = float2(cos(angle), sin(angle));
     float aa = max(fwidth(r), 0.0015);
-    float d = length(p - n * ringRadius) - 0.042;
+    float d = length(p - n * ringRadius) - dotRadius;
     float mask = smoothstep(aa, -aa, d);
     float4 col = float4(in.color_a.rgb, in.color_a.a * mask);
     if (col.a < 0.01) { discard_fragment(); }

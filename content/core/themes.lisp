@@ -30,6 +30,7 @@
     :widget_label_fg "#1a1a2e"
     :widget_slider_filled "#0969da" :widget_slider_track "#d0d7de"
     :widget_knob_filled "#8250df" :widget_knob_track "#d0d7de"
+    :widget_knob_mod_dot "#0c7d9d"
     :widget_toggle_on "#0969da" :widget_toggle_off "#8b8fa0"
     :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#f6f8fa"
     :border_active "#8b8fa0" :border_inactive "#d0d7de"))
@@ -64,6 +65,7 @@
     :widget_label_fg "#c0caf5"
     :widget_slider_filled "#7aa2f7" :widget_slider_track "#394b70"
     :widget_knob_filled "#bb9af7" :widget_knob_track "#545c7e"
+    :widget_knob_mod_dot "#7dcfff"
     :widget_toggle_on "#7aa2f7" :widget_toggle_off "#545c7e"
     :widget_toggle_knob_on "#c0caf5" :widget_toggle_knob_off "#c0caf5"
     :border_active "#7aa2f7" :border_inactive "#292e42"))
@@ -98,6 +100,7 @@
     :widget_label_fg "#edecee"
     :widget_slider_filled "#a277ff" :widget_slider_track "#6d6d6d"
     :widget_knob_filled "#a277ff" :widget_knob_track "#6d6d6d"
+    :widget_knob_mod_dot "#61ffca"
     :widget_toggle_on "#a277ff" :widget_toggle_off "#6d6d6d"
     :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#edecee"
     :border_active "#a277ff" :border_inactive "#3b334b"))
@@ -132,6 +135,7 @@
     :widget_label_fg "#c8d8f0"
     :widget_slider_filled "#3080e0" :widget_slider_track "#1e3a5a"
     :widget_knob_filled "#a88bfa" :widget_knob_track "#3a4e6a"
+    :widget_knob_mod_dot "#5ae6ff"
     :widget_toggle_on "#3080e0" :widget_toggle_off "#3a4e6a"
     :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#c8d8f0"
     :border_active "#4a9ef5" :border_inactive "#162640"))
@@ -227,6 +231,9 @@
       :widget-slider-dot    '(0.36 0.36 0.38)
       :widget-knob-filled   '(0.00 0.48 0.95)
       :widget-knob-track    '(0.04 0.04 0.04)
+      ;; Live modulated-value dot on a knob: the marker riding the ring at the
+      ;; param's current post-modulation value. Tune it here to taste.
+      :widget-knob-mod-dot  '(0.35 0.90 1.00)
       :patcher-bg           '(0.12 0.13 0.14)
       :patcher-grid-minor   '(0.22 0.23 0.25 0.34)
       :patcher-grid-major   '(0.32 0.33 0.36 0.46)

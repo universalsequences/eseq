@@ -1873,10 +1873,11 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var sweep: f32 = 4.71238898;
     var t: f32 = clamp(input.uniform_b.x, 0.0, 1.0);
     var ringRadius: f32 = clamp(input.uniform_b.y, 0.10, 1.0);
+    var dotRadius: f32 = clamp(input.uniform_b.z, 0.005, 0.40);
     var angle: f32 = start + sweep * t;
     var n: vec2<f32> = vec2<f32>(cos(angle), sin(angle));
     var aa: f32 = max(fwidth(r), 0.0015);
-    var d: f32 = length(p - n * ringRadius) - 0.042;
+    var d: f32 = length(p - n * ringRadius) - dotRadius;
     var mask: f32 = smoothstep(aa, -aa, d);
     var col: vec4<f32> = vec4<f32>(input.color_a.rgb, input.color_a.a * mask);
     if (col.a < 0.01) { discard; }
