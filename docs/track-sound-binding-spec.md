@@ -299,8 +299,16 @@ mirror stops being the track sound retroactively retunes committed takes
   pattern's sound **seeds from the track sound** (clone-by-default per §3's
   layering; a shared-ref option is rejected — it would make later per-clip
   clones retroactive). This is the "set the sound, then record" workflow.
-- Step/geometry gestures still materialize a pattern (they need step storage) —
-  but only *explicit content gestures* do; device edits never do.
+- Step/geometry gestures still materialize a pattern (they need step storage).
+  **Device edits materialize too, but only in SEQ context** (rev 5, bead
+  eseq-2lji): dialing a sound into a scene whose cell is empty creates the
+  cell, forked from the track sound, and edits that. The earlier "device
+  edits never materialize" rule sent those edits to the CARRIER instead —
+  which every take shares (§2.4.1) — so one knob turn in one scene silently
+  retuned the track's whole recorded history, with nothing in the Seq view
+  to say the lane was bare. In ARRANGEMENT context the old rule stands: the
+  track owns the sound there, so there is nothing to make scene-local and
+  the carrier is the target by design.
 - Session mode is otherwise untouched: cells with patterns, scene launches,
   punch-in step editing all resolve through cells exactly as today, because in
   session workflows the cells exist.

@@ -6473,18 +6473,49 @@ fn ensure_effective_track_pattern(
     app.state.materialize_current_scene_pattern(track, data)
 }
 
-/// Rule 3's write target, view-keyed (track-sound spec §2.2.2): in
-/// ARRANGEMENT context the track owns the sound, so the edit lands on the
-/// track-sound carrier — never a cell, never a materialization, wherever the
-/// cursor sits and whatever cells exist (symptom 8's stopped-time preset). In
-/// SEQ context it is the classic effective cell, with the carrier only as the
-/// bare-lane fallback that keeps device edits from minting a cell.
+/// Rule 3's READ target, view-keyed (track-sound spec §2.2.2): in
+/// ARRANGEMENT context the track owns the sound, so it resolves to the
+/// track-sound carrier wherever the cursor sits and whatever cells exist
+/// (symptom 8's stopped-time preset). In SEQ context it is the classic
+/// effective cell, with the carrier as the bare-lane fallback.
+///
+/// Anything that WRITES wants `rule_three_device_write_target` instead —
+/// the read fallback is not a legal write target on a bare Seq lane.
 fn rule_three_device_target(app: &App, track: usize) -> Option<crate::sequencer::PatternId> {
     if app.arrangement_view_visible {
         return app.state.track_sound_pattern_id(track);
     }
     app.state
         .effective_track_pattern_id(track)
+        .or_else(|| app.state.track_sound_pattern_id(track))
+}
+
+/// Rule 3's WRITE target. Same view-keying as `rule_three_device_target`,
+/// except that a BARE lane in Seq context materializes its scene cell
+/// (seeded from the track sound per track-sound spec §2.5) instead of
+/// falling through to the carrier.
+///
+/// The read fallback cannot be a write target here (bead eseq-2lji): the
+/// carrier is shared by every take the track has recorded (§2.4.1), so
+/// dialing a sound into a scene whose cell happens to be empty silently
+/// retuned the whole track's history — and the Seq view gives no signal
+/// that the lane is bare, so the edit looked scene-local. Materializing
+/// forks the sound (`materialize_current_scene_pattern`), so the new cell
+/// owns its own Patch/Mix and nothing else moves.
+///
+/// §2.5 says device edits do not materialize a pattern; rev 5 narrows that
+/// to ARRANGEMENT context, where the track legitimately owns the sound and
+/// there is nothing to make scene-local. The carrier stays as a last-resort
+/// fallback so a lane with no scene to materialize into keeps live knobs
+/// rather than erroring out.
+fn rule_three_device_write_target(
+    app: &mut App,
+    track: usize,
+) -> Option<crate::sequencer::PatternId> {
+    if app.arrangement_view_visible {
+        return app.state.track_sound_pattern_id(track);
+    }
+    ensure_effective_track_pattern(app, track)
         .or_else(|| app.state.track_sound_pattern_id(track))
 }
 
@@ -6501,11 +6532,12 @@ fn resolve_device_value_target(
     // bound take or track clip owns them, and only rule 3 falls back to the
     // view's owner (track-sound spec §2.2.2) — the TRACK SOUND's carrier in
     // arrangement context, the effective cell in Seq context. A device edit
-    // never materializes a scene cell. No dual-write — a bound edit never
+    // materializes a bare Seq-context cell rather than writing the shared
+    // carrier (rev 5, eseq-2lji). No dual-write — a bound edit never
     // touches the scene pattern.
     let pattern = match app.bound_read_pattern(track) {
         Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
-        _ => rule_three_device_target(app, track).ok_or(EditError::MissingTrackPattern)?,
+        _ => rule_three_device_write_target(app, track).ok_or(EditError::MissingTrackPattern)?,
     };
     let (id, slot_idx) = match cmd {
         AppCommand::SetEffectParam { slot_idx, .. }
@@ -7018,7 +7050,7 @@ pub fn apply_coalesced_sampler_slice_mutation(
         .ok_or(EditError::TrackOutOfRange { track })?;
     let pattern = match app.bound_read_pattern(track) {
         Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
-        _ => rule_three_device_target(app, track).ok_or(EditError::MissingTrackPattern)?,
+        _ => rule_three_device_write_target(app, track).ok_or(EditError::MissingTrackPattern)?,
     };
     let id = rack_slot.map_or(DeviceId::TrackInstrument(track_id), |slot| {
         DeviceId::RackInstrument(app.device_registry.rack_slot(track_id, slot))
@@ -7108,11 +7140,11 @@ pub fn apply_recorded_instrument_values_mutation(
         .ok_or(EditError::TrackOutOfRange { track })?;
     // Preset loads follow the sound binding like any other device edit
     // (takes spec 16.4); rule 3 is view-keyed (track-sound spec §2.2.2) —
-    // same resolution as `resolve_device_value_target`, never materializing
-    // a scene cell.
+    // same resolution as `resolve_device_value_target`, materializing a
+    // bare Seq-context cell rather than writing the shared carrier.
     let pattern = match app.bound_read_pattern(track) {
         Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
-        _ => rule_three_device_target(app, track).ok_or(EditError::MissingTrackPattern)?,
+        _ => rule_three_device_write_target(app, track).ok_or(EditError::MissingTrackPattern)?,
     };
     let target = ResolvedDeviceTarget {
         id: DeviceId::TrackInstrument(track_id),
@@ -7834,7 +7866,7 @@ fn apply_recorded_track_params_command(
     // carrier instead of erroring out with no target.
     let pattern_id = match bound_pattern {
         Some(pattern) => pattern,
-        None => rule_three_device_target(app, track).ok_or(EditError::MissingTrackPattern)?,
+        None => rule_three_device_write_target(app, track).ok_or(EditError::MissingTrackPattern)?,
     };
     let target = TrackPatternId { track: track_id, pattern: pattern_id };
     let merge_key = merge_key.map(|_| {
@@ -8157,8 +8189,8 @@ pub fn apply_recorded_track_params_batch(
         // Same view-keyed owner as the single-command path (§2.9
         // write-through); batches are solo/mute-style mixer gestures, which
         // are never bound-source edits.
-        let pattern_id =
-            rule_three_device_target(app, track).ok_or(EditError::MissingTrackPattern)?;
+        let pattern_id = rule_three_device_write_target(app, track)
+            .ok_or(EditError::MissingTrackPattern)?;
         let target = TrackPatternId { track: track_id, pattern: pattern_id };
         let before = app
             .state
@@ -10265,12 +10297,14 @@ mod tests {
         }), Some(0.9));
     }
 
-    /// Track-sound spec §2.2: loading an instrument preset on a bare lane
-    /// resolves the TRACK SOUND — it neither fails with
-    /// `MissingTrackPattern` nor mints a scene cell (the old lazy
-    /// materialization, spec §1.1).
+    /// Track-sound spec §2.2/§2.5 rev 5: loading an instrument preset on a
+    /// bare lane never fails with `MissingTrackPattern`, and where it lands
+    /// is view-keyed. In ARRANGEMENT context the TRACK SOUND is the target
+    /// and no cell is minted (the track owns the sound there). In SEQ
+    /// context the edit materializes the scene's cell instead of writing the
+    /// carrier every take shares (eseq-2lji).
     #[test]
-    fn instrument_preset_load_on_a_bare_lane_edits_the_track_sound_without_minting() {
+    fn instrument_preset_load_on_a_bare_lane_is_view_keyed() {
         let state = SequencerState::new(
             2,
             vec![default_empty_effect_chain(), default_empty_effect_chain()],
@@ -10308,16 +10342,36 @@ mod tests {
             .expect("launch scene 1");
         assert!(app.state.effective_track_pattern_id(1).is_none());
 
+        // Arrangement context: the track owns the sound, so the carrier is
+        // the target and nothing is minted.
+        app.arrangement_view_visible = true;
+        app.state.set_arrangement_context(true);
         apply_recorded_instrument_values_mutation(&mut app, 1, "Load preset", |_app| Ok(()))
             .expect("the preset load resolves the track sound on a bare lane");
         assert!(
             app.state.effective_track_pattern_id(1).is_none(),
-            "a device edit never materializes a scene cell (track-sound spec §2.2)"
+            "arrangement context never mints a cell — the track owns the sound"
         );
         assert!(
             app.state.track_sound_pattern_id(1).is_some(),
             "the track sound is the resolved write target"
         );
+
+        // Seq context: the cell owns the sound, so a bare lane materializes
+        // one rather than writing through to the shared carrier.
+        app.arrangement_view_visible = false;
+        app.state.set_arrangement_context(false);
+        let carrier = app
+            .state
+            .track_sound_pattern_id(1)
+            .expect("the track sound resolves");
+        apply_recorded_instrument_values_mutation(&mut app, 1, "Load preset", |_app| Ok(()))
+            .expect("the preset load resolves a target on a bare Seq lane");
+        let cell = app
+            .state
+            .effective_track_pattern_id(1)
+            .expect("Seq context materialized the scene's cell");
+        assert_ne!(cell, carrier, "and it is not the carrier itself");
     }
 
     fn configure_test_sampler_project(app: &mut App, sample_path: &str) {

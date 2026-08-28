@@ -1497,6 +1497,94 @@ pub(crate) mod tests {
         );
     }
 
+    /// eseq-2lji / track-sound spec §2.5 rev 5: dialing a sound into a scene
+    /// whose cell is EMPTY must stay scene-local.
+    ///
+    /// Rule 3's Seq-context fallback used to hand a bare lane's device edit
+    /// to the track-sound CARRIER. Every take the track has recorded shares
+    /// that carrier (§2.4.1), so one knob turn silently retuned the whole
+    /// track's history — and nothing in the Seq view said the lane was bare,
+    /// so the edit looked like it belonged to the scene the user was
+    /// standing in. The edit now materializes the cell instead, forking the
+    /// sound off the track sound.
+    #[test]
+    fn a_seq_view_edit_on_a_bare_cell_materializes_it_instead_of_the_track_sound() {
+        let (mut app, _take, _take_value, _carrier_value) = app_with_take_then_gap();
+        let carrier = app
+            .state
+            .track_sound_pattern_id(0)
+            .expect("the track sound resolves");
+        let carrier_refs = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_pools[0].refs(carrier))
+            .expect("carrier refs");
+        // A take that SHARES the track sound, as every punch-in mints
+        // (§17.3 "record → share").
+        let chunk = app
+            .state
+            .with_project_scenes(|scenes| scenes.effective_track_pattern(0))
+            .expect("effective pattern");
+        let shared_take = app
+            .state
+            .register_track_take(0, None, vec![chunk], 300, Some(carrier_refs))
+            .expect("take registers sharing the carrier");
+        let shared_chunk = app.state.with_project_scenes(|scenes| {
+            scenes.take_pools[0].get(shared_take).expect("take").chunks[0]
+        });
+        // The scene's cell for this lane is empty: the user dials the sound
+        // in BEFORE punching a pattern into it.
+        app.state.with_scenes_mut(|scenes| {
+            scenes.scenes[0].cells[0] = None;
+        });
+        let carrier_before = instrument_default(&app, carrier);
+        assert!(
+            app.state.effective_track_pattern_id(0).is_none(),
+            "the lane is bare in this scene"
+        );
+
+        app.set_arrangement_view_visible(false);
+        let target = carrier_before - 0.25;
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: target,
+            },
+        )
+        .expect("device edit applies");
+        crate::app::edit::finish_active_gesture(&mut app);
+
+        let cell = app
+            .state
+            .effective_track_pattern_id(0)
+            .expect("the edit materialized the scene's cell");
+        assert_eq!(
+            instrument_default(&app, cell),
+            target,
+            "the edit landed on the new cell"
+        );
+        assert_eq!(
+            instrument_default(&app, carrier),
+            carrier_before,
+            "the track sound is untouched"
+        );
+        assert_eq!(
+            instrument_default(&app, shared_chunk),
+            carrier_before,
+            "so every take sharing it keeps the sound it was recorded with"
+        );
+        // The fork is the point: the new cell must own its Patch/Mix, or the
+        // NEXT edit would poison the takes instead of this one.
+        app.state.with_project_scenes(|scenes| {
+            assert_ne!(
+                scenes.track_pools[0].refs(cell),
+                scenes.track_pools[0].refs(carrier),
+                "the materialized cell forked its sound off the track sound"
+            );
+        });
+    }
+
     /// The value the LIVE mirror would hand the engine for track 0's first
     /// instrument parameter — what every `push_all_restored_defaults` reads.
     fn live_instrument_default(app: &App) -> f32 {
