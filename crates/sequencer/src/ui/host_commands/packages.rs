@@ -22,13 +22,13 @@ enum CreateTarget {
 pub(super) fn handle(
     name: &str,
     payload: Value,
-    _app: &mut app::App,
+    app: &mut app::App,
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
     match name {
         "open-packages-view" => open_packages_view(editor, ctx),
-        "packages-view-key" => handle_packages_key(&payload, editor, ctx),
+        "packages-view-key" => handle_packages_key(&payload, app, editor, ctx),
         _ => {}
     }
 }
@@ -110,7 +110,12 @@ fn set_packages_buffer_mode(editor: &mut Editor) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_packages_key(payload: &Value, editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
+fn handle_packages_key(
+    payload: &Value,
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) {
     let Some(key) = extract_string_from_payload(payload, "key") else {
         return;
     };
@@ -143,11 +148,11 @@ fn handle_packages_key(payload: &Value, editor: &mut Editor, ctx: &mut LoopCtx<'
             return;
         }
         "C-a" => {
-            attach_selected_package(editor, ctx, AttachmentDestination::Scratch);
+            attach_selected_package(editor, app, ctx, AttachmentDestination::Scratch);
             return;
         }
         "C-i" => {
-            attach_selected_package(editor, ctx, AttachmentDestination::UserInit);
+            attach_selected_package(editor, app, ctx, AttachmentDestination::UserInit);
             return;
         }
         "C-j" => {
@@ -562,6 +567,7 @@ enum AttachmentDestination {
 
 fn attach_selected_package(
     editor: &mut Editor,
+    app: &mut app::App,
     ctx: &mut LoopCtx<'_>,
     destination: AttachmentDestination,
 ) {
@@ -592,9 +598,9 @@ fn attach_selected_package(
         // waiting for the next scratch replay. The scratch line is written
         // only once the module evaluates, so a broken module cannot poison
         // the project.
-        AttachmentDestination::Scratch => {
-            load_module(editor, module).and_then(|()| attach_to_scratch(editor, module))
-        }
+        AttachmentDestination::Scratch => load_module(editor, module)
+            .and_then(|()| attach_to_scratch(editor, module))
+            .inspect(|_| record_evaluated_project_import(app, module)),
         AttachmentDestination::UserInit => attach_to_user_init(editor, module),
     };
     match result {
@@ -624,6 +630,29 @@ fn load_module(editor: &mut Editor, module: &str) -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(error) => Err(format!("Could not load '{module}': {error:?}")),
     }
+}
+
+/// Record an import the host evaluated itself in the project's *evaluated*
+/// scratch source.
+///
+/// A project stores two scratch texts: the draft buffer and the source that
+/// was actually evaluated (`ProjectScratchState::evaluated_buffer`). Reopening
+/// a project replays the evaluated one, and the scheduler runtime watches it
+/// too. Attach runs `(import …)` itself, so without this the line lives only
+/// in the draft: the scheduler never sees the module, and the next open
+/// replays a scratch that does not mention it — the module silently does not
+/// come back.
+fn record_evaluated_project_import(app: &mut app::App, module: &str) {
+    if let Some(updated) = evaluated_scratch_with_import(&app.state.scratch_source(), module) {
+        app.state.set_scratch_source(updated);
+    }
+}
+
+/// `Some(updated)` when `module` still has to be added to an evaluated scratch
+/// source, `None` when it is already there.
+fn evaluated_scratch_with_import(evaluated: &str, module: &str) -> Option<String> {
+    let (updated, _, already_present) = source_with_import(evaluated, module);
+    (!already_present).then_some(updated)
 }
 
 fn attach_to_scratch(editor: &mut Editor, module: &str) -> Result<bool, String> {
@@ -760,6 +789,34 @@ fn buffer_source(editor: &Editor, path: &Path, name: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Reopening a project replays its *evaluated* scratch, not the draft
+    /// buffer, so an import the host evaluated itself has to land there too.
+    #[test]
+    fn evaluated_scratch_gains_an_attached_import() {
+        let updated = evaluated_scratch_with_import("", "demos.graph-variable-reset")
+            .expect("an empty evaluated scratch needs the import");
+        assert!(
+            import_modules(&updated).contains("demos.graph-variable-reset"),
+            "attach must be replayable from the evaluated scratch, got {updated:?}"
+        );
+    }
+
+    #[test]
+    fn evaluated_scratch_keeps_existing_lines_and_stays_idempotent() {
+        let existing = "(def tempo 120)\n";
+        let updated = evaluated_scratch_with_import(existing, "demos.macro-player")
+            .expect("a populated evaluated scratch still needs the import");
+        assert!(
+            updated.contains("(def tempo 120)"),
+            "attach must not drop what the project already evaluated, got {updated:?}"
+        );
+        assert_eq!(
+            evaluated_scratch_with_import(&updated, "demos.macro-player"),
+            None,
+            "re-attaching an already-recorded module must not append a second import"
+        );
+    }
+
     fn temp_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "eseq-packages-view-{tag}-{}-{}",
@@ -864,3 +921,4 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
