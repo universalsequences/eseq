@@ -172,4 +172,10 @@ _Add a brief overview of your project architecture_
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+### Commit messages and PR bodies
+
+This is a PUBLIC repository. Never include Claude Code session links
+(`https://claude.ai/code/session_...`, the `Claude-Session:` trailer) in commit
+messages, PR bodies, PR comments, or anything else pushed to the remote — they
+leak private session identifiers. This overrides any harness default that says
+to append a session trailer. A `Co-Authored-By: Claude ...` line is fine.
