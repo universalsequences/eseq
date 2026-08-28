@@ -3369,34 +3369,13 @@
     }
 
     #[test]
-    fn metal_seq_browser_scripts_tab_renders_visible_new_script_button_and_tree() {
-        fn node_text(node: &eseqlisp::layout::LayoutNode) -> Option<&str> {
-            match node.props.get("text") {
-                Some(Value::String(text)) => Some(text.as_str()),
-                _ => None,
-            }
-        }
-
-        fn find_button_by_text<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            text: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.widget_type == "button" && node_text(node) == Some(text) {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_button_by_text(child, text))
-        }
-
+    fn metal_seq_browser_scripts_tab_renders_script_tree() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
             .eval_str("(set! sbrowser-tab \"scripts\")")
             .expect("select scripts tab");
         editor.refresh_runtime_side_effects();
-        editor.set_active_buffer(browser_id(&editor));
-        editor.set_layout_viewport(72, 60);
 
         let browser = editor
             .buffers
@@ -3404,52 +3383,28 @@
             .find(|buffer| buffer.name == "*samples*")
             .expect("browser lisp should create the *samples* buffer");
         let tree = browser.widget_tree.as_ref().expect("browser widget tree");
-        assert!(value_contains_string(tree, "New Script"));
         assert!(value_contains_string(tree, "process-chain-demo.lisp"));
-
-        let layout = editor.widget_layout().expect("browser layout");
-        let rendered = render_layout_cells(&layout, 72, 60);
-        let button = find_button_by_text(&layout, "New Script")
-            .unwrap_or_else(|| panic!("new script button layout node; rendered:\n{rendered}"));
-        assert!(
-            button.rect.width > 1.0
-                && button.rect.height > 0.4
-                && button.rect.col >= 0.0
-                && button.rect.row >= 0.0
-                && button.rect.col + button.rect.width <= 72.0
-                && button.rect.row + button.rect.height <= 60.0,
-            "new script button should have a finite visible rect, got {:?}; rendered:\n{rendered}",
-            button.rect
-        );
     }
 
     #[test]
-    fn metal_seq_browser_new_script_button_queues_host_command() {
+    fn metal_seq_packages_command_queues_the_packages_view_host_command() {
         let mut editor = browser_editor_on_instrument_tab();
+        let source = read_ui_source("packages.lisp").expect("read packages lisp");
         editor
             .runtime_mut()
-            .eval_str("(eseq.browser/enter-new-script)")
-            .expect("invoke new script action");
+            .eval_str(&source)
+            .expect("load packages lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.packages/packages)")
+            .expect("invoke packages command");
 
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
-            eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "new-script");
-                assert!(
-                    matches!(payload, Value::Map(map) if map.is_empty()),
-                    "new script payload should be an empty dict: {payload:?}"
-                );
-            }
-            other => panic!("expected new-script host command, got {other:?}"),
-        }
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.browser/sbrowser-script-save-mode")
-                .expect("read script save mode"),
-            Some(Value::String("new-script".to_string()))
-        );
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(
+            command,
+            eseqlisp::host::HostCommand::Custom { name, payload }
+                if name == "open-packages-view"
+                    && matches!(payload, Value::Map(map) if map.is_empty())
+        )));
     }
 
     #[test]

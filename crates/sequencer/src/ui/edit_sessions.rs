@@ -913,18 +913,6 @@ pub(super) fn effect_patcher_buffer_source(buffer_name: &str, path: &Path) -> St
 
 pub(super) const NEW_INSTRUMENT_DRAFT_NAME: &str = "new-instrument-draft/";
 pub(super) const NEW_EFFECT_DRAFT_NAME: &str = "new-effect-draft/";
-pub(super) const NEW_SCRIPT_TAB_LABEL: &str = "New Script";
-pub(super) const NEW_SCRIPT_TEMPLATE: &str = r#"; ESeqLisp script
-; Source-only scripts can still appear as sequencer tabs.
-(eseq.seq-script-picker/seq-register-script-source-tab "Untitled Script")
-
-"#;
-
-#[derive(Debug, Clone)]
-pub(super) struct ScriptDraftSession {
-    pub(super) temp_path: PathBuf,
-    pub(super) buffer_name: String,
-}
 
 pub(super) const NEW_INSTRUMENT_STARTER_DSP: &str = r#"(def gate (in 1 @name gate))
 (def pitch (in 2 @name pitch))
@@ -971,19 +959,6 @@ pub(super) fn create_new_effect_draft_dir() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("Failed to create draft effect directory: {error}"))?;
     Ok(dir)
-}
-
-pub(super) fn create_new_script_draft_path() -> Result<PathBuf, String> {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("System clock is before UNIX epoch: {error}"))?
-        .as_nanos();
-    let dir = std::env::temp_dir()
-        .join("eseq-script-drafts")
-        .join(format!("draft-{}-{stamp}", std::process::id()));
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("Failed to create draft script directory: {error}"))?;
-    Ok(dir.join("untitled.lisp"))
 }
 
 pub(super) fn instrument_run_mode_label(run_mode: CustomInstrumentRunMode) -> &'static str {
@@ -1045,40 +1020,6 @@ pub(super) fn escape_lisp_string(value: &str) -> String {
 pub(super) fn script_source_buffer_name(path: &Path) -> String {
     let key = path.to_string_lossy().replace('\\', "/").replace('/', ":");
     format!("*script:{key}*")
-}
-
-pub(super) fn script_file_name_from_input(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let stem = trimmed.trim_end_matches(".lisp");
-    let mut normalized = String::new();
-    let mut previous_dash = false;
-    for ch in stem.chars() {
-        let out = if ch.is_ascii_alphanumeric() || ch == '_' {
-            Some(ch.to_ascii_lowercase())
-        } else if ch == '-' || ch.is_whitespace() {
-            Some('-')
-        } else {
-            None
-        };
-        if let Some(out) = out {
-            if out == '-' {
-                if !previous_dash && !normalized.is_empty() {
-                    normalized.push(out);
-                }
-                previous_dash = true;
-            } else {
-                normalized.push(out);
-                previous_dash = false;
-            }
-        }
-    }
-    while normalized.ends_with('-') {
-        normalized.pop();
-    }
-    (!normalized.is_empty()).then(|| format!("{normalized}.lisp"))
 }
 
 pub(super) fn open_script_source_buffer(editor: &mut Editor, path: &Path) -> Result<String, String> {

@@ -31,8 +31,6 @@
         selected-audio-effect-name
         sbrowser-editor-name
         preset-filter
-        sbrowser-script-name
-        sbrowser-script-save-mode
         editor-status-row
         project-save-mode?
         open-project-save
@@ -59,7 +57,6 @@
         activate-audio-effect
         select-midi-effect
         activate-midi-effect
-        enter-new-script
         search-header
         create-items
         add-builtin-instrument-track
@@ -127,8 +124,6 @@
 (defstate kit-save-group-id -1)
 (defstate kit-save-mode false)
 (defstate preset-filter "")
-(defstate sbrowser-script-name "")
-(defstate sbrowser-script-save-mode "")  ;; "" or "new-script"
 
 (defwidget editor-spinner
   ;; Sized to sit inside `editor-status-row`'s 1.35-row height — the
@@ -769,29 +764,6 @@
   (host-command "load-instrument-preset" (dict :name name))
   (status (str "Load preset: " name)))
 
-(def enter-new-script ()
-  (host-command "new-script" (dict))
-  (set! sbrowser-script-name "")
-  (set! sbrowser-script-save-mode "new-script")
-  (set! search-filter "")
-  (set! sbrowser-tab "scripts")
-  (status "New script"))
-
-(def script-save-mode? ()
-  (= sbrowser-script-save-mode "new-script"))
-
-(def save-new-script ()
-  (if (= (len sbrowser-script-name) 0)
-    (status "Enter a script name")
-    (host-command "save-new-script" (dict :name sbrowser-script-name))))
-
-(def cancel-new-script ()
-  (do
-    (host-command "cancel-new-script" (dict))
-    (set! sbrowser-script-name "")
-    (set! sbrowser-script-save-mode "")
-    (set! sbrowser-tab "scripts")))
-
 (def select-script (item)
   (let ((kind (get item :kind))
         (label (get item :label)))
@@ -903,40 +875,6 @@
         :font-size 11
         :on-click |x y r| (save-project)
         :color :white))))
-
-(def script-save-header ()
-  (box :width :fill :padding 0.25
-    (v-stack :width :fill :gap 0.4
-      (h-stack :width :fill :gap 0.5 :align :center
-        (label "Save Script"
-          :font-size 12
-          :color :white
-          :bg :transparent)
-        (button "Cancel"
-          :variant :ghost
-          :width 5.8
-          :height 1.2
-          :font-size 9
-          :on-click |x y r| (cancel-new-script)
-          :color :gray))
-      (text-input
-        :width :fill
-        :value sbrowser-script-name
-        :placeholder "script name..."
-        :on-change (lambda (v) (set! sbrowser-script-name v))
-        :height 1.5
-        :font-size 12
-        (mag-glass))
-      (button "Save Script"
-        :variant :primary
-        :width 10
-        :height 1.2
-        :font-size 11
-        :on-click |x y r| (save-new-script)
-        :color :white))))
-
-(def script-save-panel ()
-  (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))
 
 (def create-items ()
   (seq-saved-instrument-tree search-filter SEQ.project-instrument-engines))
@@ -1106,7 +1044,6 @@
   (set! search-filter "")
   (set! mode "audition")
   (set! preset-save-mode "")
-  (set! sbrowser-script-save-mode "")
   (set! kit-save-group-id group-id)
   (set! kit-save-name name)
   (set! kit-save-mode true)
@@ -1463,22 +1400,9 @@
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (empty-message "Presets are available for instrument tracks.")))))
 
-(def scripts-toolbar ()
-  (box :width :fill :padding 0.25
-    (h-stack :width :fill :gap 0.5 :align :center
-      (button "New Script"
-        :key "script-new-button"
-        :variant :secondary
-        :flex 1
-        :height 1.3
-        :font-size 10.5
-        :on-click |x y r| (enter-new-script)
-        :color :white))))
-
 (def scripts-tab-panel ()
   (let ((items (seq-script-tree search-filter)))
     (v-stack :key "scripts-tab-panel" :width :fill :gap 0.5 :flex 1
-      (scripts-toolbar)
       (box :width :fill :padding 0.25
         (label "Scripts"
           :font-size 10
@@ -1906,12 +1830,8 @@
           (list
             (project-save-header)
             (project-save-panel))
-          (if (script-save-mode?)
-            (list
-              (script-save-header)
-              (script-save-panel))
-            (list
-              (tabbed-content))))))))
+          (list
+            (tabbed-content)))))))
 
 ;; ── Reactive rendering (like ui/main.lisp) ──
 

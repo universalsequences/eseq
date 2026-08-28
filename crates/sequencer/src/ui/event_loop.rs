@@ -177,7 +177,7 @@ pub(crate) fn run_event_loop(
         effect_edit_session: None,
         pending_effect_preview: None,
         pending_effect_cancel_restore: None,
-        script_draft_session: None,
+        package_view_session: None,
         pending_agentic_bubbles: HashMap::new(),
         pending_learn_job: None,
         learn_param_preview: None,

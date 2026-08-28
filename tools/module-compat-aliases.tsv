@@ -408,7 +408,6 @@ sbrowser-drop-sample-on-track	eseq.browser/drop-sample-on-track	content/ui/brows
 sbrowser-drop-sound-on-track	eseq.browser/drop-sound-on-track	content/ui/browser.lisp
 sbrowser-editor-status-row	eseq.browser/editor-status-row	content/ui/browser.lisp
 sbrowser-enter-new-effect-editor	eseq.browser/enter-new-effect-editor	content/ui/browser.lisp
-sbrowser-enter-new-script	eseq.browser/enter-new-script	content/ui/browser.lisp
 sbrowser-enter-preset-save	eseq.browser/enter-preset-save	content/ui/browser.lisp
 sbrowser-filter	eseq.browser/search-filter	content/ui/browser.lisp
 sbrowser-focus-create-item	eseq.browser/focus-create-item	content/ui/browser.lisp

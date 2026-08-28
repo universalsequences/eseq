@@ -64,12 +64,10 @@
         seq-script-picker)
 
 ;; Identity aliases (hazard-free: every one is a function).  Why each:
-;;   seq-register-script-source-tab  — called by 11 headerless user scripts in
-;;       content/scripts/**, by the new-script template Rust emits
-;;       (src/ui/edit_sessions.rs:848, src/ui/host_commands/scripts.rs:178),
-;;       and stubbed/evaled flat by src/lisp_host/tests.rs.
-;;   seq-script-load-file            — production Rust evals it by flat name
-;;       (src/ui/host_commands/scripts.rs:208).
+;;   seq-register-script-source-tab  — called by headerless scripts under
+;;       content/scripts/** and stubbed/evaled flat by src/lisp_host/tests.rs.
+;;   seq-script-load-file            — used by the legacy Scripts browser while
+;;       its content is being curated into modules (eseq-mods.17).
 ;;   seq-delete-script-sequencer-by-buffer — ui/seq-step-tabs.lisp (eseq.seq-step-tabs,
 ;;       calls it from the step-tab :on-close lambda.
 ;;   seq-delete-script-sequencer, seq-script-default-dir,

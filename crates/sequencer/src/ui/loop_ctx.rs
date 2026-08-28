@@ -1,7 +1,16 @@
 use super::*;
 
-/// Inline editor session state (instrument/effect creation/editing) plus the
-/// lisp authoring-transaction checkpoints, bundled out of the event loop.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PackageViewSession {
+    pub(crate) root: PathBuf,
+    pub(crate) current_dir: PathBuf,
+    pub(crate) query: String,
+    pub(crate) selected: usize,
+    pub(crate) previous_buffer: String,
+}
+
+/// Inline editor/transient view sessions plus the Lisp authoring-transaction
+/// checkpoints, bundled out of the event loop.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct EditSessionState {
     pub(crate) editor_buffer_name: Option<String>,
@@ -14,7 +23,7 @@ pub(crate) struct EditSessionState {
     pub(crate) effect_edit_session: Option<EffectEditSession>,
     pub(crate) pending_effect_preview: Option<PendingEffectPreview>,
     pub(crate) pending_effect_cancel_restore: Option<PendingEffectCancelRestore>,
-    pub(crate) script_draft_session: Option<ScriptDraftSession>,
+    pub(crate) package_view_session: Option<PackageViewSession>,
     pub(crate) pending_agentic_bubbles: HashMap<String, PendingAgenticBubble>,
     pub(crate) pending_learn_job: Option<PendingLearnJob>,
     pub(crate) learn_param_preview: Option<LearnParamPreview>,
