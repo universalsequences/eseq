@@ -6,8 +6,8 @@ use crate::parser::{ASTParser, Expression, Parser, format_expression};
 use super::display::{node_display_input_slots, node_display_label};
 use super::lisp::{
     attribute_item_mask, attribute_span_len, format_patch_literal, is_attribute_key,
-    label_attributes_suffix, node_kind_for_op, normalize_editor_node_text, parse_patch_source,
-    parse_patch_source_with_library, positional_args, symbol_at,
+    label_attributes_suffix, node_kind_for_op, normalize_editor_node_text, param_reference_name,
+    parse_patch_source, parse_patch_source_with_library, positional_args, symbol_at,
 };
 use super::model::{
     ArgValue, BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind,
@@ -6134,14 +6134,24 @@ impl SourceDocument {
         {
             return true;
         }
-        self.scope_forms(scope).iter().any(|expr| {
-            let Expression::List(items) = expr else {
-                return false;
-            };
-            symbol_at(items, 0) == Some("param")
-                && symbol_at(items, 1) == Some(name)
-                && expression_has_true_attribute(items, "@mod")
-        })
+        let matching = self
+            .scope_forms(scope)
+            .iter()
+            .filter_map(|expr| {
+                let Expression::List(items) = expr else {
+                    return None;
+                };
+                (symbol_at(items, 0) == Some("param")).then_some(items.as_slice())
+            })
+            .filter(|items| {
+                if name.contains('.') {
+                    param_reference_name(items).as_deref() == Some(name)
+                } else {
+                    symbol_at(items, 1) == Some(name)
+                }
+            })
+            .collect::<Vec<_>>();
+        matching.len() == 1 && expression_has_true_attribute(matching[0], "@mod")
     }
 
     fn register_virtual_modulatable_param(&mut self, scope: SourceScopeId, name: String) {

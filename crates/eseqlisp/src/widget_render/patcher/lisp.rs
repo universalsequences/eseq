@@ -645,6 +645,14 @@ fn attribute_patch_literal_value(items: &[Expression], attr: &str) -> Option<Str
     attribute_value_items(items, attr).map(|values| join_formatted(values, format_patch_literal))
 }
 
+pub(super) fn param_reference_name(items: &[Expression]) -> Option<String> {
+    let name = symbol_at(items, 1)?;
+    Some(match attribute_symbol_value(items, "@group") {
+        Some(group) => format!("{group}.{name}"),
+        None => name.to_string(),
+    })
+}
+
 fn param_label(items: &[Expression]) -> String {
     let mut label = String::from("param");
     for item in items.iter().skip(1) {

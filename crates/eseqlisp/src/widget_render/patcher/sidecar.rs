@@ -922,7 +922,8 @@ fn is_inline_symbol_name(token: &str) -> bool {
         return false;
     }
     chars.all(|ch| {
-        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '+' | '*' | '/' | '<' | '>' | '=')
+        ch.is_ascii_alphanumeric()
+            || matches!(ch, '_' | '-' | '+' | '*' | '/' | '<' | '>' | '=' | '.')
     })
 }
 

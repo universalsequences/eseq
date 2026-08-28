@@ -9,6 +9,7 @@ use super::encapsulate::{
 };
 use super::geometry::*;
 use super::interaction::*;
+use super::lisp::parse_editor_node_text;
 use super::metrics::*;
 use super::model::{
     CableEndpoint, InputPortRef, InputPresentation, OutputPortRef,
@@ -5449,6 +5450,42 @@ fn projects_params_and_attributes_as_param_node() {
         node_display_label(node),
         "param cutoff @default 800 @min 20 @max 12000"
     );
+}
+
+#[test]
+fn projects_namespaced_param_references_with_canonical_node_ids_and_short_labels() {
+    let patch = parse(
+        r#"
+            (def gate (in 1))
+            (def trigger (in 2))
+            (param attack @group op1 @default 5)
+            (param attack @group op2 @default 10)
+            (def env (adsr gate trigger op1.attack op2.attack 0.8 100))
+        "#,
+    );
+
+    let op1 = patch.nodes.iter().find(|node| node.id == "op1.attack").unwrap();
+    let op2 = patch.nodes.iter().find(|node| node.id == "op2.attack").unwrap();
+    assert_eq!(node_display_label(op1), "param attack @group op1 @default 5");
+    assert_eq!(node_display_label(op2), "param attack @group op2 @default 10");
+
+    let env = patch.nodes.iter().find(|node| node.id == "env").unwrap();
+    assert_eq!(node_display_label(env), "adsr ? op1.attack op2.attack 0.8 100");
+    for (input, param_id) in [(2, "op1.attack"), (3, "op2.attack")] {
+        let connection = source_connection_for_input(&patch, "env", input);
+        assert_eq!(connection.from_node, param_id);
+        assert_eq!(connection.presentation, InputPresentation::InlineRawParam);
+    }
+}
+
+#[test]
+fn ambiguous_bare_param_reference_does_not_bind_to_an_arbitrary_group() {
+    let patch = parse(
+        "(param attack @group op1)\n(param attack @group op2)\n(def env (phasor attack))",
+    );
+    let env = patch.nodes.iter().find(|node| node.id == "env").unwrap();
+    assert!(matches!(env.args.first(), Some(ArgValue::Literal(value)) if value == "attack"));
+    assert!(!patch.connections.iter().any(|connection| connection.to_node == "env"));
 }
 
 #[test]
@@ -11198,6 +11235,40 @@ fn editor_mod_suffix_expands_to_mod_expression_and_inline_mod_sidecar() {
         .find(|node| node.id == "filtered")
         .expect("filtered node");
     assert_eq!(node_display_label(filtered), "svf cutoff~ 1 0");
+}
+
+#[test]
+fn dotted_editor_mod_suffix_writes_back_and_round_trips_losslessly() {
+    let source = r#"
+        (def signal (in 1))
+        (param mod_index @group op2 @default 0.5 @mod true @mod-mode additive)
+        (def shaped (* signal op2.mod_index))
+    "#;
+    let root_patch = parse(source);
+    let shaped = root_patch.nodes.iter().find(|node| node.id == "shaped").unwrap();
+    assert_eq!(
+        parse_editor_node_text("* op2.mod_index~").unwrap(),
+        ("*".to_string(), vec!["op2.mod_index~".to_string()]),
+        "the editor lexer must retain `.` inside the symbol"
+    );
+
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", shaped, node_display_label(shaped));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "shaped"))
+        .unwrap()
+        .text = "* op2.mod_index~".to_string();
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(def shaped (* signal (mod op2.mod_index)))"),
+        "dotted shorthand was not preserved through writeback:\n{emitted}"
+    );
+    let emitted_patch = parse(&emitted);
+    let shaped = emitted_patch.nodes.iter().find(|node| node.id == "shaped").unwrap();
+    assert_eq!(node_display_label(shaped), "* op2.mod_index~");
 }
 
 #[test]

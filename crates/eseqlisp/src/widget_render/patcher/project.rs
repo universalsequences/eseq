@@ -9,7 +9,7 @@ use super::lisp::{
     attribute_span_len, attribute_symbol_value, attribute_value, connection_kind_for_op,
     default_outputs, format_patch_literal, is_attribute_key, is_numeric_literal,
     is_unsupported_call_head, node_kind_for_op, node_label, normalize_legacy_tensor_call,
-    symbol_at,
+    param_reference_name, symbol_at,
 };
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
@@ -25,6 +25,7 @@ pub(super) struct Projector {
     patch: Patch,
     symbol_sources: HashMap<String, (String, usize)>,
     symbol_bindings: HashMap<String, BindingId>,
+    unique_param_references: HashMap<String, Option<String>>,
     history_nodes: HashMap<String, String>,
     op_occurrences: HashMap<String, usize>,
     used_ids: HashSet<String>,
@@ -51,6 +52,7 @@ impl Projector {
             patch: Patch::default(),
             symbol_sources: HashMap::new(),
             symbol_bindings: HashMap::new(),
+            unique_param_references: HashMap::new(),
             history_nodes: HashMap::new(),
             op_occurrences: HashMap::new(),
             used_ids: HashSet::new(),
@@ -62,6 +64,7 @@ impl Projector {
     }
 
     pub(super) fn project(mut self, exprs: &[Expression]) -> Patch {
+        self.index_param_references(exprs);
         for (idx, expr) in exprs.iter().enumerate() {
             let form_id = self.form_id(idx);
             self.project_top_level(expr, form_id);
@@ -69,6 +72,42 @@ impl Projector {
         refresh_patch_inline_inputs(&mut self.patch);
         assign_layout(&mut self.patch);
         self.patch
+    }
+
+    fn index_param_references(&mut self, exprs: &[Expression]) {
+        for expr in exprs {
+            let Expression::List(items) = expr else {
+                continue;
+            };
+            if symbol_at(items, 0) != Some("param") {
+                continue;
+            }
+            let Some(short_name) = symbol_at(items, 1) else {
+                continue;
+            };
+            let Some(reference_name) = param_reference_name(items) else {
+                continue;
+            };
+            self.unique_param_references
+                .entry(short_name.to_string())
+                .and_modify(|unique| *unique = None)
+                .or_insert(Some(reference_name));
+        }
+    }
+
+    fn resolved_symbol_name(&self, name: &str) -> Option<String> {
+        if self.symbol_sources.contains_key(name) {
+            return Some(name.to_string());
+        }
+        self.unique_param_references
+            .get(name)
+            .and_then(|reference| reference.clone())
+            .filter(|reference| self.symbol_sources.contains_key(reference))
+    }
+
+    fn resolved_symbol_binding(&self, name: &str) -> Option<BindingId> {
+        self.resolved_symbol_name(name)
+            .and_then(|resolved| self.symbol_bindings.get(&resolved).cloned())
     }
 
     fn form_id(&self, index: usize) -> SourceFormId {
@@ -161,8 +200,15 @@ impl Projector {
             );
             return;
         };
-        let id = self.stable_id_for_call(items, None);
-        let binding = self.binding_id(name, BindingKind::Param);
+        let reference_name = param_reference_name(items).unwrap_or_else(|| name.to_string());
+        // Preserve existing sidecar keys while the short name is unique. Only
+        // colliding declarations need their canonical group-qualified ids to
+        // remain distinct in the layout map.
+        let id = match self.unique_param_references.get(name) {
+            Some(Some(_)) => name.to_string(),
+            _ => reference_name.clone(),
+        };
+        let binding = self.binding_id(&reference_name, BindingKind::Param);
         let Some(node_id) = self.project_call(
             items,
             Some(id),
@@ -179,8 +225,9 @@ impl Projector {
             );
             return;
         };
-        self.symbol_sources.insert(name.to_string(), (node_id, 0));
-        self.symbol_bindings.insert(name.to_string(), binding);
+        self.symbol_sources
+            .insert(reference_name.clone(), (node_id, 0));
+        self.symbol_bindings.insert(reference_name, binding);
     }
 
     fn project_make_history(
@@ -822,15 +869,16 @@ impl Projector {
                 Expression::Symbol(name) => {
                     if name == MISSING_INPUT_SENTINEL {
                         arg_slots[idx] = Some(ArgValue::ConnectedExpr);
-                    } else if let Some((from_node, from_output)) =
-                        self.symbol_sources.get(name).cloned()
+                    } else if let Some(resolved_name) = self.resolved_symbol_name(name)
+                        && let Some((from_node, from_output)) =
+                            self.symbol_sources.get(&resolved_name).cloned()
                     {
                         self.flush_pending_constant_args(
                             &mut node,
                             &mut arg_slots,
                             &mut pending_constants,
                         );
-                        let resolved_binding = self.symbol_bindings.get(name).cloned();
+                        let resolved_binding = self.symbol_bindings.get(&resolved_name).cloned();
                         let presentation =
                             self.default_symbol_connection_presentation(idx, &from_node);
                         self.patch.connections.push(PatchConnection {
@@ -1080,7 +1128,7 @@ impl Projector {
             Expression::Symbol(symbol) => SourceArgValue::SymbolReference {
                 expr: arg.expr.clone(),
                 symbol: symbol.clone(),
-                resolved_binding: self.symbol_bindings.get(symbol).cloned(),
+                resolved_binding: self.resolved_symbol_binding(symbol),
             },
             Expression::List(_) => SourceArgValue::NestedExpression(arg.expr.clone()),
             _ => SourceArgValue::Literal(arg.expr.clone()),
@@ -1248,9 +1296,8 @@ fn param_node_info(op: &str, items: &[Expression]) -> Option<ParamNodeInfo> {
     if op != "param" {
         return None;
     }
-    let name = symbol_at(items, 1)?;
     Some(ParamNodeInfo {
-        name: name.to_string(),
+        name: param_reference_name(items)?,
         modulatable: param_is_modulatable(items),
     })
 }

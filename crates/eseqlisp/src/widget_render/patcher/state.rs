@@ -14,8 +14,8 @@ use crate::vm::Value;
 
 use super::generate::{label_attribute, sanitize_binding};
 use super::lisp::{
-    editor_node_port_shape, node_kind_for_op, normalize_editor_node_text, parse_editor_node_text,
-    parse_patch_source,
+    editor_node_port_shape, node_kind_for_op, normalize_editor_node_text, param_reference_name,
+    parse_editor_node_text, parse_patch_source,
 };
 use super::metrics::{
     AGENTIC_ANIMATION_SETTLE_SECS, AGENTIC_CLOSE_SECS, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS,
@@ -2084,7 +2084,7 @@ fn mod_suffix_base(value: &str) -> Option<String> {
         return None;
     }
     chars
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
         .then(|| base.to_string())
 }
 
@@ -2658,13 +2658,7 @@ fn editor_param_node_info(
         return None;
     }
     let items = parse_editor_node_items(text).unwrap_or_default();
-    let name = items
-        .get(1)
-        .and_then(|expr| match expr {
-            Expression::Symbol(name) => Some(name.clone()),
-            _ => None,
-        })
-        .or_else(|| positional_args.first().cloned())?;
+    let name = param_reference_name(&items).or_else(|| positional_args.first().cloned())?;
     let modulatable = items.windows(2).any(|pair| {
         matches!(
             (&pair[0], &pair[1]),
