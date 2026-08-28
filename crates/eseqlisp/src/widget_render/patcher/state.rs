@@ -15,7 +15,7 @@ use crate::vm::Value;
 use super::generate::{label_attribute, sanitize_binding};
 use super::lisp::{
     editor_node_port_shape, node_kind_for_op, normalize_editor_node_text, param_reference_name,
-    parse_editor_node_text, parse_patch_source,
+    param_short_name, parse_editor_node_text, parse_patch_source,
 };
 use super::metrics::{
     AGENTIC_ANIMATION_SETTLE_SECS, AGENTIC_CLOSE_SECS, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS,
@@ -1791,6 +1791,31 @@ fn param_opts_out_of_mod(label: &str) -> bool {
     })
 }
 
+/// Every spelling a param node can be referenced by in editor text, mapped to
+/// its canonical group-qualified name. Params are identified by `<group>.<name>`
+/// since eseq-gg6e, but the short name stays a legal reference while it is
+/// unambiguous across groups — `cutoff~` must still reach
+/// `(param cutoff @group filter)`.
+fn param_reference_aliases(patch: &Patch) -> HashMap<String, String> {
+    let mut short_counts: HashMap<&str, usize> = HashMap::new();
+    for param in patch.nodes.iter().filter_map(|node| node.param.as_ref()) {
+        *short_counts
+            .entry(param_short_name(&param.name))
+            .or_default() += 1;
+    }
+    let mut aliases: HashMap<String, String> = HashMap::new();
+    for param in patch.nodes.iter().filter_map(|node| node.param.as_ref()) {
+        let short = param_short_name(&param.name);
+        if short_counts.get(short) == Some(&1) {
+            aliases.insert(short.to_string(), param.name.clone());
+        }
+    }
+    for param in patch.nodes.iter().filter_map(|node| node.param.as_ref()) {
+        aliases.insert(param.name.clone(), param.name.clone());
+    }
+    aliases
+}
+
 /// Params read through a `mod` accessor: a `gain~` literal awaiting desugaring,
 /// or a `mod` node fed by the param — by cable, or by a name typed straight
 /// into the accessor's own text.
@@ -1803,7 +1828,7 @@ fn modulation_demanded_param_names(patch: &Patch) -> HashSet<String> {
     if param_name_by_node.is_empty() {
         return HashSet::new();
     }
-    let param_names = param_name_by_node.values().copied().collect::<HashSet<_>>();
+    let aliases = param_reference_aliases(patch);
     let mod_accessor_ids = patch
         .nodes
         .iter()
@@ -1821,15 +1846,16 @@ fn modulation_demanded_param_names(patch: &Patch) -> HashSet<String> {
             let (ArgValue::Literal(value) | ArgValue::SymbolRef(value)) = arg else {
                 continue;
             };
-            match mod_suffix_base(value) {
-                Some(base) if param_names.contains(base.as_str()) => {
-                    demanded.insert(base);
+            match mod_suffix_base(value).and_then(|base| aliases.get(&base).cloned()) {
+                Some(canonical) => {
+                    demanded.insert(canonical);
                 }
                 // `mod gain` typed into the accessor's text, before any cable.
-                _ if is_accessor && param_names.contains(value.as_str()) => {
-                    demanded.insert(value.clone());
+                None => {
+                    if is_accessor && let Some(canonical) = aliases.get(value) {
+                        demanded.insert(canonical.clone());
+                    }
                 }
-                _ => {}
             }
         }
     }
@@ -1887,6 +1913,7 @@ fn modulation_demanded_param_names(patch: &Patch) -> HashSet<String> {
 /// accessor is built; `drop_orphaned_inline_mod_nodes` then collects whichever
 /// accessors lost their only consumer.
 fn prune_retyped_inline_mod_slots(patch: &mut Patch) {
+    let aliases = param_reference_aliases(patch);
     let param_names = patch
         .nodes
         .iter()
@@ -1921,7 +1948,12 @@ fn prune_retyped_inline_mod_slots(patch: &mut Patch) {
             // Only a literal argument means the slot was typed into: the
             // desugared form leaves `ConnectedExpr` behind.
             match node.args.get(connection.to_input) {
-                Some(ArgValue::Literal(value)) => mod_suffix_base(value).as_deref() != Some(param),
+                Some(ArgValue::Literal(value)) => {
+                    mod_suffix_base(value)
+                        .and_then(|base| aliases.get(&base))
+                        .map(String::as_str)
+                        != Some(param.as_str())
+                }
                 _ => false,
             }
         })
@@ -1945,13 +1977,18 @@ fn desugar_editor_mod_suffix_args(patch: &mut Patch) {
         return;
     }
 
-    let param_nodes = patch
+    let aliases = param_reference_aliases(patch);
+    let by_canonical = patch
         .nodes
         .iter()
         .filter_map(|node| {
             let param = node.param.as_ref()?;
             Some((param.name.clone(), (node.id.clone(), param.modulatable)))
         })
+        .collect::<HashMap<_, _>>();
+    let param_nodes = aliases
+        .into_iter()
+        .filter_map(|(alias, canonical)| Some((alias, by_canonical.get(&canonical)?.clone())))
         .collect::<HashMap<_, _>>();
     let mut inbound: HashMap<(String, usize), String> = HashMap::new();
     for connection in &patch.connections {

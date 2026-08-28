@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use super::lisp::param_short_name;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatcherIntent {
     Instrument,
@@ -384,22 +386,66 @@ fn inline_raw_param(patch: &Patch, connection: &PatchConnection) -> Option<Inlin
         .nodes
         .iter()
         .find(|node| node.id == connection.from_node)?;
-    source
-        .param
-        .as_ref()
-        .map(|param| InlineInput::RawParam(param.name.clone()))
+    let param = source.param.as_ref()?;
+    Some(InlineInput::RawParam(param_display_reference(
+        patch,
+        param,
+        authored_symbol(connection),
+    )))
 }
 
 fn inline_mod_param(patch: &Patch, connection: &PatchConnection) -> Option<InlineInput> {
-    let param = inline_mod_accessor_param(patch, &connection.from_node)?;
-    Some(InlineInput::ModParam(param.name.clone()))
+    let (param, inbound) = inline_mod_accessor_param(patch, &connection.from_node)?;
+    Some(InlineInput::ModParam(param_display_reference(
+        patch,
+        param,
+        authored_symbol(inbound),
+    )))
+}
+
+fn authored_symbol(connection: &PatchConnection) -> Option<&str> {
+    match &connection.source.as_ref()?.previous_arg {
+        SourceArgValue::SymbolReference { symbol, .. } => Some(symbol.as_str()),
+        _ => None,
+    }
+}
+
+/// How a reference to `param` should read on a consumer node's inlet.
+///
+/// Params are identified by their group-qualified name, but the source may
+/// reference them either way — `attack` resolves to `amp.attack` as long as no
+/// other group declares an `attack`. Echoing the authored spelling back keeps
+/// retype/writeback round-trips lossless in both directions; a connection with
+/// no authored symbol behind it (a sidecar-restored or freshly dragged cable)
+/// falls back to the shortest form that is still unambiguous.
+fn param_display_reference(patch: &Patch, param: &ParamNodeInfo, authored: Option<&str>) -> String {
+    let short = param_short_name(&param.name);
+    if let Some(authored) = authored
+        && (authored == param.name || authored == short)
+    {
+        return authored.to_string();
+    }
+    let ambiguous = patch
+        .nodes
+        .iter()
+        .filter_map(|node| node.param.as_ref())
+        .filter(|other| !std::ptr::eq(*other, param))
+        .any(|other| param_short_name(&other.name) == short);
+    if ambiguous {
+        param.name.clone()
+    } else {
+        short.to_string()
+    }
 }
 
 /// Is `node_id` a projector-synthesized `(mod param)` accessor — the nested
 /// expression behind the `param~` sugar? Such a node exists only to serve the
 /// expression of the node that consumes it; the user never authored it and
 /// never sees it on the canvas. Returns the modulatable param it reads.
-fn inline_mod_accessor_param<'a>(patch: &'a Patch, node_id: &str) -> Option<&'a ParamNodeInfo> {
+fn inline_mod_accessor_param<'a>(
+    patch: &'a Patch,
+    node_id: &str,
+) -> Option<(&'a ParamNodeInfo, &'a PatchConnection)> {
     let mod_node = patch.nodes.iter().find(|node| node.id == node_id)?;
     if mod_node.op != "mod" {
         return None;
@@ -424,7 +470,7 @@ fn inline_mod_accessor_param<'a>(patch: &'a Patch, node_id: &str) -> Option<&'a 
         .find(|node| node.id == inbound.from_node)?
         .param
         .as_ref()?;
-    param.modulatable.then_some(param)
+    param.modulatable.then_some((param, inbound))
 }
 
 /// Synthesized `param~` accessors that no longer have any consumer — their

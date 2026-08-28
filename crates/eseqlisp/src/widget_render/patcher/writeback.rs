@@ -5007,15 +5007,25 @@ fn apply_param_text_edit(
     form_id: &SourceFormId,
     replacement: Expression,
 ) -> Result<(), WriteBackError> {
-    let old_name = document
+    let old_form = document
         .form_expr(&form_id.scope, form_id.index)
-        .and_then(param_name)
+        .ok_or_else(|| WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "param source has no symbolic name".to_string(),
+        })?
+        .clone();
+    let old_name = param_name(&old_form)
         .ok_or_else(|| WriteBackError::InvalidEdit {
             view_key: view_key.to_string(),
             node_id: node.id.clone(),
             reason: "param source has no symbolic name".to_string(),
         })?
         .to_string();
+    // Params bind under their group-qualified name, so the rename must look
+    // references up by that canonical id — not by the short declared symbol.
+    let old_reference = param_reference_of(&old_form).unwrap_or_else(|| old_name.clone());
+    let new_reference = param_reference_of(&replacement);
     let new_name = param_name(&replacement).map(str::to_string);
 
     let Some(new_name) = new_name else {
@@ -5076,7 +5086,7 @@ fn apply_param_text_edit(
 
     let binding = BindingId {
         scope: form_id.scope.clone(),
-        name: old_name,
+        name: old_reference.clone(),
         kind: BindingKind::Param,
     };
     let patch =
@@ -5085,8 +5095,17 @@ fn apply_param_text_edit(
             node_id: node.id.clone(),
             reason: "param rename targets a missing patch view".to_string(),
         })?;
-    for expr in resolved_binding_references(patch, &binding) {
-        document.replace_expr(&expr, Expression::Symbol(new_name.clone()))?;
+    let new_qualified = new_reference.unwrap_or_else(|| new_name.clone());
+    for (expr, symbol) in resolved_binding_symbol_references(patch, &binding) {
+        // A reference authored group-qualified stays qualified; one authored
+        // bare stays bare. Rewriting either into the other form would be the
+        // display-label lossiness this seam exists to avoid.
+        let renamed = if symbol == old_reference && old_reference != old_name {
+            new_qualified.clone()
+        } else {
+            new_name.clone()
+        };
+        document.replace_expr(&expr, Expression::Symbol(renamed))?;
     }
     Ok(())
 }
@@ -5273,6 +5292,19 @@ fn symbol_attribute_value(items: &[Expression], attr: &str) -> Result<Option<Str
 }
 
 fn resolved_binding_references(patch: &Patch, binding: &BindingId) -> Vec<SourceExprId> {
+    resolved_binding_symbol_references(patch, binding)
+        .into_iter()
+        .map(|(expr, _)| expr)
+        .collect()
+}
+
+/// Every authored reference to `binding`, paired with the symbol text the
+/// author actually wrote — a param can be referenced either bare or
+/// group-qualified, and a rename has to preserve which.
+fn resolved_binding_symbol_references(
+    patch: &Patch,
+    binding: &BindingId,
+) -> Vec<(SourceExprId, String)> {
     let mut refs = patch
         .connections
         .iter()
@@ -5280,17 +5312,18 @@ fn resolved_binding_references(patch: &Patch, binding: &BindingId) -> Vec<Source
         .filter_map(|source| match &source.previous_arg {
             SourceArgValue::SymbolReference {
                 expr,
+                symbol,
                 resolved_binding: Some(resolved_binding),
-                ..
-            } if resolved_binding == binding => Some(expr.clone()),
+            } if resolved_binding == binding => Some((expr.clone(), symbol.clone())),
             _ => None,
         })
         .collect::<Vec<_>>();
     refs.sort_by(|left, right| {
-        left.form_id
+        left.0
+            .form_id
             .index
-            .cmp(&right.form_id.index)
-            .then_with(|| expr_path_indexes(left).cmp(&expr_path_indexes(right)))
+            .cmp(&right.0.form_id.index)
+            .then_with(|| expr_path_indexes(&left.0).cmp(&expr_path_indexes(&right.0)))
     });
     refs.dedup();
     refs
@@ -5305,6 +5338,16 @@ fn param_name(expr: &Expression) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn param_reference_of(expr: &Expression) -> Option<String> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    if symbol_at(items, 0) != Some("param") {
+        return None;
+    }
+    param_reference_name(items)
 }
 
 fn edited_expression_for_node(

@@ -645,12 +645,26 @@ fn attribute_patch_literal_value(items: &[Expression], attr: &str) -> Option<Str
     attribute_value_items(items, attr).map(|values| join_formatted(values, format_patch_literal))
 }
 
+/// Canonical, group-qualified name a `(param …)` declaration is referenced by.
+///
+/// Legacy content spells the group into the symbol itself
+/// (`(param fm.attack @group fm)`), so an already-dotted name is taken as
+/// canonical rather than qualified a second time into `fm.fm.attack`.
 pub(super) fn param_reference_name(items: &[Expression]) -> Option<String> {
     let name = symbol_at(items, 1)?;
+    if name.contains('.') {
+        return Some(name.to_string());
+    }
     Some(match attribute_symbol_value(items, "@group") {
         Some(group) => format!("{group}.{name}"),
         None => name.to_string(),
     })
+}
+
+/// The trailing segment of a canonical param reference — `attack` for both
+/// `attack` and `op1.attack`.
+pub(super) fn param_short_name(reference: &str) -> &str {
+    reference.rsplit('.').next().unwrap_or(reference)
 }
 
 fn param_label(items: &[Expression]) -> String {

@@ -5464,13 +5464,30 @@ fn projects_namespaced_param_references_with_canonical_node_ids_and_short_labels
         "#,
     );
 
-    let op1 = patch.nodes.iter().find(|node| node.id == "op1.attack").unwrap();
-    let op2 = patch.nodes.iter().find(|node| node.id == "op2.attack").unwrap();
-    assert_eq!(node_display_label(op1), "param attack @group op1 @default 5");
-    assert_eq!(node_display_label(op2), "param attack @group op2 @default 10");
+    let op1 = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "op1.attack")
+        .unwrap();
+    let op2 = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "op2.attack")
+        .unwrap();
+    assert_eq!(
+        node_display_label(op1),
+        "param attack @group op1 @default 5"
+    );
+    assert_eq!(
+        node_display_label(op2),
+        "param attack @group op2 @default 10"
+    );
 
     let env = patch.nodes.iter().find(|node| node.id == "env").unwrap();
-    assert_eq!(node_display_label(env), "adsr ? op1.attack op2.attack 0.8 100");
+    assert_eq!(
+        node_display_label(env),
+        "adsr ? op1.attack op2.attack 0.8 100"
+    );
     for (input, param_id) in [(2, "op1.attack"), (3, "op2.attack")] {
         let connection = source_connection_for_input(&patch, "env", input);
         assert_eq!(connection.from_node, param_id);
@@ -5479,13 +5496,126 @@ fn projects_namespaced_param_references_with_canonical_node_ids_and_short_labels
 }
 
 #[test]
-fn ambiguous_bare_param_reference_does_not_bind_to_an_arbitrary_group() {
+fn legacy_dotted_param_declarations_keep_their_ids_and_authored_spelling() {
+    // Checked-in content spells the group into the symbol itself
+    // (`content/instruments/arcade/autogen-filters/dsp.lisp`), and the layout
+    // sidecar keys nodes by exactly that. Qualifying it again would invent
+    // `fm.fm.attack` and orphan the saved geometry.
     let patch = parse(
-        "(param attack @group op1)\n(param attack @group op2)\n(def env (phasor attack))",
+        r#"
+            (def gate (in 1))
+            (def trigger (in 2))
+            (param fm.attack @group fm @default 2)
+            (param attack @group amp @default 5)
+            (def env (adsr gate trigger fm.attack attack 0.8 100))
+        "#,
+    );
+    for (id, canonical) in [("fm.attack", "fm.attack"), ("attack", "amp.attack")] {
+        let node = patch
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap_or_else(|| panic!("param node {id}"));
+        assert_eq!(
+            node.param.as_ref().map(|param| param.name.as_str()),
+            Some(canonical)
+        );
+    }
+    let env = patch.nodes.iter().find(|node| node.id == "env").unwrap();
+    assert_eq!(node_display_label(env), "adsr ? fm.attack attack 0.8 100");
+}
+
+#[test]
+fn bare_reference_to_a_grouped_param_stays_bare_on_the_inlet() {
+    let patch = parse(
+        r#"
+            (def gate (in 1))
+            (def trigger (in 2))
+            (param attack @group amp @default 5)
+            (def env (adsr gate trigger attack 0.5 0.8 100))
+        "#,
+    );
+    let attack = patch.nodes.iter().find(|node| node.id == "attack").unwrap();
+    assert_eq!(
+        attack.param.as_ref().map(|param| param.name.as_str()),
+        Some("amp.attack")
     );
     let env = patch.nodes.iter().find(|node| node.id == "env").unwrap();
+    assert_eq!(node_display_label(env), "adsr ? attack 0.5 0.8 100");
+}
+
+#[test]
+fn writeback_grouped_param_rename_preserves_each_authored_reference_spelling() {
+    let source = "(param cutoff @group filter @default 1000)\n(def a (phasor cutoff))\n(def b (phasor filter.cutoff))";
+    let patch = parse(source);
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Param)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param.id))
+        .unwrap()
+        .text = "param brightness @group filter @default 1000".to_string();
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param brightness @group filter @default 1000.0)\n(def a (phasor brightness))\n(def b (phasor filter.brightness))"
+    );
+}
+
+#[test]
+fn short_editor_mod_suffix_still_reaches_a_grouped_param() {
+    let source = r#"
+        (def signal (in 1))
+        (param mod_index @group op2 @default 0.5 @mod true @mod-mode additive)
+        (def shaped (* signal op2.mod_index))
+    "#;
+    let root_patch = parse(source);
+    let shaped = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "shaped")
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", shaped, node_display_label(shaped));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "shaped"))
+        .unwrap()
+        .text = "* mod_index~".to_string();
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(def shaped (* signal (mod mod_index)))"),
+        "the short name is still an unambiguous reference to op2.mod_index:\n{emitted}"
+    );
+    let emitted_patch = parse(&emitted);
+    let shaped = emitted_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "shaped")
+        .unwrap();
+    assert_eq!(node_display_label(shaped), "* mod_index~");
+}
+
+#[test]
+fn ambiguous_bare_param_reference_does_not_bind_to_an_arbitrary_group() {
+    let patch =
+        parse("(param attack @group op1)\n(param attack @group op2)\n(def env (phasor attack))");
+    let env = patch.nodes.iter().find(|node| node.id == "env").unwrap();
     assert!(matches!(env.args.first(), Some(ArgValue::Literal(value)) if value == "attack"));
-    assert!(!patch.connections.iter().any(|connection| connection.to_node == "env"));
+    assert!(
+        !patch
+            .connections
+            .iter()
+            .any(|connection| connection.to_node == "env")
+    );
 }
 
 #[test]
@@ -10842,7 +10972,8 @@ fn moving_metadata_param_preserves_inline_adsr_param_presentation() {
         .expect("moved attack param");
     assert_eq!(
         attack.param.as_ref().map(|param| param.name.as_str()),
-        Some("attack")
+        Some("amp.attack"),
+        "param identity is group-qualified; the inlet label below stays short"
     );
 
     let env = patch
@@ -11061,7 +11192,7 @@ fn moving_metadata_mod_param_preserves_inline_mod_presentation() {
             .param
             .as_ref()
             .map(|param| (param.name.as_str(), param.modulatable)),
-        Some(("cutoff", true))
+        Some(("filter.cutoff", true))
     );
 
     let filtered = patch
@@ -11245,7 +11376,11 @@ fn dotted_editor_mod_suffix_writes_back_and_round_trips_losslessly() {
         (def shaped (* signal op2.mod_index))
     "#;
     let root_patch = parse(source);
-    let shaped = root_patch.nodes.iter().find(|node| node.id == "shaped").unwrap();
+    let shaped = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "shaped")
+        .unwrap();
     assert_eq!(
         parse_editor_node_text("* op2.mod_index~").unwrap(),
         ("*".to_string(), vec!["op2.mod_index~".to_string()]),
@@ -11267,7 +11402,11 @@ fn dotted_editor_mod_suffix_writes_back_and_round_trips_losslessly() {
         "dotted shorthand was not preserved through writeback:\n{emitted}"
     );
     let emitted_patch = parse(&emitted);
-    let shaped = emitted_patch.nodes.iter().find(|node| node.id == "shaped").unwrap();
+    let shaped = emitted_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "shaped")
+        .unwrap();
     assert_eq!(node_display_label(shaped), "* op2.mod_index~");
 }
 
@@ -17832,6 +17971,44 @@ fn fixture_videogame_arp_projects_without_parse_failure() {
     let source = std::fs::read_to_string(path).unwrap();
     let patch = parse_patch_source(&source, PatcherIntent::Instrument).unwrap();
     assert!(!patch.nodes.is_empty());
+}
+
+#[test]
+fn fixture_autogen_filters_param_ids_still_match_its_layout_sidecar() {
+    // The sidecar keys geometry by node id. Group-qualifying param identities
+    // must not move a checked-in param off its saved position — in particular
+    // the legacy `(param fm.attack … @group fm)` spelling must stay `fm.attack`
+    // rather than becoming `fm.fm.attack`.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../content/instruments/arcade/autogen-filters");
+    let source = std::fs::read_to_string(dir.join("dsp.lisp")).unwrap();
+    let patch = parse_patch_source(&source, PatcherIntent::Instrument).unwrap();
+    let layout: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("dsp.layout.json")).unwrap())
+            .unwrap();
+    let saved = layout["root"]["nodes"].as_object().unwrap();
+    for node in patch
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Param)
+    {
+        assert!(
+            saved.contains_key(&node.id),
+            "param node `{}` has no saved layout entry",
+            node.id
+        );
+        let name = node.param.as_ref().unwrap().name.as_str();
+        assert!(
+            name.matches('.').count() <= 1,
+            "param `{name}` was qualified twice"
+        );
+    }
+    for id in ["attack", "filter.attack", "fm.attack"] {
+        assert!(
+            patch.nodes.iter().any(|node| node.id == id),
+            "missing param node `{id}`"
+        );
+    }
 }
 
 #[test]
