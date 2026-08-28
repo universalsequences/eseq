@@ -960,6 +960,12 @@ pub(crate) fn reactive_tick_and_render(
                 ctx.meters.cached_mod_display_values.instrument.as_ref(),
             )
             .0;
+            needs_reactive_cycle |= sync_rack_slot_mod_offset_field_delta(
+                editor.runtime_mut(),
+                ctx.frame.prev_mod_display_values.rack_slot.as_ref(),
+                ctx.meters.cached_mod_display_values.rack_slot.as_ref(),
+            )
+            .0;
             ctx.frame.prev_mod_display_values = ctx.meters.cached_mod_display_values.clone();
         }
         if sequencer_visible {

@@ -12275,6 +12275,17 @@
             .unwrap_or_else(|| {
                 panic!("rack selected sampler sr knob; layout={layout_summaries:#?}")
             });
+        // eseq-hpc: a rack slot's instrument is a fourth panel path, keyed by
+        // track *and* slot. `sr` is a declared sampler mod destination, so its
+        // knob binds the live dot to the rack slot's own published field.
+        assert_eq!(
+            sr_knob.props.get("mod-offset").map(|value| match value {
+                Value::ReactiveRef { field, .. } => field.clone(),
+                other => panic!("rack sr knob should bind its live dot: {other:?}"),
+            }),
+            Some(super::rack_slot_mod_offset_field(0, 0, 8)),
+            "the dot must read the selected rack slot's field, not a track-wide one",
+        );
         let callback = sr_knob
             .props
             .get("on-change")

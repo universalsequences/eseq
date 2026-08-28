@@ -123,6 +123,22 @@ pub(super) fn rack_slot_param_map(
     }
     if let Some(targets) = mod_targets {
         insert_rack_mod_metadata(&mut pmap, targets);
+        // Modulated-value display fields (eseq-hpc), keyed by track and slot
+        // like this panel's value fields: the knob's dot rides the offset,
+        // curve visualizers bind the absolute value. Only the selected slot is
+        // sampled, which is the only one whose params this panel renders.
+        if let Some(param_idx) = idx {
+            insert_string_prop(
+                &mut pmap,
+                "mod-offset-field",
+                rack_slot_mod_offset_field(track, slot_idx, param_idx),
+            );
+            insert_string_prop(
+                &mut pmap,
+                "mod-value-field",
+                rack_slot_mod_value_field(track, slot_idx, param_idx),
+            );
+        }
     }
     insert_param_ui_metadata(&mut pmap, ui_metadata);
     insert_rack_param_target(&mut pmap, track, slot_idx);

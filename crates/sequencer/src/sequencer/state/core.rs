@@ -93,6 +93,10 @@ pub struct TransportState {
     /// instrument's live modulation. Recency comes from `VoiceSlot::age`, so
     /// this follows the note you played last and survives voice stealing.
     pub display_modulator_node_ids: Vec<AtomicU32>,
+    /// The same signal per rack slot (eseq-hpc): a rack track has no
+    /// instrument of its own, each slot does, and the panel shows one slot's
+    /// params at a time. `0` when the slot has no modulated voice.
+    pub rack_slot_display_modulator_node_ids: Vec<[AtomicU32; MAX_RACK_SLOTS]>,
     pub playhead_phase: AtomicU32,
     /// The live-keyboard record quantization mode (`RecordQuantize as u8`).
     pub record_quantize: AtomicU32,

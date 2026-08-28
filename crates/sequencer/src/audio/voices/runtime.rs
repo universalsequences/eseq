@@ -960,6 +960,67 @@ fn last_voice_modulator_node(data: &AudioCallbackData, track: usize) -> u32 {
     }
 }
 
+/// The same, per rack slot (eseq-hpc). A rack track holds one instrument per
+/// slot and its panel shows one slot at a time, so the display needs a
+/// modulator node for each.
+fn last_rack_slot_voice_modulator_node(
+    data: &AudioCallbackData,
+    track: usize,
+    slot_idx: usize,
+    slot: &RackSlotSnapshot,
+) -> u32 {
+    let better = |best: Option<(bool, u64)>, candidate: (bool, u64)| -> bool {
+        match best {
+            None => true,
+            Some(best) => candidate > best,
+        }
+    };
+    match slot.instrument_type {
+        InstrumentType::Sampler => rack_slot_pool_index(track, slot_idx)
+            .and_then(|pool_id| data.voice_pools.get(pool_id))
+            .map(|pool| {
+                let mut best: Option<(bool, u64)> = None;
+                let mut best_modulator = 0;
+                for voice in pool.voices[..pool.num_voices].iter() {
+                    let candidate = (voice.active, voice.age);
+                    if better(best, candidate) {
+                        best = Some(candidate);
+                        best_modulator = voice.modulator_id.max(0) as u32;
+                    }
+                }
+                best_modulator
+            })
+            .unwrap_or(0),
+        InstrumentType::Custom | InstrumentType::Modulator => slot
+            .track_sound_state
+            .engine_id
+            .and_then(|engine_id| {
+                let pool = data.custom_engine_pools.get(engine_id)?;
+                let mut best: Option<(bool, u64)> = None;
+                let mut best_idx = None;
+                for (idx, voice) in pool.voices[..pool.num_voices].iter().enumerate() {
+                    // Slots sharing one engine on the same track are not
+                    // distinguished here, exactly like the voice counts
+                    // published beside this.
+                    if voice.assigned_track != Some(track) {
+                        continue;
+                    }
+                    let candidate = (voice.active, voice.age);
+                    if better(best, candidate) {
+                        best = Some(candidate);
+                        best_idx = Some(idx);
+                    }
+                }
+                best_idx.map(|idx| {
+                    data.state.runtime.engine_modulator_node_ids[engine_id][idx]
+                        .load(Ordering::Relaxed)
+                })
+            })
+            .unwrap_or(0),
+        InstrumentType::Rack => 0,
+    }
+}
+
 pub(in crate::audio) fn publish_active_voice_counts(data: &AudioCallbackData, num_tracks: usize) {
     for track in 0..MAX_TRACKS {
         let active = if track < num_tracks {
@@ -1036,6 +1097,29 @@ pub(in crate::audio) fn publish_active_voice_counts(data: &AudioCallbackData, nu
         };
         data.state.transport.display_modulator_node_ids[track]
             .store(display_modulator, Ordering::Relaxed);
+
+        // Rack slots publish their own, so a rack's per-slot instrument panel
+        // gets the same display as a plain track's. Only real slots are walked:
+        // the UI reads a slot's entry only while that track *is* a rack and
+        // only for a slot index the rack still has, so leaving stale entries
+        // behind a torn-down rack costs nothing and saves this loop from
+        // touching 16 cells per track per block on a project with no racks.
+        let rack = (track < num_tracks)
+            .then(|| {
+                data.scheduler_snapshot
+                    .tracks
+                    .get(track)
+                    .and_then(|snapshot| snapshot.rack_track.as_ref())
+            })
+            .flatten();
+        if let Some(rack) = rack {
+            for (slot_idx, slot) in rack.slots.iter().enumerate().take(MAX_RACK_SLOTS) {
+                data.state.transport.rack_slot_display_modulator_node_ids[track][slot_idx].store(
+                    last_rack_slot_voice_modulator_node(data, track, slot_idx, slot),
+                    Ordering::Relaxed,
+                );
+            }
+        }
     }
 }
 

@@ -655,6 +655,10 @@ pub(crate) fn read_mod_display_values(
             &mut wanted,
         )
     });
+    // A rack track's panel shows one slot's instrument, so sample that slot.
+    let rack_slot = selected_track.and_then(|track| {
+        read_rack_slot_mod_values(lg, app, state, track, selected_step, live, &mut wanted)
+    });
 
     // Watchlist bookkeeping: only modulated, visible effects and instruments
     // cost the audio thread a per-block state snapshot.
@@ -679,6 +683,7 @@ pub(crate) fn read_mod_display_values(
     ModDisplayValues {
         effects: responses,
         instrument,
+        rack_slot,
     }
 }
 
@@ -718,6 +723,157 @@ pub(crate) fn instrument_mod_value_field(track: usize, param_idx: usize) -> Stri
     format!("inst-mod-value-{track}-{param_idx}")
 }
 
+/// One rack slot's live modulation display values (eseq-hpc). A rack track has
+/// no instrument of its own — each slot does — and the panel shows one slot at
+/// a time, so this names the slot it was sampled for.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RackSlotModValues {
+    pub track: usize,
+    pub slot_idx: usize,
+    pub values: Vec<ParamModValue>,
+}
+
+/// Reactive fields for a rack slot's params, keyed by track *and* slot the way
+/// the rack panel's own value fields are.
+pub(crate) fn rack_slot_mod_offset_field(track: usize, slot_idx: usize, param_idx: usize) -> String {
+    format!("rack-mod-offset-{track}-{slot_idx}-{param_idx}")
+}
+
+pub(crate) fn rack_slot_mod_value_field(track: usize, slot_idx: usize, param_idx: usize) -> String {
+    format!("rack-mod-value-{track}-{slot_idx}-{param_idx}")
+}
+
+/// Sample the selected track's selected rack slot, if it declares any
+/// modulation destinations.
+///
+/// Mirrors the instrument half: the audio thread publishes the slot's most
+/// recently allocated voice's modulator, and the base values come from the
+/// rack panel's own value chain (`rack_slot_param_value`, which resolves
+/// p-locks and rack macro mappings) so the dot and the knob pointer agree.
+fn read_rack_slot_mod_values(
+    lg: sequencer::audiograph::LiveGraphPtr,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_step: Option<usize>,
+    live: bool,
+    wanted: &mut HashSet<i32>,
+) -> Option<RackSlotModValues> {
+    use sequencer::instruments::voice_modulator::SLOT_COUNT;
+    let rack = state
+        .pattern
+        .rack_tracks
+        .lock()
+        .unwrap()
+        .get(track)
+        .cloned()
+        .flatten()?;
+    let slot_idx = app.selected_rack_slot_index_for_rack(track, &rack)?;
+    let slot = rack.slots.get(slot_idx)?;
+    // Custom engines hand out a borrow; the built-in sampler's descriptor is
+    // constructed on demand, so cache one and borrow that instead of rebuilding
+    // ~100 param descriptors on every meter tick. It is derived from constants,
+    // so one copy is as good as another.
+    static SAMPLER_DESCRIPTOR: std::sync::OnceLock<sequencer::effects::EffectDescriptor> =
+        std::sync::OnceLock::new();
+    let desc = match slot.instrument_type {
+        sequencer::sequencer::InstrumentType::Sampler => Some(
+            SAMPLER_DESCRIPTOR
+                .get_or_init(sequencer::effects::EffectDescriptor::builtin_sampler),
+        ),
+        _ => app.rack_slot_cached_instrument_descriptor(slot),
+    }?;
+    if desc.instrument_modulation_targets.is_empty() {
+        return None;
+    }
+    let destinations = effect_mod_destinations(desc);
+    if destinations.is_empty() {
+        return None;
+    }
+    let value_of = |idx: usize| -> f32 {
+        super::rack_panel::rack_slot_param_value(&rack, slot_idx, slot, desc, idx, selected_step)
+    };
+    let modulator_node_id = state.transport.rack_slot_display_modulator_node_ids[track][slot_idx]
+        .load(Ordering::Relaxed) as i32;
+    let modulated = live
+        && modulator_node_id > 0
+        && destinations
+            .iter()
+            .any(|&idx| effect_mod_lanes(desc, idx, &value_of).is_some());
+    let slot_values = if modulated {
+        wanted.insert(modulator_node_id);
+        read_effect_modulator_slot_values(lg, modulator_node_id)
+    } else {
+        [0.0_f32; SLOT_COUNT]
+    };
+    // Rack slot panels display user-domain values like the instrument panel.
+    let stored =
+        effect_mod_values_for_destinations(desc, 0, &value_of, &slot_values, &destinations);
+    let values = stored
+        .values
+        .into_iter()
+        .filter_map(|sampled| {
+            let pdesc = desc.params.get(sampled.param_idx)?;
+            Some(ParamModValue {
+                param_idx: sampled.param_idx,
+                offset: pdesc.stored_to_user(sampled.offset as f32) as f64,
+                value: pdesc.stored_to_user(sampled.value as f32) as f64,
+            })
+        })
+        .collect();
+    Some(RackSlotModValues {
+        track,
+        slot_idx,
+        values,
+    })
+}
+
+/// Publish the changed rack slot values. A slot (or track) change republishes
+/// every field, so the panel never shows the previous slot's modulation.
+pub(crate) fn sync_rack_slot_mod_offset_field_delta(
+    rt: &mut Runtime,
+    previous: Option<&RackSlotModValues>,
+    current: Option<&RackSlotModValues>,
+) -> (bool, usize) {
+    let mut effects_dirty = false;
+    let mut published = 0usize;
+    let Some(current) = current else {
+        return (effects_dirty, published);
+    };
+    let previous = previous.filter(|previous| {
+        previous.track == current.track && previous.slot_idx == current.slot_idx
+    });
+    for sampled in &current.values {
+        let was = previous.and_then(|previous| {
+            previous
+                .values
+                .iter()
+                .find(|candidate| candidate.param_idx == sampled.param_idx)
+                .copied()
+        });
+        let mut publish = |field: String, value: f64, was: Option<f64>| {
+            if was == Some(value) {
+                return;
+            }
+            published += 1;
+            effects_dirty |= rt
+                .set_reactive("SEQ", &field, Value::Number(value))
+                .effects_dirty;
+        };
+        publish(
+            rack_slot_mod_offset_field(current.track, current.slot_idx, sampled.param_idx),
+            sampled.offset,
+            was.map(|was| was.offset),
+        );
+        publish(
+            rack_slot_mod_value_field(current.track, current.slot_idx, sampled.param_idx),
+            sampled.value,
+            was.map(|was| was.value),
+        );
+    }
+    (effects_dirty, published)
+}
+
 /// Everything the UI tick publishes for modulated-value display: per-effect
 /// values keyed by graph node, plus the selected track's instrument. They share
 /// one watchlist reconciliation, so a single pass owns which modulator nodes
@@ -726,6 +882,7 @@ pub(crate) fn instrument_mod_value_field(track: usize, param_idx: usize) -> Stri
 pub(crate) struct ModDisplayValues {
     pub effects: Vec<EffectModValues>,
     pub instrument: Option<InstrumentModValues>,
+    pub rack_slot: Option<RackSlotModValues>,
 }
 
 /// Sample the selected track's instrument, if it declares any modulation
