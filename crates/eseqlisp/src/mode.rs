@@ -331,17 +331,19 @@ fn highlight_line_with_known(
     line: &str,
     known: &HashSet<Cow<'_, str>>,
 ) -> Vec<TokenSpan> {
+    // TokenSpan coordinates are character columns, not UTF-8 byte offsets.
+    // Keep byte boundaries only for extracting token text.
+    let chars = line.char_indices().collect::<Vec<_>>();
     let mut spans = Vec::new();
-    let bytes = line.as_bytes();
     let mut idx = 0usize;
 
-    while idx < bytes.len() {
-        let ch = bytes[idx] as char;
+    while idx < chars.len() {
+        let ch = chars[idx].1;
         match ch {
             ';' | '#' => {
                 spans.push(TokenSpan {
                     start: idx,
-                    end: bytes.len(),
+                    end: chars.len(),
                     class: TokenClass::Comment,
                 });
                 break;
@@ -349,12 +351,12 @@ fn highlight_line_with_known(
             '"' => {
                 let start = idx;
                 idx += 1;
-                while idx < bytes.len() {
-                    if bytes[idx] == b'"' {
-                        idx += 1;
+                while idx < chars.len() {
+                    let closing_quote = chars[idx].1 == '"';
+                    idx += 1;
+                    if closing_quote {
                         break;
                     }
-                    idx += 1;
                 }
                 spans.push(TokenSpan {
                     start,
@@ -375,11 +377,13 @@ fn highlight_line_with_known(
             }
             _ => {
                 let start = idx;
+                let start_byte = chars[idx].0;
                 idx += 1;
-                while idx < bytes.len() && is_symbol_byte(bytes[idx]) {
+                while idx < chars.len() && is_symbol_char(chars[idx].1) {
                     idx += 1;
                 }
-                let token = &line[start..idx];
+                let end_byte = chars.get(idx).map(|(byte, _)| *byte).unwrap_or(line.len());
+                let token = &line[start_byte..end_byte];
                 let class = classify_token(mode, token, &known);
                 if let Some(class) = class {
                     spans.push(TokenSpan {
@@ -805,23 +809,23 @@ fn symbol_prefix(line: &str, cursor_col: usize) -> Option<(usize, String)> {
     if cursor_col == 0 {
         return None;
     }
-    let bytes = line.as_bytes();
-    let mut start = cursor_col.min(bytes.len());
-    while start > 0 && is_symbol_byte(bytes[start - 1]) {
+    let chars = line.chars().collect::<Vec<_>>();
+    let end = cursor_col.min(chars.len());
+    let mut start = end;
+    while start > 0 && is_symbol_char(chars[start - 1]) {
         start -= 1;
     }
-    if start == cursor_col || start >= bytes.len() && cursor_col == 0 {
+    if start == end {
         return None;
     }
-    let prefix = line[start..cursor_col.min(bytes.len())].to_ascii_lowercase();
+    let prefix = chars[start..end].iter().collect::<String>().to_lowercase();
     if prefix.is_empty() {
         return None;
     }
     Some((start, prefix))
 }
 
-fn is_symbol_byte(byte: u8) -> bool {
-    let ch = byte as char;
+fn is_symbol_char(ch: char) -> bool {
     !ch.is_whitespace()
         && !matches!(
             ch,
@@ -832,8 +836,8 @@ fn is_symbol_byte(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        BufferMode, completion_candidates, completion_labels, completion_match, highlight_line,
-        highlight_lines,
+        BufferMode, TokenClass, completion_candidates, completion_labels, completion_match,
+        highlight_line, highlight_lines, symbol_prefix,
     };
     use crate::buffer::Buffer;
     use crate::runtime::SymbolMetadata;
@@ -1140,6 +1144,32 @@ mod tests {
             .map(|line| highlight_line(&BufferMode::ESeqLisp, line, &symbols, &buffer))
             .collect::<Vec<_>>();
         assert_eq!(batched, single);
+    }
+
+    #[test]
+    fn highlighting_uses_character_columns_for_unicode_text() {
+        let line = "RET open/create  C-a project ✓  C-i every session ★  C-j init.lisp";
+        let buffer = Buffer::from_text(0, "*packages*", line);
+        let spans = highlight_line(&BufferMode::ESeqLisp, line, &[], &buffer);
+        let char_len = line.chars().count();
+        assert!(spans
+            .iter()
+            .all(|span| span.start <= span.end && span.end <= char_len));
+
+        let source = "(def café ★)";
+        let buffer = Buffer::from_text(0, "*unicode*", source);
+        let spans = highlight_line(&BufferMode::ESeqLisp, source, &[], &buffer);
+        assert!(spans.iter().any(|span| {
+            span.class == TokenClass::Special && span.start == 1 && span.end == 4
+        }));
+    }
+
+    #[test]
+    fn symbol_prefix_uses_character_columns_for_unicode_symbols() {
+        assert_eq!(
+            symbol_prefix("(λValue", 7),
+            Some((1, "λvalue".to_string()))
+        );
     }
 
     #[test]
