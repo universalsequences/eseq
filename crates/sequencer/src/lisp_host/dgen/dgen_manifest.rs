@@ -630,6 +630,11 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
                         depth_min,
                         depth_max,
                         depth_unit: dest.unit.clone(),
+                        // The compiler already knows how the destination
+                        // combines its modulation; carry it through so the
+                        // display can reproduce the DSP instead of assuming
+                        // every lane is additive.
+                        mod_mode: crate::effects::ModulationMode::from_manifest_mode(&dest.mode),
                     },
                 );
             }

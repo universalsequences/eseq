@@ -243,10 +243,26 @@
 
 (def builtin-fx-filter-cutoff-knob (fx p)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx) "-mod-wrapper")
-    (subtree :key (builtin-fx-param-subtree-key fx p "cut-knob")
+    (subtree :key (str (builtin-fx-param-subtree-key fx p "cut-knob")
+                       (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label "cut"
         :value (filter-cutoff-value fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals 0
+        ;; Cutoff is the Filter's one modulation destination, so this knob
+        ;; needs the whole contract the other built-in panels have: the base
+        ;; domain to draw against while the mods tab retargets value/min/max to
+        ;; a depth, the assigned range arcs, the live modulation dot, and the
+        ;; depth's own unit (octaves — the DSP scales the cutoff by 2^oct, so
+        ;; a bare "4" beside a 20..20000 Hz readout reads as 4 Hz).
+        :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
+        :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
+        :unit (eseq.effects.param-controls/param-control-unit fx p)
+        :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
+        :mod-range-1-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 1)
+        :mod-range-2-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 2)
+        :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
+        :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.5
         :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
         :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)

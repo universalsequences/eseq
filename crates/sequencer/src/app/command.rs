@@ -1295,6 +1295,7 @@ mod tests {
                     depth_min: -1.0,
                     depth_max: 1.0,
                     depth_unit: None,
+                    mod_mode: Default::default(),
                 },
                 InstrumentModulationTarget {
                     base_param_idx: 0,
@@ -1305,6 +1306,7 @@ mod tests {
                     depth_min: -1.0,
                     depth_max: 1.0,
                     depth_unit: None,
+                    mod_mode: Default::default(),
                 },
             ],
             tensor_params: Vec::new(),

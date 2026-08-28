@@ -441,6 +441,19 @@ pub(crate) fn build_sampler_panel_value(
         } else {
             if let Some(targets) = modulation_targets.get(&param_idx) {
                 insert_mod_metadata(&mut pmap, targets);
+                // Modulated-value display fields (eseq-hpc), track-keyed like
+                // this panel's value fields: the knob's dot rides the offset,
+                // curve visualizers bind the absolute value.
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-offset-field",
+                    instrument_mod_offset_field(track, param_idx),
+                );
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-value-field",
+                    instrument_mod_value_field(track, param_idx),
+                );
             }
             synth_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
         }

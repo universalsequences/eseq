@@ -40,6 +40,7 @@
         param-plock-text-color
         param-control-min
         param-control-max
+        param-control-unit
         param-set-option
         param-set-control-value
         param-mod-wrapper
@@ -656,6 +657,23 @@
     (let ((target (param-control-mod-target fx p)))
       (if target (get target :depth-max) 1))
     (get p :max)))
+
+;; Unit shown on a param's control. In the mods tab the knob edits a *depth*,
+;; whose units are the destination's own modulation units and need not match
+;; the base param's: the built-in Filter's cutoff reads 20..20000 Hz but scales
+;; exponentially, so its depth is +/-4 *octaves*. Showing the depth's unit is
+;; what makes that legible instead of looking like a 4 Hz sweep. Outside the
+;; mods tab the param's own unit is used, and `false` when neither declares one
+;; so the display is unchanged.
+(def param-control-unit (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (let ((target (param-control-mod-target fx p)))
+      (if target
+        (let ((unit (get target :depth-unit)))
+          (if unit unit false))
+        false))
+    (let ((unit (get p :unit)))
+      (if unit unit false))))
 
 (def param-set-option (fx p label)
   (if fx

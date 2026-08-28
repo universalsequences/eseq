@@ -158,6 +158,8 @@
         :min (pc/instrument-param-control-min p) :max (pc/instrument-param-control-max p) :decimals 1
         :base-value (pc/instrument-param-base-value-prop p)
         :base-min (pc/instrument-param-base-min-prop p) :base-max (pc/instrument-param-base-max-prop p)
+        :mod-offset (pc/param-mod-offset p)
+        :unit (pc/param-control-unit false p)
         :mod-range-0-slot (pc/instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (pc/instrument-param-knob-mod-depth-prop p 0)
         :mod-range-1-slot (pc/instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (pc/instrument-param-knob-mod-depth-prop p 1)
         :mod-range-2-slot (pc/instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (pc/instrument-param-knob-mod-depth-prop p 2)
@@ -360,6 +362,8 @@
           :min (pc/instrument-param-control-min p) :max (pc/instrument-param-control-max p) :decimals 1
           :base-value (pc/instrument-param-base-value-prop p)
           :base-min (pc/instrument-param-base-min-prop p) :base-max (pc/instrument-param-base-max-prop p)
+          :mod-offset (pc/param-mod-offset p)
+          :unit (pc/param-control-unit false p)
           :mod-range-0-slot (pc/instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (pc/instrument-param-knob-mod-depth-prop p 0)
           :mod-range-1-slot (pc/instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (pc/instrument-param-knob-mod-depth-prop p 1)
           :mod-range-2-slot (pc/instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (pc/instrument-param-knob-mod-depth-prop p 2)

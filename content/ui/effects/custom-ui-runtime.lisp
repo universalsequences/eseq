@@ -27,6 +27,7 @@
         custom-ui-param-value
         custom-ui-param-control-min
         custom-ui-param-control-max
+        custom-ui-param-control-unit
         custom-ui-param-mod-wrapper
         custom-ui-param-control-key-mode
         custom-ui-param-base-value-prop
@@ -207,6 +208,9 @@
 
 (def custom-ui-param-control-max (p)
   (pc/param-control-max (current-fx) p))
+
+(def custom-ui-param-control-unit (p)
+  (pc/param-control-unit (current-fx) p))
 
 (def custom-ui-param-mod-wrapper (p key body)
   (pc/param-mod-wrapper (current-fx) p key body))

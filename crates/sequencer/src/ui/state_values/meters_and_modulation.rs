@@ -365,16 +365,21 @@ fn read_effect_modulator_slot_values(
     slots
 }
 
-/// Depth lanes assigned to `base_param_idx`, indexed by modulator slot. `None`
-/// when the destination is unmodulated — the caller then skips the engine read
-/// entirely and the panel renders exactly as it did before this feature.
+/// Depth lanes assigned to `base_param_idx`, indexed by modulator slot, plus
+/// how the destination combines them with its base. `None` when the
+/// destination is unmodulated — the caller then skips the engine read entirely
+/// and the panel renders exactly as it did before this feature.
 fn effect_mod_lanes(
     desc: &sequencer::effects::EffectDescriptor,
     base_param_idx: usize,
     value_of: &dyn Fn(usize) -> f32,
-) -> Option<[f32; sequencer::instruments::voice_modulator::SLOT_COUNT]> {
+) -> Option<(
+    sequencer::effects::ModulationMode,
+    [f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
+)> {
     use sequencer::instruments::voice_modulator::SLOT_COUNT;
     let mut depths = [0.0_f32; SLOT_COUNT];
+    let mut mode = sequencer::effects::ModulationMode::default();
     let mut any = false;
     for target in &desc.instrument_modulation_targets {
         if target.base_param_idx != base_param_idx {
@@ -401,9 +406,32 @@ fn effect_mod_lanes(
             continue;
         }
         depths[slot - 1] += depth;
+        // Every lane of one destination shares its combining mode; the DSP
+        // reads a single `(mod <dest>)`.
+        mode = target.mod_mode;
         any = true;
     }
-    any.then_some(depths)
+    any.then_some((mode, depths))
+}
+
+/// Apply one destination's modulation the way its DSP does.
+///
+/// The slot values are the modulator nodes' unipolar outputs; depth carries the
+/// sign and the scale. `Additive` sums in the destination's own units,
+/// `Octaves` scales exponentially — the built-in Filter multiplies its cutoff
+/// by `2^octaves`, so treating its ±4 octave depth as ±4 Hz on a 20..20000 Hz
+/// control would move the display by nothing.
+fn modulated_value(
+    mode: sequencer::effects::ModulationMode,
+    base: f32,
+    depths: &[f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
+    slot_values: &[f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
+) -> f32 {
+    use sequencer::instruments::voice_modulator::SLOT_COUNT;
+    let amount: f32 = (0..SLOT_COUNT)
+        .map(|slot| depths[slot] * slot_values[slot].clamp(0.0, 1.0))
+        .sum();
+    mode.apply(base, amount)
 }
 
 /// The param indices this descriptor declares as modulation destinations,
@@ -450,7 +478,6 @@ fn effect_mod_values_for_destinations(
     slot_values: &[f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
     destinations: &[usize],
 ) -> EffectModValues {
-    use sequencer::instruments::voice_modulator as vm;
     let mut values = Vec::with_capacity(destinations.len());
     for &param_idx in destinations {
         let Some(pdesc) = desc.params.get(param_idx) else {
@@ -458,8 +485,8 @@ fn effect_mod_values_for_destinations(
         };
         let base = value_of(param_idx);
         let value = match effect_mod_lanes(desc, param_idx, value_of) {
-            Some(depths) => {
-                let modulated = vm::additive_modulated_value(base, true, &depths, slot_values);
+            Some((mode, depths)) => {
+                let modulated = modulated_value(mode, base, &depths, slot_values);
                 if modulated == base {
                     // Modulators resting at zero settle back to the base value
                     // exactly, not to base-rounded-to-the-quantization-grid:
@@ -678,6 +705,19 @@ pub(crate) fn fx_instrument_mod_value_field(param_idx: usize) -> String {
     format!("fx-instrument-mod-value-{param_idx}")
 }
 
+/// Track-keyed variants, for the sampler panel. It is a separate builder whose
+/// param maps address their values as `instrument-param-{track}-*` rather than
+/// the FX-tile panel's un-tracked `fx-instrument-param-*`, and it is built for
+/// tracks other than the selected one, so it needs fields that name their
+/// track. Both namespaces carry the same sample.
+pub(crate) fn instrument_mod_offset_field(track: usize, param_idx: usize) -> String {
+    format!("inst-mod-offset-{track}-{param_idx}")
+}
+
+pub(crate) fn instrument_mod_value_field(track: usize, param_idx: usize) -> String {
+    format!("inst-mod-value-{track}-{param_idx}")
+}
+
 /// Everything the UI tick publishes for modulated-value display: per-effect
 /// values keyed by graph node, plus the selected track's instrument. They share
 /// one watchlist reconciliation, so a single pass owns which modulator nodes
@@ -804,6 +844,16 @@ pub(crate) fn sync_instrument_mod_offset_field_delta(
         );
         publish(
             fx_instrument_mod_value_field(sampled.param_idx),
+            sampled.value,
+            was.map(|was| was.value),
+        );
+        publish(
+            instrument_mod_offset_field(current.track, sampled.param_idx),
+            sampled.offset,
+            was.map(|was| was.offset),
+        );
+        publish(
+            instrument_mod_value_field(current.track, sampled.param_idx),
             sampled.value,
             was.map(|was| was.value),
         );

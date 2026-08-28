@@ -759,6 +759,7 @@
             depth_min: -1.0,
             depth_max: 1.0,
             depth_unit: Some("%".to_string()),
+            mod_mode: Default::default(),
         };
 
         assert_eq!(
@@ -42084,6 +42085,18 @@
             speed_knob.props.contains_key("mod-range-1-slot")
                 && speed_knob.props.contains_key("mod-range-1-depth"),
             "sampler speed knob should expose multiple modulation lanes"
+        );
+        // eseq-hpc: the sampler panel is its own builder, so it needs the
+        // modulated-value display props wired independently of the FX-tile
+        // instrument panel — without them a modulated sampler knob draws no
+        // live dot at all, whatever the depth's sign.
+        assert!(
+            speed_knob.props.contains_key("mod-offset"),
+            "sampler speed knob should expose the live modulation dot prop"
+        );
+        assert!(
+            speed_knob.props.contains_key("unit"),
+            "sampler speed knob should expose the depth's unit while editing depth"
         );
         let callback = speed_knob
             .props

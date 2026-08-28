@@ -14169,6 +14169,7 @@
                 depth_min: -1.0,
                 depth_max: 1.0,
                 depth_unit: None,
+                mod_mode: Default::default(),
             }
         };
         EffectDescriptor {
@@ -14363,6 +14364,78 @@
         assert_eq!(
             runtime.reactive_field_value("SEQ", &frame_field),
             Some(&Value::Number(at(&settled, FRAME)))
+        );
+    }
+
+    /// The built-in Filter's cutoff lane is declared in *octaves* and its DSP
+    /// scales the cutoff by `2^octaves` (`effects/filter.rs`). Reading that
+    /// depth additively — as every other destination is — makes a full-depth
+    /// sweep move a 20..20000 Hz control by 4 Hz, which is why the dot looked
+    /// stuck (and invisible for negative depths).
+    #[test]
+    fn octave_mode_destinations_scale_the_base_instead_of_adding_to_it() {
+        use sequencer::effects::ModulationMode;
+        use sequencer::instruments::voice_modulator::SLOT_COUNT;
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("the built-in Filter should expose `cutoff`");
+        let target = desc
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| target.base_param_idx == cutoff_idx)
+            .expect("cutoff should be a mod destination")
+            .clone();
+        assert_eq!(
+            target.mod_mode,
+            ModulationMode::Octaves,
+            "the descriptor has to carry the DSP's exponential contract",
+        );
+        assert_eq!(target.depth_unit.as_deref(), Some("oct"));
+
+        let mut values: Vec<f32> = desc.params.iter().map(|p| p.default).collect();
+        values[cutoff_idx] = 1_000.0;
+        values[target.depth_param_idx] = 2.0; // +2 octaves at full modulation
+        let mut slot_values = [0.0_f32; SLOT_COUNT];
+        slot_values[target.modulator_slot - 1] = 1.0;
+        let sample = |values: &[f32], slot_values: &[f32; SLOT_COUNT]| {
+            let values = values.to_vec();
+            let value_of = move |idx: usize| values.get(idx).copied().unwrap_or(0.0);
+            super::effect_mod_values_from_slot_values(&desc, 9, &value_of, slot_values)
+        };
+
+        let sampled = sample(&values, &slot_values);
+        let cutoff = sampled
+            .values
+            .iter()
+            .find(|candidate| candidate.param_idx == cutoff_idx)
+            .expect("cutoff should be published");
+        assert!(
+            (cutoff.value - 4_000.0).abs() < 20.0,
+            "+2 octaves on 1 kHz is 4 kHz, not 1002 Hz: got {}",
+            cutoff.value
+        );
+
+        // Negative depth is the case that looked broken: it has to travel a
+        // long way *down*, not sit a couple of Hz below the base.
+        values[target.depth_param_idx] = -2.0;
+        let sampled = sample(&values, &slot_values);
+        let cutoff = sampled
+            .values
+            .iter()
+            .find(|candidate| candidate.param_idx == cutoff_idx)
+            .expect("cutoff should be published");
+        assert!(
+            (cutoff.value - 250.0).abs() < 5.0,
+            "-2 octaves on 1 kHz is 250 Hz: got {}",
+            cutoff.value
+        );
+        assert!(
+            cutoff.offset < -700.0,
+            "the knob's dot needs the full downward displacement: got {}",
+            cutoff.offset
         );
     }
 

@@ -693,6 +693,46 @@ mod tests {
             "an unmodulated param's zero offset draws no dot"
         );
 
+        // Draw order: the dot has to be emitted after the knob's own arc and
+        // after the mods-tab range rings, or the arc paints over it — which is
+        // most visible when a negative depth puts the dot on the filled side
+        // of the arc. Runs are drawn in emission order, so position in this
+        // list *is* z-order.
+        let mut layered = base_props();
+        layered.insert("mod-offset".to_string(), Value::Number(0.5));
+        layered.insert("base-value".to_string(), Value::Number(0.0));
+        layered.insert("base-min".to_string(), Value::Number(-1.0));
+        layered.insert("base-max".to_string(), Value::Number(1.0));
+        layered.insert("selected-mod-slot".to_string(), Value::Number(1.0));
+        layered.insert(
+            "mod-ranges".to_string(),
+            Value::List(vec![value_cell(mod_range(1.0, -0.5))]),
+        );
+        let order = KNOB_NUMBER_WIDGET
+            .build_primitives("knob-number", &test_knob_node(layered), test_viewport())
+            .into_iter()
+            .filter_map(|primitive| match primitive {
+                GpuPrimitive::WidgetInstance { widget_type, .. } => Some(widget_type),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let dot_at = order
+            .iter()
+            .position(|widget_type| widget_type == "knob-number-mod-dot")
+            .expect("a displaced param emits its dot");
+        assert_eq!(
+            order.last().map(String::as_str),
+            Some("knob-number-mod-dot"),
+            "the dot must be drawn above the knob arc and the range rings: {order:?}"
+        );
+        assert!(
+            order
+                .iter()
+                .position(|widget_type| widget_type == "knob-number")
+                .is_some_and(|knob_at| knob_at < dot_at),
+            "the knob's own arc comes first: {order:?}"
+        );
+
         let mut modulated = base_props();
         modulated.insert("mod-offset".to_string(), Value::Number(0.5));
         let live = dots(modulated);

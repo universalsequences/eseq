@@ -309,6 +309,7 @@
           :value (pc/fx-param-value-for fx p)
           :min (pc/param-control-min fx p) :max (pc/param-control-max fx p) :decimals 2
           :mod-offset (pc/param-mod-offset p)
+          :unit (pc/param-control-unit fx p)
           :font-size 10.0 :label-font-size 8.8
           :text-color (pc/param-plock-text-color fx p) :label-color :dim
           :plock-active (if (pc/param-plock-active? fx p) 1 0)
