@@ -7,9 +7,8 @@
 ;;     `script-sequencer-name`, `script-source-tab-label`,
 ;;     `script-source-tab-requested`, `script-source-tab-opened`,
 ;;     `script-init-fn`) is NOT this module's API — it is a protocol spoken by
-;;     arbitrary user scripts under `content/scripts/**` (and by
-;;     script files Rust generates in `ui/edit_sessions.rs` /
-;;     `ui/host_commands/scripts.rs`).  Those scripts are headerless and
+;;     arbitrary legacy scripts under `content/scripts/**`. Those scripts are
+;;     headerless and
 ;;     *re-def* the names: `(def script-buffer-name "*16x16*")`,
 ;;     `(def script-init-fn () …)`.  That is hazard (i)/(m)'s codegen-re-def
 ;;     variant, so all seven stay flat through the §3 escape hatch
@@ -74,15 +73,9 @@
 ;;   seq-script-entry-visible?, seq-script-scratch-entry,
 ;;   seq-script-append-to-scratch, seq-script-picker — driven by flat name from
 ;;       src/ui/state_values/tests.rs.
-;;   seq-script-remember-source-buffer — ui/browser.lisp (module eseq.browser).
-;; That last one is a converted→converted edge, which §10 step 2 would normally
-;; retire with an import.  It stays an identity alias deliberately: `import`
-;; EVALUATES its target, and this module registers a mode, four mode keys and a
-;; global `bind-key` at top level, so importing it into a UI root would pull all
-;; of that into every test VM that touches ui/browser.lisp AND would evaluate
-;; this file at main.lisp:17 instead of its declared slot at :42.  Per the
-;; wave-7 identity-alias rule the alias serves both rungs: eseq.browser's bare
-;; reference qualifies against itself, misses, and lands on the base-name alias.
+;; Browser imports this module explicitly and calls its two picker operations
+;; through an alias; that compile-time edge is required now that transactional
+;; main.lisp loading rejects undeclared cross-module load-order dependencies.
 
 
 ;; ── Script picker ──────────────────────────────────────────────────────────

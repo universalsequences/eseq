@@ -22,6 +22,7 @@
 
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
+(import eseq.seq-script-picker :as scripts)
 
 (export search-filter
         selected-sample
@@ -778,13 +779,10 @@
         (path (get item :path)))
     (if (and (= kind "script") path)
       (do
-        ;; Hazard (m): `seq-script-picker-source-buffer` is a mutable vanilla
-        ;; `def` owned by ui/seq-script-picker.lisp.  A bare `set!` from inside
-        ;; this module writes eseq.browser's own slot and never reaches the
-        ;; owner, so the return-to-source hop after loading a script would
-        ;; silently stop working.  Go through the owner's accessor.
-        (eseq.seq-script-picker/seq-script-remember-source-buffer)
-        (eseq.seq-script-picker/seq-script-load-file path)
+        ;; The picker owns the mutable return-to-source slot. Go through its
+        ;; accessor rather than interning a same-named cell in this module.
+        (scripts/seq-script-remember-source-buffer)
+        (scripts/seq-script-load-file path)
         (status (str "Load script: " (get item :label))))
       (status "Choose a script file"))))
 
