@@ -49,7 +49,7 @@ fn open_packages_view(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
         return;
     }
 
-    let root = sequencer::app_paths::app_paths().user_modules_dir();
+    let root = sequencer::app_paths::app_paths().local_modules_dir();
     if let Err(error) = std::fs::create_dir_all(&root) {
         editor.handle_host_event(HostEvent::Status(format!(
             "Could not create packages directory '{}': {error}",
@@ -204,7 +204,7 @@ fn activate_packages_selection(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
     let selected = exact_entry.unwrap_or(session.selected);
     let Some(entry) = entries.get(selected.min(entries.len().saturating_sub(1))) else {
         editor.handle_host_event(HostEvent::Status(
-            "Type a module name or select a package".to_string(),
+            "Type a module name or select a module".to_string(),
         ));
         return;
     };
@@ -298,7 +298,12 @@ fn refresh_packages_view(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
         }
     }
     if entries.is_empty() {
-        lines.push("    No matching packages".to_string());
+        let message = if session.query.is_empty() {
+            "    No local modules yet — type a name and press RET"
+        } else {
+            "    No matching module — press RET to create it"
+        };
+        lines.push(message.to_string());
     }
 
     if let Some(buffer) = editor
@@ -350,7 +355,7 @@ fn scan_directory(directory: &Path) -> Result<Vec<PackageEntry>, String> {
     let read_dir = std::fs::read_dir(directory)
         .map_err(|error| format!("Could not read '{}': {error}", directory.display()))?;
     for item in read_dir {
-        let item = item.map_err(|error| format!("Could not read package entry: {error}"))?;
+        let item = item.map_err(|error| format!("Could not read local module entry: {error}"))?;
         let path = item.path();
         let file_type = item
             .file_type()
@@ -733,7 +738,7 @@ mod tests {
 
     #[test]
     fn bare_and_dotted_names_map_to_module_paths() {
-        let root = Path::new("/modules");
+        let root = Path::new("/packages/local");
         assert_eq!(
             create_target(root, "euclid").unwrap(),
             CreateTarget::Module {

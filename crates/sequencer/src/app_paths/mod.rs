@@ -337,8 +337,10 @@ impl AppPaths {
         }
     }
 
-    pub fn user_modules_dir(&self) -> PathBuf {
-        self.user_lisp_root().join("modules")
+    /// Manifest-free personal modules. This reserved local workspace lives
+    /// beside installed packages but is itself not a distributable package.
+    pub fn local_modules_dir(&self) -> PathBuf {
+        self.packages_dir().join("local")
     }
 
     pub fn packages_dir(&self) -> PathBuf {
@@ -362,7 +364,7 @@ impl AppPaths {
         ]);
 
         let mut roots = vec![eseqlisp::ModuleLoadRoot {
-            path: self.user_modules_dir(),
+            path: self.local_modules_dir(),
             module_prefix: None,
         }];
         roots.extend(packages.module_roots().into_iter().map(|(path, module_prefix)| {
@@ -396,8 +398,8 @@ impl AppPaths {
             self.user_rack_presets_dir(),
             self.user_kits_dir(),
             self.user_lisp_root().to_path_buf(),
-            self.user_modules_dir(),
             self.packages_dir(),
+            self.local_modules_dir(),
         ] {
             std::fs::create_dir_all(directory)?;
         }
@@ -888,8 +890,8 @@ mod tests {
             paths.sounds_dir(),
             paths.user_instruments_dir(),
             paths.user_effects_dir(),
-            paths.user_modules_dir(),
             paths.packages_dir(),
+            paths.local_modules_dir(),
         ] {
             assert!(directory.is_dir(), "missing {}", directory.display());
         }
@@ -926,7 +928,7 @@ mod tests {
         assert_eq!(
             paths.load_path().unwrap(),
             vec![
-                config.join("modules"),
+                config.join("packages/local"),
                 config.join("packages/alpha/src"),
                 config.join("packages/zeta/src"),
                 workspace.join("content/packages/dev.factory/src"),
@@ -961,8 +963,8 @@ mod tests {
         assert!(support.is_dir());
         assert!(support.join("projects").is_dir());
         assert!(support.join("instruments").is_dir());
-        assert!(config.join("modules").is_dir());
         assert!(config.join("packages").is_dir());
+        assert!(config.join("packages/local").is_dir());
         assert!(!config.join("init.lisp").exists());
 
         std::fs::remove_dir_all(root).unwrap();

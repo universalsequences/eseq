@@ -84,10 +84,12 @@ impl PackageCatalog {
         }
     }
 
-    /// Lenient scan for application startup: invalid packages (and packages
-    /// whose dependencies are missing or invalid) are excluded and reported,
-    /// while every valid package stays loadable. A broken third-party clone
-    /// must never take the factory tier down with it.
+    /// Lenient scan for application startup: directories containing a
+    /// manifest are package candidates; manifest-free workspaces are ignored.
+    /// Invalid packages (and packages whose dependencies are missing or
+    /// invalid) are excluded and reported, while every valid package stays
+    /// loadable. A broken third-party clone must never take the factory tier
+    /// down with it.
     pub fn scan_reporting(root: impl AsRef<Path>) -> (Self, Vec<PackageError>) {
         Self::scan_layered_reporting(&[root.as_ref().to_path_buf()])
     }
@@ -111,7 +113,11 @@ impl PackageCatalog {
             };
             let mut directories = entries
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                .filter(|path| path.is_dir() && !is_hidden(path))
+                .filter(|path| {
+                    path.is_dir()
+                        && !is_hidden(path)
+                        && path.join("manifest.json").is_file()
+                })
                 .collect::<Vec<_>>();
             directories.sort();
 
@@ -506,6 +512,20 @@ mod tests {
         assert_eq!(errors.len(), 3, "broken manifest + both cascading dep exclusions");
         assert!(errors.iter().any(|e| e.to_string().contains("`alec/absent` is not installed")));
         assert!(errors.iter().any(|e| e.to_string().contains("`alec/mid` is not installed")));
+    }
+
+    #[test]
+    fn catalog_ignores_manifest_free_local_module_workspaces() {
+        let root = temp_root("manifest-free-local");
+        let local = root.join("local");
+        fs::create_dir_all(&local).unwrap();
+        fs::write(local.join("euclid.lisp"), "(module my.euclid)").unwrap();
+
+        let (catalog, errors) = PackageCatalog::scan_reporting(&root);
+        assert!(catalog.packages().is_empty());
+        assert!(errors.is_empty());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

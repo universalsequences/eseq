@@ -153,8 +153,9 @@ ESeq.app/Contents/
 
 ~/.eseq.d/                                ;; user tier: hand-edited lisp (dotfile-able)
   init.lisp                               ;; loaded LAST (module spec §7 inversion)
-  modules/                                ;; user modules; shadow factory by name
-  packages/                               ;; drop-in packs (module spec §8)
+  packages/
+    local/                                ;; manifest-free personal modules
+    <package>/                            ;; distributable packs (module spec §8)
 ```
 
 Split rationale for two user roots: `~/.eseq.d/` is the part users edit,
@@ -165,13 +166,15 @@ users expect exactly this split.
 **Load path** (module spec §7, made concrete — earlier wins for file
 shadowing; `init.lisp` still evaluates last so user code wins):
 
-1. `~/.eseq.d/modules/`
-2. `~/.eseq.d/packages/<pkg>/src/` (and any configured distro)
+1. `~/.eseq.d/packages/local/` (manifest-free personal modules)
+2. `~/.eseq.d/packages/<pkg>/src/` (manifest-backed packages and any configured distro)
 3. factory: `Resources/` (release) or `<repo>/content/` (dev)
 
-### 4.0 Packages: the tier shape recurses; a repo IS a package
+### 4.0 Packages: the tier shape recurses; a repo IS a distributable package
 
-A package directory mirrors the factory layout in miniature — any content
+`packages/local/` is the reserved exception: it is a lightweight personal
+module workspace, not a distributable package, and therefore has no manifest.
+Every other package directory mirrors the factory layout in miniature — any content
 type loadable from a tier is loadable from a package with zero new code
 per type:
 

@@ -1,5 +1,6 @@
-;; A dired-like view over the user's module root. Filesystem and project-buffer
-;; mutations stay in the host, while this module owns the editor command/mode
+;; A dired-like view over the user's manifest-free packages/local workspace.
+;; Filesystem and project-buffer mutations stay in the host, while this module
+;; owns the editor command/mode
 ;; surface so user key customizations use the ordinary Lisp keymap machinery.
 (module eseq.packages)
 

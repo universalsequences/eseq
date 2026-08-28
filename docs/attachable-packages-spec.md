@@ -44,11 +44,12 @@ This works today with zero new mechanism (verified 2026-08-25):
   (`lang/compiler.rs:2411`), so it is safe under the scheduler's
   full-scratch re-eval.
 - Every runtime gets the same scoped load roots
-  (`lisp_host/shared_state.rs:406`, `ui/editor_setup.rs:47`): user modules
-  dir (`~/.eseq.d/modules`, no prefix), package `src/` roots
-  (namespace-scoped, user tier shadows factory tier), factory content
-  root. `~/.eseq.d/modules/my/riffs.lisp` with a `(module my.riffs)`
-  header is importable as `(import my.riffs)` with no other ceremony.
+  (`lisp_host/shared_state.rs:406`, `ui/editor_setup.rs:47`): the manifest-free
+  local workspace (`~/.eseq.d/packages/local`, no prefix), installed package
+  `src/` roots (namespace-scoped, user tier shadows factory tier), and the
+  factory content root. `~/.eseq.d/packages/local/my/riffs.lisp` with a
+  `(module my.riffs)` header is importable as `(import my.riffs)` with no
+  other ceremony.
 - A module registers its own UI (step tabs via `eseq.seq-step-tabs`,
   widgets, macros) from its own namespace at first evaluation. N scripts
   coexist because of namespacing — the reset/`script-init-fn` dance
@@ -70,9 +71,9 @@ affordances, both v0.1:
 ## 3. Naming note
 
 Module-spec §8 reserves `eseq.*` and single-segment names for core. Local
-scripts in the user modules dir should default the template header to a
-neutral personal prefix (template uses `my.<name>`; the user can rename).
-Enforcement stays policy, not code.
+scripts in the manifest-free `packages/local` workspace should default the
+template header to a neutral personal prefix (template uses `my.<name>`; the
+user can rename). Enforcement stays policy, not code.
 
 ## 4. Migration / retirement (v0.1)
 
@@ -95,9 +96,12 @@ Enforcement stays policy, not code.
 ## 5. The *packages* view (v0.1, eseq-mods.16)
 
 A text-only, dired-like mode that takes over the *sequencer* buffer
-(the largest tile) as a direct line to `~/.eseq.d/modules/`. Entered via
-a shortcut / `M-x packages`; exiting (`q`, Esc) restores the previous
-tab. Four verbs on one surface:
+(the largest tile) as a direct line to the manifest-free personal workspace
+at `~/.eseq.d/packages/local/`. Entered via a shortcut / `M-x packages`;
+exiting (`q`, Esc) restores the previous tab. Ordinary personal modules need
+no manifest; sibling package directories use manifests only when they need
+distribution metadata, dependencies, an entry point, or verified external
+assets. Four verbs share one surface:
 
 - **Browse**: walk the modules tree dired-style. Each file row shows the
   filename plus the `(module …)` name read from its header, so the exact
