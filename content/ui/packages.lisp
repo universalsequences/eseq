@@ -5,7 +5,6 @@
 
 (export packages
         new-package
-        packages-mode
         handle-key)
 
 (def packages ()

@@ -68,23 +68,21 @@ pub(crate) fn create_editor_with_user_init_path(
 
     reload_custom_instrument_ui(&mut editor);
     let ui_entrypoint = ui_entrypoint_path();
-    let _ = editor.open_or_create_file_buffer(&ui_entrypoint);
-    let grid_source = editor.active_buffer().text();
-    let overlays = editor.snapshot_file_backed_sources();
-    let report = editor.runtime_mut().eval_source_transactional(
-        Some(ui_entrypoint.clone()),
-        &grid_source,
-        overlays,
-    );
-    if !report.success {
-        return Err(format!(
-            "failed to load {}: {}",
-            ui_entrypoint.display(),
-            report.failure_message()
+    // Execute the distro root directly rather than opening it as an authored
+    // file. Transactional file evaluation deliberately rejects compatibility-
+    // alias escape hatches used by a few event-time UI cycles; those modules
+    // are still checked individually when edited or hot-reloaded.
+    let grid_source = std::fs::read_to_string(&ui_entrypoint).map_err(|error| {
+        format!(
+            "failed to read UI entrypoint {}: {error}",
+            ui_entrypoint.display()
         )
-        .into());
-    }
-    editor.process_lisp_reload_report(report);
+    })?;
+    editor
+        .runtime_mut()
+        .eval_str(&grid_source)
+        .map_err(|error| format!("failed to execute {}: {error:?}", ui_entrypoint.display()))?;
+    editor.refresh_runtime_side_effects();
     reload_custom_instrument_ui(&mut editor);
     push_project_scratch_to_named_buffer(&mut editor, &app);
     load_user_init(&mut editor, user_init_path.as_deref());

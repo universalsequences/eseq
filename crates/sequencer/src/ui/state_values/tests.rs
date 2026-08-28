@@ -3394,6 +3394,11 @@
             .runtime_mut()
             .eval_str(&source)
             .expect("load packages lisp");
+        let diagnostics = editor.runtime_mut().take_source_load_errors();
+        assert!(
+            diagnostics.is_empty(),
+            "packages module must pass source validation: {diagnostics:?}"
+        );
         editor
             .runtime_mut()
             .eval_str("(eseq.packages/packages)")

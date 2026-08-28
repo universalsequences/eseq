@@ -73,9 +73,10 @@
 ;;   seq-script-entry-visible?, seq-script-scratch-entry,
 ;;   seq-script-append-to-scratch, seq-script-picker — driven by flat name from
 ;;       src/ui/state_values/tests.rs.
-;; Browser imports this module explicitly and calls its two picker operations
-;; through an alias; that compile-time edge is required now that transactional
-;; main.lisp loading rejects undeclared cross-module load-order dependencies.
+;;   seq-script-remember-source-buffer — ui/browser.lisp calls this and
+;;       seq-script-load-file through the temporary identity-alias rung. An
+;;       import would cycle through this module's seq-step-tabs dependency;
+;;       eseq-mods.17 removes the legacy Scripts path entirely.
 
 
 ;; ── Script picker ──────────────────────────────────────────────────────────

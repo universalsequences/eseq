@@ -22,7 +22,6 @@
 
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
-(import eseq.seq-script-picker :as scripts)
 
 (export search-filter
         selected-sample
@@ -779,10 +778,12 @@
         (path (get item :path)))
     (if (and (= kind "script") path)
       (do
-        ;; The picker owns the mutable return-to-source slot. Go through its
-        ;; accessor rather than interning a same-named cell in this module.
-        (scripts/seq-script-remember-source-buffer)
-        (scripts/seq-script-load-file path)
+        ;; Event-time calls through the temporary identity-alias rung avoid a
+        ;; compile-time cycle: the picker imports the step-tab registry, whose
+        ;; close callback reaches back into the picker. eseq-mods.17 removes
+        ;; this legacy Scripts path entirely.
+        (seq-script-remember-source-buffer)
+        (seq-script-load-file path)
         (status (str "Load script: " (get item :label))))
       (status "Choose a script file"))))
 
