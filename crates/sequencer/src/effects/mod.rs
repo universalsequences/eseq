@@ -226,6 +226,43 @@ pub struct InstrumentModulatorDescriptor {
     pub label: String,
 }
 
+/// How a destination combines its modulation with the base value. The host
+/// needs this to *display* the effective value (knob dots, curve visualizers);
+/// the DSP has always known it, it just was not carried into the descriptor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ModulationMode {
+    /// `base + sum(depth * mod)`, in the destination's own units.
+    #[default]
+    Additive,
+    /// `base * 2^(sum(depth * mod))` — depth in octaves, for frequency
+    /// destinations where musical modulation has to be exponential (the
+    /// built-in Filter's cutoff). Reading such a depth as if it were additive
+    /// makes a ±4 look like ±4 Hz on a 20..20000 Hz control.
+    Octaves,
+}
+
+impl ModulationMode {
+    /// Map a DGenLisp manifest `@mod-mode`. Unknown modes fall back to
+    /// additive, which is what every generated destination but one uses;
+    /// `semitone` is additive too in practice — its one user
+    /// (`oberheim-sem`'s `osc_a_semi`) is itself a semitone-valued param, so
+    /// the modulation lands in the destination's own units.
+    pub fn from_manifest_mode(mode: &str) -> Self {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "octave" | "octaves" => Self::Octaves,
+            _ => Self::Additive,
+        }
+    }
+
+    /// Apply the mode to one already-summed modulation amount.
+    pub fn apply(self, base: f32, amount: f32) -> f32 {
+        match self {
+            Self::Additive => base + amount,
+            Self::Octaves => base * 2.0_f32.powf(amount),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct InstrumentModulationTarget {
     pub base_param_idx: usize,
@@ -236,6 +273,7 @@ pub struct InstrumentModulationTarget {
     pub depth_min: f32,
     pub depth_max: f32,
     pub depth_unit: Option<String>,
+    pub mod_mode: ModulationMode,
 }
 
 // ── ParamScaling ──
@@ -3286,6 +3324,10 @@ impl EffectDescriptor {
                     depth_min: -4.0,
                     depth_max: 4.0,
                     depth_unit: Some("oct".to_string()),
+                    // The DSP scales the cutoff by `2^octaves`
+                    // (`filter.rs`); the display has to do the same or a
+                    // ±4 octave lane reads as ±4 Hz.
+                    mod_mode: ModulationMode::Octaves,
                 });
         }
         desc
@@ -3679,6 +3721,7 @@ impl EffectDescriptor {
                             depth_min,
                             depth_max,
                             depth_unit: depth_unit.map(str::to_string),
+                            mod_mode: ModulationMode::Additive,
                         });
                 }
             };
@@ -4032,6 +4075,7 @@ impl EffectDescriptor {
                             depth_min,
                             depth_max,
                             depth_unit: depth_unit.map(str::to_string),
+                            mod_mode: ModulationMode::Additive,
                         });
                 }
             };
@@ -4586,6 +4630,7 @@ impl EffectDescriptor {
                             depth_min: -1.0,
                             depth_max: 1.0,
                             depth_unit: None,
+                            mod_mode: ModulationMode::Additive,
                         });
                 }
             };
@@ -5006,6 +5051,7 @@ impl EffectDescriptor {
                         depth_min,
                         depth_max,
                         depth_unit: None,
+                        mod_mode: ModulationMode::Additive,
                     });
             }
         };
@@ -5412,6 +5458,7 @@ impl EffectDescriptor {
                             depth_min,
                             depth_max,
                             depth_unit: depth_unit.map(str::to_string),
+                            mod_mode: ModulationMode::Additive,
                         });
                 }
             };
@@ -5850,6 +5897,7 @@ impl EffectDescriptor {
                             depth_min,
                             depth_max,
                             depth_unit: depth_unit.map(str::to_string),
+                            mod_mode: ModulationMode::Additive,
                         });
                 }
             };
@@ -6031,6 +6079,7 @@ impl EffectDescriptor {
                             depth_min,
                             depth_max,
                             depth_unit: depth_unit.map(str::to_string),
+                            mod_mode: ModulationMode::Additive,
                         });
                 }
             };
@@ -6376,6 +6425,7 @@ impl EffectDescriptor {
                             depth_min: -1.0,
                             depth_max: 1.0,
                             depth_unit: None,
+                            mod_mode: ModulationMode::Additive,
                         });
                 }
             };
@@ -7489,6 +7539,7 @@ impl EffectDescriptor {
                 depth_min,
                 depth_max,
                 depth_unit,
+                mod_mode: ModulationMode::Additive,
             });
         }
         params.push(ParamDescriptor {

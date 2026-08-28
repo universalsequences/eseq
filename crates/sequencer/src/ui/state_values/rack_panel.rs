@@ -78,6 +78,15 @@ pub(super) fn insert_rack_mod_metadata(
     );
 }
 
+/// Whether a rack param map should carry the modulated-value display fields.
+/// The host only samples a rack slot's instrument, so a slot's effect-chain
+/// params must stay on their base values the way they did before eseq-hpc.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RackModDisplay {
+    Published,
+    None,
+}
+
 pub(super) fn rack_slot_param_map(
     track: usize,
     slot_idx: usize,
@@ -90,6 +99,7 @@ pub(super) fn rack_slot_param_map(
     max: f32,
     options: Option<&Vec<String>>,
     mod_targets: Option<&Vec<RackUiModMetadata>>,
+    mod_display: RackModDisplay,
     ui_metadata: Option<&sequencer::effects::ParamUiMetadata>,
 ) -> Rc<RefCell<Value>> {
     let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -123,6 +133,31 @@ pub(super) fn rack_slot_param_map(
     }
     if let Some(targets) = mod_targets {
         insert_rack_mod_metadata(&mut pmap, targets);
+        // Modulated-value display fields (eseq-hpc), keyed by track and slot
+        // like this panel's value fields: the knob's dot rides the offset,
+        // curve visualizers bind the absolute value. Only the selected slot's
+        // *instrument* is sampled (`read_rack_slot_mod_values`), so only that
+        // call site asks for the fields — a slot's effect chain would otherwise
+        // bind params to fields nothing ever publishes, and a curve visualizer
+        // reading `param-effective-value` would draw them as 0.0 instead of
+        // falling back to the base value.
+        if let (RackModDisplay::Published, Some(param_idx)) = (mod_display, idx) {
+            insert_string_prop(
+                &mut pmap,
+                "mod-offset-field",
+                rack_slot_mod_offset_field(track, slot_idx, param_idx),
+            );
+            insert_string_prop(
+                &mut pmap,
+                "mod-value-field",
+                rack_slot_mod_value_field(track, slot_idx, param_idx),
+            );
+            insert_string_prop(
+                &mut pmap,
+                "mod-scale-field",
+                rack_slot_mod_scale_field(track, slot_idx, param_idx),
+            );
+        }
     }
     insert_param_ui_metadata(&mut pmap, ui_metadata);
     insert_rack_param_target(&mut pmap, track, slot_idx);
@@ -316,6 +351,7 @@ pub(super) fn build_selected_rack_slot_instrument_value(
         48.0,
         None,
         None,
+        RackModDisplay::None,
         None,
     ));
 
@@ -351,6 +387,7 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                 pdesc.stored_to_user(pdesc.max),
                 options,
                 None,
+                RackModDisplay::None,
                 None,
             ));
         } else {
@@ -366,6 +403,7 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                 pdesc.stored_to_user(pdesc.max),
                 options,
                 modulation_targets.get(&param_idx),
+                RackModDisplay::Published,
                 pdesc.ui_metadata.as_ref(),
             ));
         }
@@ -404,6 +442,7 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                 pdesc.stored_to_user(pdesc.max),
                 options,
                 None,
+                RackModDisplay::None,
                 None,
             );
             if sequencer::instruments::voice_modulator::source_type_name_from_param_name(&pdesc.name)
@@ -780,6 +819,7 @@ pub(super) fn build_rack_slot_effect_value(
                 param.max,
                 options,
                 modulation_targets.get(&param_idx),
+                RackModDisplay::None,
                 param.ui_metadata.as_ref(),
             );
             if matches!(param.kind, sequencer::effects::ParamKind::Boolean) {
@@ -847,6 +887,7 @@ pub(super) fn build_rack_slot_effect_value(
                 param.stored_to_user(param.max),
                 options,
                 None,
+                RackModDisplay::None,
                 None,
             );
             if sequencer::instruments::voice_modulator::source_type_name_from_param_name(&param.name)

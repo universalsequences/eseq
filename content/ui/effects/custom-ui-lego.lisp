@@ -368,6 +368,9 @@
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals decimals
             :base-value (eseq.effects.custom-ui-runtime/custom-ui-param-base-value-prop p)
+            :mod-offset (eseq.effects.custom-ui-runtime/custom-ui-param-mod-offset p)
+            :mod-scale (eseq.effects.custom-ui-runtime/custom-ui-param-mod-scale p)
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :base-min (eseq.effects.custom-ui-runtime/custom-ui-param-base-min-prop p) :base-max (eseq.effects.custom-ui-runtime/custom-ui-param-base-max-prop p)
             :mod-range-0-slot (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-depth-prop p 0)
             :mod-range-1-slot (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-slot-prop p 1) :mod-range-1-depth (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-depth-prop p 1)
@@ -402,6 +405,9 @@
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals decimals
             :base-value (eseq.effects.custom-ui-runtime/custom-ui-param-base-value-prop p)
+            :mod-offset (eseq.effects.custom-ui-runtime/custom-ui-param-mod-offset p)
+            :mod-scale (eseq.effects.custom-ui-runtime/custom-ui-param-mod-scale p)
+            :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :base-min (eseq.effects.custom-ui-runtime/custom-ui-param-base-min-prop p) :base-max (eseq.effects.custom-ui-runtime/custom-ui-param-base-max-prop p)
             :mod-range-0-slot (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-depth-prop p 0)
             :mod-range-1-slot (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-slot-prop p 1) :mod-range-1-depth (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-depth-prop p 1)

@@ -118,6 +118,10 @@ pub struct Theme {
     pub widget_slider_dot: Color,
     pub widget_knob_filled: Color,
     pub widget_knob_track: Color,
+    /// Live modulated-value dot on a knob (eseq-hpc): the marker riding the
+    /// ring at the param's current post-modulation value. Purely a display
+    /// accent — it is never the drag target.
+    pub widget_knob_mod_dot: Color,
     pub widget_toggle_on: Color,
     pub widget_toggle_off: Color,
     pub widget_toggle_knob_on: Color,
@@ -668,6 +672,11 @@ theme_slots!(
         widget_knob_track,
         WIDGET_KNOB_TRACK,
         Color::from_hex(0x08, 0x08, 0x08)
+    ),
+    (
+        widget_knob_mod_dot,
+        WIDGET_KNOB_MOD_DOT,
+        Color::from_hex(0x5a, 0xe6, 0xff)
     ),
     (
         widget_toggle_on,

@@ -441,6 +441,24 @@ pub(crate) fn build_sampler_panel_value(
         } else {
             if let Some(targets) = modulation_targets.get(&param_idx) {
                 insert_mod_metadata(&mut pmap, targets);
+                // Modulated-value display fields (eseq-hpc), track-keyed like
+                // this panel's value fields: the knob's dot rides the offset,
+                // curve visualizers bind the absolute value.
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-offset-field",
+                    instrument_mod_offset_field(track, param_idx),
+                );
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-value-field",
+                    instrument_mod_value_field(track, param_idx),
+                );
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-scale-field",
+                    instrument_mod_scale_field(track, param_idx),
+                );
             }
             synth_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
         }
@@ -803,6 +821,27 @@ pub(crate) fn build_instrument_panel_value(
                 "modulatable".to_string(),
                 Rc::new(RefCell::new(Value::Bool(true))),
             );
+            // Modulated-value display fields (eseq-6mva), sampled off the most
+            // recently triggered voice's modulator: the knob's dot rides the
+            // offset, curve visualizers bind the absolute value. Only declared
+            // destinations get them.
+            if let Some(param_idx) = idx {
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-offset-field",
+                    fx_instrument_mod_offset_field(param_idx),
+                );
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-value-field",
+                    fx_instrument_mod_value_field(param_idx),
+                );
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-scale-field",
+                    fx_instrument_mod_scale_field(param_idx),
+                );
+            }
             let target_values = targets
                 .iter()
                 .map(|meta| {

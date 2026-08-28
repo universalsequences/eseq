@@ -27,9 +27,12 @@
         custom-ui-param-value
         custom-ui-param-control-min
         custom-ui-param-control-max
+        custom-ui-param-control-unit
         custom-ui-param-mod-wrapper
         custom-ui-param-control-key-mode
         custom-ui-param-base-value-prop
+        custom-ui-param-mod-offset
+        custom-ui-param-mod-scale
         custom-ui-param-base-min-prop
         custom-ui-param-base-max-prop
         custom-ui-param-plock-active?
@@ -207,6 +210,9 @@
 (def custom-ui-param-control-max (p)
   (pc/param-control-max (current-fx) p))
 
+(def custom-ui-param-control-unit (p)
+  (pc/param-control-unit (current-fx) p))
+
 (def custom-ui-param-mod-wrapper (p key body)
   (pc/param-mod-wrapper (current-fx) p key body))
 
@@ -215,6 +221,17 @@
 
 (def custom-ui-param-base-value-prop (p)
   (pc/param-base-value-prop (current-fx) p))
+
+;; Live modulation offset for a custom instrument's param (eseq-6mva). The host
+;; samples the most recently triggered voice's modulator and publishes
+;; `sum(depth * mod)`; the knob draws its live dot that far from its base.
+;; `false` for params with no published field, which draws no dot.
+(def custom-ui-param-mod-offset (p)
+  (pc/param-mod-offset p))
+
+;; The exponential companion of the offset; see `pc/param-mod-scale`.
+(def custom-ui-param-mod-scale (p)
+  (pc/param-mod-scale p))
 
 (def custom-ui-param-base-min-prop (p)
   (pc/param-base-min-prop (current-fx) p))

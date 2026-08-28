@@ -11605,6 +11605,7 @@ mod tests {
                 depth_min: -1.0,
                 depth_max: 1.0,
                 depth_unit: None,
+                mod_mode: Default::default(),
             },
         ];
         state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);

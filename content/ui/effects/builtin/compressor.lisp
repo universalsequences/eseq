@@ -43,6 +43,9 @@
   (knob-number :label label-text
     :value (eseq.effects.param-controls/fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals
+    :mod-offset (eseq.effects.param-controls/param-mod-offset p)
+    :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+    :unit (eseq.effects.param-controls/param-control-unit fx p)
     :font-size 9.5 :label-font-size 9.5
     :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -160,7 +163,7 @@
       (compressor-display
         :width 23.6 :height 6.0
         :source (effect-source fx)
-        :threshold (eseq.effects.param-controls/instrument-param-base-value thr-p))
+        :threshold (eseq.effects.param-controls/param-effective-value thr-p))
       (h-stack :gap 0.55 :align :baseline
         (mini-number fx "Knee" knee-p 1 3.6)
         (label "Look." :font-size 8.5 :width 2.5 :color :dim :bg :transparent)

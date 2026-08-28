@@ -134,6 +134,7 @@
       :widget-slider-dot     '(0.431 0.431 0.451)
       :widget-knob-filled    '(0.00 0.478 1.00)
       :widget-knob-track     '(0.710 0.710 0.729)
+      :widget-knob-mod-dot   '(0.00 0.55 0.62)
       :widget-toggle-on      '(0.204 0.780 0.349)
       :widget-toggle-off     '(0.710 0.710 0.729)
       :widget-toggle-knob-on '(1.00 1.00 1.00)

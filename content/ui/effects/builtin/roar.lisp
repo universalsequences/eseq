@@ -76,6 +76,9 @@
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
         :mod-range-1-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 1)
@@ -99,6 +102,9 @@
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
+        :mod-offset (eseq.effects.param-controls/param-mod-offset p)
+        :mod-scale (eseq.effects.param-controls/param-mod-scale p)
+        :unit (eseq.effects.param-controls/param-control-unit fx p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
         :mod-range-1-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 1)
@@ -190,11 +196,13 @@
       :width 9.4 :height 4.6
       :source (effect-source fx)
       :stage stage
-      ;; Base-value bindings, not snapshot values: knob drags update the
-      ;; value field in place and do not rebuild the panel.
-      :shaper (eseq.effects.param-controls/instrument-param-base-value shaper-p)
-      :amount (eseq.effects.param-controls/instrument-param-base-value amount-p)
-      :bias (eseq.effects.param-controls/instrument-param-base-value bias-p))
+      ;; Effective-value bindings, not snapshot values: knob drags update the
+      ;; value field in place and do not rebuild the panel, and the effective
+      ;; value follows an LFO on amount/bias (eseq-hpc), falling back to the
+      ;; base value when nothing is modulating.
+      :shaper (eseq.effects.param-controls/param-effective-value shaper-p)
+      :amount (eseq.effects.param-controls/param-effective-value amount-p)
+      :bias (eseq.effects.param-controls/param-effective-value bias-p))
     (subtree :key (str "roar-shaper-option-" stage)
       (option fx shaper-p 8.4))
     (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "levl" level-p)))
@@ -205,9 +213,9 @@
       :width 9.4 :height 4.6
       :source (effect-source fx)
       :stage stage
-      :filter (eseq.effects.param-controls/instrument-param-base-value filter-p)
-      :freq (eseq.effects.param-controls/instrument-param-base-value freq-p)
-      :res (eseq.effects.param-controls/instrument-param-base-value res-p))
+      :filter (eseq.effects.param-controls/param-effective-value filter-p)
+      :freq (eseq.effects.param-controls/param-effective-value freq-p)
+      :res (eseq.effects.param-controls/param-effective-value res-p))
     (subtree :key (str "roar-filter-option-" stage)
       (option fx filter-p 8.4))
     (h-stack :gap 0.30 :align :baseline

@@ -175,6 +175,12 @@ impl SequencerState {
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                     .collect(),
                 active_voice_counts: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                display_modulator_node_ids: (0..MAX_TRACKS)
+                    .map(|_| AtomicU32::new(0))
+                    .collect(),
+                rack_slot_display_modulator_node_ids: (0..MAX_TRACKS)
+                    .map(|_| std::array::from_fn(|_| AtomicU32::new(0)))
+                    .collect(),
                 playhead_phase: AtomicU32::new(0.0_f32.to_bits()),
                 record_quantize: AtomicU32::new(
                     crate::record_quantize::RecordQuantize::DEFAULT as u32,

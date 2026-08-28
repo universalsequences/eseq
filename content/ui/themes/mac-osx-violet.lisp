@@ -110,6 +110,7 @@
       :widget-slider-dot    '(0.43 0.40 0.48)
       :widget-knob-filled   '(0.58 0.46 0.86)
       :widget-knob-track    '(0.040 0.036 0.048)
+      :widget-knob-mod-dot  '(0.45 0.95 0.75)
       :sequencer-step-border          '(0.27 0.245 0.32)
       :sequencer-step-selected-border '(0.92 0.89 0.98)
       :sequencer-step-off-fill        '(0.05 0.045 0.06)

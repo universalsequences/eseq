@@ -649,6 +649,169 @@ mod tests {
         );
     }
 
+    /// eseq-hpc: the live modulation dot. It is placed at an *offset* from the
+    /// widget's own base — which is what keeps it glued to a knob being
+    /// dragged instead of trailing the host's meter-rate sampler — it rides
+    /// the base domain (so it still tracks the base while the mods tab
+    /// retargets value/min/max to a depth), a zero offset draws nothing, and
+    /// it is a pure primitive with no interaction state.
+    #[test]
+    fn mod_offset_emits_a_live_dot_only_when_modulation_displaces_the_base() {
+        let dots = |props: HashMap<String, Value>| {
+            let node = test_knob_node(props);
+            KNOB_NUMBER_WIDGET
+                .build_primitives("knob-number", &node, test_viewport())
+                .into_iter()
+                .filter_map(|primitive| match primitive {
+                    GpuPrimitive::WidgetInstance {
+                        widget_type,
+                        instance,
+                        ..
+                    } if widget_type == "knob-number-mod-dot" => Some(instance),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let base_props = || {
+            HashMap::from([
+                ("label".to_string(), Value::String("cut".to_string())),
+                ("value".to_string(), Value::Number(0.0)),
+                ("min".to_string(), Value::Number(-1.0)),
+                ("max".to_string(), Value::Number(1.0)),
+            ])
+        };
+
+        assert!(
+            dots(base_props()).is_empty(),
+            "no `mod-offset` prop must cost no primitive at all"
+        );
+
+        let mut settled = base_props();
+        settled.insert("mod-offset".to_string(), Value::Number(0.0));
+        assert!(
+            dots(settled).is_empty(),
+            "an unmodulated param's zero offset draws no dot"
+        );
+
+        // Draw order: the dot has to be emitted after the knob's own arc and
+        // after the mods-tab range rings, or the arc paints over it — which is
+        // most visible when a negative depth puts the dot on the filled side
+        // of the arc. Runs are drawn in emission order, so position in this
+        // list *is* z-order.
+        let mut layered = base_props();
+        layered.insert("mod-offset".to_string(), Value::Number(0.5));
+        layered.insert("base-value".to_string(), Value::Number(0.0));
+        layered.insert("base-min".to_string(), Value::Number(-1.0));
+        layered.insert("base-max".to_string(), Value::Number(1.0));
+        layered.insert("selected-mod-slot".to_string(), Value::Number(1.0));
+        layered.insert(
+            "mod-ranges".to_string(),
+            Value::List(vec![value_cell(mod_range(1.0, -0.5))]),
+        );
+        let order = KNOB_NUMBER_WIDGET
+            .build_primitives("knob-number", &test_knob_node(layered), test_viewport())
+            .into_iter()
+            .filter_map(|primitive| match primitive {
+                GpuPrimitive::WidgetInstance { widget_type, .. } => Some(widget_type),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let dot_at = order
+            .iter()
+            .position(|widget_type| widget_type == "knob-number-mod-dot")
+            .expect("a displaced param emits its dot");
+        assert_eq!(
+            order.last().map(String::as_str),
+            Some("knob-number-mod-dot"),
+            "the dot must be drawn above the knob arc and the range rings: {order:?}"
+        );
+        assert!(
+            order
+                .iter()
+                .position(|widget_type| widget_type == "knob-number")
+                .is_some_and(|knob_at| knob_at < dot_at),
+            "the knob's own arc comes first: {order:?}"
+        );
+
+        let mut modulated = base_props();
+        modulated.insert("mod-offset".to_string(), Value::Number(0.5));
+        let live = dots(modulated);
+        assert_eq!(live.len(), 1);
+        assert!(
+            (live[0].uniform_b[0] - 0.75).abs() < 0.000_01,
+            "the dot sits at base + offset on the arc: {:?}",
+            live[0].uniform_b
+        );
+        assert_eq!(live[0].uniform_b[1], MOD_DOT_RING_RADIUS);
+        assert_eq!(
+            live[0].uniform_b[2], MOD_DOT_RADIUS,
+            "the dot's size is Rust-owned, not baked into the shader",
+        );
+
+        // Dragging the knob moves the base; the *same* stale offset has to
+        // ride along with it rather than staying where the sampler last saw
+        // it, which is what stops a dot flashing beside a moving knob.
+        let mut dragged = base_props();
+        dragged.insert("value".to_string(), Value::Number(0.5));
+        dragged.insert("mod-offset".to_string(), Value::Number(0.5));
+        let live = dots(dragged);
+        assert_eq!(live.len(), 1);
+        assert!(
+            (live[0].uniform_b[0] - 1.0).abs() < 0.000_01,
+            "the dot follows the dragged base: {:?}",
+            live[0].uniform_b
+        );
+
+        // Mods tab open: value/min/max carry the depth, base-* carry the base
+        // domain, and the dot must follow the base domain.
+        let mut depth_edit = base_props();
+        depth_edit.insert("value".to_string(), Value::Number(0.25));
+        depth_edit.insert("min".to_string(), Value::Number(-1.0));
+        depth_edit.insert("max".to_string(), Value::Number(1.0));
+        depth_edit.insert("base-value".to_string(), Value::Number(1_000.0));
+        depth_edit.insert("base-min".to_string(), Value::Number(0.0));
+        depth_edit.insert("base-max".to_string(), Value::Number(2_000.0));
+        depth_edit.insert("mod-offset".to_string(), Value::Number(500.0));
+        let live = dots(depth_edit);
+        assert_eq!(live.len(), 1);
+        assert!(
+            (live[0].uniform_b[0] - 0.75).abs() < 0.000_01,
+            "the dot normalizes against base-min/base-max: {:?}",
+            live[0].uniform_b
+        );
+
+        // Exponential destinations publish a factor as well, because an
+        // offset sampled against a stale base cannot survive a drag: at a
+        // 0.5x factor the dot has to halve *this* widget's base, not sit at
+        // the displacement the host last measured against another one.
+        let mut exponential = base_props();
+        exponential.insert("value".to_string(), Value::Number(1_000.0));
+        exponential.insert("min".to_string(), Value::Number(0.0));
+        exponential.insert("max".to_string(), Value::Number(2_000.0));
+        exponential.insert("mod-offset".to_string(), Value::Number(-100.0));
+        exponential.insert("mod-scale".to_string(), Value::Number(0.5));
+        let live = dots(exponential);
+        assert_eq!(live.len(), 1);
+        assert!(
+            (live[0].uniform_b[0] - 0.25).abs() < 0.000_01,
+            "the dot rides the base multiplicatively, ignoring the stale offset: {:?}",
+            live[0].uniform_b
+        );
+
+        // A neutral factor is what every additive destination publishes, and
+        // it must leave the offset path exactly as it was.
+        let mut additive = base_props();
+        additive.insert("mod-offset".to_string(), Value::Number(0.5));
+        additive.insert("mod-scale".to_string(), Value::Number(1.0));
+        let live = dots(additive);
+        assert_eq!(live.len(), 1);
+        assert!(
+            (live[0].uniform_b[0] - 0.75).abs() < 0.000_01,
+            "a 1.0 factor falls through to the offset: {:?}",
+            live[0].uniform_b
+        );
+    }
+
     #[test]
     fn metal_knob_receives_normalized_bipolar_origin() {
         let node = test_knob_node(HashMap::from([
@@ -946,6 +1109,32 @@ fn mod_slot_color(slot: i32, selected: bool) -> Color {
     };
     color.a = if selected { 0.95 } else { 0.58 };
     color
+}
+
+/// Radius the live modulation dot rides, matching the knob shader's own
+/// ring so the dot reads as a marker on the same arc as the base pointer. Keep
+/// in sync with `knobRadius` in the knob shaders below.
+const MOD_DOT_RING_RADIUS: f32 = 0.58;
+
+/// Arc travel below which the live dot is suppressed: at rest (or with the
+/// modulator momentarily at zero) the effective value equals the base value and
+/// the dot would just sit under the base pointer.
+const MOD_DOT_MIN_TRAVEL: f32 = 0.002;
+
+/// Dot radius in the knob's local (-1..1) space, passed to the shader rather
+/// than baked into it. Slightly larger than the base pointer's own notch
+/// (0.070) so the live value reads at a glance without the eye mistaking it
+/// for the pointer.
+const MOD_DOT_RADIUS: f32 = 0.084;
+
+/// Colour of the live modulation dot. Theme-controlled by default
+/// (`widget-knob-mod-dot`, tweakable in `content/core/themes.lisp` like any
+/// other widget colour) so the accent can be tuned globally; a panel can still
+/// override one knob with an explicit `mod-dot-color` prop. Deliberately *not*
+/// the modulator slot colour: the dot reads as one consistent "live value"
+/// accent across every panel rather than shifting hue with the mods tab.
+fn mod_dot_color(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(props, "mod-dot-color", theme::WIDGET_KNOB_MOD_DOT())
 }
 
 fn mod_range_ring_half_width(selected: bool) -> f32 {
@@ -1338,7 +1527,7 @@ pub static KNOB_NUMBER_WIDGET: KnobNumberWidget = KnobNumberWidget;
 
 impl WidgetDefinition for KnobNumberWidget {
     fn names(&self) -> &'static [&'static str] {
-        &["knob-number", "knob-number-mod-range"]
+        &["knob-number", "knob-number-mod-range", "knob-number-mod-dot"]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -1360,6 +1549,8 @@ impl WidgetDefinition for KnobNumberWidget {
             "base-min",
             "base-max",
             "selected-mod-slot",
+            "mod-offset",
+            "mod-scale",
             "mod-range-0-slot",
             "mod-range-0-depth",
             "mod-range-1-slot",
@@ -1663,6 +1854,7 @@ impl WidgetDefinition for KnobNumberWidget {
         match widget_type {
             "knob-number" => KNOB_NUMBER_SHADER.source(backend),
             "knob-number-mod-range" => KNOB_NUMBER_MOD_RANGE_SHADER.source(backend),
+            "knob-number-mod-dot" => KNOB_NUMBER_MOD_DOT_SHADER.source(backend),
             _ => None,
         }
     }
@@ -1892,6 +2084,71 @@ impl WidgetDefinition for KnobNumberWidget {
             }
         }
 
+        // Live modulation dot (eseq-hpc). Purely read-only telemetry: the host
+        // publishes how far modulation currently pushes the param from its
+        // base, and the dot is drawn at that displacement from *this* widget's
+        // own base — a thin marker riding the same ring as the base pointer.
+        // It is never hit-tested and never written back into widget state, so
+        // the solid base pointer stays the drag target and a drag on a
+        // modulated knob still edits the base value. The mods-tab range arcs
+        // above are untouched.
+        //
+        // The prop is an offset rather than an absolute value on purpose: the
+        // host samples modulation at meter rate, so an absolute value would
+        // trail a drag by up to a tick and flash a dot beside a knob nothing
+        // is modulating. An offset rides along with the base instead, and an
+        // unmodulated param's offset is exactly zero.
+        //
+        // `base + offset` only composes with a moving base for *additive*
+        // modulation. Exponential destinations (an octaves-mode filter cutoff)
+        // also publish `mod-scale` = 2^octaves, and there the displacement
+        // rides the base multiplicatively: a +2-octave lane sampled at 1 kHz
+        // has to draw at 32 kHz once the base is dragged to 8 kHz, not at
+        // 11 kHz. `mod-scale` is exactly 1.0 for additive destinations and
+        // absent for panels that publish no scale field, so both fall through
+        // to the offset. One factor is always enough — the host collapses
+        // every lane of one destination into a single mode.
+        let mod_scale = node
+            .props
+            .get("mod-scale")
+            .and_then(value_as_f32)
+            .filter(|scale| *scale != 1.0 && scale.is_finite());
+        if let Some(offset) = node.props.get("mod-offset").and_then(value_as_f32)
+            && base_range.abs() > 0.000_001
+            && (offset != 0.0 || mod_scale.is_some())
+        {
+            let modulated = match mod_scale {
+                Some(scale) => base_value * scale,
+                None => base_value + offset,
+            };
+            let base_t = taper_normalize(taper, base_min, base_max, base_value);
+            let mod_t = taper_normalize(taper, base_min, base_max, modulated);
+            if (mod_t - base_t).abs() > MOD_DOT_MIN_TRAVEL {
+                let color = mod_dot_color(&node.props);
+                prims.push(GpuPrimitive::WidgetInstance {
+                    widget_type: "knob-number-mod-dot".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t,
+                        orientation: 0.0,
+                        itime: viewport.time_seconds,
+                        uniform_a: [0.0; 4],
+                        uniform_b: [mod_t, MOD_DOT_RING_RADIUS, MOD_DOT_RADIUS, 0.0],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
+                        color_a: [color.r, color.g, color.b, color.a],
+                        color_b: [0.0; 4],
+                        color_c: [0.0; 4],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: false,
+                });
+            }
+        }
+
         if let Some(label_band) = component_layout.label_band
             && component_layout.label_font_size >= 0.5
         {
@@ -2040,6 +2297,33 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     return col;
 }
 "#, super::wgsl::KNOB_NUMBER_SHADER);
+
+/// Live modulation marker (eseq-hpc): one small dot on the knob's ring at
+/// the effective value's arc position. `uniform_b.x` is the normalized value,
+/// `uniform_b.y` the ring radius (kept equal to the knob shader's `knobRadius`
+/// so the dot rides the same arc as the base pointer).
+const KNOB_NUMBER_MOD_DOT_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 uv = in.uv;
+    float2 p = float2((uv.x - 0.5) * 2.0, (uv.y - 0.5) * 2.0);
+    float r = length(p);
+
+    float start = 1.57079633;
+    float sweep = 4.71238898;
+    float t = clamp(in.uniform_b.x, 0.0, 1.0);
+    float ringRadius = clamp(in.uniform_b.y, 0.10, 1.0);
+    float dotRadius = clamp(in.uniform_b.z, 0.005, 0.40);
+    float angle = start + sweep * t;
+    float2 n = float2(cos(angle), sin(angle));
+    float aa = max(fwidth(r), 0.0015);
+    float d = length(p - n * ringRadius) - dotRadius;
+    float mask = smoothstep(aa, -aa, d);
+    float4 col = float4(in.color_a.rgb, in.color_a.a * mask);
+    if (col.a < 0.01) { discard_fragment(); }
+    return col;
+}
+"#, super::wgsl::KNOB_NUMBER_MOD_DOT_SHADER);
 
 const KNOB_NUMBER_MOD_RANGE_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])

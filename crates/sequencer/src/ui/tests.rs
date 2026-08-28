@@ -5301,9 +5301,10 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
-                cached_filter_table_responses: Vec::new(),
-                watched_filter_table_modulators: std::collections::HashSet::new(),
-                filter_table_poll_fx_epoch: usize::MAX,
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -6321,9 +6322,10 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
-                cached_filter_table_responses: Vec::new(),
-                watched_filter_table_modulators: std::collections::HashSet::new(),
-                filter_table_poll_fx_epoch: usize::MAX,
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -6950,9 +6952,10 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
-                cached_filter_table_responses: Vec::new(),
-                watched_filter_table_modulators: std::collections::HashSet::new(),
-                filter_table_poll_fx_epoch: usize::MAX,
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -7990,9 +7993,10 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
-                cached_filter_table_responses: Vec::new(),
-                watched_filter_table_modulators: std::collections::HashSet::new(),
-                filter_table_poll_fx_epoch: usize::MAX,
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -9350,9 +9354,10 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: cached_modulator_phases.clone(),
                 cached_modulator_levels: cached_modulator_levels.clone(),
-                cached_filter_table_responses: Vec::new(),
-                watched_filter_table_modulators: std::collections::HashSet::new(),
-                filter_table_poll_fx_epoch: usize::MAX,
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
                 cached_cpu_load_bits: 0.0f32.to_bits(),
                 last_meter_poll_at: Instant::now(),
                 last_cpu_ui_poll_at: Instant::now(),
@@ -14164,6 +14169,7 @@
                 depth_min: -1.0,
                 depth_max: 1.0,
                 depth_unit: None,
+                mod_mode: Default::default(),
             }
         };
         EffectDescriptor {
@@ -14177,15 +14183,27 @@
         }
     }
 
-    /// End of the eseq-dtx.13 chain: modulator-node slot values (what the
-    /// audio thread parks in `voice_modulator::STATE_DISPLAY_SLOT_VALUE`) are
-    /// combined with the slot's base/depth/active params and published into
-    /// the SEQ fields the Filter Table panel binds its spectrum curve to.
+    /// End of the eseq-dtx.13 chain, generalized in eseq-hpc: modulator-node
+    /// slot values (what the audio thread parks in
+    /// `voice_modulator::STATE_DISPLAY_SLOT_VALUE`) are combined with the
+    /// slot's base/depth/active params and published into the per-param SEQ
+    /// fields panels bind their knob dots and curve visualizers to.
     #[test]
-    fn filter_table_response_fields_follow_modulator_slot_values() {
+    fn effect_mod_offset_fields_follow_modulator_slot_values() {
         use sequencer::instruments::voice_modulator::SLOT_COUNT;
         let desc = filter_table_mod_descriptor();
         let node_id = 77;
+        // Only declared destinations are published — the sparse contract.
+        let at = |sample: &super::EffectModValues, param_idx: usize| -> f64 {
+            sample
+                .values
+                .iter()
+                .find(|candidate| candidate.param_idx == param_idx)
+                .unwrap_or_else(|| panic!("param {param_idx} should be published: {sample:?}"))
+                .value
+        };
+        const FRAME: usize = 0;
+        const CUTOFF: usize = 1;
 
         // Base values: no mod active, no depth. Two independent destinations
         // are wired but idle.
@@ -14195,21 +14213,26 @@
             move |idx: usize| values.get(idx).copied().unwrap_or(0.0)
         };
 
-        let unmodulated = super::filter_table_response_from_slot_values(
+        let unmodulated = super::effect_mod_values_from_slot_values(
             &desc,
             node_id,
             &base_of(&values),
             &[0.75_f32; SLOT_COUNT],
         );
-        assert!(
-            (unmodulated.frame - 0.2).abs() < 1.0e-3,
-            "an inactive destination must render the base frame, got {}",
-            unmodulated.frame
+        assert_eq!(
+            unmodulated.values.len(),
+            2,
+            "resonance declares no lane, so it must not be published: {unmodulated:?}"
         );
         assert!(
-            (unmodulated.cutoff - 1_000.0).abs() < 1.0,
+            (at(&unmodulated, FRAME) - 0.2).abs() < 1.0e-3,
+            "an inactive destination must render the base frame, got {}",
+            at(&unmodulated, FRAME)
+        );
+        assert!(
+            (at(&unmodulated, CUTOFF) - 1_000.0).abs() < 1.0,
             "an inactive destination must render the base cutoff, got {}",
-            unmodulated.cutoff
+            at(&unmodulated, CUTOFF)
         );
 
         // Requirement (d): frame and cutoff modulated at once, from two
@@ -14221,91 +14244,222 @@
         let mut slot_values = [0.0_f32; SLOT_COUNT];
         slot_values[0] = 1.0; // slot 1 modulator at full
         slot_values[1] = 0.5; // slot 2 modulator at half
-        let modulated = super::filter_table_response_from_slot_values(
+        let modulated = super::effect_mod_values_from_slot_values(
             &desc,
             node_id,
             &base_of(&values),
             &slot_values,
         );
         assert!(
-            (modulated.frame - 0.7).abs() < 1.0e-2,
+            (at(&modulated, FRAME) - 0.7).abs() < 1.0e-2,
             "frame should be base + depth * slot-1, got {}",
-            modulated.frame
+            at(&modulated, FRAME)
         );
         assert!(
-            (modulated.cutoff - 3_000.0).abs() < 30.0,
+            (at(&modulated, CUTOFF) - 3_000.0).abs() < 30.0,
             "cutoff should be base + depth * slot-2, got {}",
-            modulated.cutoff
+            at(&modulated, CUTOFF)
         );
 
         // Modulation past the declared range is clipped exactly like the DSP.
         slot_values[0] = 1.0;
         values[4] = 5.0;
-        let clipped = super::filter_table_response_from_slot_values(
+        let clipped = super::effect_mod_values_from_slot_values(
             &desc,
             node_id,
             &base_of(&values),
             &slot_values,
         );
-        assert!((clipped.frame - 1.0).abs() < 1.0e-6, "got {}", clipped.frame);
+        assert!(
+            (at(&clipped, FRAME) - 1.0).abs() < 1.0e-6,
+            "got {}",
+            at(&clipped, FRAME)
+        );
         values[4] = 0.5;
 
         // Requirement (b): modulators resting at zero settle back to base.
-        let settled = super::filter_table_response_from_slot_values(
+        let settled = super::effect_mod_values_from_slot_values(
             &desc,
             node_id,
             &base_of(&values),
             &[0.0_f32; SLOT_COUNT],
         );
         assert!(
-            (settled.frame - unmodulated.frame).abs() < 1.0e-2,
+            (at(&settled, FRAME) - at(&unmodulated, FRAME)).abs() < 1.0e-2,
             "a modulator at rest is the base frame, got {} vs {}",
-            settled.frame,
-            unmodulated.frame
+            at(&settled, FRAME),
+            at(&unmodulated, FRAME)
         );
         assert!(
-            (settled.cutoff - unmodulated.cutoff).abs() < 1.0,
+            (at(&settled, CUTOFF) - at(&unmodulated, CUTOFF)).abs() < 1.0,
             "a modulator at rest is the base cutoff, got {} vs {}",
-            settled.cutoff,
-            unmodulated.cutoff
+            at(&settled, CUTOFF),
+            at(&unmodulated, CUTOFF)
         );
 
-        // Widget end: the delta sync writes the SEQ fields the panel binds.
+        // The offset half is what knobs draw from: an idle destination is
+        // *exactly* zero (no dot, and nothing that can lag a drag), a live one
+        // is the displacement from the base.
+        let offset_at = |sample: &super::EffectModValues, param_idx: usize| -> f64 {
+            sample
+                .values
+                .iter()
+                .find(|candidate| candidate.param_idx == param_idx)
+                .unwrap_or_else(|| panic!("param {param_idx} should be published: {sample:?}"))
+                .offset
+        };
+        assert_eq!(
+            offset_at(&unmodulated, FRAME),
+            0.0,
+            "an inactive destination must displace the base by exactly zero"
+        );
+        assert_eq!(offset_at(&settled, FRAME), 0.0, "so must a resting one");
+        // These destinations are additive, so their multiplicative form is
+        // exactly 1.0 — the widget's signal to compose with the offset.
+        assert!(
+            modulated
+                .values
+                .iter()
+                .all(|sampled| sampled.scale == 1.0),
+            "additive destinations must publish a neutral scale: {modulated:?}"
+        );
+        assert!(
+            (offset_at(&modulated, FRAME) - 0.5).abs() < 1.0e-2,
+            "a live destination publishes depth * slot value, got {}",
+            offset_at(&modulated, FRAME)
+        );
+
+        // Widget end: the delta sync writes the SEQ fields the panel binds —
+        // an offset for the knob dot and the absolute value for curves.
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", Vec::new(), true);
         let (_, published) =
-            super::sync_filter_table_response_field_delta(&mut runtime, &[], &[modulated]);
-        assert_eq!(published, 3, "a first sample publishes all three fields");
-        let frame_field = super::filter_table_response_field(node_id, "frame");
-        let cutoff_field = super::filter_table_response_field(node_id, "cutoff");
+            super::sync_effect_mod_offset_field_delta(&mut runtime, &[], &[modulated.clone()]);
+        assert_eq!(
+            published, 6,
+            "a first sample publishes all three fields of both destinations"
+        );
+        let frame_field = super::effect_mod_value_field(node_id, FRAME);
+        let cutoff_field = super::effect_mod_value_field(node_id, CUTOFF);
         assert_eq!(
             runtime.reactive_field_value("SEQ", &frame_field),
-            Some(&Value::Number(modulated.frame))
+            Some(&Value::Number(at(&modulated, FRAME)))
         );
         assert_eq!(
             runtime.reactive_field_value("SEQ", &cutoff_field),
-            Some(&Value::Number(modulated.cutoff))
+            Some(&Value::Number(at(&modulated, CUTOFF)))
+        );
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", &super::effect_mod_offset_field(node_id, FRAME)),
+            Some(&Value::Number(offset_at(&modulated, FRAME)))
         );
 
         // Re-publishing an unchanged sample writes nothing: an idle modulated
         // panel does not dirty the widget every tick (requirement (e)).
-        let (_, republished) = super::sync_filter_table_response_field_delta(
+        let (_, republished) = super::sync_effect_mod_offset_field_delta(
             &mut runtime,
-            &[modulated],
-            &[modulated],
+            std::slice::from_ref(&modulated),
+            std::slice::from_ref(&modulated),
         );
         assert_eq!(republished, 0, "an unchanged sample must write nothing");
 
-        // ... and a settled sample puts the base spectrum back on the wire.
-        let (_, settled_published) = super::sync_filter_table_response_field_delta(
+        // ... and a settled sample puts the base values back on the wire.
+        let (_, settled_published) = super::sync_effect_mod_offset_field_delta(
             &mut runtime,
-            &[modulated],
-            &[settled],
+            std::slice::from_ref(&modulated),
+            std::slice::from_ref(&settled),
         );
         assert!(settled_published > 0, "settling back must republish");
         assert_eq!(
             runtime.reactive_field_value("SEQ", &frame_field),
-            Some(&Value::Number(settled.frame))
+            Some(&Value::Number(at(&settled, FRAME)))
+        );
+    }
+
+    /// The built-in Filter's cutoff lane is declared in *octaves* and its DSP
+    /// scales the cutoff by `2^octaves` (`effects/filter.rs`). Reading that
+    /// depth additively — as every other destination is — makes a full-depth
+    /// sweep move a 20..20000 Hz control by 4 Hz, which is why the dot looked
+    /// stuck (and invisible for negative depths).
+    #[test]
+    fn octave_mode_destinations_scale_the_base_instead_of_adding_to_it() {
+        use sequencer::effects::ModulationMode;
+        use sequencer::instruments::voice_modulator::SLOT_COUNT;
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("the built-in Filter should expose `cutoff`");
+        let target = desc
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| target.base_param_idx == cutoff_idx)
+            .expect("cutoff should be a mod destination")
+            .clone();
+        assert_eq!(
+            target.mod_mode,
+            ModulationMode::Octaves,
+            "the descriptor has to carry the DSP's exponential contract",
+        );
+        assert_eq!(target.depth_unit.as_deref(), Some("oct"));
+
+        let mut values: Vec<f32> = desc.params.iter().map(|p| p.default).collect();
+        values[cutoff_idx] = 1_000.0;
+        values[target.depth_param_idx] = 2.0; // +2 octaves at full modulation
+        let mut slot_values = [0.0_f32; SLOT_COUNT];
+        slot_values[target.modulator_slot - 1] = 1.0;
+        let sample = |values: &[f32], slot_values: &[f32; SLOT_COUNT]| {
+            let values = values.to_vec();
+            let value_of = move |idx: usize| values.get(idx).copied().unwrap_or(0.0);
+            super::effect_mod_values_from_slot_values(&desc, 9, &value_of, slot_values)
+        };
+
+        let sampled = sample(&values, &slot_values);
+        let cutoff = sampled
+            .values
+            .iter()
+            .find(|candidate| candidate.param_idx == cutoff_idx)
+            .expect("cutoff should be published");
+        assert!(
+            (cutoff.value - 4_000.0).abs() < 20.0,
+            "+2 octaves on 1 kHz is 4 kHz, not 1002 Hz: got {}",
+            cutoff.value
+        );
+        assert!(
+            (cutoff.scale - 4.0).abs() < 1.0e-2,
+            "+2 octaves is a 4x factor: got {}",
+            cutoff.scale
+        );
+
+        // Negative depth is the case that looked broken: it has to travel a
+        // long way *down*, not sit a couple of Hz below the base.
+        values[target.depth_param_idx] = -2.0;
+        let sampled = sample(&values, &slot_values);
+        let cutoff = sampled
+            .values
+            .iter()
+            .find(|candidate| candidate.param_idx == cutoff_idx)
+            .expect("cutoff should be published");
+        assert!(
+            (cutoff.value - 250.0).abs() < 5.0,
+            "-2 octaves on 1 kHz is 250 Hz: got {}",
+            cutoff.value
+        );
+        assert!(
+            cutoff.offset < -700.0,
+            "the knob's dot needs the full downward displacement: got {}",
+            cutoff.offset
+        );
+        // The offset alone cannot compose with a base that moves between
+        // samples, so an exponential destination also publishes its factor:
+        // a knob dragged to 8 kHz has to draw the dot at 2 kHz, not at
+        // 8000 - 750 Hz. Additive destinations publish exactly 1.0, which is
+        // the widget's signal to use the offset instead.
+        assert!(
+            (cutoff.scale - 0.25).abs() < 1.0e-3,
+            "-2 octaves is a 0.25x factor: got {}",
+            cutoff.scale
         );
     }
 
@@ -14318,7 +14472,7 @@
     /// `sync_track_effect_param_value_field`), and the watchlist gate leaking
     /// a per-block state snapshot for an unmodulated or hidden panel.
     #[test]
-    fn read_filter_table_responses_tracks_real_descriptor_params_and_gates_the_watchlist() {
+    fn read_mod_display_values_tracks_real_descriptor_params_and_gates_the_watchlist() {
         use sequencer::app;
         use sequencer::audio::engine;
         use sequencer::effects::filter_table;
@@ -14404,21 +14558,46 @@
                       watched: &mut std::collections::HashSet<i32>,
                       selected_step: Option<usize>,
                       live: bool| {
-            let responses =
-                super::read_filter_table_responses(lg_ptr, app, &state, selected_step, live, watched);
-            assert_eq!(responses.len(), 1, "one Filter Table instance");
-            responses[0]
+            let sampled = super::read_mod_display_values(
+                lg_ptr,
+                app,
+                &state,
+                None,
+                selected_step,
+                live,
+                watched,
+            );
+            assert_eq!(sampled.effects.len(), 1, "one Filter Table instance");
+            sampled.effects[0].clone()
+        };
+        // Sparse publication: look one destination's effective value up by
+        // param index, the way a panel's `mod-value-field` binding does.
+        let at = |sample: &super::EffectModValues, param_idx: usize| -> f64 {
+            sample
+                .values
+                .iter()
+                .find(|candidate| candidate.param_idx == param_idx)
+                .unwrap_or_else(|| panic!("param {param_idx} should be published: {sample:?}"))
+                .value
         };
 
         // Unmodulated: the base values land on the right fields, and nothing
         // joins the watchlist (an idle panel costs the audio thread nothing).
         let base = sample(&app, &mut watched, None, true);
-        assert!((base.frame - 0.25).abs() < 1.0e-6, "got {}", base.frame);
-        assert!((base.cutoff - 2_000.0).abs() < 1.0e-3, "got {}", base.cutoff);
         assert!(
-            (base.resonance - 0.5).abs() < 1.0e-6,
+            (at(&base, frame_idx) - 0.25).abs() < 1.0e-6,
             "got {}",
-            base.resonance
+            at(&base, frame_idx)
+        );
+        assert!(
+            (at(&base, cutoff_idx) - 2_000.0).abs() < 1.0e-3,
+            "got {}",
+            at(&base, cutoff_idx)
+        );
+        assert!(
+            (at(&base, resonance_idx) - 0.5).abs() < 1.0e-6,
+            "got {}",
+            at(&base, resonance_idx)
         );
         assert!(
             watched.is_empty(),
@@ -14433,16 +14612,16 @@
         state.transport.track_playheads[0].store(3, Ordering::Relaxed);
         let played = sample(&app, &mut watched, None, true);
         assert!(
-            (played.cutoff - 600.0).abs() < 1.0e-3,
+            (at(&played, cutoff_idx) - 600.0).abs() < 1.0e-3,
             "a p-locked step under the playhead must move the curve, got {}",
-            played.cutoff,
+            at(&played, cutoff_idx),
         );
         // An explicit selection still wins over the playhead.
         let selected = sample(&app, &mut watched, Some(0), true);
         assert!(
-            (selected.cutoff - 2_000.0).abs() < 1.0e-3,
+            (at(&selected, cutoff_idx) - 2_000.0).abs() < 1.0e-3,
             "the selected step has no cutoff p-lock, got {}",
-            selected.cutoff,
+            at(&selected, cutoff_idx),
         );
         state.transport.playing.store(false, Ordering::Relaxed);
 
@@ -14468,9 +14647,9 @@
         // The node has not rendered, so its display tail is still zero and the
         // effective value is the base one — the settle-to-base contract.
         assert!(
-            (modulated.cutoff - 2_000.0).abs() < 2.0,
+            (at(&modulated, cutoff_idx) - 2_000.0).abs() < 2.0,
             "a modulator at rest renders the base cutoff, got {}",
-            modulated.cutoff,
+            at(&modulated, cutoff_idx),
         );
 
         // Hiding the FX panel drops the watchlist entry again.
@@ -14479,11 +14658,107 @@
             watched.is_empty(),
             "a hidden panel must release its watchlist entries",
         );
-        // (Within a cent: a modulated destination is quantized on the log
-        // frequency axis even while the sample itself is at rest.)
         assert!(
-            (hidden.cutoff - 2_000.0).abs() < 2.0,
+            (at(&hidden, cutoff_idx) - 2_000.0).abs() < 2.0,
             "a hidden panel reports base values, got {}",
-            hidden.cutoff,
+            at(&hidden, cutoff_idx),
+        );
+
+        // eseq-6mva: the same pass samples the selected track's instrument.
+        // The sampler's lanes carry a *dynamic* slot (a `mod <dest> src` param
+        // whose value picks the modulator), which is the shape the effect
+        // descriptors never exercise, and its panel publishes user-domain
+        // values.
+        let instrument_desc = app.graph.instrument_descriptors[0].clone();
+        let speed_idx = instrument_desc
+            .params
+            .iter()
+            .position(|param| param.name == "speed")
+            .expect("the sampler should expose `speed`");
+        let speed_target = instrument_desc
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| target.base_param_idx == speed_idx)
+            .expect("speed should be a sampler mod destination")
+            .clone();
+        let source_idx = speed_target
+            .source_param_idx
+            .expect("sampler lanes select their slot through a source param");
+        let instrument_slot = &state.pattern.instrument_slots[0];
+        // The headless app never ran the graph build that sizes the slot, and
+        // `slot_param_stored_value` ignores defaults past `num_params`.
+        instrument_slot
+            .num_params
+            .store(instrument_desc.params.len() as u32, Ordering::Relaxed);
+        instrument_slot.defaults.set(speed_idx, 1.5);
+        let sample_instrument = |app: &app::App,
+                                 watched: &mut std::collections::HashSet<i32>,
+                                 live: bool| {
+            super::read_mod_display_values(lg_ptr, app, &state, Some(0), None, live, watched)
+                .instrument
+                .expect("the sampler declares modulation destinations")
+        };
+
+        let inst_at = |sample: &super::InstrumentModValues, param_idx: usize| -> f64 {
+            sample
+                .values
+                .iter()
+                .find(|candidate| candidate.param_idx == param_idx)
+                .unwrap_or_else(|| panic!("param {param_idx} should be published: {sample:?}"))
+                .value
+        };
+        let modulator_node_id = 4_321;
+        let mut instrument_watched: std::collections::HashSet<i32> =
+            std::collections::HashSet::new();
+        let base = sample_instrument(&app, &mut instrument_watched, true);
+        assert_eq!(base.track, 0);
+        assert!(
+            (inst_at(&base, speed_idx) - 1.5).abs() < 1.0e-6,
+            "an unmodulated destination publishes its base value, got {}",
+            inst_at(&base, speed_idx),
+        );
+        assert!(
+            !instrument_watched.contains(&modulator_node_id),
+            "an unmodulated instrument must not be watched: {instrument_watched:?}",
+        );
+
+        // Arming a lane requires both the slot selector and a depth; the audio
+        // thread's published last-triggered voice is what gets watched.
+        instrument_slot.defaults.set(source_idx, 1.0);
+        instrument_slot.defaults.set(speed_target.depth_param_idx, 0.5);
+        state.transport.display_modulator_node_ids[0]
+            .store(modulator_node_id as u32, Ordering::Relaxed);
+        let modulated = sample_instrument(&app, &mut instrument_watched, true);
+        assert!(
+            instrument_watched.contains(&modulator_node_id),
+            "a modulated instrument watches the last-triggered voice's modulator: \
+             {instrument_watched:?}",
+        );
+        // That node does not exist in this headless graph, so the slot values
+        // read back as zero — the settle-to-base contract again.
+        assert!(
+            (inst_at(&modulated, speed_idx) - 1.5).abs() < 1.0e-6,
+            "a modulator at rest renders the base value, got {}",
+            inst_at(&modulated, speed_idx),
+        );
+
+        // Selecting the lane's `off` slot releases the watchlist entry, as
+        // does hiding the panel.
+        instrument_slot.defaults.set(source_idx, 0.0);
+        let _ = sample_instrument(&app, &mut instrument_watched, true);
+        assert!(
+            !instrument_watched.contains(&modulator_node_id),
+            "an `off` slot selector must release the watchlist entry: {instrument_watched:?}",
+        );
+        instrument_slot.defaults.set(source_idx, 1.0);
+        let _ = sample_instrument(&app, &mut instrument_watched, true);
+        assert!(
+            instrument_watched.contains(&modulator_node_id),
+            "a re-armed lane watches again: {instrument_watched:?}",
+        );
+        let _ = sample_instrument(&app, &mut instrument_watched, false);
+        assert!(
+            instrument_watched.is_empty(),
+            "a hidden panel must release every watchlist entry: {instrument_watched:?}",
         );
     }

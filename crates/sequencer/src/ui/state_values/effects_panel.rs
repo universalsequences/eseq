@@ -51,26 +51,6 @@ fn filter_table_editor_value(node_id: i32) -> Option<Value> {
     Some(Value::Map(map))
 }
 
-/// Reactive field names carrying the Filter Table's effective (post-host-
-/// modulation) response values (eseq-dtx.13). The panel binds the spectrum
-/// curve to these instead of reading the knob's base value, so an LFO on
-/// frame/cutoff/resonance animates the drawn response. The fields always hold
-/// a value — the base one when nothing is modulating — so nothing about the
-/// unmodulated render changes.
-fn insert_filter_table_response_fields(
-    slot_map: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>,
-    node_id: i32,
-) {
-    for param in ["frame", "cutoff", "resonance"] {
-        slot_map.insert(
-            format!("response-{param}-field"),
-            Rc::new(RefCell::new(Value::String(filter_table_response_field(
-                node_id, param,
-            )))),
-        );
-    }
-}
-
 /// Build a Lisp Value::List of effect slot maps for a track.
 /// Each slot is a map: {:name "Filter" :params ({:name "cutoff" :value 1000 :min 20 :max 20000} ...)}
 pub(crate) fn build_effects_value(
@@ -269,7 +249,6 @@ pub(crate) fn build_effects_value(
                         ))),
                     );
                 }
-                insert_filter_table_response_fields(&mut slot_map, node_id);
                 if let Some(editor) = filter_table_editor_value(node_id) {
                     slot_map.insert("editor".to_string(), Rc::new(RefCell::new(editor)));
                 }
@@ -358,6 +337,7 @@ pub(crate) fn build_effects_value(
                     .push(target.1);
             }
 
+            let mod_destinations = effect_mod_destinations(desc);
             let modulation_routing_params = modulation_routing_param_indices(desc);
 
             let params: Vec<Rc<RefCell<Value>>> = desc
@@ -519,6 +499,29 @@ pub(crate) fn build_effects_value(
                     }
                     if let Some(targets) = modulation_targets.get(&param_idx) {
                         insert_mod_metadata(&mut pmap, targets);
+                        // Modulated-value display fields (eseq-hpc), read-only
+                        // telemetry: the knob draws its dot from the *offset*
+                        // (so it cannot lag a drag), curve visualizers bind the
+                        // absolute value (one reactive ref straight into a
+                        // widget prop). Only declared modulation destinations
+                        // get them; an idle one holds 0.0 and the base value.
+                        if node_id > 0 && mod_destinations.contains(&param_idx) {
+                            insert_string_prop(
+                                &mut pmap,
+                                "mod-offset-field",
+                                effect_mod_offset_field(node_id, param_idx),
+                            );
+                            insert_string_prop(
+                                &mut pmap,
+                                "mod-value-field",
+                                effect_mod_value_field(node_id, param_idx),
+                            );
+                            insert_string_prop(
+                                &mut pmap,
+                                "mod-scale-field",
+                                effect_mod_scale_field(node_id, param_idx),
+                            );
+                        }
                     }
                     insert_param_ui_metadata(&mut pmap, pdesc.ui_metadata.as_ref());
                     Some(Rc::new(RefCell::new(Value::Map(pmap))))
@@ -923,7 +926,6 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                 ))),
                             );
                         }
-                        insert_filter_table_response_fields(&mut slot_map, node_id);
                         if let Some(editor) = filter_table_editor_value(node_id) {
                             slot_map
                                 .insert("editor".to_string(), Rc::new(RefCell::new(editor)));
@@ -998,6 +1000,7 @@ pub(crate) fn build_bus_effects_value_for_selection(
                             .push(target.1);
                     }
 
+                    let mod_destinations = effect_mod_destinations(desc);
                     let modulation_routing_params = modulation_routing_param_indices(desc);
 
                     let params: Vec<Rc<RefCell<Value>>> = desc
@@ -1146,6 +1149,25 @@ pub(crate) fn build_bus_effects_value_for_selection(
                             }
                             if let Some(targets) = modulation_targets.get(&param_idx) {
                                 insert_mod_metadata(&mut pmap, targets);
+                                // Effective-value field (eseq-hpc); see the
+                                // track path for the contract.
+                                if node_id > 0 && mod_destinations.contains(&param_idx) {
+                                    insert_string_prop(
+                                        &mut pmap,
+                                        "mod-offset-field",
+                                        effect_mod_offset_field(node_id, param_idx),
+                                    );
+                                    insert_string_prop(
+                                        &mut pmap,
+                                        "mod-value-field",
+                                        effect_mod_value_field(node_id, param_idx),
+                                    );
+                                    insert_string_prop(
+                                        &mut pmap,
+                                        "mod-scale-field",
+                                        effect_mod_scale_field(node_id, param_idx),
+                                    );
+                                }
                             }
                             insert_param_ui_metadata(&mut pmap, pdesc.ui_metadata.as_ref());
                             Some(Rc::new(RefCell::new(Value::Map(pmap))))

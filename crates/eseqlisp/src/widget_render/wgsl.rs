@@ -1861,6 +1861,29 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     return col;
 }"#;
 
+pub const KNOB_NUMBER_MOD_DOT_SHADER: &str = r#"
+@fragment
+fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
+{
+    var uv: vec2<f32> = input.uv;
+    var p: vec2<f32> = vec2<f32>((uv.x - 0.5) * 2.0, (uv.y - 0.5) * 2.0);
+    var r: f32 = length(p);
+
+    var start: f32 = 1.57079633;
+    var sweep: f32 = 4.71238898;
+    var t: f32 = clamp(input.uniform_b.x, 0.0, 1.0);
+    var ringRadius: f32 = clamp(input.uniform_b.y, 0.10, 1.0);
+    var dotRadius: f32 = clamp(input.uniform_b.z, 0.005, 0.40);
+    var angle: f32 = start + sweep * t;
+    var n: vec2<f32> = vec2<f32>(cos(angle), sin(angle));
+    var aa: f32 = max(fwidth(r), 0.0015);
+    var d: f32 = length(p - n * ringRadius) - dotRadius;
+    var mask: f32 = smoothstep(aa, -aa, d);
+    var col: vec4<f32> = vec4<f32>(input.color_a.rgb, input.color_a.a * mask);
+    if (col.a < 0.01) { discard; }
+    return col;
+}"#;
+
 pub const KNOB_NUMBER_MOD_RANGE_SHADER: &str = r#"
 @fragment
 fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>

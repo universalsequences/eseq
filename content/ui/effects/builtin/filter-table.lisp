@@ -19,6 +19,9 @@
         :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
         :value-scale value-scale :decimals decimals
         :base-value (pc/param-base-value-prop fx p)
+        :mod-offset (pc/param-mod-offset p)
+        :mod-scale (pc/param-mod-scale p)
+        :unit (pc/param-control-unit fx p)
         :base-min (pc/param-base-min-prop fx p) :base-max (pc/param-base-max-prop fx p)
         :mod-range-0-slot (pc/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (pc/param-knob-mod-depth-prop fx p 0)
         :mod-range-1-slot (pc/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (pc/param-knob-mod-depth-prop fx p 1)
@@ -46,19 +49,6 @@
 ;; (typed Hz values and the displayed number are unaffected).
 (def freq-knob (fx label-text p)
   (parameter-knob fx label-text p 0 1 "log"))
-
-;; Effective (post-modulation) response values (eseq-dtx.13). The host samples
-;; the effect's modulator node at meter rate and publishes `base + depth * mod`
-;; into these SEQ fields; binding the widget props to them makes the spectrum
-;; curve follow an LFO on frame/cutoff/resonance instead of freezing at the
-;; knob's base value. The field always carries the base value when nothing is
-;; modulating, so an unmodulated panel renders exactly as before. Rack slots
-;; get no field and fall back to the base knob value.
-(def response-value (fx p field-key)
-  (let ((field (get fx field-key)))
-    (if field
-      (bind-seq field)
-      (pc/instrument-param-base-value p))))
 
 (def spectrum-source (fx)
   (if (get fx :rack-fx)
@@ -316,7 +306,7 @@
                 :waves-per-set 64 :set 0
                 :wave (if (get fx :editor)
                   (get (get fx :editor) :selected-frame-normalized)
-                  (response-value fx frame-p :response-frame-field))
+                  (pc/param-effective-value frame-p))
                 :wave-normalized true
                 :wave-color (rgba 1.0 0.62 0.25 1.0)                  
                 :inactive-color (rgba 0.20 0.43 0.72 0.14)
@@ -333,9 +323,9 @@
                 :freq-min 20 :freq-max 20000
                 :response-min-db -48 :response-max-db 8
                 :response-data-key table-key
-                :response-frame (response-value fx frame-p :response-frame-field)
-                :response-cutoff (response-value fx cutoff-p :response-cutoff-field)
-                :response-resonance (response-value fx res-p :response-resonance-field)
+                :response-frame (pc/param-effective-value frame-p)
+                :response-cutoff (pc/param-effective-value cutoff-p)
+                :response-resonance (pc/param-effective-value res-p)
                 :background-color :mixer-control-bg
                 :curve-color (rgba 0.78 0.84 0.92 0.96)
                 :spectrum-color (rgba 0.18 0.38 0.64 0.30)

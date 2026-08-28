@@ -40,6 +40,7 @@
         param-plock-text-color
         param-control-min
         param-control-max
+        param-control-unit
         param-set-option
         param-set-control-value
         param-mod-wrapper
@@ -53,6 +54,9 @@
         param-knob-mod-slot-prop
         param-knob-mod-depth-prop
         param-base-value-prop
+        param-mod-offset
+        param-effective-value
+        param-mod-scale
         param-base-min-prop
         param-base-max-prop
         param-selected-mod-slot-prop
@@ -655,6 +659,23 @@
       (if target (get target :depth-max) 1))
     (get p :max)))
 
+;; Unit shown on a param's control. In the mods tab the knob edits a *depth*,
+;; whose units are the destination's own modulation units and need not match
+;; the base param's: the built-in Filter's cutoff reads 20..20000 Hz but scales
+;; exponentially, so its depth is +/-4 *octaves*. Showing the depth's unit is
+;; what makes that legible instead of looking like a 4 Hz sweep. Outside the
+;; mods tab the param's own unit is used, and `false` when neither declares one
+;; so the display is unchanged.
+(def param-control-unit (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (let ((target (param-control-mod-target fx p)))
+      (if target
+        (let ((unit (get target :depth-unit)))
+          (if unit unit false))
+        false))
+    (let ((unit (get p :unit)))
+      (if unit unit false))))
+
 (def param-set-option (fx p label)
   (if fx
     (do
@@ -826,6 +847,47 @@
 (def param-knob-mod-depth-prop (fx p idx)
   (let ((target (param-knob-mod-target fx p idx)))
     (if target (instrument-mod-target-depth target) false)))
+
+;; Live modulation offset for a param (eseq-hpc): how far modulation currently
+;; pushes it from its base, in the base's own units. The host samples the
+;; modulator node at meter rate and publishes `sum(depth * mod)` for every
+;; declared modulation destination; knobs draw their live dot at that
+;; displacement from the base they are already showing.
+;;
+;; An offset rather than the absolute effective value on purpose. The base moves
+;; the instant a knob is dragged while the sampler only runs at meter rate, so
+;; an absolute value trails the drag and flashes a dot beside a knob nothing is
+;; modulating; an offset rides along with the base instead, and an unmodulated
+;; param's offset is exactly 0. Read-only telemetry either way — nothing here
+;; writes back into widget state, so dragging a modulated knob still edits the
+;; base value. `false` when the param is not a modulation destination (no field
+;; published), which is what makes the overlay cost nothing on unmodulatable
+;; params and on rack slots.
+(def param-mod-offset (p)
+  (let ((field (get p :mod-offset-field)))
+    (if field (bind-seq field) false)))
+
+;; The absolute effective value, for curve visualizers. They bind one reactive
+;; field straight into a widget prop — a computed `base + offset` expression
+;; would not be re-evaluated when only the bound value field changes, so the
+;; curve would freeze until the panel rebuilt — which is why the host publishes
+;; the sum alongside the offset. Falls back to the base value for params with no
+;; published field (rack slots, non-destinations).
+(def param-effective-value (p)
+  (let ((field (get p :mod-value-field)))
+    (if field (bind-seq field) (instrument-param-base-value p))))
+
+;; The multiplicative form of the same displacement, for destinations whose
+;; modulation mode is exponential (the built-in Filter's cutoff, whose depth is
+;; in octaves). `base + offset` only composes with a *moving* base when the mode
+;; is additive: a +2-octave lane sampled at 1 kHz publishes a 3 kHz offset, and
+;; a knob dragged to 8 kHz before the next 50 ms tick would draw its dot at
+;; 11 kHz instead of 32 kHz. The host publishes `2^octaves` here — exactly 1.0
+;; for additive destinations — and the knob prefers `base * scale` whenever it
+;; is not 1.0. `false` when the param is not a modulation destination.
+(def param-mod-scale (p)
+  (let ((field (get p :mod-scale-field)))
+    (if field (bind-seq field) false)))
 
 (def param-base-value-prop (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
