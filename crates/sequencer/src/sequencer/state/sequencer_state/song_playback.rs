@@ -638,7 +638,24 @@ impl SequencerState {
     /// device panel. Idempotent, and a no-op in the overwhelmingly common
     /// case where nothing is borrowed.
     pub fn release_bound_device_state(&self) {
-        self.release_borrowed_lanes(self.sound_binding_borrowed.swap(0, Ordering::AcqRel));
+        self.release_bound_device_state_except(0);
+    }
+
+    /// `release_bound_device_state` sparing the lanes in `hold_mask`: their
+    /// loans stay claimed and their mirrors keep the borrowed sound.
+    ///
+    /// The song row mirror uses this for lanes the next row resolves to the
+    /// source that is already borrowed (takes spec §17.3's gap hold is the
+    /// audible case). Releasing them would repaint the mirror from the lane
+    /// owner and push that at the engine, and only the binding sync that
+    /// runs *after* the row apply would put the held sound back — an audible
+    /// snap to a sound the user never dialed in.
+    pub fn release_bound_device_state_except(&self, hold_mask: u64) {
+        self.release_borrowed_lanes(
+            self.sound_binding_borrowed
+                .fetch_and(hold_mask, Ordering::AcqRel)
+                & !hold_mask,
+        );
     }
 
     /// Release one lane (its binding fell back to the scene pattern).

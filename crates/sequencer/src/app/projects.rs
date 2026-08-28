@@ -4842,6 +4842,18 @@ impl App {
     }
 
     pub fn push_all_restored_defaults(&mut self) {
+        self.push_all_restored_defaults_except(0);
+    }
+
+    /// `push_all_restored_defaults` sparing the lanes in `hold_mask`.
+    ///
+    /// The song row mirror holds back lanes whose sound the row does not
+    /// change (takes spec §17.3's gap hold): their mirror still carries the
+    /// borrowed sound, so re-pushing it is at best redundant, and the
+    /// instrument/effect DEFAULTS half actively flattens the p-locks of a
+    /// note that is still ringing across the boundary — the same stomp the
+    /// sampler/custom-instrument exemptions already avoid.
+    pub fn push_all_restored_defaults_except(&mut self, hold_mask: u64) {
         let state = Arc::clone(&self.state);
         let effect_descriptors = &self.graph.effect_descriptors;
         let instrument_descriptors = &self.graph.instrument_descriptors;
@@ -4861,6 +4873,9 @@ impl App {
 
         self.push_master_volume();
         for track_idx in 0..self.tracks.len() {
+            if track_idx < 64 && hold_mask >> track_idx & 1 == 1 {
+                continue;
+            }
             self.push_track_volume(track_idx);
             self.push_track_pan(track_idx);
             self.push_track_mute(track_idx);
@@ -4895,7 +4910,7 @@ impl App {
             }
         }
         self.push_solo_mutes();
-        self.push_all_restored_instrument_defaults();
+        self.push_all_restored_instrument_defaults_except(hold_mask);
         self.state.publish_scheduler_snapshot();
     }
 }

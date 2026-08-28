@@ -212,7 +212,7 @@ impl App {
                 .current_row_ordinal()
                 .min(song.rows.len().saturating_sub(1));
             if let Some(row) = song.rows.get(ordinal) {
-                self.apply_song_row_control(row.scene, &row.overrides, false)?;
+                self.apply_song_row_control(row.scene, &row.overrides, false, 0)?;
                 self.song_mirrored_row = Some(ordinal);
                 self.song_row_mirror_epoch += 1;
                 // The row apply released any bound device loan and pushed the
@@ -253,7 +253,7 @@ impl App {
                 .current_row_ordinal()
                 .min(song.rows.len().saturating_sub(1));
             if let Some(row) = song.rows.get(ordinal) {
-                self.apply_song_row_control(row.scene, &row.overrides, false)?;
+                self.apply_song_row_control(row.scene, &row.overrides, false, 0)?;
                 self.song_mirrored_row = Some(ordinal);
                 self.song_row_mirror_epoch += 1;
                 // Same as `back_to_song`: the row apply dropped the loan and
@@ -438,7 +438,7 @@ impl App {
         // The song is the only launch authority from here: drop any pending
         // quantized session launches so none fires mid-song.
         let _ = self.state.quantized_launches().cancel_all();
-        self.apply_song_row_control(row.scene, &row.overrides, true)?;
+        self.apply_song_row_control(row.scene, &row.overrides, true, 0)?;
         self.state
             .start_song_playback(Arc::clone(&song), start_beat, true)
             .map_err(|error| format!("Song playback could not start: {error}"))?;
@@ -678,7 +678,12 @@ impl App {
         if !notice.wrapped && self.song_mirrored_row == Some(notice.row_ordinal) {
             return Ok(());
         }
-        self.apply_song_row_control(row.scene, &row.overrides, false)?;
+        // Lanes the incoming row resolves to what is already borrowed stay
+        // claimed across the apply (takes spec §17.3): the boundary must not
+        // hand the engine the lane owner's sound, or a defaults push, in the
+        // window before `sync_track_sound_bindings` re-resolves below.
+        let device_hold_mask = self.row_device_hold_mask(row);
+        self.apply_song_row_control(row.scene, &row.overrides, false, device_hold_mask)?;
         self.song_mirrored_row = Some(notice.row_ordinal);
         self.song_row_mirror_epoch += 1;
         // The row apply released any bound device loan and pushed the row's
@@ -720,6 +725,7 @@ impl App {
         scene: Option<usize>,
         overrides: &[(usize, Option<PatternId>)],
         bump_pattern_epoch: bool,
+        device_hold_mask: u64,
     ) -> Result<(), String> {
         // An unscened row (empty-arrangement spec 4.2) recalls no scene: the
         // Seq view stays where it is, and the row's explicit overrides fully
@@ -748,13 +754,14 @@ impl App {
             bump_pattern_epoch,
             latched_mask,
             scene_latched,
+            device_hold_mask,
         )?;
         self.graph_controller().apply_sample_ids(&sample_ids);
         let _ = self
             .graph_controller()
             .sync_track_instrument_run_modes_from_live_state();
         self.graph_controller().sync_current_pattern_mod_routes();
-        self.push_all_restored_defaults();
+        self.push_all_restored_defaults_except(device_hold_mask);
         Ok(())
     }
 }
@@ -881,7 +888,7 @@ mod tests {
         app.arrangement_view_visible = true;
         app.state.set_arrangement_context(true);
         app.song_transport_play(false).expect("song playback starts");
-        app.apply_song_row_control(Some(0), &[(0, None)], false)
+        app.apply_song_row_control(Some(0), &[(0, None)], false, 0)
             .expect("sparse row applies");
         assert!(
             app.state.is_scene_silenced(0),
@@ -925,7 +932,7 @@ mod tests {
         let mut app = app_with_song();
         assert!(!app.arrangement_view_visible, "the Seq tab");
         app.song_transport_play(false).expect("song playback starts");
-        app.apply_song_row_control(Some(0), &[(0, None)], false)
+        app.apply_song_row_control(Some(0), &[(0, None)], false, 0)
             .expect("sparse row applies");
         assert!(app.state.is_scene_silenced(0));
 
@@ -948,7 +955,7 @@ mod tests {
         app.arrangement_view_visible = true;
         app.state.set_arrangement_context(true);
         app.song_transport_play(false).expect("song playback starts");
-        app.apply_song_row_control(Some(0), &[(0, None)], false)
+        app.apply_song_row_control(Some(0), &[(0, None)], false, 0)
             .expect("explicit-empty row applies");
         assert!(app.state.is_scene_silenced(0));
         let cell = app

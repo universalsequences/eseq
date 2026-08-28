@@ -12,7 +12,7 @@
 //! selection lifecycle (16.6); routing edits through it lives in `edit.rs`
 //! and the panel read surfaces.
 
-use crate::sequencer::{ClipId, LaneSource, PatternId, SoundRefs, TakeId};
+use crate::sequencer::{ClipId, LaneSource, PatternId, RuntimeSongRow, SoundRefs, TakeId};
 
 use super::App;
 
@@ -228,6 +228,59 @@ impl App {
             }),
             source => Some(source),
         }
+    }
+
+    /// Lanes whose sound survives an upcoming row transition unchanged
+    /// (§17.3 gap hold + §2.8 borrow-release seam).
+    ///
+    /// A row apply releases every device loan, repaints each released lane's
+    /// mirror from the lane *owner* (the scene cell, or the track-sound
+    /// carrier), and then pushes that repaint at the engine — all before the
+    /// gap hold gets a chance to re-resolve in `sync_track_sound_bindings`.
+    /// For a lane the next row resolves to exactly what is already borrowed
+    /// (a take followed by an empty span is the audible case: the ringing
+    /// tail is still the take's), that whole round trip is a transient of a
+    /// sound the user never dialed in, plus a defaults push that flattens
+    /// the p-locks of any still-sounding note.
+    ///
+    /// Holding the lane out of both halves makes the boundary a no-op for
+    /// it: nothing repaints the mirror, nothing pushes at the engine, and
+    /// the binding sync afterwards finds the loan already in place.
+    pub(crate) fn row_device_hold_mask(&self, row: &RuntimeSongRow) -> u64 {
+        // Rule 2 only owns the lane while the song is actually sounding;
+        // stopped or in session mode the row apply's repaint is correct.
+        if !(self.song_playback_authority_active() && self.state.is_playing()) {
+            return 0;
+        }
+        let borrowed = self.state.sound_binding_borrowed_mask();
+        let latched = self.state.song_manual_latch_mask();
+        let mut mask = 0u64;
+        for track in 0..self.tracks.len().min(64) {
+            if borrowed >> track & 1 == 0 || latched >> track & 1 == 1 {
+                continue;
+            }
+            // A selection (rule 1) outranks the lane, and its borrow is
+            // display-only while the song sounds — the row's own push is
+            // what keeps the engine on the audible sound there.
+            if self.selected_bound_source(track).is_some() {
+                continue;
+            }
+            let next = match row.resolved_sources.get(track).copied() {
+                Some(LaneSource::Take(id)) => Some(BoundSource::Take(id)),
+                Some(LaneSource::Pattern(id)) => Some(BoundSource::Pattern(id)),
+                // The gap hold: an empty span keeps sounding the last
+                // non-empty source rather than resetting to the lane owner.
+                Some(LaneSource::Empty) => self.held_lane_source(track),
+                None => None,
+            };
+            let Some(next) = next else { continue };
+            if self.loaded_sound_binding.get(track).copied().flatten() == Some(next)
+                && self.bound_source_alive(track, next)
+            {
+                mask |= 1u64 << track;
+            }
+        }
+        mask
     }
 
     /// The track's bound source (16.3). Cheap enough for per-frame reads:
@@ -1353,6 +1406,175 @@ pub(crate) mod tests {
                 "the cell followed its pattern"
             );
         });
+    }
+
+    /// The value the LIVE mirror would hand the engine for track 0's first
+    /// instrument parameter — what every `push_all_restored_defaults` reads.
+    fn live_instrument_default(app: &App) -> f32 {
+        app.state.pattern.instrument_slots[0].defaults.get(0)
+    }
+
+    /// `app_with_take` reshaped into the eseq-cwx8 repro: the take covers
+    /// `[0, 8)` with an empty span after it, and the take's sound is a
+    /// DIFFERENT Patch from the one the scene cell / track-sound carrier
+    /// holds — so any repaint from the lane owner is audible rather than
+    /// coincidentally identical.
+    ///
+    /// Returns the app, the take, and (take value, carrier value).
+    fn app_with_take_then_gap() -> (App, TakeId, f32, f32) {
+        let (app, take, scene_pattern, chunks) = app_with_take();
+        const TAKE_VALUE: f32 = 0.1875;
+        app.state.with_scenes_mut(|scenes| {
+            for chunk in &chunks {
+                let mut data = scenes.track_pools[0].get(*chunk).expect("chunk in pool");
+                data.instrument_slot.defaults[0] = TAKE_VALUE;
+                assert!(scenes.track_pools[0].store(*chunk, data));
+            }
+        });
+        let carrier_value = instrument_default(&app, scene_pattern);
+        assert_ne!(
+            carrier_value, TAKE_VALUE,
+            "the repro needs the take's sound to differ from the lane owner's"
+        );
+
+        let mut arrangement = crate::sequencer::ProjectArrangement::new(1, 16.0);
+        arrangement.track_lanes[0].push(crate::sequencer::ArrClip::new_take(
+            ClipId(0),
+            0.0,
+            8.0,
+            take.0,
+            0.0,
+        ));
+        arrangement.next_clip_id = 1;
+        app.state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("arrangement installs");
+        (app, take, TAKE_VALUE, carrier_value)
+    }
+
+    /// The ordinal of the first row whose track-0 lane resolves `Empty`.
+    fn empty_row_ordinal(app: &App) -> usize {
+        app.active_runtime_song
+            .as_ref()
+            .expect("runtime song")
+            .rows
+            .iter()
+            .position(|row| matches!(row.resolved_sources.first(), Some(LaneSource::Empty)))
+            .expect("the arrangement compiles an empty span row")
+    }
+
+    /// eseq-cwx8: crossing take -> empty through the REAL row-mirror path
+    /// (`mirror_song_row_applied` -> `apply_song_row_latched` ->
+    /// `release_borrowed_lanes` -> `push_all_restored_defaults`) must not
+    /// hand the engine the lane owner's sound for the window before the
+    /// §17.3 gap hold re-resolves. The lane's loan is held across the whole
+    /// apply, so nothing repaints the mirror and nothing pushes.
+    #[test]
+    fn take_to_empty_boundary_never_repaints_the_lane_owner_sound() {
+        let (mut app, take, take_value, carrier_value) = app_with_take_then_gap();
+        app.song_transport_play(false).expect("song playback starts");
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Take(take)),
+            "row 0 plays the take"
+        );
+        assert_eq!(
+            live_instrument_default(&app),
+            take_value,
+            "the take's sound is what the engine is being handed"
+        );
+
+        let empty_row = empty_row_ordinal(&app);
+        let row = app.active_runtime_song.as_ref().expect("runtime song").rows[empty_row].clone();
+        assert_eq!(
+            app.row_device_hold_mask(&row),
+            1,
+            "the gap row resolves track 0 to the already-borrowed take"
+        );
+        let epoch_before = app.sound_binding_epoch;
+        let notice = crate::sequencer::AudibleSongRowApplied {
+            row_id: row.id,
+            row_ordinal: empty_row,
+            effective_beat: row.start_beat,
+            effective_sample: 0,
+            wrapped: false,
+        };
+        app.mirror_song_row_applied(&notice)
+            .expect("the row mirror applies");
+
+        assert_eq!(
+            app.state.sound_binding_borrowed_mask() & 1,
+            1,
+            "the loan is never dropped, so no owner repaint and no engine push \
+             can happen in the window before the gap hold re-resolves"
+        );
+        assert_eq!(
+            app.sound_binding_epoch, epoch_before,
+            "the binding never moved: the gap holds the same take"
+        );
+        assert_eq!(
+            live_instrument_default(&app),
+            take_value,
+            "the boundary left the take's sound behind the panel"
+        );
+        assert_ne!(live_instrument_default(&app), carrier_value);
+        assert_eq!(
+            app.loaded_sound_binding[0],
+            Some(BoundSource::Take(take)),
+            "the gap holds the take's sound loaded (§17.3)"
+        );
+        assert!(!app.sound_binding_is_silent(0), "the held sound is the monitor");
+        app.song_transport_stop().expect("stop succeeds");
+    }
+
+    /// Why the hold mask exists: with it cleared, the row apply's blanket
+    /// `release_bound_device_state` repaints the released lane from its
+    /// owner (the track-sound carrier in arrangement context) — the snap
+    /// eseq-cwx8 reported, and the state that `push_all_restored_defaults`
+    /// would then push at the engine.
+    #[test]
+    fn a_row_apply_without_the_hold_repaints_the_lane_owner() {
+        let (mut app, _take, take_value, carrier_value) = app_with_take_then_gap();
+        app.song_transport_play(false).expect("song playback starts");
+        app.sync_track_sound_bindings();
+        assert_eq!(live_instrument_default(&app), take_value);
+
+        let empty_row = empty_row_ordinal(&app);
+        let row = app.active_runtime_song.as_ref().expect("runtime song").rows[empty_row].clone();
+        let scene = row.scene.unwrap_or_else(|| app.state.current_scene_index());
+        let apply = |app: &App, hold_mask: u64| {
+            app.state
+                .apply_song_row_latched(
+                    scene,
+                    &row.overrides,
+                    1,
+                    &app.graph.track_buffer_ids,
+                    &app.graph.track_sample_rates,
+                    &app.tracks,
+                    &app.graph.track_instrument_types,
+                    false,
+                    0,
+                    false,
+                    hold_mask,
+                )
+                .expect("the row applies");
+        };
+
+        apply(&app, 1);
+        assert_eq!(
+            live_instrument_default(&app),
+            take_value,
+            "the held lane keeps its loan and its sound"
+        );
+
+        apply(&app, 0);
+        assert_eq!(
+            live_instrument_default(&app),
+            carrier_value,
+            "released without the hold, the lane snaps to its owner's sound"
+        );
+        app.song_transport_stop().expect("stop succeeds");
     }
 
     /// Gaps hold refs (§17.3 / §18.2 item 3): when the playhead leaves the

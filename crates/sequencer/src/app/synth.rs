@@ -1628,7 +1628,16 @@ impl App {
     }
 
     pub(super) fn push_all_restored_instrument_defaults(&self) {
+        self.push_all_restored_instrument_defaults_except(0);
+    }
+
+    /// `push_all_restored_instrument_defaults` sparing the lanes in
+    /// `hold_mask` — see `push_all_restored_defaults_except`.
+    pub(super) fn push_all_restored_instrument_defaults_except(&self, hold_mask: u64) {
         for track in 0..self.tracks.len() {
+            if track < 64 && hold_mask >> track & 1 == 1 {
+                continue;
+            }
             if self.graph.track_instrument_types.get(track) == Some(&InstrumentType::Rack) {
                 self.push_rack_slot_instrument_defaults_for_track(track);
                 continue;

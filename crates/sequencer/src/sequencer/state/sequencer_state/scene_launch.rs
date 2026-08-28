@@ -630,6 +630,7 @@ impl SequencerState {
             bump_pattern_epoch,
             0,
             false,
+            0,
         )
     }
 
@@ -645,6 +646,14 @@ impl SequencerState {
     /// to Song) still follow the row. Moving the scene identity here would
     /// audibly re-key every scene-indexed reactive binding and misfile the
     /// next save-back into the row's scene.
+    ///
+    /// `device_hold_mask` marks lanes whose device loan must survive the
+    /// apply because the row resolves them to the source already borrowed
+    /// (takes spec §17.3's gap hold is the audible case). Releasing those
+    /// would repaint their mirror from the lane owner and let the caller's
+    /// defaults push hand that to the engine, for the window before the
+    /// binding sync re-borrows — an audible snap to a sound the user never
+    /// dialed in.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_song_row_latched(
         &self,
@@ -658,6 +667,7 @@ impl SequencerState {
         bump_pattern_epoch: bool,
         latched_mask: u64,
         scene_latched: bool,
+        device_hold_mask: u64,
     ) -> Result<Vec<(i32, String, u32)>, String> {
         let latched = |track: usize| track < 64 && latched_mask >> track & 1 == 1;
         if overrides.iter().any(|(track, _)| *track >= num_tracks) {
@@ -679,7 +689,11 @@ impl SequencerState {
         // Read BEFORE the release below: the snapshot substituted borrowed
         // lanes' device halves with their cells' (see `masked_save_masks`).
         let save_masks = self.masked_save_masks();
-        self.release_bound_device_state();
+        // `device_hold_mask` lanes keep their loan: the row resolves them to
+        // the source that is already borrowed, so releasing would repaint
+        // the mirror from the lane owner and push that at the engine for the
+        // window before the binding sync re-borrows (takes spec §17.3).
+        self.release_bound_device_state_except(device_hold_mask);
         let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             if scene >= scenes.scene_count() {
