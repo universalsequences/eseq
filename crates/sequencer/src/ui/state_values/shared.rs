@@ -170,6 +170,9 @@ pub(super) fn insert_param_ui_metadata(
     if let Some(role) = &metadata.role {
         insert_string_prop(map, "role", role);
     }
+    if let Some(display_name) = &metadata.display_name {
+        insert_string_prop(map, "display-name", display_name);
+    }
 }
 
 pub(super) fn instrument_slot_param_value(

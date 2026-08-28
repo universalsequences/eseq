@@ -38739,6 +38739,87 @@
     }
 
     #[test]
+    fn param_ui_metadata_exposes_display_name_without_changing_group_or_envelope_identity() {
+        let metadata = sequencer::effects::ParamUiMetadata {
+            group: Some("amp".to_string()),
+            env: Some("amp.envelope".to_string()),
+            role: Some("attack".to_string()),
+            tags: Vec::new(),
+            display_name: Some("attack".to_string()),
+        };
+        let mut map = HashMap::new();
+
+        insert_param_ui_metadata(&mut map, Some(&metadata));
+
+        for (key, expected) in [
+            ("group", "amp"),
+            ("env", "amp.envelope"),
+            ("role", "attack"),
+            ("display-name", "attack"),
+        ] {
+            assert_eq!(
+                map.get(key).map(|value| value.borrow().clone()),
+                Some(Value::String(expected.to_string())),
+                "{key} should retain its own manifest identity"
+            );
+        }
+    }
+
+    #[test]
+    fn param_grid_group_labels_use_display_name_and_strip_legacy_group_prefix() {
+        let mut declared_short = test_param_map_with_ui_metadata(
+            "op1.attack",
+            0,
+            0.5,
+            0.0,
+            1.0,
+            Some("op1"),
+            None,
+            None,
+        );
+        declared_short.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("attack".to_string()))),
+        );
+        let legacy_dotted = test_param_map_with_ui_metadata(
+            "op2.attack",
+            1,
+            0.5,
+            0.0,
+            1.0,
+            Some("op2"),
+            None,
+            None,
+        );
+        let editor = param_grid_test_editor(vec![
+            Value::Map(declared_short),
+            Value::Map(legacy_dotted),
+        ]);
+
+        let layout = editor.widget_layout().expect("namespaced param grid layout");
+        assert_finite_layout_tree(&layout);
+        for (group, canonical_name) in [("op1", "op1.attack"), ("op2", "op2.attack")] {
+            let panel = find_layout_node_by_debug_name(
+                &layout,
+                &format!("fx-param-group-{group}"),
+            )
+            .unwrap_or_else(|| panic!("{group} group panel"));
+            let control = find_layout_node_by_debug_name(
+                panel,
+                &format!("fx-param-compact-knob-{canonical_name}"),
+            )
+            .unwrap_or_else(|| panic!("{canonical_name} knob"));
+            let knob = find_layout_node_by_widget_type(control, "knob-number")
+                .unwrap_or_else(|| panic!("knob-number inside {canonical_name}"));
+            assert_eq!(
+                knob.props.get("label").cloned(),
+                Some(Value::String("attack".to_string())),
+                "{canonical_name} should render its short label inside the {group} section"
+            );
+        }
+    }
+
+    #[test]
     fn param_grid_groups_metadata_params_into_visible_panels() {
         let editor = param_grid_test_editor(vec![
             Value::Map(test_param_map_with_ui_metadata(

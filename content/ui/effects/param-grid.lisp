@@ -21,6 +21,13 @@
 ;; Everything else is private. Subtree :key strings and :debug-name strings
 ;; are byte-identical (hazard e) — they are flat keyspaces that never qualify.
 
+(def param-display-name (p)
+  (let ((name (if (get p :display-name) (get p :display-name) (get p :name))))
+    (let ((group-prefix (if (get p :group) (str (get p :group) ".") false)))
+      (if (and group-prefix (string-starts-with? name group-prefix))
+        (substring name (len group-prefix) (len name))
+        name))))
+
 (def fx-param-row (p fx subtree-key)
   (subtree :key subtree-key
     (pc/param-mod-wrapper fx p (str subtree-key "-mod-wrapper")
@@ -28,7 +35,7 @@
       (h-stack :gap 0.45 :align :center
         (box :width 13.2 :height 1.25
           (h-stack :gap 0.25 :align :baseline
-            (label (substring (get p :name) 0 9) :font-size 12 :width 7
+            (label (substring (param-display-name p) 0 9) :font-size 12 :width 7
                    :color :dim :bg :transparent)
             (if (get p :boolean)
               (button (if (pc/fx-param-on? p) "ON" "OFF")
@@ -245,7 +252,7 @@
         (default-env-source params)))))
 
 (def compact-label (p)
-  (substring (get p :name) 0 9))
+  (substring (param-display-name p) 0 9))
 
 (def compact-control-width () 6.3)
 (def compact-control-height () 2.55)

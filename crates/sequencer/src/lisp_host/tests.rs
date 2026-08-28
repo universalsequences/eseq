@@ -4385,6 +4385,20 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let descriptor = super::instrument_descriptor_from_manifest("namespaced", &manifest);
 
         assert_eq!(descriptor.params[0].name, "amp.attack");
+        assert_eq!(
+            descriptor.params[0]
+                .ui_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.display_name.as_deref()),
+            Some("attack")
+        );
+        assert_eq!(
+            descriptor.params[0]
+                .ui_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.group.as_deref()),
+            Some("amp")
+        );
         assert!(matches!(
             descriptor.resolve_persisted_param_name("attack"),
             crate::effects::PersistedParamNameResolution::Unique(0)
