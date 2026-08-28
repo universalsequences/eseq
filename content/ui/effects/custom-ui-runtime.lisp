@@ -32,6 +32,7 @@
         custom-ui-param-control-key-mode
         custom-ui-param-base-value-prop
         custom-ui-param-mod-offset
+        custom-ui-param-mod-scale
         custom-ui-param-base-min-prop
         custom-ui-param-base-max-prop
         custom-ui-param-plock-active?
@@ -227,6 +228,10 @@
 ;; `false` for params with no published field, which draws no dot.
 (def custom-ui-param-mod-offset (p)
   (pc/param-mod-offset p))
+
+;; The exponential companion of the offset; see `pc/param-mod-scale`.
+(def custom-ui-param-mod-scale (p)
+  (pc/param-mod-scale p))
 
 (def custom-ui-param-base-min-prop (p)
   (pc/param-base-min-prop (current-fx) p))

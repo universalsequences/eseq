@@ -454,6 +454,11 @@ pub(crate) fn build_sampler_panel_value(
                     "mod-value-field",
                     instrument_mod_value_field(track, param_idx),
                 );
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-scale-field",
+                    instrument_mod_scale_field(track, param_idx),
+                );
             }
             synth_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
         }
@@ -830,6 +835,11 @@ pub(crate) fn build_instrument_panel_value(
                     &mut pmap,
                     "mod-value-field",
                     fx_instrument_mod_value_field(param_idx),
+                );
+                insert_string_prop(
+                    &mut pmap,
+                    "mod-scale-field",
+                    fx_instrument_mod_scale_field(param_idx),
                 );
             }
             let target_values = targets

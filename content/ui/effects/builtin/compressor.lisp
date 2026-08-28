@@ -44,6 +44,7 @@
     :value (eseq.effects.param-controls/fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals
     :mod-offset (eseq.effects.param-controls/param-mod-offset p)
+    :mod-scale (eseq.effects.param-controls/param-mod-scale p)
     :unit (eseq.effects.param-controls/param-control-unit fx p)
     :font-size 9.5 :label-font-size 9.5
     :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim

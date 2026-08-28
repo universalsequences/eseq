@@ -56,6 +56,7 @@
         param-base-value-prop
         param-mod-offset
         param-effective-value
+        param-mod-scale
         param-base-min-prop
         param-base-max-prop
         param-selected-mod-slot-prop
@@ -875,6 +876,18 @@
 (def param-effective-value (p)
   (let ((field (get p :mod-value-field)))
     (if field (bind-seq field) (instrument-param-base-value p))))
+
+;; The multiplicative form of the same displacement, for destinations whose
+;; modulation mode is exponential (the built-in Filter's cutoff, whose depth is
+;; in octaves). `base + offset` only composes with a *moving* base when the mode
+;; is additive: a +2-octave lane sampled at 1 kHz publishes a 3 kHz offset, and
+;; a knob dragged to 8 kHz before the next 50 ms tick would draw its dot at
+;; 11 kHz instead of 32 kHz. The host publishes `2^octaves` here — exactly 1.0
+;; for additive destinations — and the knob prefers `base * scale` whenever it
+;; is not 1.0. `false` when the param is not a modulation destination.
+(def param-mod-scale (p)
+  (let ((field (get p :mod-scale-field)))
+    (if field (bind-seq field) false)))
 
 (def param-base-value-prop (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))

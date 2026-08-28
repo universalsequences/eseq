@@ -779,6 +779,37 @@ mod tests {
             "the dot normalizes against base-min/base-max: {:?}",
             live[0].uniform_b
         );
+
+        // Exponential destinations publish a factor as well, because an
+        // offset sampled against a stale base cannot survive a drag: at a
+        // 0.5x factor the dot has to halve *this* widget's base, not sit at
+        // the displacement the host last measured against another one.
+        let mut exponential = base_props();
+        exponential.insert("value".to_string(), Value::Number(1_000.0));
+        exponential.insert("min".to_string(), Value::Number(0.0));
+        exponential.insert("max".to_string(), Value::Number(2_000.0));
+        exponential.insert("mod-offset".to_string(), Value::Number(-100.0));
+        exponential.insert("mod-scale".to_string(), Value::Number(0.5));
+        let live = dots(exponential);
+        assert_eq!(live.len(), 1);
+        assert!(
+            (live[0].uniform_b[0] - 0.25).abs() < 0.000_01,
+            "the dot rides the base multiplicatively, ignoring the stale offset: {:?}",
+            live[0].uniform_b
+        );
+
+        // A neutral factor is what every additive destination publishes, and
+        // it must leave the offset path exactly as it was.
+        let mut additive = base_props();
+        additive.insert("mod-offset".to_string(), Value::Number(0.5));
+        additive.insert("mod-scale".to_string(), Value::Number(1.0));
+        let live = dots(additive);
+        assert_eq!(live.len(), 1);
+        assert!(
+            (live[0].uniform_b[0] - 0.75).abs() < 0.000_01,
+            "a 1.0 factor falls through to the offset: {:?}",
+            live[0].uniform_b
+        );
     }
 
     #[test]
@@ -1519,6 +1550,7 @@ impl WidgetDefinition for KnobNumberWidget {
             "base-max",
             "selected-mod-slot",
             "mod-offset",
+            "mod-scale",
             "mod-range-0-slot",
             "mod-range-0-depth",
             "mod-range-1-slot",
@@ -2066,12 +2098,31 @@ impl WidgetDefinition for KnobNumberWidget {
         // trail a drag by up to a tick and flash a dot beside a knob nothing
         // is modulating. An offset rides along with the base instead, and an
         // unmodulated param's offset is exactly zero.
+        //
+        // `base + offset` only composes with a moving base for *additive*
+        // modulation. Exponential destinations (an octaves-mode filter cutoff)
+        // also publish `mod-scale` = 2^octaves, and there the displacement
+        // rides the base multiplicatively: a +2-octave lane sampled at 1 kHz
+        // has to draw at 32 kHz once the base is dragged to 8 kHz, not at
+        // 11 kHz. `mod-scale` is exactly 1.0 for additive destinations and
+        // absent for panels that publish no scale field, so both fall through
+        // to the offset. One factor is always enough — the host collapses
+        // every lane of one destination into a single mode.
+        let mod_scale = node
+            .props
+            .get("mod-scale")
+            .and_then(value_as_f32)
+            .filter(|scale| *scale != 1.0 && scale.is_finite());
         if let Some(offset) = node.props.get("mod-offset").and_then(value_as_f32)
             && base_range.abs() > 0.000_001
-            && offset != 0.0
+            && (offset != 0.0 || mod_scale.is_some())
         {
+            let modulated = match mod_scale {
+                Some(scale) => base_value * scale,
+                None => base_value + offset,
+            };
             let base_t = taper_normalize(taper, base_min, base_max, base_value);
-            let mod_t = taper_normalize(taper, base_min, base_max, base_value + offset);
+            let mod_t = taper_normalize(taper, base_min, base_max, modulated);
             if (mod_t - base_t).abs() > MOD_DOT_MIN_TRAVEL {
                 let color = mod_dot_color(&node.props);
                 prims.push(GpuPrimitive::WidgetInstance {

@@ -14071,6 +14071,59 @@
     }
 
     #[test]
+    fn rack_slot_effect_params_carry_no_modulated_value_fields() {
+        // eseq-hpc: only a rack slot's *instrument* is sampled
+        // (`read_rack_slot_mod_values`). A slot's effect chain declares
+        // modulation targets too, but nothing ever publishes `rack-mod-*` for
+        // them — and `pc/param-effective-value` prefers a bound field over the
+        // base value, so a Filter in a rack slot's chain would draw its curve
+        // from a field stuck at 0.0 instead of from its own cutoff.
+        let descriptor = sequencer::effects::EffectDescriptor::builtin_filter();
+        let app = test_app_with_rack_panel();
+        let snapshot = sequencer::effects::EffectSlotSnapshot::new_default(&descriptor, 43);
+        assert!(
+            app.state
+                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+                    slot.effect_descriptors[0] = descriptor.clone();
+                    slot.effect_slots[0] = snapshot.clone();
+                    slot.custom_effect_names[0] = Some(format!("builtin:{}", descriptor.name));
+                },)
+        );
+        let rack = app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(0)
+            .cloned()
+            .flatten()
+            .expect("rack fixture");
+        let effect = build_rack_slot_effect_value(&rack, 0, 0, 0, &descriptor, &snapshot, None);
+        let effect = effect.borrow().clone();
+        assert!(
+            value_param_has_key(&effect, "cutoff", "mod-targets"),
+            "fixture: a rack slot Filter's cutoff is a declared modulation destination"
+        );
+        for key in ["mod-offset-field", "mod-value-field", "mod-scale-field"] {
+            assert!(
+                !value_param_has_key(&effect, "cutoff", key),
+                "a rack slot effect param must not bind the unpublished {key}"
+            );
+        }
+
+        // The same slot's instrument does keep them: that is the one path the
+        // host samples.
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let panel = build_instrument_panel_value(&app, 0, &selected);
+        assert_eq!(
+            value_param_string(&panel, "sr", "mod-offset-field"),
+            Some(super::rack_slot_mod_offset_field(0, 0, 8)),
+            "the rack slot instrument's declared destinations still bind their fields"
+        );
+    }
+
+    #[test]
     fn rack_slot_effect_plocks_appear_in_track_rows_and_step_mask() {
         let app = test_app_with_rack_panel_and_slot_fx();
         assert!(app.state.update_rack_slot_in_current_pattern(0, 0, |slot| {
@@ -41689,6 +41742,12 @@
         fn test_mod_target(source_idx: f64, depth_idx: f64, source_slot: f64, depth: f64) -> Value {
             Value::Map(HashMap::from([
                 (
+                    // The depth's own unit, which the knob shows instead of
+                    // the base param's while the mods tab retargets it.
+                    "depth-unit".to_string(),
+                    Rc::new(RefCell::new(Value::String("oct".to_string()))),
+                ),
+                (
                     "source-idx".to_string(),
                     Rc::new(RefCell::new(Value::Number(source_idx))),
                 ),
@@ -41736,6 +41795,14 @@
                 test_mod_target(20.0, 21.0, 2.0, 0.25),
                 test_mod_target(22.0, 23.0, 0.0, 0.0),
             ]))),
+        );
+        // eseq-hpc: speed is a declared modulation destination, so the host
+        // publishes its live-dot fields and the panel has to bind them.
+        speed.insert(
+            "mod-offset-field".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                "fx-instrument-mod-offset-11".to_string(),
+            ))),
         );
         let mut start = test_param_map("start", 2, 0.0, 0.0, 1.0);
         start.insert(
@@ -41966,6 +42033,7 @@
                 ("midi-effects", test_list(vec![])),
                 ("instrument-panel", test_list(vec![Value::Map(inst)])),
                 ("sampler-playhead", Value::Number(0.0)),
+                ("fx-instrument-mod-offset-11", Value::Number(0.0)),
                 ("bus-effects", test_list(vec![])),
             ],
             true,
@@ -42100,14 +42168,31 @@
         // eseq-hpc: the sampler panel is its own builder, so it needs the
         // modulated-value display props wired independently of the FX-tile
         // instrument panel — without them a modulated sampler knob draws no
-        // live dot at all, whatever the depth's sign.
+        // live dot at all, whatever the depth's sign. The props are always
+        // *present* (the Lisp helpers publish `false` rather than omitting
+        // them), so assert they are actually bound and carry real values.
         assert!(
-            speed_knob.props.contains_key("mod-offset"),
-            "sampler speed knob should expose the live modulation dot prop"
+            matches!(
+                speed_knob.props.get("mod-offset"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "sampler speed knob should bind its live dot: {:?}",
+            speed_knob.props.get("mod-offset")
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "fx-instrument-mod-offset-11", Value::Number(0.4));
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(&speed_knob.props, "mod-offset", -1.0),
+            0.4,
         );
         assert!(
-            speed_knob.props.contains_key("unit"),
-            "sampler speed knob should expose the depth's unit while editing depth"
+            matches!(
+                speed_knob.props.get("unit"),
+                Some(Value::String(unit)) if unit == "oct"
+            ),
+            "sampler speed knob should show the depth's unit while editing depth: {:?}",
+            speed_knob.props.get("unit")
         );
         let callback = speed_knob
             .props

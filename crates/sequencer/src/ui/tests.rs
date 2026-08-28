@@ -14314,6 +14314,15 @@
             "an inactive destination must displace the base by exactly zero"
         );
         assert_eq!(offset_at(&settled, FRAME), 0.0, "so must a resting one");
+        // These destinations are additive, so their multiplicative form is
+        // exactly 1.0 — the widget's signal to compose with the offset.
+        assert!(
+            modulated
+                .values
+                .iter()
+                .all(|sampled| sampled.scale == 1.0),
+            "additive destinations must publish a neutral scale: {modulated:?}"
+        );
         assert!(
             (offset_at(&modulated, FRAME) - 0.5).abs() < 1.0e-2,
             "a live destination publishes depth * slot value, got {}",
@@ -14327,8 +14336,8 @@
         let (_, published) =
             super::sync_effect_mod_offset_field_delta(&mut runtime, &[], &[modulated.clone()]);
         assert_eq!(
-            published, 4,
-            "a first sample publishes both fields of both destinations"
+            published, 6,
+            "a first sample publishes all three fields of both destinations"
         );
         let frame_field = super::effect_mod_value_field(node_id, FRAME);
         let cutoff_field = super::effect_mod_value_field(node_id, CUTOFF);
@@ -14417,6 +14426,11 @@
             "+2 octaves on 1 kHz is 4 kHz, not 1002 Hz: got {}",
             cutoff.value
         );
+        assert!(
+            (cutoff.scale - 4.0).abs() < 1.0e-2,
+            "+2 octaves is a 4x factor: got {}",
+            cutoff.scale
+        );
 
         // Negative depth is the case that looked broken: it has to travel a
         // long way *down*, not sit a couple of Hz below the base.
@@ -14436,6 +14450,16 @@
             cutoff.offset < -700.0,
             "the knob's dot needs the full downward displacement: got {}",
             cutoff.offset
+        );
+        // The offset alone cannot compose with a base that moves between
+        // samples, so an exponential destination also publishes its factor:
+        // a knob dragged to 8 kHz has to draw the dot at 2 kHz, not at
+        // 8000 - 750 Hz. Additive destinations publish exactly 1.0, which is
+        // the widget's signal to use the offset instead.
+        assert!(
+            (cutoff.scale - 0.25).abs() < 1.0e-3,
+            "-2 octaves is a 0.25x factor: got {}",
+            cutoff.scale
         );
     }
 

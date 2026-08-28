@@ -516,6 +516,11 @@ pub(crate) fn build_effects_value(
                                 "mod-value-field",
                                 effect_mod_value_field(node_id, param_idx),
                             );
+                            insert_string_prop(
+                                &mut pmap,
+                                "mod-scale-field",
+                                effect_mod_scale_field(node_id, param_idx),
+                            );
                         }
                     }
                     insert_param_ui_metadata(&mut pmap, pdesc.ui_metadata.as_ref());
@@ -1156,6 +1161,11 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                         &mut pmap,
                                         "mod-value-field",
                                         effect_mod_value_field(node_id, param_idx),
+                                    );
+                                    insert_string_prop(
+                                        &mut pmap,
+                                        "mod-scale-field",
+                                        effect_mod_scale_field(node_id, param_idx),
                                     );
                                 }
                             }

@@ -288,11 +288,22 @@ pub(super) fn quantize_modulator_unit_value(value: f32) -> f64 {
 ///   bind one reactive field straight into a widget prop rather than computing
 ///   from two (a computed prop would not be re-evaluated when only the bound
 ///   value field changes), so they need the sum published for them.
+/// * `scale` is the multiplicative form of the same displacement, for
+///   destinations whose `ModulationMode` is exponential. `base + offset` only
+///   composes with a *moving* base for `Additive` lanes: an `Octaves` lane
+///   sampled at 1 kHz with +2 octaves publishes an offset of 3 kHz, and a knob
+///   dragged to 8 kHz before the next tick would draw its dot at 11 kHz
+///   instead of 32 kHz. `scale` is `2^octaves` for those, exactly `1.0`
+///   otherwise, and the widget prefers `base * scale` whenever it is not 1.0.
+///   One factor is always enough: `effect_mod_lanes` collapses every lane of
+///   one destination into a single mode, because the DSP reads a single
+///   `(mod <dest>)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ParamModValue {
     pub param_idx: usize,
     pub offset: f64,
     pub value: f64,
+    pub scale: f64,
 }
 
 /// One effect instance's live modulation display values, keyed by the effect's
@@ -317,6 +328,13 @@ pub(crate) fn effect_mod_offset_field(node_id: i32, param_idx: usize) -> String 
 /// visualizers. Same sparsity as the offset field.
 pub(crate) fn effect_mod_value_field(node_id: i32, param_idx: usize) -> String {
     format!("fx-mod-value-{node_id}-{param_idx}")
+}
+
+/// Reactive field carrying one param's *multiplicative* displacement, for
+/// exponential destinations. Exactly `1.0` for additive ones, so a knob that
+/// reads it always has a usable factor.
+pub(crate) fn effect_mod_scale_field(node_id: i32, param_idx: usize) -> String {
+    format!("fx-mod-scale-{node_id}-{param_idx}")
 }
 
 /// Quantize an effective value so audio-rate jitter below a pixel of travel
@@ -449,45 +467,68 @@ pub(crate) fn effect_mod_destinations(desc: &sequencer::effects::EffectDescripto
     destinations
 }
 
-/// Pure half of the sampler: apply the additive modulation contract to every
-/// declared destination for one already-sampled set of modulator slot values,
-/// reporting each as an offset from that destination's base. All-zero
-/// `slot_values` yields all-zero offsets, which is what an unmodulated (or
-/// hidden) panel publishes.
+/// Every declared destination paired with the lanes assigned to it, resolved in
+/// one pass. Both consumers read this: the watchlist gate (is *anything*
+/// modulated?) and the value arithmetic. Walking the mod matrix once for both
+/// is what keeps them from disagreeing — and the matrix is walked once per
+/// destination, not twice.
+type DestinationLanes = Vec<(
+    usize,
+    Option<(
+        sequencer::effects::ModulationMode,
+        [f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
+    )>,
+)>;
+
+fn destination_lanes(
+    desc: &sequencer::effects::EffectDescriptor,
+    value_of: &dyn Fn(usize) -> f32,
+) -> DestinationLanes {
+    effect_mod_destinations(desc)
+        .into_iter()
+        .map(|param_idx| (param_idx, effect_mod_lanes(desc, param_idx, value_of)))
+        .collect()
+}
+
+/// Pure half of the sampler: apply the modulation contract to every declared
+/// destination for one already-sampled set of modulator slot values, reporting
+/// each as an offset from that destination's base. All-zero `slot_values`
+/// yields all-zero offsets, which is what an unmodulated (or hidden) panel
+/// publishes.
 pub(crate) fn effect_mod_values_from_slot_values(
     desc: &sequencer::effects::EffectDescriptor,
     node_id: i32,
     value_of: &dyn Fn(usize) -> f32,
     slot_values: &[f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
 ) -> EffectModValues {
-    effect_mod_values_for_destinations(
+    effect_mod_values_for_lanes(
         desc,
         node_id,
         value_of,
         slot_values,
-        &effect_mod_destinations(desc),
+        &destination_lanes(desc, value_of),
     )
 }
 
-/// As above, with the destination list already resolved — the poller walks it
-/// once per slot for the watchlist gate and reuses it here.
-fn effect_mod_values_for_destinations(
+/// As above, with the destinations and their lanes already resolved — the
+/// poller resolves them once for the watchlist gate and reuses them here.
+fn effect_mod_values_for_lanes(
     desc: &sequencer::effects::EffectDescriptor,
     node_id: i32,
     value_of: &dyn Fn(usize) -> f32,
     slot_values: &[f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
-    destinations: &[usize],
+    lanes: &DestinationLanes,
 ) -> EffectModValues {
-    let mut values = Vec::with_capacity(destinations.len());
-    for &param_idx in destinations {
+    let mut values = Vec::with_capacity(lanes.len());
+    for &(param_idx, lanes) in lanes {
         let Some(pdesc) = desc.params.get(param_idx) else {
             continue;
         };
         let base = value_of(param_idx);
-        let value = match effect_mod_lanes(desc, param_idx, value_of) {
+        let (value, mode) = match lanes {
             Some((mode, depths)) => {
                 let modulated = modulated_value(mode, base, &depths, slot_values);
-                if modulated == base {
+                let value = if modulated == base {
                     // Modulators resting at zero settle back to the base value
                     // exactly, not to base-rounded-to-the-quantization-grid:
                     // an assigned-but-idle lane must leave a knob's dot hidden
@@ -498,16 +539,25 @@ fn effect_mod_values_for_destinations(
                     // travel; the DSP clips each control to its declared range
                     // before using it, so the display sees the same bounds.
                     quantize_effective_value(pdesc, modulated)
-                }
+                };
+                (value, Some(mode))
             }
-            None => base as f64,
+            None => (base as f64, None),
         };
         // The offset is derived from the same sample, so an idle destination
-        // is exactly 0.0 rather than a rounding residue.
+        // is exactly 0.0 rather than a rounding residue. The exponential form
+        // is derived from the *published* value rather than recomputed from
+        // `2^amount`, so a knob drawing `base * scale` lands on exactly the
+        // same number a curve visualizer binds.
+        let scale = match mode {
+            Some(sequencer::effects::ModulationMode::Octaves) if base != 0.0 => value / base as f64,
+            _ => 1.0,
+        };
         values.push(ParamModValue {
             param_idx,
             offset: value - base as f64,
             value,
+            scale,
         });
     }
     EffectModValues { node_id, values }
@@ -525,22 +575,18 @@ fn effect_mod_values_for_slot(
     use sequencer::instruments::voice_modulator::SLOT_COUNT;
     // An unmodulated effect costs nothing new — no watchlist entry, no engine
     // state read, and all-zero slot values make the pure half return exactly
-    // the base values. The lane lookup is shared with
-    // `effect_mod_values_from_slot_values` so the gate and the arithmetic can
-    // never disagree about what is modulated.
-    let destinations = effect_mod_destinations(desc);
-    let modulated = live
-        && modulator_node_id > 0
-        && destinations
-            .iter()
-            .any(|&idx| effect_mod_lanes(desc, idx, value_of).is_some());
+    // the base values. The lanes are resolved once and shared with the
+    // arithmetic below, so the gate and the values can never disagree about
+    // what is modulated.
+    let lanes = destination_lanes(desc, value_of);
+    let modulated = live && modulator_node_id > 0 && lanes.iter().any(|(_, lanes)| lanes.is_some());
     let slot_values = if modulated {
         wanted.insert(modulator_node_id);
         read_effect_modulator_slot_values(lg, modulator_node_id)
     } else {
         [0.0_f32; SLOT_COUNT]
     };
-    effect_mod_values_for_destinations(desc, node_id, value_of, &slot_values, &destinations)
+    effect_mod_values_for_lanes(desc, node_id, value_of, &slot_values, &lanes)
 }
 
 /// Sample every live effect instance's effective parameter values.
@@ -710,6 +756,12 @@ pub(crate) fn fx_instrument_mod_value_field(param_idx: usize) -> String {
     format!("fx-instrument-mod-value-{param_idx}")
 }
 
+/// Multiplicative displacement for exponential destinations; see
+/// `effect_mod_scale_field`.
+pub(crate) fn fx_instrument_mod_scale_field(param_idx: usize) -> String {
+    format!("fx-instrument-mod-scale-{param_idx}")
+}
+
 /// Track-keyed variants, for the sampler panel. It is a separate builder whose
 /// param maps address their values as `instrument-param-{track}-*` rather than
 /// the FX-tile panel's un-tracked `fx-instrument-param-*`, and it is built for
@@ -721,6 +773,10 @@ pub(crate) fn instrument_mod_offset_field(track: usize, param_idx: usize) -> Str
 
 pub(crate) fn instrument_mod_value_field(track: usize, param_idx: usize) -> String {
     format!("inst-mod-value-{track}-{param_idx}")
+}
+
+pub(crate) fn instrument_mod_scale_field(track: usize, param_idx: usize) -> String {
+    format!("inst-mod-scale-{track}-{param_idx}")
 }
 
 /// One rack slot's live modulation display values (eseq-hpc). A rack track has
@@ -743,6 +799,10 @@ pub(crate) fn rack_slot_mod_value_field(track: usize, slot_idx: usize, param_idx
     format!("rack-mod-value-{track}-{slot_idx}-{param_idx}")
 }
 
+pub(crate) fn rack_slot_mod_scale_field(track: usize, slot_idx: usize, param_idx: usize) -> String {
+    format!("rack-mod-scale-{track}-{slot_idx}-{param_idx}")
+}
+
 /// Sample the selected track's selected rack slot, if it declares any
 /// modulation destinations.
 ///
@@ -760,15 +820,15 @@ fn read_rack_slot_mod_values(
     wanted: &mut HashSet<i32>,
 ) -> Option<RackSlotModValues> {
     use sequencer::instruments::voice_modulator::SLOT_COUNT;
-    let rack = state
-        .pattern
-        .rack_tracks
-        .lock()
-        .unwrap()
-        .get(track)
-        .cloned()
-        .flatten()?;
-    let slot_idx = app.selected_rack_slot_index_for_rack(track, &rack)?;
+    // Borrow the snapshot rather than cloning it: a rack track owns every
+    // slot's p-lock grid and effect descriptors (~100 String-bearing params
+    // each), which is far too much to copy on a 50 ms meter poll. Nothing under
+    // this guard takes the same lock — `selected_rack_slot_index_for_rack` and
+    // `rack_slot_cached_instrument_descriptor` read `app`, and the modulator
+    // sample goes to the live graph — so holding it for the read is safe.
+    let racks = state.pattern.rack_tracks.lock().unwrap();
+    let rack = racks.get(track)?.as_ref()?;
+    let slot_idx = app.selected_rack_slot_index_for_rack(track, rack)?;
     let slot = rack.slots.get(slot_idx)?;
     // Custom engines hand out a borrow; the built-in sampler's descriptor is
     // constructed on demand, so cache one and borrow that instead of rebuilding
@@ -786,20 +846,23 @@ fn read_rack_slot_mod_values(
     if desc.instrument_modulation_targets.is_empty() {
         return None;
     }
-    let destinations = effect_mod_destinations(desc);
-    if destinations.is_empty() {
+    let value_of = |idx: usize| -> f32 {
+        super::rack_panel::rack_slot_param_value(rack, slot_idx, slot, desc, idx, selected_step)
+    };
+    let lanes = destination_lanes(desc, &value_of);
+    if lanes.is_empty() {
         return None;
     }
-    let value_of = |idx: usize| -> f32 {
-        super::rack_panel::rack_slot_param_value(&rack, slot_idx, slot, desc, idx, selected_step)
-    };
-    let modulator_node_id = state.transport.rack_slot_display_modulator_node_ids[track][slot_idx]
-        .load(Ordering::Relaxed) as i32;
-    let modulated = live
-        && modulator_node_id > 0
-        && destinations
-            .iter()
-            .any(|&idx| effect_mod_lanes(desc, idx, &value_of).is_some());
+    // A track or slot that has gone out of range simply has no modulator to
+    // read; it must never index-panic the UI thread.
+    let modulator_node_id = state
+        .transport
+        .rack_slot_display_modulator_node_ids
+        .get(track)
+        .and_then(|slots| slots.get(slot_idx))
+        .map(|node_id| node_id.load(Ordering::Relaxed) as i32)
+        .unwrap_or(0);
+    let modulated = live && modulator_node_id > 0 && lanes.iter().any(|(_, lanes)| lanes.is_some());
     let slot_values = if modulated {
         wanted.insert(modulator_node_id);
         read_effect_modulator_slot_values(lg, modulator_node_id)
@@ -807,8 +870,7 @@ fn read_rack_slot_mod_values(
         [0.0_f32; SLOT_COUNT]
     };
     // Rack slot panels display user-domain values like the instrument panel.
-    let stored =
-        effect_mod_values_for_destinations(desc, 0, &value_of, &slot_values, &destinations);
+    let stored = effect_mod_values_for_lanes(desc, 0, &value_of, &slot_values, &lanes);
     let values = stored
         .values
         .into_iter()
@@ -818,6 +880,9 @@ fn read_rack_slot_mod_values(
                 param_idx: sampled.param_idx,
                 offset: pdesc.stored_to_user(sampled.offset as f32) as f64,
                 value: pdesc.stored_to_user(sampled.value as f32) as f64,
+                // `stored_to_user` is linear through the origin, so a ratio of
+                // two scaled values is the ratio of the stored ones.
+                scale: sampled.scale,
             })
         })
         .collect();
@@ -838,6 +903,45 @@ pub(crate) fn sync_rack_slot_mod_offset_field_delta(
     let mut effects_dirty = false;
     let mut published = 0usize;
     let Some(current) = current else {
+        // Nothing to sample any more (slot deselected, rack removed, panel
+        // hidden). The fields the last sample wrote would otherwise keep their
+        // final values forever, freezing a dot beside an unmodulated knob, so
+        // settle them. Only fires on the transition.
+        if let Some(previous) = previous {
+            for sampled in &previous.values {
+                for (field, value) in [
+                    (
+                        rack_slot_mod_offset_field(
+                            previous.track,
+                            previous.slot_idx,
+                            sampled.param_idx,
+                        ),
+                        0.0,
+                    ),
+                    (
+                        rack_slot_mod_value_field(
+                            previous.track,
+                            previous.slot_idx,
+                            sampled.param_idx,
+                        ),
+                        0.0,
+                    ),
+                    (
+                        rack_slot_mod_scale_field(
+                            previous.track,
+                            previous.slot_idx,
+                            sampled.param_idx,
+                        ),
+                        1.0,
+                    ),
+                ] {
+                    published += 1;
+                    effects_dirty |= rt
+                        .set_reactive("SEQ", &field, Value::Number(value))
+                        .effects_dirty;
+                }
+            }
+        }
         return (effects_dirty, published);
     };
     let previous = previous.filter(|previous| {
@@ -869,6 +973,11 @@ pub(crate) fn sync_rack_slot_mod_offset_field_delta(
             rack_slot_mod_value_field(current.track, current.slot_idx, sampled.param_idx),
             sampled.value,
             was.map(|was| was.value),
+        );
+        publish(
+            rack_slot_mod_scale_field(current.track, current.slot_idx, sampled.param_idx),
+            sampled.scale,
+            was.map(|was| was.scale),
         );
     }
     (effects_dirty, published)
@@ -923,16 +1032,19 @@ fn read_instrument_mod_values_for_track(
             .unwrap_or_else(|| slot_param_stored_value(slot, pdesc, idx, display_step))
     };
 
-    let destinations = effect_mod_destinations(desc);
-    if destinations.is_empty() {
+    let lanes = destination_lanes(desc, &value_of);
+    if lanes.is_empty() {
         return None;
     }
-    let modulator_node_id = state.transport.display_modulator_node_ids[track].load(Ordering::Relaxed) as i32;
-    let modulated = live
-        && modulator_node_id > 0
-        && destinations
-            .iter()
-            .any(|&idx| effect_mod_lanes(desc, idx, &value_of).is_some());
+    // A track that has gone out of range simply has no modulator to read; it
+    // must never index-panic the UI thread.
+    let modulator_node_id = state
+        .transport
+        .display_modulator_node_ids
+        .get(track)
+        .map(|node_id| node_id.load(Ordering::Relaxed) as i32)
+        .unwrap_or(0);
+    let modulated = live && modulator_node_id > 0 && lanes.iter().any(|(_, lanes)| lanes.is_some());
     let slot_values = if modulated {
         wanted.insert(modulator_node_id);
         read_effect_modulator_slot_values(lg, modulator_node_id)
@@ -944,7 +1056,7 @@ fn read_instrument_mod_values_for_track(
     // 0..100), so scale the offset on the way out. `stored_to_user` is linear,
     // so scaling a difference is the same as differencing two scaled values,
     // and a zero offset stays exactly zero.
-    let stored = effect_mod_values_for_destinations(desc, 0, &value_of, &slot_values, &destinations);
+    let stored = effect_mod_values_for_lanes(desc, 0, &value_of, &slot_values, &lanes);
     let values = stored
         .values
         .into_iter()
@@ -957,6 +1069,9 @@ fn read_instrument_mod_values_for_track(
                 // and a zero offset stays exactly zero.
                 offset: pdesc.stored_to_user(sampled.offset as f32) as f64,
                 value: pdesc.stored_to_user(sampled.value as f32) as f64,
+                // Linear through the origin, so the ratio survives the domain
+                // change unchanged.
+                scale: sampled.scale,
             })
         })
         .collect();
@@ -974,6 +1089,35 @@ pub(crate) fn sync_instrument_mod_offset_field_delta(
     let mut effects_dirty = false;
     let mut published = 0usize;
     let Some(current) = current else {
+        // Same settling as the rack half: the previous sample's fields would
+        // otherwise hold their last values forever once the track stops being
+        // sampled, freezing a dot beside an unmodulated knob.
+        if let Some(previous) = previous {
+            for sampled in &previous.values {
+                for (field, value) in [
+                    (fx_instrument_mod_offset_field(sampled.param_idx), 0.0),
+                    (fx_instrument_mod_value_field(sampled.param_idx), 0.0),
+                    (fx_instrument_mod_scale_field(sampled.param_idx), 1.0),
+                    (
+                        instrument_mod_offset_field(previous.track, sampled.param_idx),
+                        0.0,
+                    ),
+                    (
+                        instrument_mod_value_field(previous.track, sampled.param_idx),
+                        0.0,
+                    ),
+                    (
+                        instrument_mod_scale_field(previous.track, sampled.param_idx),
+                        1.0,
+                    ),
+                ] {
+                    published += 1;
+                    effects_dirty |= rt
+                        .set_reactive("SEQ", &field, Value::Number(value))
+                        .effects_dirty;
+                }
+            }
+        }
         return (effects_dirty, published);
     };
     let previous = previous.filter(|previous| previous.track == current.track);
@@ -1010,9 +1154,19 @@ pub(crate) fn sync_instrument_mod_offset_field_delta(
             was.map(|was| was.offset),
         );
         publish(
+            fx_instrument_mod_scale_field(sampled.param_idx),
+            sampled.scale,
+            was.map(|was| was.scale),
+        );
+        publish(
             instrument_mod_value_field(current.track, sampled.param_idx),
             sampled.value,
             was.map(|was| was.value),
+        );
+        publish(
+            instrument_mod_scale_field(current.track, sampled.param_idx),
+            sampled.scale,
+            was.map(|was| was.scale),
         );
     }
     (effects_dirty, published)
@@ -1057,6 +1211,11 @@ pub(crate) fn sync_effect_mod_offset_field_delta(
                 effect_mod_value_field(response.node_id, sampled.param_idx),
                 sampled.value,
                 was.map(|was| was.value),
+            );
+            publish(
+                effect_mod_scale_field(response.node_id, sampled.param_idx),
+                sampled.scale,
+                was.map(|was| was.scale),
             );
         }
     }
