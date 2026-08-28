@@ -308,6 +308,7 @@
         (knob-number :label (compact-label p)
           :value (pc/fx-param-value-for fx p)
           :min (pc/param-control-min fx p) :max (pc/param-control-max fx p) :decimals 2
+          :modulated-value (pc/param-modulated-value p)
           :font-size 10.0 :label-font-size 8.8
           :text-color (pc/param-plock-text-color fx p) :label-color :dim
           :plock-active (if (pc/param-plock-active? fx p) 1 0)

@@ -37494,7 +37494,24 @@
             vec![
                 mod_param("frame", 0, 0.0, 0.0, 1.0, 20.0),
                 mod_param("cutoff", 1, 1000.0, 40.0, 18000.0, 21.0),
-                mod_param("resonance", 2, 0.0, 0.0, 1.0, 22.0),
+                {
+                    // eseq-hpc: resonance is also a published modulation
+                    // destination, so its knob and the spectrum curve read the
+                    // host's effective-value field instead of the base one.
+                    // frame/cutoff deliberately keep no field, covering the
+                    // fallback-to-base path in the same panel.
+                    let Value::Map(mut param) = mod_param("resonance", 2, 0.0, 0.0, 1.0, 22.0)
+                    else {
+                        unreachable!("mod_param builds a map")
+                    };
+                    param.insert(
+                        "mod-value-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(
+                            "fx-mod-value-77-2".to_string(),
+                        ))),
+                    );
+                    Value::Map(param)
+                },
                 mod_param("mix", 3, 0.7, 0.0, 1.0, 23.0),
                 Value::Map(test_param_map("output", 4, 1.0, 0.25, 2.0)),
             ],
@@ -37537,6 +37554,7 @@
                 ("filter-table-live-0", Value::Number(0.0)),
                 ("filter-table-live-1", Value::Number(1000.0)),
                 ("filter-table-live-2", Value::Number(0.0)),
+                ("fx-mod-value-77-2", Value::Number(0.0)),
                 ("filter-table-live-3", Value::Number(0.7)),
                 ("available-effects", test_list(vec![])),
                 (
@@ -37619,6 +37637,56 @@
                 -1.0,
             ),
             4000.0,
+        );
+
+        // eseq-hpc: resonance publishes an effective value, so both its curve
+        // binding and its knob overlay follow the host's field — and nothing
+        // writes back into the knob's own value.
+        assert!(
+            matches!(
+                spectrum_viewer.props.get("response-resonance"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "a modulated destination's curve binds to its effective-value field",
+        );
+        let resonance_knob =
+            find_knob_by_label(&layout, "resonance").expect("resonance knob-number");
+        assert!(
+            matches!(
+                resonance_knob.props.get("modulated-value"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "a modulated destination's knob binds its live dot to the same field",
+        );
+        let frame_knob = find_knob_by_label(&layout, "frame").expect("frame knob-number");
+        assert!(
+            !matches!(
+                frame_knob.props.get("modulated-value"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "a param with no published effective value must draw no live dot",
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "fx-mod-value-77-2",
+            Value::Number(0.8),
+        );
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(
+                &spectrum_viewer.props,
+                "response-resonance",
+                -1.0,
+            ),
+            0.8,
+        );
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(&resonance_knob.props, "modulated-value", -1.0),
+            0.8,
+        );
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(&resonance_knob.props, "value", -1.0),
+            0.0,
+            "the overlay must not disturb the knob's own (base) value",
         );
 
         // With preset options provided the table name renders as the preset

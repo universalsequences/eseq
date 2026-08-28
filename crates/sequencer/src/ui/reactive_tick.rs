@@ -327,28 +327,28 @@ pub(crate) fn reactive_tick_and_render(
             meter_polled = true;
             ctx.meters.last_meter_poll_at = Instant::now();
         }
-        // Effective Filter Table response values (eseq-dtx.13). Gated on the FX
-        // panel: hidden panels drop their modulator nodes off the watchlist and
-        // report base values, which is also what settles the curve back to base
-        // when modulation stops.
+        // Effective (post-modulation) effect param values (eseq-dtx.13,
+        // generalized in eseq-hpc). Gated on the FX panel: hidden panels drop
+        // their modulator nodes off the watchlist and report base values, which
+        // is also what settles knob dots and curves back to base when
+        // modulation stops.
         //
         // Also polled off-cadence whenever fx_epoch moves, so a freshly
-        // inserted Filter Table publishes its base response in the same tick
-        // its panel is built. Without that seed `bind-seq` vivifies 0.0 and the
-        // panel renders frame=0 / cutoff=0 Hz (off the 40..18000 log axis) for
+        // inserted effect publishes its base values in the same tick its panel
+        // is built. Without that seed `bind-seq` vivifies 0.0 and e.g. a Filter
+        // Table renders frame=0 / cutoff=0 Hz (off the 40..18000 log axis) for
         // up to a meter interval.
-        let filter_table_epoch = ctx.shared.fx_epoch.load(Ordering::Relaxed);
-        if meter_polled || filter_table_epoch != ctx.meters.filter_table_poll_fx_epoch {
-            ctx.meters.filter_table_poll_fx_epoch = filter_table_epoch;
-            let filter_table_selected_step =
-                selected_plock_step(&ctx.shared.selected_steps);
-            ctx.meters.cached_filter_table_responses = read_filter_table_responses(
+        let effect_mod_epoch = ctx.shared.fx_epoch.load(Ordering::Relaxed);
+        if meter_polled || effect_mod_epoch != ctx.meters.effect_mod_poll_fx_epoch {
+            ctx.meters.effect_mod_poll_fx_epoch = effect_mod_epoch;
+            let effect_mod_selected_step = selected_plock_step(&ctx.shared.selected_steps);
+            ctx.meters.cached_effect_mod_values = read_effect_mod_values(
                 app.graph.lg,
                 &app,
                 &ctx.shared.state,
-                filter_table_selected_step,
+                effect_mod_selected_step,
                 fx_visible,
-                &mut ctx.meters.watched_filter_table_modulators,
+                &mut ctx.meters.watched_effect_modulators,
             );
         }
         let mut needs_reactive_cycle = false;
@@ -932,19 +932,18 @@ pub(crate) fn reactive_tick_and_render(
             }
             ctx.frame.prev_modulator_levels = ctx.meters.cached_modulator_levels.clone();
         }
-        // Filter Table response bindings (eseq-dtx.13). Published whatever the
-        // panel visibility: the sampler already reports base values while the
-        // FX panel is hidden, so this is what leaves the fields holding the
-        // base spectrum for the next open, and it only writes on change.
-        if ctx.meters.cached_filter_table_responses != ctx.frame.prev_filter_table_responses {
-            needs_reactive_cycle |= sync_filter_table_response_field_delta(
+        // Effective-value bindings (eseq-dtx.13, eseq-hpc). Published whatever
+        // the panel visibility: the sampler already reports base values while
+        // the FX panel is hidden, so this is what leaves the fields holding
+        // base values for the next open, and it only writes on change.
+        if ctx.meters.cached_effect_mod_values != ctx.frame.prev_effect_mod_values {
+            needs_reactive_cycle |= sync_effect_mod_value_field_delta(
                 editor.runtime_mut(),
-                &ctx.frame.prev_filter_table_responses,
-                &ctx.meters.cached_filter_table_responses,
+                &ctx.frame.prev_effect_mod_values,
+                &ctx.meters.cached_effect_mod_values,
             )
             .0;
-            ctx.frame.prev_filter_table_responses =
-                ctx.meters.cached_filter_table_responses.clone();
+            ctx.frame.prev_effect_mod_values = ctx.meters.cached_effect_mod_values.clone();
         }
         if sequencer_visible {
             let previous_track_playheads = ctx.frame.prev_track_playheads.clone();

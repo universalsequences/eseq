@@ -66,6 +66,7 @@
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
+        :modulated-value (eseq.effects.param-controls/param-modulated-value p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
         :mod-range-1-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 1)
@@ -89,6 +90,7 @@
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
+        :modulated-value (eseq.effects.param-controls/param-modulated-value p)
         :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
         :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
         :mod-range-1-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 1)
@@ -132,22 +134,24 @@
     :source (analyzer-source fx)
     :tap-point :post-fx
     :fft-size 4096 :time-slices 64 :min-db -84 :max-db 0 :smoothing 0.72
-    ;; These must be the base-value bindings, not the snapshot :value fields.
-    ;; Knob drags update :value-field in place and do not rebuild the panel.
-    :mode (eseq.effects.param-controls/instrument-param-base-value mode-p)
-    :circuit (eseq.effects.param-controls/instrument-param-base-value circuit-p)
-    :notches (eseq.effects.param-controls/instrument-param-base-value notches-p)
-    :center (eseq.effects.param-controls/instrument-param-base-value center-p)
-    :spread (eseq.effects.param-controls/instrument-param-base-value spread-p)
-    :blend (eseq.effects.param-controls/instrument-param-base-value blend-p)
-    :flanger-time (eseq.effects.param-controls/instrument-param-base-value flt-p)
-    :doubler-time (eseq.effects.param-controls/instrument-param-base-value dbt-p)
-    :amount (eseq.effects.param-controls/instrument-param-base-value amount-p)
-    :stereo (eseq.effects.param-controls/instrument-param-base-value stereo-p)
-    :sync (eseq.effects.param-controls/instrument-param-base-value sync-p)
-    :rate (eseq.effects.param-controls/instrument-param-base-value rate-p)
-    :sync-div (eseq.effects.param-controls/instrument-param-base-value div-p)
-    :lfo-shape (eseq.effects.param-controls/instrument-param-base-value shape-p)
+    ;; These must be the effective-value bindings, not the snapshot :value
+    ;; fields. Knob drags update :value-field in place and do not rebuild the
+    ;; panel, and `param-effective-value` follows an LFO on center/spread/blend
+    ;; (eseq-hpc), falling back to the base value when nothing is modulating.
+    :mode (eseq.effects.param-controls/param-effective-value mode-p)
+    :circuit (eseq.effects.param-controls/param-effective-value circuit-p)
+    :notches (eseq.effects.param-controls/param-effective-value notches-p)
+    :center (eseq.effects.param-controls/param-effective-value center-p)
+    :spread (eseq.effects.param-controls/param-effective-value spread-p)
+    :blend (eseq.effects.param-controls/param-effective-value blend-p)
+    :flanger-time (eseq.effects.param-controls/param-effective-value flt-p)
+    :doubler-time (eseq.effects.param-controls/param-effective-value dbt-p)
+    :amount (eseq.effects.param-controls/param-effective-value amount-p)
+    :stereo (eseq.effects.param-controls/param-effective-value stereo-p)
+    :sync (eseq.effects.param-controls/param-effective-value sync-p)
+    :rate (eseq.effects.param-controls/param-effective-value rate-p)
+    :sync-div (eseq.effects.param-controls/param-effective-value div-p)
+    :lfo-shape (eseq.effects.param-controls/param-effective-value shape-p)
     :bpm (bind-seq "bpm")))
 
 (def notches-control (fx p)

@@ -53,6 +53,8 @@
         param-knob-mod-slot-prop
         param-knob-mod-depth-prop
         param-base-value-prop
+        param-modulated-value
+        param-effective-value
         param-base-min-prop
         param-base-max-prop
         param-selected-mod-slot-prop
@@ -826,6 +828,24 @@
 (def param-knob-mod-depth-prop (fx p idx)
   (let ((target (param-knob-mod-target fx p idx)))
     (if target (instrument-mod-target-depth target) false)))
+
+;; Effective (post-modulation) parameter value (eseq-hpc). The host samples the
+;; effect's modulator node at meter rate and publishes `base + sum(depth * mod)`
+;; into this field for every declared modulation destination; knobs draw their
+;; live dot at it and curve visualizers re-evaluate their curve with it. This is
+;; read-only telemetry — nothing here writes back into widget state, so dragging
+;; a modulated knob still edits the base value. `false` when the param is not a
+;; modulation destination (no field published), which is what makes the knob
+;; overlay cost nothing on unmodulatable params and on rack slots.
+(def param-modulated-value (p)
+  (let ((field (get p :mod-value-field)))
+    (if field (bind-seq field) false)))
+
+;; Same value, but falling back to the base value so curve visualizers — which
+;; need a number either way — can read one accessor.
+(def param-effective-value (p)
+  (let ((field (get p :mod-value-field)))
+    (if field (bind-seq field) (instrument-param-base-value p))))
 
 (def param-base-value-prop (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
