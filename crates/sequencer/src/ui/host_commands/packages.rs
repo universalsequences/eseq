@@ -570,7 +570,15 @@ fn attach_selected_package(
     };
 
     let result = match destination {
-        AttachmentDestination::Scratch => attach_to_scratch(editor, module),
+        // Attaching to the project loads the module on the spot, the way
+        // clicking a script in the Scripts tab used to: the module registers
+        // its step tab, effect buffers and macros immediately instead of
+        // waiting for the next scratch replay. The scratch line is written
+        // only once the module evaluates, so a broken module cannot poison
+        // the project.
+        AttachmentDestination::Scratch => {
+            load_module(editor, module).and_then(|()| attach_to_scratch(editor, module))
+        }
         AttachmentDestination::UserInit => attach_to_user_init(editor, module),
     };
     match result {
@@ -588,6 +596,17 @@ fn attach_selected_package(
             refresh_packages_view(editor, ctx);
         }
         Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+    }
+}
+
+/// Evaluate `(import <module>)` in the UI runtime. `import` is load-once and
+/// idempotent, so re-attaching an already-loaded module is a no-op.
+fn load_module(editor: &mut Editor, module: &str) -> Result<(), String> {
+    let result = editor.runtime_mut().eval_str(&format!("(import {module})"));
+    editor.refresh_runtime_side_effects();
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("Could not load '{module}': {error:?}")),
     }
 }
 
