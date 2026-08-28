@@ -242,11 +242,27 @@ fn close_packages_view(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
     let _ = editor.swap_buffer_in_tile_showing(PACKAGES_BUFFER_NAME, &session.previous_buffer);
     editor.remove_buffer_by_name(PACKAGES_BUFFER_NAME);
     let _ = editor.switch_active_tile_to_buffer_named(&session.previous_buffer);
+    reinstall_step_tabs(editor);
 }
 
 fn finish_packages_session(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
     ctx.sessions.package_view_session = None;
     editor.remove_buffer_by_name(PACKAGES_BUFFER_NAME);
+    reinstall_step_tabs(editor);
+}
+
+/// Reinstall the step-tab bar once the sequencer is back on screen.
+///
+/// `set-window-tabs-for` no-ops when no tile is showing the target buffer, and
+/// the Packages view takes over the sequencer's tile. A module attached from
+/// the view registers its step tab while *sequencer* is off screen, so the
+/// refresh its registration triggers cannot install anything — without this
+/// the tab is registered but never appears.
+fn reinstall_step_tabs(editor: &mut Editor) {
+    let _ = editor
+        .runtime_mut()
+        .eval_str("(eseq.seq-step-tabs/seq-refresh-step-tabs-if-present)");
+    editor.refresh_runtime_side_effects();
 }
 
 fn refresh_packages_view(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {

@@ -50,6 +50,7 @@
         seq-arrangement-view?
         seq-visible-main-panel-buffer
         seq-main-step-tile-layout-spec
+        seq-refresh-step-tabs-if-present
         seq-register-step-sequencer-tab
         seq-register-script-step-sequencer-tab
         seq-unregister-step-sequencer-tab

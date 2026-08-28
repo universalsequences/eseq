@@ -17101,6 +17101,71 @@
         );
     }
 
+    /// The Packages view takes over the sequencer's tile, and
+    /// `set-window-tabs-for` no-ops when no tile is showing the target buffer
+    /// (`editor/natives.rs`). So a module attached from that view registers
+    /// its step tab while *sequencer* is off screen and the refresh its
+    /// registration triggers installs nothing — the tab exists in
+    /// `seq-registered-step-tabs` but never appears. Closing the view has to
+    /// reinstall the bar.
+    #[test]
+    fn metal_seq_step_tab_registered_off_screen_installs_on_the_next_refresh() {
+        fn sequencer_tab_labels(editor: &eseqlisp::Editor) -> Vec<String> {
+            let Some(idx) = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == "*sequencer*")
+            else {
+                return Vec::new();
+            };
+            editor
+                .tile_root
+                .find_leaf_by_buffer_idx(idx)
+                .map(|leaf| leaf.tabs.iter().map(|tab| tab.label.clone()).collect())
+                .unwrap_or_default()
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        // Stand in for the Packages view taking over the sequencer's tile.
+        editor.create_scratch_buffer("*packages-stand-in*", "", eseqlisp::BufferMode::ESeqLisp);
+        assert!(
+            editor.swap_buffer_in_tile_showing("*sequencer*", "*packages-stand-in*"),
+            "the sequencer tile should accept the stand-in buffer"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*attached-demo*" (label "attached"))
+                (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
+                  "demo" "*attached-demo*" "" "")
+                "#,
+            )
+            .expect("register a step tab while the sequencer is off screen");
+        editor.refresh_runtime_side_effects();
+        assert!(
+            !sequencer_tab_labels(&editor).iter().any(|l| l == "demo"),
+            "registering off screen cannot install the bar; that is the bug"
+        );
+
+        assert!(
+            editor.swap_buffer_in_tile_showing("*packages-stand-in*", "*sequencer*"),
+            "the sequencer should come back to its tile"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.seq-step-tabs/seq-refresh-step-tabs-if-present)")
+            .expect("the refresh must be exported for the host to call on close");
+        editor.refresh_runtime_side_effects();
+
+        let labels = sequencer_tab_labels(&editor);
+        assert!(
+            labels.iter().any(|label| label == "demo"),
+            "reinstalling the bar should surface the attached module's tab, got {labels:?}"
+        );
+    }
+
     #[test]
     fn metal_seq_source_only_script_tab_is_closable_and_removes_its_scratch_load() {
         let mut editor = full_grid_editor_for_scroll_tests();
