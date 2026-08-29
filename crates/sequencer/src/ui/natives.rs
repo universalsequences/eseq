@@ -6272,10 +6272,20 @@ pub(crate) fn init_runtime(
     // tracks only decide where live NOTES land.
     let rec = recording.clone();
     let ui_ep = ui_epoch.clone();
-    runtime.register_native("seq-toggle-record", move |_args, _ctx| {
+    runtime.register_native("seq-toggle-record", move |_args, ctx| {
         let was = rec.load(Ordering::Relaxed);
         rec.store(!was, Ordering::Relaxed);
         ui_ep.fetch_add(1, Ordering::Relaxed);
+        // Record is a live punch control while the song plays
+        // (unified-transport spec 5), not just an arm flag: engaging it
+        // mid-playback punches into arrangement capture and disengaging it
+        // punches out and commits. Without this the transport state machine
+        // never observed the button at all — Play, then Record, then a
+        // scene launch captured nothing.
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "song-toggle-record".to_string(),
+            payload: Value::Bool(!was),
+        });
         Ok(Value::Bool(!was))
     });
 

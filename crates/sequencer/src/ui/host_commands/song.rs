@@ -47,6 +47,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "song-capture-cancel",
     "song-back-to-song",
     "song-back-to-song-track",
+    "song-toggle-record",
     "song-status",
     // Sound binding (takes spec 16): timeline clip selection is the explicit
     // binding gesture, plus the two explicit propagation gestures.
@@ -637,6 +638,13 @@ fn run_transport(
             let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
             app.back_to_song_track(track).map(Some)
         }
+        // The record button during playback (unified-transport spec 5):
+        // punch in mid-pass, punch out without stopping. Stopped this is a
+        // no-op — the arm flag the native already toggled is what Play reads.
+        "song-toggle-record" => {
+            let engaged = matches!(payload, Value::Bool(true));
+            app.set_song_record_engaged(engaged)
+        }
         "song-status" => Ok(Some(song_status_summary(app))),
         // Selecting a clip re-binds the track's device panel, monitor sound
         // and record-clone template in one move (takes spec 16.2/16.6), so
@@ -845,6 +853,7 @@ const TRANSPORT_COMMANDS: &[&str] = &[
     "song-capture-cancel",
     "song-back-to-song",
     "song-back-to-song-track",
+    "song-toggle-record",
     "song-status",
     "song-select-clip",
     "song-deselect-clip",

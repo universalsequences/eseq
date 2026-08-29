@@ -118,6 +118,81 @@ impl App {
         true
     }
 
+    /// The record button while the song is the playback authority
+    /// (unified-transport spec 5): record is a live PUNCH control, not a
+    /// transport command.
+    ///
+    /// - Engaged mid-playback it promotes into arrangement capture, so the
+    ///   launches from here are captured. Before this, the promotion was
+    ///   reachable only from `stamp_recording_kind_for_note` — the first
+    ///   armed NOTE — so hitting Play, then Record, then launching a scene
+    ///   captured nothing at all: the launch latched (the arrangement
+    ///   audibly stopped and the scene played) with no take to record into.
+    /// - Disengaged during capture it punches out: the pass commits at the
+    ///   current record beat and playback continues on the arrangement it
+    ///   just became.
+    ///
+    /// View-keyed exactly like the note path: the Seq view means loop
+    /// overdub, not arrangement capture.
+    pub fn set_song_record_engaged(&mut self, engaged: bool) -> Result<Option<String>, String> {
+        match (engaged, self.song_transport_mode) {
+            (true, SongTransportMode::SongPlayback) => {
+                if !self.arrangement_view_visible {
+                    if self.recording_kind.is_none() && self.state.is_playing() {
+                        self.recording_kind = Some(RecordingKind::Overdub);
+                    }
+                    return Ok(None);
+                }
+                Ok(self
+                    .promote_song_playback_to_capture()
+                    .then(|| "Arrangement capture punched in".to_string()))
+            }
+            (false, SongTransportMode::ArrangementCapture) => self.song_capture_punch_out(),
+            // Stopped, or already in the requested state: the record button
+            // is just an arm flag and Play decides the mode.
+            _ => Ok(None),
+        }
+    }
+
+    /// Punch out of arrangement capture WITHOUT stopping (spec 5): commit the
+    /// pass at the current record beat and keep playing. The stop path
+    /// (`arrangement_capture_stop`) is the same commit plus a transport
+    /// teardown; the ordering rules it documents apply here identically.
+    pub fn song_capture_punch_out(&mut self) -> Result<Option<String>, String> {
+        if self.song_transport_mode != SongTransportMode::ArrangementCapture {
+            return Ok(None);
+        }
+        // Same authority as the stop boundary: the latency-compensated
+        // record clock every capture event was stamped against.
+        let end_raw_beats = self
+            .state
+            .record_beats_at_instant(std::time::Instant::now())
+            .unwrap_or_else(|| self.state.scheduler_rendered_beats())
+            .max(0.0);
+        // Unlock the song editing primitives before committing: the commit
+        // itself goes through `song_replace`.
+        self.set_song_transport_mode(SongTransportMode::SongPlayback);
+        self.recording_kind = None;
+        let result = self.finish_song_capture_take(end_raw_beats).map(Some);
+        // The latch clears only AFTER the commit, exactly as at stop: the
+        // commit's scene-sync snapshot must still see latched lanes as stale
+        // or it writes the performer's launch over the scene cell's pattern.
+        // Clearing it is also the point of the gesture — punching out hands
+        // the lanes back to the arrangement (takes spec 10: "the latch
+        // clears automatically at punch-out/commit").
+        let released_latch = self.state.song_manual_latch_mask();
+        self.state.clear_song_manual_latch();
+        // Claim-end reinstall (track-sound spec §2.8), as at capture stop.
+        self.state
+            .restore_track_sounds_to_mirror_masked(released_latch);
+        // The scheduler is still playing the song as it was BEFORE the
+        // splice; hand it the arrangement the pass just produced so the
+        // punched-in region plays back on the next pass over it.
+        self.rebuild_active_song_after_arrangement_edit();
+        self.sync_track_sound_bindings();
+        result
+    }
+
     /// Stamp the recording kind from the view under the performer at the
     /// first armed note of a recording engaged mid-playback
     /// (unified-transport spec 5): the arrangement view promotes into
@@ -1306,6 +1381,116 @@ mod tests {
             take.events()[0].beat
         );
         let _ = app.song_capture_cancel();
+    }
+
+    /// eseq-r3c1 (unified-transport spec 5): the record button is a live
+    /// PUNCH control while the song plays. Engaging it mid-playback promotes
+    /// into arrangement capture — the promotion used to be reachable only
+    /// from the first armed NOTE, so Play → Record → launch a scene captured
+    /// nothing at all.
+    #[test]
+    fn record_engaged_mid_playback_punches_into_capture() {
+        let mut app = app_with_song();
+        app.set_arrangement_view_visible(true);
+        app.song_transport_play(false).expect("song playback starts");
+        assert_eq!(app.song_transport_mode, SongTransportMode::SongPlayback);
+        assert!(
+            app.song_capture_take.is_none(),
+            "plain playback opens no capture take"
+        );
+
+        let status = app
+            .set_song_record_engaged(true)
+            .expect("record engages")
+            .expect("punch-in reports");
+        assert!(status.contains("punched in"), "got {status}");
+        assert_eq!(app.song_transport_mode, SongTransportMode::ArrangementCapture);
+        assert!(
+            app.song_capture_take.is_some(),
+            "a scene launched from here has a take to record into"
+        );
+        assert!(app.state.is_playing(), "punching in never stops the transport");
+
+        // The gesture the user actually performs next: launch a scene. It is
+        // captured now, where before it latched and vanished.
+        app.state.set_scheduler_rendered_beats(4.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("scene launch");
+        assert_eq!(
+            app.song_capture_take.as_ref().map(|take| take.event_count()),
+            Some(1),
+            "the launch lands in the capture"
+        );
+        let _ = app.song_capture_cancel();
+    }
+
+    /// The other half: disengaging record punches OUT — the pass commits at
+    /// the current record beat and playback continues, rather than the
+    /// capture running on to Stop as if the button did nothing.
+    #[test]
+    fn record_disengaged_punches_out_and_keeps_playing() {
+        let mut app = app_with_song();
+        app.set_arrangement_view_visible(true);
+        let song_before = app.state.committed_song();
+        app.song_transport_play(true).expect("capture starts");
+        assert_eq!(app.song_transport_mode, SongTransportMode::ArrangementCapture);
+
+        // Row 1 (beat 4) already resolves scene 1, so launch a DIFFERENT
+        // scene — otherwise the splice is correctly a no-op and the test
+        // would prove nothing about committing.
+        app.state.set_scheduler_rendered_beats(4.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 2 })
+            .expect("scene launch");
+        assert_ne!(
+            app.state.song_manual_latch_mask(),
+            0,
+            "the launch latches the lanes"
+        );
+
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.set_song_record_engaged(false).expect("record disengages");
+
+        assert_eq!(
+            app.song_transport_mode,
+            SongTransportMode::SongPlayback,
+            "punch-out leaves capture but not playback"
+        );
+        assert!(app.state.is_playing(), "the transport keeps rolling");
+        assert!(app.song_capture_take.is_none(), "the pass is committed");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            0,
+            "punching out hands the lanes back to the arrangement \
+             (takes spec 10)"
+        );
+        assert_ne!(
+            app.state.committed_song(),
+            song_before,
+            "the performance is spliced into the arrangement"
+        );
+        assert!(
+            app.active_runtime_song.is_some(),
+            "the scheduler is handed the arrangement the pass produced"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+    }
+
+    /// View-keyed like the note path: in the Seq view the record button means
+    /// loop overdub, not arrangement capture.
+    #[test]
+    fn record_engaged_in_the_seq_view_never_punches_into_capture() {
+        let mut app = app_with_song();
+        assert!(!app.arrangement_view_visible, "the Seq tab");
+        app.song_transport_play(false).expect("song playback starts");
+        app.set_song_record_engaged(true).expect("record engages");
+        assert_eq!(
+            app.song_transport_mode,
+            SongTransportMode::SongPlayback,
+            "the Seq view records into the loop, not over the arrangement"
+        );
+        assert!(app.song_capture_take.is_none());
+        assert_eq!(app.recording_kind, Some(RecordingKind::Overdub));
+        app.song_transport_stop().expect("stop succeeds");
     }
 
     #[test]
