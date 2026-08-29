@@ -484,7 +484,9 @@ pub(crate) fn run_event_loop(
                 shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
             }
         }
-        if backend.poll_editable_shader_overrides() {
+        if !sequencer::app_paths::app_paths().is_release()
+            && backend.poll_editable_shader_overrides()
+        {
             editor.mark_needs_redraw();
         }
         release_due_key_lock_auditions(

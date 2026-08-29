@@ -6,9 +6,9 @@ Every location the DGen toolchain touches — the DGenLisp helper binary, the
 staged toolchain, effect/instrument source roots, the dylib cache, and the
 scratch dirs — resolves through [`AppPaths`], from roots captured once at
 construction. Nothing here consults `std::env::current_dir()` after
-construction, so the compile path works from any working directory. Other
-subsystems still rely on `paths::enter_sequencer_dir()`'s chdir; that stays
-untouched.
+construction, so the compile path works from any working directory. The UI
+startup still enters the sequencer directory in development mode, but skips
+that checkout-only chdir when this module detects a packaged executable.
 
 In dev mode every query resolves to exactly what the pre-`AppPaths` code
 resolved to when running from the workspace (post `enter_sequencer_dir()`).
@@ -78,8 +78,6 @@ pub enum AppPaths {
     /// executable directory, staged resources in `contents_resources`, and
     /// mutable user/cache roots supplied by the platform launcher.
     ///
-    /// Phase 5 (parent spec): nothing constructs this yet; the shapes exist
-    /// so the release layout is pinned now.
     Release {
         executable_dir: PathBuf,
         contents_resources: PathBuf,
@@ -128,8 +126,6 @@ impl AppPaths {
         Ok(paths)
     }
 
-    /// Phase 5 only: deriving these roots (bundle location, `<bundle-id>`
-    /// dirs) is unimplemented; no production code constructs this arm yet.
     pub fn release(
         executable_dir: PathBuf,
         contents_resources: PathBuf,
@@ -144,6 +140,10 @@ impl AppPaths {
             caches,
             user_lisp_root,
         }
+    }
+
+    pub fn is_release(&self) -> bool {
+        matches!(self, AppPaths::Release { .. })
     }
 
     /// The DGenLisp helper binary invoked for every compile.
@@ -674,6 +674,111 @@ pub fn resolve_sample_ref(path: &std::path::Path) -> PathBuf {
 
 static APP_PATHS: OnceLock<AppPaths> = OnceLock::new();
 
+const RELEASE_DATA_DIRECTORY: &str = "eseq";
+
+#[derive(Debug, PartialEq, Eq)]
+enum RuntimeLayout {
+    Dev,
+    Release {
+        executable_dir: PathBuf,
+        contents_resources: PathBuf,
+    },
+}
+
+/// Select the runtime layout solely from the executable's location. A release
+/// executable must be an immediate child of `*.app/Contents/MacOS`; paths that
+/// merely contain one of those component names remain development paths.
+fn runtime_layout(executable: &Path) -> RuntimeLayout {
+    let Some(executable_dir) = executable.parent() else {
+        return RuntimeLayout::Dev;
+    };
+    let Some(contents_dir) = executable_dir.parent() else {
+        return RuntimeLayout::Dev;
+    };
+    let Some(app_dir) = contents_dir.parent() else {
+        return RuntimeLayout::Dev;
+    };
+    let is_bundle = executable_dir.file_name().is_some_and(|name| name == "MacOS")
+        && contents_dir.file_name().is_some_and(|name| name == "Contents")
+        && app_dir.extension().is_some_and(|extension| extension == "app");
+    if !is_bundle {
+        return RuntimeLayout::Dev;
+    }
+    RuntimeLayout::Release {
+        executable_dir: executable_dir.to_path_buf(),
+        contents_resources: contents_dir.join("Resources"),
+    }
+}
+
+fn release_paths_for_executable_and_home(
+    executable: &Path,
+    home: &Path,
+) -> Option<AppPaths> {
+    let RuntimeLayout::Release {
+        executable_dir,
+        contents_resources,
+    } = runtime_layout(executable)
+    else {
+        return None;
+    };
+    Some(AppPaths::release(
+        executable_dir,
+        contents_resources,
+        home.join("Library/Application Support").join(RELEASE_DATA_DIRECTORY),
+        home.join("Library/Caches").join(RELEASE_DATA_DIRECTORY),
+        home.join(".eseq.d"),
+    ))
+}
+
+fn release_paths_for_executable(executable: &Path) -> io::Result<Option<AppPaths>> {
+    if runtime_layout(executable) == RuntimeLayout::Dev {
+        return Ok(None);
+    }
+    // Release deliberately does not consult ESEQ_CONFIG_DIR or any checkout /
+    // toolchain override. Installed roots are fixed relative to HOME and the
+    // bundle so a developer environment cannot redirect a shipped app.
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
+    Ok(release_paths_for_executable_and_home(executable, &home))
+}
+
+fn install(paths: AppPaths) -> &'static AppPaths {
+    let installed = APP_PATHS.get_or_init(|| paths);
+    configure_eseqlisp_roots(installed);
+    installed
+}
+
+/// Detect and install the process layout. Packaged executables use only
+/// bundle/user roots; all other executables preserve the workspace behavior.
+pub fn init() -> io::Result<&'static AppPaths> {
+    let executable = std::env::current_exe()?;
+    let paths = match release_paths_for_executable(&executable)? {
+        Some(paths) => paths,
+        None => AppPaths::dev_from_env(
+            crate::paths::sequencer_dir()?,
+            crate::paths::workspace_root(),
+        )?,
+    };
+    Ok(install(paths))
+}
+
+/// Install the release layout for a known bundled executable. This is useful
+/// to launch/test a bundle path explicitly and rejects non-bundle paths.
+pub fn init_release(executable: &Path) -> io::Result<&'static AppPaths> {
+    let paths = release_paths_for_executable(executable)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "release executable is not inside *.app/Contents/MacOS: {}",
+                executable.display()
+            ),
+        )
+    })?;
+    Ok(install(paths))
+}
+
 /// Install the dev-layout `AppPaths` for this process. Called at startup next
 /// to `paths::enter_sequencer_dir()`, while the workspace is still locatable.
 /// Idempotent; later calls keep the first installation.
@@ -682,8 +787,7 @@ pub fn init_dev() -> io::Result<()> {
         crate::paths::sequencer_dir()?,
         crate::paths::workspace_root(),
     )?;
-    configure_eseqlisp_roots(&paths);
-    let _ = APP_PATHS.set(paths);
+    install(paths);
     Ok(())
 }
 
@@ -702,10 +806,8 @@ fn configure_eseqlisp_roots(paths: &AppPaths) {
     eseqlisp::hot_reload::set_global_load_fallback_roots(roots);
 }
 
-/// Process-wide accessor. Falls back to a dev-layout construction when
-/// `init_dev()` was never called (tests, helper tools); the fallback locates
-/// the workspace once and caches the result — queries never re-consult the
-/// working directory.
+/// Process-wide accessor. Startup should call [`init`]; tests and helper tools
+/// retain a dev fallback so existing library-only entry points remain usable.
 pub fn app_paths() -> &'static AppPaths {
     APP_PATHS.get_or_init(|| {
         let sequencer_dir = crate::paths::sequencer_dir()
@@ -720,6 +822,114 @@ pub fn app_paths() -> &'static AppPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_executable_selects_release_and_keeps_all_roots_out_of_checkout() {
+        let executable = Path::new("/Applications/ESeq.app/Contents/MacOS/metal_seq");
+        let paths = release_paths_for_executable_and_home(executable, Path::new("/Users/test"))
+            .expect("bundle path must select Release");
+        assert!(paths.is_release());
+        assert_eq!(
+            runtime_layout(executable),
+            RuntimeLayout::Release {
+                executable_dir: PathBuf::from("/Applications/ESeq.app/Contents/MacOS"),
+                contents_resources: PathBuf::from("/Applications/ESeq.app/Contents/Resources"),
+            }
+        );
+
+        let contents = Path::new("/Applications/ESeq.app/Contents");
+        let support = Path::new("/Users/test/Library/Application Support/eseq");
+        let caches = Path::new("/Users/test/Library/Caches/eseq");
+        let user_lisp = Path::new("/Users/test/.eseq.d");
+        let rooted_paths = [
+            paths.dgenlisp_tool(),
+            paths.dgen_toolchain_root(),
+            paths.dgen_abi_dir(),
+            paths.perf_probe_projects_dir(),
+            paths.factory_root(),
+            paths.user_data_root(),
+            paths.local_modules_dir(),
+            paths.packages_dir(),
+            paths.factory_packages_dir(),
+            paths.core_dir(),
+            paths.ui_dir(),
+            paths.defmacros_dir(),
+            paths.midi_fx_dir(),
+            paths.presets_dir(),
+            paths.rack_presets_dir(),
+            paths.kits_dir(),
+            paths.processes_dir(),
+            paths.scripts_dir(),
+            paths.impulses_dir(),
+            paths.filter_tables_dir(),
+            paths.projects_dir(),
+            paths.recordings_dir(),
+            paths.samples_dir(),
+            paths.sample_db_path(),
+            paths.sample_facts_path(),
+            paths.sounds_dir(),
+            paths.sample_assets_dir(),
+            paths.user_filter_tables_dir(),
+            paths.user_presets_dir(),
+            paths.user_rack_presets_dir(),
+            paths.user_kits_dir(),
+            paths.effects_dir(),
+            paths.instruments_dir(),
+            paths.user_effects_dir(),
+            paths.user_instruments_dir(),
+            paths.dgen_asset_fallback_base(),
+            paths.dgen_cache_root(),
+            paths.learn_jobs_dir(),
+            paths.dgen_scratch_dir(),
+            paths.ir_prep_dir(),
+        ];
+        for path in rooted_paths {
+            assert!(
+                path.starts_with(contents)
+                    || path.starts_with(support)
+                    || path.starts_with(caches)
+                    || path.starts_with(user_lisp),
+                "release path escaped installed/user roots: {}",
+                path.display()
+            );
+            assert!(!path.starts_with("/ws"));
+        }
+        assert_eq!(paths.user_lisp_root(), user_lisp);
+        for path in paths.effect_dirs().into_iter().chain(paths.instrument_dirs()) {
+            assert!(path.starts_with(contents) || path.starts_with(support));
+        }
+    }
+
+    #[test]
+    fn workspace_executable_selects_dev() {
+        let executable = Path::new("/ws/target/debug/metal_seq");
+        assert_eq!(runtime_layout(executable), RuntimeLayout::Dev);
+        assert!(release_paths_for_executable_and_home(executable, Path::new("/Users/test"))
+            .is_none());
+    }
+
+    #[test]
+    fn release_arm_ignores_dev_toolchain_and_checkout_roots() {
+        // Release construction has no override inputs: even values named by
+        // ESEQ_DGEN_TOOLCHAIN_ROOT and SEQUENCER_ROOT cannot enter this arm.
+        let paths = release_paths_for_executable_and_home(
+            Path::new("/Applications/ESeq.app/Contents/MacOS/metal_seq"),
+            Path::new("/Users/test"),
+        )
+        .unwrap();
+        let eseq_dgen_toolchain_root = Path::new("/ws/shared-toolchain");
+        let sequencer_root = Path::new("/ws/crates/sequencer");
+        assert_ne!(paths.dgen_toolchain_root(), eseq_dgen_toolchain_root);
+        assert_ne!(paths.factory_root(), sequencer_root);
+        assert_eq!(
+            paths.dgen_toolchain_root(),
+            PathBuf::from("/Applications/ESeq.app/Contents/Resources/dgen-toolchain")
+        );
+        assert_eq!(
+            paths.factory_root(),
+            PathBuf::from("/Applications/ESeq.app/Contents/Resources")
+        );
+    }
 
     #[test]
     fn dev_paths_resolve_from_captured_roots_only() {

@@ -34,13 +34,24 @@ pub fn user_init_path() -> Option<PathBuf> {
 }
 
 pub fn eseqlisp_init_candidates() -> Vec<PathBuf> {
+    let app_paths = crate::app_paths::app_paths();
+    let override_root = (!app_paths.is_release())
+        .then(|| std::env::var("ESEQLISP_ROOT").ok())
+        .flatten();
+    eseqlisp_init_candidates_for(app_paths, override_root.as_deref())
+}
+
+fn eseqlisp_init_candidates_for(
+    app_paths: &crate::app_paths::AppPaths,
+    dev_override: Option<&str>,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Ok(root) = std::env::var("ESEQLISP_ROOT") {
-        if !root.trim().is_empty() {
+    if !app_paths.is_release() {
+        if let Some(root) = dev_override.filter(|root| !root.trim().is_empty()) {
             paths.push(PathBuf::from(root).join("init.lisp"));
         }
     }
-    paths.push(crate::app_paths::app_paths().core_dir().join("init.lisp"));
+    paths.push(app_paths.core_dir().join("init.lisp"));
     paths
 }
 
@@ -87,4 +98,40 @@ fn repo_roots_from_current_exe() -> Vec<PathBuf> {
 
 fn is_package_dir(path: &Path, package: &str) -> bool {
     path.join("Cargo.toml").is_file() && path.file_name().is_some_and(|name| name == package)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_init_candidates_ignore_eseqlisp_root() {
+        let paths = crate::app_paths::AppPaths::release(
+            PathBuf::from("/ESeq.app/Contents/MacOS"),
+            PathBuf::from("/ESeq.app/Contents/Resources"),
+            PathBuf::from("/Support"),
+            PathBuf::from("/Caches"),
+            PathBuf::from("/home/test/.eseq.d"),
+        );
+        assert_eq!(
+            eseqlisp_init_candidates_for(&paths, Some("/checkout/crates/eseqlisp")),
+            vec![PathBuf::from("/ESeq.app/Contents/Resources/core/init.lisp")]
+        );
+    }
+
+    #[test]
+    fn dev_init_candidates_still_honor_eseqlisp_root() {
+        let paths = crate::app_paths::AppPaths::dev(
+            PathBuf::from("/ws/crates/sequencer"),
+            PathBuf::from("/ws"),
+            PathBuf::from("/home/test/.eseq.d"),
+        );
+        assert_eq!(
+            eseqlisp_init_candidates_for(&paths, Some("/ws/crates/eseqlisp")),
+            vec![
+                PathBuf::from("/ws/crates/eseqlisp/init.lisp"),
+                PathBuf::from("/ws/content/core/init.lisp"),
+            ]
+        );
+    }
 }
