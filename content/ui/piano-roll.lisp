@@ -381,14 +381,14 @@
 (def clip-panel-width 24)
 
 (def panel-row (name body)
-  (h-stack :gap 0.3 :align :baseline
+  (h-stack :gap 0.3 :align :center
     (box :width 4.6 :height 1.0
       (label name :font-size 10 :color :dim :bg :transparent))
     body))
 
 (def panel-static (name text key)
   (panel-row name
-    (box :width 8 :height 1.0
+    (box :width 5 :height 1.0 :h-align :left
       (label text :key key :font-size 10 :color :white :bg :transparent))))
 
 ;; Signed display (spec 6): an offset in the top half of the pattern reads as
@@ -449,6 +449,7 @@
 (def panel-length-row ()
   (panel-row "Length"
     (number-picker :key "panel-length"
+      :noui true
       :value (num-steps)
       ;; A take's linear axis can outgrow one pattern (chunks); patterns and
       ;; the live path stay capped at MAX_STEPS.
@@ -483,25 +484,44 @@
           :height 1
           :width :fill
           :background-color (rgba (nth color 0) (nth color 1) (nth color 2) 1.0)
-          (h-stack (box :width 0.5)
-            (label
-              (nth SEQ.track-names SEQ.current-track)
-              :font-size 10 :bg :transparent :color :black))
+          (h-stack 
+            :gap 0
+            (box :width 1.0)
+            (badge (substring (nth SEQ.track-names SEQ.current-track) 0 15)
+              :key (str "pianoroll-label-content-" SEQ.current-track)
+              :icon (eseq.track-collapse/type-icon SEQ.current-track)
+              :width 10.8
+              :height 1.0
+              :padding 0
+              :font-size 10
+              :h-align :left
+              :background-color :transparent
+              :border-color :transparent
+              :highlight-color :transparent
+              :shadow-color :transparent
+              :color :black
+              :bg :transparent)
+            )
+          ;(label
+          ;  (nth SEQ.track-names SEQ.current-track)
+          ;  :font-size 10 :bg :transparent :color :black
+          ;))
           )
-
+        
         (box :width :fill :height 1.0
-          :background-color :gray
+          :background-color :mixer-strip-selected-bg
           (h-stack (box :width 0.5)
             (label SEQ.focus-label
               :key "panel-source"
               :font-size 10 :color :white :bg :transparent
               )
             ))
-
+        
         (box :padding 1  :height 5
+          :background-color :mixer-strip-bg
           :width clip-panel-width
           (v-stack :gap 0.25
-
+            
             (clip-panel-rows)
             (panel-length-row)
             ;; Informational in v1 (spec 6): states the pattern/take duality; layout
