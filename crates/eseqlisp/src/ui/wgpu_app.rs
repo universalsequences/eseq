@@ -1274,39 +1274,14 @@ impl WgpuAppBackend {
                 }
                 let key = (primitive.sample_key.clone(), primitive.samples_per_bucket);
                 let bucket_count = self.waveform_buffers[&key].bucket_count;
-                let ndc_min = [
-                    (primitive.rect.col * cell_w / vp_w) * 2.0 - 1.0,
-                    1.0 - ((primitive.rect.row + primitive.rect.height) * cell_h / vp_h) * 2.0,
-                ];
-                let ndc_max = [
-                    ((primitive.rect.col + primitive.rect.width) * cell_w / vp_w) * 2.0 - 1.0,
-                    1.0 - (primitive.rect.row * cell_h / vp_h) * 2.0,
-                ];
-                let instance = WaveformInstance {
-                    ndc_min,
-                    ndc_max,
-                    sample_start: primitive.sample_start,
-                    sample_end: primitive.sample_end,
-                    bucket_count: primitive.bucket_count.min(bucket_count),
-                    aspect_ratio: (primitive.rect.width * cell_w
-                        / (primitive.rect.height * cell_h))
-                        .max(0.0001),
-                    selection_start: primitive.selection_start,
-                    selection_end: primitive.selection_end,
-                    show_selection_start: primitive.show_selection_start as i32,
-                    show_selection_end: primitive.show_selection_end as i32,
-                    playhead_position: primitive.playhead_position,
-                    show_playhead: primitive.show_playhead as i32,
-                    waveform_color: primitive.waveform_color.to_rgba(),
-                    inactive_waveform_color: primitive.inactive_waveform_color.to_rgba(),
-                    marker_color: primitive.marker_color.to_rgba(),
-                    active_marker_color: primitive.active_marker_color.to_rgba(),
-                    active_selection_start: primitive.active_selection_start as i32,
-                    active_selection_end: primitive.active_selection_end as i32,
-                    selection_color: primitive.selection_color.to_rgba(),
-                    bg_color: theme::BG().to_rgba(),
-                    border_color: theme::BORDER_INACTIVE().to_rgba(),
-                };
+                let instance = WaveformInstance::from_primitive(
+                    &primitive,
+                    bucket_count,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
                 let gpu = self.gpu.as_ref().expect("gpu initialized");
                 plan.push(DrawCmd {
                     scissor: seg_scissor,
@@ -1913,7 +1888,7 @@ impl WgpuAppBackend {
                 let border_color = if tile.is_active {
                     theme::BORDER_ACTIVE()
                 } else {
-                    tile_bg
+                    theme::BORDER_INACTIVE()
                 };
                 let gpu = self.gpu.as_ref().expect("gpu initialized");
                 let chrome = gpu

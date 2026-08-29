@@ -984,8 +984,8 @@
               :width 7 :height 1.2)
             (subtree :key "transport-scene-launch-quantize"
               (dropdown
-                :bg-color '(rgba 0.1 0.1 0.1 0.3) ;:instrument-control-bg
-                :border-color '(rgba 0.4 0.4 0.4 1)
+                :bg-color :mixer-strip-bg
+                :border-color :mixer-strip-selected-bg
                 :badge-color :transparent
                 :key "transport-scene-launch-quantize-dropdown"
                 :debug-name "transport-scene-launch-quantize"
@@ -996,8 +996,8 @@
             (box :width 1.0)
             (subtree :key "transport-record-quantize"
               (dropdown
-                :bg-color '(rgba 0.1 0.1 0.1 0.3)
-                :border-color '(rgba 0.4 0.4 0.4 1)
+                :bg-color :mixer-strip-bg
+                :border-color :mixer-strip-selected-bg
                 :badge-color :transparent
                 :key "transport-record-quantize-dropdown"
                 :debug-name "transport-record-quantize"

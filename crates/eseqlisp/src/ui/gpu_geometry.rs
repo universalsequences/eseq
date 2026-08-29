@@ -121,6 +121,56 @@ pub(crate) struct WaveformInstance {
     pub border_color: [f32; 4],
 }
 
+impl WaveformInstance {
+    /// Build the GPU instance for one [`GpuWaveformPrimitive`].
+    ///
+    /// Shared by every backend so instance assembly (NDC placement, aspect
+    /// ratio, bool→int flags, theme colors) cannot drift between them.
+    /// `bucket_count` is clamped to the buckets actually resident in the
+    /// sample buffer for this frame.
+    pub(crate) fn from_primitive(
+        primitive: &widget_render::GpuWaveformPrimitive,
+        resident_bucket_count: u32,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Self {
+        let rect = &primitive.rect;
+        let ndc_min = [
+            (rect.col * cell_w / vp_w) * 2.0 - 1.0,
+            1.0 - ((rect.row + rect.height) * cell_h / vp_h) * 2.0,
+        ];
+        let ndc_max = [
+            ((rect.col + rect.width) * cell_w / vp_w) * 2.0 - 1.0,
+            1.0 - (rect.row * cell_h / vp_h) * 2.0,
+        ];
+        Self {
+            ndc_min,
+            ndc_max,
+            sample_start: primitive.sample_start,
+            sample_end: primitive.sample_end,
+            bucket_count: primitive.bucket_count.min(resident_bucket_count),
+            aspect_ratio: ((rect.width * cell_w) / (rect.height * cell_h)).max(0.0001),
+            selection_start: primitive.selection_start,
+            selection_end: primitive.selection_end,
+            show_selection_start: i32::from(primitive.show_selection_start),
+            show_selection_end: i32::from(primitive.show_selection_end),
+            playhead_position: primitive.playhead_position,
+            show_playhead: i32::from(primitive.show_playhead),
+            waveform_color: primitive.waveform_color.to_rgba(),
+            inactive_waveform_color: primitive.inactive_waveform_color.to_rgba(),
+            marker_color: primitive.marker_color.to_rgba(),
+            active_marker_color: primitive.active_marker_color.to_rgba(),
+            active_selection_start: i32::from(primitive.active_selection_start),
+            active_selection_end: i32::from(primitive.active_selection_end),
+            selection_color: primitive.selection_color.to_rgba(),
+            bg_color: crate::ui::theme::BG().to_rgba(),
+            border_color: crate::ui::theme::BORDER_INACTIVE().to_rgba(),
+        }
+    }
+}
+
 /// One live spectrogram / EQ spectrum view.
 ///
 /// `display_hz_padding` is not decoration: MSL aligns `float4` to 16 bytes, so

@@ -206,7 +206,7 @@
 
       ;; Focus borders remain bright enough to communicate active state.
       :border-active   '(0.40 0.48 0.58)
-      :border-inactive '(0.0175 0.0240 0.0320)
+      :border-inactive '(0.0575 0.0740 0.1020)
       )))
 
 (mac-osx-midnight-50-theme)

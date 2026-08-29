@@ -37,7 +37,7 @@
 ;; the two `*-layout-spec` entries are evaled by name from Rust tests. The
 ;; `apply-*` names are also the M-x-visible spellings.
 
-(def buffer-radius 12)
+(def buffer-radius 16)
 
 (def step-and-track-panel-layout-spec ()
   (list :cols :gap 1
