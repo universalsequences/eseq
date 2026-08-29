@@ -139,6 +139,7 @@ pub(crate) fn run_event_loop(
     mut editor: Editor,
     mut backend: AppBackend,
     mut track_names: Vec<String>,
+    lisp_hot_reload_enabled: bool,
     shared: SharedHandles,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 5. Metal event loop
@@ -151,7 +152,11 @@ pub(crate) fn run_event_loop(
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
     let mut soft_step_param_edit = SoftStepParamEdit::default();
-    let mut lisp_hot_reload_watcher = LispHotReloadWatcher::start(watched_lisp_paths(&editor));
+    let mut lisp_hot_reload_watcher = if lisp_hot_reload_enabled {
+        LispHotReloadWatcher::start(watched_lisp_paths(&editor))
+    } else {
+        None
+    };
     let mut lisp_hot_reload_source_revision = editor.runtime().lisp_source_revision();
     let mut last_lisp_hot_reload_path_scan = Instant::now();
 
