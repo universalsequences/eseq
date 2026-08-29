@@ -744,10 +744,31 @@ fn release_paths_for_executable(executable: &Path) -> io::Result<Option<AppPaths
     Ok(release_paths_for_executable_and_home(executable, &home))
 }
 
-fn install(paths: AppPaths) -> &'static AppPaths {
+/// Install `paths` as the process layout, or fail loudly if a different arm
+/// was already installed. `APP_PATHS` is also lazily filled by [`app_paths`]
+/// with a dev fallback, so a query that runs before startup would otherwise
+/// leave a bundled app silently resolving to the build machine's checkout —
+/// the exact failure the Release arm exists to prevent. Re-installing the same
+/// arm stays idempotent.
+fn install(paths: AppPaths) -> io::Result<&'static AppPaths> {
+    let want_release = paths.is_release();
     let installed = APP_PATHS.get_or_init(|| paths);
+    if installed.is_release() != want_release {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "app paths were already initialized as the {} layout; cannot install the {} layout",
+                arm_name(installed.is_release()),
+                arm_name(want_release),
+            ),
+        ));
+    }
     configure_eseqlisp_roots(installed);
-    installed
+    Ok(installed)
+}
+
+fn arm_name(is_release: bool) -> &'static str {
+    if is_release { "release" } else { "dev" }
 }
 
 /// Detect and install the process layout. Packaged executables use only
@@ -761,7 +782,7 @@ pub fn init() -> io::Result<&'static AppPaths> {
             crate::paths::workspace_root(),
         )?,
     };
-    Ok(install(paths))
+    install(paths)
 }
 
 /// Install the release layout for a known bundled executable. This is useful
@@ -776,7 +797,7 @@ pub fn init_release(executable: &Path) -> io::Result<&'static AppPaths> {
             ),
         )
     })?;
-    Ok(install(paths))
+    install(paths)
 }
 
 /// Install the dev-layout `AppPaths` for this process. Called at startup next
@@ -787,7 +808,7 @@ pub fn init_dev() -> io::Result<()> {
         crate::paths::sequencer_dir()?,
         crate::paths::workspace_root(),
     )?;
-    install(paths);
+    install(paths)?;
     Ok(())
 }
 
@@ -897,6 +918,28 @@ mod tests {
         assert_eq!(paths.user_lisp_root(), user_lisp);
         for path in paths.effect_dirs().into_iter().chain(paths.instrument_dirs()) {
             assert!(path.starts_with(contents) || path.starts_with(support));
+        }
+    }
+
+    #[test]
+    fn near_miss_bundle_paths_stay_on_dev() {
+        // Only an exact `*.app/Contents/MacOS/<exe>` shape is a bundle; a
+        // checkout that merely contains one of those component names is not.
+        for executable in [
+            "/ws/MacOS/metal_seq",
+            "/ws/Contents/MacOS/metal_seq",
+            "/ws/ESeq.app/MacOS/metal_seq",
+            "/ws/ESeq.app/Contents/metal_seq",
+            "/ws/ESeq/Contents/MacOS/metal_seq",
+            "/ws/ESeq.app/Contents/MacOS/nested/metal_seq",
+            "/ws/ESeq.app.bak/Contents/MacOS/metal_seq",
+            "metal_seq",
+        ] {
+            assert_eq!(
+                runtime_layout(Path::new(executable)),
+                RuntimeLayout::Dev,
+                "{executable} must not be treated as a bundle"
+            );
         }
     }
 

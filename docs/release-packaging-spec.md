@@ -199,15 +199,20 @@ ESeq.app/Contents/
     dgen-toolchain/    <- from crates/sequencer/tools/dgen-toolchain (~140 MB)
     core/  ui/  defmacros/  effects/  instruments/  midi-fx/
     presets/  kits/  processes/  scripts/  impulses/  filter-tables/
-                       <- content/ copied verbatim
+    packages/          <- content/ copied verbatim
 ```
 
-**Conflict to resolve:** the toolchain spec's Bundle Layout section shows
-`Resources/runtime/eseqlisp/init.lisp` and `Resources/factory/…`. The code
-disagrees — `factory_root()` returns `contents_resources` directly, so
-`core_dir()` is `Resources/core`. `content-tiers-spec.md` is rev 2 and newer;
-the code follows it. **The toolchain spec's layout section is stale and must
-be corrected to match**, or the accessors changed. Do not ship the ambiguity.
+**Conflict resolved (R1a):** the toolchain spec's Bundle Layout section used
+to show `Resources/runtime/eseqlisp/init.lisp` and `Resources/factory/…`. The
+code disagrees — `factory_root()` returns `contents_resources` directly, so
+`core_dir()` is `Resources/core` — and `content-tiers-spec.md` (rev 2, newer)
+matches the code. The toolchain spec's layout section was corrected to the
+tree above; the accessors were left unchanged. The layout above is the single
+authority for the dist script; there is no `runtime/` or `factory/` nesting.
+
+The staged toolchain is copied whole, so `Resources/dgen-toolchain/` carries
+the full stage layout (`VERSION.json`, `LAYOUT.md`, `bin/`, `lib/`, `include/`,
+`abi/`, `empty-sdk/`, `LICENSES/`), not a curated subset.
 
 ### 4.5 The staged toolchain is gitignored
 

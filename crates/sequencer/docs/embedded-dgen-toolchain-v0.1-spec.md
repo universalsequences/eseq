@@ -144,6 +144,7 @@ ESeq.app/
       scripts/
       impulses/
       filter-tables/
+      packages/
 ```
 
 `Resources/` is the factory root: top-level `content/` is copied into it

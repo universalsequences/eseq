@@ -101,6 +101,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let capture_args = capture::CaptureArgs::parse_env()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let app_paths = sequencer::app_paths::init()?;
+    // Checkout-only startup work: the chdir into the crate directory, and the
+    // live shader-override watch that reads this workspace's shader sources.
+    // Both are absent in a bundle — the chdir fails outright and the watch
+    // would `fs::metadata` a nonexistent path on every rendered frame.
+    eseqlisp::ui::set_editable_shader_overrides_enabled(!app_paths.is_release());
     if !app_paths.is_release() {
         sequencer::paths::enter_sequencer_dir()?;
     }

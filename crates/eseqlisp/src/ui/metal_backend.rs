@@ -4234,6 +4234,9 @@ fragment float4 live_spectrogram_frag(
         }
 
         fn compile_pending_button_surface_override(&mut self) -> bool {
+            if !crate::ui::editable_shader_overrides_enabled() {
+                return false;
+            }
             let path =
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders/button_surface.metal");
             let metadata = match fs::metadata(&path) {
