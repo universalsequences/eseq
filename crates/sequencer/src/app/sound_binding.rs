@@ -1585,6 +1585,67 @@ pub(crate) mod tests {
         });
     }
 
+    /// eseq-wypz: a row's take lane must put the TAKE's sound behind the
+    /// panel, not the scene cell's.
+    ///
+    /// `apply_song_row_latched` deliberately keeps a take lane's SESSION
+    /// identity on the scene cell (the live grid must not show take chunks),
+    /// and it did that with a full `restore_to` — which also dragged the
+    /// cell's DEVICE half into the mirror. The caller's
+    /// `push_all_restored_defaults` then handed that to the engine, and only
+    /// the binding sync a step later re-borrowed the take and pushed the
+    /// right sound. On a project where the cell and the take have diverged
+    /// (dial a sound into a scene, then play the arrangement) the wrong
+    /// sound is what you hear.
+    #[test]
+    fn a_rows_take_lane_installs_the_takes_sound_not_the_scene_cells() {
+        let (app, take, take_value, cell_value) = app_with_take_then_gap();
+        let scene_pattern = app
+            .state
+            .effective_track_pattern_id(0)
+            .expect("the scene cell resolves");
+        let chunk = app.state.with_project_scenes(|scenes| {
+            scenes.take_pools[0].get(take).expect("take").chunks[0]
+        });
+        assert_ne!(
+            take_value, cell_value,
+            "the repro needs the take and the scene cell to have diverged"
+        );
+
+        let live = |app: &App| app.state.pattern.instrument_slots[0].defaults.get(0);
+        // Put the CELL's sound behind the panel, so a stale repaint is
+        // visible as "nothing moved" rather than accidentally correct.
+        app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0].get(scene_pattern).expect("cell")
+        });
+        assert_eq!(live(&app), cell_value, "the mirror starts on the cell");
+
+        // The row plays the take on this lane while the scene cell exists —
+        // exactly the shape `restore_to` used to repaint over.
+        app.state
+            .apply_song_row_latched(
+                0,
+                &[(0, Some(chunk))],
+                1,
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+                false,
+                0,
+                false,
+                0,
+            )
+            .expect("the row applies");
+
+        assert_eq!(
+            live(&app),
+            take_value,
+            "the take lane's mirror is the take's sound, so the defaults push \
+             that follows cannot hand the engine the cell's"
+        );
+    }
+
     /// The value the LIVE mirror would hand the engine for track 0's first
     /// instrument parameter — what every `push_all_restored_defaults` reads.
     fn live_instrument_default(app: &App) -> f32 {

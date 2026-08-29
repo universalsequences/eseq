@@ -701,8 +701,17 @@ impl SequencerState {
             }
             // Resolve the complete row state before mutating anything so a
             // rejected row leaves scenes, overrides, and live state intact.
-            let mut resolved: Vec<(usize, Option<PatternId>, Option<TrackPatternData>, bool)> =
-                Vec::with_capacity(num_tracks);
+            // Per lane: (track, session override id, the pattern whose state
+            // the mirror takes, whether the row plays a TAKE there, and — for
+            // a take lane — the chunk whose SOUND the lane is actually
+            // playing.
+            let mut resolved: Vec<(
+                usize,
+                Option<PatternId>,
+                Option<TrackPatternData>,
+                bool,
+                Option<TrackPatternData>,
+            )> = Vec::with_capacity(num_tracks);
             for track in 0..num_tracks {
                 if latched(track) {
                     continue;
@@ -729,6 +738,14 @@ impl SequencerState {
                         .get(track)
                         .is_some_and(|takes| takes.is_claimed(id))
                 );
+                // The take's own chunk, read BEFORE the take-lane rewrite
+                // below drops the override: its device half is the sound the
+                // lane is audibly playing (takes spec §17.2 — every chunk
+                // shares the take's one Patch/Mix pair).
+                let take_sound = take_lane
+                    .then(|| override_entry.flatten())
+                    .flatten()
+                    .and_then(|id| scenes.track_pools.get(track)?.get(id));
                 let override_entry = if take_lane { None } else { override_entry };
                 let override_id = override_entry.flatten();
                 let effective = match override_entry {
@@ -757,7 +774,7 @@ impl SequencerState {
                     ),
                     None => None,
                 };
-                resolved.push((track, override_id, data, take_lane));
+                resolved.push((track, override_id, data, take_lane, take_sound));
             }
             if let Some(current_snapshot) = current_snapshot {
                 let current_scene = self.current_scene_index();
@@ -771,7 +788,7 @@ impl SequencerState {
                     *slot = None;
                 }
             }
-            for (track, override_id, _, _) in &resolved {
+            for (track, override_id, _, _, _) in &resolved {
                 if override_id.is_some() {
                     if let Some(slot) = scenes.track_overrides.get_mut(*track) {
                         *slot = *override_id;
@@ -788,13 +805,13 @@ impl SequencerState {
                             .map(|data| data.sample_id.clone())
                             .unwrap_or((-1, String::new(), 44_100))
                     } else {
-                        let entry = resolved.iter().find(|(t, _, _, _)| *t == track);
+                        let entry = resolved.iter().find(|(t, _, _, _, _)| *t == track);
                         match entry {
-                            Some((_, _, Some(data), _)) => data.sample_id.clone(),
+                            Some((_, _, Some(data), _, _)) => data.sample_id.clone(),
                             // A take lane with no scene cell keeps its
                             // current binding — the lane is audibly playing
                             // its take, not being silenced or rebound.
-                            Some((_, _, None, true)) => scenes
+                            Some((_, _, None, true, _)) => scenes
                                 .effective_track_pattern(track)
                                 .map(|data| data.sample_id.clone())
                                 .unwrap_or((-1, String::new(), 44_100)),
@@ -803,10 +820,13 @@ impl SequencerState {
                     }
                 })
                 .collect();
-            let launched: Vec<(usize, Option<TrackPatternData>, bool)> = resolved
-                .into_iter()
-                .map(|(track, _, data, take_lane)| (track, data, take_lane))
-                .collect();
+            let launched: Vec<(usize, Option<TrackPatternData>, bool, Option<TrackPatternData>)> =
+                resolved
+                    .into_iter()
+                    .map(|(track, _, data, take_lane, take_sound)| {
+                        (track, data, take_lane, take_sound)
+                    })
+                    .collect();
             (launched, sample_ids)
         };
         let (launched, sample_ids) = launched;
@@ -815,16 +835,28 @@ impl SequencerState {
         // lanes are absent from `launched` and their bits were cleared when
         // the latch was set — the performer's launch is what plays there.
         let mut take_mask = 0u64;
-        for (track, _, take_lane) in &launched {
+        for (track, _, take_lane, _) in &launched {
             if *take_lane && *track < 64 {
                 take_mask |= 1u64 << *track;
             }
         }
         self.set_song_take_lane_mask(take_mask);
-        for (track, data, take_lane) in launched {
+        for (track, data, take_lane, take_sound) in launched {
             match data {
                 Some(data) => {
                     data.restore_to(self, track);
+                    // A take lane's SESSION identity is the scene cell (the
+                    // live grid keeps showing the cell's steps), but its
+                    // SOUND is the take's — the cell's device half is not
+                    // what the lane is playing. Restoring it would put a
+                    // sound the user never dialed in behind the panel and,
+                    // via the caller's defaults push, at the engine, until
+                    // the binding sync re-borrows the take a step later
+                    // (bead eseq-wypz). Audible whenever the cell and the
+                    // take have diverged.
+                    if let Some(take_sound) = take_sound.as_ref() {
+                        take_sound.restore_device_state_to(self, track);
+                    }
                     self.set_scene_silenced(track, false);
                 }
                 // A take lane whose scene cell is bare: the lane is audibly
