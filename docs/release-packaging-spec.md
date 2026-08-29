@@ -231,6 +231,15 @@ logs once when the file is missing, so a bundle is *functionally* fine — but
 it is a per-frame `fs::metadata` on a path that can never exist. Gate it off
 on the Release arm.
 
+The Lisp hot-reload watcher (`LispHotReloadWatcher`, started from
+`crates/sequencer/src/ui/event_loop.rs`) is the second instance of the same
+class, found while reviewing R1a: it walks and `notify`-registers every Lisp
+source the editor knows about — 180 files across 111 directories in a bundle —
+and rescans that set once a second. Bundle resources are immutable, so no event
+it could deliver is actionable. `metal_main` therefore passes
+`!app_paths.is_release()` into `run_event_loop`, which skips both the watcher
+construction and the periodic path rescan.
+
 This is the class of issue R1 exists to surface. There may be others; the
 acceptance below is written to catch them.
 
