@@ -6,7 +6,7 @@ pub fn enter_sequencer_dir() -> io::Result<()> {
 }
 
 pub fn sequencer_dir() -> io::Result<PathBuf> {
-    find_package_dir("sequencer", "SEQUENCER_ROOT", env!("CARGO_MANIFEST_DIR")).ok_or_else(|| {
+    find_package_dir("sequencer", "SEQUENCER_ROOT", env!("ESEQ_DEV_MANIFEST_DIR")).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "sequencer crate directory not found",
@@ -15,7 +15,7 @@ pub fn sequencer_dir() -> io::Result<PathBuf> {
 }
 
 pub fn workspace_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(env!("ESEQ_DEV_MANIFEST_DIR"));
     manifest_dir
         .parent()
         .and_then(|crates_dir| crates_dir.parent())

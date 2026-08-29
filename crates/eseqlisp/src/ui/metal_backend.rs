@@ -4238,7 +4238,7 @@ fragment float4 live_spectrogram_frag(
                 return false;
             }
             let path =
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders/button_surface.metal");
+                PathBuf::from(env!("ESEQ_DEV_MANIFEST_DIR")).join("shaders/button_surface.metal");
             let metadata = match fs::metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(error) => {

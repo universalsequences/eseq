@@ -406,6 +406,23 @@ impl AppPaths {
         Ok(())
     }
 
+    /// Destination for the low-level crash report installed at startup.
+    ///
+    /// Dev keeps the historical checkout-relative name — startup has already
+    /// chdir'd into the crate directory by then. Release must be absolute:
+    /// Finder launches a bundle with the working directory set to `/`, so
+    /// opening a relative path there fails with `ReadOnlyFilesystem` and takes
+    /// the whole process down before a window ever opens. The directory is
+    /// `user_data_root()`, which [`Self::ensure_user_tier`] has already made.
+    pub fn crash_log_path(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { .. } => PathBuf::from(crate::crash::CRASH_LOG_FILENAME),
+            AppPaths::Release { .. } => self
+                .user_data_root()
+                .join(crate::crash::CRASH_LOG_FILENAME),
+        }
+    }
+
     /// Core eseqlisp shipped with the application.
     pub fn core_dir(&self) -> PathBuf {
         self.factory_root().join("core")
@@ -674,7 +691,13 @@ pub fn resolve_sample_ref(path: &std::path::Path) -> PathBuf {
 
 static APP_PATHS: OnceLock<AppPaths> = OnceLock::new();
 
-const RELEASE_DATA_DIRECTORY: &str = "eseq";
+/// Installed user data and cache directory name. This is the ratified
+/// `CFBundleIdentifier` (`dist/macos/build.sh`, release spec section 3.1) and
+/// must stay in lockstep with it: `~/Library/Application Support/<bundle-id>/`
+/// and `~/Library/Caches/<bundle-id>/` are the conventional macOS locations,
+/// and changing the name after a tester has saved a project orphans their
+/// library. Decide once, migrate never.
+const RELEASE_DATA_DIRECTORY: &str = "com.universalsequences.eseq";
 
 #[derive(Debug, PartialEq, Eq)]
 enum RuntimeLayout {
@@ -832,7 +855,7 @@ fn configure_eseqlisp_roots(paths: &AppPaths) {
 pub fn app_paths() -> &'static AppPaths {
     APP_PATHS.get_or_init(|| {
         let sequencer_dir = crate::paths::sequencer_dir()
-            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+            .unwrap_or_else(|_| PathBuf::from(env!("ESEQ_DEV_MANIFEST_DIR")));
         let paths = AppPaths::dev_from_env(sequencer_dir, crate::paths::workspace_root())
             .expect("resolve user Lisp root from HOME or ESEQ_CONFIG_DIR");
         configure_eseqlisp_roots(&paths);
@@ -843,6 +866,24 @@ pub fn app_paths() -> &'static AppPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finder launches a bundle with the working directory set to `/`, so a
+    /// relative crash-log path aborts startup with `ReadOnlyFilesystem` before
+    /// a window opens. Release must resolve it absolutely.
+    #[test]
+    fn release_crash_log_is_absolute_and_inside_user_data_root() {
+        let paths = release_paths_for_executable_and_home(
+            Path::new("/Applications/ESeq.app/Contents/MacOS/metal_seq"),
+            Path::new("/Users/test"),
+        )
+        .expect("bundle path must select Release");
+        let crash_log = paths.crash_log_path();
+        assert_eq!(
+            crash_log,
+            paths.user_data_root().join(crate::crash::CRASH_LOG_FILENAME)
+        );
+        assert!(crash_log.is_absolute(), "{}", crash_log.display());
+    }
 
     #[test]
     fn bundled_executable_selects_release_and_keeps_all_roots_out_of_checkout() {
@@ -859,8 +900,9 @@ mod tests {
         );
 
         let contents = Path::new("/Applications/ESeq.app/Contents");
-        let support = Path::new("/Users/test/Library/Application Support/eseq");
-        let caches = Path::new("/Users/test/Library/Caches/eseq");
+        let support =
+            Path::new("/Users/test/Library/Application Support/com.universalsequences.eseq");
+        let caches = Path::new("/Users/test/Library/Caches/com.universalsequences.eseq");
         let user_lisp = Path::new("/Users/test/.eseq.d");
         let rooted_paths = [
             paths.dgenlisp_tool(),
@@ -1202,13 +1244,13 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!("eseq-release-user-tier-{unique}"));
-        let support = root.join("Library/Application Support/eseq");
+        let support = root.join("Library/Application Support/com.universalsequences.eseq");
         let config = root.join("home/.eseq.d");
         let paths = AppPaths::release(
             root.join("ESeq.app/Contents/MacOS"),
             root.join("ESeq.app/Contents/Resources"),
             support.clone(),
-            root.join("Library/Caches/eseq"),
+            root.join("Library/Caches/com.universalsequences.eseq"),
             config.clone(),
         );
 

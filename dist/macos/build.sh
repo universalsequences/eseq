@@ -45,6 +45,13 @@ readonly TOOLCHAIN_MINIMUM_MACOS="$(plutil -extract minimum_macos raw "$TOOLCHAI
 [[ "$TOOLCHAIN_MINIMUM_MACOS" == "$MINIMUM_MACOS" ]] || \
   fail "staged toolchain requires macOS $TOOLCHAIN_MINIMUM_MACOS; expected $MINIMUM_MACOS"
 
+# The identifier is ratified once (release spec section 3.1) and appears both
+# here and as the installed data directory in the Release path arm. A silent
+# divergence would split a tester's library across two directories.
+readonly APP_PATHS_SRC="$REPO_ROOT/crates/sequencer/src/app_paths/mod.rs"
+grep -q "RELEASE_DATA_DIRECTORY: &str = \"$BUNDLE_ID\";" "$APP_PATHS_SRC" || \
+  fail "RELEASE_DATA_DIRECTORY in $APP_PATHS_SRC does not match CFBundleIdentifier $BUNDLE_ID"
+
 readonly VERSION="$(awk '
   /^\[package\]$/ { in_package = 1; next }
   in_package && /^\[/ { exit }
@@ -68,8 +75,12 @@ if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
     readonly TARGET_DIR="$REPO_ROOT/$CARGO_TARGET_DIR"
   fi
 else
-  readonly TARGET_DIR="$REPO_ROOT/target"
+  # Deliberately not the shared "target/": the path remapping below is part of
+  # the RUSTFLAGS fingerprint, so sharing a directory with ordinary
+  # `cargo build --release` would make the two rebuild each other every time.
+  readonly TARGET_DIR="$REPO_ROOT/target/package"
 fi
+export CARGO_TARGET_DIR="$TARGET_DIR"
 readonly METAL_SEQ="$TARGET_DIR/release/metal_seq"
 readonly ESEQ_CLI="$TARGET_DIR/release/eseq"
 
@@ -93,6 +104,18 @@ cat "$TOOLCHAIN_VERSION"
 printf '\n'
 
 cd "$REPO_ROOT"
+# A shipped binary must not disclose the build machine. Without this, rustc
+# bakes an absolute panic/debuginfo path for every crate it compiles -- the
+# checkout, the Cargo registry, and the target directory -- and the audit
+# below rejects the bundle. The replacements are opaque roots, not real paths.
+readonly CARGO_ROOT="${CARGO_HOME:-$HOME/.cargo}"
+readonly RUSTUP_ROOT="${RUSTUP_HOME:-$HOME/.rustup}"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$TARGET_DIR=/build --remap-path-prefix=$REPO_ROOT=/eseq --remap-path-prefix=$CARGO_ROOT=/cargo --remap-path-prefix=$RUSTUP_ROOT=/rustup"
+# Replaces the dev-only `env!("ESEQ_DEV_MANIFEST_DIR")` checkout literals with a
+# synthetic root (see the build scripts). Every consumer is a fallback guarded
+# by an existence check, so they simply stop resolving, which is the packaged
+# behavior anyway.
+export ESEQ_PACKAGED=1
 cargo build --release -p sequencer --bin metal_seq --bin eseq
 [[ -x "$METAL_SEQ" ]] || fail "Cargo did not produce $METAL_SEQ"
 [[ -x "$ESEQ_CLI" ]] || fail "Cargo did not produce $ESEQ_CLI"

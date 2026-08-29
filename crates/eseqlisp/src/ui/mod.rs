@@ -2,7 +2,7 @@
 /// dimensions and tile constraints are authored in units of this cell grid.
 pub(crate) const DEFAULT_MONOSPACE_FONT_SIZE_PT: f64 = 16.0;
 
-/// Live-editable shader overrides read from `env!("CARGO_MANIFEST_DIR")` in
+/// Live-editable shader overrides read from `env!("ESEQ_DEV_MANIFEST_DIR")` in
 /// this crate's source tree. That path only exists in a checkout, so a
 /// packaged application must switch the watch off: otherwise every rendered
 /// frame pays an `fs::metadata` on a path that can never resolve. Hosts call

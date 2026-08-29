@@ -40,3 +40,9 @@ Then run:
 
 The script builds the release binaries, assembles and ad-hoc-signs
 `dist/out/ESeq.app`, and creates `dist/out/ESeq-<version>-<hash>.dmg`.
+
+Release builds are compiled with `--remap-path-prefix` so no path from the
+build machine is baked into the shipped binaries, and the script verifies that
+before it packages anything. Those flags are part of the build fingerprint, so
+packaging uses its own `target/package/` directory rather than fighting
+`cargo build --release` for the shared one.

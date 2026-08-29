@@ -3,6 +3,10 @@ use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
 use std::sync::{Mutex, OnceLock};
 
+/// Basename of the crash report. The containing directory is chosen by
+/// [`crate::app_paths::AppPaths::crash_log_path`].
+pub const CRASH_LOG_FILENAME: &str = "sequencer-crash.log";
+
 static CRASH_LOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 static CRASH_LOG_PATH: OnceLock<String> = OnceLock::new();
 
@@ -69,7 +73,7 @@ mod imp {
         CRASH_LOG_PATH
             .get()
             .map(String::as_str)
-            .unwrap_or("sequencer-crash.log")
+            .unwrap_or(super::CRASH_LOG_FILENAME)
     }
 
     fn save_terminal_state() {
@@ -186,7 +190,12 @@ pub fn install() -> std::io::Result<()> {
     let crash_log_path = std::env::var("TINYSEQ_CRASH_LOG")
         .ok()
         .filter(|path| !path.trim().is_empty())
-        .unwrap_or_else(|| "sequencer-crash.log".to_string());
+        .unwrap_or_else(|| {
+            crate::app_paths::app_paths()
+                .crash_log_path()
+                .to_string_lossy()
+                .into_owned()
+        });
     let _ = CRASH_LOG_PATH.set(crash_log_path.clone());
 
     let crash_log_file = OpenOptions::new()

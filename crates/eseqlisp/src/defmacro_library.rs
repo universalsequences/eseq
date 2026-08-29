@@ -569,7 +569,7 @@ pub fn default_library_root() -> Option<PathBuf> {
     if let Some(root) = DEFAULT_LIBRARY_ROOT.get() {
         return root.is_dir().then(|| root.clone());
     }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(env!("ESEQ_DEV_MANIFEST_DIR"));
     let candidates = [
         manifest_dir.join("../sequencer/defmacros"),
         manifest_dir.join("../../content/defmacros"),

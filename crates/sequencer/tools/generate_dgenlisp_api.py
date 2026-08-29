@@ -1088,7 +1088,10 @@ def main():
     data = {
         "schema_version": 1,
         "generated_from": {
-            "dgenlisp_root": str(dgen_root),
+            # Provenance only, and this manifest is include_str!'d into the
+            # shipped binary -- record the stable trailing components, never
+            # the generating machine's absolute checkout path.
+            "dgenlisp_root": str(Path(*dgen_root.parts[-2:])),
             "source_files": [
                 "README.md",
                 "main.swift",
