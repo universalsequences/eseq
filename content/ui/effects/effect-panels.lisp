@@ -156,11 +156,11 @@
 
 (def instrument-header-tab-button (text active width click)
   (v-stack :height 0.9 :gap 0
-    (box :height 0.1)
+    (box :height 0.15)
     (button text
       :width (* 1.5 width)
-      :height 0.8
-      :padding 0.05
+      :height 2.0
+      :padding 0.55
       :font-size 11
       :shape :tab
       :active (if active 1 0)

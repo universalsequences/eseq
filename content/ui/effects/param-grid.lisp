@@ -255,7 +255,7 @@
   (substring (param-display-name p) 0 9))
 
 (def compact-control-width () 6.3)
-(def compact-control-height () 2.55)
+(def compact-control-height () 2.70)
 (def group-label-width () 5.4)
 (def group-label-gap () 0.25)
 (def group-control-gap () 0.22)

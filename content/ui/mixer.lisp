@@ -1667,7 +1667,7 @@
               (label "poly" :font-size 8 :color :dim :bg :transparent)
               (button (if SEQ.tp-poly "ON" "OFF") :width 3.2 :height 1.3
                 :background-color (if SEQ.tp-poly (rgba 0.95 0.48 0.18 1.0) '(rgba 0.1 0.1 0.1 1))
-                :border-color :white
+                :border-color :none
                 :font-size 11
                 :color (if SEQ.tp-poly :black :white)
                 ;; Rack tracks: playback polyphony is per-slot
@@ -1683,7 +1683,7 @@
               (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
                 :noui false :font-size 8 :text-color :white
                 :background-color :mixer-strip-bg
-                :border-color :dim
+                :border-color :none
                 :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow)
                     (if SEQ.tp-is-rack
                       (host-command "set-rack-slot-max-polyphony"
@@ -1709,19 +1709,19 @@
     (track-context-menu)))
 
 (effect-buffer "*mixer*"
-  (h-stack :padding 0.2 :gap 0.3
-    (each (render-order) |item|
-      (render-item item))
-    (box :width 1.0 :height 11.0)
+  (h-stack :padding 0.2 :gap 1.5
+    (h-stack :gap 0.5
+      (each (render-order) |item|
+        (render-item item)))
     (sample-drop-zone)
-    (box :width 1.0 :height 11.0)
-    (each (range 0 (len SEQ.bus-names)) |display-i|
-      (let ((i (display-bus-index display-i)))
-        (subtree :key (str "mixer-v2-bus-" i)
-          (if (group-bus-id? (nth SEQ.bus-ids i))
-            (box :width 0.0 :height 0.0)
-            (bus-strip i)))))
-    (track-context-menu)))
+    (h-stack :gap 0.5
+      (each (range 0 (len SEQ.bus-names)) |display-i|
+        (let ((i (display-bus-index display-i)))
+          (subtree :key (str "mixer-v2-bus-" i)
+            (if (group-bus-id? (nth SEQ.bus-ids i))
+              (box :width 0.0 :height 0.0)
+              (bus-strip i)))))
+      (track-context-menu))))
 
 ;; Ctrl+G / Cmd+G — fold the multi-selected tracks into a new group.
 (def group-selected ()

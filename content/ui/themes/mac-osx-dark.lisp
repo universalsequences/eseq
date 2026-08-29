@@ -69,7 +69,7 @@
       
       ;; Tile borders
       :border-active   '(0.42 0.42 0.44)     ; Lighter gray for active tile
-      :border-inactive '(0.09 0.09 .095)    ; Match buffer background
+      :border-inactive '(0.10 0.10 .105)    ; Match buffer background
       :tree-row-alt-bg '(0.14 0.15 0.16)   ; Subtle tree zebra stripe
       
       ;; Sequencer panels

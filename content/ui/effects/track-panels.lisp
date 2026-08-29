@@ -467,15 +467,16 @@
           (v-stack :gap 0.5 :align :center
             (label "steps" :font-size 8 :color :dim :bg :transparent)
             (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
+              :border-color :none
               :noui false :font-size 8 :text-color :white
               :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :num-steps v)))
               :width 4.2 :height 1.15))
-
+          
           (v-stack :align :center :gap 0.34
             (label "poly" :font-size 8 :color :dim :bg :transparent)
             (button  (if SEQ.tp-poly "ON" "OFF") :width 3.2 :height 1.3
               :background-color (if SEQ.tp-poly  (rgba 0.95 0.48 0.18 1.0) '(rgba 0.1 0.1 0.1 1))
-              :border-color :white
+              :border-color :none
               :font-size 11
               :color (if SEQ.tp-poly :black :white)
               ;; Rack tracks: playback polyphony is per-slot (RackSlotSnapshot::max_polyphony),
@@ -491,12 +492,13 @@
           (v-stack :gap 0.5 :align :center
             (label "voices" :font-size 8 :color :dim :bg :transparent)
             (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
+              :border-color :none
               :noui false :font-size 8 :text-color :white
               :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow)
-                (if SEQ.tp-is-rack
-                  (host-command "set-rack-slot-max-polyphony"
-                    (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
-                  (seq-set-track-param :voices v))))
+                  (if SEQ.tp-is-rack
+                    (host-command "set-rack-slot-max-polyphony"
+                      (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
+                    (seq-set-track-param :voices v))))
               :width 3.4 :height 1.15)
             )
           (v-stack :align :center :gap 0.40
@@ -505,7 +507,7 @@
               :options SEQ.fts-options
               :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-fts v)))
               :width 7.0 :height 1.25 :font-size 9))
-
+          
           ))
       (box :debug-name "track-groove-parameters-panel" :padding 0.5
         :background-color :mixer-strip-bg
@@ -528,6 +530,7 @@
               (label "swing" :font-size 8 :color :dim :bg :transparent)
               (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
                 :key "track-swing"
+                :border-color :none
                 :noui false :font-size 8 :text-color :dim
                 :plock-active (if (track-param-plock-active? "swing") 1 0)
                 :plock-default (track-param-plock-default "swing" SEQ.tp-swing)
@@ -537,7 +540,7 @@
                 :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :swing v)))
                 :width 5.2 :height 1.15))
             )
-
+          
           (v-stack :align :center :gap 0.40
             (label "timebase" :font-size 8 :color :dim :bg :transparent)
             (dropdown :value SEQ.tp-timebase
@@ -549,7 +552,7 @@
               :plock-color-g (pc/param-plock-color-g)
               :plock-color-b (pc/param-plock-color-b)
               :width 6.0 :height 1.25 :font-size 9))
-
+          
           (v-stack :align :center :gap 0.40
             (label "mute grp" :font-size 8 :color :dim :bg :transparent)
             (dropdown :value SEQ.tp-mute-group
