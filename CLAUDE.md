@@ -79,11 +79,12 @@ overrides it with a locally built compiler.
 The compiler is only half of it: it shells out to a hermetic clang/lld stage
 pinned in `content/dgen-toolchain.lock` and installed by
 `./scripts/fetch_dgen_toolchain.sh`, also once per fresh checkout. That script
-can only fetch targets with a published `url` in the lock — currently just
-`x86_64-unknown-linux-gnu`. `arm64-apple-macos` is pinned but unpublished and is
-vendored by `./rebuild_dgenlisp_tool.sh` from a local dgen-audio checkout, so a
-Mac without that checkout cannot bootstrap the stage and every DGen compile
-hard-fails.
+fetches targets with a published `url` in the lock; both `arm64-apple-macos`
+and `x86_64-unknown-linux-gnu` have one, so a fresh checkout on either
+platform bootstraps the stage with no dgen-audio checkout.
+`./rebuild_dgenlisp_tool.sh` still vendors the identical mac archive from a
+local dgen-audio checkout when you have one; both routes land on the same
+pinned sha256.
 
 ### Cheap clean-HEAD check
 
