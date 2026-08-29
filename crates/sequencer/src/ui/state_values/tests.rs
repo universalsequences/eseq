@@ -17246,11 +17246,14 @@
     fn metal_seq_script_scratch_cleanup_matches_relative_load_to_canonical_source() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let relative_path = "content/scripts/processes/process-conductor-demo.lisp";
-        let canonical_path =
-            std::fs::canonicalize(sequencer::paths::workspace_root().join(relative_path))
-                .expect("canonical process conductor demo path")
-                .display()
-                .to_string();
+        let canonical_path = std::fs::canonicalize(
+            sequencer::app_paths::app_paths()
+                .project_script_root()
+                .join(relative_path),
+        )
+        .expect("canonical process conductor demo path")
+        .display()
+        .to_string();
         let scratch_source = format!(
             "(def keep-before true)\n\n(load \"{relative_path}\")\n\n(def keep-after true)"
         );

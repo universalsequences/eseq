@@ -24,7 +24,7 @@ pub fn workspace_root() -> PathBuf {
 }
 
 pub fn project_scratch_source_path() -> PathBuf {
-    workspace_root().join(".eseqlisp-scratch")
+    crate::app_paths::app_paths().project_scratch_source_path()
 }
 
 /// User Lisp customization entrypoint from the process-wide, captured path

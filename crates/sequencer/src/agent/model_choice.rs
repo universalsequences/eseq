@@ -6,10 +6,10 @@
 //! it. Unset falls back to the historical behaviour in `agentic_bubble.rs`
 //! (Gemini flash when a Gemini key is present).
 //!
-//! Persisted to `.eseq/prefs.json` under the workspace root — the same
-//! directory the dgen dylib cache already uses — so the choice survives a
-//! relaunch. Persistence is best-effort: a read or write failure degrades to
-//! "no choice recorded" rather than failing the bubble.
+//! Persisted through `AppPaths`: `.eseq/prefs.json` in development and
+//! Application Support in an installed app. Persistence is best-effort: a read
+//! or write failure degrades to "no choice recorded" rather than failing the
+//! bubble.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -26,9 +26,7 @@ struct Prefs {
 }
 
 fn prefs_path() -> PathBuf {
-    crate::paths::workspace_root()
-        .join(".eseq")
-        .join("prefs.json")
+    crate::app_paths::app_paths().preferences_path()
 }
 
 fn cell() -> &'static Mutex<Option<String>> {

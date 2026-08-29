@@ -4,7 +4,8 @@
 ;; The bubbles are one-shot turns rather than conversations, so unlike the
 ;; *agent* panel's per-conversation `agent/set-model` the choice is a single
 ;; process-global setting, owned by Rust (agent::model_choice) and persisted
-;; to .eseq/prefs.json. This file is only the picker.
+;; through AppPaths (Application Support in an installed app). This file is
+;; only the picker.
 ;;
 ;; Mounted by the two Rust-generated patcher buffer templates in
 ;; src/ui/edit_sessions.rs — `instrument_patcher_buffer_source` and

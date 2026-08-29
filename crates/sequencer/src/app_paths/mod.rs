@@ -328,6 +328,40 @@ impl AppPaths {
         }
     }
 
+    /// Base used to resolve relative scripts persisted in a project's scratch
+    /// source. Development preserves the historical workspace-relative forms;
+    /// installed projects resolve mutable relative paths from Application
+    /// Support, while factory paths remain available through the configured
+    /// eseqlisp load fallback roots.
+    pub fn project_script_root(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { workspace_root, .. } => workspace_root.clone(),
+            AppPaths::Release {
+                application_support, ..
+            } => application_support.clone(),
+        }
+    }
+
+    /// Synthetic source path associated with a project's persisted scratch
+    /// buffer. Its parent deliberately matches [`Self::project_script_root`]
+    /// so runtime relative loads and UI path normalization use the same base.
+    pub fn project_scratch_source_path(&self) -> PathBuf {
+        self.project_script_root().join(".eseqlisp-scratch")
+    }
+
+    /// Process-global preferences written by UI features such as the agentic
+    /// model picker.
+    pub fn preferences_path(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { workspace_root, .. } => {
+                workspace_root.join(".eseq").join("prefs.json")
+            }
+            AppPaths::Release {
+                application_support, ..
+            } => application_support.join("prefs.json"),
+        }
+    }
+
     /// Hand-edited user Lisp root. Dev honors `ESEQ_CONFIG_DIR`; release
     /// construction receives the resolved `~/.eseq.d` path explicitly.
     pub fn user_lisp_root(&self) -> &Path {
@@ -563,6 +597,12 @@ impl AppPaths {
             }
             AppPaths::Release { caches, .. } => caches.join("dgen"),
         }
+    }
+
+    /// Persistent prepared convolution IRs. This is distinct from
+    /// [`Self::ir_prep_dir`], which holds transient partitioning scratch.
+    pub fn convolution_ir_cache_dir(&self) -> PathBuf {
+        self.dgen_cache_root().join("ir-prep")
     }
 
     /// Persistent patch-learning job artifacts. These are deliberately kept
@@ -911,6 +951,9 @@ mod tests {
             paths.perf_probe_projects_dir(),
             paths.factory_root(),
             paths.user_data_root(),
+            paths.project_script_root(),
+            paths.project_scratch_source_path(),
+            paths.preferences_path(),
             paths.local_modules_dir(),
             paths.packages_dir(),
             paths.factory_packages_dir(),
@@ -942,6 +985,7 @@ mod tests {
             paths.user_instruments_dir(),
             paths.dgen_asset_fallback_base(),
             paths.dgen_cache_root(),
+            paths.convolution_ir_cache_dir(),
             paths.learn_jobs_dir(),
             paths.dgen_scratch_dir(),
             paths.ir_prep_dir(),
@@ -1047,6 +1091,15 @@ mod tests {
         );
         assert_eq!(paths.factory_root(), PathBuf::from("/ws/content"));
         assert_eq!(paths.user_data_root(), PathBuf::from("/ws/.local"));
+        assert_eq!(paths.project_script_root(), PathBuf::from("/ws"));
+        assert_eq!(
+            paths.project_scratch_source_path(),
+            PathBuf::from("/ws/.eseqlisp-scratch")
+        );
+        assert_eq!(
+            paths.preferences_path(),
+            PathBuf::from("/ws/.eseq/prefs.json")
+        );
         assert_eq!(paths.user_lisp_root(), Path::new("/home/test/.eseq.d"));
         assert_eq!(paths.core_dir(), PathBuf::from("/ws/content/core"));
         assert_eq!(paths.ui_dir(), PathBuf::from("/ws/content/ui"));
@@ -1070,6 +1123,10 @@ mod tests {
         assert_eq!(
             paths.dgen_cache_root(),
             PathBuf::from("/ws/.eseq/dgenlisp-cache")
+        );
+        assert_eq!(
+            paths.convolution_ir_cache_dir(),
+            PathBuf::from("/ws/.eseq/dgenlisp-cache/ir-prep")
         );
         assert_eq!(
             paths.learn_jobs_dir(),
@@ -1158,6 +1215,19 @@ mod tests {
         assert_eq!(paths.projects_dir(), PathBuf::from("/Support/projects"));
         assert_eq!(paths.samples_dir(), PathBuf::from("/Support/samples"));
         assert_eq!(paths.sample_db_path(), PathBuf::from("/Support/samples.db"));
+        assert_eq!(paths.project_script_root(), PathBuf::from("/Support"));
+        assert_eq!(
+            paths.project_scratch_source_path(),
+            PathBuf::from("/Support/.eseqlisp-scratch")
+        );
+        assert_eq!(
+            paths.preferences_path(),
+            PathBuf::from("/Support/prefs.json")
+        );
+        assert_eq!(
+            paths.convolution_ir_cache_dir(),
+            PathBuf::from("/Caches/dgen/ir-prep")
+        );
         assert_eq!(paths.sample_facts_path(), PathBuf::from("/Support/samples.jsonl"));
         assert_eq!(paths.user_lisp_root(), Path::new("/home/test/.eseq.d"));
     }
