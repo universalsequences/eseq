@@ -1849,6 +1849,118 @@ fn first_click_opens_an_unfocused_conditionally_replaced_dropdown() {
 }
 
 #[test]
+fn dropdown_outside_click_blurs_trigger_and_another_trigger_opens_immediately() {
+    fn click(editor: &mut Editor, node: &crate::layout::LayoutNode) {
+        let col = node.rect.col + node.rect.width * 0.5;
+        let row = node.rect.row + node.rect.height * 0.5;
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(
+                mouse_event(kind, col.floor() as u16, row.floor() as u16),
+                0,
+                0,
+                30,
+                12,
+                col,
+                row,
+            );
+        }
+    }
+
+    fn register_open_dropdown(editor: &Editor) {
+        let layout = editor.runtime.current_layout.as_deref().expect("dropdown layout");
+        let _ = crate::widget_render::collect_gpu_primitives(
+            layout,
+            crate::widget_render::WidgetViewport {
+                cell_w: 10.0,
+                cell_h: 20.0,
+                vp_w: 300.0,
+                vp_h: 240.0,
+                time_seconds: 0.0,
+                focused_widget_id: editor.focused_widget_id(),
+                focused_branch: false,
+                overlay_viewport_bottom: 12.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            },
+            0.0,
+            12,
+        );
+    }
+
+    let _overlay_guard = OverlayClearGuard;
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect
+              (v-stack :gap 4
+                (dropdown :key "outside-click-first"
+                  :width 8 :options '("one" "two") :value "one")
+                (dropdown :key "outside-click-second"
+                  :width 8 :options '("alpha" "beta") :value "alpha")))
+            "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(30, 12);
+
+    let layout = editor.runtime.current_layout.as_ref().expect("dropdown layout");
+    let first = super::find_layout_node_by_stable_key(layout, "outside-click-first")
+        .expect("first dropdown")
+        .clone();
+    let second = super::find_layout_node_by_stable_key(layout, "outside-click-second")
+        .expect("second dropdown")
+        .clone();
+
+    click(&mut editor, &first);
+    register_open_dropdown(&editor);
+    assert_eq!(editor.focused_widget_id(), Some(first.widget_id));
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 25, 10),
+        0,
+        0,
+        30,
+        12,
+        25.0,
+        10.0,
+    );
+    assert!(!crate::widget_render::dropdown::is_dropdown_open(first.widget_id));
+    assert_eq!(
+        editor.focused_widget_id(),
+        None,
+        "an outside click must blur the dropdown trigger it closes"
+    );
+
+    click(&mut editor, &first);
+    register_open_dropdown(&editor);
+    click(&mut editor, &first);
+    assert!(!crate::widget_render::dropdown::is_dropdown_open(first.widget_id));
+    assert_eq!(
+        editor.focused_widget_id(),
+        Some(first.widget_id),
+        "clicking the open dropdown's own trigger should close it without blurring it"
+    );
+
+    click(&mut editor, &first);
+    register_open_dropdown(&editor);
+    click(&mut editor, &second);
+    assert!(!crate::widget_render::dropdown::is_dropdown_open(first.widget_id));
+    assert_eq!(editor.focused_widget_id(), Some(second.widget_id));
+    assert!(
+        crate::widget_render::dropdown::is_dropdown_open(second.widget_id),
+        "the click that closes the first dropdown must open the second dropdown"
+    );
+
+    crate::widget_render::dropdown::close_dropdown(second.widget_id);
+}
+
+#[test]
 fn ctrl_a_moves_to_start_of_line() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

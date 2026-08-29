@@ -341,19 +341,55 @@ impl Editor {
     ) -> bool {
         // If an overlay is active and the click is inside the topmost entry,
         // skip focus so the overlay intercept handles it (the modal intercept
-        // does its own subtree focus click). If outside, dismiss the topmost
-        // entry only — a dropdown above a modal closes first, the modal
-        // survives — and consume the click so it cannot activate the widget
-        // underneath in the same mouse-down.
+        // does its own subtree focus click). Outside clicks dismiss only the
+        // topmost entry, so a dropdown above a modal closes first and the modal
+        // survives. A modal consumes that click to protect its underlay. A
+        // dropdown is transient: a click outside its trigger blurs it and
+        // continues normal hit testing so the same mouse-down can focus and
+        // activate another control (in particular, another dropdown trigger).
         if let Some(entry) = crate::widget_render::topmost_overlay() {
             let local_row = precise_row - content_row as f32;
             let local_col = precise_col - content_col as f32;
             if crate::widget_render::overlay_contains(local_col, local_row) {
                 return false;
             }
+            let dismissed_dropdown_owner =
+                (entry.kind == crate::widget_render::OverlayKind::Dropdown)
+                    .then(|| {
+                        self.runtime
+                            .current_layout
+                            .as_deref()
+                            .and_then(|layout| find_node_by_id(layout, entry.widget_id))
+                    })
+                    .flatten();
+            let clicked_dropdown_owner = dismissed_dropdown_owner.as_ref().is_some_and(|owner| {
+                if precise_col < content_col as f32 || precise_row < content_row as f32 {
+                    return false;
+                }
+                let local_row = precise_row - content_row as f32 + self.total_scroll_top();
+                let local_col = precise_col - content_col as f32
+                    + self.active_leaf().widget_scroll_left;
+                self.runtime
+                    .current_layout
+                    .as_deref()
+                    .and_then(|layout| {
+                        crate::ui::layout::hit_test_focusable(layout, local_row, local_col)
+                    })
+                    .is_some_and(|clicked| same_focus_identity(clicked, owner))
+            });
             self.dismiss_overlay_entry(entry);
+            if !clicked_dropdown_owner
+                && let Some(owner) = dismissed_dropdown_owner.as_ref()
+                && self
+                    .focused_widget_node()
+                    .is_some_and(|focused| same_focus_identity(&focused, owner))
+            {
+                self.blur_focused_widget();
+            }
             self.mark_needs_redraw();
-            return true;
+            if entry.kind == crate::widget_render::OverlayKind::Modal || clicked_dropdown_owner {
+                return true;
+            }
         }
         if !self.has_focusable_widgets() {
             return false;
