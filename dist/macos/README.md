@@ -3,6 +3,9 @@
 ESeq R1 is an ad-hoc-signed Apple Silicon application for macOS 11 or newer.
 It does not require a developer checkout after installation.
 
+For a clean-account acceptance pass, use the
+[fresh-account DMG test checklist](../../docs/macos-dmg-fresh-account-test.md).
+
 ## Install the DMG
 
 1. Open `ESeq-<version>-<hash>.dmg`.
