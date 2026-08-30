@@ -21,11 +21,13 @@ use fontdue::{Font, FontSettings};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(target_os = "macos")]
-use objc2_core_foundation::{CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFData, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize};
 #[cfg(target_os = "macos")]
 use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph};
 #[cfg(target_os = "macos")]
-use objc2_core_text::{CTFont, CTFontOrientation, CTFontUIFontType};
+use objc2_core_text::{
+    CTFont, CTFontManagerCreateFontDescriptorFromData, CTFontOrientation, CTFontUIFontType,
+};
 
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
@@ -690,6 +692,27 @@ fn load_named_font(name: &str) -> Option<NamedFontResolution> {
     })
 }
 
+/// Load a specific font file without registering it globally or consulting the
+/// process's font database. Packaged applications use this path so a user font
+/// with the same PostScript name cannot change the layout grid, and a missing
+/// bundled font cannot silently become CoreText's proportional fallback.
+#[cfg(target_os = "macos")]
+fn load_font_file(path: &std::path::Path) -> Result<LoadedFont, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read bundled font {}: {error}", path.display()))?;
+    let data = CFData::from_bytes(&bytes);
+    let descriptor = unsafe { CTFontManagerCreateFontDescriptorFromData(&data) }
+        .ok_or_else(|| format!("bundled font is invalid: {}", path.display()))?;
+    let font = unsafe {
+        CTFont::with_font_descriptor(&descriptor, CORE_TEXT_BASE_SIZE, std::ptr::null())
+    };
+    let post_script_name = post_script_name(&font);
+    Ok(LoadedFont {
+        face: FontFace::new(font),
+        post_script_name,
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn load_system_ui_font() -> Option<LoadedFont> {
     let font = unsafe {
@@ -770,6 +793,38 @@ impl GlyphAtlas {
                 font_name, loaded.post_script_name
             );
         }
+        Self::from_loaded_font(loaded, font_size)
+    }
+
+    /// Build an atlas from one exact font file. Unlike [`Self::new`], this
+    /// never asks CoreText to resolve a name and therefore never substitutes a
+    /// user or system font. The expected PostScript name protects the package
+    /// against accidentally shipping a different face at the configured path.
+    #[cfg(target_os = "macos")]
+    pub fn new_from_file(
+        path: &std::path::Path,
+        expected_post_script_name: &str,
+        font_size: f64,
+    ) -> Result<Self, String> {
+        if !font_size.is_finite() || font_size <= 0.0 {
+            return Err(format!("invalid font size: {font_size}"));
+        }
+        let loaded = load_font_file(path)?;
+        if loaded.post_script_name != expected_post_script_name {
+            return Err(format!(
+                "bundled font {} has PostScript name {:?}; expected {:?}",
+                path.display(), loaded.post_script_name, expected_post_script_name
+            ));
+        }
+        Self::from_loaded_font(loaded, font_size).ok_or_else(|| {
+            format!(
+                "bundled font {} has no usable metrics at {font_size}pt",
+                path.display()
+            )
+        })
+    }
+
+    fn from_loaded_font(loaded: LoadedFont, font_size: f64) -> Option<Self> {
         let font_size = font_size as f32;
         let metrics = loaded.face.line_metrics(font_size)?;
         let cell_w = loaded.face.advance('m', font_size).ceil().max(1.0) as usize;
@@ -1063,6 +1118,18 @@ impl MetalGlyphAtlas {
         })
     }
 
+    pub fn new_from_file(
+        device: &ProtocolObject<dyn MTLDevice>,
+        path: &std::path::Path,
+        expected_post_script_name: &str,
+        font_size: f64,
+    ) -> Result<Self, String> {
+        let texture = make_metal_texture(device, ATLAS_SIZE)
+            .ok_or_else(|| "failed to create the monospace glyph texture".to_string())?;
+        let atlas = GlyphAtlas::new_from_file(path, expected_post_script_name, font_size)?;
+        Ok(Self { texture, atlas })
+    }
+
     pub fn get_or_rasterize(&mut self, ch: char) -> Option<&GlyphEntry> {
         let previous_revision = self.atlas.bitmap.revision();
         let entry = *self.atlas.get_or_rasterize(ch)?;
@@ -1342,6 +1409,12 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    fn bundled_jetbrains_mono_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../dist/macos/fonts/JetBrainsMono-Regular.ttf")
+    }
+
     /// CoreText's JetBrains Mono cell at 16pt, as it was before the fontdue
     /// port.
     #[cfg(target_os = "macos")]
@@ -1353,10 +1426,28 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn the_jetbrains_mono_cell_matches_the_pre_port_core_text_metrics() {
-        let atlas = GlyphAtlas::new("JetBrainsMono-Regular", 16.0)
-            .expect("JetBrains Mono is the application's monospace font");
+        let atlas = GlyphAtlas::new_from_file(
+            &bundled_jetbrains_mono_path(),
+            "JetBrainsMono-Regular",
+            16.0,
+        )
+        .expect("the bundled JetBrains Mono face must load directly");
         assert_eq!(atlas.post_script_name, "JetBrainsMono-Regular");
         assert_eq!((atlas.cell_w, atlas.cell_h), JETBRAINS_MONO_16PT_CELL);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn an_exact_font_file_rejects_the_wrong_postscript_name() {
+        let error = GlyphAtlas::new_from_file(
+            &bundled_jetbrains_mono_path(),
+            "SomeSubstitutedFont-Regular",
+            16.0,
+        )
+        .err()
+        .expect("a different face must never stand in for the layout font");
+        assert!(error.contains("JetBrainsMono-Regular"), "{error}");
+        assert!(error.contains("SomeSubstitutedFont-Regular"), "{error}");
     }
 
     #[test]

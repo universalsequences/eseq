@@ -196,6 +196,9 @@ ESeq.app/Contents/
                        <- from crates/sequencer/tools/DGenLisp-macos-arm64
   Resources/
     AppIcon.icns
+    fonts/
+      JetBrainsMono-Regular.ttf
+      OFL.txt           <- SIL Open Font License 1.1
     dgen-toolchain/    <- from crates/sequencer/tools/dgen-toolchain (~140 MB)
     core/  ui/  defmacros/  effects/  instruments/  midi-fx/
     presets/  kits/  processes/  scripts/  impulses/  filter-tables/
@@ -209,6 +212,15 @@ code disagrees — `factory_root()` returns `contents_resources` directly, so
 matches the code. The toolchain spec's layout section was corrected to the
 tree above; the accessors were left unchanged. The layout above is the single
 authority for the dist script; there is no `runtime/` or `factory/` nesting.
+
+JetBrains Mono 2.304 is loaded directly from the bundled font file before the
+layout atlas is created. Most visible labels use CoreText's system UI face, but
+the monospace face defines ESeq's global cell grid; allowing CoreText to
+silently substitute a missing user font changes every cell-authored panel's
+geometry. Direct file loading makes the grid independent of account fonts and
+fails startup loudly if the packaged face is missing, invalid, or has the wrong
+PostScript name. The unmodified font and `OFL.txt` are copied from
+`dist/macos/fonts/`, and the dist script verifies the pinned font checksum.
 
 The staged toolchain is copied whole, so `Resources/dgen-toolchain/` carries
 the full stage layout (`VERSION.json`, `LAYOUT.md`, `bin/`, `lib/`, `include/`,

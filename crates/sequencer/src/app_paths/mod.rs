@@ -308,6 +308,19 @@ impl AppPaths {
         }
     }
 
+    /// Exact monospace face that defines the application's cell grid. It is a
+    /// checked-in packaging resource in development and is copied into the app
+    /// bundle for release, so layout never depends on a user's installed fonts.
+    pub fn ui_monospace_font(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { workspace_root, .. } => workspace_root
+                .join("dist/macos/fonts/JetBrainsMono-Regular.ttf"),
+            AppPaths::Release {
+                contents_resources, ..
+            } => contents_resources.join("fonts/JetBrainsMono-Regular.ttf"),
+        }
+    }
+
     /// Read-only factory content root.
     pub fn factory_root(&self) -> PathBuf {
         match self {
@@ -949,6 +962,7 @@ mod tests {
             paths.dgen_toolchain_root(),
             paths.dgen_abi_dir(),
             paths.perf_probe_projects_dir(),
+            paths.ui_monospace_font(),
             paths.factory_root(),
             paths.user_data_root(),
             paths.project_script_root(),

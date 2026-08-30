@@ -9,6 +9,10 @@ readonly DGEN_TOOLCHAIN="$TOOLS_DIR/dgen-toolchain"
 readonly TOOLCHAIN_VERSION="$DGEN_TOOLCHAIN/VERSION.json"
 readonly CONTENT_DIR="$REPO_ROOT/content"
 readonly ICON="$SCRIPT_DIR/AppIcon.icns"
+readonly FONT_DIR="$SCRIPT_DIR/fonts"
+readonly UI_FONT="$FONT_DIR/JetBrainsMono-Regular.ttf"
+readonly UI_FONT_LICENSE="$FONT_DIR/OFL.txt"
+readonly UI_FONT_SHA256="a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f"
 readonly OUTPUT_DIR="$REPO_ROOT/dist/out"
 readonly BUNDLE_ID="com.universalsequences.eseq"
 readonly MINIMUM_MACOS="11.0"
@@ -30,13 +34,19 @@ if [[ ! -x "$DGEN_TOOL" ]]; then
 fi
 [[ -d "$CONTENT_DIR" ]] || fail "factory content not found at $CONTENT_DIR"
 [[ -f "$ICON" ]] || fail "app icon not found at $ICON"
+[[ -f "$UI_FONT" ]] || fail "application font not found at $UI_FONT"
+[[ -f "$UI_FONT_LICENSE" ]] || fail "application font license not found at $UI_FONT_LICENSE"
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "macOS packaging must run on macOS"
 [[ "$(uname -m)" == "arm64" ]] || fail "ESeq R1 supports Apple Silicon (arm64) only"
 
-for command in cargo codesign ditto git hdiutil plutil strings xattr; do
+for command in cargo codesign ditto git hdiutil plutil shasum strings xattr; do
   require_command "$command"
 done
+
+readonly ACTUAL_UI_FONT_SHA256="$(shasum -a 256 "$UI_FONT" | awk '{print $1}')"
+[[ "$ACTUAL_UI_FONT_SHA256" == "$UI_FONT_SHA256" ]] || \
+  fail "application font checksum mismatch: expected $UI_FONT_SHA256, got $ACTUAL_UI_FONT_SHA256"
 
 readonly TOOLCHAIN_TARGET="$(plutil -extract target raw "$TOOLCHAIN_VERSION")"
 readonly TOOLCHAIN_MINIMUM_MACOS="$(plutil -extract minimum_macos raw "$TOOLCHAIN_VERSION")"
@@ -127,6 +137,7 @@ ditto "$DGEN_TOOL" "$MACOS/DGenLisp-macos-arm64"
 ditto "$DGEN_TOOLCHAIN" "$RESOURCES/dgen-toolchain"
 ditto "$CONTENT_DIR" "$RESOURCES"
 ditto "$ICON" "$RESOURCES/AppIcon.icns"
+ditto "$FONT_DIR" "$RESOURCES/fonts"
 
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

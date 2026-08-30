@@ -23,6 +23,9 @@ The command-line program is bundled at
 User content is stored under
 `~/Library/Application Support/com.universalsequences.eseq/` and generated
 compiler artifacts under `~/Library/Caches/com.universalsequences.eseq/`.
+The application bundles its exact JetBrains Mono 2.304 layout face under the
+SIL Open Font License 1.1; it does not depend on fonts installed in the user's
+account.
 
 ## Build from a checkout
 
