@@ -8,19 +8,21 @@ installed application bundle.
 ## Test artifact
 
 Download
-[`ESeq-0.1.0-e8f4142d.dmg`](https://github.com/universalsequences/eseq/releases/download/r1-test-e8f4142d/ESeq-0.1.0-e8f4142d.dmg).
-It was built from commit `e8f4142d` for Apple Silicon macOS 11 or newer.
+[`ESeq-0.1.0-7236b0e1.dmg`](https://github.com/universalsequences/eseq/releases/download/r1-test-7236b0e1/ESeq-0.1.0-7236b0e1.dmg).
+It was built from commit `7236b0e1` for Apple Silicon macOS 11 or newer.
+This build includes the account-independent layout-font fix discovered during
+the first fresh-account pass.
 
 SHA-256:
 
 ```text
-00b1be9381c3c1e56a4a491de9a87219bfe4df71bf42227c49ff222271dffc34
+9a45b057b8e645a3b3bc409f925da61eb7aa34a5bb63172ad1e94c1f34bc0b37
 ```
 
 Optionally verify the download before opening it:
 
 ```sh
-shasum -a 256 ~/Downloads/ESeq-0.1.0-e8f4142d.dmg
+shasum -a 256 ~/Downloads/ESeq-0.1.0-7236b0e1.dmg
 ```
 
 ## Scope of this test
@@ -35,20 +37,31 @@ DGenLisp compiler and hermetic clang/lld stage.
 
 ## Install
 
-1. Create a **Standard** account in **System Settings > Users & Groups**, then
+1. `/Applications` is shared by every account. From the administrator account,
+   remove or rename any existing `/Applications/ESeq.app` before switching
+   users; otherwise Finder may keep or launch an older build.
+2. Create a **Standard** account in **System Settings > Users & Groups**, then
    sign in to it.
-2. Download the DMG from the link above in the new account. Opening a browser
+3. Download the DMG from the link above in the new account. Opening a browser
    download also exercises macOS quarantine behavior that a locally copied DMG
    may not reproduce.
-3. Open the DMG and drag **ESeq** onto the **Applications** shortcut.
-4. This R1 build is ad-hoc signed rather than notarized. In Terminal, remove
+4. Open the DMG and drag **ESeq** onto the **Applications** shortcut, supplying
+   administrator credentials when Finder requests them.
+5. Confirm that the installed application is this checklist's build:
+
+   ```sh
+   defaults read /Applications/ESeq.app/Contents/Info.plist CFBundleVersion
+   ```
+
+   The command must print `7236b0e1`.
+6. This R1 build is ad-hoc signed rather than notarized. In Terminal, remove
    quarantine from the installed test build:
 
    ```sh
    xattr -dr com.apple.quarantine /Applications/ESeq.app
    ```
 
-5. Eject the DMG and open `/Applications/ESeq.app`. Do not run the copy on the
+7. Eject the DMG and open `/Applications/ESeq.app`. Do not run the copy on the
    mounted image.
 
 Before first launch, neither user-content root should exist:
