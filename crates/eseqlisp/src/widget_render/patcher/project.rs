@@ -1454,6 +1454,42 @@ pub(super) struct OperatorPortDocumentation {
     pub(super) summary: Option<String>,
 }
 
+pub(super) fn dgenlisp_operator_attributes() -> &'static HashMap<String, Vec<String>> {
+    static OPERATOR_ATTRIBUTES: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+    OPERATOR_ATTRIBUTES.get_or_init(|| {
+        let metadata = crate::dgenlisp::manifest();
+        let operators = metadata
+            .get("operators")
+            .and_then(serde_json::Value::as_array)
+            .expect("bundled dgenlisp-operators.json must contain an operators array");
+
+        let mut attributes = HashMap::new();
+        for operator in operators {
+            let Some(name) = operator.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let names = operator
+                .get("attributes")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            attributes.insert(name.to_string(), names.clone());
+            if let Some(aliases) = operator
+                .get("aliases")
+                .and_then(serde_json::Value::as_array)
+            {
+                for alias in aliases.iter().filter_map(serde_json::Value::as_str) {
+                    attributes.insert(alias.to_string(), names.clone());
+                }
+            }
+        }
+        attributes
+    })
+}
+
 pub(super) fn dgenlisp_operator_documentation() -> &'static HashMap<String, OperatorDocumentation> {
     static OPERATOR_DOCUMENTATION: OnceLock<HashMap<String, OperatorDocumentation>> =
         OnceLock::new();

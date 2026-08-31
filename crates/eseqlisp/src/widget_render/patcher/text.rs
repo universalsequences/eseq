@@ -5,8 +5,8 @@ use super::super::text_input::{TextInputState, selection_range as text_selection
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
 use super::model::MacroPatch;
 use super::project::{
-    OperatorDocumentation, OperatorPortDocumentation, dgenlisp_operator_documentation,
-    dgenlisp_operator_names,
+    OperatorDocumentation, OperatorPortDocumentation, dgenlisp_operator_attributes,
+    dgenlisp_operator_documentation, dgenlisp_operator_names,
 };
 use super::state::{
     PatcherInteractionState, PatcherNodeOrigin, PatcherTextEdit, debug_log_edit_event,
@@ -97,25 +97,41 @@ pub(super) fn patcher_autocomplete_suggestions(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
 ) -> Vec<PatcherAutocompleteSuggestion> {
-    let Some(prefix) = autocomplete_prefix(&edit.text) else {
+    let Some(context) = autocomplete_context(edit) else {
         return Vec::new();
     };
-    let prefix = prefix.to_lowercase();
-    let docs = dgenlisp_operator_documentation();
-    let mut candidates: HashMap<String, Option<OperatorDocumentation>> = dgenlisp_operator_names()
-        .iter()
-        .filter(|name| name.to_lowercase().starts_with(&prefix))
-        .map(|name| (name.clone(), docs.get(name).cloned()))
-        .collect();
-    if "history".starts_with(&prefix) {
-        candidates.insert("history".to_string(), Some(patcher_history_documentation()));
-    }
-    for macro_patch in local_macros {
-        if macro_patch.name.to_lowercase().starts_with(&prefix) {
-            candidates.insert(
-                macro_patch.name.clone(),
-                Some(local_macro_documentation(macro_patch)),
+    let prefix = context.prefix.to_lowercase();
+    let mut candidates = HashMap::new();
+    match context.kind {
+        AutocompleteKind::Operator => {
+            let docs = dgenlisp_operator_documentation();
+            candidates.extend(
+                dgenlisp_operator_names()
+                    .iter()
+                    .filter(|name| name.to_lowercase().starts_with(&prefix))
+                    .map(|name| (name.clone(), docs.get(name).cloned())),
             );
+            if "history".starts_with(&prefix) {
+                candidates.insert("history".to_string(), Some(patcher_history_documentation()));
+            }
+            for macro_patch in local_macros {
+                if macro_patch.name.to_lowercase().starts_with(&prefix) {
+                    candidates.insert(
+                        macro_patch.name.clone(),
+                        Some(local_macro_documentation(macro_patch)),
+                    );
+                }
+            }
+        }
+        AutocompleteKind::Attribute { operator } => {
+            if let Some(attributes) = dgenlisp_operator_attributes().get(operator) {
+                candidates.extend(
+                    attributes
+                        .iter()
+                        .filter(|name| name.to_lowercase().starts_with(&prefix))
+                        .map(|name| (name.clone(), None)),
+                );
+            }
         }
     }
     let mut matches: Vec<PatcherAutocompleteSuggestion> = candidates
@@ -225,6 +241,10 @@ pub(super) fn apply_patcher_autocomplete(
     edit: &mut PatcherTextEdit,
     local_macros: &[MacroPatch],
 ) -> bool {
+    let Some(context) = autocomplete_context(edit) else {
+        return false;
+    };
+    let (start, end) = (context.start, context.end);
     let matches = patcher_autocomplete_matches(edit, local_macros);
     if matches.is_empty() {
         edit.autocomplete_selected = 0;
@@ -232,9 +252,6 @@ pub(super) fn apply_patcher_autocomplete(
     }
     let selected = edit.autocomplete_selected.min(matches.len() - 1);
     let replacement = &matches[selected];
-    let Some((start, end)) = first_token_byte_span(&edit.text) else {
-        return false;
-    };
     let mut completed = String::with_capacity(edit.text.len() + replacement.len() + 1);
     completed.push_str(&edit.text[..start]);
     completed.push_str(replacement);
@@ -247,11 +264,35 @@ pub(super) fn apply_patcher_autocomplete(
     }
     completed.push_str(&edit.text[end..]);
     edit.text = completed;
-    edit.state.cursor_pos = edit.text[..start].chars().count() + replacement.chars().count() + 1;
+    edit.state.cursor_pos = edit.text[..start].chars().count()
+        + replacement.chars().count()
+        + 1;
     edit.state.selection_anchor = None;
     edit.state.selecting = false;
     edit.autocomplete_selected = 0;
     true
+}
+
+/// The untyped tail of the selected completion, for rendering immediately
+/// after the caret. Ghost text is intentionally limited to a trailing token:
+/// drawing it inside authored suffix text would obscure that text rather than
+/// preview the result that Tab will produce.
+pub(super) fn patcher_autocomplete_ghost_text(
+    edit: &PatcherTextEdit,
+    local_macros: &[MacroPatch],
+) -> Option<String> {
+    if edit.state.selection_anchor.is_some() {
+        return None;
+    }
+    let context = autocomplete_context(edit)?;
+    if context.cursor != context.end || context.end != edit.text.len() {
+        return None;
+    }
+    let matches = patcher_autocomplete_matches(edit, local_macros);
+    let selected = matches.get(edit.autocomplete_selected.min(matches.len().saturating_sub(1)))?;
+    let prefix_chars = context.prefix.chars().count();
+    let remainder = selected.chars().skip(prefix_chars).collect::<String>();
+    (!remainder.is_empty()).then_some(remainder)
 }
 
 pub(super) fn clamp_patcher_autocomplete_selection(edit: &mut PatcherTextEdit) {
@@ -270,17 +311,81 @@ pub(super) fn clamp_patcher_autocomplete_selection_with_macros(
     }
 }
 
-fn autocomplete_prefix(text: &str) -> Option<&str> {
-    let (start, end) = first_token_byte_span(text)?;
-    if text[end..].chars().next().is_some_and(char::is_whitespace) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutocompleteKind<'a> {
+    Operator,
+    Attribute { operator: &'a str },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AutocompleteContext<'a> {
+    kind: AutocompleteKind<'a>,
+    prefix: &'a str,
+    start: usize,
+    end: usize,
+    cursor: usize,
+}
+
+fn autocomplete_context(edit: &PatcherTextEdit) -> Option<AutocompleteContext<'_>> {
+    let cursor = char_to_byte_index(&edit.text, edit.state.cursor_pos);
+    let (start, end) = token_byte_span_at_cursor(&edit.text, cursor)?;
+    let prefix = &edit.text[start..cursor];
+    if prefix.is_empty() {
         return None;
     }
-    let prefix = &text[start..end];
-    if prefix.is_empty() {
-        None
+    let first_token = first_token_byte_span(&edit.text)?;
+    let kind = if (start, end) == first_token {
+        AutocompleteKind::Operator
     } else {
-        Some(prefix)
+        if !prefix.starts_with('@') {
+            return None;
+        }
+        AutocompleteKind::Attribute {
+            operator: &edit.text[first_token.0..first_token.1],
+        }
+    };
+    Some(AutocompleteContext {
+        kind,
+        prefix,
+        start,
+        end,
+        cursor,
+    })
+}
+
+fn char_to_byte_index(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(byte_index, _)| byte_index)
+        .unwrap_or(text.len())
+}
+
+fn token_byte_span_at_cursor(text: &str, cursor: usize) -> Option<(usize, usize)> {
+    let cursor_char = text[cursor..].chars().next();
+    let previous_char = text[..cursor].chars().next_back();
+    if cursor_char.is_none_or(char::is_whitespace)
+        && previous_char.is_none_or(char::is_whitespace)
+    {
+        return None;
     }
+    let anchor = if cursor_char.is_some_and(|ch| !ch.is_whitespace()) {
+        cursor
+    } else {
+        text[..cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)?
+    };
+    let start = text[..anchor]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(index + ch.len_utf8()))
+        .unwrap_or(0);
+    let end = text[anchor..]
+        .char_indices()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(anchor + index))
+        .unwrap_or(text.len());
+    Some((start, end))
 }
 
 fn first_token_byte_span(text: &str) -> Option<(usize, usize)> {

@@ -18,7 +18,10 @@ use super::model::{
 use super::project::{dgenlisp_operator_documentation, dgenlisp_operator_names};
 use super::render::*;
 use super::state::*;
-use super::text::{apply_patcher_autocomplete, patcher_autocomplete_suggestions};
+use super::text::{
+    apply_patcher_autocomplete, patcher_autocomplete_ghost_text,
+    patcher_autocomplete_suggestions,
+};
 use super::text_metrics::{cache_text_widths, measured_cursor_offset, measured_text_width};
 use super::writeback::{
     WriteBackError, emit_patch_writeback, emit_patch_writeback_result,
@@ -15784,6 +15787,80 @@ fn patcher_reports_text_capture_only_while_node_text_edit_is_active() {
 }
 
 #[test]
+fn patcher_autocomplete_completes_attributes_for_the_active_operator() {
+    let mut edit = PatcherTextEdit {
+        node_id: "draft".to_string(),
+        text: "tensor @".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 8,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    };
+
+    assert_eq!(
+        patcher_autocomplete_suggestions(&edit, &[])
+            .into_iter()
+            .map(|suggestion| suggestion.name)
+            .collect::<Vec<_>>(),
+        vec!["@data", "@file", "@name", "@shape"]
+    );
+
+    edit.text = "tensor @sh".to_string();
+    edit.state.cursor_pos = 10;
+    assert_eq!(
+        patcher_autocomplete_suggestions(&edit, &[])
+            .into_iter()
+            .map(|suggestion| suggestion.name)
+            .collect::<Vec<_>>(),
+        vec!["@shape"]
+    );
+    assert_eq!(
+        patcher_autocomplete_ghost_text(&edit, &[]).as_deref(),
+        Some("ape")
+    );
+    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert_eq!(edit.text, "tensor @shape ");
+    assert_eq!(edit.state.cursor_pos, 14);
+}
+
+#[test]
+fn patcher_attribute_autocomplete_is_filtered_by_operator_and_replaces_the_token() {
+    let mut edit = PatcherTextEdit {
+        node_id: "draft".to_string(),
+        text: "compressor @sh 0.5".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 14,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    };
+    assert!(patcher_autocomplete_suggestions(&edit, &[]).is_empty());
+
+    edit.text = "tensor @fi [512]".to_string();
+    edit.state.cursor_pos = 10;
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[]);
+    assert_eq!(
+        suggestions
+            .iter()
+            .map(|suggestion| suggestion.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["@file"]
+    );
+    assert!(
+        patcher_autocomplete_ghost_text(&edit, &[]).is_none(),
+        "ghost text must not obscure an authored suffix"
+    );
+    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert_eq!(edit.text, "tensor @file [512]");
+    assert_eq!(edit.state.cursor_pos, 13);
+}
+
+#[test]
 fn patcher_autocomplete_documents_adsrexp_preamble_macro() {
     let mut edit = PatcherTextEdit {
         node_id: "draft".to_string(),
@@ -18965,6 +19042,17 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
 
 #[test]
 fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
+    let measurer = FixedWidthTextMeasurer;
+    cache_text_widths(
+        "bi".to_string(),
+        NODE_FONT_SIZE,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: NODE_FONT_SIZE,
+        },
+    );
     let mut state = PatcherInteractionState::default();
     let created_id = allocate_created_node(&mut state, "root", (2.0, 2.0));
     state.text_edit = Some(PatcherTextEdit {
@@ -19015,6 +19103,16 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
             )
         }),
         "active operator prefix should render its autocomplete suggestion"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                GpuPrimitive::ProportionalText(text)
+                    if text.text == "quad" && text.fg == theme::PATCHER_TEXT_MUTED()
+            )
+        }),
+        "the selected completion remainder should render as muted inline ghost text"
     );
     assert!(
         prims.iter().any(|prim| {

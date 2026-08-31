@@ -54,7 +54,7 @@ use super::state::{
     ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
     set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
 };
-use super::text::patcher_autocomplete_suggestions;
+use super::text::{patcher_autocomplete_ghost_text, patcher_autocomplete_suggestions};
 use super::text_metrics::{measured_cursor_offset, measured_text_width, wrap_measured_text};
 
 /// Horizontal inset of the selected-row bar from the panel edge, in cells.
@@ -1329,6 +1329,8 @@ fn draw_patch_with_view_key(
         if let Some(edit) = active_edit {
             active_edit_panel = Some((rect, edit));
         }
+        let autocomplete_ghost = active_edit
+            .and_then(|edit| patcher_autocomplete_ghost_text(edit, &autocomplete_macros));
         let highlighted_inputs = highlighted_inputs_for_node(&interaction_state.drag, &node.id);
         let highlighted_outputs = highlighted_outputs_for_node(&interaction_state.drag, &node.id);
         push_node(
@@ -1346,6 +1348,7 @@ fn draw_patch_with_view_key(
             interaction_state.hovered_node.as_deref() == Some(node.id.as_str()),
             interaction_state.agentic_morph_nodes.get(&node.id),
             active_edit,
+            autocomplete_ghost.as_deref(),
             hovered_label_arg_index(interaction_state, &node.id),
             &highlighted_inputs,
             &highlighted_outputs,
@@ -2121,6 +2124,7 @@ fn push_node(
     hovered: bool,
     morph: Option<&AgenticMorph>,
     edit: Option<&PatcherTextEdit>,
+    autocomplete_ghost: Option<&str>,
     hovered_arg: Option<usize>,
     highlighted_inputs: &[usize],
     highlighted_outputs: &[usize],
@@ -2219,7 +2223,16 @@ fn push_node(
         selection_prims,
     );
     let mut text_prims = Vec::new();
-    push_node_label(&mut text_prims, node, rect, text, edit, hovered_arg, zoom);
+    push_node_label(
+        &mut text_prims,
+        node,
+        rect,
+        text,
+        edit,
+        autocomplete_ghost,
+        hovered_arg,
+        zoom,
+    );
     if let Some(diagnostic) = &node.diagnostic {
         text_prims.push(GpuPrimitive::ProportionalText(
             GpuProportionalTextPrimitive {
@@ -2450,6 +2463,7 @@ fn push_node_label(
     rect: Rect,
     head_color: crate::backend::Color,
     edit: Option<&PatcherTextEdit>,
+    autocomplete_ghost: Option<&str>,
     hovered_arg: Option<usize>,
     zoom: f32,
 ) {
@@ -2474,6 +2488,28 @@ fn push_node_label(
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
         ));
+        if let Some(ghost) = autocomplete_ghost
+            && let Some(cursor_x) = measured_cursor_offset(
+                &edit.text,
+                font_size,
+                edit.state.cursor_pos.min(edit.text.chars().count()),
+            )
+        {
+            let ghost_col = text_col + cursor_x * zoom;
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
+                    row: text_row,
+                    col: ghost_col,
+                    align_width: (rect.col + rect.width - ghost_col - 0.92 * zoom).max(0.0),
+                    h_align: 0.0,
+                    text: ghost.to_string(),
+                    font_size,
+                    scale: zoom,
+                    fg: theme::PATCHER_TEXT_MUTED(),
+                    bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                },
+            ));
+        }
         return;
     }
     let label = node_display_label(node);
