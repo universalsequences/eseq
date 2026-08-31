@@ -871,6 +871,27 @@ pub(super) fn handle(
                                 let next =
                                     desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
                                 if selected.is_empty() {
+                                    let printable = !matches!(
+                                        desc.host_control,
+                                        Some(sequencer::effects::HostControl::FxSidechain { .. })
+                                    ) && !sequencer::instruments::voice_modulator::is_envelope_source_param_value(
+                                        desc.node_param_idx,
+                                        next,
+                                    );
+                                    let track = current_track.load(Ordering::Relaxed);
+                                    if printable
+                                        && try_latch_param_print(
+                                            ctx.shared,
+                                            track,
+                                            &[(PrintTarget::BusEffect {
+                                                bus_idx,
+                                                slot_idx,
+                                                param_idx,
+                                            }, next)],
+                                        )
+                                    {
+                                        return;
+                                    }
                                     match app.apply_recorded_bus_effect_value_mutation(
                                         bus_idx,
                                         slot_idx,
@@ -957,6 +978,13 @@ pub(super) fn handle(
                                 let next =
                                     desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
                                 if selected.is_empty() {
+                                    if try_latch_param_print(
+                                        ctx.shared,
+                                        track,
+                                        &[(PrintTarget::MidiFx { slot_idx, param_idx }, next)],
+                                    ) {
+                                        return;
+                                    }
                                     app::apply_command(
                                         &mut app,
                                         app::AppCommand::SetMidiFxParam {
@@ -1428,26 +1456,34 @@ pub(super) fn handle(
                         .get(track)
                         .and_then(|slots| slots.get(slot_idx))
                     {
-                        app::apply_command(
-                            &mut app,
-                            app::AppCommand::SetMidiFxParam {
+                        let print_gesture = desc.is_some()
+                            && try_latch_param_print(
+                                ctx.shared,
+                                track,
+                                &[(PrintTarget::MidiFx { slot_idx, param_idx }, clamped)],
+                            );
+                        if !print_gesture {
+                            app::apply_command(
+                                &mut app,
+                                app::AppCommand::SetMidiFxParam {
+                                    track,
+                                    slot_idx,
+                                    param_idx,
+                                    value: clamped,
+                                },
+                            );
+                            sync_midi_fx_param_value_field(
+                                editor.runtime_mut(),
+                                &state,
                                 track,
                                 slot_idx,
                                 param_idx,
-                                value: clamped,
-                            },
-                        );
-                        sync_midi_fx_param_value_field(
-                            editor.runtime_mut(),
-                            &state,
-                            track,
-                            slot_idx,
-                            param_idx,
-                            None,
-                        );
-                        if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
-                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                None,
+                            );
+                            if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -1537,17 +1573,25 @@ pub(super) fn handle(
                             .get(track)
                             .and_then(|slots| slots.get(slot_idx))
                         {
-                            app::apply_command(
-                                &mut app,
-                                app::AppCommand::SetMidiFxParam {
-                                    track,
-                                    slot_idx,
-                                    param_idx,
-                                    value: selected_idx as f32,
-                                },
+                            let value = selected_idx as f32;
+                            let print_gesture = try_latch_param_print(
+                                ctx.shared,
+                                track,
+                                &[(PrintTarget::MidiFx { slot_idx, param_idx }, value)],
                             );
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
-                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            if !print_gesture {
+                                app::apply_command(
+                                    &mut app,
+                                    app::AppCommand::SetMidiFxParam {
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        value,
+                                    },
+                                );
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -2375,30 +2419,22 @@ fn try_latch_effect_param_print(
     updates: &[(usize, f32)],
     neural_selection_empty: bool,
 ) -> bool {
-    if updates.is_empty()
-        || !neural_selection_empty
-        || !shared.selected_steps.lock().unwrap().is_empty()
-        || !shared.state.is_playing()
-        || !shared.recording.load(Ordering::Relaxed)
-    {
+    if !neural_selection_empty {
         return false;
     }
-
-    let mut print = shared.step_print.lock().unwrap();
-    for (param_idx, value) in updates {
-        print.latch(
-            track,
-            PrintTarget::Effect {
-                slot_idx,
-                param_idx: *param_idx,
-            },
-            *value,
-        );
-    }
-    // A touch on another track may have replaced a Step target, so update its
-    // engine-only override at the same latch transition.
-    print.publish_engine_override(&shared.state);
-    true
+    let targets = updates
+        .iter()
+        .map(|(param_idx, value)| {
+            (
+                PrintTarget::Effect {
+                    slot_idx,
+                    param_idx: *param_idx,
+                },
+                *value,
+            )
+        })
+        .collect::<Vec<_>>();
+    try_latch_param_print(shared, track, &targets)
 }
 
 /// Queue the panel-tree rebuild through the normal post-event invalidation

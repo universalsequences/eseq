@@ -377,34 +377,57 @@ pub(super) fn handle(
                         .and_then(|bus| bus.effect_descriptors.get(slot_idx))
                         .and_then(|desc| desc.params.get(param_idx))
                         .cloned();
-                    match app.apply_recorded_bus_effect_value_mutation(
-                        bus_idx,
-                        slot_idx,
-                        "Set bus effect parameter",
-                        format!("param:{param_idx}"),
-                        |app| app.set_bus_effect_param(
-                            bus_idx, slot_idx, param_idx, value,
-                        ),
-                    ) {
-                        Ok(()) => {
-                            app.publish_bus_effect_runtime();
-                            *bus_state.lock().unwrap() = app.buses.clone();
-                            sync_bus_effect_param_value_field(
-                                editor.runtime_mut(),
-                                &app,
+                    let stored = desc.as_ref().map(|param| param.clamp(value)).unwrap_or(value);
+                    let printable = desc.as_ref().is_some_and(|param| {
+                        !matches!(
+                            param.host_control,
+                            Some(sequencer::effects::HostControl::FxSidechain { .. })
+                        ) && !sequencer::instruments::voice_modulator::is_envelope_source_param_value(
+                            param.node_param_idx,
+                            stored,
+                        )
+                    });
+                    let track = current_track.load(Ordering::Relaxed);
+                    let print_gesture = printable
+                        && try_latch_param_print(
+                            ctx.shared,
+                            track,
+                            &[(PrintTarget::BusEffect {
                                 bus_idx,
                                 slot_idx,
                                 param_idx,
-                            );
-                            if desc.as_ref().is_some_and(param_change_needs_fx_rebuild)
-                            {
-                                fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }, stored)],
+                        );
+                    if !print_gesture {
+                        match app.apply_recorded_bus_effect_value_mutation(
+                            bus_idx,
+                            slot_idx,
+                            "Set bus effect parameter",
+                            format!("param:{param_idx}"),
+                            |app| app.set_bus_effect_param(
+                                bus_idx, slot_idx, param_idx, stored,
+                            ),
+                        ) {
+                            Ok(()) => {
+                                app.publish_bus_effect_runtime();
+                                *bus_state.lock().unwrap() = app.buses.clone();
+                                sync_bus_effect_param_value_field(
+                                    editor.runtime_mut(),
+                                    &app,
+                                    bus_idx,
+                                    slot_idx,
+                                    param_idx,
+                                );
+                                if desc.as_ref().is_some_and(param_change_needs_fx_rebuild)
+                                {
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
+                            Err(error) => editor.handle_host_event(HostEvent::Status(
+                                format!("Error setting bus effect param: {error}"),
+                            )),
                         }
-                        Err(error) => editor.handle_host_event(HostEvent::Status(
-                            format!("Error setting bus effect param: {error}"),
-                        )),
                     }
                 }
             }
@@ -500,43 +523,68 @@ pub(super) fn handle(
                                 .and_then(|param| param.host_control.as_ref()),
                             Some(sequencer::effects::HostControl::FxSidechain { .. })
                         );
-                        match app.apply_recorded_bus_effect_value_mutation(
-                            bus_idx,
-                            slot_idx,
-                            "Set bus effect option",
-                            format!("param:{param_idx}"),
-                            |app| {
-                                if is_host_sidechain {
-                                    app.apply_bus_effect_sidechain_selection(
-                                        bus_idx, slot_idx, param_idx, selected_idx,
+                        let value = selected_idx as f32;
+                        let printable = !is_host_sidechain
+                            && app.buses
+                                .get(bus_idx)
+                                .and_then(|bus| bus.effect_descriptors.get(slot_idx))
+                                .and_then(|desc| desc.params.get(param_idx))
+                                .is_some_and(|param| {
+                                    !sequencer::instruments::voice_modulator::is_envelope_source_param_value(
+                                        param.node_param_idx,
+                                        value,
+                                    )
+                                });
+                        let track = current_track.load(Ordering::Relaxed);
+                        let print_gesture = printable
+                            && try_latch_param_print(
+                                ctx.shared,
+                                track,
+                                &[(PrintTarget::BusEffect {
+                                    bus_idx,
+                                    slot_idx,
+                                    param_idx,
+                                }, value)],
+                            );
+                        if !print_gesture {
+                            match app.apply_recorded_bus_effect_value_mutation(
+                                bus_idx,
+                                slot_idx,
+                                "Set bus effect option",
+                                format!("param:{param_idx}"),
+                                |app| {
+                                    if is_host_sidechain {
+                                        app.apply_bus_effect_sidechain_selection(
+                                            bus_idx, slot_idx, param_idx, selected_idx,
+                                        );
+                                    }
+                                    app.set_bus_effect_param(
+                                        bus_idx, slot_idx, param_idx, value,
+                                    )
+                                },
+                            ) {
+                                Ok(()) => {
+                                    app.publish_bus_effect_runtime();
+                                    *bus_state.lock().unwrap() = app.buses.clone();
+                                    let rt = editor.runtime_mut();
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "bus-effects",
+                                        build_bus_effects_value_for_selection(
+                                            &app,
+                                            Some(&selected_steps),
+                                        ),
                                     );
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
-                                app.set_bus_effect_param(
-                                    bus_idx, slot_idx, param_idx, selected_idx as f32,
-                                )
-                            },
-                        ) {
-                            Ok(()) => {
-                                app.publish_bus_effect_runtime();
-                                *bus_state.lock().unwrap() = app.buses.clone();
-                                let rt = editor.runtime_mut();
-                                sync_bus_mixer_state(rt, &app);
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "bus-effects",
-                                    build_bus_effects_value_for_selection(
-                                        &app,
-                                        Some(&selected_steps),
-                                    ),
-                                );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
-                                fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                Err(error) => editor.handle_host_event(HostEvent::Status(
+                                    format!("Error setting bus effect option: {error}"),
+                                )),
                             }
-                            Err(error) => editor.handle_host_event(HostEvent::Status(
-                                format!("Error setting bus effect option: {error}"),
-                            )),
                         }
                     }
                 }

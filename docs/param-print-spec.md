@@ -135,6 +135,9 @@ the base value that isn't changing).
 ## 5. Non-goals (v1)
 
 - Printing onto steps without triggers (never creates triggers).
-- Tensor-param printing (`SetEffectTensorPlock*`) — revisit with eseq-prm.4.
+- Tensor-param printing (`Set*TensorPlock*`) remains excluded from v1. Tensor
+  controls edit one cell while their p-lock stores a whole matrix, so they need
+  a cell-addressed print target plus an explicit merge policy for simultaneous
+  cell gestures; treating them like scalar targets would lose concurrent edits.
 - Any change to explicit selection-plock editing or neural overrides.
 - Latch-until-stop mode (explicitly rejected in favor of hold-to-print).

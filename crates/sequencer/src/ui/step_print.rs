@@ -8,11 +8,12 @@ a focused-track change also disarms it. Multiple held targets print together.
 
 Step targets write live `step_data`, use the engine-side override so the
 write is audible before snapshot republish, and push targeted step
-invalidations. Instrument and effect targets write atomic p-lock data instead:
-their base values remain untouched, `EffectSlotState::set_plock` stamps device
-identity, and no scheduler snapshot is needed. Both paths ride the open
-`RecordingHistoryTransaction`, so one record pass undoes as one "Record take"
-entry rather than creating device-edit gesture history.
+invalidations. Track instrument/effect and MIDI-FX targets write atomic p-lock
+data directly. Rack targets are coalesced into one scheduler-track publish per
+tick, and bus targets into one bus-runtime publish. Base values remain
+untouched throughout. Every path rides the open `RecordingHistoryTransaction`,
+so one record pass undoes as one "Record take" entry rather than creating
+device-edit gesture history.
 */
 
 use super::*;
@@ -23,6 +24,16 @@ pub(crate) enum PrintTarget {
     Step(StepParam),
     Instrument { param_idx: usize },
     Effect { slot_idx: usize, param_idx: usize },
+    BusEffect { bus_idx: usize, slot_idx: usize, param_idx: usize },
+    MidiFx { slot_idx: usize, param_idx: usize },
+    RackSlotParam { slot_idx: usize, param: RackSlotParam },
+    RackSlotInstrument { slot_idx: usize, param_idx: usize },
+    RackSlotEffect {
+        rack_slot_idx: usize,
+        effect_slot_idx: usize,
+        param_idx: usize,
+    },
+    RackMacro { macro_idx: usize },
 }
 
 impl From<StepParam> for PrintTarget {
@@ -111,9 +122,8 @@ impl StepPrintState {
     /// their own picker-specific release command, so a release must not erase
     /// an unrelated step-param hold.
     pub(crate) fn release_device_param_gesture(&mut self) {
-        self.values.retain(|(target, _)| {
-            !matches!(target, PrintTarget::Instrument { .. } | PrintTarget::Effect { .. })
-        });
+        self.values
+            .retain(|(target, _)| matches!(target, PrintTarget::Step(_)));
         if self.values.is_empty() {
             self.disarm();
         }
@@ -162,6 +172,33 @@ impl StepPrintState {
             }
         }
     }
+}
+
+/// Divert already-resolved, already-clamped base-value edits into the live
+/// print latch when the shared record/play/no-selection gate is active.
+/// Callers must preserve any target-specific higher-precedence diversion
+/// (notably neural overrides) before reaching this helper.
+pub(crate) fn try_latch_param_print(
+    shared: &SharedHandles,
+    track: usize,
+    targets: &[(PrintTarget, f32)],
+) -> bool {
+    if targets.is_empty()
+        || shared.current_track.load(Ordering::Relaxed) != track
+        || !shared.selected_steps.lock().unwrap().is_empty()
+        || !shared.state.is_playing()
+        || !shared.recording.load(Ordering::Relaxed)
+    {
+        return false;
+    }
+    let mut print = shared.step_print.lock().unwrap();
+    for (target, value) in targets {
+        print.latch(track, *target, *value);
+    }
+    // A cross-track touch may have replaced a Step target, so clear or
+    // republish its engine-only override at the same latch transition.
+    print.publish_engine_override(&shared.state);
+    true
 }
 
 /// One frame of print mode: disarm when the (recording && playing && same
@@ -358,6 +395,8 @@ pub(crate) fn tick_step_print(
         shared.state.publish_scheduler_track(track);
     }
     let mut wrote = false;
+    let mut rack_snapshot_dirty = false;
+    let mut bus_runtime_dirty = false;
     let mut plock_presence_steps = Vec::new();
     for step in &printed.steps {
         let mut wrote_plock = false;
@@ -399,16 +438,101 @@ pub(crate) fn tick_step_print(
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
                 }
+                PrintTarget::BusEffect { bus_idx, slot_idx, param_idx } => {
+                    let target_wrote = app.print_bus_effect_plock(
+                        *bus_idx,
+                        *step,
+                        *slot_idx,
+                        *param_idx,
+                        *value,
+                    );
+                    wrote |= target_wrote;
+                    wrote_plock |= target_wrote;
+                    bus_runtime_dirty |= target_wrote;
+                }
+                PrintTarget::MidiFx { slot_idx, param_idx } => {
+                    let target_wrote = app.print_midi_fx_plock(
+                        printed.track,
+                        *step,
+                        *slot_idx,
+                        *param_idx,
+                        *value,
+                    );
+                    wrote |= target_wrote;
+                    wrote_plock |= target_wrote;
+                }
+                PrintTarget::RackSlotParam { slot_idx, param } => {
+                    let target_wrote = app.print_rack_slot_param_plock(
+                        printed.track,
+                        *step,
+                        *slot_idx,
+                        *param,
+                        *value,
+                    );
+                    wrote |= target_wrote;
+                    wrote_plock |= target_wrote;
+                    rack_snapshot_dirty |= target_wrote;
+                }
+                PrintTarget::RackSlotInstrument { slot_idx, param_idx } => {
+                    let target_wrote = app.print_rack_slot_instrument_plock(
+                        printed.track,
+                        *step,
+                        *slot_idx,
+                        *param_idx,
+                        *value,
+                    );
+                    wrote |= target_wrote;
+                    wrote_plock |= target_wrote;
+                    rack_snapshot_dirty |= target_wrote;
+                }
+                PrintTarget::RackSlotEffect {
+                    rack_slot_idx,
+                    effect_slot_idx,
+                    param_idx,
+                } => {
+                    let target_wrote = app.print_rack_slot_effect_plock(
+                        printed.track,
+                        *step,
+                        *rack_slot_idx,
+                        *effect_slot_idx,
+                        *param_idx,
+                        *value,
+                    );
+                    wrote |= target_wrote;
+                    wrote_plock |= target_wrote;
+                    rack_snapshot_dirty |= target_wrote;
+                }
+                PrintTarget::RackMacro { macro_idx } => {
+                    let target_wrote = app.print_rack_macro_plock(
+                        printed.track,
+                        *step,
+                        *macro_idx,
+                        *value,
+                    );
+                    wrote |= target_wrote;
+                    wrote_plock |= target_wrote;
+                    rack_snapshot_dirty |= target_wrote;
+                }
             }
         }
         if wrote_plock {
             plock_presence_steps.push(*step);
         }
     }
-    // A held batch can contain several instrument/effect params and a slow UI
-    // frame can cross several steps. Publish one track-scoped presence batch
-    // after every atomic p-lock write has landed, rather than invalidating per
-    // target (or widening the update through ui_epoch/fx_epoch).
+    // Rack p-locks live in snapshot-backed rack state, while bus p-locks live
+    // in the separately published bus runtime. Coalesce each publication once
+    // per tick after all writes land; never publish once per target/step.
+    if rack_snapshot_dirty {
+        shared.state.publish_scheduler_track(printed.track);
+    }
+    if bus_runtime_dirty {
+        app.publish_bus_effect_runtime();
+        *shared.bus_state.lock().unwrap() = app.buses.clone();
+    }
+    // A held batch can contain several params and a slow UI frame can cross
+    // several steps. Publish one track-scoped presence batch after every
+    // p-lock write has landed, rather than invalidating per target (or
+    // widening the update through ui_epoch/fx_epoch).
     if !plock_presence_steps.is_empty() {
         shared
             .ui_invalidations

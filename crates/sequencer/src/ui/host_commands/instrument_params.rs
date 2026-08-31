@@ -993,7 +993,7 @@ mod tests {
     /// rather than any sync helper, because both previous fixes for this bug
     /// were validated against helpers/mirrors and missed the real path.
     #[test]
-    fn instrument_and_effect_param_commands_print_while_recording() {
+    fn device_param_commands_print_while_recording() {
         const TRACK: usize = 0;
         const STEP: usize = 3;
         const PARAM: usize = 0;
@@ -1028,6 +1028,61 @@ mod tests {
             sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.instrument_descriptors = vec![descriptor.clone()];
         app.graph.effect_descriptors = vec![vec![descriptor.clone()]];
+
+        let midi_descriptor = sequencer::lisp_host::load_midi_fx_descriptor("arp")
+            .expect("builtin arp descriptor");
+        state.pattern.track_params[TRACK]
+            .set_midi_fx_chain(vec![midi_descriptor.name.clone()]);
+        state.pattern.midi_fx_slots[TRACK][0].apply_descriptor(&midi_descriptor, 43);
+
+        app.buses[0].effect_descriptors = vec![descriptor.clone()];
+        app.buses[0].effect_slots = vec![
+            sequencer::effects::EffectSlotSnapshot::new_default(&descriptor, 44),
+        ];
+
+        let sampler_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let mut rack_effect_slots =
+            sequencer::sequencer::RackSlotSnapshot::empty_effect_slots();
+        rack_effect_slots[0] =
+            sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(
+                &descriptor,
+                45,
+                0,
+            );
+        let mut rack_effect_descriptors =
+            sequencer::effects::EffectDescriptor::default_full_chain();
+        rack_effect_descriptors[0] = descriptor.clone();
+        state.set_rack_track_for_all_pattern_snapshots(
+            TRACK,
+            sequencer::sequencer::RackTrackSnapshot::new(
+                vec![sequencer::sequencer::RackSlotSnapshot {
+                    instrument_type: sequencer::sequencer::InstrumentType::Sampler,
+                    instrument_run_mode:
+                        sequencer::sequencer::CustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 8,
+                    param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
+                    instrument_slot:
+                        sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(
+                            &sampler_descriptor,
+                            46,
+                            0,
+                        ),
+                    effect_slots: rack_effect_slots,
+                    effect_descriptors: rack_effect_descriptors,
+                    custom_effect_names:
+                        sequencer::sequencer::RackSlotSnapshot::empty_effect_names(),
+                    track_sound_state: sequencer::sequencer::TrackSoundState::default(),
+                    sample_id: Some((1, "test.wav".to_string(), 44_100)),
+                }],
+                sequencer::sequencer::default_rack_macros(),
+            ),
+        );
 
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", Vec::new(), true);
@@ -1319,6 +1374,115 @@ mod tests {
             epochs_before,
             "effect printing must not rebuild the fx or whole UI trees"
         );
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_device_param_gesture();
+
+        // Extended scalar targets share the same gate and one tick. Their
+        // defaults remain untouched while each family receives a p-lock.
+        let midi_default_before =
+            state.pattern.midi_fx_slots[TRACK][0].defaults.get(0);
+        let bus_default_before = app.buses[0].effect_slots[0].defaults[2];
+        let rack_before = state.pattern.rack_tracks.lock().unwrap()[TRACK]
+            .as_ref()
+            .unwrap()
+            .clone();
+        dispatch_custom_host_command(
+            "set-midi-fx-param",
+            number_payload(&[("slot-idx", 0.0), ("param-idx", 0.0), ("value", 6.0)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-bus-effect-param",
+            number_payload(&[
+                ("bus", 0.0),
+                ("slot-idx", 0.0),
+                ("param-idx", 2.0),
+                ("value", 1_600.0),
+            ]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-rack-slot-gain",
+            number_payload(&[("track", 0.0), ("slot", 0.0), ("value", 1.5)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-rack-slot-instrument-param",
+            number_payload(&[
+                ("track", 0.0),
+                ("slot", 0.0),
+                ("param-idx", 8.0),
+                ("value", 22_050.0),
+            ]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-rack-slot-effect-param",
+            number_payload(&[
+                ("track", 0.0),
+                ("rack-slot", 0.0),
+                ("effect-slot", 0.0),
+                ("param", 2.0),
+                ("value", 1_200.0),
+            ]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-rack-macro-value",
+            number_payload(&[("track", 0.0), ("id", 0.0), ("value", 0.65)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert_eq!(
+            state.pattern.midi_fx_slots[TRACK][0].defaults.get(0),
+            midi_default_before,
+        );
+        assert_eq!(
+            state.pattern.midi_fx_slots[TRACK][0].plocks.get(PRINT_STEP, 0),
+            Some(6.0),
+        );
+        assert_eq!(app.buses[0].effect_slots[0].defaults[2], bus_default_before);
+        assert_eq!(app.buses[0].effect_slots[0].plocks[PRINT_STEP][2], Some(1_600.0));
+        let racks = state.pattern.rack_tracks.lock().unwrap();
+        let rack = racks[TRACK].as_ref().unwrap();
+        assert_eq!(rack.slots[0].gain, rack_before.slots[0].gain);
+        assert_eq!(
+            rack.slots[0]
+                .param_plocks
+                .get(PRINT_STEP, sequencer::sequencer::RackSlotParam::Gain),
+            Some(1.5),
+        );
+        assert_eq!(
+            rack.slots[0].instrument_slot.defaults,
+            rack_before.slots[0].instrument_slot.defaults,
+        );
+        assert_eq!(
+            rack.slots[0].instrument_slot.plocks[PRINT_STEP][8],
+            Some(22_050.0),
+        );
+        assert_eq!(
+            rack.slots[0].effect_slots[0].defaults,
+            rack_before.slots[0].effect_slots[0].defaults,
+        );
+        assert_eq!(rack.slots[0].effect_slots[0].plocks[PRINT_STEP][2], Some(1_200.0));
+        assert_eq!(rack.macros[0].value, rack_before.macros[0].value);
+        assert_eq!(rack.macros[0].plocks[PRINT_STEP], Some(0.65));
+        drop(racks);
         shared
             .step_print
             .lock()
