@@ -721,6 +721,7 @@ def main():
 
     out = {
         "shape": [N, len(SETS) * WAVES_PER_SET],
+        "kind": "wavetable-bank",
         "layout": "wave-major: index = wave * 512 + sample",
         "source": SOURCE,
         "sets": set_names,
@@ -743,6 +744,7 @@ def verify(bank_path):
         bank = json.load(f)
 
     assert bank["shape"] == [N, 32 * WAVES_PER_SET], bank["shape"]
+    assert bank["kind"] == "wavetable-bank", bank["kind"]
     assert len(bank["sets"]) == 32, len(bank["sets"])
     assert bank["waves_per_set"] == WAVES_PER_SET
     assert len(bank["data"]) == N * 32 * WAVES_PER_SET, len(bank["data"])
