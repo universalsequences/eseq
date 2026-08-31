@@ -3,6 +3,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
+
+use serde::Deserialize;
+use serde::de::{SeqAccess, Visitor};
 
 use crate::buffer::BufferTextStyle;
 use crate::runtime::{LayoutTabSpec, Runtime};
@@ -10,6 +15,224 @@ use crate::theme;
 use crate::vm::{Value, format_lisp_value};
 
 use super::{MAX_TEXT_ZOOM, MIN_TEXT_ZOOM};
+
+#[derive(Clone, Debug, Deserialize)]
+struct TensorAssetHeader {
+    shape: Vec<u64>,
+    #[serde(deserialize_with = "deserialize_data_length")]
+    data: usize,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    kind: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    layout: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    source: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_positive_u64")]
+    waves_per_set: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_optional_strings")]
+    sets: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_strings")]
+    wave_names: Option<Vec<String>>,
+}
+
+fn deserialize_data_length<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct DataLengthVisitor;
+    impl<'de> Visitor<'de> for DataLengthVisitor {
+        type Value = usize;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a flat array of finite numbers")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut length = 0usize;
+            while let Some(value) = sequence.next_element::<f64>()? {
+                if !value.is_finite() {
+                    return Err(serde::de::Error::custom("tensor data must be finite"));
+                }
+                length = length
+                    .checked_add(1)
+                    .ok_or_else(|| serde::de::Error::custom("tensor data is too large"))?;
+            }
+            Ok(length)
+        }
+    }
+
+    deserializer.deserialize_seq(DataLengthVisitor)
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().map(str::to_string))
+}
+
+fn deserialize_optional_positive_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_u64().filter(|value| *value > 0))
+}
+
+fn deserialize_optional_strings<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let Some(values) = value.as_array() else {
+        return Ok(None);
+    };
+    let Some(strings) = values
+        .iter()
+        .map(|value| value.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    Ok(Some(strings))
+}
+
+#[derive(Clone)]
+struct CachedAssetMetadata {
+    modified: SystemTime,
+    header: Option<TensorAssetHeader>,
+}
+
+fn asset_metadata_cache() -> &'static Mutex<HashMap<PathBuf, CachedAssetMetadata>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedAssetMetadata>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn load_asset_metadata(path: &Path) -> Option<TensorAssetHeader> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    if let Ok(cache) = asset_metadata_cache().lock() {
+        if let Some(cached) = cache.get(path).filter(|cached| cached.modified == modified) {
+            return cached.header.clone();
+        }
+    }
+
+    let header = std::fs::File::open(path)
+        .ok()
+        .and_then(|file| serde_json::from_reader::<_, TensorAssetHeader>(file).ok())
+        .filter(|header| {
+            !header.shape.is_empty()
+                && header.shape.iter().all(|dimension| *dimension > 0)
+                && header
+                    .shape
+                    .iter()
+                    .try_fold(1usize, |product, dimension| {
+                        usize::try_from(*dimension)
+                            .ok()
+                            .and_then(|dimension| product.checked_mul(dimension))
+                    })
+                    == Some(header.data)
+        });
+    if let Ok(mut cache) = asset_metadata_cache().lock() {
+        cache.insert(
+            path.to_path_buf(),
+            CachedAssetMetadata {
+                modified,
+                header: header.clone(),
+            },
+        );
+    }
+    header
+}
+
+fn asset_metadata_value(header: TensorAssetHeader) -> Value {
+    fn list(values: impl IntoIterator<Item = Value>) -> Value {
+        Value::List(
+            values
+                .into_iter()
+                .map(|value| Rc::new(RefCell::new(value)))
+                .collect(),
+        )
+    }
+    fn optional_string(value: Option<String>) -> Value {
+        value.map(Value::String).unwrap_or(Value::Nil)
+    }
+    fn optional_strings(value: Option<Vec<String>>, limit: usize) -> Value {
+        value
+            .map(|values| list(values.into_iter().take(limit).map(Value::String)))
+            .unwrap_or(Value::Nil)
+    }
+
+    let wave_count = header.shape[1..]
+        .iter()
+        .try_fold(1usize, |product, dimension| {
+            usize::try_from(*dimension)
+                .ok()
+                .and_then(|dimension| product.checked_mul(dimension))
+        })
+        .expect("validated tensor shape product");
+    let waves_per_set = header
+        .waves_per_set
+        .and_then(|value| usize::try_from(value).ok());
+    let set_count = waves_per_set
+        .map(|value| wave_count / value)
+        .unwrap_or(1)
+        .max(1);
+    let fields = HashMap::from([
+        (
+            "shape".to_string(),
+            Rc::new(RefCell::new(list(
+                header
+                    .shape
+                    .into_iter()
+                    .map(|dimension| Value::Number(dimension as f64)),
+            ))),
+        ),
+        (
+            "kind".to_string(),
+            Rc::new(RefCell::new(optional_string(header.kind))),
+        ),
+        (
+            "layout".to_string(),
+            Rc::new(RefCell::new(optional_string(header.layout))),
+        ),
+        (
+            "source".to_string(),
+            Rc::new(RefCell::new(optional_string(header.source))),
+        ),
+        (
+            "wave-count".to_string(),
+            Rc::new(RefCell::new(Value::Number(wave_count as f64))),
+        ),
+        (
+            "waves-per-set".to_string(),
+            Rc::new(RefCell::new(
+                waves_per_set
+                    .map(|value| Value::Number(value as f64))
+                    .unwrap_or(Value::Nil),
+            )),
+        ),
+        (
+            "set-count".to_string(),
+            Rc::new(RefCell::new(Value::Number(set_count as f64))),
+        ),
+        (
+            "sets".to_string(),
+            Rc::new(RefCell::new(optional_strings(header.sets, set_count))),
+        ),
+        (
+            "wave-names".to_string(),
+            Rc::new(RefCell::new(optional_strings(
+                header.wave_names,
+                wave_count,
+            ))),
+        ),
+    ]);
+    Value::Map(fields)
+}
 
 fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabSpec>, String> {
     let Value::List(entries) = value else {
@@ -104,6 +327,28 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                 .current_sexp()
                 .map(Value::String)
                 .unwrap_or(Value::String(String::new())))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "asset-metadata",
+        "(asset-metadata path)",
+        "Return a tensor asset's header metadata, or Nil when it is missing or invalid.",
+        |args, ctx| {
+            let Some(Value::String(reference)) = args.first() else {
+                return Err("asset-metadata expects a relative path string".to_string());
+            };
+            let current_path = ctx.current_buffer_path();
+            let draft_root = current_path.as_deref().and_then(Path::parent);
+            let Some(path) = crate::widget_render::patcher::resolve_asset_reference(
+                reference,
+                draft_root,
+            ) else {
+                return Ok(Value::Nil);
+            };
+            Ok(load_asset_metadata(&path)
+                .map(asset_metadata_value)
+                .unwrap_or(Value::Nil))
         },
     );
 
@@ -1605,5 +1850,168 @@ fn parse_style_color(value: &Rc<RefCell<Value>>) -> Result<crate::backend::Color
             theme::named_color(name).ok_or_else(|| format!("Unknown style color '{name}'"))
         }
         _ => Err("Style colors must be keywords or strings".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod asset_metadata_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("eseqlisp-{name}-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn map_number(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> f64 {
+        let value = map.get(key).unwrap().borrow();
+        let Value::Number(value) = &*value else {
+            panic!("expected numeric :{key}, got {value:?}");
+        };
+        *value
+    }
+
+    fn list_strings(value: &Rc<RefCell<Value>>) -> Vec<String> {
+        let value = value.borrow();
+        let Value::List(values) = &*value else {
+            panic!("expected string list, got {value:?}");
+        };
+        values
+            .iter()
+            .map(|value| {
+                let value = value.borrow();
+                let Value::String(value) = &*value else {
+                    panic!("expected string, got {value:?}");
+                };
+                value.clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn asset_metadata_reads_object_header_and_derives_counts() {
+        let root = temp_root("asset-metadata-object");
+        let path = root.join("bank.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "shape": [2, 4],
+                "data": [0, 1, 2, 3, 4, 5, 6, 7],
+                "kind": "wavetable-bank",
+                "waves_per_set": 2,
+                "sets": ["A", "B"],
+                "wave_names": ["a", "b", "c", "d"],
+                "source": "test",
+                "layout": "wave-major"
+            }"#,
+        )
+        .unwrap();
+
+        let mut runtime = Runtime::new();
+        register_editor_natives(&mut runtime);
+        runtime.shared.borrow_mut().current_buffer_path = Some(root.join("ui.lisp"));
+        let Some(Value::Map(map)) = runtime
+            .eval_str(r#"(asset-metadata "bank.json")"#)
+            .unwrap()
+        else {
+            panic!("expected metadata map from Lisp native");
+        };
+        assert_eq!(map_number(&map, "wave-count"), 4.0);
+        assert_eq!(map_number(&map, "set-count"), 2.0);
+        assert_eq!(list_strings(map.get("sets").unwrap()), ["A", "B"]);
+        assert_eq!(list_strings(map.get("wave-names").unwrap()).len(), 4);
+        assert!(matches!(&*map.get("kind").unwrap().borrow(), Value::String(kind) if kind == "wavetable-bank"));
+        assert!(
+            !format_lisp_value(&Value::Map(map)).contains("0 1 2 3"),
+            "asset data must not enter the returned Lisp value"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_metadata_rejects_bare_array() {
+        let root = temp_root("asset-metadata-array");
+        let path = root.join("bank.json");
+        std::fs::write(&path, "[0, 1, 2, 3]").unwrap();
+        assert!(load_asset_metadata(&path).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_metadata_returns_none_for_missing_file() {
+        let root = temp_root("asset-metadata-missing");
+        assert!(load_asset_metadata(&root.join("missing.json")).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_metadata_clamps_advisory_names_to_derived_counts() {
+        let root = temp_root("asset-metadata-clamp");
+        let path = root.join("bank.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "shape": [1, 5],
+                "data": [0, 1, 2, 3, 4],
+                "waves_per_set": 2,
+                "sets": ["A", "B", "truncated remainder"],
+                "wave_names": ["1", "2", "3", "4", "5", "extra"]
+            }"#,
+        )
+        .unwrap();
+
+        let Value::Map(map) = asset_metadata_value(load_asset_metadata(&path).unwrap()) else {
+            panic!("expected metadata map");
+        };
+        assert_eq!(map_number(&map, "set-count"), 2.0);
+        assert_eq!(list_strings(map.get("sets").unwrap()), ["A", "B"]);
+        assert_eq!(list_strings(map.get("wave-names").unwrap()).len(), 5);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_metadata_resolution_prefers_draft_then_user_then_factory() {
+        let root = temp_root("asset-metadata-resolution");
+        let draft = root.join("draft");
+        let user = root.join("user");
+        let factory = root.join("factory");
+        for tier in [&draft, &user, &factory] {
+            std::fs::create_dir_all(tier.join("waves")).unwrap();
+        }
+        let relative = "waves/bank.json";
+        let draft_path = draft.join(relative);
+        let user_path = user.join(relative);
+        let factory_path = factory.join(relative);
+        std::fs::write(&factory_path, "factory").unwrap();
+        std::fs::write(&user_path, "user").unwrap();
+        std::fs::write(&draft_path, "draft").unwrap();
+
+        let resolve = || {
+            crate::widget_render::patcher::resolve_asset_reference_with_roots(
+                relative,
+                Some(&draft),
+                Some(&user),
+                Some(&factory),
+            )
+            .unwrap()
+        };
+        assert_eq!(resolve(), draft_path.canonicalize().unwrap());
+        std::fs::remove_file(&draft_path).unwrap();
+        assert_eq!(resolve(), user_path.canonicalize().unwrap());
+        std::fs::remove_file(&user_path).unwrap();
+        assert_eq!(resolve(), factory_path.canonicalize().unwrap());
+        assert!(crate::widget_render::patcher::resolve_asset_reference_with_roots(
+            factory_path.to_str().unwrap(),
+            Some(&draft),
+            Some(&user),
+            Some(&factory),
+        )
+        .is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

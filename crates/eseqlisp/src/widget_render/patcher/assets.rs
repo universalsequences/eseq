@@ -18,6 +18,50 @@ pub fn set_asset_library_roots(user: PathBuf, factory: PathBuf) {
     let _ = ASSET_LIBRARY_ROOTS.set([user, factory]);
 }
 
+/// Resolves the same relative asset spelling used by DGenLisp: draft-local,
+/// then the user asset library, then the factory asset library. Absolute
+/// paths are deliberately excluded from host UI reads.
+pub(crate) fn resolve_asset_reference(reference: &str, draft_root: Option<&Path>) -> Option<PathBuf> {
+    let roots = ASSET_LIBRARY_ROOTS.get();
+    resolve_asset_reference_with_roots(
+        reference,
+        draft_root,
+        roots.map(|roots| roots[0].as_path()),
+        roots.map(|roots| roots[1].as_path()),
+    )
+}
+
+pub(crate) fn resolve_asset_reference_with_roots(
+    reference: &str,
+    draft_root: Option<&Path>,
+    user_root: Option<&Path>,
+    factory_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let reference = Path::new(reference);
+    if reference.is_absolute() {
+        return None;
+    }
+
+    if let Some(candidate) = draft_root.map(|root| root.join(reference)) {
+        if candidate.is_file() {
+            return Some(candidate.canonicalize().unwrap_or(candidate));
+        }
+    }
+
+    for root in [user_root, factory_root].into_iter().flatten() {
+        let candidate = root.join(reference);
+        if !candidate.is_file() {
+            continue;
+        }
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let canonical_candidate = candidate.canonicalize().unwrap_or(candidate);
+        if canonical_candidate.starts_with(&canonical_root) {
+            return Some(canonical_candidate);
+        }
+    }
+    None
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PatcherAssetSidebarEntry {
     pub reference: String,

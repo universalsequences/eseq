@@ -34,6 +34,9 @@ use crate::defmacro_library::{DefmacroLibrary, DefmacroPackage};
 use crate::ui::platform::has_primary_shortcut_modifier;
 
 pub use assets::{PatcherAssetSidebarEntry, asset_sidebar_entries, set_asset_library_roots};
+pub(crate) use assets::resolve_asset_reference;
+#[cfg(test)]
+pub(crate) use assets::resolve_asset_reference_with_roots;
 pub use connect::{PatcherConnectOp, PatcherConnectReport};
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
