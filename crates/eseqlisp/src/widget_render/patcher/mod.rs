@@ -33,8 +33,10 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use crate::defmacro_library::{DefmacroLibrary, DefmacroPackage};
 use crate::ui::platform::has_primary_shortcut_modifier;
 
-pub use assets::{PatcherAssetSidebarEntry, asset_sidebar_entries, set_asset_roots};
-pub(crate) use assets::resolve_asset_reference;
+pub use assets::{
+    PatcherAssetSidebarEntry, asset_sidebar_entries, register_asset_source_root, set_asset_roots,
+};
+pub(crate) use assets::{resolve_asset_reference, resolve_registered_asset_reference};
 #[cfg(test)]
 pub(crate) use assets::resolve_asset_reference_with_fallback_roots;
 pub use connect::{PatcherConnectOp, PatcherConnectReport};

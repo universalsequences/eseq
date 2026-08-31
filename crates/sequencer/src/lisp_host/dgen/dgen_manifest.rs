@@ -31,6 +31,7 @@ pub struct EffectGraphNodeIds {
 #[derive(Clone)]
 pub struct DGenManifest {
     pub dylib_path: PathBuf,
+    pub asset_base: Option<PathBuf>,
     pub version: u32,
     pub process_abi: String,
     pub total_memory_slots: usize,
@@ -65,6 +66,17 @@ pub struct DGenParam {
     pub group: Option<String>,
     pub env: Option<String>,
     pub role: Option<String>,
+    pub options: Option<DGenParamOptions>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DGenParamOptions {
+    Labels(Vec<String>),
+    Asset {
+        tensor: String,
+        file: String,
+        key: String,
+    },
 }
 
 #[derive(Clone)]
@@ -242,6 +254,7 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
                         group: p["group"].as_str().map(|s| s.to_string()),
                         env: p["env"].as_str().map(|s| s.to_string()),
                         role: p["role"].as_str().map(|s| s.to_string()),
+                        options: parse_dgen_param_options(p),
                     }
                 })
                 .collect()
@@ -401,6 +414,7 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
 
     Ok(DGenManifest {
         dylib_path,
+        asset_base: None,
         version,
         process_abi,
         total_memory_slots: v["totalMemorySlots"].as_u64().unwrap_or(256) as usize,
@@ -419,13 +433,33 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
     })
 }
 
+fn parse_dgen_param_options(param: &serde_json::Value) -> Option<DGenParamOptions> {
+    let options = param.get("options")?;
+    if let Some(labels) = options.get("labels").and_then(serde_json::Value::as_array) {
+        let labels = labels
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>()?;
+        return Some(DGenParamOptions::Labels(
+            labels.into_iter().map(str::to_string).collect(),
+        ));
+    }
+
+    Some(DGenParamOptions::Asset {
+        tensor: options.get("tensor")?.as_str()?.to_string(),
+        file: options.get("file")?.as_str()?.to_string(),
+        key: options.get("key")?.as_str()?.to_string(),
+    })
+}
+
 pub fn instrument_descriptor_from_manifest(
     name: &str,
     manifest: &DGenManifest,
 ) -> crate::effects::EffectDescriptor {
-    let mut desc = crate::effects::EffectDescriptor::from_lisp_manifest(
+    let mut desc = crate::effects::EffectDescriptor::from_lisp_manifest_with_asset_base(
         name,
         &manifest.params,
+        manifest.asset_base.as_deref(),
         manifest.n_inputs,
         manifest.n_outputs,
     );
@@ -573,6 +607,7 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
                 env: None,
                 role: None,
                 tags: Vec::new(),
+                asset_options: None,
                 display_name: Some(format!("__dgen_mod_active__{display_name}")),
             }),
         });
@@ -616,6 +651,7 @@ pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
                     env: None,
                     role: None,
                     tags: Vec::new(),
+                    asset_options: None,
                     display_name: Some(format!("mod {display_name} slot {} amt", lane.slot)),
                 }),
             });

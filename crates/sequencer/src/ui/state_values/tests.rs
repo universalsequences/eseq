@@ -6824,6 +6824,15 @@
     }
 
     fn load_param_grid_test_lisp(editor: &mut eseqlisp::Editor) {
+        editor.runtime_mut().register_native("asset-metadata", |args, _ctx| {
+            if args.first() != Some(&Value::String("waves/bank.json".to_string())) {
+                return Ok(Value::Nil);
+            }
+            Ok(Value::Map(HashMap::from([(
+                "sets".to_string(),
+                Rc::new(RefCell::new(test_string_list(&["Basic", "Metallic"]))),
+            )])))
+        });
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -39022,6 +39031,7 @@
             env: Some("amp.envelope".to_string()),
             role: Some("attack".to_string()),
             tags: Vec::new(),
+            asset_options: None,
             display_name: Some("attack".to_string()),
         };
         let mut map = HashMap::new();
@@ -39040,6 +39050,95 @@
                 "{key} should retain its own manifest identity"
             );
         }
+    }
+
+    #[test]
+    fn param_ui_metadata_exposes_asset_option_reference() {
+        let metadata = sequencer::effects::ParamUiMetadata {
+            group: None,
+            env: None,
+            role: None,
+            tags: Vec::new(),
+            asset_options: Some(sequencer::effects::ParamAssetOptions {
+                tensor: "bank".to_string(),
+                file: "waves/bank.json".to_string(),
+                key: "sets".to_string(),
+                asset_base: Some(std::path::PathBuf::from("/trusted/instrument")),
+            }),
+            display_name: None,
+        };
+        let mut map = HashMap::new();
+
+        insert_param_ui_metadata(&mut map, Some(&metadata));
+
+        let Value::Map(options) = &*map
+            .get("options")
+            .expect("asset options should be surfaced")
+            .borrow()
+        else {
+            panic!("asset options should be a map");
+        };
+        for (key, expected) in [("tensor", "bank"), ("file", "waves/bank.json")] {
+            assert_eq!(
+                options.get(key).map(|value| value.borrow().clone()),
+                Some(Value::String(expected.to_string()))
+            );
+        }
+        assert_eq!(
+            options.get("key").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("sets".to_string()))
+        );
+        assert_eq!(
+            options.get("asset-base").map(|value| value.borrow().clone()),
+            Some(Value::String("/trusted/instrument".to_string()))
+        );
+    }
+
+    #[test]
+    fn param_grid_resolves_asset_options_and_degrades_missing_assets_to_integer_knobs() {
+        let asset_options = |file: &str| {
+            Rc::new(RefCell::new(Value::Map(HashMap::from([
+                (
+                    "tensor".to_string(),
+                    Rc::new(RefCell::new(Value::String("bank".to_string()))),
+                ),
+                (
+                    "file".to_string(),
+                    Rc::new(RefCell::new(Value::String(file.to_string()))),
+                ),
+                (
+                    "key".to_string(),
+                    Rc::new(RefCell::new(Value::Keyword("sets".to_string()))),
+                ),
+            ]))))
+        };
+
+        let mut resolved = test_param_map("bank", 0, 1.0, 0.0, 1.0);
+        resolved.insert("options".to_string(), asset_options("waves/bank.json"));
+        let editor = param_grid_test_editor(vec![Value::Map(resolved)]);
+        let layout = editor.widget_layout().expect("asset options layout");
+        let dropdown = find_layout_node_by_widget_type(&layout, "dropdown")
+            .expect("resolved asset options should render a dropdown");
+        assert!(matches!(
+            dropdown.props.get("options"),
+            Some(Value::List(labels))
+                if labels.iter().map(|label| label.borrow().clone()).collect::<Vec<_>>()
+                    == vec![Value::String("Basic".to_string()), Value::String("Metallic".to_string())]
+        ));
+        assert!(dropdown.rect.width.is_finite() && dropdown.rect.width > 0.0);
+        assert!(dropdown.rect.height.is_finite() && dropdown.rect.height > 0.0);
+
+        let mut missing = test_param_map("bank", 0, 1.0, 0.0, 7.0);
+        missing.insert("options".to_string(), asset_options("waves/missing.json"));
+        let editor = param_grid_test_editor(vec![Value::Map(missing)]);
+        let layout = editor.widget_layout().expect("missing asset options layout");
+        assert!(
+            find_layout_node_by_widget_type(&layout, "dropdown").is_none(),
+            "missing asset metadata must not leave a broken dropdown"
+        );
+        let fallback = find_layout_node_by_widget_type(&layout, "number-picker")
+            .expect("missing asset metadata should degrade to the numeric control");
+        assert_eq!(fallback.props.get("decimals"), Some(&Value::Number(0.0)));
     }
 
     #[test]

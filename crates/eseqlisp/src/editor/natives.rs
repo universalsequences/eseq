@@ -332,18 +332,27 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
 
     runtime.register_native_with_docs(
         "asset-metadata",
-        "(asset-metadata path)",
-        "Return a tensor asset's header metadata, or Nil when it is missing or invalid.",
+        "(asset-metadata path [registered-source-root])",
+        "Return a tensor asset's header metadata, or Nil when it is missing or invalid. The optional source root must have been registered by the host compiler.",
         |args, ctx| {
             let Some(Value::String(reference)) = args.first() else {
                 return Err("asset-metadata expects a relative path string".to_string());
             };
-            let current_path = ctx.current_buffer_path();
-            let draft_root = current_path.as_deref().and_then(Path::parent);
-            let Some(path) = crate::widget_render::patcher::resolve_asset_reference(
-                reference,
-                draft_root,
-            ) else {
+            let path = match args.get(1) {
+                Some(Value::String(source_root)) => {
+                    crate::widget_render::patcher::resolve_registered_asset_reference(
+                        reference,
+                        Path::new(source_root),
+                    )
+                }
+                Some(_) => return Err("asset-metadata base must be a path string".to_string()),
+                None => {
+                    let current_path = ctx.current_buffer_path();
+                    let draft_root = current_path.as_deref().and_then(Path::parent);
+                    crate::widget_render::patcher::resolve_asset_reference(reference, draft_root)
+                }
+            };
+            let Some(path) = path else {
                 return Ok(Value::Nil);
             };
             Ok(load_asset_metadata(&path)
@@ -1931,6 +1940,40 @@ mod asset_metadata_tests {
             "asset data must not enter the returned Lisp value"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_metadata_reads_only_registered_explicit_source_roots() {
+        let root = temp_root("asset-metadata-registered-base");
+        std::fs::write(
+            root.join("bank.json"),
+            r#"{"shape":[2],"data":[0,1],"sets":["A","B"]}"#,
+        )
+        .unwrap();
+        let unregistered = temp_root("asset-metadata-unregistered-base");
+        std::fs::write(
+            unregistered.join("bank.json"),
+            r#"{"shape":[2],"data":[0,1],"sets":["wrong"]}"#,
+        )
+        .unwrap();
+
+        let registered = crate::widget_render::patcher::register_asset_source_root(&root);
+        let mut runtime = Runtime::new();
+        register_editor_natives(&mut runtime);
+        let expression = format!(
+            "(asset-metadata \"bank.json\" \"{}\")",
+            registered.to_string_lossy()
+        );
+        assert!(matches!(runtime.eval_str(&expression).unwrap(), Some(Value::Map(_))));
+
+        let expression = format!(
+            "(asset-metadata \"bank.json\" \"{}\")",
+            unregistered.to_string_lossy()
+        );
+        assert_eq!(runtime.eval_str(&expression).unwrap(), Some(Value::Nil));
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(unregistered).unwrap();
     }
 
     #[test]

@@ -28,8 +28,30 @@
         (substring name (len group-prefix) (len name))
         name))))
 
+(def param-options (p)
+  (let ((options (get p :options)))
+    (if (get options :file)
+      (let ((metadata
+              (if (get options :asset-base)
+                (asset-metadata (get options :file) (get options :asset-base))
+                (asset-metadata (get options :file)))))
+        (if metadata
+          (get metadata (get options :key))
+          false))
+      options)))
+
+(def param-with-resolved-options (p)
+  (let ((options (get p :options)))
+    (merge p
+      :options (param-options p)
+      :integer-option-fallback (if (get options :file) true false))))
+
+(def param-grid-control-value (p value)
+  (if (get p :integer-option-fallback) (round value) value))
+
 (def fx-param-row (p fx subtree-key)
-  (subtree :key subtree-key
+  (let ((p (param-with-resolved-options p)))
+    (subtree :key subtree-key
     (pc/param-mod-wrapper fx p (str subtree-key "-mod-wrapper")
     (box :height 1.25
       (h-stack :gap 0.45 :align :center
@@ -61,14 +83,15 @@
                 :plock-color-b (pc/param-plock-color-b)
                 :width 5.8 :height 1.2 :font-size 11)
               (number-picker :value (pc/fx-param-value-for fx p)
-                :min (pc/param-control-min fx p) :max (pc/param-control-max fx p) :decimals 2
+                :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
+                :decimals (if (get p :integer-option-fallback) 0 2)
                 :noui true :font-size 12 :text-color (pc/param-plock-text-color fx p)
                 :plock-active (if (pc/param-plock-active? fx p) 1 0)
                 :plock-color-r (pc/param-plock-color-r)
                 :plock-color-g (pc/param-plock-color-g)
                 :plock-color-b (pc/param-plock-color-b)
                 :on-change (lambda (v)
-                  (pc/param-set-control-value fx p v))
+                  (pc/param-set-control-value fx p (param-grid-control-value p v)))
                 :width 5.2 :height 1.1)))))
         (if (or (get p :options) (get p :boolean))
           (label "" :width 7.8 :bg :transparent)
@@ -80,7 +103,7 @@
                    :plock-color-g (pc/param-plock-color-g)
                    :plock-color-b (pc/param-plock-color-b)
                    :on-change (lambda (v)
-                     (pc/param-set-control-value fx p v)))))))))
+                     (pc/param-set-control-value fx p (param-grid-control-value p v)))))))))))
 
 (def param-subtree-key (fx p ci)
   (if fx
@@ -307,7 +330,8 @@
         :height (compact-control-height) :padding 0
         (knob-number :label (compact-label p)
           :value (pc/fx-param-value-for fx p)
-          :min (pc/param-control-min fx p) :max (pc/param-control-max fx p) :decimals 2
+          :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
+          :decimals (if (get p :integer-option-fallback) 0 2)
           :mod-offset (pc/param-mod-offset p)
           :mod-scale (pc/param-mod-scale p)
           :unit (pc/param-control-unit fx p)
@@ -320,14 +344,15 @@
           :plock-color-b (pc/param-plock-color-b)
           :width (compact-control-width) :height 2.42
           :on-change (lambda (v)
-            (pc/param-set-control-value fx p v)))))))
+            (pc/param-set-control-value fx p (param-grid-control-value p v))))))))
 
 (def compact-control (p fx key)
-  (if (get p :boolean)
-    (compact-button p fx key)
-    (if (get p :options)
-      (compact-option p fx key)
-      (compact-knob p fx key))))
+  (let ((p (param-with-resolved-options p)))
+    (if (get p :boolean)
+      (compact-button p fx key)
+      (if (get p :options)
+        (compact-option p fx key)
+        (compact-knob p fx key)))))
 
 (def adsr-number (p fx key title decimals unit)
   (pc/param-mod-wrapper fx p (str key "-mod-wrapper")

@@ -178,9 +178,18 @@ pub struct ParamUiMetadata {
     pub env: Option<String>,
     pub role: Option<String>,
     pub tags: Vec<String>,
+    pub asset_options: Option<ParamAssetOptions>,
     /// The source-level name shown by DGenLisp. When it differs from the
     /// canonical host id, it is also the migration alias for saved data.
     pub display_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParamAssetOptions {
+    pub tensor: String,
+    pub file: String,
+    pub key: String,
+    pub asset_base: Option<std::path::PathBuf>,
 }
 
 impl ParamUiMetadata {
@@ -203,6 +212,7 @@ impl ParamUiMetadata {
                 env,
                 role,
                 tags,
+                asset_options: None,
                 display_name: None,
             })
         }
@@ -1458,6 +1468,7 @@ mod tests {
                 group: None,
                 env: None,
                 role: None,
+                options: None,
             }],
             0,
             1,
@@ -1486,6 +1497,7 @@ mod tests {
                 group: None,
                 env: None,
                 role: None,
+                options: None,
             }], 0, 1,
         );
         let new_desc = EffectDescriptor::from_lisp_manifest(
@@ -1503,6 +1515,7 @@ mod tests {
                 group: Some("filter".to_string()),
                 env: None,
                 role: None,
+                options: None,
             }], 0, 1,
         );
         let slot = EffectSlotState::new(&old_desc, 100);
@@ -1534,6 +1547,7 @@ mod tests {
                     group: Some("amp".to_string()),
                     env: Some("amp_env".to_string()),
                     role: Some("attack".to_string()),
+                    options: None,
                 },
                 crate::lisp_host::DGenParam {
                     name: "hidden_release".to_string(),
@@ -1548,6 +1562,7 @@ mod tests {
                     group: Some("amp".to_string()),
                     env: Some("amp_env".to_string()),
                     role: Some("release".to_string()),
+                    options: None,
                 },
             ],
             0,
@@ -7743,10 +7758,26 @@ impl EffectDescriptor {
         }
     }
 
-    /// Construct from a lisp effect manifest.
+    /// Construct from a lisp effect manifest without source-local assets.
     pub fn from_lisp_manifest(
         name: &str,
         params: &[crate::lisp_host::DGenParam],
+        input_channels: usize,
+        output_channels: usize,
+    ) -> Self {
+        Self::from_lisp_manifest_with_asset_base(
+            name,
+            params,
+            None,
+            input_channels,
+            output_channels,
+        )
+    }
+
+    pub fn from_lisp_manifest_with_asset_base(
+        name: &str,
+        params: &[crate::lisp_host::DGenParam],
+        asset_base: Option<&std::path::Path>,
         input_channels: usize,
         output_channels: usize,
     ) -> Self {
@@ -7758,8 +7789,13 @@ impl EffectDescriptor {
                 min: p.min,
                 max: p.max,
                 default: p.default,
-                kind: ParamKind::Continuous {
-                    unit: p.unit.clone(),
+                kind: match &p.options {
+                    Some(crate::lisp_host::DGenParamOptions::Labels(labels)) => {
+                        ParamKind::Enum { labels: labels.clone() }
+                    }
+                    _ => ParamKind::Continuous {
+                        unit: p.unit.clone(),
+                    },
                 },
                 scaling: ParamScaling::Linear,
                 node_param_idx: (crate::lisp_host::HEADER_SLOTS + p.cell_id) as u32,
@@ -7778,9 +7814,29 @@ impl EffectDescriptor {
                                 env: None,
                                 role: None,
                                 tags: Vec::new(),
+                                asset_options: None,
                                 display_name: None,
                             })
                             .display_name = Some(p.display_name.clone());
+                    }
+                    if let Some(crate::lisp_host::DGenParamOptions::Asset { tensor, file, key }) =
+                        &p.options
+                    {
+                        metadata
+                            .get_or_insert_with(|| ParamUiMetadata {
+                                group: None,
+                                env: None,
+                                role: None,
+                                tags: Vec::new(),
+                                asset_options: None,
+                                display_name: None,
+                            })
+                            .asset_options = Some(ParamAssetOptions {
+                                tensor: tensor.clone(),
+                                file: file.clone(),
+                                key: key.clone(),
+                                asset_base: asset_base.map(std::path::Path::to_path_buf),
+                            });
                     }
                     metadata
                 },

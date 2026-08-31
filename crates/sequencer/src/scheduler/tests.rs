@@ -9413,6 +9413,7 @@ fn scheduler_process_param_lookup_aliases_pre_namespacing_names(
             group: Some(group.to_string()),
             env: None,
             role: Some("attack".to_string()),
+            options: None,
         }
     };
     let descriptor = EffectDescriptor::from_lisp_manifest(

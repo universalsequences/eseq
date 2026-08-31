@@ -3147,9 +3147,10 @@ impl App {
         name: &str,
         manifest: &lisp_host::DGenManifest,
     ) -> EffectDescriptor {
-        let mut desc = EffectDescriptor::from_lisp_manifest(
+        let mut desc = EffectDescriptor::from_lisp_manifest_with_asset_base(
             name,
             &manifest.params,
+            manifest.asset_base.as_deref(),
             manifest.n_inputs,
             manifest.n_outputs,
         );
@@ -3189,9 +3190,10 @@ impl App {
         name: &str,
         manifest: &lisp_host::DGenManifest,
     ) -> EffectDescriptor {
-        let mut desc = EffectDescriptor::from_lisp_manifest(
+        let mut desc = EffectDescriptor::from_lisp_manifest_with_asset_base(
             name,
             &manifest.params,
+            manifest.asset_base.as_deref(),
             manifest.n_inputs,
             manifest.n_outputs,
         );
@@ -4702,9 +4704,10 @@ impl App {
     ) -> Result<(), String> {
         let locator = Self::rack_slot_fx_locator(track, rack_slot);
         let (manifest, node_ids) = self.install_compiled_fx_node(locator, effect_slot, result)?;
-        let mut descriptor = EffectDescriptor::from_lisp_manifest(
+        let mut descriptor = EffectDescriptor::from_lisp_manifest_with_asset_base(
             name,
             &manifest.params,
+            manifest.asset_base.as_deref(),
             manifest.n_inputs,
             manifest.n_outputs,
         );
@@ -5414,6 +5417,7 @@ mod tests {
     fn test_instrument_manifest() -> lisp_host::DGenManifest {
         lisp_host::DGenManifest {
             dylib_path: std::path::PathBuf::new(),
+            asset_base: None,
             version: 1,
             process_abi: String::new(),
             total_memory_slots: 1,

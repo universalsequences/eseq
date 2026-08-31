@@ -424,13 +424,17 @@ pub fn compile_and_load_instrument_with_origin(
     asset_base: Option<&Path>,
     origin: DGenSourceOrigin,
 ) -> Result<CompileResult, String> {
-    dylib_cache::global_cache_manager().acquire(
+    let mut result = dylib_cache::global_cache_manager().acquire(
         DGenCompileKind::Instrument,
         origin,
         source,
         sample_rate,
         asset_base,
-    )
+    )?;
+    result.manifest.asset_base = asset_base.map(|base| {
+        eseqlisp::widget_render::patcher::register_asset_source_root(base)
+    });
+    Ok(result)
 }
 
 pub fn compile_and_load_instrument_uncached_with_asset_base(
@@ -439,7 +443,10 @@ pub fn compile_and_load_instrument_uncached_with_asset_base(
     asset_base: Option<&Path>,
 ) -> Result<CompileResult, String> {
     let json = compile_instrument_with_asset_base(source, sample_rate, asset_base)?;
-    let manifest = parse_manifest(&json)?;
+    let mut manifest = parse_manifest(&json)?;
+    manifest.asset_base = asset_base.map(|base| {
+        eseqlisp::widget_render::patcher::register_asset_source_root(base)
+    });
     let lib = load_dylib_prewarmed(&manifest)?;
     Ok(CompileResult {
         manifest,

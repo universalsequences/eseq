@@ -3333,6 +3333,7 @@ mod tests {
                 group: Some(group.to_string()),
                 env: None,
                 role: None,
+                options: None,
             }
         };
         let descriptor = EffectDescriptor::from_lisp_manifest(

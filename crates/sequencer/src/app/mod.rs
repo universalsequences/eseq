@@ -347,6 +347,7 @@ mod engine_registry_tests {
     fn manifest() -> DGenManifest {
         DGenManifest {
             dylib_path: std::path::PathBuf::new(),
+            asset_base: None,
             version: 2,
             process_abi: "dgen-host-abi-v1".to_string(),
             total_memory_slots: 0,

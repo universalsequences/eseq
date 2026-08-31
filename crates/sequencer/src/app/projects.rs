@@ -5324,6 +5324,7 @@ mod tests {
                 env: None,
                 role: None,
                 tags: Vec::new(),
+                asset_options: None,
                 display_name: Some(display_name.to_string()),
             });
             param

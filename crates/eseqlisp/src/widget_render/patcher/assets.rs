@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 
@@ -15,6 +15,11 @@ struct AssetRoots {
 }
 
 static ASSET_ROOTS: OnceLock<AssetRoots> = OnceLock::new();
+static TRUSTED_SOURCE_ROOTS: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+
+fn trusted_source_roots() -> &'static Mutex<BTreeSet<PathBuf>> {
+    TRUSTED_SOURCE_ROOTS.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
 
 /// Installs the content fallback base and mutable/factory asset libraries used
 /// by DGenLisp asset resolution. Patcher autocomplete lists only the libraries;
@@ -26,6 +31,40 @@ pub fn set_asset_roots(fallback_base: PathBuf, user: PathBuf, factory: PathBuf) 
         fallback_base,
         libraries: [user, factory],
     });
+}
+
+/// Registers a compiler-approved source directory for later metadata reads
+/// from generated UI buffers. The UI receives the canonical directory from
+/// the host; callers cannot use the optional metadata base to escape this set.
+pub fn register_asset_source_root(root: &Path) -> PathBuf {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if let Ok(mut roots) = trusted_source_roots().lock() {
+        roots.insert(canonical.clone());
+    }
+    canonical
+}
+
+pub(crate) fn resolve_registered_asset_reference(
+    reference: &str,
+    source_root: &Path,
+) -> Option<PathBuf> {
+    let source_root = source_root.canonicalize().ok()?;
+    let registered = trusted_source_roots().lock().ok()?;
+    if !registered.contains(&source_root) {
+        return None;
+    }
+    drop(registered);
+
+    let reference = Path::new(reference);
+    if reference.is_absolute() {
+        return None;
+    }
+    let candidate = source_root.join(reference);
+    if !candidate.is_file() {
+        return None;
+    }
+    let candidate = candidate.canonicalize().ok()?;
+    candidate.starts_with(&source_root).then_some(candidate)
 }
 
 /// Resolves the same relative asset spelling used by DGenLisp: draft-local (or

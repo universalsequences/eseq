@@ -4295,6 +4295,78 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn parse_manifest_reads_param_options() {
+        let mut manifest = parse_manifest(
+            r#"{
+                "processAbi": "dgen-host-abi-v1",
+                "params": [
+                    {
+                        "name": "mode",
+                        "cellId": 0,
+                        "options": {"labels": ["lowpass", "highpass"]}
+                    },
+                    {
+                        "name": "bank",
+                        "cellId": 1,
+                        "options": {
+                            "tensor": "waves",
+                            "file": "waves/bank.json",
+                            "key": "sets"
+                        }
+                    },
+                    {
+                        "name": "incomplete",
+                        "cellId": 2,
+                        "options": {"tensor": "waves", "key": "sets"}
+                    }
+                ]
+            }"#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(
+            manifest.params[0].options,
+            Some(super::DGenParamOptions::Labels(vec![
+                "lowpass".to_string(),
+                "highpass".to_string(),
+            ]))
+        );
+        assert_eq!(
+            manifest.params[1].options,
+            Some(super::DGenParamOptions::Asset {
+                tensor: "waves".to_string(),
+                file: "waves/bank.json".to_string(),
+                key: "sets".to_string(),
+            })
+        );
+        assert_eq!(manifest.params[2].options, None);
+
+        manifest.asset_base = Some(std::path::PathBuf::from("/trusted/options"));
+        let descriptor = super::instrument_descriptor_from_manifest("options", &manifest);
+        assert!(matches!(
+            &descriptor.params[0].kind,
+            crate::effects::ParamKind::Enum { labels }
+                if labels == &["lowpass".to_string(), "highpass".to_string()]
+        ));
+        assert_eq!(
+            descriptor.params[1]
+                .ui_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.asset_options.as_ref()),
+            Some(&crate::effects::ParamAssetOptions {
+                tensor: "waves".to_string(),
+                file: "waves/bank.json".to_string(),
+                key: "sets".to_string(),
+                asset_base: Some(std::path::PathBuf::from("/trusted/options")),
+            })
+        );
+        assert!(matches!(
+            descriptor.params[2].kind,
+            crate::effects::ParamKind::Continuous { .. }
+        ));
+    }
+
+    #[test]
     fn parse_manifest_reads_ui_metadata() {
         let manifest = parse_manifest(
             r#"{
@@ -4419,6 +4491,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn dgen_init_message_honors_param_span() {
         let manifest = super::DGenManifest {
             dylib_path: std::path::PathBuf::new(),
+            asset_base: None,
             version: 2,
             process_abi: "dgen-host-abi-v1".to_string(),
             total_memory_slots: 16,
@@ -4436,6 +4509,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     group: None,
                     env: None,
                     role: None,
+                    options: None,
                 },
                 DGenParam {
                     name: "vector".to_string(),
@@ -4450,6 +4524,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     group: None,
                     env: None,
                     role: None,
+                    options: None,
                 },
             ],
             groups: Vec::new(),
@@ -4482,6 +4557,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let total_memory_slots = 16;
         let manifest = super::DGenManifest {
             dylib_path: std::path::PathBuf::new(),
+            asset_base: None,
             version: 2,
             process_abi: "dgen-host-abi-v1".to_string(),
             total_memory_slots,
@@ -4498,6 +4574,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 group: None,
                 env: None,
                 role: None,
+                options: None,
             }],
             groups: Vec::new(),
             envelopes: Vec::new(),
@@ -6873,6 +6950,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 group: None,
                 env: None,
                 role: None,
+                options: None,
             }],
             0,
             0,
@@ -6920,6 +6998,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 group: None,
                 env: None,
                 role: None,
+                options: None,
             }],
             2,
             2,
@@ -6977,6 +7056,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 group: None,
                 env: None,
                 role: None,
+                options: None,
             }],
             0,
             0,
