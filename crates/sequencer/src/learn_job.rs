@@ -572,13 +572,10 @@ fn snapshot_patch_assets(spec: &LearnJobSpec, job_dir: &Path) -> Result<(), Stri
                 "patch-learning asset path must stay inside the patch directory: {reference}"
             ));
         }
-        let source = source_dir.join(relative);
-        if !source.is_file() {
-            return Err(format!(
-                "patch-learning asset does not exist: {}",
-                source.display()
-            ));
-        }
+        let source = crate::lisp_host::dylib_cache::resolve_asset_reference(
+            &reference,
+            Some(source_dir),
+        )?;
         let destination = job_dir.join(relative);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -1014,6 +1011,40 @@ mod tests {
             "[0.1, 0.2]"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn snapshot_patch_assets_resolves_user_library_fallback() {
+        let root = temp_dir("library-assets");
+        fs::create_dir_all(&root).unwrap();
+        let unique = format!(
+            "learn-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        );
+        let library_dir = crate::app_paths::app_paths()
+            .user_assets_dir()
+            .join("__tests")
+            .join(&unique);
+        fs::create_dir_all(&library_dir).unwrap();
+        fs::write(library_dir.join("bank.json"), "[0.3, 0.4]").unwrap();
+
+        let mut job_spec = spec(&root, true);
+        job_spec.patch_source = format!(
+            "(def bank (tensor @shape [2] @file \"__tests/{unique}/bank.json\"))"
+        );
+        snapshot_patch_assets(&job_spec, &root.join("snapshot")).unwrap();
+        assert_eq!(
+            fs::read_to_string(
+                root.join("snapshot/__tests")
+                    .join(&unique)
+                    .join("bank.json")
+            )
+            .unwrap(),
+            "[0.3, 0.4]"
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(library_dir).unwrap();
     }
 
     #[test]

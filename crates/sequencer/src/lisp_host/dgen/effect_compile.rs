@@ -465,14 +465,18 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     dir: &Path,
     dylib_name: &str,
 ) -> Result<String, String> {
-    let effective_source = &finalize_effective_dgen_source(effective_source);
+    let effective_source = finalize_effective_dgen_source(effective_source);
+    let effective_source = super::dylib_cache::rewrite_library_asset_references(
+        &effective_source,
+        asset_base,
+    )?;
     std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
     let source_name = match kind {
         DGenCompileKind::Effect => "effect",
         DGenCompileKind::Instrument => "instrument",
     };
     let src_path = dir.join(format!("{dylib_name}.lisp"));
-    std::fs::write(&src_path, effective_source)
+    std::fs::write(&src_path, &effective_source)
         .map_err(|e| format!("Failed to write source: {e}"))?;
 
     // The stage is mandatory on every host. In particular, omitting this on
@@ -498,9 +502,10 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     if kind == DGenCompileKind::Instrument {
         command.args(["--voices", "12"]);
     }
-    if let Some(asset_base) = asset_base {
-        command.args(["--asset-base", asset_base.to_str().unwrap_or(".")]);
-    }
+    let effective_asset_base = asset_base
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| crate::app_paths::app_paths().dgen_asset_fallback_base());
+    command.arg("--asset-base").arg(&effective_asset_base);
     let output = command
         .output()
         .map_err(|e| format!("Failed to run DGenLisp: {e}"))?;
@@ -509,7 +514,7 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let error = format!("{}{}", stderr, stdout);
-        log_dgenlisp_compile_failure(source_name, &src_path, &error, effective_source);
+        log_dgenlisp_compile_failure(source_name, &src_path, &error, &effective_source);
         return Err(error);
     }
 
