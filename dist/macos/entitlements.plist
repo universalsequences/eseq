@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- ESeq compiles and loads DGen dylibs at runtime on the user's machine.
+       Those dylibs carry only the ad-hoc signature the embedded linker
+       produces; they can never carry the release Team ID, so library
+       validation must not be enforced against them. This is a deliberate
+       product decision (embedded-dgen-toolchain spec, "Code Signing And
+       Hardened Runtime"). No broader executable-memory or debugger
+       entitlement is granted unless the release acceptance matrix proves it
+       is required. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

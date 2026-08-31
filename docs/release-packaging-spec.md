@@ -303,6 +303,15 @@ Owned by `crates/sequencer/docs/embedded-dgen-toolchain-v0.1-spec.md` Phase 5
 and bead `eseq-toolchain.3`. Sparkle, the appcast, and the two channels are
 additive to that and are not yet specced; do so when R2 exists.
 
+The dist script implements the R3 pipeline behind `ESEQ_SIGNING_IDENTITY` and
+`ESEQ_NOTARY_PROFILE` (see `dist/macos/README.md`): individually signed
+helpers, hardened runtime, the `disable-library-validation` entitlement from
+`dist/macos/entitlements.plist`, app notarized and stapled before DMG
+creation (a UDZO image is read-only), then the DMG signed, notarized, and
+stapled too. Unset, the script is byte-identical in behavior to R1. The
+clean-machine acceptance matrix in the toolchain spec remains the exit
+criterion.
+
 ---
 
 ## 8. Open questions

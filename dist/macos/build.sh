@@ -13,9 +13,20 @@ readonly FONT_DIR="$SCRIPT_DIR/fonts"
 readonly UI_FONT="$FONT_DIR/JetBrainsMono-Regular.ttf"
 readonly UI_FONT_LICENSE="$FONT_DIR/OFL.txt"
 readonly UI_FONT_SHA256="a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f"
+readonly ENTITLEMENTS="$SCRIPT_DIR/entitlements.plist"
 readonly OUTPUT_DIR="$REPO_ROOT/dist/out"
 readonly BUNDLE_ID="com.universalsequences.eseq"
 readonly MINIMUM_MACOS="11.0"
+
+# R3 (eseq-toolchain.3): Developer ID signing and notarization, opt-in via
+# environment so the unsigned R1 path stays the default.
+#   ESEQ_SIGNING_IDENTITY  "Developer ID Application: Name (TEAMID)" or the
+#                          certificate hash from `security find-identity`.
+#   ESEQ_NOTARY_PROFILE    keychain profile stored by
+#                          `xcrun notarytool store-credentials`. Requires
+#                          ESEQ_SIGNING_IDENTITY.
+readonly SIGNING_IDENTITY="${ESEQ_SIGNING_IDENTITY:-}"
+readonly NOTARY_PROFILE="${ESEQ_NOTARY_PROFILE:-}"
 
 fail() {
   printf 'error: %s\n' "$*" >&2
@@ -43,6 +54,17 @@ fi
 for command in cargo codesign ditto git hdiutil plutil shasum strings xattr; do
   require_command "$command"
 done
+
+if [[ -n "$NOTARY_PROFILE" && -z "$SIGNING_IDENTITY" ]]; then
+  fail "ESEQ_NOTARY_PROFILE requires ESEQ_SIGNING_IDENTITY: notarization rejects ad-hoc signatures"
+fi
+if [[ -n "$SIGNING_IDENTITY" ]]; then
+  [[ -f "$ENTITLEMENTS" ]] || fail "entitlements not found at $ENTITLEMENTS"
+  plutil -lint "$ENTITLEMENTS" >/dev/null
+  require_command xcrun
+  security find-identity -v -p codesigning | grep -F -q "$SIGNING_IDENTITY" || \
+    fail "signing identity not found in the keychain: $SIGNING_IDENTITY (see \`security find-identity -v -p codesigning\`)"
+fi
 
 readonly ACTUAL_UI_FONT_SHA256="$(shasum -a 256 "$UI_FONT" | awk '{print $1}')"
 [[ "$ACTUAL_UI_FONT_SHA256" == "$UI_FONT_SHA256" ]] || \
@@ -181,10 +203,55 @@ plutil -lint "$CONTENTS/Info.plist"
 # Neither belongs in a release bundle, and resource forks make codesign reject it.
 xattr -cr "$APP"
 
-# Sign the outer bundle last so its resource seal covers the completed tree.
-# Cargo and the staged tools already carry linker/ad-hoc signatures.
-codesign --force --sign - --timestamp=none "$APP"
-codesign --verify --deep --strict "$APP"
+if [[ -n "$SIGNING_IDENTITY" ]]; then
+  # R3 signing, per the toolchain spec's release process: sign nested helpers
+  # individually with their intended identifiers, then the outer app with the
+  # hardened runtime and the reviewed entitlements. Never sign with --deep --
+  # it signs inside-out in an unspecified order and applies the app's
+  # entitlements nowhere.
+  #
+  # eseq and metal_seq both load runtime-generated dylibs, so both carry the
+  # disable-library-validation entitlement; the compiler and linker helpers
+  # only exec and get no entitlements.
+  readonly HELPERS=(
+    "$MACOS/eseq"
+    "$MACOS/DGenLisp-macos-arm64"
+    "$RESOURCES/dgen-toolchain/bin/dgen-clang"
+    "$RESOURCES/dgen-toolchain/bin/ld64.lld"
+  )
+  while IFS= read -r -d '' executable; do
+    for known in "${HELPERS[@]}" "$MACOS/metal_seq"; do
+      [[ "$executable" == "$known" ]] && continue 2
+    done
+    fail "unlisted executable in bundle needs a signing decision: $executable"
+  done < <(find "$MACOS" "$RESOURCES/dgen-toolchain" -type f -perm -111 -print0)
+
+  for helper in "${HELPERS[@]}"; do
+    helper_entitlements=()
+    if [[ "$(basename "$helper")" == "eseq" ]]; then
+      helper_entitlements=(--entitlements "$ENTITLEMENTS")
+    fi
+    codesign --force --sign "$SIGNING_IDENTITY" \
+      --options runtime --timestamp \
+      --identifier "$BUNDLE_ID.$(basename "$helper")" \
+      ${helper_entitlements[@]+"${helper_entitlements[@]}"} \
+      "$helper"
+  done
+  codesign --force --sign "$SIGNING_IDENTITY" \
+    --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS" \
+    "$APP"
+  codesign --verify --deep --strict "$APP"
+  codesign --display --entitlements - "$APP" | \
+    grep -q "com.apple.security.cs.disable-library-validation" || \
+    fail "signed app is missing the disable-library-validation entitlement"
+else
+  # R1: sign the outer bundle ad-hoc, last, so its resource seal covers the
+  # completed tree. Cargo and the staged tools already carry linker/ad-hoc
+  # signatures.
+  codesign --force --sign - --timestamp=none "$APP"
+  codesign --verify --deep --strict "$APP"
+fi
 
 # A release artifact must not disclose or depend on this checkout. Audit every
 # executable payload, not just CFBundleExecutable.
@@ -193,6 +260,28 @@ while IFS= read -r -d '' executable; do
     fail "build-machine path found in shipped executable: $executable"
   fi
 done < <(find "$MACOS" "$RESOURCES/dgen-toolchain/bin" -type f -perm -111 -print0)
+
+notarize() {
+  local artifact="$1"
+  local log="$WORK_DIR/notary-$(basename "$artifact").log"
+  xcrun notarytool submit "$artifact" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait | tee "$log"
+  grep -q "status: Accepted" "$log" || \
+    fail "notarization was not accepted for $artifact; fetch details with \`xcrun notarytool log <submission-id> --keychain-profile $NOTARY_PROFILE\`"
+}
+
+if [[ -n "$NOTARY_PROFILE" ]]; then
+  # Notarize and staple the app itself before it goes into the DMG: a UDZO
+  # image is read-only, so an app stapled after DMG creation would leave the
+  # installed copy dependent on an online Gatekeeper check.
+  readonly APP_ZIP="$WORK_DIR/$ARTIFACT_NAME.zip"
+  ditto -c -k --keepParent "$APP" "$APP_ZIP"
+  notarize "$APP_ZIP"
+  xcrun stapler staple "$APP"
+  spctl --assess --type execute "$APP" || \
+    fail "Gatekeeper rejects the stapled app"
+fi
 
 mkdir -p "$DMG_ROOT"
 ditto "$APP" "$DMG_ROOT/ESeq.app"
@@ -203,6 +292,16 @@ hdiutil create \
   -format UDZO \
   -ov \
   "$DMG"
+
+if [[ -n "$SIGNING_IDENTITY" ]]; then
+  codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$DMG"
+fi
+if [[ -n "$NOTARY_PROFILE" ]]; then
+  # Notarize the DMG as well so the download itself carries a ticket and
+  # Gatekeeper accepts it offline before the app is ever copied out.
+  notarize "$DMG"
+  xcrun stapler staple "$DMG"
+fi
 
 rm -rf "$OUTPUT_DIR/ESeq.app"
 ditto "$APP" "$OUTPUT_DIR/ESeq.app"
