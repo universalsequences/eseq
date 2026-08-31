@@ -40,6 +40,7 @@
         seq-registered-step-tabs
         piano-roll-default-pane-height
         lower-fx-layout-height
+        seq-tile-border-width
         seq-step-tab-buffer
         seq-step-tab-sequencer-name
         seq-step-tab-source-path
@@ -77,6 +78,11 @@
 ;; render root at load time (roots must never be imported).
 (def piano-roll-default-pane-height 11.5)
 (def lower-fx-layout-height piano-roll-default-pane-height)
+
+;; One border width for every tile chrome stroke. Home is this hub for the
+;; same reason as piano-roll-default-pane-height: eseq.seq-layout reads it at
+;; load time and imports us, so it cannot be imported back.
+(def seq-tile-border-width 2)
 
 (def seq-step-tab-label (tab)
   (nth tab 0))
@@ -137,8 +143,8 @@
     (if (and (> (len tabs) 1) (seq-main-step-tab-buffer? buffer))
       (list :buf buffer
         :tabs tabs
-        :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
-      (list :buf buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25))))
+        :hide-status true :border-radius 12 :border-width seq-tile-border-width :background-color :buffer-bg :min-width 25)
+      (list :buf buffer :hide-status true :border-radius 12 :border-width seq-tile-border-width :background-color :buffer-bg :min-width 25))))
 
 (def seq-refresh-step-tabs-if-present ()
   (let ((tabs (seq-main-step-tabs)))

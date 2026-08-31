@@ -13,7 +13,8 @@
     (dict :name "mac-osx-midnight-50" :command "seq-theme-mac-osx-midnight-50" :file "@/ui/themes/mac-osx-midnight-50.lisp")
     (dict :name "black-ir-theme" :command "seq-theme-black-ir" :file "@/ui/themes/black-ir-theme.lisp")
     (dict :name "mac-osx-ember" :command "seq-theme-mac-osx-ember" :file "@/ui/themes/mac-osx-ember.lisp")
-    (dict :name "mac-osx-violet" :command "seq-theme-mac-osx-violet" :file "@/ui/themes/mac-osx-violet.lisp")))
+    (dict :name "mac-osx-violet" :command "seq-theme-mac-osx-violet" :file "@/ui/themes/mac-osx-violet.lisp")
+    (dict :name "tahoe-terminal" :command "seq-theme-tahoe-terminal" :file "@/ui/themes/tahoe-terminal.lisp")))
 
 (def seq-apply-theme-file (name file)
   (do
@@ -50,3 +51,6 @@
 
 (def seq-theme-mac-osx-violet ()
   (seq-apply-theme-file "mac-osx-violet" "@/ui/themes/mac-osx-violet.lisp"))
+
+(def seq-theme-tahoe-terminal ()
+  (seq-apply-theme-file "tahoe-terminal" "@/ui/themes/tahoe-terminal.lisp"))

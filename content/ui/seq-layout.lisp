@@ -38,24 +38,27 @@
 ;; `apply-*` names are also the M-x-visible spellings.
 
 (def buffer-radius 16)
+;; The width itself lives in the seq-step-tabs hub (which cannot import us);
+;; edit it there and every tile follows, including *sequencer*.
+(def border-width eseq.seq-step-tabs/seq-tile-border-width)
 
 (def step-and-track-panel-layout-spec ()
   (list :cols :gap 1
     0.78 (eseq.seq-step-tabs/seq-main-step-tile-layout-spec)
     0.22 (list :rows :gap 1
-      0.48 (list :buf "*step*" :hide-status true :border-radius buffer-radius :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28)
-      0.52 (list :buf "*track*" :hide-status true :border-radius buffer-radius :border-width 4 :background-color :buffer-bg :max-height 7 :min-height 7 :min-width 28 :max-width 28))))
+      0.48 (list :buf "*step*" :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-width 28 :max-width 28)
+      0.52 (list :buf "*track*" :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :max-height 7 :min-height 7 :min-width 28 :max-width 28))))
 
 (def main-panel-layout-spec ()
   (if (eseq.seq-step-tabs/seq-arrangement-view?)
-    (list :buf "*arrangement*" :hide-status true :border-radius buffer-radius :border-width 4 :background-color :buffer-bg :min-width 25)
+    (list :buf "*arrangement*" :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-width 25)
     (step-and-track-panel-layout-spec)))
 
 (def collapsible-panel-layout-spec (buffer on-collapse min-width max-width min-height max-height)
   (list :buf buffer
     :hide-status true
     :border-radius buffer-radius
-    :border-width 4
+    :border-width border-width
     :background-color :buffer-bg
     :min-width min-width
     :max-width max-width
@@ -117,7 +120,7 @@
           0.95 main-layout
           lower-ratio (if (= lower-buffer "*fx*")
             (fx-panel-layout-spec nil nil lower-min-height lower-max-height)
-            (list :buf lower-buffer :hide-status true :border-radius buffer-radius :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height))))
+            (list :buf lower-buffer :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height))))
       (list :rows :gap 1
         0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
         0.95 main-layout))))
@@ -162,10 +165,10 @@
     22 26 nil nil))
 
 (def patcher-canvas-layout-spec (patcher-buffer)
-  (list :buf patcher-buffer :hide-status true :border-radius buffer-radius :border-width 4 :background-color :buffer-bg :min-height 20))
+  (list :buf patcher-buffer :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-height 20))
 
 (def patch-learn-buffer-layout-spec (learn-buffer)
-  (list :buf learn-buffer :hide-status true :border-radius buffer-radius :border-width 4 :background-color :buffer-bg :min-width 28 :min-height 20))
+  (list :buf learn-buffer :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-width 28 :min-height 20))
 
 (def patcher-main-layout-spec (patcher-buffer)
   (if eseq.seq-core-state/patch-macros-panel-visible
@@ -190,10 +193,10 @@
             (list :cols :gap 1
               0.14 (patch-macros-panel-layout-spec)
               0.53 (patcher-canvas-layout-spec patcher-buffer)
-              0.33 (list :buf source-buffer :hide-status true :border-raduis buffer-radius :border-width 4 :background-color :buffer-bg :min-height 20))
+              0.33 (list :buf source-buffer :hide-status true :border-raduis buffer-radius :border-width border-width :background-color :buffer-bg :min-height 20))
             (list :cols :gap 1
               0.62 (patcher-canvas-layout-spec patcher-buffer)
-              0.38 (list :buf source-buffer :hide-status true :border-radius buffer-radius :border-width 4 :background-color :buffer-bg :min-height 20)))))
+              0.38 (list :buf source-buffer :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-height 20)))))
     (if (patcher-bottom-bar-visible?)
       (list :rows :gap 1
         0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)

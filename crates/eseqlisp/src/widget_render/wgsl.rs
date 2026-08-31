@@ -2032,19 +2032,19 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var radius: f32 = clamp(input.corner_radius, 0.0, min(aspect, 1.0));
     var half_size: vec2<f32> = vec2<f32>(aspect, 1.0);
     var d: f32 = sdf_rounded_rect(p, half_size, radius);
-    var aa: f32 = max(fwidth(d), 0.001);
-    var outer_mask: f32 = smoothstep(aa, -aa, d);
+    // Isotropic pixel size: fwidth(d) grows up to ~1.41x where the corner arc
+    // runs diagonally, fattening the stroke there; fwidth(p) does not.
+    var pixel: f32 = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+    var outer_mask: f32 = smoothstep(pixel, -pixel, d);
 
     var border_px: f32 = max(input.uniform_a.x, 0.0);
     var border_mask: f32 = 0.0;
     var fill_mask: f32 = outer_mask;
     if (border_px > 0.0) {
-        var border_thickness: f32 = border_px * aa;
-        var inner_size: vec2<f32> = max(half_size - vec2<f32>(border_thickness), vec2<f32>(0.001));
-        var inner_radius: f32 = max(radius - border_thickness, 0.0);
-        var inner_d: f32 = sdf_rounded_rect(p, inner_size, inner_radius);
-        var inner_aa: f32 = max(fwidth(inner_d), 0.001);
-        var inner_mask: f32 = smoothstep(inner_aa, -inner_aa, inner_d);
+        // Euclidean SDF: the inner contour is the outer one offset inward,
+        // uniform thickness by construction.
+        var inner_d: f32 = d + border_px * pixel;
+        var inner_mask: f32 = smoothstep(pixel, -pixel, inner_d);
         border_mask = clamp(outer_mask - inner_mask, 0.0, 1.0);
         fill_mask = inner_mask;
     }
@@ -2071,12 +2071,14 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var q: vec2<f32> = abs(p) - half_size;
     var d: f32 = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
 
-    var edge: f32 = fwidth(d) * 1.2;
+    // Isotropic pixel size (fwidth(d) fattens the stroke on corner arcs).
+    var pixel: f32 = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+    var edge: f32 = pixel * 1.2;
     var mask: f32 = smoothstep(edge, -edge, d);
     if (mask < 0.002) { discard; }
 
     var border_px: f32 = select(0.0, 1.25, input.value_t > 0.5);
-    var inner_d: f32 = d + border_px * max(edge, 0.001);
+    var inner_d: f32 = d + border_px * pixel;
     var inner_mask: f32 = smoothstep(edge, -edge, inner_d);
     var border_mask: f32 = clamp(mask - inner_mask, 0.0, 1.0);
 
@@ -2130,17 +2132,18 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var cornerRadius: f32 = min(input.corner_radius, min(aspect, 1.0));
 
     var dist: f32 = sdf_rounded_rect(localPos, sdfSize, cornerRadius);
-    var derivative: f32 = max(fwidth(dist), 0.001);
-    var outerAlpha: f32 = smoothstep(derivative, -derivative, dist);
+    // Isotropic pixel size: fwidth(dist) grows up to ~1.41x where the corner
+    // arc runs diagonally, fattening the stroke there.
+    var pixel: f32 = max(max(fwidth(localPos.x), fwidth(localPos.y)), 0.001);
+    var outerAlpha: f32 = smoothstep(pixel, -pixel, dist);
     if (outerAlpha <= 0.001) {
         discard;
     }
 
-    var borderThickness: f32 = max(input.uniform_a.x, 0.0) * derivative;
-    var innerSize: vec2<f32> = max(sdfSize - vec2<f32>(borderThickness), vec2<f32>(0.001));
-    var innerDist: f32 = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
-    var innerDerivative: f32 = max(fwidth(innerDist), 0.001);
-    var innerAlpha: f32 = smoothstep(innerDerivative, -innerDerivative, innerDist);
+    // Euclidean SDF: the inner contour is the outer one offset inward,
+    // uniform thickness by construction.
+    var innerDist: f32 = dist + max(input.uniform_a.x, 0.0) * pixel;
+    var innerAlpha: f32 = smoothstep(pixel, -pixel, innerDist);
     var borderMask: f32 = outerAlpha * (1.0 - innerAlpha);
 
     var color: vec3<f32> = mix(input.color_b.rgb, input.color_a.rgb, borderMask);

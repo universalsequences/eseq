@@ -254,7 +254,25 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
         };
 
         let timeout = frame_interval.saturating_sub(last_render_at.elapsed());
-        match backend.poll_event(timeout) {
+        // Render on resize ticks delivered while the poll is stuck inside
+        // macOS's live-resize modal loop; otherwise the compositor stretches
+        // the previous frame to the new window size.
+        let mut live_resize_redraw = |backend: &mut MetalBackend| {
+            let (cols, rows) = backend.viewport_size();
+            editor.update_tile_rects(cols as u16, rows as u16);
+            let tiled_frame = frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
+            match backend.render_tiled(&tiled_frame) {
+                Ok(metal_backend::TiledRenderStatus::Presented) => {
+                    editor.clear_needs_redraw();
+                    last_render_at = Instant::now();
+                }
+                Ok(metal_backend::TiledRenderStatus::NotPresented) => {
+                    frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
+                }
+                Err(_) => {}
+            }
+        };
+        match backend.poll_event_with_redraw(timeout, &mut live_resize_redraw) {
             Some(Event::Key(key)) => editor.handle_key(key),
             Some(Event::Mouse(mouse)) => {
                 let (precise_col, precise_row) = backend

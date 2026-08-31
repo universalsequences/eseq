@@ -73,6 +73,18 @@ pub(crate) fn expanded_step_slot_plocked_field(track_id: usize, slot: usize) -> 
     format!("seqv-slot-plocked-{track_id}-{slot}")
 }
 
+pub(crate) fn expanded_step_slot_plock_kind_field(track_id: usize, slot: usize) -> String {
+    format!("seqv-slot-plock-kind-{track_id}-{slot}")
+}
+
+pub(crate) fn expanded_step_slot_variant_color_field(
+    track_id: usize,
+    slot: usize,
+    channel: char,
+) -> String {
+    format!("seqv-slot-variant-{channel}-{track_id}-{slot}")
+}
+
 pub(crate) fn expanded_step_slot_selected_field(track_id: usize, slot: usize) -> String {
     format!("seqv-slot-selected-{track_id}-{slot}")
 }
@@ -258,6 +270,48 @@ pub(crate) fn sync_expanded_step_param_slot(
     dirty
 }
 
+/// Publish the p-lock render fields (`seqv-slot-plock-kind-*` plus the three
+/// `seqv-slot-variant-{r,g,b}-*` channels) for one expanded-lane slot. Split
+/// out of `sync_expanded_step_slot` so the p-lock authoring path can refresh
+/// just these fields without paying for a full slot sync; `plock_render` is
+/// the per-track `plock_variant_step_render_values` list, computed once per
+/// track by the caller.
+pub(crate) fn sync_expanded_step_slot_plock_render_fields(
+    rt: &mut Runtime,
+    viewport: ExpandedStepViewport,
+    slot: usize,
+    visible: bool,
+    plock_render: &[PlockVariantStepRender],
+) -> bool {
+    let step = viewport.page.saturating_mul(PAGE_SIZE).saturating_add(slot);
+    let render = if visible {
+        plock_render.get(step).copied()
+    } else {
+        None
+    };
+    let mut dirty = rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_plock_kind_field(viewport.track_id, slot),
+            Value::Number(render.map(|render| render.kind as f64).unwrap_or(0.0)),
+        )
+        .effects_dirty;
+    for (channel_idx, channel) in ['r', 'g', 'b'].into_iter().enumerate() {
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &expanded_step_slot_variant_color_field(viewport.track_id, slot, channel),
+                Value::Number(
+                    render
+                        .map(|render| render.color[channel_idx] as f64)
+                        .unwrap_or(0.0),
+                ),
+            )
+            .effects_dirty;
+    }
+    dirty
+}
+
 pub(crate) fn sync_expanded_step_slot(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -266,6 +320,7 @@ pub(crate) fn sync_expanded_step_slot(
     current_track_idx: usize,
     viewport: ExpandedStepViewport,
     slot: usize,
+    plock_render: &[PlockVariantStepRender],
 ) -> bool {
     let step = viewport.page.saturating_mul(PAGE_SIZE).saturating_add(slot);
     let num_steps = state.pattern.track_params[viewport.track]
@@ -316,6 +371,7 @@ pub(crate) fn sync_expanded_step_slot(
             ),
         )
         .effects_dirty;
+    dirty |= sync_expanded_step_slot_plock_render_fields(rt, viewport, slot, visible, plock_render);
     dirty |= rt
         .set_reactive(
             "SEQ",
@@ -355,6 +411,7 @@ pub(crate) fn sync_expanded_step_viewport(
         return false;
     }
     let mut dirty = sync_expanded_step_cursor_param_fields(rt, state, viewport);
+    let plock_render = plock_variant_step_render_values(state, viewport.track);
     let page_count = track_playhead_row_count(state, viewport.track).max(1);
     for page in 0..((MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE) {
         dirty |= rt
@@ -374,6 +431,7 @@ pub(crate) fn sync_expanded_step_viewport(
             current_track_idx,
             viewport,
             slot,
+            &plock_render,
         );
     }
     dirty

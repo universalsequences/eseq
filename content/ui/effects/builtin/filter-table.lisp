@@ -35,7 +35,7 @@
         :plock-color-r (pc/param-plock-color-r)
         :plock-color-g (pc/param-plock-color-g)
         :plock-color-b (pc/param-plock-color-b)
-        :width 6.8 :height 2.0 :knob-size 1.75
+        :width 6.8 :height 2.5 :knob-size 2.75
         :on-change (lambda (v) (pc/param-set-control-value fx p v))))))
 
 (def percent-knob (fx label-text p)

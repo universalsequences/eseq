@@ -64,8 +64,8 @@
 ;; loaded: no tile shows it, but as a loaded effect-buffer its whole-list
 ;; SEQ reads (steps/velocities/...) forced a full hidden-buffer rerun on
 ;; every step or scene edit (~5ms per launch/edit). The file is kept for
-;; reference; `metal-track-tick` (the one widget the live UI still uses)
-;; now lives in ui/sequencer.lisp.
+;; reference; its `metal-track-tick` widget also lives in ui/sequencer.lisp
+;; (legacy-only since the expanded toggle moved to `seqv-step-shell`).
 (import eseq.sequencer)
 (import eseq.arrangement)
 (load "@/ui/effects/step-buffer.lisp")

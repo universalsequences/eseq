@@ -1668,19 +1668,19 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float radius = clamp(in.corner_radius, 0.0, min(aspect, 1.0));
     float2 half_size = float2(aspect, 1.0);
     float d = sdf_rounded_rect(p, half_size, radius);
-    float aa = max(fwidth(d), 0.001);
-    float outer_mask = smoothstep(aa, -aa, d);
+    // Isotropic pixel size: fwidth(d) grows up to ~1.41x where the corner arc
+    // runs diagonally, fattening the stroke there; fwidth(p) does not.
+    float pixel = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+    float outer_mask = smoothstep(pixel, -pixel, d);
 
     float border_px = max(in.uniform_a.x, 0.0);
     float border_mask = 0.0;
     float fill_mask = outer_mask;
     if (border_px > 0.0) {
-        float border_thickness = border_px * aa;
-        float2 inner_size = max(half_size - float2(border_thickness), float2(0.001));
-        float inner_radius = max(radius - border_thickness, 0.0);
-        float inner_d = sdf_rounded_rect(p, inner_size, inner_radius);
-        float inner_aa = max(fwidth(inner_d), 0.001);
-        float inner_mask = smoothstep(inner_aa, -inner_aa, inner_d);
+        // Euclidean SDF: the inner contour is the outer one offset inward,
+        // uniform thickness by construction.
+        float inner_d = d + border_px * pixel;
+        float inner_mask = smoothstep(pixel, -pixel, inner_d);
         border_mask = clamp(outer_mask - inner_mask, 0.0, 1.0);
         fill_mask = inner_mask;
     }
@@ -1707,12 +1707,14 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float2 q = abs(p) - half_size;
     float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 
-    float edge = fwidth(d) * 1.2;
+    // Isotropic pixel size (fwidth(d) fattens the stroke on corner arcs).
+    float pixel = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+    float edge = pixel * 1.2;
     float mask = smoothstep(edge, -edge, d);
     if (mask < 0.002) { discard_fragment(); }
 
     float border_px = in.value_t > 0.5 ? 1.25 : 0.0;
-    float inner_d = d + border_px * max(edge, 0.001);
+    float inner_d = d + border_px * pixel;
     float inner_mask = smoothstep(edge, -edge, inner_d);
     float border_mask = clamp(mask - inner_mask, 0.0, 1.0);
 
@@ -4520,17 +4522,18 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float cornerRadius = min(in.corner_radius, min(aspect, 1.0));
 
     float dist = sdf_rounded_rect(localPos, sdfSize, cornerRadius);
-    float derivative = max(fwidth(dist), 0.001);
-    float outerAlpha = smoothstep(derivative, -derivative, dist);
+    // Isotropic pixel size: fwidth(dist) grows up to ~1.41x where the corner
+    // arc runs diagonally, fattening the stroke there.
+    float pixel = max(max(fwidth(localPos.x), fwidth(localPos.y)), 0.001);
+    float outerAlpha = smoothstep(pixel, -pixel, dist);
     if (outerAlpha <= 0.001) {
         discard_fragment();
     }
 
-    float borderThickness = max(in.uniform_a.x, 0.0) * derivative;
-    float2 innerSize = max(sdfSize - float2(borderThickness), float2(0.001));
-    float innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
-    float innerDerivative = max(fwidth(innerDist), 0.001);
-    float innerAlpha = smoothstep(innerDerivative, -innerDerivative, innerDist);
+    // Euclidean SDF: the inner contour is the outer one offset inward,
+    // uniform thickness by construction.
+    float innerDist = dist + max(in.uniform_a.x, 0.0) * pixel;
+    float innerAlpha = smoothstep(pixel, -pixel, innerDist);
     float borderMask = outerAlpha * (1.0 - innerAlpha);
 
     float3 color = mix(in.color_b.rgb, in.color_a.rgb, borderMask);

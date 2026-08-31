@@ -531,13 +531,14 @@ fn compute_border_mask(
     outerMask: ptr<function, f32>,
 ) -> f32 {
     let outerDist = sdf_rounded_rect(localPos, outerSize, cornerRadius);
-    let outerDeriv = max(fwidth(outerDist), 0.001);
-    let borderThickness = borderPixels * outerDeriv;
-    let innerSize = outerSize - vec2<f32>(borderThickness);
-    let innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
-    let innerDeriv = max(fwidth(innerDist), 0.001);
-    *outerMask = smoothstep(outerDeriv, -outerDeriv, outerDist);
-    let innerMask = smoothstep(innerDeriv, -innerDeriv, innerDist);
+    // Isotropic pixel size: fwidth(outerDist) grows up to ~1.41x where the
+    // corner arc runs diagonally, fattening the stroke there.
+    let pixel = max(max(fwidth(localPos.x), fwidth(localPos.y)), 0.001);
+    // Euclidean SDF: the inner contour is the outer one offset inward,
+    // uniform thickness by construction.
+    let innerDist = outerDist + borderPixels * pixel;
+    *outerMask = smoothstep(pixel, -pixel, outerDist);
+    let innerMask = smoothstep(pixel, -pixel, innerDist);
     return *outerMask * (1.0 - innerMask);
 }
 "#;

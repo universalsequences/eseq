@@ -366,7 +366,7 @@
   :state (active)
   :shader
   (let ((fg-col :fg)
-      (muted-col (rgba 0.25 0.25 0.20 1.0))
+      (muted-col :mixer-strip-bg)
       (bg-col (if (= active 1)
           :transparent
           :transparent
@@ -396,7 +396,7 @@
   :state (active)
   :shader
   (let ((fg-col :fg)
-      (muted-col (rgba 0.25 0.25 0.20 1.0))
+      (muted-col :mixer-strip-bg)
       (bg-col (if (= active 1)
           :mixer-strip-selected-bg
           :transparent
@@ -426,7 +426,7 @@
   :state (active)
   :shader
   (let ((fg-col :fg)
-      (muted-col (rgba 0.25 0.25 0.20 1.0))
+      (muted-col :mixer-strip-bg)
       (bg-col (if (= active 1)
           :mixer-strip-selected-bg
           :transparent
@@ -456,7 +456,7 @@
   :state (active)
   :shader
   (let ((fg-col :fg)
-      (muted-col (rgba 0.25 0.25 0.27 1.0))
+      (muted-col :mixer-strip-bg)
       (bg-col :transparent)
       (line-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
@@ -482,7 +482,7 @@
   :state (active)
   :shader
   (let ((fg-col :fg)
-      (muted-col (rgba 0.25 0.25 0.27 1.0))
+      (muted-col :mixer-strip-bg)
       (bg-col :transparent)
       (line-col (if (= active 1) fg-col muted-col)))
     (sdf/layer

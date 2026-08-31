@@ -806,11 +806,11 @@
             (rgba 0.32 0.33 0.37 0.5)
             (rgba 0 0 0 0))))
 
-;; The expanded-lane step tick. Moved verbatim from ui/step-grid.lisp when
-;; the legacy *metal* buffer was unplugged from main.lisp — this widget is
-;; the one piece of that file the live UI still renders. If step-grid.lisp
-;; is ever reloaded, its identical copy is harmless (this one loads later
-;; and wins).
+;; Legacy step tick, moved verbatim from ui/step-grid.lisp when the *metal*
+;; buffer was unplugged from main.lisp. The expanded lane used it until its
+;; toggle switched to the shared `seqv-step-shell`; kept only so a reloaded
+;; step-grid.lisp still resolves (its identical copy is harmless — this one
+;; loads later and wins).
 (defwidget metal-track-tick
   :width 1.5 :height 1.5
   :state (active plocked selected track-r track-g track-b)
@@ -1208,6 +1208,18 @@
 (def slot-plocked-binding (track-id slot)
   (bind-seq (slot-field "plocked" track-id slot)))
 
+(def slot-plock-kind-binding (track-id slot)
+  (bind-seq (slot-field "plock-kind" track-id slot)))
+
+(def slot-variant-r-binding (track-id slot)
+  (bind-seq (slot-field "variant-r" track-id slot)))
+
+(def slot-variant-g-binding (track-id slot)
+  (bind-seq (slot-field "variant-g" track-id slot)))
+
+(def slot-variant-b-binding (track-id slot)
+  (bind-seq (slot-field "variant-b" track-id slot)))
+
 (def slot-selected-binding (track-id slot)
   (bind-seq (slot-field "selected" track-id slot)))
 
@@ -1565,7 +1577,6 @@
                   (expanded-slot-drag track track-id i evt))
                 (v-stack :align :center :gap expanded-step-column-gap
                   (let ((active-ref (slot-active-binding track-id i))
-                      (plocked-ref (slot-plocked-binding track-id i))
                       (selected-ref (slot-selected-binding track-id i))
                       (track-r (expanded-track-color-r track))
                       (track-g (expanded-track-color-g track))
@@ -1595,12 +1606,29 @@
                         :material (eseq.sequencer/step-slider-track-material)
                         :on-change (lambda (v)
                           (set-expanded-slot-param track track-id i mode v)))
+                      ;; Same shell widget as the compact grid's step-cell, so
+                      ;; the expanded toggle inherits its p-lock tick (incl.
+                      ;; variant colors) and active/selected/muted rendering.
                       (box
                         :key (str "expanded-step-toggle-" track-id "-" i)
                         :active active-ref
-                        :plocked plocked-ref
+                        :plock-kind (slot-plock-kind-binding track-id i)
                         :selected selected-ref
-                        :background "aqua-button"
+                        :duration 0
+                        :muted (bind-seq-nth "track-muted-effective" track)
+                        :hide 0
+                        :track-r (bind-seq-nth "step-color-r-effective" track)
+                        :track-g (bind-seq-nth "step-color-g-effective" track)
+                        :track-b (bind-seq-nth "step-color-b-effective" track)
+                        :variant-r (slot-variant-r-binding track-id i)
+                        :variant-g (slot-variant-g-binding track-id i)
+                        :variant-b (slot-variant-b-binding track-id i)
+                        :color :sequencer-step-border
+                        :selected-color :sequencer-step-selected-border
+                        :off-fill (if (= (step-odd i) 1)
+                          :sequencer-step-off-fill-alt
+                          :sequencer-step-off-fill)
+                        :background "seqv-step-shell"
                         :align :center :width 3 :height expanded-step-toggle-height
                         :on-mouse-down (lambda (evt)
                           (expanded-slot-pointer-down track track-id i evt))
@@ -1609,14 +1637,7 @@
                         :on-mouse-up (lambda (evt)
                           (expanded-slot-pointer-up track track-id i evt))
                         :on-double-click (lambda (evt)
-                          (expanded-slot-double-click track track-id i evt))
-                        (metal-track-tick
-                          :active active-ref
-                          :plocked plocked-ref
-                          :selected selected-ref
-                          :track-r track-r
-                          :track-g track-g
-                          :track-b track-b))))
+                          (expanded-slot-double-click track track-id i evt)))))
                   (number-label
                     :key (str "expanded-step-label-" track-id "-" i)
                     :value (slot-label-binding track-id i)

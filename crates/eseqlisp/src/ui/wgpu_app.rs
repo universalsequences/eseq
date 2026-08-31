@@ -2652,6 +2652,19 @@ fn create_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
     EventLoop::new()
 }
 
+impl WgpuAppBackend {
+    /// Signature parity with `MetalBackend::poll_backend_event_with_redraw`.
+    /// The live-resize modal-loop stall is macOS-specific; here the callback
+    /// is unused and this is a plain poll.
+    pub fn poll_backend_event_with_redraw(
+        &mut self,
+        timeout: Duration,
+        _redraw: &mut dyn FnMut(&mut Self),
+    ) -> Option<BackendEvent> {
+        self.poll_backend_event(timeout)
+    }
+}
+
 impl Backend for WgpuAppBackend {
     fn initialize(&mut self) -> Result<(), BackendError> {
         // ── Window ───────────────────────────────────────────────────────────

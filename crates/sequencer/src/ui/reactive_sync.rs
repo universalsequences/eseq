@@ -824,6 +824,7 @@ pub(super) fn sync_step_batch_structural_bindings(
                     current_track_idx,
                     viewport,
                     slot,
+                    &render_values,
                 );
             }
         }
@@ -958,20 +959,25 @@ pub(super) fn sync_step_selection_bindings(
         }
     }
     if let Some(app) = app {
-        for viewport in expanded_step_projection.viewports_for_track(track) {
-            for &step in changed_steps {
-                let Some(slot) = visible_slot_for_step(viewport, step) else {
-                    continue;
-                };
-                dirty |= sync_expanded_step_slot(
-                    rt,
-                    state,
-                    app,
-                    &selected,
-                    current_track_idx,
-                    viewport,
-                    slot,
-                );
+        let viewports = expanded_step_projection.viewports_for_track(track);
+        if !viewports.is_empty() {
+            let render_values = plock_variant_step_render_values(state, track);
+            for viewport in viewports {
+                for &step in changed_steps {
+                    let Some(slot) = visible_slot_for_step(viewport, step) else {
+                        continue;
+                    };
+                    dirty |= sync_expanded_step_slot(
+                        rt,
+                        state,
+                        app,
+                        &selected,
+                        current_track_idx,
+                        viewport,
+                        slot,
+                        &render_values,
+                    );
+                }
             }
         }
     }
@@ -1577,17 +1583,19 @@ pub(super) fn sync_expanded_step_plocked_fields_for_steps(
         .get_num_steps()
         .min(MAX_STEPS);
     let mut dirty = false;
+    let render_values = plock_variant_step_render_values(state, track);
     for viewport in viewports {
         for &step in steps {
             let Some(slot) = visible_slot_for_step(viewport, step) else {
                 continue;
             };
+            let visible = step < num_steps;
             dirty |= rt
                 .set_reactive(
                     "SEQ",
                     &expanded_step_slot_plocked_field(viewport.track_id, slot),
                     Value::Bool(
-                        step < num_steps
+                        visible
                             && track_step_has_plock(
                                 state,
                                 track,
@@ -1597,6 +1605,13 @@ pub(super) fn sync_expanded_step_plocked_fields_for_steps(
                     ),
                 )
                 .effects_dirty;
+            dirty |= sync_expanded_step_slot_plock_render_fields(
+                rt,
+                viewport,
+                slot,
+                visible,
+                &render_values,
+            );
         }
     }
     dirty

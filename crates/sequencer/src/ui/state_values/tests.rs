@@ -9755,6 +9755,7 @@
             cursor_step: 0,
         });
         let field = expanded_step_slot_plocked_field(TRACK_ID, STEP);
+        let kind_field = expanded_step_slot_plock_kind_field(TRACK_ID, STEP);
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", vec![], true);
         runtime.register_reactive("SEQV", vec![], true);
@@ -9781,6 +9782,11 @@
             Some(false),
             "an unlocked step must publish an unlit expanded p-lock tick"
         );
+        assert_eq!(
+            reactive_number(&runtime, "SEQ", &kind_field),
+            Some(0.0),
+            "an unlocked step must publish plock-kind 0 for the expanded step shell"
+        );
 
         app.state.pattern.instrument_slots[0].set_plock(STEP, cutoff_idx, 900.0);
         sync_instrument_plock_presence_display_fields(
@@ -9795,6 +9801,10 @@
             plocked(&runtime),
             Some(true),
             "the first p-lock write must light the expanded lane's tick without an epoch bump"
+        );
+        assert!(
+            reactive_number(&runtime, "SEQ", &kind_field).is_some_and(|kind| kind > 0.0),
+            "the first p-lock write must publish a nonzero plock-kind for the expanded step shell"
         );
     }
 

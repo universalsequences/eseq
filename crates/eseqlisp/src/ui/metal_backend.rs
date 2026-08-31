@@ -571,13 +571,14 @@ float sdf_rounded_rect(float2 p, float2 half_size, float radius) {
 float compute_border_mask(float2 localPos, float2 outerSize, float cornerRadius,
                           float borderPixels, thread float& outerMask) {
     float outerDist = sdf_rounded_rect(localPos, outerSize, cornerRadius);
-    float outerDeriv = max(fwidth(outerDist), 0.001);
-    float borderThickness = borderPixels * outerDeriv;
-    float2 innerSize = outerSize - float2(borderThickness);
-    float innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
-    float innerDeriv = max(fwidth(innerDist), 0.001);
-    outerMask = smoothstep(outerDeriv, -outerDeriv, outerDist);
-    float innerMask = smoothstep(innerDeriv, -innerDeriv, innerDist);
+    // Isotropic pixel size: fwidth(outerDist) grows up to ~1.41x where the
+    // corner arc runs diagonally, fattening the stroke there.
+    float pixel = max(max(fwidth(localPos.x), fwidth(localPos.y)), 0.001);
+    // Euclidean SDF: the inner contour is the outer one offset inward,
+    // uniform thickness by construction.
+    float innerDist = outerDist + borderPixels * pixel;
+    outerMask = smoothstep(pixel, -pixel, outerDist);
+    float innerMask = smoothstep(pixel, -pixel, innerDist);
     return outerMask * (1.0 - innerMask);
 }
 "#;
@@ -6002,6 +6003,239 @@ fragment float4 live_spectrogram_frag(
         }
     }
 
+    impl MetalBackend {
+        /// Like `poll_backend_event`, but invokes `redraw` to render a frame
+        /// whenever the window is resized while the pump is blocked. During a
+        /// macOS live resize AppKit runs a modal tracking loop inside
+        /// `pump_events`, so the caller's outer render loop cannot run until
+        /// the drag ends; without this callback the compositor stretches the
+        /// last presented frame to the new layer bounds.
+        pub fn poll_backend_event_with_redraw(
+            &mut self,
+            timeout: Duration,
+            redraw: &mut dyn FnMut(&mut Self),
+        ) -> Option<BackendEvent> {
+            if std::mem::take(&mut self.close_requested) {
+                self.backend_poll_profile.note_immediate();
+                return Some(BackendEvent::Quit);
+            }
+            if let Some(paths) = self.pending_file_drops.pop_front() {
+                self.backend_poll_profile.note_immediate();
+                return Some(BackendEvent::FileDrop(paths));
+            }
+            let terminal_event = self.poll_event_with_redraw(timeout, redraw);
+            if std::mem::take(&mut self.close_requested) {
+                Some(BackendEvent::Quit)
+            } else {
+                terminal_event.map(BackendEvent::Terminal)
+            }
+        }
+
+        pub fn poll_event_with_redraw(
+            &mut self,
+            timeout: Duration,
+            redraw: &mut dyn FnMut(&mut Self),
+        ) -> Option<Event> {
+            if let Some(ev) = self.pending.pop_front() {
+                self.backend_poll_profile.note_immediate();
+                if matches!(ev, Event::Mouse(_)) {
+                    self.last_precise_mouse = Some(self.cursor_pos);
+                }
+                return Some(ev);
+            }
+            if let Some(ev) = self.pending_drag.take() {
+                self.backend_poll_profile.note_immediate();
+                self.last_precise_mouse = Some(self.cursor_pos);
+                return Some(ev);
+            }
+            if let Some(ev) = self.pending_move.take() {
+                self.backend_poll_profile.note_immediate();
+                self.last_precise_mouse = Some(self.cursor_pos);
+                return Some(ev);
+            }
+            // Take the event loop out of `self` so the pump closure can borrow
+            // `self` as a whole (it must call `redraw(self)` mid-pump).
+            let Some(mut event_loop) = self.event_loop.take() else {
+                return None;
+            };
+            let cell_size = self
+                .atlas
+                .as_ref()
+                .map(|a| (a.cell_w.max(1) as f64, a.cell_h.max(1) as f64))
+                .unwrap_or((8.0, 16.0));
+            let wake_at = Instant::now() + timeout;
+            let mut dropped_paths = Vec::new();
+            let pump_started = Instant::now();
+            event_loop.pump_events(Some(timeout), |event, elwt| {
+                elwt.set_control_flow(if timeout.is_zero() {
+                    ControlFlow::Poll
+                } else {
+                    ControlFlow::WaitUntil(wake_at)
+                });
+                let WEvent::WindowEvent { event, .. } = event else {
+                    return;
+                };
+                match event {
+                    WindowEvent::CloseRequested => {
+                        self.close_requested = true;
+                    }
+                    WindowEvent::Resized(new_size) => {
+                        self.layer.setDrawableSize(CGSize {
+                            width: new_size.width as f64,
+                            height: new_size.height as f64,
+                        });
+                        // Ask macOS to send RedrawRequested during the modal drag loop.
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                        self.pending.push_back(Event::Resize(
+                            new_size.width as u16,
+                            new_size.height as u16,
+                        ));
+                        // Live resize runs inside AppKit's modal tracking loop, so
+                        // pump_events does not return until the drag ends; render a
+                        // frame now or the compositor stretches the last presented
+                        // frame to the new layer bounds.
+                        redraw(self);
+                    }
+                    WindowEvent::RedrawRequested => {
+                        self.pending.push_back(Event::Resize(0, 0));
+                    }
+                    WindowEvent::DroppedFile(path) => {
+                        dropped_paths.push(path);
+                    }
+                    WindowEvent::ModifiersChanged(mods) => {
+                        self.modifiers = winit_mods_to_crossterm(mods.state());
+                    }
+                    WindowEvent::KeyboardInput { event: kev, .. } => {
+                        match kev.state {
+                            ElementState::Pressed => {
+                                if let Some(ev) =
+                                    translate_key(&kev.logical_key, &kev.physical_key, self.modifiers)
+                                {
+                                    self.pending.push_back(ev);
+                                }
+                            }
+                            ElementState::Released => {
+                                // Emit Release events for note-off handling in sequencer
+                                if let Some(ev) = translate_key_with_state(
+                                    &kev.logical_key,
+                                    &kev.physical_key,
+                                    self.modifiers,
+                                    kev.state,
+                                ) {
+                                    self.pending.push_back(ev);
+                                }
+                            }
+                        }
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let exact_col = (position.x / cell_size.0).max(0.0) as f32;
+                        let exact_row = (position.y / cell_size.1).max(0.0) as f32;
+                        let col = exact_col.floor() as u16;
+                        let row = exact_row.floor() as u16;
+                        self.cursor_pos = (exact_col, exact_row);
+                        self.cursor_cell = (col, row);
+                        if let Some(button) = self.pressed_mouse_button {
+                            self.pending_drag = Some(Event::Mouse(MouseEvent {
+                                kind: MouseEventKind::Drag(button),
+                                column: col,
+                                row,
+                                modifiers: self.modifiers,
+                            }));
+                        } else {
+                            // Coalesce Moved events — only keep the latest for hover detection
+                            self.pending_move = Some(Event::Mouse(MouseEvent {
+                                kind: MouseEventKind::Moved,
+                                column: col,
+                                row,
+                                modifiers: self.modifiers,
+                            }));
+                        }
+                    }
+                    WindowEvent::MouseInput { state, button, .. } => {
+                        let Some(button) = translate_mouse_button(button) else {
+                            return;
+                        };
+                        match state {
+                            ElementState::Pressed => {
+                                self.pressed_mouse_button = Some(button);
+                                self.pending.push_back(Event::Mouse(MouseEvent {
+                                    kind: MouseEventKind::Down(button),
+                                    column: self.cursor_cell.0,
+                                    row: self.cursor_cell.1,
+                                    modifiers: self.modifiers,
+                                }));
+                            }
+                            ElementState::Released => {
+                                let release = Event::Mouse(MouseEvent {
+                                    kind: MouseEventKind::Up(button),
+                                    column: self.cursor_cell.0,
+                                    row: self.cursor_cell.1,
+                                    modifiers: self.modifiers,
+                                });
+                                enqueue_mouse_release(&mut self.pending, &mut self.pending_drag, release);
+                                if self.pressed_mouse_button.as_ref() == Some(&button) {
+                                    self.pressed_mouse_button = None;
+                                }
+                            }
+                        }
+                    }
+                    WindowEvent::MouseWheel { delta, phase, .. } => {
+                        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                            return;
+                        }
+                        if let Some(until) = self.suppress_scroll_until {
+                            if Instant::now() < until {
+                                return;
+                            }
+                            self.suppress_scroll_until = None;
+                        }
+                        let delta = crate::ui::pointer_input::scroll_delta_pixels(
+                            delta,
+                            cell_size.1 as f32,
+                        );
+                        if let Some(magnify_delta) =
+                            crate::ui::pointer_input::ctrl_scroll_magnify_delta(self.modifiers, delta)
+                        {
+                            self.pending_magnify.push_back((magnify_delta, self.cursor_pos));
+                        } else {
+                            self.pending_scroll.push_back((delta, self.cursor_pos));
+                        }
+                    }
+                    WindowEvent::TouchpadMagnify { delta, phase, .. } => {
+                        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                            return;
+                        }
+                        self.pending_scroll.clear();
+                        self.suppress_scroll_until = Some(Instant::now() + Duration::from_millis(120));
+                        self.pending_magnify.push_back((delta, self.cursor_pos));
+                    }
+                    _ => {}
+                }
+            });
+            self.event_loop = Some(event_loop);
+            let pump_elapsed = pump_started.elapsed();
+            if !dropped_paths.is_empty() {
+                self.pending_file_drops.push_back(dropped_paths);
+            }
+            let result = if let Some(ev) = self.pending.pop_front() {
+                if matches!(ev, Event::Mouse(_)) {
+                    self.last_precise_mouse = Some(self.cursor_pos);
+                }
+                Some(ev)
+            } else if let Some(ev) = self.pending_drag.take() {
+                self.last_precise_mouse = Some(self.cursor_pos);
+                Some(ev)
+            } else {
+                None
+            };
+            self.backend_poll_profile
+                .note_pump(timeout, pump_elapsed, result.is_some());
+            result
+        }
+    }
+
     impl Backend for MetalBackend {
         fn initialize(&mut self) -> Result<(), BackendError> {
             // ── Window ───────────────────────────────────────────────────────
@@ -6339,225 +6573,11 @@ fragment float4 live_spectrogram_frag(
         }
 
         fn poll_backend_event(&mut self, timeout: Duration) -> Option<BackendEvent> {
-            if std::mem::take(&mut self.close_requested) {
-                self.backend_poll_profile.note_immediate();
-                return Some(BackendEvent::Quit);
-            }
-            if let Some(paths) = self.pending_file_drops.pop_front() {
-                self.backend_poll_profile.note_immediate();
-                return Some(BackendEvent::FileDrop(paths));
-            }
-            let terminal_event = self.poll_event(timeout);
-            if std::mem::take(&mut self.close_requested) {
-                Some(BackendEvent::Quit)
-            } else {
-                terminal_event.map(BackendEvent::Terminal)
-            }
+            self.poll_backend_event_with_redraw(timeout, &mut |_| {})
         }
 
         fn poll_event(&mut self, timeout: Duration) -> Option<Event> {
-            if let Some(ev) = self.pending.pop_front() {
-                self.backend_poll_profile.note_immediate();
-                if matches!(ev, Event::Mouse(_)) {
-                    self.last_precise_mouse = Some(self.cursor_pos);
-                }
-                return Some(ev);
-            }
-            if let Some(ev) = self.pending_drag.take() {
-                self.backend_poll_profile.note_immediate();
-                self.last_precise_mouse = Some(self.cursor_pos);
-                return Some(ev);
-            }
-            if let Some(ev) = self.pending_move.take() {
-                self.backend_poll_profile.note_immediate();
-                self.last_precise_mouse = Some(self.cursor_pos);
-                return Some(ev);
-            }
-            let Some(event_loop) = &mut self.event_loop else {
-                return None;
-            };
-            let pending = &mut self.pending;
-            let pending_drag = &mut self.pending_drag;
-            let pending_move = &mut self.pending_move;
-            let pending_magnify = &mut self.pending_magnify;
-            let pending_scroll = &mut self.pending_scroll;
-            let close_requested = &mut self.close_requested;
-            let suppress_scroll_until = &mut self.suppress_scroll_until;
-            let modifiers = &mut self.modifiers;
-            let pressed_mouse_button = &mut self.pressed_mouse_button;
-            let cursor_cell = &mut self.cursor_cell;
-            let cursor_pos = &mut self.cursor_pos;
-            let layer_ref = &self.layer;
-            let window_ref = self.window.as_ref();
-            let cell_size = self
-                .atlas
-                .as_ref()
-                .map(|a| (a.cell_w.max(1) as f64, a.cell_h.max(1) as f64))
-                .unwrap_or((8.0, 16.0));
-            let wake_at = Instant::now() + timeout;
-            let mut dropped_paths = Vec::new();
-            let pump_started = Instant::now();
-            event_loop.pump_events(Some(timeout), |event, elwt| {
-                elwt.set_control_flow(if timeout.is_zero() {
-                    ControlFlow::Poll
-                } else {
-                    ControlFlow::WaitUntil(wake_at)
-                });
-                let WEvent::WindowEvent { event, .. } = event else {
-                    return;
-                };
-                match event {
-                    WindowEvent::CloseRequested => {
-                        *close_requested = true;
-                    }
-                    WindowEvent::Resized(new_size) => {
-                        layer_ref.setDrawableSize(CGSize {
-                            width: new_size.width as f64,
-                            height: new_size.height as f64,
-                        });
-                        // Ask macOS to send RedrawRequested during the modal drag loop.
-                        if let Some(w) = window_ref {
-                            w.request_redraw();
-                        }
-                        pending.push_back(Event::Resize(
-                            new_size.width as u16,
-                            new_size.height as u16,
-                        ));
-                    }
-                    WindowEvent::RedrawRequested => {
-                        pending.push_back(Event::Resize(0, 0));
-                    }
-                    WindowEvent::DroppedFile(path) => {
-                        dropped_paths.push(path);
-                    }
-                    WindowEvent::ModifiersChanged(mods) => {
-                        *modifiers = winit_mods_to_crossterm(mods.state());
-                    }
-                    WindowEvent::KeyboardInput { event: kev, .. } => {
-                        match kev.state {
-                            ElementState::Pressed => {
-                                if let Some(ev) =
-                                    translate_key(&kev.logical_key, &kev.physical_key, *modifiers)
-                                {
-                                    pending.push_back(ev);
-                                }
-                            }
-                            ElementState::Released => {
-                                // Emit Release events for note-off handling in sequencer
-                                if let Some(ev) = translate_key_with_state(
-                                    &kev.logical_key,
-                                    &kev.physical_key,
-                                    *modifiers,
-                                    kev.state,
-                                ) {
-                                    pending.push_back(ev);
-                                }
-                            }
-                        }
-                    }
-                    WindowEvent::CursorMoved { position, .. } => {
-                        let exact_col = (position.x / cell_size.0).max(0.0) as f32;
-                        let exact_row = (position.y / cell_size.1).max(0.0) as f32;
-                        let col = exact_col.floor() as u16;
-                        let row = exact_row.floor() as u16;
-                        *cursor_pos = (exact_col, exact_row);
-                        *cursor_cell = (col, row);
-                        if let Some(button) = pressed_mouse_button {
-                            *pending_drag = Some(Event::Mouse(MouseEvent {
-                                kind: MouseEventKind::Drag(*button),
-                                column: col,
-                                row,
-                                modifiers: *modifiers,
-                            }));
-                        } else {
-                            // Coalesce Moved events — only keep the latest for hover detection
-                            *pending_move = Some(Event::Mouse(MouseEvent {
-                                kind: MouseEventKind::Moved,
-                                column: col,
-                                row,
-                                modifiers: *modifiers,
-                            }));
-                        }
-                    }
-                    WindowEvent::MouseInput { state, button, .. } => {
-                        let Some(button) = translate_mouse_button(button) else {
-                            return;
-                        };
-                        match state {
-                            ElementState::Pressed => {
-                                *pressed_mouse_button = Some(button);
-                                pending.push_back(Event::Mouse(MouseEvent {
-                                    kind: MouseEventKind::Down(button),
-                                    column: cursor_cell.0,
-                                    row: cursor_cell.1,
-                                    modifiers: *modifiers,
-                                }));
-                            }
-                            ElementState::Released => {
-                                let release = Event::Mouse(MouseEvent {
-                                    kind: MouseEventKind::Up(button),
-                                    column: cursor_cell.0,
-                                    row: cursor_cell.1,
-                                    modifiers: *modifiers,
-                                });
-                                enqueue_mouse_release(pending, pending_drag, release);
-                                if pressed_mouse_button.as_ref() == Some(&button) {
-                                    *pressed_mouse_button = None;
-                                }
-                            }
-                        }
-                    }
-                    WindowEvent::MouseWheel { delta, phase, .. } => {
-                        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                            return;
-                        }
-                        if let Some(until) = *suppress_scroll_until {
-                            if Instant::now() < until {
-                                return;
-                            }
-                            *suppress_scroll_until = None;
-                        }
-                        let delta = crate::ui::pointer_input::scroll_delta_pixels(
-                            delta,
-                            cell_size.1 as f32,
-                        );
-                        if let Some(magnify_delta) =
-                            crate::ui::pointer_input::ctrl_scroll_magnify_delta(*modifiers, delta)
-                        {
-                            pending_magnify.push_back((magnify_delta, *cursor_pos));
-                        } else {
-                            pending_scroll.push_back((delta, *cursor_pos));
-                        }
-                    }
-                    WindowEvent::TouchpadMagnify { delta, phase, .. } => {
-                        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                            return;
-                        }
-                        pending_scroll.clear();
-                        *suppress_scroll_until = Some(Instant::now() + Duration::from_millis(120));
-                        pending_magnify.push_back((delta, *cursor_pos));
-                    }
-                    _ => {}
-                }
-            });
-            let pump_elapsed = pump_started.elapsed();
-            if !dropped_paths.is_empty() {
-                self.pending_file_drops.push_back(dropped_paths);
-            }
-            let result = if let Some(ev) = self.pending.pop_front() {
-                if matches!(ev, Event::Mouse(_)) {
-                    self.last_precise_mouse = Some(self.cursor_pos);
-                }
-                Some(ev)
-            } else if let Some(ev) = self.pending_drag.take() {
-                self.last_precise_mouse = Some(self.cursor_pos);
-                Some(ev)
-            } else {
-                None
-            };
-            self.backend_poll_profile
-                .note_pump(timeout, pump_elapsed, result.is_some());
-            result
+            self.poll_event_with_redraw(timeout, &mut |_| {})
         }
 
         fn render(&mut self, frame: &RenderFrame) -> Result<(), BackendError> {

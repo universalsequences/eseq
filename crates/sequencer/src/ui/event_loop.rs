@@ -640,7 +640,28 @@ pub(crate) fn run_event_loop(
         } else {
             Duration::from_millis(50)
         };
-        if let Some(event) = backend.poll_backend_event(timeout) {
+        // During a macOS live resize the poll blocks inside AppKit's modal
+        // tracking loop, so this outer loop cannot render; the backend invokes
+        // this callback on each resize tick to keep the frame matching the
+        // window instead of letting the compositor stretch the previous one.
+        let mut live_resize_redraw = |backend: &mut AppBackend| {
+            let (cols, rows) = backend.viewport_size();
+            editor.update_tile_rects(cols as u16, rows as u16);
+            let tiled_frame =
+                eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
+            match backend.render_tiled(&tiled_frame) {
+                Ok(TiledRenderStatus::Presented) => {
+                    editor.clear_needs_redraw();
+                    last_render_at = Instant::now();
+                }
+                Ok(TiledRenderStatus::NotPresented) => {
+                    eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
+                }
+                Err(_) => {}
+            }
+        };
+        if let Some(event) = backend.poll_backend_event_with_redraw(timeout, &mut live_resize_redraw)
+        {
             let event_started = Instant::now();
             match event {
                 BackendEvent::Quit => editor.request_quit(),
