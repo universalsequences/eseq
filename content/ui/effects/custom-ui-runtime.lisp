@@ -152,8 +152,9 @@
       (if (and fx (not (get fx :rack-fx)) (not (get fx :bus-fx)) (not (get fx :midi-fx)))
         (host-command
           (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
-          (dict :slot-idx (get fx :slot-idx) :updates updates
-                :commit (not (get env :active))))
+          (dict :slot-idx (get fx :slot-idx)
+                :target-node-id (get fx :target-node-id)
+                :updates updates :commit (not (get env :active))))
         (if (and (not fx) (not (pc/instrument-rack-target? attack-p)))
           (host-command
             (if (seq-has-selection?) "set-instrument-plock-batch" "set-instrument-param-batch")

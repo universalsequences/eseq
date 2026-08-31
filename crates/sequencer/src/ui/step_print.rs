@@ -8,9 +8,9 @@ a focused-track change also disarms it. Multiple held targets print together.
 
 Step targets write live `step_data`, use the engine-side override so the
 write is audible before snapshot republish, and push targeted step
-invalidations. Instrument targets write atomic p-lock data instead: their base
-value remains untouched, `EffectSlotState::set_plock` stamps device identity,
-and no scheduler snapshot is needed. Both paths ride the open
+invalidations. Instrument and effect targets write atomic p-lock data instead:
+their base values remain untouched, `EffectSlotState::set_plock` stamps device
+identity, and no scheduler snapshot is needed. Both paths ride the open
 `RecordingHistoryTransaction`, so one record pass undoes as one "Record take"
 entry rather than creating device-edit gesture history.
 */
@@ -107,12 +107,13 @@ impl StepPrintState {
         false
     }
 
-    /// Pointer release ends instrument-print gestures. Step targets have
+    /// Pointer release ends device-param print gestures. Step targets have
     /// their own picker-specific release command, so a release must not erase
     /// an unrelated step-param hold.
-    pub(crate) fn release_instrument_gesture(&mut self) {
-        self.values
-            .retain(|(target, _)| !matches!(target, PrintTarget::Instrument { .. }));
+    pub(crate) fn release_device_param_gesture(&mut self) {
+        self.values.retain(|(target, _)| {
+            !matches!(target, PrintTarget::Instrument { .. } | PrintTarget::Effect { .. })
+        });
         if self.values.is_empty() {
             self.disarm();
         }
@@ -383,10 +384,15 @@ pub(crate) fn tick_step_print(
                         *value,
                     );
                 }
-                // The latch owns the target shape now so the effect slice can
-                // add its host-command gate and write path without another
-                // state-model migration.
-                PrintTarget::Effect { .. } => {}
+                PrintTarget::Effect { slot_idx, param_idx } => {
+                    wrote |= app.print_effect_plock(
+                        printed.track,
+                        *step,
+                        *slot_idx,
+                        *param_idx,
+                        *value,
+                    );
+                }
             }
         }
     }
@@ -583,8 +589,31 @@ mod step_print_tests {
             "instrument printing must not use the step engine override"
         );
 
-        print.release_instrument_gesture();
+        print.release_device_param_gesture();
         assert!(!print.armed());
+    }
+
+    #[test]
+    fn device_gesture_release_removes_instrument_and_effect_targets_only() {
+        let mut print = StepPrintState::default();
+        print.latch(0, StepParam::Velocity, 0.5);
+        print.latch(0, PrintTarget::Instrument { param_idx: 2 }, 0.6);
+        print.latch(
+            0,
+            PrintTarget::Effect {
+                slot_idx: 1,
+                param_idx: 3,
+            },
+            0.7,
+        );
+
+        print.release_device_param_gesture();
+
+        assert!(print.armed(), "the independent step-param hold remains armed");
+        assert_eq!(
+            print.values,
+            vec![(PrintTarget::Step(StepParam::Velocity), 0.5)]
+        );
     }
 
     #[test]

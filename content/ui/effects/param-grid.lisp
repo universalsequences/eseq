@@ -399,6 +399,7 @@
                   (host-command
                     (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
                     (dict :slot-idx (get fx :slot-idx)
+                          :target-node-id (get fx :target-node-id)
                           :updates (list
                             (dict :param-idx (get attack-p :idx) :value (get env :attack))
                             (dict :param-idx (get decay-p :idx) :value (get env :decay))

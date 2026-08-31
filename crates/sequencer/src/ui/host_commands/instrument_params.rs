@@ -932,6 +932,51 @@ mod tests {
         )
     }
 
+    fn effect_option_payload(slot_idx: usize, node_id: u32, param_idx: usize, label: &str) -> Value {
+        Value::Map(
+            [
+                ("slot-idx".to_string(), Value::Number(slot_idx as f64)),
+                ("target-node-id".to_string(), Value::Number(node_id as f64)),
+                ("param-idx".to_string(), Value::Number(param_idx as f64)),
+                ("label".to_string(), Value::String(label.to_string())),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
+            .collect(),
+        )
+    }
+
+    fn effect_batch_payload(
+        slot_idx: usize,
+        node_id: u32,
+        updates: &[(usize, f32)],
+    ) -> Value {
+        let updates = updates
+            .iter()
+            .map(|(param_idx, value)| {
+                Rc::new(RefCell::new(Value::Map(
+                    [
+                        ("param-idx".to_string(), Value::Number(*param_idx as f64)),
+                        ("value".to_string(), Value::Number(*value as f64)),
+                    ]
+                    .into_iter()
+                    .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
+                    .collect(),
+                )))
+            })
+            .collect();
+        Value::Map(
+            [
+                ("slot-idx".to_string(), Value::Number(slot_idx as f64)),
+                ("target-node-id".to_string(), Value::Number(node_id as f64)),
+                ("updates".to_string(), Value::List(updates)),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
+            .collect(),
+        )
+    }
+
     fn reactive_number(editor: &Editor, field: &str) -> f64 {
         match editor.runtime().reactive_field_value("SEQ", field) {
             Some(Value::Number(n)) => *n,
@@ -948,7 +993,7 @@ mod tests {
     /// rather than any sync helper, because both previous fixes for this bug
     /// were validated against helpers/mirrors and missed the real path.
     #[test]
-    fn instrument_param_commands_publish_explicit_plocks_and_print_while_recording() {
+    fn instrument_and_effect_param_commands_print_while_recording() {
         const TRACK: usize = 0;
         const STEP: usize = 3;
         const PARAM: usize = 0;
@@ -959,6 +1004,9 @@ mod tests {
         ));
         let descriptor = sequencer::effects::EffectDescriptor::builtin_filter();
         state.pattern.instrument_slots[TRACK].apply_descriptor(&descriptor, 1);
+        const EFFECT_NODE_ID: u32 = 42;
+        state.pattern.effect_chains[TRACK][0]
+            .apply_descriptor(&descriptor, EFFECT_NODE_ID);
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = app::App::new(
             state.clone(),
@@ -979,6 +1027,7 @@ mod tests {
         app.track_registry =
             sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.instrument_descriptors = vec![descriptor.clone()];
+        app.graph.effect_descriptors = vec![vec![descriptor.clone()]];
 
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", Vec::new(), true);
@@ -1161,8 +1210,89 @@ mod tests {
             .step_print
             .lock()
             .unwrap()
-            .release_instrument_gesture();
+            .release_device_param_gesture();
         assert!(!shared.step_print.lock().unwrap().armed());
+
+        // Track-effect scalar, batch, and enum-option commands all use the
+        // same print gate. The stale reported index proves each latch keys on
+        // the slot resolved from the stable node id, not the payload index.
+        const EFFECT_SLOT: usize = 0;
+        const STALE_REPORTED_SLOT: usize = 7;
+        let effect_slot = &state.pattern.effect_chains[TRACK][EFFECT_SLOT];
+        let effect_default_before = effect_slot.defaults.get(2);
+        let epochs_before = (
+            fx_epoch.load(Ordering::Relaxed),
+            ui_epoch.load(Ordering::Relaxed),
+        );
+        dispatch_custom_host_command(
+            "set-effect-param",
+            number_payload(&[
+                ("slot-idx", STALE_REPORTED_SLOT as f64),
+                ("target-node-id", EFFECT_NODE_ID as f64),
+                ("param-idx", 2.0),
+                ("value", 1_800.0),
+            ]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert_eq!(effect_slot.defaults.get(2), effect_default_before);
+        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert_eq!(effect_slot.plocks.get(PRINT_STEP, 2), Some(1_800.0));
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_device_param_gesture();
+
+        dispatch_custom_host_command(
+            "set-effect-param-batch",
+            effect_batch_payload(
+                STALE_REPORTED_SLOT,
+                EFFECT_NODE_ID,
+                &[(2, 2_200.0), (3, 0.8)],
+            ),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert_eq!(effect_slot.plocks.get(PRINT_STEP, 2), Some(2_200.0));
+        assert_eq!(effect_slot.plocks.get(PRINT_STEP, 3), Some(0.8));
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_device_param_gesture();
+
+        dispatch_custom_host_command(
+            "set-effect-param-option",
+            effect_option_payload(
+                STALE_REPORTED_SLOT,
+                EFFECT_NODE_ID,
+                1,
+                "highpass",
+            ),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert_eq!(effect_slot.plocks.get(PRINT_STEP, 1), Some(1.0));
+        assert_eq!(effect_slot.defaults.get(1), descriptor.params[1].default);
+        assert_eq!(
+            (
+                fx_epoch.load(Ordering::Relaxed),
+                ui_epoch.load(Ordering::Relaxed),
+            ),
+            epochs_before,
+            "effect printing must not rebuild the fx or whole UI trees"
+        );
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_device_param_gesture();
 
         // If the record gate races off, the same payload falls through to the
         // normal base edit rather than being dropped.

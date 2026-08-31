@@ -120,6 +120,7 @@
         (host-command
           (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
           (dict :slot-idx (get fx :slot-idx)
+                :target-node-id (get fx :target-node-id)
                 :updates (list
                   (dict :param-idx (get cutoff-p :idx) :value (get event :freq))
                   (dict :param-idx (get resonance-p :idx) :value (get event :q)))

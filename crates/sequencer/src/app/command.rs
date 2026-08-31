@@ -1279,6 +1279,42 @@ impl App {
         sync_instrument_mod_active_plock(self, track, step, param_idx);
         true
     }
+
+    /// Write one live-recorded track-effect p-lock without opening
+    /// device-edit history or publishing a scheduler snapshot. The resolved
+    /// slot index is part of the print target, and `set_plock` stamps the
+    /// current effect identity into the atomic p-lock data.
+    pub fn print_effect_plock(
+        &mut self,
+        track: usize,
+        step: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        let Some(value) = self
+            .graph
+            .effect_descriptors
+            .get(track)
+            .and_then(|descriptors| descriptors.get(slot_idx))
+            .and_then(|descriptor| descriptor.params.get(param_idx))
+            .map(|descriptor| descriptor.clamp(value))
+        else {
+            return false;
+        };
+        let Some(slot) = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+        else {
+            return false;
+        };
+        slot.set_plock(step, param_idx, value);
+        sync_effect_mod_active_plock(self, track, step, slot_idx, param_idx);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1968,6 +2004,31 @@ mod tests {
         assert!(app.print_instrument_plock(0, 3, 2, 9.0));
 
         let slot = &app.state.pattern.instrument_slots[0];
+        let defaults_after: Vec<f32> = (0..desc.params.len())
+            .map(|param_idx| slot.defaults.get(param_idx))
+            .collect();
+        assert_eq!(defaults_after, defaults_before);
+        assert_eq!(slot.plocks.get(3, 2), Some(1.0), "value is descriptor-clamped");
+        assert_eq!(slot.plocks.get(3, 1), Some(1.0), "mod-active lock is synced");
+        assert_eq!(
+            slot.plocks.get_id(3, 2),
+            slot.param_node_id(2),
+            "the print write carries the current ParamNodeId stamp"
+        );
+    }
+
+    #[test]
+    fn printed_effect_plock_clamps_stamps_and_syncs_mod_active_without_changing_defaults() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc.clone());
+        app.state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
+        let defaults_before: Vec<f32> = (0..desc.params.len())
+            .map(|param_idx| app.state.pattern.effect_chains[0][0].defaults.get(param_idx))
+            .collect();
+
+        assert!(app.print_effect_plock(0, 3, 0, 2, 9.0));
+
+        let slot = &app.state.pattern.effect_chains[0][0];
         let defaults_after: Vec<f32> = (0..desc.params.len())
             .map(|param_idx| slot.defaults.get(param_idx))
             .collect();

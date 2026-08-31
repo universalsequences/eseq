@@ -568,12 +568,24 @@ pub(super) fn handle(
         }
         "set-effect-param-batch" | "set-effect-plock-batch" => {
             if let Value::Map(ref map) = payload {
-                let slot_idx = map_usize(map, "slot-idx");
-                if let (Some(slot_idx), Some(updates)) =
-                    (slot_idx, map_param_updates(map))
+                let reported_slot = map_usize(map, "slot-idx");
+                let target_node_id = map_usize(map, "target-node-id")
+                    .and_then(|id| u32::try_from(id).ok());
+                if let (Some(reported_slot), Some(updates)) =
+                    (reported_slot, map_param_updates(map))
                 {
                     let track = map_usize(map, "track")
                         .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+                    let Some(slot_idx) = state.resolve_effect_slot_target(
+                        track,
+                        reported_slot,
+                        target_node_id,
+                    ) else {
+                        editor.handle_host_event(HostEvent::Error(
+                            "effect parameter target is no longer available".to_string(),
+                        ));
+                        return;
+                    };
                     let steps = map_usize_list(map, "steps").unwrap_or_else(|| {
                         selected_steps
                             .lock()
@@ -611,6 +623,27 @@ pub(super) fn handle(
                             })
                         })
                         .collect::<Vec<_>>();
+                    let neural_selection = selected_neural_neurons.lock().unwrap().clone();
+                    let print_updates = commands
+                        .iter()
+                        .filter_map(|command| match command {
+                            app::AppCommand::SetEffectParam {
+                                param_idx, value, ..
+                            } => Some((*param_idx, *value)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    if name == "set-effect-param-batch"
+                        && try_latch_effect_param_print(
+                            ctx.shared,
+                            track,
+                            slot_idx,
+                            &print_updates,
+                            neural_selection.is_empty(),
+                        )
+                    {
+                        return;
+                    }
                     let result = if name == "set-effect-plock-batch" {
                         let gesture = map_string(map, "gesture")
                             .unwrap_or_else(|| "effect-curve".to_string());
@@ -651,8 +684,6 @@ pub(super) fn handle(
                                 _ => None,
                             })
                             .collect::<Vec<_>>();
-                        let neural_selection =
-                            selected_neural_neurons.lock().unwrap().clone();
                         sync_effect_param_batch_display(
                             &mut editor,
                             &app,
@@ -739,35 +770,45 @@ pub(super) fn handle(
                             "Edit neural override",
                         );
                     }
-                    if !wrote_neural_plock {
-                        app::apply_command(
-                            &mut app,
-                            app::AppCommand::SetEffectParam {
+                    let print_gesture = !wrote_neural_plock
+                        && try_latch_effect_param_print(
+                            ctx.shared,
+                            track,
+                            slot_idx,
+                            &[(param_idx, clamped)],
+                            neural_selection.is_empty(),
+                        );
+                    if !print_gesture {
+                        if !wrote_neural_plock {
+                            app::apply_command(
+                                &mut app,
+                                app::AppCommand::SetEffectParam {
+                                    track,
+                                    slot_idx,
+                                    param_idx,
+                                    value: clamped,
+                                },
+                            );
+                        }
+                        sync_effect_param_authoring_display(
+                            &mut editor,
+                            EffectParamDisplaySync {
+                                state: &state,
+                                effect_descriptors: &app.graph.effect_descriptors,
+                                app: &app,
+                                selected_steps: &selected_steps,
+                                selection: &neural_selection,
                                 track,
                                 slot_idx,
                                 param_idx,
-                                value: clamped,
+                                display_step: None,
+                                sync_plock_list: wrote_neural_plock,
                             },
                         );
-                    }
-                    sync_effect_param_authoring_display(
-                        &mut editor,
-                        EffectParamDisplaySync {
-                            state: &state,
-                            effect_descriptors: &app.graph.effect_descriptors,
-                            app: &app,
-                            selected_steps: &selected_steps,
-                            selection: &neural_selection,
-                            track,
-                            slot_idx,
-                            param_idx,
-                            display_step: None,
-                            sync_plock_list: wrote_neural_plock,
-                        },
-                    );
-                    if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
-                        fx_epoch.fetch_add(1, Ordering::Relaxed);
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -1147,6 +1188,8 @@ pub(super) fn handle(
                                     value: selected_idx as f32,
                                 },
                             );
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
                         } else {
                             let value = selected_idx as f32;
                             let (neural_selection, wrote_neural_plock, neural_history_before) =
@@ -1165,35 +1208,45 @@ pub(super) fn handle(
                                     "Edit neural override",
                                 );
                             }
-                            if !wrote_neural_plock {
-                                app::apply_command(
-                                    &mut app,
-                                    app::AppCommand::SetEffectParam {
+                            let print_gesture = !wrote_neural_plock
+                                && try_latch_effect_param_print(
+                                    ctx.shared,
+                                    track,
+                                    slot_idx,
+                                    &[(param_idx, value)],
+                                    neural_selection.is_empty(),
+                                );
+                            if !print_gesture {
+                                if !wrote_neural_plock {
+                                    app::apply_command(
+                                        &mut app,
+                                        app::AppCommand::SetEffectParam {
+                                            track,
+                                            slot_idx,
+                                            param_idx,
+                                            value,
+                                        },
+                                    );
+                                }
+                                sync_effect_param_authoring_display(
+                                    &mut editor,
+                                    EffectParamDisplaySync {
+                                        state: &state,
+                                        effect_descriptors: &app.graph.effect_descriptors,
+                                        app: &app,
+                                        selected_steps: &selected_steps,
+                                        selection: &neural_selection,
                                         track,
                                         slot_idx,
                                         param_idx,
-                                        value,
+                                        display_step: None,
+                                        sync_plock_list: wrote_neural_plock,
                                     },
                                 );
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
-                            sync_effect_param_authoring_display(
-                                &mut editor,
-                                EffectParamDisplaySync {
-                                    state: &state,
-                                    effect_descriptors: &app.graph.effect_descriptors,
-                                    app: &app,
-                                    selected_steps: &selected_steps,
-                                    selection: &neural_selection,
-                                    track,
-                                    slot_idx,
-                                    param_idx,
-                                    display_step: None,
-                                    sync_plock_list: wrote_neural_plock,
-                                },
-                            );
                         }
-                        fx_epoch.fetch_add(1, Ordering::Relaxed);
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -2309,6 +2362,43 @@ pub(super) fn handle(
         }
         _ => {}
     }
+}
+
+/// Divert a normal track-effect value edit into the live print latch when the
+/// record/play/no-selection gate is active. Values have already been clamped
+/// against the descriptor, and `slot_idx` has already been resolved from the
+/// control's stable node identity.
+fn try_latch_effect_param_print(
+    shared: &SharedHandles,
+    track: usize,
+    slot_idx: usize,
+    updates: &[(usize, f32)],
+    neural_selection_empty: bool,
+) -> bool {
+    if updates.is_empty()
+        || !neural_selection_empty
+        || !shared.selected_steps.lock().unwrap().is_empty()
+        || !shared.state.is_playing()
+        || !shared.recording.load(Ordering::Relaxed)
+    {
+        return false;
+    }
+
+    let mut print = shared.step_print.lock().unwrap();
+    for (param_idx, value) in updates {
+        print.latch(
+            track,
+            PrintTarget::Effect {
+                slot_idx,
+                param_idx: *param_idx,
+            },
+            *value,
+        );
+    }
+    // A touch on another track may have replaced a Step target, so update its
+    // engine-only override at the same latch transition.
+    print.publish_engine_override(&shared.state);
+    true
 }
 
 /// Queue the panel-tree rebuild through the normal post-event invalidation

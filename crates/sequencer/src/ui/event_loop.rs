@@ -1627,14 +1627,14 @@ pub(crate) fn run_event_loop(
             gesture.rack_control_snapshot_dirty = false;
         }
         if pointer_released_this_loop {
-            // Instrument param print is a hold gesture. It shares the same
+            // Device-param print is a hold gesture. It shares the same
             // pointer-release boundary as coalesced knob-edit history, but
             // does not create a device-p-lock gesture entry of its own.
             shared
                 .step_print
                 .lock()
                 .unwrap()
-                .release_instrument_gesture();
+                .release_device_param_gesture();
             app::edit::finish_active_gesture(&mut app);
         } else if !pointer_is_down {
             app::edit::finish_active_gesture_if_idle(&mut app);
