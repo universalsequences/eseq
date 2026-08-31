@@ -904,7 +904,8 @@ pub fn init_dev() -> io::Result<()> {
 /// the content/ split and must now fall back to the factory content root.
 fn configure_eseqlisp_roots(paths: &AppPaths) {
     eseqlisp::defmacro_library::set_default_library_root(paths.defmacros_dir());
-    eseqlisp::widget_render::patcher::set_asset_library_roots(
+    eseqlisp::widget_render::patcher::set_asset_roots(
+        paths.factory_root(),
         paths.user_assets_dir(),
         paths.factory_assets_dir(),
     );

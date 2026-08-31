@@ -23,13 +23,12 @@
 (def tri-small-row (body)
   (box :width :fill :height :fill :v-align :center body))
 
+(def tri-bank-file () "instruments/core/triton/waves/bank.json")
+
 (def tri-set-options ()
-  '("Square PW" "Bright Saw" "Round Saw" "Sub Sine" "Tri Wave"
-    "E.Organ Lo" "E.Organ Hi" "Organ Reed" "E.Piano Soft" "E.Piano Bell"
-    "Clavinet" "Elec Bass" "Dist Bass" "DX Bell" "FM Metal" "FM Pluck"
-    "Chip Digi" "VGame Lead" "Voice Ooh" "Voice Choir" "Str.Machine"
-    "Str.Bowed" "Grit Dist" "Nylon Gtr" "Reed Winds" "Overtone" "Odd Harm"
-    "Theremin" "Hand Drawn" "Bit Crush" "C64 Chip" "Granular"))
+  (let ((metadata (asset-metadata (tri-bank-file))))
+    (let ((sets (if metadata (get metadata :sets) nil)))
+      (if (and sets (nth sets 0)) sets '("Bank")))))
 
 (def tri-lfo-wave-options ()
   '("tri" "sawD" "sqr" "sine" "s&h"))

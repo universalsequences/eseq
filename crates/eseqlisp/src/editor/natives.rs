@@ -1975,26 +1975,30 @@ mod asset_metadata_tests {
     }
 
     #[test]
-    fn asset_metadata_resolution_prefers_draft_then_user_then_factory() {
+    fn asset_metadata_resolution_matches_dgen_local_user_factory_precedence() {
         let root = temp_root("asset-metadata-resolution");
         let draft = root.join("draft");
+        let fallback = root.join("fallback");
         let user = root.join("user");
         let factory = root.join("factory");
-        for tier in [&draft, &user, &factory] {
+        for tier in [&draft, &fallback, &user, &factory] {
             std::fs::create_dir_all(tier.join("waves")).unwrap();
         }
         let relative = "waves/bank.json";
         let draft_path = draft.join(relative);
+        let fallback_path = fallback.join(relative);
         let user_path = user.join(relative);
         let factory_path = factory.join(relative);
         std::fs::write(&factory_path, "factory").unwrap();
         std::fs::write(&user_path, "user").unwrap();
+        std::fs::write(&fallback_path, "fallback").unwrap();
         std::fs::write(&draft_path, "draft").unwrap();
 
         let resolve = || {
-            crate::widget_render::patcher::resolve_asset_reference_with_roots(
+            crate::widget_render::patcher::resolve_asset_reference_with_fallback_roots(
                 relative,
                 Some(&draft),
+                Some(&fallback),
                 Some(&user),
                 Some(&factory),
             )
@@ -2002,12 +2006,15 @@ mod asset_metadata_tests {
         };
         assert_eq!(resolve(), draft_path.canonicalize().unwrap());
         std::fs::remove_file(&draft_path).unwrap();
+        assert_eq!(resolve(), fallback_path.canonicalize().unwrap());
+        std::fs::remove_file(&fallback_path).unwrap();
         assert_eq!(resolve(), user_path.canonicalize().unwrap());
         std::fs::remove_file(&user_path).unwrap();
         assert_eq!(resolve(), factory_path.canonicalize().unwrap());
-        assert!(crate::widget_render::patcher::resolve_asset_reference_with_roots(
+        assert!(crate::widget_render::patcher::resolve_asset_reference_with_fallback_roots(
             factory_path.to_str().unwrap(),
             Some(&draft),
+            Some(&fallback),
             Some(&user),
             Some(&factory),
         )

@@ -9,31 +9,43 @@ use crate::layout::LayoutNode;
 
 use super::prop_str;
 
-static ASSET_LIBRARY_ROOTS: OnceLock<[PathBuf; 2]> = OnceLock::new();
-
-/// Installs the mutable and factory asset roots used by patcher `@file`
-/// autocomplete. The sequencer owns application path discovery; eseqlisp only
-/// consumes the resolved roots.
-pub fn set_asset_library_roots(user: PathBuf, factory: PathBuf) {
-    let _ = ASSET_LIBRARY_ROOTS.set([user, factory]);
+struct AssetRoots {
+    fallback_base: PathBuf,
+    libraries: [PathBuf; 2],
 }
 
-/// Resolves the same relative asset spelling used by DGenLisp: draft-local,
-/// then the user asset library, then the factory asset library. Absolute
-/// paths are deliberately excluded from host UI reads.
+static ASSET_ROOTS: OnceLock<AssetRoots> = OnceLock::new();
+
+/// Installs the content fallback base and mutable/factory asset libraries used
+/// by DGenLisp asset resolution. Patcher autocomplete lists only the libraries;
+/// host metadata reads also use the content base when no draft path exists.
+/// This lets generated custom-UI buffers resolve fully content-relative paths
+/// even though they no longer have the original UI file as their active path.
+pub fn set_asset_roots(fallback_base: PathBuf, user: PathBuf, factory: PathBuf) {
+    let _ = ASSET_ROOTS.set(AssetRoots {
+        fallback_base,
+        libraries: [user, factory],
+    });
+}
+
+/// Resolves the same relative asset spelling used by DGenLisp: draft-local (or
+/// the configured content base), then the user asset library, then the factory
+/// asset library. Absolute paths are deliberately excluded from host UI reads.
 pub(crate) fn resolve_asset_reference(reference: &str, draft_root: Option<&Path>) -> Option<PathBuf> {
-    let roots = ASSET_LIBRARY_ROOTS.get();
-    resolve_asset_reference_with_roots(
+    let roots = ASSET_ROOTS.get();
+    resolve_asset_reference_with_fallback_roots(
         reference,
         draft_root,
-        roots.map(|roots| roots[0].as_path()),
-        roots.map(|roots| roots[1].as_path()),
+        roots.map(|roots| roots.fallback_base.as_path()),
+        roots.map(|roots| roots.libraries[0].as_path()),
+        roots.map(|roots| roots.libraries[1].as_path()),
     )
 }
 
-pub(crate) fn resolve_asset_reference_with_roots(
+pub(crate) fn resolve_asset_reference_with_fallback_roots(
     reference: &str,
     draft_root: Option<&Path>,
+    fallback_root: Option<&Path>,
     user_root: Option<&Path>,
     factory_root: Option<&Path>,
 ) -> Option<PathBuf> {
@@ -42,7 +54,8 @@ pub(crate) fn resolve_asset_reference_with_roots(
         return None;
     }
 
-    if let Some(candidate) = draft_root.map(|root| root.join(reference)) {
+    for root in [draft_root, fallback_root].into_iter().flatten() {
+        let candidate = root.join(reference);
         if candidate.is_file() {
             return Some(candidate.canonicalize().unwrap_or(candidate));
         }
@@ -74,11 +87,11 @@ pub struct PatcherAssetSidebarEntry {
 /// library root, matching host-side `@file` resolution.
 pub fn asset_sidebar_entries(source_path: Option<&Path>) -> Vec<PatcherAssetSidebarEntry> {
     let draft_root = source_path.and_then(Path::parent);
-    let roots = ASSET_LIBRARY_ROOTS.get();
+    let roots = ASSET_ROOTS.get();
     collect_asset_sidebar_entries(
         draft_root,
-        roots.map(|roots| roots[0].as_path()),
-        roots.map(|roots| roots[1].as_path()),
+        roots.map(|roots| roots.libraries[0].as_path()),
+        roots.map(|roots| roots.libraries[1].as_path()),
     )
 }
 
@@ -87,9 +100,9 @@ pub(super) fn autocomplete_asset_paths_for_node(node: &LayoutNode) -> Vec<String
         .or_else(|| prop_str(&node.props, "file"))
         .map(PathBuf::from);
     let draft_root = source_path.as_deref().and_then(Path::parent);
-    let library_roots = ASSET_LIBRARY_ROOTS
+    let library_roots = ASSET_ROOTS
         .get()
-        .map(|roots| roots.as_slice())
+        .map(|roots| roots.libraries.as_slice())
         .unwrap_or(&[]);
     collect_asset_path_spellings(draft_root, source_path.as_deref(), library_roots)
 }

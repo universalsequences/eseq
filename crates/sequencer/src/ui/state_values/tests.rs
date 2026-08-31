@@ -42986,6 +42986,8 @@
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
                 (defstate eseq.seq-core-state/selected-bus -1)
+                (def asset-metadata (path)
+                  (dict :sets '("Metadata Alpha" "Metadata Omega") :waves-per-set 7))
                 "#,
             )
             .expect("install fx test helpers");
@@ -43026,6 +43028,16 @@
                 && adsr_editor.rect.height <= 4.0,
             "ADSR editor should stay constrained in the medium detail panel, got {:?}",
             adsr_editor.rect
+        );
+
+        let osc1_set = find_stable_key_suffix(&layout, "osc1_set")
+            .expect("osc1 set control should be present in layout");
+        let osc1_set_dropdown = find_layout_node_by_widget_type(osc1_set, "dropdown")
+            .expect("osc1 set control should contain a dropdown");
+        assert_eq!(
+            osc1_set_dropdown.props.get("options"),
+            Some(&test_string_list(&["Metadata Alpha", "Metadata Omega"])),
+            "Triton set labels should come from the bank's asset metadata"
         );
 
         for suffix in [
@@ -44291,6 +44303,8 @@
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
                 (defstate eseq.seq-core-state/selected-bus -1)
+                (def asset-metadata (path)
+                  (dict :sets '("Metadata Alpha" "Metadata Omega") :waves-per-set 7))
                 "#,
             )
             .expect("install fx test helpers");
@@ -44331,6 +44345,20 @@
             viewer.rect.width > 10.0 && viewer.rect.height > 3.0 && viewer.rect.height < 4.2,
             "the single wavetable viewer should occupy visible space while leaving explicit room for the oscillator tabs, got {:?}",
             viewer.rect
+        );
+        assert_eq!(
+            viewer.props.get("waves-per-set"),
+            Some(&Value::Number(7.0)),
+            "wavetable viewer grouping should come from the bank's asset metadata"
+        );
+        let osc1_set = find_stable_key_suffix(&layout, "osc1_set")
+            .expect("osc1 set control should be present in layout");
+        let osc1_set_dropdown = find_layout_node_by_widget_type(osc1_set, "dropdown")
+            .expect("osc1 set control should contain a dropdown");
+        assert_eq!(
+            osc1_set_dropdown.props.get("options"),
+            Some(&test_string_list(&["Metadata Alpha", "Metadata Omega"])),
+            "wavetable set labels should come from the bank's asset metadata"
         );
         assert_eq!(
             count_widget_type(&layout, "wavetable-viewer"),
