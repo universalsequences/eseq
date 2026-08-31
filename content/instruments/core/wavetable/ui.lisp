@@ -1,16 +1,15 @@
-;; Wavetable — Ableton Wavetable-inspired UI: one tabbed oscillator column with
-;; a live wavetable-viewer (selected wave in accent, warp/fold/morph reactive),
-;; plus filter / envelope / global columns.
+;; Wavetable — tabbed oscillators, live wave display, filter, envelopes, and
+;; global controls, all expressed through semantic colors from the active theme.
 
-(def wt-orange () (rgba 1.00 0.64 0.22 1.0))
-(def wt-blue   () (rgba 0.45 0.78 1.00 1.0))
-(def wt-cream  () (rgba 0.93 0.88 0.78 1.0))
-(def wt-grey   () (rgba 0.46 0.46 0.48 0.55))
+(def wt-orange () (eseq.effects.custom-ui-lego/ui-accent-orange))
+(def wt-blue   () (eseq.effects.custom-ui-lego/ui-accent-blue))
+(def wt-cream  () :fg)
+(def wt-grey   () :dim)
 
-(def wt-surf () (rgba 0.075 0.072 0.068 1.0))
-(def wt-surf-cool () (rgba 0.146 0.146 0.154 1.0))
-(def wt-bord () (rgba 0.30 0.24 0.12 0.060))
-(def wt-bord-cool () (rgba 0.14 0.30 0.44 0.060))
+(def wt-surf () :instrument-group-bg)
+(def wt-surf-cool () :instrument-group-bg)
+(def wt-bord () :border-inactive)
+(def wt-bord-cool () :border-inactive)
 
 (def wt-osc-h () (+ (eseq.effects.custom-ui-lego/ui-lego-dense-h) (eseq.effects.custom-ui-lego/ui-lego-dense-h) (eseq.effects.custom-ui-lego/ui-lego-small-h)
                     (eseq.effects.custom-ui-lego/ui-lego-gap) (eseq.effects.custom-ui-lego/ui-lego-gap)))
@@ -111,9 +110,9 @@
         :gain-max 12
         :q-min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min resonance-p)
         :q-max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max resonance-p)
-        :background-color (rgba 0.035 0.038 0.042 1.0)
+        :background-color :instrument-control-bg
         :corner-radius 5
-        :grid-color (rgba 0.34 0.34 0.36 0.40)
+        :grid-color :border-inactive
         :stroke-color (wt-blue)
         :point-color (wt-orange)
         :width :fill
@@ -136,7 +135,7 @@
         :fold (eseq.effects.custom-ui-runtime/custom-ui-param-value pfold)
         :wave-color accent
         :inactive-color (wt-grey)
-        :background-color (rgba 0.035 0.038 0.042 1.0)
+        :background-color :instrument-control-bg
         :width :fill
         :height (wt-viewer-h))
       (label "missing wavetable params" :font-size 8 :color :red :bg :transparent))))

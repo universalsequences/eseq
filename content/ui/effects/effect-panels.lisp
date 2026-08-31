@@ -165,7 +165,7 @@
       :shape :tab
       :active (if active 1 0)
       :background-color :transparent
-      :active-background-color :black
+      :active-background-color :bg
       :color :dim
       :active-color :white
       :border-color :transparent

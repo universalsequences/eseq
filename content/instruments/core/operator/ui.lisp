@@ -1,19 +1,17 @@
-;; Operator — FM character: gold/teal/coral/violet per-operator identity.
-;; Mode-driven center panel (Ableton Operator style): clicking an op panel,
-;; the filter panel, or a center tab (A/B/C/D/FILT/WAVE) swaps the center
-;; view — envelope detail on top, context sub-panel (oscillator / filter env
-;; / user-wave partials) below, tab strip at the bottom.
+;; Operator — per-operator identity expressed through semantic theme colors.
+;; Clicking an op panel, filter panel, or center tab swaps the center view —
+;; envelope detail above context controls and the tab strip below.
 
-(def opx-gold   () (rgba 1.00 0.76 0.30 1.0))
-(def opx-teal   () (rgba 0.36 0.86 0.80 1.0))
-(def opx-coral  () (rgba 1.00 0.45 0.40 1.0))
-(def opx-violet () (rgba 0.72 0.55 1.00 1.0))
-(def opx-cream  () (rgba 0.93 0.89 0.80 1.0))
-(def opx-ice    () (rgba 0.50 0.76 1.00 1.0))
+(def opx-gold   () (eseq.effects.custom-ui-lego/ui-accent-orange))
+(def opx-teal   () (eseq.effects.custom-ui-lego/ui-accent-cyan))
+(def opx-coral  () :red)
+(def opx-violet () (eseq.effects.custom-ui-lego/ui-accent-violet))
+(def opx-cream  () :fg)
+(def opx-ice    () (eseq.effects.custom-ui-lego/ui-accent-blue))
 
-(def opx-surf-warm () (rgba 0.094 0.086 0.066 1.0))
-(def opx-surf-cool () (rgba 0.140 0.146 0.150 1.0))
-(def opx-surf-dark () (rgba 0.055 0.058 0.064 1.0))
+(def opx-surf-warm () :instrument-group-bg)
+(def opx-surf-cool () :instrument-group-bg)
+(def opx-surf-dark () :instrument-control-bg)
 
 ;; selected section's panel goes transparent (Ableton-style: the rack
 ;; background shows through); unselected panels keep their darker surface
@@ -22,9 +20,9 @@
 (def opx-cool-surface (section)
   (eseq.effects.custom-ui-lego/ui-lego-sel-surface section :transparent (opx-surf-cool)))
 
-(def opx-bord-warm () (rgba 0.44 0.32 0.10 0.060))
-(def opx-bord-cool () (rgba 0.14 0.36 0.34 0.060))
-(def opx-bord-dark () (rgba 0.22 0.22 0.26 0.060))
+(def opx-bord-warm () :border-inactive)
+(def opx-bord-cool () :border-inactive)
+(def opx-bord-dark () :border-inactive)
 
 (def opx-panel-dense (section surface border stripe body)
   (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-dense-h) surface border stripe body))

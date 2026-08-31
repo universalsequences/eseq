@@ -552,6 +552,14 @@ fn validate_spec(spec: &LearnJobSpec) -> Result<(), String> {
 }
 
 fn snapshot_patch_assets(spec: &LearnJobSpec, job_dir: &Path) -> Result<(), String> {
+    snapshot_patch_assets_with_paths(spec, job_dir, crate::app_paths::app_paths())
+}
+
+fn snapshot_patch_assets_with_paths(
+    spec: &LearnJobSpec,
+    job_dir: &Path,
+    paths: &crate::app_paths::AppPaths,
+) -> Result<(), String> {
     let source_dir = spec
         .patch_path
         .parent()
@@ -572,9 +580,10 @@ fn snapshot_patch_assets(spec: &LearnJobSpec, job_dir: &Path) -> Result<(), Stri
                 "patch-learning asset path must stay inside the patch directory: {reference}"
             ));
         }
-        let source = crate::lisp_host::dylib_cache::resolve_asset_reference(
+        let (source, _origin) = crate::lisp_host::dylib_cache::resolve_asset_reference_with_paths(
             &reference,
             Some(source_dir),
+            paths,
         )?;
         let destination = job_dir.join(relative);
         if let Some(parent) = destination.parent() {
@@ -1017,34 +1026,27 @@ mod tests {
     fn snapshot_patch_assets_resolves_user_library_fallback() {
         let root = temp_dir("library-assets");
         fs::create_dir_all(&root).unwrap();
-        let unique = format!(
-            "learn-test-{}-{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        // A temp-rooted AppPaths keeps the fixture out of the real user asset
+        // library, so a failed assert cannot leak files the UI enumerates.
+        let workspace = root.join("workspace");
+        let paths = crate::app_paths::AppPaths::dev(
+            workspace.join("crates/sequencer"),
+            workspace.clone(),
+            root.join("config"),
         );
-        let library_dir = crate::app_paths::app_paths()
-            .user_assets_dir()
-            .join("__tests")
-            .join(&unique);
+        let library_dir = paths.user_assets_dir().join("waves");
         fs::create_dir_all(&library_dir).unwrap();
         fs::write(library_dir.join("bank.json"), "[0.3, 0.4]").unwrap();
 
         let mut job_spec = spec(&root, true);
-        job_spec.patch_source = format!(
-            "(def bank (tensor @shape [2] @file \"__tests/{unique}/bank.json\"))"
-        );
-        snapshot_patch_assets(&job_spec, &root.join("snapshot")).unwrap();
+        job_spec.patch_source =
+            "(def bank (tensor @shape [2] @file \"waves/bank.json\"))".to_string();
+        snapshot_patch_assets_with_paths(&job_spec, &root.join("snapshot"), &paths).unwrap();
         assert_eq!(
-            fs::read_to_string(
-                root.join("snapshot/__tests")
-                    .join(&unique)
-                    .join("bank.json")
-            )
-            .unwrap(),
+            fs::read_to_string(root.join("snapshot/waves/bank.json")).unwrap(),
             "[0.3, 0.4]"
         );
         fs::remove_dir_all(root).unwrap();
-        fs::remove_dir_all(library_dir).unwrap();
     }
 
     #[test]

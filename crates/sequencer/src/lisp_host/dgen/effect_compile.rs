@@ -502,9 +502,7 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     if kind == DGenCompileKind::Instrument {
         command.args(["--voices", "12"]);
     }
-    let effective_asset_base = asset_base
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| crate::app_paths::app_paths().dgen_asset_fallback_base());
+    let effective_asset_base = super::dylib_cache::effective_asset_base(asset_base);
     command.arg("--asset-base").arg(&effective_asset_base);
     let output = command
         .output()

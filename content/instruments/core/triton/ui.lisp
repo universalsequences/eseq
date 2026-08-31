@@ -1,18 +1,17 @@
-;; Triton — Korg Triton workstation character: silver/blue palette,
-;; PCM set dropdowns per oscillator, multi-stage EG stage row, dual
-;; LFO+MOD strips (built on the ui-lego-panel-x / tab / fader pieces).
+;; Triton — Korg workstation character expressed through semantic theme
+;; colors, with PCM selectors, multi-stage envelopes, and dual LFO/MOD strips.
 
-(def tri-blue   () (rgba 0.38 0.64 1.00 1.0))
-(def tri-teal   () (rgba 0.30 0.86 0.80 1.0))
-(def tri-silver () (rgba 0.82 0.85 0.90 1.0))
-(def tri-amber  () (rgba 1.00 0.70 0.28 1.0))
-(def tri-violet () (rgba 0.74 0.58 1.00 1.0))
+(def tri-blue   () (eseq.effects.custom-ui-lego/ui-accent-blue))
+(def tri-teal   () (eseq.effects.custom-ui-lego/ui-accent-cyan))
+(def tri-silver () :fg)
+(def tri-amber  () (eseq.effects.custom-ui-lego/ui-accent-orange))
+(def tri-violet () (eseq.effects.custom-ui-lego/ui-accent-violet))
 
-(def tri-surf-cool () (rgba 0.075 0.085 0.105 1.0))
-(def tri-surf-dark () (rgba 0.055 0.060 0.072 1.0))
+(def tri-surf-cool () :instrument-group-bg)
+(def tri-surf-dark () :instrument-control-bg)
 
-(def tri-bord-cool () (rgba 0.16 0.28 0.46 0.060))
-(def tri-bord-dark () (rgba 0.20 0.22 0.28 0.060))
+(def tri-bord-cool () :border-inactive)
+(def tri-bord-dark () :border-inactive)
 
 (def tri-panel-dense (section surface border stripe body)
   (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-dense-h) surface border stripe body))
