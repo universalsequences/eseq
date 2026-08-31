@@ -1727,10 +1727,22 @@ pub(crate) fn reactive_tick_and_render(
                     .as_ref()
                     .map(|session| session.last_valid_source.as_str())
             });
+        let editor_patch_path = ctx
+            .sessions
+            .instrument_edit_session
+            .as_ref()
+            .map(|session| session.path.as_path())
+            .or_else(|| {
+                ctx.sessions
+                    .effect_edit_session
+                    .as_ref()
+                    .map(|session| session.path.as_path())
+            });
         let sidebar_fingerprint = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             editor_patch_source.hash(&mut hasher);
+            editor_patch_path.hash(&mut hasher);
             hasher.finish()
         };
         if sidebar_fingerprint != ctx.frame.prev_editor_macro_sidebar_fingerprint {
@@ -1742,6 +1754,7 @@ pub(crate) fn reactive_tick_and_render(
             } else {
                 Vec::new()
             };
+            let assets = eseqlisp::widget_render::patcher::asset_sidebar_entries(editor_patch_path);
             let rt = editor.runtime_mut();
             rt.set_reactive(
                 "SEQ",
@@ -1752,6 +1765,11 @@ pub(crate) fn reactive_tick_and_render(
                 "SEQ",
                 "editor-library-macros",
                 build_library_macro_sidebar_value(&library_macros, &scan.imports),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "editor-assets",
+                build_asset_sidebar_value(&assets),
             );
             ctx.frame.prev_editor_macro_sidebar_fingerprint = sidebar_fingerprint;
             needs_reactive_cycle = true;

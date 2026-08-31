@@ -20947,6 +20947,81 @@
     }
 
     #[test]
+    fn metal_seq_patch_macros_sidebar_lists_tiered_assets_as_asset_drags() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*patch-macros*")
+            .expect("patch macros buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        let assets = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(list (dict :label "wavetables/basic-shapes.json"
+                               :name "wavetables/basic-shapes.json"
+                               :kind "patcher-asset"
+                               :detail "Factory"
+                               :file "wavetables/basic-shapes.json"
+                               :source-path "/factory/wavetables/basic-shapes.json"
+                               :drag-type "dgen-asset"
+                               :draggable true
+                               :drop-target false))"#,
+            )
+            .expect("build editor assets")
+            .expect("editor assets value");
+        let update = editor
+            .runtime_mut()
+            .set_reactive("SEQ", "editor-assets", assets);
+        assert!(update.effects_dirty, "asset publication must dirty the sidebar effect");
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (eseq.patch-macros/patch-macros-items) 0) :label)")
+                .unwrap(),
+            Some(Value::String("Assets".to_string()))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (eseq.patch-macros/patch-macros-items) 1) :detail)")
+                .unwrap(),
+            Some(Value::String("Factory".to_string()))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (eseq.patch-macros/patch-macros-items) 1) :drag-type)")
+                .unwrap(),
+            Some(Value::String("dgen-asset".to_string()))
+        );
+
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let widget_tree = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*patch-macros*")
+            .and_then(|buffer| buffer.widget_tree.as_ref())
+            .expect("patch macros widget tree after asset publication");
+        assert!(
+            value_contains_string(widget_tree, "wavetables/basic-shapes.json"),
+            "published asset must be present in the rendered sidebar tree"
+        );
+        let layout = eseqlisp::layout::LayoutEngine::new(32, 24, 1.0)
+            .layout(widget_tree)
+            .expect("patch macros asset layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            layout.rect.width > 0.0 && layout.rect.height > 0.0,
+            "asset sidebar root must measure nonzero: {:?}",
+            layout.rect
+        );
+    }
+
+    #[test]
     fn click_outside_focused_transport_bpm_picker_blurs_and_restores_dot_shortcut() {
         use crossterm::event::{
             KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,

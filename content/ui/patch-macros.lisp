@@ -1,9 +1,10 @@
 ;; ui/patch-macros.lisp — Macro sidebar for the patch editor.
 ;; Renders to *patch-macros* buffer: defmacros defined in the current patch
 ;; ("In Patch", nested by call structure) plus the saved defmacro library
-;; ("Library"; macros imported by the patch get the :sliders icon). Rows drag
-;; into the patch editor as "dgen-macro" items; dropping one creates a node
-;; calling that macro at the drop point. The blue selected row always mirrors
+;; ("Library"; macros imported by the patch get the :sliders icon), and file-
+;; backed tensor assets from the draft, user, and factory tiers. Macro rows drag
+;; as "dgen-macro"; asset rows override that with "dgen-asset". The blue
+;; selected row always mirrors
 ;; the macro view open in the patcher (SEQ.editor-open-macro); single-click an
 ;; "In Patch" row to open that macro's view. Library rows only open on
 ;; double-click, so click-dragging one into the patch does not navigate.
@@ -16,7 +17,8 @@
 ;;
 ;; It needs no imports of its own: everything it touches outside the file is a
 ;; Rust native, a widget, or the SEQ reactive namespace (SEQ.editor-patch-macros
-;; / SEQ.editor-library-macros / SEQ.editor-open-macro), none of which are
+;; / SEQ.editor-library-macros / SEQ.editor-assets /
+;; SEQ.editor-open-macro), none of which are
 ;; module-scoped. Only `patch-macros-items` and `patch-macros-filter` are
 ;; reachable from outside (Rust tests eval them by flat name); every other def
 ;; is `%`-private with the now-redundant file prefix stripped.
@@ -134,7 +136,13 @@
         (list (header-row "Library"))
         (map (lambda (m) (lib-leaf m false)) visible)))))
 
-;; Search active: flatten both sections to matching rows.
+(def asset-section (assets)
+  (let ((visible (filter (lambda (asset) (match? asset)) assets)))
+    (if (= (len visible) 0)
+      (list)
+      (append (list (header-row "Assets")) visible))))
+
+;; Search active: flatten both macro sections and assets to matching rows.
 (def flat-patch-section ()
   (let ((visible (filter (lambda (m) (match? m)) SEQ.editor-patch-macros)))
     (if (= (len visible) 0)
@@ -150,15 +158,19 @@
                      :drop-target false))
              visible)))))
 
-(def patch-macros-items ()
+(def items-for-assets (assets)
   (if (= patch-macros-filter "")
-    (append (nested-patch-section) (lib-section))
-    (append (flat-patch-section) (lib-section))))
+    (append (nested-patch-section) (lib-section) (asset-section assets))
+    (append (flat-patch-section) (lib-section) (asset-section assets))))
+
+(def patch-macros-items ()
+  (items-for-assets SEQ.editor-assets))
 
 (def activate (item)
-  (if (= (get item :kind) "header")
-    nil
-    (host-command "open-editor-macro-view" (dict :name (get item :name)))))
+  (if (or (= (get item :kind) "patch-macro")
+          (= (get item :kind) "library-macro"))
+    (host-command "open-editor-macro-view" (dict :name (get item :name)))
+    nil))
 
 ;; Single-click path: only "In Patch" rows navigate. Library rows stay inert
 ;; so a click-and-drag out of the sidebar never yanks the view away.
@@ -176,7 +188,7 @@
       :key "search"
       :width :fill
       :value patch-macros-filter
-      :placeholder "Search macros..."
+      :placeholder "Search macros and assets..."
       :on-change (lambda (v) (set! patch-macros-filter v))
       :height 1.5
       :font-size 11)))
@@ -192,7 +204,9 @@
 ;; explicit subtree root and EmitTree then routes the update as a subtree
 ;; replacement, which is dropped when the buffer has no tree yet.
 (effect-buffer "*patch-macros*"
-  (let ((items (patch-macros-items)))
+  ;; Pass the reactive field at the render root so the effect subscribes even
+  ;; though most sidebar assembly lives in helper functions.
+  (let ((items (items-for-assets SEQ.editor-assets)))
     (v-stack :width :fill :gap 0.4 :flex 1
       (search-row)
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1

@@ -32,7 +32,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use crate::defmacro_library::{DefmacroLibrary, DefmacroPackage};
 use crate::ui::platform::has_primary_shortcut_modifier;
 
-pub use assets::set_asset_library_roots;
+pub use assets::{PatcherAssetSidebarEntry, asset_sidebar_entries, set_asset_library_roots};
 pub use connect::{PatcherConnectOp, PatcherConnectReport};
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
@@ -732,28 +732,63 @@ pub fn patcher_has_text_edit(node: &crate::layout::LayoutNode) -> bool {
         || state::answering_agentic_bubble_id(&state).is_some()
 }
 
-/// Drag type accepted by the patcher canvas: macro items dragged from the
-/// macro sidebar. Dropping one creates a node calling that macro.
+/// Drag types accepted from the patcher sidebar. Macro drops create a call;
+/// asset drops create a file-backed tensor with shape read from the asset.
 pub const PATCHER_MACRO_DRAG_TYPE: &str = "dgen-macro";
+pub const PATCHER_ASSET_DRAG_TYPE: &str = "dgen-asset";
 
 pub fn patcher_accepts_drop(node: &LayoutNode, drag_type: &str) -> bool {
-    node.widget_type == "patcher" && drag_type == PATCHER_MACRO_DRAG_TYPE
+    node.widget_type == "patcher"
+        && matches!(
+            drag_type,
+            PATCHER_MACRO_DRAG_TYPE | PATCHER_ASSET_DRAG_TYPE
+        )
 }
 
-fn macro_drop_payload_name(payload: &Value) -> Option<String> {
+fn drop_payload_string(payload: &Value, key: &str) -> Option<String> {
     let Value::Map(map) = payload else {
         return None;
     };
-    let name = map.get("name").or_else(|| map.get("label"))?;
-    match &*name.borrow() {
-        Value::String(name) if !name.trim().is_empty() => Some(name.trim().to_string()),
+    let value = map.get(key)?;
+    match &*value.borrow() {
+        Value::String(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
         _ => None,
     }
 }
 
-/// Drop a macro item onto the patcher canvas: allocate a created node whose
-/// text is the macro call at the drop point, then emit the standard writeback
-/// payload so the host persists and recompiles exactly as for a typed node.
+fn macro_drop_payload_name(payload: &Value) -> Option<String> {
+    drop_payload_string(payload, "name").or_else(|| drop_payload_string(payload, "label"))
+}
+
+fn asset_drop_node_text(payload: &Value) -> Option<String> {
+    let reference = drop_payload_string(payload, "file")?;
+    let reference_path = Path::new(&reference);
+    if reference_path.is_absolute()
+        || !reference_path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        || reference
+            .chars()
+            .any(|character| character == '"' || character.is_control())
+    {
+        return None;
+    }
+    let source_path = PathBuf::from(drop_payload_string(payload, "source-path")?);
+    let shape = assets::read_tensor_asset_shape(&source_path)?;
+    let shape = shape
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let quoted_reference = serde_json::to_string(&reference).ok()?;
+    Some(lisp::normalize_editor_node_text(&format!(
+        "tensor @shape [{shape}] @file {quoted_reference}"
+    )))
+}
+
+/// Drop a sidebar item onto the patcher canvas, then emit the standard
+/// writeback payload so the host persists and recompiles exactly as for a
+/// typed node.
 pub fn handle_patcher_drop(
     node: &LayoutNode,
     drag_type: &str,
@@ -764,12 +799,18 @@ pub fn handle_patcher_drop(
     if !patcher_accepts_drop(node, drag_type) {
         return None;
     }
-    let macro_name = macro_drop_payload_name(payload)?;
+    let node_text = match drag_type {
+        PATCHER_MACRO_DRAG_TYPE => macro_drop_payload_name(payload)?,
+        PATCHER_ASSET_DRAG_TYPE => asset_drop_node_text(payload)?,
+        _ => return None,
+    };
     let key = state::patcher_state_key(node);
     let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
     let mut state = state::get_patcher_interaction_state(key);
     // A macro view must not gain a node calling the macro it defines.
-    if state.active_macro.as_deref() == Some(macro_name.as_str()) {
+    if drag_type == PATCHER_MACRO_DRAG_TYPE
+        && state.active_macro.as_deref() == Some(node_text.as_str())
+    {
         return None;
     }
     let view_key = state::active_patcher_view_key(&state);
@@ -789,7 +830,7 @@ pub fn handle_patcher_drop(
         .edit_state
         .nodes
         .get_mut(&state::node_edit_key(&view_key, &created_id))?
-        .text = macro_name;
+        .text = lisp::normalize_editor_node_text(&node_text);
     state::set_patcher_interaction_state(key, state);
     patcher_change_output(node, patcher_writeback_payload(node))
 }

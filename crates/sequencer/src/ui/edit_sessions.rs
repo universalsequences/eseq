@@ -843,6 +843,33 @@ pub(super) fn build_patch_macro_sidebar_value(
     )
 }
 
+pub(super) fn build_asset_sidebar_value(
+    entries: &[eseqlisp::widget_render::patcher::PatcherAssetSidebarEntry],
+) -> Value {
+    Value::List(
+        entries
+            .iter()
+            .map(|entry| {
+                std::rc::Rc::new(std::cell::RefCell::new(values::map_value(vec![
+                    ("label", Value::String(entry.reference.clone())),
+                    ("name", Value::String(entry.reference.clone())),
+                    ("kind", Value::String("patcher-asset".to_string())),
+                    ("detail", Value::String(entry.tier.to_string())),
+                    ("tier", Value::String(entry.tier.to_string())),
+                    ("file", Value::String(entry.reference.clone())),
+                    (
+                        "source-path",
+                        Value::String(entry.source_path.to_string_lossy().into_owned()),
+                    ),
+                    ("drag-type", Value::String("dgen-asset".to_string())),
+                    ("draggable", Value::Bool(true)),
+                    ("drop-target", Value::Bool(false)),
+                ])))
+            })
+            .collect(),
+    )
+}
+
 pub(super) fn build_library_macro_sidebar_value(
     entries: &[eseqlisp::widget_render::patcher::MacroLibrarySidebarEntry],
     used: &[String],

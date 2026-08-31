@@ -3181,6 +3181,7 @@ pub(crate) fn init_runtime(
                 ("learn-error", Value::String(String::new())),
                 ("editor-patch-macros", Value::List(vec![])),
                 ("editor-library-macros", Value::List(vec![])),
+                ("editor-assets", Value::List(vec![])),
                 ("editor-open-macro", Value::String(String::new())),
                 (
                     "editor-instrument-run-mode",

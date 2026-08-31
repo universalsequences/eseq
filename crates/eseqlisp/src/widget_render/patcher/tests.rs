@@ -180,7 +180,7 @@ fn dropping_macro_item_creates_macro_node_and_emits_writeback() {
     )]));
     assert!(
         handle_patcher_drop(&node, "sample", &payload, 40.0, 15.0).is_none(),
-        "non-macro drags must be rejected"
+        "unsupported drags must be rejected"
     );
 
     let output = handle_patcher_drop(&node, "dgen-macro", &payload, 40.0, 15.0)
@@ -210,6 +210,60 @@ fn dropping_macro_item_creates_macro_node_and_emits_writeback() {
         emitted.contains("(use-defmacro shape)"),
         "emitted source should import the dropped library macro:\n{emitted}"
     );
+}
+
+#[test]
+fn dropping_asset_item_reads_shape_and_creates_file_backed_tensor() {
+    let source = "(def input (in 1))\n(out input 1)";
+    let path = temp_patcher_dsp_path("patcher-asset-drop");
+    fs::write(&path, source).unwrap();
+    let asset_path = path.parent().unwrap().join("basic-shapes.json");
+    fs::write(
+        &asset_path,
+        r#"{"shape":[512,4],"data":[0.0,1.0]}"#,
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let payload = Value::Map(HashMap::from([
+        (
+            "file".to_string(),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::String(
+                "wavetables/basic-shapes.json".to_string(),
+            ))),
+        ),
+        (
+            "source-path".to_string(),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::String(
+                asset_path.display().to_string(),
+            ))),
+        ),
+    ]));
+
+    let output = handle_patcher_drop(&node, "dgen-asset", &payload, 40.0, 15.0)
+        .expect("asset drop should emit a writeback output");
+    let state = get_patcher_interaction_state(patcher_state_key(&node));
+    assert!(state.edit_state.nodes.values().any(|edit| {
+        edit.text
+            == "tensor @shape [512 4] @file \"wavetables/basic-shapes.json\""
+    }));
+
+    let Value::Map(payload) = &output.args[0] else {
+        panic!("writeback payload should be a map");
+    };
+    let Value::String(emitted) = payload.get("source").unwrap().borrow().clone() else {
+        panic!("payload source should be a string");
+    };
+    let patch = parse_patch_source(&emitted, PatcherIntent::Instrument).unwrap();
+    let tensor = patch.nodes.iter().find(|node| node.op == "tensor").unwrap();
+    assert!(
+        tensor
+            .label
+            .ends_with(" @shape [512 4] @file \"wavetables/basic-shapes.json\""),
+        "generated attributes must survive in node.label: {}",
+        tensor.label
+    );
+
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
 #[test]
@@ -15940,6 +15994,56 @@ fn patcher_asset_path_catalog_uses_draft_and_library_relative_spellings() {
         ]
     );
     assert!(!spellings.iter().any(|path| path.ends_with("dsp.lisp")));
+
+    fs::remove_dir_all(draft_root).unwrap();
+    fs::remove_dir_all(user_root).unwrap();
+    fs::remove_dir_all(factory_root).unwrap();
+}
+
+#[test]
+fn patcher_asset_sidebar_catalog_labels_tiers_and_requires_tensor_shape() {
+    let draft_source = temp_patcher_dsp_path("patcher-sidebar-draft");
+    let user_source = temp_patcher_dsp_path("patcher-sidebar-user");
+    let factory_source = temp_patcher_dsp_path("patcher-sidebar-factory");
+    let draft_root = draft_source.parent().unwrap();
+    let user_root = user_source.parent().unwrap();
+    let factory_root = factory_source.parent().unwrap();
+    for directory in [
+        draft_root.join("waves"),
+        user_root.join("wavetables"),
+        factory_root.join("wavetables"),
+    ] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    fs::write(draft_root.join("waves/draft.json"), r#"{"shape":[8]}"#).unwrap();
+    fs::write(
+        user_root.join("wavetables/user.json"),
+        r#"{"shape":[16,2]}"#,
+    )
+    .unwrap();
+    fs::write(
+        factory_root.join("wavetables/factory.json"),
+        r#"{"shape":[512,4]}"#,
+    )
+    .unwrap();
+    fs::write(factory_root.join("wavetables/not-a-tensor.json"), "[]").unwrap();
+
+    let entries = assets::collect_asset_sidebar_entries(
+        Some(draft_root),
+        Some(user_root),
+        Some(factory_root),
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.tier, entry.reference.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("Draft", "waves/draft.json"),
+            ("User", "wavetables/user.json"),
+            ("Factory", "wavetables/factory.json"),
+        ]
+    );
 
     fs::remove_dir_all(draft_root).unwrap();
     fs::remove_dir_all(user_root).unwrap();

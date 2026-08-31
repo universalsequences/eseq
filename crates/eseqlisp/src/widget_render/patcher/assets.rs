@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+use serde::Deserialize;
 
 use crate::layout::LayoutNode;
 
@@ -15,6 +18,26 @@ pub fn set_asset_library_roots(user: PathBuf, factory: PathBuf) {
     let _ = ASSET_LIBRARY_ROOTS.set([user, factory]);
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PatcherAssetSidebarEntry {
+    pub reference: String,
+    pub source_path: PathBuf,
+    pub tier: &'static str,
+}
+
+/// Lists tensor JSON assets available to the active patch. Draft references are
+/// relative to the patch directory; shared references are relative to their
+/// library root, matching host-side `@file` resolution.
+pub fn asset_sidebar_entries(source_path: Option<&Path>) -> Vec<PatcherAssetSidebarEntry> {
+    let draft_root = source_path.and_then(Path::parent);
+    let roots = ASSET_LIBRARY_ROOTS.get();
+    collect_asset_sidebar_entries(
+        draft_root,
+        roots.map(|roots| roots[0].as_path()),
+        roots.map(|roots| roots[1].as_path()),
+    )
+}
+
 pub(super) fn autocomplete_asset_paths_for_node(node: &LayoutNode) -> Vec<String> {
     let source_path = prop_str(&node.props, "path")
         .or_else(|| prop_str(&node.props, "file"))
@@ -25,6 +48,91 @@ pub(super) fn autocomplete_asset_paths_for_node(node: &LayoutNode) -> Vec<String
         .map(|roots| roots.as_slice())
         .unwrap_or(&[]);
     collect_asset_path_spellings(draft_root, source_path.as_deref(), library_roots)
+}
+
+pub(super) fn collect_asset_sidebar_entries(
+    draft_root: Option<&Path>,
+    user_root: Option<&Path>,
+    factory_root: Option<&Path>,
+) -> Vec<PatcherAssetSidebarEntry> {
+    let mut entries = Vec::new();
+    if let Some(root) = draft_root {
+        collect_tensor_assets_under(root, root, "Draft", &mut entries);
+    }
+    if let Some(root) = user_root {
+        collect_tensor_assets_under(root, root, "User", &mut entries);
+    }
+    if let Some(root) = factory_root {
+        collect_tensor_assets_under(root, root, "Factory", &mut entries);
+    }
+    entries.sort_by(|left, right| {
+        let tier_order = |tier| match tier {
+            "Draft" => 0,
+            "User" => 1,
+            _ => 2,
+        };
+        tier_order(left.tier)
+            .cmp(&tier_order(right.tier))
+            .then_with(|| left.reference.cmp(&right.reference))
+    });
+    entries
+}
+
+fn collect_tensor_assets_under(
+    root: &Path,
+    directory: &Path,
+    tier: &'static str,
+    entries: &mut Vec<PatcherAssetSidebarEntry>,
+) {
+    let Ok(directory_entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in directory_entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_tensor_assets_under(root, &path, tier, entries);
+            continue;
+        }
+        if !file_type.is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+            || read_tensor_asset_shape(&path).is_none()
+        {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let Some(reference) = relative.to_str() else {
+            continue;
+        };
+        let reference = reference.replace(std::path::MAIN_SEPARATOR, "/");
+        if reference.is_empty()
+            || reference
+                .chars()
+                .any(|character| character == '"' || character.is_control())
+        {
+            continue;
+        }
+        entries.push(PatcherAssetSidebarEntry {
+            reference,
+            source_path: path,
+            tier,
+        });
+    }
+}
+
+#[derive(Deserialize)]
+struct TensorAssetHeader {
+    shape: Vec<u64>,
+}
+
+pub(super) fn read_tensor_asset_shape(path: &Path) -> Option<Vec<u64>> {
+    let header: TensorAssetHeader = serde_json::from_reader(File::open(path).ok()?).ok()?;
+    (!header.shape.is_empty() && header.shape.iter().all(|dimension| *dimension > 0))
+        .then_some(header.shape)
 }
 
 pub(super) fn collect_asset_path_spellings(

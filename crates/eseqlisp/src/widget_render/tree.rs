@@ -918,6 +918,7 @@ impl WidgetDefinition for TreeWidget {
         if row.has_children || !row.draggable {
             return None;
         }
+        let drag_type = item_string_field(&row.item_value, "drag-type").unwrap_or(drag_type);
         Some(make_drag_value(&drag_type, &row.item_value))
     }
 
