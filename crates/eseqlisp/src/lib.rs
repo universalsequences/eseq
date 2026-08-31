@@ -102,7 +102,7 @@ pub mod widgets;
 /// also pass the returned path as `EditorConfig::init_source_path` so relative
 /// loads (such as `./themes.lisp`) resolve beside it.
 pub fn factory_core_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/core")
+    std::path::PathBuf::from(env!("ESEQ_DEV_MANIFEST_DIR")).join("../../content/core")
 }
 
 pub fn factory_init_path() -> std::path::PathBuf {

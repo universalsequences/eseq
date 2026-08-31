@@ -18,6 +18,7 @@ pub(crate) fn create_editor_and_backend(
     let mut backend =
         AppBackend::new_with_size_and_font_size(1250, 850, METAL_SEQ_TEXT_FONT_SIZE_PT)
             .map_err(|_| "render backend creation failed")?;
+    configure_application_font(&mut backend)?;
     backend
         .initialize()
         .map_err(|_| "render backend init failed")?;
@@ -102,11 +103,30 @@ pub(crate) fn create_capture_backend(
     let mut backend =
         AppBackend::new_capture_with_font_size(width, height, METAL_SEQ_TEXT_FONT_SIZE_PT)
             .map_err(|_| "Metal capture backend creation failed")?;
+    configure_application_font(&mut backend)?;
     backend
         .initialize()
         .map_err(|_| "Metal capture backend init failed")?;
     configure_editor_for_backend(editor, &mut backend);
     Ok(backend)
+}
+
+#[cfg(target_os = "macos")]
+fn configure_application_font(
+    backend: &mut AppBackend,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let font = sequencer::app_paths::app_paths().ui_monospace_font();
+    backend
+        .set_monospace_font_path(&font)
+        .map_err(|_| format!("failed to configure application font {}", font.display()))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_application_font(
+    _backend: &mut AppBackend,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
 }
 
 fn configure_editor_for_backend(editor: &mut Editor, backend: &mut AppBackend) {

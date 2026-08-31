@@ -215,7 +215,12 @@ rm -rf "$TOOLCHAIN_DEST"
 mv "$STAGED_ROOT" "$TOOLCHAIN_DEST"
 rm -rf "$STAGING_TMP"
 
-python3 - "$LOCK_FILE" "$HOST_TARGET" "$ARCHIVE_NAME" "$ARCHIVE_HASH" "$LLVM_VERSION" "$DGEN_ABI_VERSION" <<'PY'
+SHA_CHANGED=0
+if [[ "$LOCKED_HASH" != "$ARCHIVE_HASH" ]]; then
+  SHA_CHANGED=1
+fi
+
+python3 - "$LOCK_FILE" "$HOST_TARGET" "$ARCHIVE_NAME" "$ARCHIVE_HASH" "$LLVM_VERSION" "$DGEN_ABI_VERSION" "$SHA_CHANGED" <<'PY'
 from pathlib import Path
 import sys
 
@@ -227,20 +232,41 @@ updates = {
     f"target.{target}.llvm_version": sys.argv[5],
     f"target.{target}.dgen_abi_version": sys.argv[6],
 }
-lines = path.read_text().splitlines()
+sha_changed = sys.argv[7] == "1"
+url_key = f"target.{target}.url"
 seen = set()
-for index, line in enumerate(lines):
+kept = []
+dropped_url = None
+for line in path.read_text().splitlines():
     fields = line.split(maxsplit=1)
-    if fields and fields[0] in updates:
-        key = fields[0]
-        lines[index] = f"{key} {updates[key]}"
+    key = fields[0] if fields else None
+    if key in updates:
+        kept.append(f"{key} {updates[key]}")
         seen.add(key)
+        continue
+    # A url and an archive_sha256 are one pin: the url names the published
+    # archive and the sha256 is what that archive must hash to. Vendoring a
+    # locally rebuilt archive under --update-lock changes the sha but cannot
+    # change what is published, so keeping the url would commit a lock whose
+    # halves disagree and whose fetch fails sha verification on every fresh
+    # checkout. Drop it, returning this target to the honest vendored-only
+    # state, until the new archive is published and the url re-added.
+    if key == url_key and sha_changed:
+        dropped_url = fields[1] if len(fields) > 1 else ""
+        continue
+    kept.append(line)
 if seen != updates.keys():
     missing = sorted(updates.keys() - seen)
     raise SystemExit(f"error: lock file is missing the {target} record: {', '.join(missing)}")
 temporary = path.with_name(path.name + ".tmp")
-temporary.write_text("\n".join(lines) + "\n")
+temporary.write_text("\n".join(kept) + "\n")
 temporary.replace(path)
+if dropped_url is not None:
+    print(f"Dropped now-stale {url_key}:")
+    print(f"  {dropped_url}")
+    print("It named the previously published archive, which no longer matches the")
+    print("pinned sha256. Publish the rebuilt archive and re-add the url to make")
+    print("this target fetchable again; until then it is vendored-only.")
 PY
 
 echo "Staged toolchain:"

@@ -169,7 +169,9 @@ pub(super) fn canonical_project_script_path(path: &str) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        sequencer::paths::workspace_root().join(path)
+        sequencer::app_paths::app_paths()
+            .project_script_root()
+            .join(path)
     };
     std::fs::canonicalize(&absolute).unwrap_or(absolute)
 }

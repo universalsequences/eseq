@@ -117,10 +117,7 @@ fn prepare_ir_uncached(path: &Path, host_sr: u32) -> Result<StereoIr, String> {
 const IR_CACHE_MAGIC: &[u8; 8] = b"ESEQIR01";
 
 fn ir_cache_root() -> PathBuf {
-    crate::paths::workspace_root()
-        .join(".eseq")
-        .join("dgenlisp-cache")
-        .join("ir-prep")
+    crate::app_paths::app_paths().convolution_ir_cache_dir()
 }
 
 fn ir_cache_key(path: &Path, host_sr: u32) -> Result<String, String> {

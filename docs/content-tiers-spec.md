@@ -254,7 +254,7 @@ patcher, the in-app agent, or an external Claude Code session. Rules:
 
 ```rust
 impl AppPaths {
-    fn factory_root(&self) -> &Path;      // Dev: <repo>/assets ; Release: Resources/
+    fn factory_root(&self) -> &Path;      // Dev: <repo>/content ; Release: Resources/
     fn user_data_root(&self) -> &Path;    // Dev: <repo>/.local (gitignored) ; Release: App Support
     fn user_lisp_root(&self) -> &Path;    // ~/.eseq.d (both arms; env-overridable in dev)
     fn load_path(&self) -> Vec<PathBuf>;  // §4 order

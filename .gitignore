@@ -16,6 +16,7 @@ crates/musicplayer/Music/
 crates/eseqlisp/profiles/
 
 # Build/profiling artifacts.
+/dist/out/
 *.o
 *.dylib
 *.so

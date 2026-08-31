@@ -64,14 +64,14 @@ the compiler and cannot find it hard-fails with a message naming the fetch
 command.
 
 `fetch_dgen_toolchain.sh` can only fetch targets that have a published `url` in
-`content/dgen-toolchain.lock` — currently just `x86_64-unknown-linux-gnu`. The
-`arm64-apple-macos` stage is pinned by sha256 but unpublished: on macOS it is
-vendored by `./rebuild_dgenlisp_tool.sh` from a local
-[dgen-audio](https://github.com/universalsequences/dgen-audio) checkout that
-already contains the pinned `.toolchain/` archive, so a Mac without that
-checkout cannot bootstrap the clang/lld stage from this repository alone. Once
-the stage is staged, `fetch_dgen_toolchain.sh` recognises it and exits
-successfully. `ESEQ_DGENLISP_TOOL=/abs/path` overrides the pinned compiler with a
+`content/dgen-toolchain.lock`, which both `arm64-apple-macos` and
+`x86_64-unknown-linux-gnu` now do — a fresh checkout on either platform
+bootstraps the clang/lld stage from this repository alone. On macOS
+`./rebuild_dgenlisp_tool.sh` still vendors the identical archive from a local
+[dgen-audio](https://github.com/universalsequences/dgen-audio) checkout when you
+have one; both routes land on the same pinned sha256, and once the stage is
+staged `fetch_dgen_toolchain.sh` recognises it and exits successfully.
+`ESEQ_DGENLISP_TOOL=/abs/path` overrides the pinned compiler with a
 locally built one. Maintainers publishing a new compiler should follow the
 complete [Linux DGenLisp release recipe](docs/dgenlisp-release.md), including
 its container, binary-verification, draft-recovery, and lock re-pin steps.

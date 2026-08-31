@@ -46,7 +46,7 @@ pub fn resolve_content_relative_asset(path: &str) -> PathBuf {
 fn load_fallback_roots() -> &'static [PathBuf] {
     LOAD_FALLBACK_ROOTS
         .get_or_init(|| {
-            let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let workspace = Path::new(env!("ESEQ_DEV_MANIFEST_DIR")).join("../..");
             let content = workspace.join("content");
             if content.is_dir() {
                 vec![

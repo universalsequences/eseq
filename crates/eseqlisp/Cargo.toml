@@ -45,8 +45,8 @@ objc2-metal = { version = "0.3", features = [
 ] }
 objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer"] }
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSColor", "NSResponder", "NSAppearance", "NSHapticFeedback"] }
-objc2-core-foundation = { version = "0.3", features = ["CFCGTypes", "CFString"] }
-objc2-core-text = { version = "0.3", features = ["CTFont"] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes", "CFData", "CFString"] }
+objc2-core-text = { version = "0.3", features = ["CTFont", "CTFontDescriptor", "CTFontManager"] }
 objc2-core-graphics = { version = "0.3", features = [
     "CGBitmapContext",
     "CGColorSpace",

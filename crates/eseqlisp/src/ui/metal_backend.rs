@@ -1940,6 +1940,7 @@ fragment float4 live_spectrogram_frag(
     const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SUFFIX: &str = "__agent-instrument-stub-bg";
     const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SAFE_SUFFIX: &str = "__agent_instrument_stub_bg";
     const AGENT_INSTRUMENT_STUB_SKELETON_DEBUG_NAME: &str = "agent-instrument-stub-skeleton";
+    const MONOSPACE_FONT_NAME: &str = "JetBrainsMono-Regular";
     use crate::ui::DEFAULT_MONOSPACE_FONT_SIZE_PT;
 
     fn simple_widget_run_cacheable(widget_type: &str) -> bool {
@@ -2320,6 +2321,7 @@ fragment float4 live_spectrogram_frag(
         initial_window_size: LogicalSize<f64>,
         initial_window_visible: bool,
         monospace_font_size_pt: f64,
+        monospace_font_path: Option<PathBuf>,
     }
 
     impl MetalBackend {
@@ -2456,7 +2458,40 @@ fragment float4 live_spectrogram_frag(
                 initial_window_size: LogicalSize::new(width as f64, height as f64),
                 initial_window_visible: visible,
                 monospace_font_size_pt,
+                monospace_font_path: None,
             })
+        }
+
+        /// Select an exact application-owned monospace face. This must be set
+        /// before initialization; the file is loaded directly rather than by
+        /// PostScript name so user-installed fonts and CoreText substitution
+        /// cannot alter the layout cell grid.
+        pub fn set_monospace_font_path(
+            &mut self,
+            path: impl Into<PathBuf>,
+        ) -> Result<(), BackendError> {
+            if self.window.is_some() {
+                return Err(BackendError::MetalError);
+            }
+            self.monospace_font_path = Some(path.into());
+            Ok(())
+        }
+
+        fn create_monospace_atlas(&self, font_size: f64) -> Result<GlyphAtlas, BackendError> {
+            if let Some(path) = &self.monospace_font_path {
+                return GlyphAtlas::new_from_file(
+                    &self.device,
+                    path,
+                    MONOSPACE_FONT_NAME,
+                    font_size,
+                )
+                .map_err(|error| {
+                    eprintln!("[glyph_atlas] {error}");
+                    BackendError::MetalError
+                });
+            }
+            GlyphAtlas::new(&self.device, MONOSPACE_FONT_NAME, font_size)
+                .ok_or(BackendError::MetalError)
         }
 
         fn elapsed_time_seconds(&self) -> f32 {
@@ -3700,11 +3735,9 @@ fragment float4 live_spectrogram_frag(
                     .as_ref()
                     .map(|w| w.scale_factor())
                     .unwrap_or(1.0);
-                let next = GlyphAtlas::new(
-                    &self.device,
-                    "JetBrainsMono-Regular",
-                    self.monospace_font_size_pt * zoom as f64 * scale,
-                )?;
+                let next = self
+                    .create_monospace_atlas(self.monospace_font_size_pt * zoom as f64 * scale)
+                    .ok()?;
                 self.text_atlas = Some(next);
                 self.text_atlas_zoom = zoom;
                 self.cached_text_key = None;
@@ -4234,8 +4267,11 @@ fragment float4 live_spectrogram_frag(
         }
 
         fn compile_pending_button_surface_override(&mut self) -> bool {
+            if !crate::ui::editable_shader_overrides_enabled() {
+                return false;
+            }
             let path =
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders/button_surface.metal");
+                PathBuf::from(env!("ESEQ_DEV_MANIFEST_DIR")).join("shaders/button_surface.metal");
             let metadata = match fs::metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(error) => {
@@ -6004,21 +6040,17 @@ fragment float4 live_spectrogram_frag(
                 .as_ref()
                 .map(|w| w.scale_factor())
                 .unwrap_or(1.0);
-            self.atlas = GlyphAtlas::new(
-                &self.device,
-                "JetBrainsMono-Regular",
-                self.monospace_font_size_pt * scale,
-            );
+            let atlas = self.create_monospace_atlas(self.monospace_font_size_pt * scale)?;
+            self.atlas = Some(atlas);
             let text_zoom = if self.text_atlas_zoom.is_finite() && self.text_atlas_zoom > 0.0 {
                 self.text_atlas_zoom
             } else {
                 1.0
             };
-            self.text_atlas = GlyphAtlas::new(
-                &self.device,
-                "JetBrainsMono-Regular",
+            let text_atlas = self.create_monospace_atlas(
                 self.monospace_font_size_pt * text_zoom as f64 * scale,
-            );
+            )?;
+            self.text_atlas = Some(text_atlas);
             self.text_atlas_zoom = text_zoom;
             self.prop_atlas = ProportionalGlyphAtlas::new(&self.device, scale);
             self.mono_atlas_generation = self.mono_atlas_generation.wrapping_add(1);

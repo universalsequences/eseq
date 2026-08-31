@@ -196,18 +196,35 @@ ESeq.app/Contents/
                        <- from crates/sequencer/tools/DGenLisp-macos-arm64
   Resources/
     AppIcon.icns
+    fonts/
+      JetBrainsMono-Regular.ttf
+      OFL.txt           <- SIL Open Font License 1.1
     dgen-toolchain/    <- from crates/sequencer/tools/dgen-toolchain (~140 MB)
     core/  ui/  defmacros/  effects/  instruments/  midi-fx/
     presets/  kits/  processes/  scripts/  impulses/  filter-tables/
-                       <- content/ copied verbatim
+    packages/          <- content/ copied verbatim
 ```
 
-**Conflict to resolve:** the toolchain spec's Bundle Layout section shows
-`Resources/runtime/eseqlisp/init.lisp` and `Resources/factory/…`. The code
-disagrees — `factory_root()` returns `contents_resources` directly, so
-`core_dir()` is `Resources/core`. `content-tiers-spec.md` is rev 2 and newer;
-the code follows it. **The toolchain spec's layout section is stale and must
-be corrected to match**, or the accessors changed. Do not ship the ambiguity.
+**Conflict resolved (R1a):** the toolchain spec's Bundle Layout section used
+to show `Resources/runtime/eseqlisp/init.lisp` and `Resources/factory/…`. The
+code disagrees — `factory_root()` returns `contents_resources` directly, so
+`core_dir()` is `Resources/core` — and `content-tiers-spec.md` (rev 2, newer)
+matches the code. The toolchain spec's layout section was corrected to the
+tree above; the accessors were left unchanged. The layout above is the single
+authority for the dist script; there is no `runtime/` or `factory/` nesting.
+
+JetBrains Mono 2.304 is loaded directly from the bundled font file before the
+layout atlas is created. Most visible labels use CoreText's system UI face, but
+the monospace face defines ESeq's global cell grid; allowing CoreText to
+silently substitute a missing user font changes every cell-authored panel's
+geometry. Direct file loading makes the grid independent of account fonts and
+fails startup loudly if the packaged face is missing, invalid, or has the wrong
+PostScript name. The unmodified font and `OFL.txt` are copied from
+`dist/macos/fonts/`, and the dist script verifies the pinned font checksum.
+
+The staged toolchain is copied whole, so `Resources/dgen-toolchain/` carries
+the full stage layout (`VERSION.json`, `LAYOUT.md`, `bin/`, `lib/`, `include/`,
+`abi/`, `empty-sdk/`, `LICENSES/`), not a curated subset.
 
 ### 4.5 The staged toolchain is gitignored
 
@@ -225,6 +242,15 @@ should be recorded in the build log.
 logs once when the file is missing, so a bundle is *functionally* fine — but
 it is a per-frame `fs::metadata` on a path that can never exist. Gate it off
 on the Release arm.
+
+The Lisp hot-reload watcher (`LispHotReloadWatcher`, started from
+`crates/sequencer/src/ui/event_loop.rs`) is the second instance of the same
+class, found while reviewing R1a: it walks and `notify`-registers every Lisp
+source the editor knows about — 180 files across 111 directories in a bundle —
+and rescans that set once a second. Bundle resources are immutable, so no event
+it could deliver is actionable. `metal_main` therefore passes
+`!app_paths.is_release()` into `run_event_loop`, which skips both the watcher
+construction and the periodic path rescan.
 
 This is the class of issue R1 exists to surface. There may be others; the
 acceptance below is written to catch them.
@@ -276,6 +302,15 @@ commit. Decide that before writing the workflow.
 Owned by `crates/sequencer/docs/embedded-dgen-toolchain-v0.1-spec.md` Phase 5
 and bead `eseq-toolchain.3`. Sparkle, the appcast, and the two channels are
 additive to that and are not yet specced; do so when R2 exists.
+
+The dist script implements the R3 pipeline behind `ESEQ_SIGNING_IDENTITY` and
+`ESEQ_NOTARY_PROFILE` (see `dist/macos/README.md`): individually signed
+helpers, hardened runtime, the `disable-library-validation` entitlement from
+`dist/macos/entitlements.plist`, app notarized and stapled before DMG
+creation (a UDZO image is read-only), then the DMG signed, notarized, and
+stapled too. Unset, the script is byte-identical in behavior to R1. The
+clean-machine acceptance matrix in the toolchain spec remains the exit
+criterion.
 
 ---
 

@@ -14,11 +14,14 @@
 # Either way archive_sha256 is the pin and a mismatch is a hard error.
 format_version 3
 
-# Vendored locally: this archive is built from LLVM source by dgen-audio's
-# scripts/build-toolchain.sh on an Apple Silicon host and has never been
-# published, so there is no url to fetch.
+# Published and fetchable. Built from LLVM source by dgen-audio's
+# scripts/build-toolchain.sh on an Apple Silicon host, which enforces the
+# strings-based relocatability scan the repacked Linux stage below is exempt
+# from. ./rebuild_dgenlisp_tool.sh still vendors the identical archive from a
+# local dgen-audio checkout; both routes land on this same sha256.
 target.arm64-apple-macos.archive dgen-toolchain-20.1.8-arm64.tar.gz
 target.arm64-apple-macos.archive_sha256 3f5a813d50294df2fd55bf6e63562f491b7e0c3d4cf52c762995dc03f036d5ca
+target.arm64-apple-macos.url https://github.com/universalsequences/dgen-audio/releases/download/dgen-toolchain-20.1.8/dgen-toolchain-20.1.8-arm64.tar.gz
 target.arm64-apple-macos.llvm_version 20.1.8
 target.arm64-apple-macos.dgen_abi_version 1
 

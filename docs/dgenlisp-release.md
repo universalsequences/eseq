@@ -384,11 +384,12 @@ runtime headers and ABI files, the compiler distribution is not standalone.
 
 ### 4. Stage the pinned arm64 compiler toolchain
 
-Eseq's arm64 toolchain is currently vendored from a local dgen-audio archive,
-not downloaded: its stanza in
-[`content/dgen-toolchain.lock`](../content/dgen-toolchain.lock) deliberately has
-no URL. If the exact archive pinned there is absent, build it natively according
-to `toolchain/LAYOUT.md`:
+Eseq's arm64 toolchain is published, so the ordinary route is
+`./scripts/fetch_dgen_toolchain.sh`, which downloads the archive pinned in
+[`content/dgen-toolchain.lock`](../content/dgen-toolchain.lock) and verifies its
+sha256. A release build that vendors instead — the archive already in
+`$DGEN_ROOT/.toolchain/`, or one built natively according to
+`toolchain/LAYOUT.md` — lands on the same pinned hash:
 
 ```sh
 cd "$DGEN_ROOT"
@@ -407,7 +408,10 @@ test "$(jq -r .target "$TOOLCHAIN/VERSION.json")" = arm64-apple-macos
 
 `rebuild_dgenlisp_tool.sh` does not build DGenLisp and does not accept a
 nearby toolchain archive: it stages only the archive identity pinned by eseq.
-A hash mismatch is a release blocker, not permission to weaken the check.
+A hash mismatch is a release blocker, not permission to weaken the check. If you
+do re-pin with `--update-lock`, the script drops the target's now-stale `url`,
+because the published archive it names no longer hashes to the new pin; publish
+the rebuilt archive and re-add the url deliberately.
 
 ### 5. Run all pre-publication gates
 

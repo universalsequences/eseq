@@ -100,9 +100,16 @@ mod tests;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let capture_args = capture::CaptureArgs::parse_env()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    sequencer::paths::enter_sequencer_dir()?;
-    sequencer::app_paths::init_dev()?;
-    let app_paths = sequencer::app_paths::app_paths();
+    let app_paths = sequencer::app_paths::init()?;
+    // Checkout-only startup work: the chdir into the crate directory and the
+    // live shader/Lisp watches. Bundle resources are immutable, so watching
+    // them would add startup traversal and steady-state filesystem polling
+    // without ever producing a valid reload.
+    eseqlisp::ui::set_editable_shader_overrides_enabled(!app_paths.is_release());
+    let lisp_hot_reload_enabled = !app_paths.is_release();
+    if !app_paths.is_release() {
+        sequencer::paths::enter_sequencer_dir()?;
+    }
     app_paths.ensure_user_tier()?;
     match sequencer::package_samples::reconcile_app_package_samples(app_paths) {
         Ok(report) => {
@@ -279,7 +286,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
     };
 
-    run_event_loop(app, editor, backend, track_names, shared)?;
+    run_event_loop(
+        app,
+        editor,
+        backend,
+        track_names,
+        lisp_hot_reload_enabled,
+        shared,
+    )?;
 
     drop(stream);
     unsafe {

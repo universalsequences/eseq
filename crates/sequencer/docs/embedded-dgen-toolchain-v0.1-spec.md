@@ -118,28 +118,45 @@ ESeq.app/
     Info.plist
     MacOS/
       metal_seq
-      DGenLisp
-      dgen-clang
-      ld64.lld
+      eseq
+      DGenLisp-macos-arm64
     Resources/
       dgen-toolchain/
         VERSION.json
         LICENSES/
           LLVM-LICENSE.txt
           THIRD-PARTY-NOTICES.txt
+        bin/
+          dgen-clang
+          ld64.lld
         include/
           dgen_runtime.h
           clang/<version>/include/...
-      runtime/
-        eseqlisp/init.lisp
-        ui/...
-      factory/...
+      core/
+      ui/
+      defmacros/
+      effects/
+      instruments/
+      midi-fx/
+      presets/
+      kits/
+      processes/
+      scripts/
+      impulses/
+      filter-tables/
+      packages/
 ```
 
-`DGenLisp`, `dgen-clang`, and `ld64.lld` are nested executable code. Each is
-built for arm64, stripped of development-only data, signed individually with
-the release identity, and then sealed by the outer app signature. They are not
-stored under `Contents/Resources`.
+`Resources/` is the factory root: top-level `content/` is copied into it
+verbatim, matching `docs/content-tiers-spec.md` and `AppPaths::factory_root`.
+There is no additional `runtime/` or `factory/` nesting.
+
+`DGenLisp-macos-arm64`, `dgen-clang`, and `ld64.lld` are nested executable
+code. Each is built for arm64, stripped of development-only data, signed
+individually with the release identity, and then sealed by the outer app
+signature. The DGenLisp launcher is in `Contents/MacOS`; the staged compiler
+and linker retain their hermetic toolchain layout under
+`Contents/Resources/dgen-toolchain/bin`.
 
 The compiler is an ESeq-private tool. Its filename, arguments, directory
 layout, and presence are not a public command-line API.

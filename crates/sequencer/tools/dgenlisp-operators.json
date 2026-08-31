@@ -546,7 +546,7 @@
     }
   ],
   "generated_from": {
-    "dgenlisp_root": "/Users/alecresende/code/swift/dgen/Sources/DGenLisp",
+    "dgenlisp_root": "Sources/DGenLisp",
     "source_files": [
       "README.md",
       "main.swift",
