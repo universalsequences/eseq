@@ -8,10 +8,11 @@ a focused-track change also disarms it. Multiple held targets print together.
 
 Step targets write live `step_data`, use the engine-side override so the
 write is audible before snapshot republish, and push targeted step
-invalidations. Track instrument/effect and MIDI-FX targets write atomic p-lock
-data directly. Rack targets are coalesced into one scheduler-track publish per
-tick, and bus targets into one bus-runtime publish. Base values remain
-untouched throughout. Every path rides the open `RecordingHistoryTransaction`,
+invalidations. Track instrument/effect targets write atomic p-lock data the
+audio thread reads directly. MIDI-FX and rack targets are coalesced into one
+scheduler-track publish per tick (the scheduler reads both families from its
+published snapshot), and bus targets into one bus-runtime publish. Base values
+remain untouched throughout. Every path rides the open `RecordingHistoryTransaction`,
 so one record pass undoes as one "Record take" entry rather than creating
 device-edit gesture history.
 */
@@ -395,7 +396,7 @@ pub(crate) fn tick_step_print(
         shared.state.publish_scheduler_track(track);
     }
     let mut wrote = false;
-    let mut rack_snapshot_dirty = false;
+    let mut track_snapshot_dirty = false;
     let mut bus_runtime_dirty = false;
     let mut plock_presence_steps = Vec::new();
     for step in &printed.steps {
@@ -460,6 +461,7 @@ pub(crate) fn tick_step_print(
                     );
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
+                    track_snapshot_dirty |= target_wrote;
                 }
                 PrintTarget::RackSlotParam { slot_idx, param } => {
                     let target_wrote = app.print_rack_slot_param_plock(
@@ -471,7 +473,7 @@ pub(crate) fn tick_step_print(
                     );
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
-                    rack_snapshot_dirty |= target_wrote;
+                    track_snapshot_dirty |= target_wrote;
                 }
                 PrintTarget::RackSlotInstrument { slot_idx, param_idx } => {
                     let target_wrote = app.print_rack_slot_instrument_plock(
@@ -483,7 +485,7 @@ pub(crate) fn tick_step_print(
                     );
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
-                    rack_snapshot_dirty |= target_wrote;
+                    track_snapshot_dirty |= target_wrote;
                 }
                 PrintTarget::RackSlotEffect {
                     rack_slot_idx,
@@ -500,7 +502,7 @@ pub(crate) fn tick_step_print(
                     );
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
-                    rack_snapshot_dirty |= target_wrote;
+                    track_snapshot_dirty |= target_wrote;
                 }
                 PrintTarget::RackMacro { macro_idx } => {
                     let target_wrote = app.print_rack_macro_plock(
@@ -511,7 +513,7 @@ pub(crate) fn tick_step_print(
                     );
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
-                    rack_snapshot_dirty |= target_wrote;
+                    track_snapshot_dirty |= target_wrote;
                 }
             }
         }
@@ -519,10 +521,11 @@ pub(crate) fn tick_step_print(
             plock_presence_steps.push(*step);
         }
     }
-    // Rack p-locks live in snapshot-backed rack state, while bus p-locks live
-    // in the separately published bus runtime. Coalesce each publication once
-    // per tick after all writes land; never publish once per target/step.
-    if rack_snapshot_dirty {
+    // Rack and MIDI-FX p-locks reach the scheduler only through its published
+    // per-track snapshot, while bus p-locks live in the separately published
+    // bus runtime. Coalesce each publication once per tick after all writes
+    // land; never publish once per target/step.
+    if track_snapshot_dirty {
         shared.state.publish_scheduler_track(printed.track);
     }
     if bus_runtime_dirty {

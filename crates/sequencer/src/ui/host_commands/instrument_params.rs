@@ -1396,6 +1396,25 @@ mod tests {
             &mut editor,
             &mut ctx,
         );
+        // Tick the MIDI-FX print alone: the scheduler applies MIDI-FX p-locks
+        // from its published snapshot, not live slot state, so this tick must
+        // republish the track by itself (no rack target may piggyback the
+        // publish).
+        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert_eq!(
+            state.pattern.midi_fx_slots[TRACK][0].defaults.get(0),
+            midi_default_before,
+        );
+        assert_eq!(
+            state.pattern.midi_fx_slots[TRACK][0].plocks.get(PRINT_STEP, 0),
+            Some(6.0),
+        );
+        assert_eq!(
+            state.latest_scheduler_snapshot().tracks[TRACK].midi_fx_slots[0]
+                .plocks[PRINT_STEP][0],
+            Some(6.0),
+            "printed MIDI-FX p-lock reaches the published scheduler snapshot",
+        );
         dispatch_custom_host_command(
             "set-bus-effect-param",
             number_payload(&[
@@ -1448,14 +1467,6 @@ mod tests {
             &mut ctx,
         );
         assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
-        assert_eq!(
-            state.pattern.midi_fx_slots[TRACK][0].defaults.get(0),
-            midi_default_before,
-        );
-        assert_eq!(
-            state.pattern.midi_fx_slots[TRACK][0].plocks.get(PRINT_STEP, 0),
-            Some(6.0),
-        );
         assert_eq!(app.buses[0].effect_slots[0].defaults[2], bus_default_before);
         assert_eq!(app.buses[0].effect_slots[0].plocks[PRINT_STEP][2], Some(1_600.0));
         let racks = state.pattern.rack_tracks.lock().unwrap();
