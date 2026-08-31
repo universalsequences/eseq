@@ -358,7 +358,9 @@ pub(crate) fn tick_step_print(
         shared.state.publish_scheduler_track(track);
     }
     let mut wrote = false;
+    let mut plock_presence_steps = Vec::new();
     for step in &printed.steps {
+        let mut wrote_plock = false;
         for (target, value) in &printed.targets {
             match target {
                 PrintTarget::Step(param) => {
@@ -377,24 +379,44 @@ pub(crate) fn tick_step_print(
                     }
                 }
                 PrintTarget::Instrument { param_idx } => {
-                    wrote |= app.print_instrument_plock(
+                    let target_wrote = app.print_instrument_plock(
                         printed.track,
                         *step,
                         *param_idx,
                         *value,
                     );
+                    wrote |= target_wrote;
+                    wrote_plock |= target_wrote;
                 }
                 PrintTarget::Effect { slot_idx, param_idx } => {
-                    wrote |= app.print_effect_plock(
+                    let target_wrote = app.print_effect_plock(
                         printed.track,
                         *step,
                         *slot_idx,
                         *param_idx,
                         *value,
                     );
+                    wrote |= target_wrote;
+                    wrote_plock |= target_wrote;
                 }
             }
         }
+        if wrote_plock {
+            plock_presence_steps.push(*step);
+        }
+    }
+    // A held batch can contain several instrument/effect params and a slow UI
+    // frame can cross several steps. Publish one track-scoped presence batch
+    // after every atomic p-lock write has landed, rather than invalidating per
+    // target (or widening the update through ui_epoch/fx_epoch).
+    if !plock_presence_steps.is_empty() {
+        shared
+            .ui_invalidations
+            .push(UiInvalidation::StepInvalidationBatch {
+                track: printed.track,
+                steps: plock_presence_steps,
+                change: StepInvalidation::PlockPresence,
+            });
     }
     StepPrintTick {
         printed: wrote,

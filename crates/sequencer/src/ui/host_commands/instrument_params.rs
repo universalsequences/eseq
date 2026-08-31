@@ -1188,9 +1188,23 @@ mod tests {
         state.transport.playing.store(true, Ordering::Relaxed);
         shared.recording.store(true, Ordering::Relaxed);
         let default_before = state.pattern.instrument_slots[TRACK].defaults.get(PARAM);
+        let print_epochs_before = (
+            fx_epoch.load(Ordering::Relaxed),
+            ui_epoch.load(Ordering::Relaxed),
+        );
+        // Replay consecutive real handler updates from one drag before the
+        // frame tick. Only the latest held value should print, and the tick
+        // must enqueue one presence batch rather than rebuilding *fx*.
         dispatch_custom_host_command(
             "set-instrument-param",
             number_payload(&[("param-idx", PARAM as f64), ("value", 0.73)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-instrument-param",
+            number_payload(&[("param-idx", PARAM as f64), ("value", 0.74)]),
             &mut app,
             &mut editor,
             &mut ctx,
@@ -1204,7 +1218,24 @@ mod tests {
         assert!(tick.printed);
         assert_eq!(
             state.pattern.instrument_slots[TRACK].plocks.get(PRINT_STEP, PARAM),
-            Some(0.73)
+            Some(0.74)
+        );
+        assert_eq!(
+            (
+                fx_epoch.load(Ordering::Relaxed),
+                ui_epoch.load(Ordering::Relaxed),
+            ),
+            print_epochs_before,
+            "a printed drag must not rebuild the fx or whole UI trees"
+        );
+        assert_eq!(
+            shared.ui_invalidations.drain(),
+            vec![UiInvalidation::StepInvalidationBatch {
+                track: TRACK,
+                steps: vec![PRINT_STEP],
+                change: StepInvalidation::PlockPresence,
+            }],
+            "all printed params for one tick must share one targeted presence invalidation"
         );
         shared
             .step_print

@@ -1741,6 +1741,7 @@ pub(super) fn apply_ui_invalidations(
             | UiInvalidation::Pattern(PatternInvalidation::TrackLength { track })
             | UiInvalidation::Pattern(PatternInvalidation::TrackTiming { track })
             | UiInvalidation::Step { track, .. }
+            | UiInvalidation::StepInvalidationBatch { track, .. }
             | UiInvalidation::StepBatch { track, .. }
             | UiInvalidation::StepSelection { track, .. }
             | UiInvalidation::ExpandedStepViewport { track, .. }
@@ -1895,6 +1896,58 @@ pub(super) fn apply_ui_invalidations(
                         app,
                         track,
                         step,
+                        current_track_idx,
+                        selected_steps,
+                        expanded_step_projection,
+                    );
+                }
+            },
+            UiInvalidation::StepInvalidationBatch {
+                track,
+                steps,
+                change,
+            } => match change {
+                StepInvalidation::Param(param) => {
+                    let param = param.to_step_param();
+                    for step in steps {
+                        needs_reactive_cycle |= sync_single_step_param_binding(
+                            rt,
+                            state,
+                            track,
+                            step,
+                            param,
+                            current_track_idx,
+                            selected_steps,
+                            expanded_step_projection,
+                        );
+                        push_deferred_track_step(&mut plock_render_steps, track, step);
+                    }
+                    if !step_param_track_lists.contains(&(track, param)) {
+                        step_param_track_lists.push((track, param));
+                    }
+                    if track == current_track_idx {
+                        piano_roll_step_params_dirty = true;
+                    }
+                }
+                StepInvalidation::DurationSpan => {
+                    for step in steps {
+                        needs_reactive_cycle |=
+                            sync_track_duration_span_binding_fields(rt, state, track, step);
+                    }
+                    if !duration_span_tracks.contains(&track) {
+                        duration_span_tracks.push(track);
+                    }
+                }
+                StepInvalidation::Active
+                | StepInvalidation::Payload
+                | StepInvalidation::PlockPresence
+                | StepInvalidation::Selected => {
+                    needs_reactive_cycle |= sync_step_batch_structural_bindings(
+                        rt,
+                        state,
+                        app,
+                        track,
+                        &steps,
                         current_track_idx,
                         selected_steps,
                         expanded_step_projection,

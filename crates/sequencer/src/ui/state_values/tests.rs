@@ -9768,11 +9768,11 @@
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", vec![], true);
         runtime.register_reactive("SEQV", vec![], true);
-        let plocked = |runtime: &Runtime| {
+        let plocked = |runtime: &Runtime, field: &str| {
             let Some(Value::Map(map)) = runtime.global_value("SEQ") else {
                 return None;
             };
-            map.get(&field).and_then(|value| match &*value.borrow() {
+            map.get(field).and_then(|value| match &*value.borrow() {
                 Value::Bool(value) => Some(*value),
                 _ => None,
             })
@@ -9787,7 +9787,7 @@
             &selected_steps,
         );
         assert_eq!(
-            plocked(&runtime),
+            plocked(&runtime, &field),
             Some(false),
             "an unlocked step must publish an unlit expanded p-lock tick"
         );
@@ -9807,13 +9807,39 @@
             &selected_steps,
         );
         assert_eq!(
-            plocked(&runtime),
+            plocked(&runtime, &field),
             Some(true),
             "the first p-lock write must light the expanded lane's tick without an epoch bump"
         );
         assert!(
             reactive_number(&runtime, "SEQ", &kind_field).is_some_and(|kind| kind > 0.0),
             "the first p-lock write must publish a nonzero plock-kind for the expanded step shell"
+        );
+
+        // Live printing is gated on an empty selection, so it cannot use the
+        // selected-step helper above. Its coalesced PlockPresence batch flows
+        // through the structural batch sync and must still update the exact
+        // expanded slot that was printed.
+        const PRINT_STEP: usize = 3;
+        selected_steps.lock().unwrap().clear();
+        app.state.pattern.instrument_slots[0].set_plock(PRINT_STEP, cutoff_idx, 1_200.0);
+        sync_step_batch_structural_bindings(
+            &mut runtime,
+            &app.state,
+            &app,
+            0,
+            &[PRINT_STEP],
+            0,
+            &selected_steps,
+            &expanded_step_projection,
+        );
+        assert_eq!(
+            plocked(
+                &runtime,
+                &expanded_step_slot_plocked_field(TRACK_ID, PRINT_STEP),
+            ),
+            Some(true),
+            "a printed p-lock must light its expanded slot with no selected step"
         );
     }
 
