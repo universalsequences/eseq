@@ -285,7 +285,10 @@ pub(super) fn patcher_autocomplete_ghost_text(
         return None;
     }
     let context = autocomplete_context(edit)?;
-    if context.cursor != context.end || context.end != edit.text.len() {
+    if !matches!(context.kind, AutocompleteKind::Attribute { .. })
+        || context.cursor != context.end
+        || context.end != edit.text.len()
+    {
         return None;
     }
     let matches = patcher_autocomplete_matches(edit, local_macros);
