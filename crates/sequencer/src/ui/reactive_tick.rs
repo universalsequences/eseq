@@ -250,12 +250,11 @@ pub(crate) fn reactive_tick_and_render(
         editor.mark_needs_redraw();
     }
 
-    // Live step-param printing (bead eseq-jc9): while playing+recording, an
-    // armed *step*-buffer param latch writes onto each trigger step the
-    // playhead passes. The tick pushes targeted Step invalidations (drained
-    // below in this same frame) instead of bumping ui_epoch; the writes ride
-    // the open "Record take" undo transaction like live note recording.
-    let step_print_tick = tick_step_print(ctx.shared, editor.runtime_mut());
+    // Live param printing: while playing+recording, an armed target writes
+    // onto each trigger step the playhead passes. Step targets push targeted
+    // invalidations; instrument targets update atomic p-lock storage directly.
+    // Both ride the open "Record take" transaction like live note recording.
+    let step_print_tick = tick_step_print(&mut app, ctx.shared, editor.runtime_mut());
     if step_print_tick.printed {
         app.mark_recording_take_changed();
     }

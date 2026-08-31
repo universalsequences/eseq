@@ -72,36 +72,58 @@ pub(super) fn handle(
                                 "Edit neural override",
                             );
                         }
-                        if !wrote_neural_plock {
-                            app::apply_command(
-                                &mut app,
-                                app::AppCommand::SetInstrumentParam {
+                        let print_gesture = !wrote_neural_plock
+                            && neural_selection.is_empty()
+                            && selected_steps.lock().unwrap().is_empty()
+                            && state.is_playing()
+                            && ctx.shared.recording.load(Ordering::Relaxed);
+                        if print_gesture {
+                            // While record+play is active the knob is a
+                            // recorder: latch the already-clamped value and
+                            // leave the base value untouched. The reactive
+                            // tick writes p-locks onto passing triggers.
+                            let mut print = ctx.shared.step_print.lock().unwrap();
+                            print.latch(
+                                track,
+                                PrintTarget::Instrument { param_idx },
+                                stored,
+                            );
+                            // A cross-track touch may have replaced a Step
+                            // target, so clear or republish its engine-only
+                            // override at the same latch transition.
+                            print.publish_engine_override(&state);
+                        } else {
+                            if !wrote_neural_plock {
+                                app::apply_command(
+                                    &mut app,
+                                    app::AppCommand::SetInstrumentParam {
+                                        track,
+                                        param_idx,
+                                        value: stored,
+                                    },
+                                );
+                            }
+                            sync_instrument_param_authoring_display(
+                                &mut editor,
+                                InstrumentParamDisplaySync {
+                                    app: &app,
+                                    state: &state,
+                                    selected_steps: &selected_steps,
+                                    selection: &neural_selection,
+                                    expanded_step_projection: &expanded_step_projection,
                                     track,
+                                    current_track_idx: track,
                                     param_idx,
-                                    value: stored,
+                                    display_step: None,
+                                    sync_plock_list: wrote_neural_plock,
+                                    sync_plock_presence: false,
+                                    sync_sampler_times: true,
                                 },
                             );
-                        }
-                        sync_instrument_param_authoring_display(
-                            &mut editor,
-                            InstrumentParamDisplaySync {
-                                app: &app,
-                                state: &state,
-                                selected_steps: &selected_steps,
-                                selection: &neural_selection,
-                                expanded_step_projection: &expanded_step_projection,
-                                track,
-                                current_track_idx: track,
-                                param_idx,
-                                display_step: None,
-                                sync_plock_list: wrote_neural_plock,
-                                sync_plock_presence: false,
-                                sync_sampler_times: true,
-                            },
-                        );
-                        if param_change_needs_fx_rebuild(&desc) {
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
-                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            if param_change_needs_fx_rebuild(&desc) {
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -926,7 +948,7 @@ mod tests {
     /// rather than any sync helper, because both previous fixes for this bug
     /// were validated against helpers/mirrors and missed the real path.
     #[test]
-    fn set_instrument_plock_publishes_the_compact_step_plock_render_fields() {
+    fn instrument_param_commands_publish_explicit_plocks_and_print_while_recording() {
         const TRACK: usize = 0;
         const STEP: usize = 3;
         const PARAM: usize = 0;
@@ -1105,6 +1127,56 @@ mod tests {
                 Some(Value::Bool(true))
             ),
             "the per-step p-lock presence bool must stay in sync"
+        );
+
+        // With no selection, record+play diverts the normal base-param host
+        // command into the print latch. The base stays untouched and the tick
+        // writes only the triggered step under the playhead.
+        const PRINT_STEP: usize = 5;
+        selected_steps.lock().unwrap().clear();
+        state.pattern.patterns[TRACK].toggle_step(PRINT_STEP);
+        state.transport.track_playheads[TRACK].store(PRINT_STEP as u32, Ordering::Relaxed);
+        state.transport.playing.store(true, Ordering::Relaxed);
+        shared.recording.store(true, Ordering::Relaxed);
+        let default_before = state.pattern.instrument_slots[TRACK].defaults.get(PARAM);
+        dispatch_custom_host_command(
+            "set-instrument-param",
+            number_payload(&[("param-idx", PARAM as f64), ("value", 0.73)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert_eq!(
+            state.pattern.instrument_slots[TRACK].defaults.get(PARAM),
+            default_before,
+            "printing must never write the instrument base value"
+        );
+        let tick = tick_step_print(&mut app, &shared, editor.runtime_mut());
+        assert!(tick.printed);
+        assert_eq!(
+            state.pattern.instrument_slots[TRACK].plocks.get(PRINT_STEP, PARAM),
+            Some(0.73)
+        );
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_instrument_gesture();
+        assert!(!shared.step_print.lock().unwrap().armed());
+
+        // If the record gate races off, the same payload falls through to the
+        // normal base edit rather than being dropped.
+        shared.recording.store(false, Ordering::Relaxed);
+        dispatch_custom_host_command(
+            "set-instrument-param",
+            number_payload(&[("param-idx", PARAM as f64), ("value", 0.31)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert_eq!(
+            state.pattern.instrument_slots[TRACK].defaults.get(PARAM),
+            0.31
         );
     }
 }

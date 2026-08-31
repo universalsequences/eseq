@@ -1252,6 +1252,35 @@ pub fn apply_command(app: &mut App, cmd: AppCommand) {
     }
 }
 
+impl App {
+    /// Write one live-recorded instrument p-lock without opening device-edit
+    /// history or publishing a scheduler snapshot. `SlotPLockData` is atomic
+    /// and audio-visible; the surrounding recording transaction owns undo.
+    pub fn print_instrument_plock(
+        &mut self,
+        track: usize,
+        step: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        let Some(value) = self
+            .graph
+            .instrument_descriptors
+            .get(track)
+            .and_then(|descriptor| descriptor.params.get(param_idx))
+            .map(|descriptor| descriptor.clamp(value))
+        else {
+            return false;
+        };
+        let Some(slot) = self.state.pattern.instrument_slots.get(track) else {
+            return false;
+        };
+        slot.set_plock(step, param_idx, value);
+        sync_instrument_mod_active_plock(self, track, step, param_idx);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -1925,6 +1954,30 @@ mod tests {
         assert_eq!(
             slot.tensor_params.plock_values(3, 0).unwrap(),
             vec![0.1, 0.85, 0.3, 0.4]
+        );
+    }
+
+    #[test]
+    fn printed_instrument_plock_clamps_stamps_and_syncs_mod_active_without_changing_defaults() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_instrument_descriptor(desc.clone());
+        let defaults_before: Vec<f32> = (0..desc.params.len())
+            .map(|param_idx| app.state.pattern.instrument_slots[0].defaults.get(param_idx))
+            .collect();
+
+        assert!(app.print_instrument_plock(0, 3, 2, 9.0));
+
+        let slot = &app.state.pattern.instrument_slots[0];
+        let defaults_after: Vec<f32> = (0..desc.params.len())
+            .map(|param_idx| slot.defaults.get(param_idx))
+            .collect();
+        assert_eq!(defaults_after, defaults_before);
+        assert_eq!(slot.plocks.get(3, 2), Some(1.0), "value is descriptor-clamped");
+        assert_eq!(slot.plocks.get(3, 1), Some(1.0), "mod-active lock is synced");
+        assert_eq!(
+            slot.plocks.get_id(3, 2),
+            slot.param_node_id(2),
+            "the print write carries the current ParamNodeId stamp"
         );
     }
 

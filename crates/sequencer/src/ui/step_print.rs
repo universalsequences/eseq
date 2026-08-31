@@ -1,35 +1,42 @@
 /*!
-Live step-param printing (bead eseq-jc9).
+Live parameter printing (beads eseq-jc9 and eseq-prm).
 
-While the transport is playing with record on, touching a param in the
-`*step*` buffer's parameter box arms PRINT mode for that param: the touched
-value latches and is written onto every trigger step the playhead passes on
-the focused track, until the transport pauses, recording turns off, or the
-focused track changes. Untouched params and trigger-less steps are left
-alone. Sweeping a picker while the pattern loops therefore lays the gesture
-into the steps.
+While transport and recording are active, touching an eligible parameter
+latches a [`PrintTarget`] and writes its value onto every triggered step the
+playhead passes. The hold ends on control release; transport/recording-off or
+a focused-track change also disarms it. Multiple held targets print together.
 
-Writes go straight into live `step_data` (the same base-value lane the
-*step* panel and live note recording use) and ride the open
-`RecordingHistoryTransaction`, so a whole record pass undoes as one
-"Record take" entry. UI updates use targeted `UiInvalidation::Step` pushes —
-never a `ui_epoch` bump — matching the `set-step-param-history` perf
-contract. The scheduler snapshot republish is deferred while a roll hold has
-unpublished writes so the roll's double-trigger rule keeps holding; rolled
-hits recorded while print mode is armed take the latched values
-(`override_roll_hit`), which is what lets a roll+sweep lay down triggers
-with the intended durations in one motion.
+Step targets write live `step_data`, use the engine-side override so the
+write is audible before snapshot republish, and push targeted step
+invalidations. Instrument targets write atomic p-lock data instead: their base
+value remains untouched, `EffectSlotState::set_plock` stamps device identity,
+and no scheduler snapshot is needed. Both paths ride the open
+`RecordingHistoryTransaction`, so one record pass undoes as one "Record take"
+entry rather than creating device-edit gesture history.
 */
 
 use super::*;
 use sequencer::sequencer::RollHitRecorded;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrintTarget {
+    Step(StepParam),
+    Instrument { param_idx: usize },
+    Effect { slot_idx: usize, param_idx: usize },
+}
+
+impl From<StepParam> for PrintTarget {
+    fn from(param: StepParam) -> Self {
+        Self::Step(param)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct StepPrintState {
     /// Track the latch belongs to (the focused track at touch time).
     track: usize,
-    /// Latched (param, value) pairs — only touched params print.
-    values: Vec<(StepParam, f32)>,
+    /// Latched (target, value) pairs — only touched params print.
+    values: Vec<(PrintTarget, f32)>,
     /// Playhead step printed last tick, so each boundary prints once and a
     /// frame that skipped steps can catch up across the gap (wrap-aware).
     last_step: Option<usize>,
@@ -50,7 +57,7 @@ pub(crate) struct StepPrintState {
 pub(crate) struct PrintedSteps {
     pub(crate) track: usize,
     pub(crate) steps: Vec<usize>,
-    pub(crate) params: Vec<StepParam>,
+    pub(crate) targets: Vec<(PrintTarget, f32)>,
 }
 
 impl StepPrintState {
@@ -60,14 +67,20 @@ impl StepPrintState {
 
     /// Arm-on-touch: latch a param value for printing. A touch on a
     /// different track than the current latch restarts the latch there.
-    pub(crate) fn latch(&mut self, track: usize, param: StepParam, value: f32) {
+    pub(crate) fn latch(
+        &mut self,
+        track: usize,
+        target: impl Into<PrintTarget>,
+        value: f32,
+    ) {
+        let target = target.into();
         if self.armed() && self.track != track {
             self.disarm();
         }
         self.track = track;
-        match self.values.iter_mut().find(|(existing, _)| *existing == param) {
+        match self.values.iter_mut().find(|(existing, _)| *existing == target) {
             Some(entry) => entry.1 = value,
-            None => self.values.push((param, value)),
+            None => self.values.push((target, value)),
         }
         self.touch_dirty = true;
     }
@@ -84,13 +97,25 @@ impl StepPrintState {
     /// Mouse-up on one picker ends that param's print (hold-to-print: the
     /// gesture is the arm). Returns whether the whole latch ended — the last
     /// held param releasing disarms print mode entirely.
-    pub(crate) fn unlatch(&mut self, param: StepParam) -> bool {
-        self.values.retain(|(existing, _)| *existing != param);
+    pub(crate) fn unlatch(&mut self, target: impl Into<PrintTarget>) -> bool {
+        let target = target.into();
+        self.values.retain(|(existing, _)| *existing != target);
         if self.values.is_empty() {
             self.disarm();
             return true;
         }
         false
+    }
+
+    /// Pointer release ends instrument-print gestures. Step targets have
+    /// their own picker-specific release command, so a release must not erase
+    /// an unrelated step-param hold.
+    pub(crate) fn release_instrument_gesture(&mut self) {
+        self.values
+            .retain(|(target, _)| !matches!(target, PrintTarget::Instrument { .. }));
+        if self.values.is_empty() {
+            self.disarm();
+        }
     }
 
     /// Mirror the latch into the engine-side override so the scheduler plays
@@ -106,15 +131,19 @@ impl StepPrintState {
         let value = |param: StepParam| {
             self.values
                 .iter()
-                .find(|(existing, _)| *existing == param)
+                .find(|(target, _)| *target == PrintTarget::Step(param))
                 .map(|(_, value)| *value)
         };
-        state.step_print_override.set(
-            self.track,
-            value(StepParam::Velocity),
-            value(StepParam::Duration),
-            value(StepParam::Transpose),
-        );
+        let velocity = value(StepParam::Velocity);
+        let duration = value(StepParam::Duration);
+        let transpose = value(StepParam::Transpose);
+        if velocity.is_none() && duration.is_none() && transpose.is_none() {
+            state.step_print_override.clear();
+        } else {
+            state
+                .step_print_override
+                .set(self.track, velocity, duration, transpose);
+        }
     }
 
     /// Rolled hits recorded while print mode is armed take the latched
@@ -123,11 +152,11 @@ impl StepPrintState {
         if !self.armed() || hit.track != self.track {
             return;
         }
-        for (param, value) in &self.values {
-            match param {
-                StepParam::Transpose => hit.transpose = *value,
-                StepParam::Velocity => hit.velocity = *value,
-                StepParam::Duration => hit.duration_steps = *value,
+        for (target, value) in &self.values {
+            match target {
+                PrintTarget::Step(StepParam::Transpose) => hit.transpose = *value,
+                PrintTarget::Step(StepParam::Velocity) => hit.velocity = *value,
+                PrintTarget::Step(StepParam::Duration) => hit.duration_steps = *value,
                 _ => {}
             }
         }
@@ -196,19 +225,28 @@ pub(crate) fn print_pass(
         if !state.pattern.patterns[track].is_active(step) {
             continue;
         }
-        for (param, value) in &print.values {
-            state.set_step_param_no_publish(track, step, *param, *value);
+        for (target, value) in &print.values {
+            if let PrintTarget::Step(param) = target {
+                state.set_step_param_no_publish(track, step, *param, *value);
+            }
         }
         printed.push(step);
     }
     if printed.is_empty() {
         return PrintedSteps::default();
     }
-    print.dirty_unpublished_tracks |= 1u64 << track.min(sequencer::sequencer::MAX_TRACKS - 1);
+    if print
+        .values
+        .iter()
+        .any(|(target, _)| matches!(target, PrintTarget::Step(_)))
+    {
+        print.dirty_unpublished_tracks |=
+            1u64 << track.min(sequencer::sequencer::MAX_TRACKS - 1);
+    }
     PrintedSteps {
         track,
         steps: printed,
-        params: print.values.iter().map(|(param, _)| *param).collect(),
+        targets: print.values.clone(),
     }
 }
 
@@ -229,11 +267,13 @@ pub(crate) struct StepPrintTick {
 /// self-heal within a frame.
 fn sync_print_display_fields(rt: &mut Runtime, print: &StepPrintState) -> bool {
     let mut dirty = false;
-    for (param, value) in &print.values {
-        if let Some(field) = fx_step_param_value_field(*param) {
-            dirty |= rt
-                .set_reactive("SEQ", field, Value::Number(*value as f64))
-                .effects_dirty;
+    for (target, value) in &print.values {
+        if let PrintTarget::Step(param) = target {
+            if let Some(field) = fx_step_param_value_field(*param) {
+                dirty |= rt
+                    .set_reactive("SEQ", field, Value::Number(*value as f64))
+                    .effects_dirty;
+            }
         }
     }
     dirty
@@ -274,7 +314,11 @@ pub(crate) fn restore_cursor_display_fields(
 /// so the printed values are audible on the same pass's later steps. The
 /// publish defers while a roll hold has unpublished pattern writes; the
 /// roll's own release publish carries the printed values along.
-pub(crate) fn tick_step_print(shared: &SharedHandles, rt: &mut Runtime) -> StepPrintTick {
+pub(crate) fn tick_step_print(
+    app: &mut app::App,
+    shared: &SharedHandles,
+    rt: &mut Runtime,
+) -> StepPrintTick {
     let mut print = shared.step_print.lock().unwrap();
     if !print.armed() && print.dirty_unpublished_tracks == 0 {
         return StepPrintTick::default();
@@ -312,24 +356,42 @@ pub(crate) fn tick_step_print(shared: &SharedHandles, rt: &mut Runtime) -> StepP
         remaining &= remaining - 1;
         shared.state.publish_scheduler_track(track);
     }
+    let mut wrote = false;
     for step in &printed.steps {
-        for param in &printed.params {
-            shared.ui_invalidations.push(UiInvalidation::Step {
-                track: printed.track,
-                step: *step,
-                change: StepInvalidation::Param((*param).into()),
-            });
-            if *param == StepParam::Duration {
-                shared.ui_invalidations.push(UiInvalidation::Step {
-                    track: printed.track,
-                    step: *step,
-                    change: StepInvalidation::DurationSpan,
-                });
+        for (target, value) in &printed.targets {
+            match target {
+                PrintTarget::Step(param) => {
+                    wrote = true;
+                    shared.ui_invalidations.push(UiInvalidation::Step {
+                        track: printed.track,
+                        step: *step,
+                        change: StepInvalidation::Param((*param).into()),
+                    });
+                    if *param == StepParam::Duration {
+                        shared.ui_invalidations.push(UiInvalidation::Step {
+                            track: printed.track,
+                            step: *step,
+                            change: StepInvalidation::DurationSpan,
+                        });
+                    }
+                }
+                PrintTarget::Instrument { param_idx } => {
+                    wrote |= app.print_instrument_plock(
+                        printed.track,
+                        *step,
+                        *param_idx,
+                        *value,
+                    );
+                }
+                // The latch owns the target shape now so the effect slice can
+                // add its host-command gate and write path without another
+                // state-model migration.
+                PrintTarget::Effect { .. } => {}
             }
         }
     }
     StepPrintTick {
-        printed: !printed.steps.is_empty(),
+        printed: wrote,
         display_dirty,
     }
 }
@@ -337,7 +399,8 @@ pub(crate) fn tick_step_print(shared: &SharedHandles, rt: &mut Runtime) -> StepP
 #[cfg(test)]
 mod step_print_tests {
     use super::{
-        print_pass, restore_cursor_display_fields, sync_print_display_fields, StepPrintState,
+        print_pass, restore_cursor_display_fields, sync_print_display_fields, PrintTarget,
+        StepPrintState,
     };
     use eseqlisp::vm::Value;
     use eseqlisp::Runtime;
@@ -497,6 +560,31 @@ mod step_print_tests {
         let velocity_before = other.velocity;
         print.override_roll_hit(&mut other);
         assert_eq!(other.velocity, velocity_before);
+    }
+
+    #[test]
+    fn instrument_targets_share_the_boundary_latch_without_mutating_step_values() {
+        let state = playing_state();
+        state.pattern.patterns[0].toggle_step(3);
+        state.pattern.instrument_slots[0].defaults.set(2, 0.2);
+        set_playhead(&state, 3);
+        let mut print = StepPrintState::default();
+        let target = PrintTarget::Instrument { param_idx: 2 };
+        print.latch(0, target, 0.8);
+
+        let printed = print_pass(&state, &mut print, 0, true);
+        assert_eq!(printed.steps, vec![3]);
+        assert_eq!(printed.targets, vec![(target, 0.8)]);
+        assert_eq!(state.pattern.instrument_slots[0].defaults.get(2), 0.2);
+        assert_eq!(state.pattern.instrument_slots[0].plocks.get(3, 2), None);
+        assert_eq!(
+            state.step_print_override.values_for_track(0),
+            (None, None, None),
+            "instrument printing must not use the step engine override"
+        );
+
+        print.release_instrument_gesture();
+        assert!(!print.armed());
     }
 
     #[test]
