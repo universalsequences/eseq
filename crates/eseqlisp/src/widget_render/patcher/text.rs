@@ -1,7 +1,9 @@
 use crate::layout::Rect;
+use crate::parser::{ASTParser, Expression, Parser, Token};
 use std::collections::HashMap;
 
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
+use super::lisp::{attribute_span_len, is_attribute_key};
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
 use super::model::MacroPatch;
 use super::project::{
@@ -62,6 +64,7 @@ pub(super) fn begin_patcher_text_edit(
     node_id: String,
     text: String,
     cursor_pos: usize,
+    asset_paths: Vec<String>,
 ) {
     state.selected_nodes.clear();
     state.selected_nodes.insert(node_id.clone());
@@ -79,6 +82,7 @@ pub(super) fn begin_patcher_text_edit(
         },
         autocomplete_selected: 0,
     });
+    state.autocomplete_asset_paths = asset_paths;
     state.hover_back_button = false;
     debug_log_edit_event("begin-text-edit", state);
 }
@@ -86,8 +90,9 @@ pub(super) fn begin_patcher_text_edit(
 pub(super) fn patcher_autocomplete_matches(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
 ) -> Vec<String> {
-    patcher_autocomplete_suggestions(edit, local_macros)
+    patcher_autocomplete_suggestions(edit, local_macros, asset_paths)
         .into_iter()
         .map(|suggestion| suggestion.name)
         .collect()
@@ -96,6 +101,7 @@ pub(super) fn patcher_autocomplete_matches(
 pub(super) fn patcher_autocomplete_suggestions(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
 ) -> Vec<PatcherAutocompleteSuggestion> {
     let Some(context) = autocomplete_context(edit) else {
         return Vec::new();
@@ -132,6 +138,16 @@ pub(super) fn patcher_autocomplete_suggestions(
                         .map(|name| (name.clone(), None)),
                 );
             }
+        }
+        AutocompleteKind::AssetPath => {
+            let path_prefix = prefix.strip_prefix('"').unwrap_or(&prefix);
+            let path_prefix = path_prefix.strip_suffix('"').unwrap_or(path_prefix);
+            candidates.extend(
+                asset_paths
+                    .iter()
+                    .filter(|path| path.to_lowercase().starts_with(path_prefix))
+                    .map(|path| (format!("\"{path}\""), None)),
+            );
         }
     }
     let mut matches: Vec<PatcherAutocompleteSuggestion> = candidates
@@ -217,16 +233,18 @@ fn local_macro_documentation(macro_patch: &MacroPatch) -> OperatorDocumentation 
 pub(super) fn patcher_autocomplete_is_open(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
 ) -> bool {
-    !patcher_autocomplete_matches(edit, local_macros).is_empty()
+    !patcher_autocomplete_matches(edit, local_macros, asset_paths).is_empty()
 }
 
 pub(super) fn move_patcher_autocomplete_selection(
     edit: &mut PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
     delta: isize,
 ) -> bool {
-    let matches = patcher_autocomplete_matches(edit, local_macros);
+    let matches = patcher_autocomplete_matches(edit, local_macros, asset_paths);
     if matches.is_empty() {
         edit.autocomplete_selected = 0;
         return false;
@@ -240,12 +258,13 @@ pub(super) fn move_patcher_autocomplete_selection(
 pub(super) fn apply_patcher_autocomplete(
     edit: &mut PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
 ) -> bool {
     let Some(context) = autocomplete_context(edit) else {
         return false;
     };
     let (start, end) = (context.start, context.end);
-    let matches = patcher_autocomplete_matches(edit, local_macros);
+    let matches = patcher_autocomplete_matches(edit, local_macros, asset_paths);
     if matches.is_empty() {
         edit.autocomplete_selected = 0;
         return false;
@@ -291,7 +310,7 @@ pub(super) fn patcher_autocomplete_ghost_text(
     {
         return None;
     }
-    let matches = patcher_autocomplete_matches(edit, local_macros);
+    let matches = patcher_autocomplete_matches(edit, local_macros, &[]);
     let selected = matches.get(edit.autocomplete_selected.min(matches.len().saturating_sub(1)))?;
     let prefix_chars = context.prefix.chars().count();
     let remainder = selected.chars().skip(prefix_chars).collect::<String>();
@@ -299,14 +318,15 @@ pub(super) fn patcher_autocomplete_ghost_text(
 }
 
 pub(super) fn clamp_patcher_autocomplete_selection(edit: &mut PatcherTextEdit) {
-    clamp_patcher_autocomplete_selection_with_macros(edit, &[]);
+    clamp_patcher_autocomplete_selection_with_macros(edit, &[], &[]);
 }
 
 pub(super) fn clamp_patcher_autocomplete_selection_with_macros(
     edit: &mut PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
 ) {
-    let len = patcher_autocomplete_matches(edit, local_macros).len();
+    let len = patcher_autocomplete_matches(edit, local_macros, asset_paths).len();
     if len == 0 {
         edit.autocomplete_selected = 0;
     } else {
@@ -318,6 +338,7 @@ pub(super) fn clamp_patcher_autocomplete_selection_with_macros(
 enum AutocompleteKind<'a> {
     Operator,
     Attribute { operator: &'a str },
+    AssetPath,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -331,6 +352,16 @@ struct AutocompleteContext<'a> {
 
 fn autocomplete_context(edit: &PatcherTextEdit) -> Option<AutocompleteContext<'_>> {
     let cursor = char_to_byte_index(&edit.text, edit.state.cursor_pos);
+    if let Some((start, end)) = asset_path_value_span_at_cursor(&edit.text, cursor) {
+        return Some(AutocompleteContext {
+            kind: AutocompleteKind::AssetPath,
+            prefix: &edit.text[start..cursor],
+            start,
+            end,
+            cursor,
+        });
+    }
+
     let (start, end) = token_byte_span_at_cursor(&edit.text, cursor)?;
     let prefix = &edit.text[start..cursor];
     if prefix.is_empty() {
@@ -354,6 +385,80 @@ fn autocomplete_context(edit: &PatcherTextEdit) -> Option<AutocompleteContext<'_
         end,
         cursor,
     })
+}
+
+/// Returns the source span of the `@file`/`@default-file` value under the
+/// cursor. Attribute traversal deliberately uses `attribute_span_len`: a
+/// preceding bracketed value may occupy several parser items, and treating
+/// every attribute as a key/value pair would misidentify its tail as a path.
+fn asset_path_value_span_at_cursor(text: &str, cursor: usize) -> Option<(usize, usize)> {
+    let source = format!("({text})");
+    let tokens = Parser::new(source).parse().ok()?;
+    let expressions = ASTParser::new(tokens).parse().ok()?;
+    let Expression::List(items) = expressions.first()? else {
+        return None;
+    };
+    let item_spans = top_level_item_byte_spans(text)?;
+    if items.len() != item_spans.len() {
+        return None;
+    }
+
+    let mut idx = 1;
+    while idx < items.len() {
+        if !is_attribute_key(&items[idx]) {
+            idx += 1;
+            continue;
+        }
+        let span = attribute_span_len(items, idx);
+        let is_file_attribute = matches!(
+            &items[idx],
+            Expression::Symbol(key) if key == "@file" || key == "@default-file"
+        );
+        if is_file_attribute {
+            if span > 1 {
+                let value_span = item_spans[idx + 1];
+                if value_span.0 <= cursor && cursor <= value_span.1 {
+                    return Some(value_span);
+                }
+            } else {
+                let key_end = item_spans[idx].1;
+                if key_end <= cursor && text[key_end..cursor].chars().all(char::is_whitespace) {
+                    return Some((cursor, cursor));
+                }
+            }
+        }
+        idx += span;
+    }
+    None
+}
+
+fn top_level_item_byte_spans(text: &str) -> Option<Vec<(usize, usize)>> {
+    let tokens = Parser::new(text.to_string()).parse_spanned().ok()?;
+    let mut spans = Vec::new();
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let start = tokens[idx].span.start_byte;
+        let end_idx = token_expression_end(&tokens, idx)?;
+        spans.push((start, tokens[end_idx].span.end_byte));
+        idx = end_idx + 1;
+    }
+    Some(spans)
+}
+
+fn token_expression_end(tokens: &[crate::parser::SpannedToken], start: usize) -> Option<usize> {
+    match tokens.get(start)?.token {
+        Token::Quote | Token::Backtick | Token::Comma | Token::CommaAt => {
+            token_expression_end(tokens, start + 1)
+        }
+        Token::LeftParen => {
+            let mut idx = start + 1;
+            while idx < tokens.len() && !matches!(tokens[idx].token, Token::RightParen) {
+                idx = token_expression_end(tokens, idx)? + 1;
+            }
+            Some(idx.min(tokens.len().saturating_sub(1)))
+        }
+        _ => Some(start),
+    }
 }
 
 fn char_to_byte_index(text: &str, char_index: usize) -> usize {

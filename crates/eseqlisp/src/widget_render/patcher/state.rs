@@ -136,6 +136,10 @@ pub(super) struct PatcherInteractionState {
     pub(super) selected_cable: Option<String>,
     pub(super) edit_state: PatchEditState,
     pub(super) text_edit: Option<PatcherTextEdit>,
+    /// File spellings captured when the active node edit begins. Keeping the
+    /// catalog on the edit session avoids walking asset directories every
+    /// render frame while still refreshing it for each new edit.
+    pub(super) autocomplete_asset_paths: Vec<String>,
     pub(super) agentic_bubbles: HashMap<String, AgenticBubble>,
     pub(super) agentic_morph_nodes: HashMap<String, AgenticMorph>,
     pub(super) z_order: HashMap<String, Vec<String>>,

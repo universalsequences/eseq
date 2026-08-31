@@ -897,13 +897,17 @@ pub fn init_dev() -> io::Result<()> {
     Ok(())
 }
 
-/// Hand eseqlisp the roots it cannot derive itself: the defmacro library and
-/// the relative-`(load …)` fallback roots. User scratch buffers load factory
-/// scripts with paths like `scripts/sequencers/x.lisp` (or the migrated
-/// `content/scripts/…` form); those resolved against the crate-dir cwd before
+/// Hand eseqlisp the roots it cannot derive itself: the defmacro library,
+/// patcher asset libraries, and relative-`(load …)` fallback roots. User
+/// scratch buffers load factory scripts with paths like
+/// `scripts/sequencers/x.lisp` (or the migrated `content/scripts/…` form); those resolved against the crate-dir cwd before
 /// the content/ split and must now fall back to the factory content root.
 fn configure_eseqlisp_roots(paths: &AppPaths) {
     eseqlisp::defmacro_library::set_default_library_root(paths.defmacros_dir());
+    eseqlisp::widget_render::patcher::set_asset_library_roots(
+        paths.user_assets_dir(),
+        paths.factory_assets_dir(),
+    );
     let factory_root = paths.factory_root();
     let mut roots = vec![factory_root.clone()];
     if let Some(parent) = factory_root.parent() {

@@ -1369,6 +1369,7 @@ fn draw_patch_with_view_key(
             node_rect,
             edit,
             &autocomplete_macros,
+            &interaction_state.autocomplete_asset_paths,
             viewport,
             zoom,
         );
@@ -1694,10 +1695,11 @@ fn push_autocomplete_panel(
     node_rect: Rect,
     edit: &PatcherTextEdit,
     local_macros: &[super::model::MacroPatch],
+    asset_paths: &[String],
     viewport: WidgetViewport,
     zoom: f32,
 ) {
-    let suggestions = patcher_autocomplete_suggestions(edit, local_macros);
+    let suggestions = patcher_autocomplete_suggestions(edit, local_macros, asset_paths);
     if suggestions.is_empty() {
         return;
     }

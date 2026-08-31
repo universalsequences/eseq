@@ -1,4 +1,5 @@
 mod alignment;
+mod assets;
 mod connect;
 mod display;
 mod emit;
@@ -31,6 +32,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use crate::defmacro_library::{DefmacroLibrary, DefmacroPackage};
 use crate::ui::platform::has_primary_shortcut_modifier;
 
+pub use assets::set_asset_library_roots;
 pub use connect::{PatcherConnectOp, PatcherConnectReport};
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
@@ -1172,6 +1174,7 @@ impl WidgetDefinition for PatcherWidget {
         let mut state = get_patcher_interaction_state(key);
         let view_key = active_patcher_view_key(&state);
         let autocomplete_macros = autocomplete_macros_for_state(node, &state, &view_key);
+        let autocomplete_asset_paths = state.autocomplete_asset_paths.clone();
         if let Ok((path, _)) = load_patch_from_props(&node.props) {
             state::register_patcher_path_key(path, key);
         }
@@ -1424,29 +1427,51 @@ impl WidgetDefinition for PatcherWidget {
             }
             KeyCode::Tab if state.text_edit.is_some() => {
                 if let Some(edit) = state.text_edit.as_mut() {
-                    apply_patcher_autocomplete(edit, &autocomplete_macros);
+                    apply_patcher_autocomplete(
+                        edit,
+                        &autocomplete_macros,
+                        &autocomplete_asset_paths,
+                    );
                 }
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Down
                 if state.text_edit.as_ref().is_some_and(|edit| {
-                    patcher_autocomplete_is_open(edit, &autocomplete_macros)
+                    patcher_autocomplete_is_open(
+                        edit,
+                        &autocomplete_macros,
+                        &autocomplete_asset_paths,
+                    )
                 }) =>
             {
                 if let Some(edit) = state.text_edit.as_mut() {
-                    move_patcher_autocomplete_selection(edit, &autocomplete_macros, 1);
+                    move_patcher_autocomplete_selection(
+                        edit,
+                        &autocomplete_macros,
+                        &autocomplete_asset_paths,
+                        1,
+                    );
                 }
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Up
                 if state.text_edit.as_ref().is_some_and(|edit| {
-                    patcher_autocomplete_is_open(edit, &autocomplete_macros)
+                    patcher_autocomplete_is_open(
+                        edit,
+                        &autocomplete_macros,
+                        &autocomplete_asset_paths,
+                    )
                 }) =>
             {
                 if let Some(edit) = state.text_edit.as_mut() {
-                    move_patcher_autocomplete_selection(edit, &autocomplete_macros, -1);
+                    move_patcher_autocomplete_selection(
+                        edit,
+                        &autocomplete_macros,
+                        &autocomplete_asset_paths,
+                        -1,
+                    );
                 }
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
@@ -1486,6 +1511,7 @@ impl WidgetDefinition for PatcherWidget {
                         clamp_patcher_autocomplete_selection_with_macros(
                             edit,
                             &autocomplete_macros,
+                            &autocomplete_asset_paths,
                         );
                         set_patcher_interaction_state(key, state);
                         Some(WidgetEvent::Custom(Value::Nil))

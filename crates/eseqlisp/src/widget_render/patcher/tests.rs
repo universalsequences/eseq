@@ -15801,7 +15801,7 @@ fn patcher_autocomplete_completes_attributes_for_the_active_operator() {
     };
 
     assert_eq!(
-        patcher_autocomplete_suggestions(&edit, &[])
+        patcher_autocomplete_suggestions(&edit, &[], &[])
             .into_iter()
             .map(|suggestion| suggestion.name)
             .collect::<Vec<_>>(),
@@ -15811,7 +15811,7 @@ fn patcher_autocomplete_completes_attributes_for_the_active_operator() {
     edit.text = "tensor @sh".to_string();
     edit.state.cursor_pos = 10;
     assert_eq!(
-        patcher_autocomplete_suggestions(&edit, &[])
+        patcher_autocomplete_suggestions(&edit, &[], &[])
             .into_iter()
             .map(|suggestion| suggestion.name)
             .collect::<Vec<_>>(),
@@ -15821,7 +15821,7 @@ fn patcher_autocomplete_completes_attributes_for_the_active_operator() {
         patcher_autocomplete_ghost_text(&edit, &[]).as_deref(),
         Some("ape")
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
     assert_eq!(edit.text, "tensor @shape ");
     assert_eq!(edit.state.cursor_pos, 14);
 }
@@ -15839,11 +15839,11 @@ fn patcher_attribute_autocomplete_is_filtered_by_operator_and_replaces_the_token
         },
         autocomplete_selected: 0,
     };
-    assert!(patcher_autocomplete_suggestions(&edit, &[]).is_empty());
+    assert!(patcher_autocomplete_suggestions(&edit, &[], &[]).is_empty());
 
     edit.text = "tensor @fi [512]".to_string();
     edit.state.cursor_pos = 10;
-    let suggestions = patcher_autocomplete_suggestions(&edit, &[]);
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
     assert_eq!(
         suggestions
             .iter()
@@ -15855,9 +15855,95 @@ fn patcher_attribute_autocomplete_is_filtered_by_operator_and_replaces_the_token
         patcher_autocomplete_ghost_text(&edit, &[]).is_none(),
         "ghost text must not obscure an authored suffix"
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
     assert_eq!(edit.text, "tensor @file [512]");
     assert_eq!(edit.state.cursor_pos, 13);
+}
+
+#[test]
+fn patcher_autocomplete_completes_file_attribute_values_after_bracketed_attributes() {
+    let asset_paths = vec![
+        "samples/kick.wav".to_string(),
+        "wavetables/basic-shapes.json".to_string(),
+        "wavetables/bright bank.json".to_string(),
+    ];
+    let text = "tensor @shape [512 448] @file \"wavetables/br".to_string();
+    let cursor_pos = text.chars().count();
+    let mut edit = PatcherTextEdit {
+        node_id: "draft".to_string(),
+        text,
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    };
+
+    assert_eq!(
+        patcher_autocomplete_suggestions(&edit, &[], &asset_paths)
+            .into_iter()
+            .map(|suggestion| suggestion.name)
+            .collect::<Vec<_>>(),
+        vec!["\"wavetables/bright bank.json\""]
+    );
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &asset_paths));
+    assert_eq!(
+        edit.text,
+        "tensor @shape [512 448] @file \"wavetables/bright bank.json\" "
+    );
+
+    edit.text = "tensor @shape [512 448] @default-file ".to_string();
+    edit.state.cursor_pos = edit.text.chars().count();
+    assert_eq!(
+        patcher_autocomplete_suggestions(&edit, &[], &asset_paths)
+            .into_iter()
+            .map(|suggestion| suggestion.name)
+            .collect::<Vec<_>>(),
+        vec![
+            "\"samples/kick.wav\"",
+            "\"wavetables/basic-shapes.json\"",
+            "\"wavetables/bright bank.json\"",
+        ]
+    );
+}
+
+#[test]
+fn patcher_asset_path_catalog_uses_draft_and_library_relative_spellings() {
+    let draft_source = temp_patcher_dsp_path("patcher-path-catalog-draft");
+    let user_source = temp_patcher_dsp_path("patcher-path-catalog-user");
+    let factory_source = temp_patcher_dsp_path("patcher-path-catalog-factory");
+    let draft_root = draft_source.parent().unwrap();
+    let user_root = user_source.parent().unwrap();
+    let factory_root = factory_source.parent().unwrap();
+    fs::create_dir_all(draft_root.join("waves")).unwrap();
+    fs::create_dir_all(user_root.join("wavetables")).unwrap();
+    fs::create_dir_all(factory_root.join("wavetables")).unwrap();
+    fs::write(&draft_source, "(out 0)").unwrap();
+    fs::write(draft_root.join("waves/draft.json"), "[]").unwrap();
+    fs::write(user_root.join("wavetables/shared.json"), "[]").unwrap();
+    fs::write(factory_root.join("wavetables/shared.json"), "[]").unwrap();
+    fs::write(factory_root.join("wavetables/factory.json"), "[]").unwrap();
+
+    let spellings = assets::collect_asset_path_spellings(
+        Some(draft_root),
+        Some(&draft_source),
+        &[user_root.to_path_buf(), factory_root.to_path_buf()],
+    );
+    assert_eq!(
+        spellings,
+        vec![
+            "waves/draft.json",
+            "wavetables/factory.json",
+            "wavetables/shared.json",
+        ]
+    );
+    assert!(!spellings.iter().any(|path| path.ends_with("dsp.lisp")));
+
+    fs::remove_dir_all(draft_root).unwrap();
+    fs::remove_dir_all(user_root).unwrap();
+    fs::remove_dir_all(factory_root).unwrap();
 }
 
 #[test]
@@ -15873,7 +15959,7 @@ fn patcher_autocomplete_documents_adsrexp_preamble_macro() {
         },
         autocomplete_selected: 0,
     };
-    let suggestions = patcher_autocomplete_suggestions(&edit, &[]);
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
     let adsrexp = suggestions
         .iter()
         .find(|suggestion| suggestion.name == "adsrexp")
@@ -15906,7 +15992,7 @@ fn patcher_autocomplete_documents_adsrexp_preamble_macro() {
             "fall_curve",
         ]
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
     assert_eq!(edit.text, "adsrexp ");
 }
 
@@ -15923,7 +16009,7 @@ fn patcher_autocomplete_documents_patcher_only_history_node() {
         },
         autocomplete_selected: 0,
     };
-    let suggestions = patcher_autocomplete_suggestions(&edit, &[]);
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
     let history = suggestions
         .iter()
         .find(|suggestion| suggestion.name == "history")
@@ -15944,7 +16030,7 @@ fn patcher_autocomplete_documents_patcher_only_history_node() {
         !dgenlisp_operator_names().contains("history"),
         "history is a patcher graph convenience, not a DGenLisp operator"
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
     assert_eq!(edit.text, "history ");
 }
 
@@ -21479,7 +21565,7 @@ fn patcher_undo_gesture_coalescing_skips_noop_transitions() {
     // A text-edit gesture that ends back at its base (cancelled created node)
     // records nothing either.
     let created = allocate_created_node(&mut state, "root", (1.0, 1.0));
-    text::begin_patcher_text_edit(&mut state, created, String::new(), 0);
+    text::begin_patcher_text_edit(&mut state, created, String::new(), 0, Vec::new());
     set_patcher_interaction_state(key, state.clone());
     cancel_patcher_text_edit(&mut state, "root");
     set_patcher_interaction_state(key, state);
