@@ -24,6 +24,7 @@ mod writeback;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -784,6 +785,175 @@ fn asset_drop_node_text(payload: &Value) -> Option<String> {
     Some(lisp::normalize_editor_node_text(&format!(
         "tensor @shape [{shape}] @file {quoted_reference}"
     )))
+}
+
+pub(crate) struct ImportedPatcherAsset {
+    pub(crate) output: super::EventOutput,
+    pub(crate) destination: PathBuf,
+}
+
+fn files_equal(left: &Path, right: &Path) -> std::io::Result<bool> {
+    if std::fs::metadata(left)?.len() != std::fs::metadata(right)?.len() {
+        return Ok(false);
+    }
+    let mut left = std::io::BufReader::new(std::fs::File::open(left)?);
+    let mut right = std::io::BufReader::new(std::fs::File::open(right)?);
+    let mut left_buffer = [0_u8; 64 * 1024];
+    let mut right_buffer = [0_u8; 64 * 1024];
+    loop {
+        let left_len = left.read(&mut left_buffer)?;
+        let right_len = right.read(&mut right_buffer)?;
+        if left_len != right_len || left_buffer[..left_len] != right_buffer[..right_len] {
+            return Ok(false);
+        }
+        if left_len == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn copy_asset_without_overwriting(
+    source: &Path,
+    waves_dir: &Path,
+) -> Result<(PathBuf, bool), String> {
+    let filename = source
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("Dropped asset has no file name: {}", source.display()))?;
+    let filename_path = Path::new(filename);
+    let stem = filename_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| {
+            format!(
+                "Dropped asset file name is not valid UTF-8: {}",
+                source.display()
+            )
+        })?;
+    let extension = filename_path.extension().and_then(|extension| extension.to_str());
+
+    std::fs::create_dir_all(waves_dir)
+        .map_err(|error| format!("Could not create {}: {error}", waves_dir.display()))?;
+    for suffix in 0_u64.. {
+        let candidate_name = if suffix == 0 {
+            filename.to_owned()
+        } else if let Some(extension) = extension {
+            format!("{stem}-{suffix}.{extension}").into()
+        } else {
+            format!("{stem}-{suffix}").into()
+        };
+        let destination = waves_dir.join(candidate_name);
+        if destination.exists() {
+            if files_equal(source, &destination).unwrap_or(false) {
+                return Ok((destination, false));
+            }
+            continue;
+        }
+
+        let mut input = std::fs::File::open(source).map_err(|error| {
+            format!(
+                "Could not open dropped asset {}: {error}",
+                source.display()
+            )
+        })?;
+        let mut output = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Could not create imported asset {}: {error}",
+                    destination.display()
+                ));
+            }
+        };
+        if let Err(error) = std::io::copy(&mut input, &mut output).and_then(|_| output.flush()) {
+            drop(output);
+            let _ = std::fs::remove_file(&destination);
+            return Err(format!(
+                "Could not copy dropped asset to {}: {error}",
+                destination.display()
+            ));
+        }
+        return Ok((destination, true));
+    }
+    unreachable!("u64 asset-name suffix space exhausted")
+}
+
+/// Copies an OS-dropped tensor asset under the patch's `waves/` directory and
+/// stages the same normalized tensor-node writeback used by sidebar drops.
+pub(crate) fn import_patcher_asset_file(
+    node: &LayoutNode,
+    source: &Path,
+    local_col: f32,
+    local_row: f32,
+) -> Result<ImportedPatcherAsset, String> {
+    if !source
+        .metadata()
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+    {
+        return Err(format!("Dropped asset is not a regular file: {}", source.display()));
+    }
+    assets::read_tensor_asset_shape(source).ok_or_else(|| {
+        format!(
+            "Dropped file is not a tensor JSON asset with a non-empty positive shape: {}",
+            source.display()
+        )
+    })?;
+    let patch_path = prop_str(&node.props, "path")
+        .or_else(|| prop_str(&node.props, "file"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "Patcher has no source path for asset import".to_string())?;
+    let draft_dir = patch_path.parent().ok_or_else(|| {
+        format!(
+            "Patcher source has no parent directory: {}",
+            patch_path.display()
+        )
+    })?;
+    let (destination, created_file) =
+        copy_asset_without_overwriting(source, &draft_dir.join("waves"))?;
+    let filename = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "Imported asset name is not valid UTF-8: {}",
+                destination.display()
+            )
+        })?;
+    let reference = format!("waves/{filename}");
+    let payload = Value::Map(HashMap::from([
+        (
+            "file".to_string(),
+            Rc::new(RefCell::new(Value::String(reference))),
+        ),
+        (
+            "source-path".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                destination.to_string_lossy().into_owned(),
+            ))),
+        ),
+    ]));
+    let Some(output) = handle_patcher_drop(
+        node,
+        PATCHER_ASSET_DRAG_TYPE,
+        &payload,
+        local_col,
+        local_row,
+    ) else {
+        if created_file {
+            let _ = std::fs::remove_file(&destination);
+        }
+        return Err("Could not insert a tensor node for the imported asset".to_string());
+    };
+    Ok(ImportedPatcherAsset {
+        output,
+        destination,
+    })
 }
 
 /// Drop a sidebar item onto the patcher canvas, then emit the standard

@@ -666,25 +666,39 @@ pub(crate) fn run_event_loop(
             match event {
                 BackendEvent::Quit => editor.request_quit(),
                 BackendEvent::FileDrop(paths) => {
-                    match SampleImportSession::from_drop(
-                        paths,
-                        &sequencer::app_paths::app_paths().sample_db_path(),
-                    ) {
-                        Ok(session) => {
-                            if session.is_empty() {
-                                editor.show_transient_message(
-                                    "No supported audio files found in dropped items",
-                                );
-                            } else {
-                                sample_import_session = Some(session);
-                                if let Some(session) = sample_import_session.as_ref() {
-                                    session.render_into_editor(&mut editor);
-                                }
-                                editor.show_transient_message("Sample import staged");
-                            }
+                    match editor.handle_patcher_file_drop(&paths, 0) {
+                        Ok(Some(imported)) => {
+                            editor.show_transient_message(format!(
+                                "Imported {imported} tensor asset into the patch draft"
+                            ));
                         }
                         Err(error) => {
-                            editor.show_transient_message(format!("Sample import failed: {error}"));
+                            editor.show_transient_message(format!("Asset import failed: {error}"));
+                        }
+                        Ok(None) => {
+                            match SampleImportSession::from_drop(
+                                paths,
+                                &sequencer::app_paths::app_paths().sample_db_path(),
+                            ) {
+                                Ok(session) => {
+                                    if session.is_empty() {
+                                        editor.show_transient_message(
+                                            "No supported audio files found in dropped items",
+                                        );
+                                    } else {
+                                        sample_import_session = Some(session);
+                                        if let Some(session) = sample_import_session.as_ref() {
+                                            session.render_into_editor(&mut editor);
+                                        }
+                                        editor.show_transient_message("Sample import staged");
+                                    }
+                                }
+                                Err(error) => {
+                                    editor.show_transient_message(format!(
+                                        "Sample import failed: {error}"
+                                    ));
+                                }
+                            }
                         }
                     }
                 }

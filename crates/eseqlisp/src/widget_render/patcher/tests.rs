@@ -267,6 +267,52 @@ fn dropping_asset_item_reads_shape_and_creates_file_backed_tensor() {
 }
 
 #[test]
+fn os_file_drop_copies_asset_under_waves_without_overwriting_and_inserts_tensor() {
+    let source = "(def input (in 1))\n(out input 1)";
+    let path = temp_patcher_dsp_path("patcher-os-asset-drop");
+    fs::write(&path, source).unwrap();
+    let waves = path.parent().unwrap().join("waves");
+    fs::create_dir(&waves).unwrap();
+    fs::write(waves.join("bank.json"), r#"{"shape":[1],"data":[0.0]}"#).unwrap();
+    let dropped_dir = std::env::temp_dir().join(format!(
+        "eseqlisp-patcher-dropped-asset-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dropped_dir);
+    fs::create_dir(&dropped_dir).unwrap();
+    let dropped = dropped_dir.join("bank.json");
+    fs::write(&dropped, r#"{"shape":[512,4],"data":[0.0,1.0]}"#).unwrap();
+    let node = patcher_test_node(&path);
+
+    let imported = import_patcher_asset_file(&node, &dropped, 40.0, 15.0).unwrap();
+
+    assert_eq!(imported.destination, waves.join("bank-1.json"));
+    assert_eq!(
+        fs::read_to_string(waves.join("bank.json")).unwrap(),
+        r#"{"shape":[1],"data":[0.0]}"#,
+        "an existing draft asset must never be overwritten"
+    );
+    assert_eq!(
+        fs::read_to_string(&imported.destination).unwrap(),
+        fs::read_to_string(&dropped).unwrap()
+    );
+    let state = get_patcher_interaction_state(patcher_state_key(&node));
+    assert!(state.edit_state.nodes.values().any(|edit| {
+        edit.text == "tensor @shape [512 4] @file \"waves/bank-1.json\""
+    }));
+    let Value::Map(payload) = &imported.output.args[0] else {
+        panic!("writeback payload should be a map");
+    };
+    let Value::String(emitted) = payload.get("source").unwrap().borrow().clone() else {
+        panic!("payload source should be a string");
+    };
+    assert!(emitted.contains("@file \"waves/bank-1.json\""));
+
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    fs::remove_dir_all(dropped_dir).unwrap();
+}
+
+#[test]
 fn navigate_patcher_view_preserves_staged_edits() {
     let path = std::env::temp_dir().join(format!(
         "eseqlisp-patcher-navigate-{}.lisp",

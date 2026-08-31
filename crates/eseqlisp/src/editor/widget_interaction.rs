@@ -1912,6 +1912,45 @@ impl Editor {
         )
     }
 
+    pub(super) fn import_external_patcher_asset_at(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Result<Option<usize>, String> {
+        let Some(layout) = self.runtime.current_layout.as_ref() else {
+            return Ok(None);
+        };
+        let local_col = precise_col - content_col as f32 + self.widget_layout_scroll_left();
+        let local_row = precise_row - content_row as f32 + self.total_scroll_top();
+        let Some((target, hit_row, hit_col)) = deepest_drop_target(
+            layout,
+            local_row,
+            local_col,
+            widget_render::patcher::PATCHER_ASSET_DRAG_TYPE,
+        ) else {
+            return Ok(None);
+        };
+        if paths.len() != 1 {
+            return Err("Drop exactly one tensor JSON asset onto the patcher canvas".to_string());
+        }
+        let imported = widget_render::patcher::import_patcher_asset_file(
+            &target,
+            &paths[0],
+            hit_col,
+            hit_row,
+        )?;
+        if !self.apply_widget_output(Some(imported.output)) {
+            return Err(format!(
+                "Imported {} but could not apply the patcher writeback",
+                imported.destination.display()
+            ));
+        }
+        Ok(Some(1))
+    }
+
     pub(super) fn dispatch_widget_drop_event(
         &self,
         gesture: &WidgetGesture,
