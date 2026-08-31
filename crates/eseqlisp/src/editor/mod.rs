@@ -3047,14 +3047,18 @@ impl Editor {
     }
 
     /// Imports one tensor JSON file when the OS drop lands on a patcher canvas.
-    /// `Ok(None)` means the pointer was not over a patcher and lets the host
-    /// route the same drop to its ordinary sample importer.
+    /// `Ok(None)` means the drop is not a single-`.json` drop over a patcher
+    /// and lets the host route it to its ordinary sample importer.
     pub fn handle_patcher_file_drop(
         &mut self,
         paths: &[std::path::PathBuf],
+        drop_position: Option<(f32, f32)>,
         border_inset: u16,
     ) -> Result<Option<usize>, String> {
-        let Some((screen_col, screen_row)) = self.last_pointer_screen else {
+        // Prefer the backend-reported drop position: during an external OS
+        // drag no mouse events reach the editor, so the tracked pointer is
+        // wherever the cursor last was before the drag started.
+        let Some((screen_col, screen_row)) = drop_position.or(self.last_pointer_screen) else {
             return Ok(None);
         };
         let Some(tile_id) = self.tile_at_screen(screen_col, screen_row) else {

@@ -1920,6 +1920,19 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> Result<Option<usize>, String> {
+        // Only a single .json file is a candidate tensor-asset import; anything
+        // else (audio files, multi-file drops) falls through to the host's
+        // sample importer even when the pointer is over a patcher.
+        let [path] = paths else {
+            return Ok(None);
+        };
+        if !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        {
+            return Ok(None);
+        }
         let Some(layout) = self.runtime.current_layout.as_ref() else {
             return Ok(None);
         };
@@ -1933,15 +1946,8 @@ impl Editor {
         ) else {
             return Ok(None);
         };
-        if paths.len() != 1 {
-            return Err("Drop exactly one tensor JSON asset onto the patcher canvas".to_string());
-        }
-        let imported = widget_render::patcher::import_patcher_asset_file(
-            &target,
-            &paths[0],
-            hit_col,
-            hit_row,
-        )?;
+        let imported =
+            widget_render::patcher::import_patcher_asset_file(&target, path, hit_col, hit_row)?;
         if !self.apply_widget_output(Some(imported.output)) {
             return Err(format!(
                 "Imported {} but could not apply the patcher writeback",

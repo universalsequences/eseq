@@ -665,8 +665,8 @@ pub(crate) fn run_event_loop(
             let event_started = Instant::now();
             match event {
                 BackendEvent::Quit => editor.request_quit(),
-                BackendEvent::FileDrop(paths) => {
-                    match editor.handle_patcher_file_drop(&paths, 0) {
+                BackendEvent::FileDrop(paths, drop_position) => {
+                    match editor.handle_patcher_file_drop(&paths, drop_position, 0) {
                         Ok(Some(imported)) => {
                             editor.show_transient_message(format!(
                                 "Imported {imported} tensor asset into the patch draft"
