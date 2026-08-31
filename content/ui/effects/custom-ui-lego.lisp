@@ -537,7 +537,7 @@
             (dropdown :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
-              :bg-color :instrument-control-bg
+              :bg-color :mixer-strip-selected-bg
               :text-color accent
               :chevron-color accent
               :badge-color :dropdown-badge-bg
@@ -566,7 +566,7 @@
             (dropdown :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
-              :bg-color :instrument-control-bg
+              :bg-color :mixer-strip-selected-bg
               :text-color accent
               :chevron-color accent
               :badge-color :dropdown-badge-bg
@@ -596,9 +596,9 @@
             (dropdown :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
-              :bg-color :instrument-control-bg
+              :bg-color :mixer-strip-selected-bg
               :text-color accent
-              :chevron-color accent
+              :chevron-color :black
               :badge-color :dropdown-badge-bg
               :border-color :border-inactive
               :border-width 0.05
