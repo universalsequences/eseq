@@ -41,7 +41,8 @@ pub use connect::{PatcherConnectOp, PatcherConnectReport};
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CableSegmentInfo,
-    CallSourceShape, ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroOrigin,
+    CallSourceShape, ConnectionKind, ConnectionSource, ConnectionSourceTarget, ExprPath,
+    ExprPathSegment, MacroOrigin,
     MacroPatch, NodeKind, NodeSource, Patch, PatchConnection, PatchNode, PatcherIntent,
     SourceArgValue, SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
 };

@@ -29,7 +29,10 @@ use super::metrics::{
     SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS, SEGMENTED_CABLE_DRAG_PADDING_CELLS,
     WHEEL_PAN_STEP_CELLS,
 };
-use super::model::{CableEndpoint, CableSegmentInfo, InputPortRef, NodeKind, OutputPortRef, Patch};
+use super::model::{
+    CableEndpoint, CableSegmentInfo, InputPortRef, NodeKind, OutputPortRef, PARAM_OPTIONS_INPUT,
+    Patch, is_tensor_options_source,
+};
 use super::state::{
     AlignmentAxis, AlignmentSnapState, PatcherClipboard, PatcherClipboardConnection,
     PatcherClipboardNode, PatcherDragState, PatcherInteractionState, PatcherMacroEdit,
@@ -770,10 +773,38 @@ fn maybe_emit_alignment_haptic(
     trigger_alignment_haptic();
 }
 
+/// Param inlets are semantic `@options` links, not summing DSP inputs: they
+/// accept exactly one tensor outlet. Ordinary endpoints retain the patcher's
+/// normal permissive summing-inlet behavior.
+fn connection_endpoints_are_valid(
+    patch: &Patch,
+    from: &OutputPortRef,
+    to: &InputPortRef,
+    replaced_cable_id: Option<&str>,
+) -> bool {
+    let Some(target) = patch.nodes.iter().find(|node| node.id == to.node_id) else {
+        return false;
+    };
+    if target.kind != NodeKind::Param {
+        return true;
+    }
+    let Some(source) = patch.nodes.iter().find(|node| node.id == from.node_id) else {
+        return false;
+    };
+    to.input_index == PARAM_OPTIONS_INPUT
+        && from.output_index == 0
+        && is_tensor_options_source(source)
+        && !patch.connections.iter().any(|connection| {
+            connection.to_node == to.node_id
+                && connection.to_input == PARAM_OPTIONS_INPUT
+                && replaced_cable_id
+                    .is_none_or(|cable_id| source_connection_id(connection) != cable_id)
+        })
+}
+
 /// Move one endpoint of `cable_id` onto `from`/`to`. Returns whether the patch
 /// actually changed: dropping the endpoint back where it started, or onto an
-/// edge the patch already carries, must not mint a second identical cable — an
-/// inlet sums its cables, so a duplicate doubles the signal.
+/// edge the patch already carries, must not mint a second identical cable.
 fn retarget_cable(
     state: &mut PatcherInteractionState,
     patch: &Patch,
@@ -782,6 +813,9 @@ fn retarget_cable(
     from: OutputPortRef,
     to: InputPortRef,
 ) -> bool {
+    if !connection_endpoints_are_valid(patch, &from, &to, Some(cable_id)) {
+        return false;
+    }
     let new_id = connection_id_from_ports(&from, &to);
     if new_id == cable_id {
         return false;
@@ -849,13 +883,15 @@ pub(super) fn handle_patcher_pointer_up(
             // Re-dragging an edge that already exists must not mint a second
             // one: an inlet sums its cables, so the duplicate would double the
             // signal.
-            if !connection_exists(
-                &patch,
-                &from.node_id,
-                from.output_index,
-                &target.node_id,
-                target.input_index,
-            ) {
+            if connection_endpoints_are_valid(&patch, &from, &target, None)
+                && !connection_exists(
+                    &patch,
+                    &from.node_id,
+                    from.output_index,
+                    &target.node_id,
+                    target.input_index,
+                )
+            {
                 allocate_created_connection(&mut state, &view_key, from, target);
                 semantic_changed = true;
             }

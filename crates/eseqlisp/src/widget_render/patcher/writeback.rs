@@ -12,7 +12,8 @@ use super::lisp::{
 use super::model::{
     ArgValue, BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind,
     OutputPortRef, Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId,
-    SourceFormId, SourceOwner, SourceScopeId,
+    SourceFormId, SourceOwner, SourceScopeId, is_param_options_connection,
+    options_connection_is_valid,
 };
 use super::project::{dgenlisp_operator_names, dgenlisp_operator_required_input_counts};
 use super::state::{
@@ -359,6 +360,32 @@ fn validate_connection_edits(
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
 ) -> Result<(), WriteBackError> {
+    for view_key in writeback_views(root_patch, interaction_state) {
+        let Some(patch) = patch_for_view(root_patch, &view_key) else {
+            continue;
+        };
+        let visible = super::state::patch_with_interaction_state(
+            patch.clone(),
+            interaction_state,
+            &view_key,
+        );
+        let mut options_targets = HashSet::new();
+        for connection in visible
+            .connections
+            .iter()
+            .filter(|connection| is_param_options_connection(&visible, connection))
+        {
+            if !options_connection_is_valid(&visible, connection)
+                || !options_targets.insert(connection.to_node.as_str())
+            {
+                return Err(WriteBackError::UnsupportedCreatedConnection {
+                    view_key: view_key.clone(),
+                    connection_id: source_connection_id(connection),
+                });
+            }
+        }
+    }
+
     for edit in interaction_state.edit_state.connections.values() {
         match edit.origin {
             PatcherConnectionOrigin::Created { .. } => {
@@ -3865,24 +3892,52 @@ fn rewrite_created_value_consumers(
                 reason: "generated binding consumer must be source-backed".to_string(),
             });
         };
-        rewrite_node_input(
-            document,
-            view_key,
-            dest,
-            connection.to.input_index,
-            Expression::Symbol(
-                generated
-                    .get_output(view_key, &edit.id, connection.from.output_index)
-                    .unwrap_or_else(|| {
-                        generated
-                            .get(view_key, &edit.id)
-                            .expect("generated binding has output zero")
-                    })
-                    .to_string(),
-            ),
-        )?;
+        let value = Expression::Symbol(
+            generated
+                .get_output(view_key, &edit.id, connection.from.output_index)
+                .unwrap_or_else(|| {
+                    generated
+                        .get(view_key, &edit.id)
+                        .expect("generated binding has output zero")
+                })
+                .to_string(),
+        );
+        if dest.kind == NodeKind::Param {
+            rewrite_param_options(document, view_key, dest, Some(value))?;
+        } else {
+            rewrite_node_input(
+                document,
+                view_key,
+                dest,
+                connection.to.input_index,
+                value,
+            )?;
+        }
     }
     Ok(())
+}
+
+fn rewrite_param_options(
+    document: &mut SourceDocument,
+    view_key: &str,
+    node: &PatchNode,
+    value: Option<Expression>,
+) -> Result<(), WriteBackError> {
+    let Some(call) = node
+        .source
+        .as_ref()
+        .and_then(|source| source.call_shape.as_ref())
+        .map(|shape| &shape.call)
+    else {
+        return Err(WriteBackError::UnsupportedGeneratedBinding {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "param options consumer has no source-owned call".to_string(),
+        });
+    };
+    document
+        .replace_call_attribute(call, "@options", value)
+        .map_err(|error| writeback_error_with_node(error, view_key, &node.id))
 }
 
 fn rewrite_node_input(
@@ -4059,13 +4114,19 @@ fn apply_cable_writeback(
                 connection_id,
             });
         };
-        rewrite_node_input(
-            document,
-            &view_key,
-            dest,
-            connection.to_input,
-            Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()),
-        )?;
+        if patch_for_view(root_patch, &view_key)
+            .is_some_and(|patch| is_param_options_connection(patch, connection))
+        {
+            rewrite_param_options(document, &view_key, dest, None)?;
+        } else {
+            rewrite_node_input(
+                document,
+                &view_key,
+                dest,
+                connection.to_input,
+                Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()),
+            )?;
+        }
     }
 
     // Pass 2: source-backed cables whose endpoints changed.
@@ -4143,16 +4204,19 @@ fn apply_cable_writeback(
         ) {
             continue;
         }
-        // Apply the edit to the destination node's source-owned call shape.
-        // The helper preserves semantic input indexes and inserts sentinel
-        // values for any missing positional gaps before attributes.
-        rewrite_node_input(
-            document,
-            &connection.view_key,
-            dest,
-            connection.to.input_index,
-            value,
-        )?;
+        // A param's only inlet owns the binding-valued `@options` attribute;
+        // every other inlet rewrites a positional argument.
+        if dest.kind == NodeKind::Param {
+            rewrite_param_options(document, &connection.view_key, dest, Some(value))?;
+        } else {
+            rewrite_node_input(
+                document,
+                &connection.view_key,
+                dest,
+                connection.to.input_index,
+                value,
+            )?;
+        }
         reorder_destination_after_new_dependency(
             document,
             root_patch,
@@ -4332,13 +4396,19 @@ fn apply_source_connection_edit_writeback(
     let same_destination =
         original.to_node == edit.to.node_id && original.to_input == edit.to.input_index;
     if !same_destination {
-        rewrite_node_input(
-            document,
-            &edit.view_key,
-            original_dest,
-            original.to_input,
-            Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()),
-        )?;
+        if patch_for_view(root_patch, &edit.view_key)
+            .is_some_and(|patch| is_param_options_connection(patch, original))
+        {
+            rewrite_param_options(document, &edit.view_key, original_dest, None)?;
+        } else {
+            rewrite_node_input(
+                document,
+                &edit.view_key,
+                original_dest,
+                original.to_input,
+                Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()),
+            )?;
+        }
     }
     let value = value_reference_expr(
         document,
@@ -4349,13 +4419,17 @@ fn apply_source_connection_edit_writeback(
         &edit.view_key,
         &edit.from,
     )?;
-    rewrite_node_input(
-        document,
-        &edit.view_key,
-        new_dest,
-        edit.to.input_index,
-        value,
-    )?;
+    if new_dest.kind == NodeKind::Param {
+        rewrite_param_options(document, &edit.view_key, new_dest, Some(value))?;
+    } else {
+        rewrite_node_input(
+            document,
+            &edit.view_key,
+            new_dest,
+            edit.to.input_index,
+            value,
+        )?;
+    }
     reorder_destination_after_new_dependency(
         document,
         root_patch,
@@ -4640,7 +4714,7 @@ fn deleted_write_value_expr(
             return connection
                 .source
                 .as_ref()
-                .map(|source| source.to_arg.expr.clone());
+                .map(|source| source.target.expr().clone());
         }
     }
     None
@@ -5854,6 +5928,53 @@ impl SourceDocument {
             });
         };
         replace_or_insert_positional_arg(items, semantic_index, value);
+        Ok(())
+    }
+
+    fn replace_call_attribute(
+        &mut self,
+        call: &SourceExprId,
+        attribute: &str,
+        value: Option<Expression>,
+    ) -> Result<(), WriteBackError> {
+        let Some(form) = self.form_expr_mut(&call.form_id.scope, call.form_id.index) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(&call.form_id.scope),
+                node_id: String::new(),
+                reason: format!("missing source form {}", call.form_id.index),
+            });
+        };
+        let Some(expr) = expr_at_path_mut(form, &call.path.0) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(&call.form_id.scope),
+                node_id: String::new(),
+                reason: "source expression path does not resolve".to_string(),
+            });
+        };
+        let Expression::List(items) = expr else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(&call.form_id.scope),
+                node_id: String::new(),
+                reason: "source expression path does not point to a call".to_string(),
+            });
+        };
+        let mut idx = 1;
+        while idx < items.len() {
+            if matches!(&items[idx], Expression::Symbol(key) if key == attribute) {
+                let span = attribute_span_len(items, idx);
+                items.drain(idx..items.len().min(idx + span));
+                break;
+            }
+            idx += if is_attribute_key(&items[idx]) {
+                attribute_span_len(items, idx)
+            } else {
+                1
+            };
+        }
+        if let Some(value) = value {
+            items.push(Expression::Symbol(attribute.to_string()));
+            items.push(value);
+        }
         Ok(())
     }
 

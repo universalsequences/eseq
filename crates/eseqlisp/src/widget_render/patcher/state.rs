@@ -2731,7 +2731,11 @@ fn editor_param_node_info(
                 if key == "@mod" && value == "true"
         )
     });
-    Some(ParamNodeInfo { name, modulatable })
+    Some(ParamNodeInfo {
+        name,
+        modulatable,
+        options_tensor: None,
+    })
 }
 
 fn parse_editor_node_items(text: &str) -> Result<Vec<Expression>, String> {

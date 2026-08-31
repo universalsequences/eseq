@@ -32,6 +32,10 @@ pub enum ArgValue {
 pub struct ParamNodeInfo {
     pub name: String,
     pub modulatable: bool,
+    /// The authored tensor binding behind `@options`, when projection resolved it
+    /// into an options cable. This survives graph serialization so deleting that
+    /// cable removes the attribute instead of exposing stale source text.
+    pub options_tensor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,8 +176,23 @@ pub enum BindingKind {
 pub struct ConnectionSource {
     pub from_expr: Option<SourceExprId>,
     pub to_call: SourceExprId,
-    pub to_arg: ArgSource,
+    pub target: ConnectionSourceTarget,
     pub previous_arg: SourceArgValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionSourceTarget {
+    Argument(ArgSource),
+    Attribute(AttributeSource),
+}
+
+impl ConnectionSourceTarget {
+    pub fn expr(&self) -> &SourceExprId {
+        match self {
+            Self::Argument(arg) => &arg.expr,
+            Self::Attribute(attribute) => &attribute.value,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +249,35 @@ pub enum InputPresentation {
     Cable,
     InlineRawParam,
     InlineModParam,
+}
+
+/// The sole semantic inlet on a param node. A cable here declares
+/// `@options <source-binding>` rather than a positional DSP input.
+pub const PARAM_OPTIONS_INPUT: usize = 0;
+
+pub fn is_tensor_options_source(node: &PatchNode) -> bool {
+    matches!(node.op.as_str(), "tensor" | "tensor-param")
+}
+
+pub fn is_param_options_connection(patch: &Patch, connection: &PatchConnection) -> bool {
+    connection.to_input == PARAM_OPTIONS_INPUT
+        && patch
+            .nodes
+            .iter()
+            .find(|node| node.id == connection.to_node)
+            .is_some_and(|node| node.kind == NodeKind::Param)
+}
+
+pub fn options_connection_is_valid(patch: &Patch, connection: &PatchConnection) -> bool {
+    if !is_param_options_connection(patch, connection) {
+        return true;
+    }
+    connection.from_output == 0
+        && patch
+            .nodes
+            .iter()
+            .find(|node| node.id == connection.from_node)
+            .is_some_and(is_tensor_options_source)
 }
 
 #[derive(Debug, Clone)]

@@ -12,7 +12,7 @@ use super::interaction::*;
 use super::lisp::parse_editor_node_text;
 use super::metrics::*;
 use super::model::{
-    CableEndpoint, InputPortRef, InputPresentation, OutputPortRef,
+    CableEndpoint, ConnectionSourceTarget, InputPortRef, InputPresentation, OutputPortRef,
     connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
 use super::project::{dgenlisp_operator_documentation, dgenlisp_operator_names};
@@ -6728,8 +6728,11 @@ fn source_metadata_tracks_history_compound_ownership_and_connections() {
         feedback_source.to_call,
         source_expr(SourceScopeId::Root, 3, &[])
     );
-    assert_eq!(feedback_source.to_arg.semantic_index, 1);
-    assert_eq!(feedback_source.to_arg.item_index, 2);
+    let ConnectionSourceTarget::Argument(feedback_arg) = &feedback_source.target else {
+        panic!("feedback destination should be positional");
+    };
+    assert_eq!(feedback_arg.semantic_index, 1);
+    assert_eq!(feedback_arg.item_index, 2);
 
     assert!(
         patch
@@ -6739,8 +6742,11 @@ fn source_metadata_tracks_history_compound_ownership_and_connections() {
                 && connection.kind == ConnectionKind::Forward
                 && connection.source.as_ref().is_some_and(|source| {
                     source.to_call == source_expr(SourceScopeId::Root, 2, &[2])
-                        && source.to_arg.semantic_index == 0
-                        && source.to_arg.item_index == 1
+                        && matches!(
+                            &source.target,
+                            ConnectionSourceTarget::Argument(arg)
+                                if arg.semantic_index == 0 && arg.item_index == 1
+                        )
                 }))
     );
 }
@@ -22900,6 +22906,125 @@ fn tensor_data_attribute_survives_writeback_round_trip() {
     assert!(
         generated.contains("@shape [3 3]") && generated.contains("@data [0 1 0 1 -4 1 0 1 0]"),
         "generated source lost the attribute arrays:\n{generated}"
+    );
+}
+
+#[test]
+fn tensor_param_options_attribute_projects_as_a_cable_and_round_trips() {
+    let source = "(def bank (tensor @shape [512 4] @file \"waves/basic.json\"))\n\
+(param table @options bank @default 0)\n";
+    let patch = parse(source);
+    let tensor = patch.nodes.iter().find(|node| node.id == "bank").unwrap();
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.param.as_ref().is_some_and(|param| param.name == "table"))
+        .unwrap();
+    let options = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == param.id)
+        .expect("@options tensor reference should project as a cable");
+    assert_eq!(options.from_node, tensor.id);
+    assert_eq!(options.to_input, super::model::PARAM_OPTIONS_INPUT);
+    assert!(
+        !node_display_label(param).contains("@options"),
+        "the cable is the patcher surface for the binding-valued attribute"
+    );
+    assert_eq!(patch_input_indices(&patch).get(&param.id), Some(&vec![0]));
+
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+    let tensor_pos = generated.find("(def bank (tensor").unwrap();
+    let param_pos = generated
+        .find("(param table @default 0 @options bank)")
+        .unwrap_or_else(|| panic!("options binding was not emitted:\n{generated}"));
+    assert!(
+        tensor_pos < param_pos,
+        "options tensor must be defined before the param resolves it:\n{generated}"
+    );
+    assert_generation_roundtrip(
+        "tensor-param-options",
+        source,
+        PatcherIntent::Instrument,
+        None,
+    );
+}
+
+#[test]
+fn dragging_tensor_to_param_emits_options_and_deleting_the_cable_removes_it() {
+    let source = "(def bank (tensor @shape [512 4] @file \"waves/basic.json\"))\n\
+(param table @default 0)\n";
+    let root = parse(source);
+    let param_id = root
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Param)
+        .unwrap()
+        .id
+        .clone();
+    let mut state = PatcherInteractionState::default();
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: "bank".to_string(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: param_id.clone(),
+            input_index: super::model::PARAM_OPTIONS_INPUT,
+        },
+    );
+    let written = emit_patch_writeback(source, PatcherIntent::Instrument, &state)
+        .expect("surgical writeback options cable");
+    assert!(written.contains("@options bank"), "{written}");
+
+    let visible = sidecar::root_patch_with_interaction(&root, &state);
+    let generated = super::generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate options cable")
+        .source;
+    assert!(
+        generated.contains("(param table @default 0 @options bank)"),
+        "created cable did not emit @options with the claimed binding:\n{generated}"
+    );
+
+    let imported = parse(&generated);
+    let options = imported
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == param_id)
+        .unwrap();
+    let mut deleted = PatcherInteractionState::default();
+    deleted
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", &source_connection_id(options)));
+    let surgically_deleted = emit_patch_writeback(&generated, PatcherIntent::Instrument, &deleted)
+        .expect("surgical deletion of options cable");
+    assert!(!surgically_deleted.contains("@options"), "{surgically_deleted}");
+
+    let visible = sidecar::root_patch_with_interaction(&imported, &deleted);
+    let regenerated = super::generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate after deleting options cable")
+        .source;
+    assert!(!regenerated.contains("@options"), "{regenerated}");
+}
+
+#[test]
+fn inline_param_options_remain_an_attribute_without_a_cable() {
+    let source = "(param mode @options [\"lowpass\" \"highpass\"] @default 0)\n";
+    let patch = parse(source);
+    assert!(patch.connections.is_empty());
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .expect("generate inline options")
+        .source;
+    assert!(
+        generated.contains("@options")
+            && generated.contains("\"lowpass\"")
+            && generated.contains("\"highpass\""),
+        "{generated}"
     );
 }
 
