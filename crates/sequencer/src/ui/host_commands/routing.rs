@@ -391,6 +391,8 @@ pub(super) fn handle(
                     let print_gesture = printable
                         && try_latch_param_print(
                             ctx.shared,
+                            &mut *editor,
+                            &app,
                             track,
                             &[(PrintTarget::BusEffect {
                                 bus_idx,
@@ -539,6 +541,8 @@ pub(super) fn handle(
                         let print_gesture = printable
                             && try_latch_param_print(
                                 ctx.shared,
+                                &mut *editor,
+                                &app,
                                 track,
                                 &[(PrintTarget::BusEffect {
                                     bus_idx,

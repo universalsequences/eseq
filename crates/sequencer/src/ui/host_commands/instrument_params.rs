@@ -92,6 +92,17 @@ pub(super) fn handle(
                             // target, so clear or republish its engine-only
                             // override at the same latch transition.
                             print.publish_engine_override(&state);
+                            drop(print);
+                            // The base write is skipped, so the knob's own
+                            // display binding has to follow the latch here or
+                            // it only moves when the playhead crosses a step.
+                            // Visual only — the sound stays step-quantized.
+                            sync_print_latch_display(
+                                &mut editor,
+                                &app,
+                                track,
+                                &[(PrintTarget::Instrument { param_idx }, stored)],
+                            );
                         } else {
                             if !wrote_neural_plock {
                                 app::apply_command(
@@ -1269,6 +1280,33 @@ mod tests {
             default_before,
             "printing must never write the instrument base value"
         );
+        // The print branch skips the base write, so it owes the touched
+        // control's own display binding the LATCHED value right now — before
+        // any playhead crossing runs `sync_fx_param_bindings_delta`. Without
+        // this the knob only moves once per step (very visible at slow BPM).
+        {
+            let param_name = descriptor.params[PARAM].name.clone();
+            let expected = descriptor.params[PARAM].stored_to_user(0.74) as f64;
+            for field in [
+                instrument_param_value_field(TRACK, PARAM, &param_name),
+                fx_instrument_param_value_field(PARAM, &param_name),
+            ] {
+                assert_eq!(
+                    reactive_number(&editor, &field),
+                    expected,
+                    "the knob's bound display field must follow the print latch \
+                     before any step crossing"
+                );
+            }
+        }
+        assert_eq!(
+            (
+                fx_epoch.load(Ordering::Relaxed),
+                ui_epoch.load(Ordering::Relaxed),
+            ),
+            print_epochs_before,
+            "the display-only latch mirror must not bump any epoch"
+        );
         let tick = tick_step_print(&mut app, &shared, editor.runtime_mut());
         assert!(tick.printed);
         assert_eq!(
@@ -1334,6 +1372,31 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(effect_slot.defaults.get(2), effect_default_before);
+        // Same contract for a track effect knob: its bound field follows the
+        // latch immediately, in stored units (matching
+        // `sync_track_effect_param_value_field`), with no epoch bump.
+        assert_eq!(
+            reactive_number(
+                &editor,
+                &track_effect_param_value_field(
+                    TRACK,
+                    EFFECT_SLOT,
+                    2,
+                    &descriptor.params[2].name,
+                ),
+            ),
+            1_800.0,
+            "the effect knob's bound display field must follow the print latch \
+             before any step crossing"
+        );
+        assert_eq!(
+            (
+                fx_epoch.load(Ordering::Relaxed),
+                ui_epoch.load(Ordering::Relaxed),
+            ),
+            epochs_before,
+            "the effect display-only latch mirror must not bump any epoch"
+        );
         assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
         assert_eq!(effect_slot.plocks.get(PRINT_STEP, 2), Some(1_800.0));
         assert_eq!(

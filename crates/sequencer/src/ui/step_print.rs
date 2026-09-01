@@ -207,12 +207,215 @@ impl StepPrintState {
     }
 }
 
+/// The reactive display field(s) a device print target's own control binds to,
+/// paired with the latched value rendered the way that control's normal sync
+/// path renders it (instrument and rack-instrument params are published in
+/// user units; every other family publishes the stored value as-is).
+///
+/// Step targets are absent on purpose: their pickers are re-asserted every
+/// armed frame by `sync_print_display_fields`.
+fn print_latch_display_updates(
+    app: &app::App,
+    track: usize,
+    targets: &[(PrintTarget, f32)],
+) -> Vec<(String, Value)> {
+    let mut updates: Vec<(String, Value)> = Vec::new();
+    for (target, value) in targets {
+        let value = *value;
+        match target {
+            PrintTarget::Step(_) => {}
+            PrintTarget::Instrument { param_idx } => {
+                if let Some(pdesc) = app
+                    .graph
+                    .instrument_descriptors
+                    .get(track)
+                    .and_then(|desc| desc.params.get(*param_idx))
+                {
+                    let user = Value::Number(pdesc.stored_to_user(value) as f64);
+                    // The *fx* panel binds the track-relative alias; the
+                    // per-track instrument panel binds the absolute one.
+                    // `sync_fx_param_binding_fields` writes both, so both must
+                    // follow the latch.
+                    updates.push((
+                        instrument_param_value_field(track, *param_idx, &pdesc.name),
+                        user.clone(),
+                    ));
+                    updates.push((
+                        fx_instrument_param_value_field(*param_idx, &pdesc.name),
+                        user,
+                    ));
+                }
+            }
+            PrintTarget::Effect { slot_idx, param_idx } => {
+                if let Some(pdesc) = app
+                    .graph
+                    .effect_descriptors
+                    .get(track)
+                    .and_then(|slots| slots.get(*slot_idx))
+                    .and_then(|desc| desc.params.get(*param_idx))
+                {
+                    updates.push((
+                        track_effect_param_value_field(
+                            track, *slot_idx, *param_idx, &pdesc.name,
+                        ),
+                        Value::Number(value as f64),
+                    ));
+                }
+            }
+            PrintTarget::BusEffect { bus_idx, slot_idx, param_idx } => {
+                if let Some(pdesc) = app
+                    .buses
+                    .get(*bus_idx)
+                    .and_then(|bus| bus.effect_descriptors.get(*slot_idx))
+                    .and_then(|desc| desc.params.get(*param_idx))
+                {
+                    updates.push((
+                        bus_effect_param_value_field(
+                            *bus_idx, *slot_idx, *param_idx, &pdesc.name,
+                        ),
+                        Value::Number(value as f64),
+                    ));
+                }
+            }
+            PrintTarget::MidiFx { slot_idx, param_idx } => {
+                let Some(track_params) = app.state.pattern.track_params.get(track) else {
+                    continue;
+                };
+                if let Some(pdesc) = track_params
+                    .midi_fx_chain()
+                    .get(*slot_idx)
+                    .and_then(|fx_name| sequencer::lisp_host::load_midi_fx_descriptor(fx_name))
+                    .and_then(|desc| desc.params.get(*param_idx).cloned())
+                {
+                    updates.push((
+                        midi_fx_param_value_field(track, *slot_idx, *param_idx, &pdesc.name),
+                        Value::Number(value as f64),
+                    ));
+                }
+            }
+            PrintTarget::RackMacro { macro_idx } => {
+                updates.push((
+                    rack_macro_value_field(track, *macro_idx),
+                    Value::Number(value as f64),
+                ));
+            }
+            PrintTarget::RackSlotParam { slot_idx, param } => {
+                updates.push((
+                    rack_slot_value_field(track, *slot_idx, *param),
+                    if matches!(
+                        param,
+                        RackSlotParam::Mute | RackSlotParam::Solo
+                    ) {
+                        Value::Bool(value > 0.5)
+                    } else {
+                        Value::Number(value as f64)
+                    },
+                ));
+            }
+            PrintTarget::RackSlotInstrument { slot_idx, param_idx } => {
+                let racks = app.state.pattern.rack_tracks.lock().unwrap();
+                let Some(slot) = racks
+                    .get(track)
+                    .and_then(Option::as_ref)
+                    .and_then(|rack| rack.slots.get(*slot_idx))
+                else {
+                    continue;
+                };
+                if let Some(pdesc) = app
+                    .rack_slot_instrument_descriptor(slot)
+                    .and_then(|desc| desc.params.get(*param_idx).cloned())
+                {
+                    updates.push((
+                        rack_slot_instrument_param_value_field(
+                            track, *slot_idx, *param_idx, &pdesc.name,
+                        ),
+                        Value::Number(pdesc.stored_to_user(value) as f64),
+                    ));
+                }
+            }
+            PrintTarget::RackSlotEffect {
+                rack_slot_idx,
+                effect_slot_idx,
+                param_idx,
+            } => {
+                let racks = app.state.pattern.rack_tracks.lock().unwrap();
+                let Some(pdesc) = racks
+                    .get(track)
+                    .and_then(Option::as_ref)
+                    .and_then(|rack| rack.slots.get(*rack_slot_idx))
+                    .and_then(|slot| slot.effect_descriptors.get(*effect_slot_idx))
+                    .and_then(|desc| desc.params.get(*param_idx))
+                else {
+                    continue;
+                };
+                updates.push((
+                    rack_slot_effect_param_value_field(
+                        track,
+                        *rack_slot_idx,
+                        *effect_slot_idx,
+                        *param_idx,
+                        &pdesc.name,
+                    ),
+                    Value::Number(value as f64),
+                ));
+            }
+        }
+    }
+    updates
+}
+
+/// Mirror an accepted print latch into the touched control's own bound display
+/// field (bead eseq-prm).
+///
+/// Printing deliberately leaves the base/authoring value alone, so none of the
+/// normal `sync_*_param_authoring_display` paths run for a printed gesture.
+/// The control's field is then rewritten only when the playhead crosses a step
+/// boundary (`sync_fx_param_bindings_delta`), so at slow tempi the knob jumps
+/// once per step instead of following the pointer.
+///
+/// Deliberate split, do not "fix" the other half: the VISUAL follows the hand
+/// continuously (that is this function), while the SOUND stays step-quantized
+/// by design — the engine-side print override is applied at trigger/step
+/// resolution so monitoring a printed gesture is exactly what the recorded
+/// p-locks will play back. Nothing here touches the scheduler or the override
+/// application path.
+///
+/// This write is display-only: it never touches the base value and never bumps
+/// `ui_epoch`/`fx_epoch` (a printed drag must not rebuild the fx or whole UI
+/// trees). Ordering against the per-crossing sync is a non-issue: that sync
+/// resolves the same field through `held_plock_value`, which finds the p-lock
+/// this very latch printed onto the step just passed, so it re-derives the
+/// identical number. After the gesture releases, that printed p-lock is still
+/// in the pattern and the transport is by definition still running (printing
+/// requires it), so the next crossing keeps the control on the printed value
+/// rather than freezing it on something stale.
+pub(crate) fn sync_print_latch_display(
+    editor: &mut Editor,
+    app: &app::App,
+    track: usize,
+    targets: &[(PrintTarget, f32)],
+) {
+    let updates = print_latch_display_updates(app, track, targets);
+    if updates.is_empty() {
+        return;
+    }
+    let mut dirty = false;
+    let rt = editor.runtime_mut();
+    for (field, value) in updates {
+        let result = rt.set_reactive("SEQ", &field, value);
+        dirty |= result.effects_dirty || result.widgets_dirty;
+    }
+    flush_reactive_display_edit(editor, dirty);
+}
+
 /// Divert already-resolved, already-clamped base-value edits into the live
 /// print latch when the shared record/play/no-selection gate is active.
 /// Callers must preserve any target-specific higher-precedence diversion
 /// (notably neural overrides) before reaching this helper.
 pub(crate) fn try_latch_param_print(
     shared: &SharedHandles,
+    editor: &mut Editor,
+    app: &app::App,
     track: usize,
     targets: &[(PrintTarget, f32)],
 ) -> bool {
@@ -224,13 +427,18 @@ pub(crate) fn try_latch_param_print(
     {
         return false;
     }
-    let mut print = shared.step_print.lock().unwrap();
-    for (target, value) in targets {
-        print.latch(track, *target, *value);
+    {
+        let mut print = shared.step_print.lock().unwrap();
+        for (target, value) in targets {
+            print.latch(track, *target, *value);
+        }
+        // A cross-track touch may have replaced a Step target, so clear or
+        // republish its engine-only override at the same latch transition.
+        print.publish_engine_override(&shared.state);
     }
-    // A cross-track touch may have replaced a Step target, so clear or
-    // republish its engine-only override at the same latch transition.
-    print.publish_engine_override(&shared.state);
+    // The latch replaces the base-value write, so the control's own display
+    // binding has to follow the latch or the knob only moves once per step.
+    sync_print_latch_display(editor, app, track, targets);
     true
 }
 

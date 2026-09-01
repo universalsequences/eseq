@@ -441,6 +441,8 @@ pub(super) fn handle(
                     if print_value.is_some()
                         && try_latch_param_print(
                             ctx.shared,
+                            &mut editor,
+                            &app,
                             track,
                             &[(PrintTarget::RackSlotEffect {
                                 rack_slot_idx: rack_slot,
@@ -608,6 +610,8 @@ pub(super) fn handle(
                             ) {
                                 if try_latch_param_print(
                                     ctx.shared,
+                                    &mut editor,
+                                    &app,
                                     track,
                                     &[(PrintTarget::RackSlotEffect {
                                         rack_slot_idx: rack_slot,
@@ -850,6 +854,8 @@ pub(super) fn handle(
                 ) {
                     if try_latch_rack_slot_param_print(
                         ctx.shared,
+                        &mut editor,
+                        &app,
                         track,
                         slot_idx,
                         RackSlotParam::Gain,
@@ -891,6 +897,8 @@ pub(super) fn handle(
                 ) {
                     if try_latch_rack_slot_param_print(
                         ctx.shared,
+                        &mut editor,
+                        &app,
                         track,
                         slot_idx,
                         RackSlotParam::Pan,
@@ -931,6 +939,8 @@ pub(super) fn handle(
                     let value = map_bool(map, "value");
                     if try_latch_rack_slot_param_print(
                         ctx.shared,
+                        &mut editor,
+                        &app,
                         track,
                         slot_idx,
                         RackSlotParam::Mute,
@@ -984,6 +994,8 @@ pub(super) fn handle(
                     let value = map_bool(map, "value");
                     if try_latch_rack_slot_param_print(
                         ctx.shared,
+                        &mut editor,
+                        &app,
                         track,
                         slot_idx,
                         RackSlotParam::Solo,
@@ -1032,6 +1044,8 @@ pub(super) fn handle(
                 ) {
                     if try_latch_rack_slot_param_print(
                         ctx.shared,
+                        &mut editor,
+                        &app,
                         track,
                         slot_idx,
                         RackSlotParam::MaxPolyphony,
@@ -1104,6 +1118,8 @@ pub(super) fn handle(
                 ) {
                     if try_latch_rack_slot_param_print(
                         ctx.shared,
+                        &mut editor,
+                        &app,
                         track,
                         slot_idx,
                         RackSlotParam::BaseNote,
@@ -1175,6 +1191,8 @@ pub(super) fn handle(
                 ) {
                     if try_latch_param_print(
                         ctx.shared,
+                        &mut editor,
+                        &app,
                         track,
                         &[(PrintTarget::RackMacro { macro_idx }, value.clamp(0.0, 1.0))],
                     ) {
@@ -1432,7 +1450,7 @@ pub(super) fn handle(
                                 _ => None,
                             })
                             .collect::<Vec<_>>();
-                        if try_latch_param_print(ctx.shared, track, &targets) {
+                        if try_latch_param_print(ctx.shared, &mut editor, &app, track, &targets) {
                             return;
                         }
                     }
@@ -1489,6 +1507,8 @@ pub(super) fn handle(
                                 desc.clamp(desc.user_input_to_stored(user_val));
                             if try_latch_param_print(
                                 ctx.shared,
+                                &mut editor,
+                                &app,
                                 track,
                                 &[(PrintTarget::RackSlotInstrument {
                                     slot_idx,
@@ -1625,6 +1645,8 @@ pub(super) fn handle(
                                 desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
                             if try_latch_param_print(
                                 ctx.shared,
+                                &mut editor,
+                                &app,
                                 track,
                                 &[(PrintTarget::RackSlotInstrument {
                                     slot_idx,
@@ -1749,6 +1771,8 @@ pub(super) fn handle(
                                 let value = selected_idx as f32;
                                 if try_latch_param_print(
                                     ctx.shared,
+                                    &mut editor,
+                                    &app,
                                     track,
                                     &[(PrintTarget::RackSlotInstrument {
                                         slot_idx,
@@ -1964,6 +1988,8 @@ pub(super) fn handle(
 
 fn try_latch_rack_slot_param_print(
     shared: &SharedHandles,
+    editor: &mut Editor,
+    app: &app::App,
     track: usize,
     slot_idx: usize,
     param: RackSlotParam,
@@ -1971,6 +1997,8 @@ fn try_latch_rack_slot_param_print(
 ) -> bool {
     try_latch_param_print(
         shared,
+        editor,
+        app,
         track,
         &[(PrintTarget::RackSlotParam { slot_idx, param }, param.clamp(value))],
     )

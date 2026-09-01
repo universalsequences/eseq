@@ -636,6 +636,8 @@ pub(super) fn handle(
                     if name == "set-effect-param-batch"
                         && try_latch_effect_param_print(
                             ctx.shared,
+                            &mut editor,
+                            &app,
                             track,
                             slot_idx,
                             &print_updates,
@@ -773,6 +775,8 @@ pub(super) fn handle(
                     let print_gesture = !wrote_neural_plock
                         && try_latch_effect_param_print(
                             ctx.shared,
+                            &mut editor,
+                            &app,
                             track,
                             slot_idx,
                             &[(param_idx, clamped)],
@@ -882,6 +886,8 @@ pub(super) fn handle(
                                     if printable
                                         && try_latch_param_print(
                                             ctx.shared,
+                                            &mut editor,
+                                            &app,
                                             track,
                                             &[(PrintTarget::BusEffect {
                                                 bus_idx,
@@ -980,6 +986,8 @@ pub(super) fn handle(
                                 if selected.is_empty() {
                                     if try_latch_param_print(
                                         ctx.shared,
+                                        &mut editor,
+                                        &app,
                                         track,
                                         &[(PrintTarget::MidiFx { slot_idx, param_idx }, next)],
                                     ) {
@@ -1239,6 +1247,8 @@ pub(super) fn handle(
                             let print_gesture = !wrote_neural_plock
                                 && try_latch_effect_param_print(
                                     ctx.shared,
+                                    &mut editor,
+                                    &app,
                                     track,
                                     slot_idx,
                                     &[(param_idx, value)],
@@ -1459,6 +1469,8 @@ pub(super) fn handle(
                         let print_gesture = desc.is_some()
                             && try_latch_param_print(
                                 ctx.shared,
+                                &mut editor,
+                                &app,
                                 track,
                                 &[(PrintTarget::MidiFx { slot_idx, param_idx }, clamped)],
                             );
@@ -1576,6 +1588,8 @@ pub(super) fn handle(
                             let value = selected_idx as f32;
                             let print_gesture = try_latch_param_print(
                                 ctx.shared,
+                                &mut editor,
+                                &app,
                                 track,
                                 &[(PrintTarget::MidiFx { slot_idx, param_idx }, value)],
                             );
@@ -2414,6 +2428,8 @@ pub(super) fn handle(
 /// control's stable node identity.
 fn try_latch_effect_param_print(
     shared: &SharedHandles,
+    editor: &mut Editor,
+    app: &app::App,
     track: usize,
     slot_idx: usize,
     updates: &[(usize, f32)],
@@ -2434,7 +2450,7 @@ fn try_latch_effect_param_print(
             )
         })
         .collect::<Vec<_>>();
-    try_latch_param_print(shared, track, &targets)
+    try_latch_param_print(shared, editor, app, track, &targets)
 }
 
 /// Queue the panel-tree rebuild through the normal post-event invalidation
