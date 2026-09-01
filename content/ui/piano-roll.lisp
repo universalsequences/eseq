@@ -29,6 +29,10 @@
 ;; compile. Resolution in the whole-file harness VMs works per (n2): module
 ;; files resolve against the source-manager cwd, which is crates/sequencer.
 (import eseq.seq-step-tabs)
+;; The type-icon call below resolves through the shared runtime in the app
+;; (sequencer.lisp imports track-collapse first), but an isolated load needs
+;; the import here too.
+(import eseq.track-collapse)
 
 (export piano-roll-view-start
         piano-roll-view-duration
