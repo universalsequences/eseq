@@ -715,8 +715,8 @@
             :color (* (if (= muted 1) 0.3 1) (eseq.materials/color offcol offcol))))
         ;; p-lock indicator
         (sdf/fill
-          (sdf/translate 0 0.82
-            (sdf/rounded-rect 0.52 0.10 0.05))
+          (sdf/translate 0.0 0.89
+            (sdf/rounded-rect 0.17 0.08 0.09))
           (material
             ;; The tick tracks p-locks, not the gate: off steps are a
             ;; deliberate p-lock target (warp bpm, sampler ranges) and must
