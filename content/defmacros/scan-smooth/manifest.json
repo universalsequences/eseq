@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "scan-smooth",
+  "params": [
+    "target",
+    "trigger"
+  ],
+  "outputs": [
+    "scan"
+  ],
+  "summary": "Wave-position chase (the Wavetable synth's morph feel): ~8 ms one-pole glide toward target, snapped to target on trigger so new notes never inherit a glide.",
+  "tags": [
+    "smoothing",
+    "wavetable",
+    "utility"
+  ]
+}

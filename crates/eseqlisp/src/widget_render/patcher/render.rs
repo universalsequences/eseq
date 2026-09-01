@@ -52,10 +52,38 @@ use super::state::{
     PatcherPanState, PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
     get_patcher_interaction_state, get_patcher_pan_state, max_node_z_index, node_z_index,
     ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
-    set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
+    set_patcher_pan_state, set_selected_asset_for_key, source_connection_id,
+    sync_patcher_z_order,
 };
 use super::text::{patcher_autocomplete_ghost_text, patcher_autocomplete_suggestions};
 use super::text_metrics::{measured_cursor_offset, measured_text_width, wrap_measured_text};
+
+/// The `@file`/`@default-file` reference of the selected tensor node, when
+/// exactly one node is selected and it is file-backed. Feeds the sidebar's
+/// asset inspector via `set_selected_asset_for_key`.
+fn selected_file_asset_reference(
+    patch: &Patch,
+    state: &PatcherInteractionState,
+) -> Option<String> {
+    if state.selected_nodes.len() != 1 {
+        return None;
+    }
+    let id = state.selected_nodes.iter().next()?;
+    let node = patch.nodes.iter().find(|node| &node.id == id)?;
+    if !super::model::is_tensor_options_source(node) {
+        return None;
+    }
+    let reference = super::generate::label_attribute(&node.label, "@file")
+        .or_else(|| super::generate::label_attribute(&node.label, "@default-file"))?;
+    // Attribute values format as expressions, so a string reference keeps its
+    // quotes; the inspector wants the bare spelling.
+    let reference = reference
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(&reference)
+        .to_string();
+    (!reference.is_empty()).then_some(reference)
+}
 
 /// Horizontal inset of the selected-row bar from the panel edge, in cells.
 const AUTOCOMPLETE_ROW_INSET_CELLS: f32 = 0.22;
@@ -126,6 +154,13 @@ pub(super) fn build_primitives_for_patcher(
             let autocomplete_macros =
                 super::autocomplete_macros_for_patch(&node.props, Some(&patch));
             sync_patcher_z_order(&mut interaction_state, &view_key, &patch);
+            // Mirror the selected file-backed tensor for the sidebar's asset
+            // inspector: the render pass is the one place that holds both the
+            // effective patch and the selection every frame.
+            set_selected_asset_for_key(
+                key,
+                selected_file_asset_reference(&patch, &interaction_state),
+            );
             let content_size = patch_content_size(&patch);
             if pan_uninitialized && patcher_fit_enabled(&node.props) {
                 pan_state.zoom = fit_zoom(content_size, node.rect);

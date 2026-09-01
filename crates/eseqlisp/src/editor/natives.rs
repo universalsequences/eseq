@@ -120,9 +120,14 @@ fn load_asset_metadata(path: &Path) -> Option<TensorAssetHeader> {
         }
     }
 
+    // Buffered: serde_json::from_reader over a raw File reads one byte per
+    // syscall, and counting the tensor's `data` elements walks the whole
+    // array even though only the header survives.
     let header = std::fs::File::open(path)
         .ok()
-        .and_then(|file| serde_json::from_reader::<_, TensorAssetHeader>(file).ok())
+        .and_then(|file| {
+            serde_json::from_reader::<_, TensorAssetHeader>(std::io::BufReader::new(file)).ok()
+        })
         .filter(|header| {
             !header.shape.is_empty()
                 && header.shape.iter().all(|dimension| *dimension > 0)
@@ -146,6 +151,47 @@ fn load_asset_metadata(path: &Path) -> Option<TensorAssetHeader> {
         );
     }
     header
+}
+
+/// Resolve an `@options` asset reference to its label list for `key`, using
+/// the same resolution and cached header parse as the `asset-metadata`
+/// native. `base` is the compile's registered asset source root (draft dir);
+/// without one the reference resolves through the shared library precedence.
+/// The host uses this to bake tensor-backed option labels into an Enum param
+/// descriptor at manifest load, matching the compile the labels came from.
+pub fn asset_option_labels(
+    reference: &str,
+    base: Option<&Path>,
+    key: &str,
+) -> Option<Vec<String>> {
+    let path = match base {
+        Some(base) => crate::widget_render::patcher::resolve_registered_asset_reference(
+            reference, base,
+        ),
+        None => crate::widget_render::patcher::resolve_asset_reference(reference, None),
+    }?;
+    let header = load_asset_metadata(&path)?;
+    match key {
+        "sets" => header.sets,
+        "wave-names" | "wave_names" => header.wave_names,
+        _ => None,
+    }
+    .filter(|labels| !labels.is_empty())
+}
+
+/// Resolve an asset reference against the draft root and shared library
+/// precedence, returning its metadata as the same Lisp map shape as the
+/// `asset-metadata` native (Nil when missing or invalid). Lets the host mirror
+/// selected-asset metadata into reactive state without a Lisp round-trip.
+pub fn asset_metadata_lisp_value(reference: &str, draft_root: Option<&Path>) -> Value {
+    let Some(path) =
+        crate::widget_render::patcher::resolve_asset_reference(reference, draft_root)
+    else {
+        return Value::Nil;
+    };
+    load_asset_metadata(&path)
+        .map(asset_metadata_value)
+        .unwrap_or(Value::Nil)
 }
 
 fn asset_metadata_value(header: TensorAssetHeader) -> Value {

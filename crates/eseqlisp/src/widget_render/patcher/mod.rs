@@ -321,6 +321,15 @@ pub fn active_macro_view_for_path(path: impl AsRef<std::path::Path>) -> Option<S
         .find_map(state::active_macro_for_key)
 }
 
+/// The `@file` reference of the single selected file-backed tensor node in
+/// the patcher for `path`, mirrored by the render pass. Feeds the macro
+/// sidebar's asset inspector.
+pub fn selected_asset_for_path(path: impl AsRef<std::path::Path>) -> Option<String> {
+    state::patcher_keys_for_path(path.as_ref())
+        .into_iter()
+        .find_map(state::selected_asset_for_key)
+}
+
 /// Navigate the patcher for `path` to a macro view (or the root with None),
 /// preserving staged edits — unlike `reload_patcher_macro_view_for_path`,
 /// which resets the whole interaction state after a save.

@@ -643,6 +643,35 @@ pub(super) fn active_macro_for_key(key: u64) -> Option<String> {
         .with(|states| states.borrow().get(&key)?.active_macro.clone())
 }
 
+thread_local! {
+    /// The `@file` reference of the single selected file-backed tensor node,
+    /// per patcher key. Derived state, mirrored by the render pass (which has
+    /// both the parsed patch and the selection) so the sidebar's asset
+    /// inspector can read it per tick without reparsing the patch — and
+    /// without touching `set_patcher_interaction_state`, whose history hook
+    /// would otherwise fold a derived value into undo transitions.
+    static PATCHER_SELECTED_ASSETS: RefCell<HashMap<u64, String>> =
+        RefCell::new(HashMap::new());
+}
+
+pub(super) fn set_selected_asset_for_key(key: u64, reference: Option<String>) {
+    PATCHER_SELECTED_ASSETS.with(|assets| {
+        let mut assets = assets.borrow_mut();
+        match reference {
+            Some(reference) => {
+                assets.insert(key, reference);
+            }
+            None => {
+                assets.remove(&key);
+            }
+        }
+    });
+}
+
+pub(super) fn selected_asset_for_key(key: u64) -> Option<String> {
+    PATCHER_SELECTED_ASSETS.with(|assets| assets.borrow().get(&key).cloned())
+}
+
 pub(super) fn set_patcher_interaction_state(key: u64, mut state: PatcherInteractionState) {
     prune_closed_agentic_bubbles(&mut state);
     let changed = PATCHER_INTERACTION_STATES.with(|states| {

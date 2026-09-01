@@ -225,10 +225,47 @@ struct TensorAssetHeader {
     shape: Vec<u64>,
 }
 
+#[derive(Clone)]
+struct CachedAssetShape {
+    modified: std::time::SystemTime,
+    shape: Option<Vec<u64>>,
+}
+
+fn asset_shape_cache() -> &'static Mutex<std::collections::HashMap<PathBuf, CachedAssetShape>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, CachedAssetShape>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The sidebar rescans every `*.json` under every asset root on each
+/// fingerprint change (every successful compile included), and skipping a
+/// large tensor's `data` array still lexes all of it — so cache by mtime,
+/// negative results included, and read buffered: `serde_json::from_reader`
+/// over a raw `File` issues one syscall per byte.
 pub(super) fn read_tensor_asset_shape(path: &Path) -> Option<Vec<u64>> {
-    let header: TensorAssetHeader = serde_json::from_reader(File::open(path).ok()?).ok()?;
-    (!header.shape.is_empty() && header.shape.iter().all(|dimension| *dimension > 0))
-        .then_some(header.shape)
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    if let Ok(cache) = asset_shape_cache().lock() {
+        if let Some(cached) = cache.get(path).filter(|cached| cached.modified == modified) {
+            return cached.shape.clone();
+        }
+    }
+    let shape = File::open(path)
+        .ok()
+        .and_then(|file| {
+            serde_json::from_reader::<_, TensorAssetHeader>(std::io::BufReader::new(file)).ok()
+        })
+        .map(|header| header.shape)
+        .filter(|shape| !shape.is_empty() && shape.iter().all(|dimension| *dimension > 0));
+    if let Ok(mut cache) = asset_shape_cache().lock() {
+        cache.insert(
+            path.to_path_buf(),
+            CachedAssetShape {
+                modified,
+                shape: shape.clone(),
+            },
+        );
+    }
+    shape
 }
 
 pub(super) fn collect_asset_path_spellings(

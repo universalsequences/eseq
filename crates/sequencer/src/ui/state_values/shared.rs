@@ -173,6 +173,14 @@ pub(super) fn insert_param_ui_metadata(
     if let Some(display_name) = &metadata.display_name {
         insert_string_prop(map, "display-name", display_name);
     }
+    // Resolved tensor-backed options are baked into ParamKind::Enum at
+    // manifest load, and the Enum arm has already inserted its label list as
+    // "options" — the raw asset reference map is only surfaced for params
+    // whose reference did NOT resolve (the UI's degrade path), so it must
+    // never clobber resolved labels.
+    if map.contains_key("options") {
+        return;
+    }
     if let Some(options) = &metadata.asset_options {
         let mut option_map = HashMap::new();
         insert_string_prop(&mut option_map, "tensor", &options.tensor);

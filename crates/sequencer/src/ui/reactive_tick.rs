@@ -1798,6 +1798,41 @@ pub(crate) fn reactive_tick_and_render(
             needs_reactive_cycle = true;
         }
 
+        // The sidebar's asset inspector mirrors the single selected
+        // file-backed tensor node. The render pass maintains the reference
+        // per patcher key; metadata is re-read (through the mtime-keyed
+        // header cache) only when the reference changes.
+        let selected_asset =
+            editor_patch_path.and_then(eseqlisp::widget_render::patcher::selected_asset_for_path);
+        if selected_asset != ctx.frame.prev_editor_selected_asset {
+            let value = selected_asset
+                .as_deref()
+                .map(|reference| {
+                    let draft_root = editor_patch_path.and_then(std::path::Path::parent);
+                    let metadata =
+                        eseqlisp::editor::asset_metadata_lisp_value(reference, draft_root);
+                    let mut fields = match metadata {
+                        Value::Map(fields) => fields,
+                        // Unresolvable or invalid: the inspector still shows
+                        // the reference with no metadata rows.
+                        _ => std::collections::HashMap::new(),
+                    };
+                    fields.insert(
+                        "reference".to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::String(
+                            reference.to_string(),
+                        ))),
+                    );
+                    Value::Map(fields)
+                })
+                .unwrap_or(Value::Nil);
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "editor-selected-asset", value);
+            ctx.frame.prev_editor_selected_asset = selected_asset;
+            needs_reactive_cycle = true;
+        }
+
         if needs_reactive_cycle {
             let profile_cycle = profile_pattern_reactive_cycle;
             let cycle_total_started = Instant::now();

@@ -200,13 +200,58 @@
       :color :gray
       :bg :transparent)))
 
+;; ── Asset inspector ─────────────────────────────────────────────────────
+;; When exactly one file-backed tensor node is selected in the patcher, the
+;; host mirrors its reference + asset metadata into SEQ.editor-selected-asset
+;; (Nil otherwise); a compact panel below the tree shows the high-level shape
+;; so the index math (set * waves-per-set + wave) is patchable at a glance.
+
+(def join-names (names)
+  (reduce |acc n| (if (= acc "") n (str acc ", " n)) "" names))
+
+(def dims-text (shape)
+  (reduce |acc d| (if (= acc "") (str d) (str acc " x " d)) "" shape))
+
+(def inspector-row (text color size)
+  (label text :font-size size :color color :bg :transparent :width :fill))
+
+(def asset-inspector (a)
+  (let ((shape (get a :shape))
+        (kind (get a :kind))
+        (sets (get a :sets))
+        (wave-names (get a :wave-names))
+        (waves-per-set (get a :waves-per-set))
+        (source (get a :source)))
+    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.45
+      (v-stack :width :fill :gap 0.18
+        (inspector-row (get a :reference) :white 9.5)
+        (if (not (= shape nil))
+          (inspector-row
+            (if (= kind nil)
+              (dims-text shape)
+              (str kind "  " (dims-text shape)))
+            :gray 9))
+        (if (not (= waves-per-set nil))
+          (inspector-row
+            (str (get a :set-count) " sets x " waves-per-set " waves/set")
+            :gray 9))
+        (if (not (= sets nil))
+          (inspector-row (join-names sets) :dim 8.5))
+        ;; Per-wave names matter most when there is no set structure to
+        ;; summarize (single-set assets like basic-shapes).
+        (if (and (not (= wave-names nil)) (= sets nil))
+          (inspector-row (join-names wave-names) :dim 8.5))
+        (if (not (= source nil))
+          (inspector-row source :dim 8))))))
+
 ;; The buffer root must stay keyless: a keyed root is annotated as an
 ;; explicit subtree root and EmitTree then routes the update as a subtree
 ;; replacement, which is dropped when the buffer has no tree yet.
 (effect-buffer "*patch-macros*"
-  ;; Pass the reactive field at the render root so the effect subscribes even
+  ;; Pass the reactive fields at the render root so the effect subscribes even
   ;; though most sidebar assembly lives in helper functions.
-  (let ((items (items-for-assets SEQ.editor-assets)))
+  (let ((items (items-for-assets SEQ.editor-assets))
+        (selected-asset SEQ.editor-selected-asset))
     (v-stack :width :fill :gap 0.4 :flex 1
       (search-row)
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
@@ -231,4 +276,6 @@
               :on-select (lambda (item) (click item))
               :on-toggle (lambda (item) (click item))
               :on-activate (lambda (item) (activate item))
-              :on-modified-activate (lambda (item) (activate item)))))))))
+              :on-modified-activate (lambda (item) (activate item))))))
+      (if (not (= selected-asset nil))
+        (asset-inspector selected-asset)))))
