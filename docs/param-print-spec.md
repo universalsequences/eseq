@@ -61,11 +61,17 @@ enum PrintTarget {
 ```
 
 Only the `Step` arm uses `publish_engine_override` / `StepPrintOverride` /
-`dirty_unpublished_tracks` / `publish_scheduler_track` — that apparatus exists
-because `step_data` writes need a snapshot republish and land behind the
-playhead. P-lock arms skip it entirely: `SlotPLockData`
-(`crates/sequencer/src/effects/mod.rs:8100`) is an `AtomicU32` array the audio
-thread reads directly. `override_roll_hit` also applies only to the `Step` arm
+`dirty_unpublished_tracks` — that apparatus exists because `step_data` writes
+land behind the playhead. P-lock arms do NOT get to skip the snapshot publish,
+though (rev 1 wrongly claimed they could): `SlotPLockData`
+(`crates/sequencer/src/effects/mod.rs:8100`) is an `AtomicU32` array, but the
+scheduler resolves every device p-lock family — instrument, effect, MIDI-FX,
+rack — from `EffectSlotSnapshot` deep copies captured at publish time, so an
+unpublished print is inaudible until the next unrelated publish or transport
+restart. `tick_step_print` therefore coalesces one copy-on-write
+`publish_scheduler_track` per tick whenever any track-scoped p-lock printed
+(and one bus-runtime publish for bus targets). `override_roll_hit` applies
+only to the `Step` arm
 (roll + param print composes naturally: rolled hits land as triggers, the
 p-lock prints onto them on the same pass).
 

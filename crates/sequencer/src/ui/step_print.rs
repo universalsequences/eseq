@@ -8,11 +8,12 @@ a focused-track change also disarms it. Multiple held targets print together.
 
 Step targets write live `step_data`, use the engine-side override so the
 write is audible before snapshot republish, and push targeted step
-invalidations. Track instrument/effect targets write atomic p-lock data the
-audio thread reads directly. MIDI-FX and rack targets are coalesced into one
-scheduler-track publish per tick (the scheduler reads both families from its
-published snapshot), and bus targets into one bus-runtime publish. Base values
-remain untouched throughout. Every path rides the open `RecordingHistoryTransaction`,
+invalidations. Device targets write live p-lock storage, but the scheduler
+resolves every device p-lock family from its published snapshot (deep-copied
+at publish time), so instrument, effect, MIDI-FX, and rack targets are all
+coalesced into one copy-on-write scheduler-track publish per tick, and bus
+targets into one bus-runtime publish. Base values remain untouched
+throughout. Every path rides the open `RecordingHistoryTransaction`,
 so one record pass undoes as one "Record take" entry rather than creating
 device-edit gesture history.
 */
@@ -427,6 +428,7 @@ pub(crate) fn tick_step_print(
                     );
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
+                    track_snapshot_dirty |= target_wrote;
                 }
                 PrintTarget::Effect { slot_idx, param_idx } => {
                     let target_wrote = app.print_effect_plock(
@@ -438,6 +440,7 @@ pub(crate) fn tick_step_print(
                     );
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
+                    track_snapshot_dirty |= target_wrote;
                 }
                 PrintTarget::BusEffect { bus_idx, slot_idx, param_idx } => {
                     let target_wrote = app.print_bus_effect_plock(
@@ -521,10 +524,13 @@ pub(crate) fn tick_step_print(
             plock_presence_steps.push(*step);
         }
     }
-    // Rack and MIDI-FX p-locks reach the scheduler only through its published
-    // per-track snapshot, while bus p-locks live in the separately published
-    // bus runtime. Coalesce each publication once per tick after all writes
-    // land; never publish once per target/step.
+    // Every track-scoped device p-lock family (instrument, effect, MIDI-FX,
+    // rack) reaches the scheduler only through its published per-track
+    // snapshot — live `SlotPLockData` writes are atomic but the snapshot
+    // capture deep-copies them, so an unpublished print is inaudible until
+    // the next unrelated publish (or transport restart). Bus p-locks live in
+    // the separately published bus runtime. Coalesce each publication once
+    // per tick after all writes land; never publish once per target/step.
     if track_snapshot_dirty {
         shared.state.publish_scheduler_track(printed.track);
     }

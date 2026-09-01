@@ -1275,6 +1275,17 @@ mod tests {
             state.pattern.instrument_slots[TRACK].plocks.get(PRINT_STEP, PARAM),
             Some(0.74)
         );
+        // The scheduler resolves instrument p-locks from its published
+        // snapshot (a deep copy), not live SlotPLockData, so the tick must
+        // have republished the track — otherwise the printed gesture stays
+        // inaudible until the next transport restart.
+        assert_eq!(
+            state.latest_scheduler_snapshot().tracks[TRACK]
+                .instrument_slot
+                .plocks[PRINT_STEP][PARAM],
+            Some(0.74),
+            "printed instrument p-lock reaches the published scheduler snapshot",
+        );
         assert_eq!(
             (
                 fx_epoch.load(Ordering::Relaxed),
@@ -1325,6 +1336,13 @@ mod tests {
         assert_eq!(effect_slot.defaults.get(2), effect_default_before);
         assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
         assert_eq!(effect_slot.plocks.get(PRINT_STEP, 2), Some(1_800.0));
+        assert_eq!(
+            state.latest_scheduler_snapshot().tracks[TRACK].effect_slots
+                [EFFECT_SLOT]
+                .plocks[PRINT_STEP][2],
+            Some(1_800.0),
+            "printed effect p-lock reaches the published scheduler snapshot",
+        );
         shared
             .step_print
             .lock()
