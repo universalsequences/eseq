@@ -1120,6 +1120,13 @@ pub(crate) fn run_event_loop(
                     } else {
                         RecordingKeyOutcome::Ignored
                     };
+                    if recording_key_outcome.triggered_note() {
+                        // A live key fired an armed track: the user is playing
+                        // now, so drop any widget focus left by an earlier
+                        // click (e.g. a number picker), the same way the
+                        // transport flip does in the reactive tick.
+                        editor.blur_all_widget_focus();
+                    }
                     let intercepted = recording_key_outcome.consumed();
                     if recording_key_outcome.recorded_take() {
                         // Take-retargeted notes touch neither the live

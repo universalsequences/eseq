@@ -162,24 +162,27 @@
       (def-chip (= (get chip :kind) "def"))
       (c (plock-chip-color chip)))
     (box :key (str "track-plock-chip-" (get chip :kind) "-" (get chip :label))
-      :height 1.12
+      :height 1.0
       :align :baseline
-      :padding 0.14
+      :padding 0.014
       :background-color (if current
         (rgba (get chip :color-r) (get chip :color-g) (get chip :color-b) 0.11)
-        (rgba 1 1 1 0.025))
+        :mixer-strip-bg
+        )
       :border-width (if current 0.75 0.35)
-      :border-color (if current c (rgba 1 1 1 0.10))
-      :corner-radius 5
+      :border-color (if current c :mixer-strip-selected-bg)
+      :corner-radius 8
       :on-click |x y r| (plock-chip-click chip)
       (h-stack :gap 0.16 :align :baseline
-        (box :width 0.18 :height 0.68
+        (box :width 0.18 :height 0.38
           :corner-radius 2
           :background-color (if def-chip :transparent c)
           :border-width (if def-chip 1 0)
           :border-color c)
         (label (plock-chip-label chip)
-          :font-size 8.6 :color (if current :black :dim) :bg :transparent)))))
+          :font-size 8.0 :color (if current :black :dim) :bg :transparent)
+        (box :width 0.1 )
+        ))))
 
 (def plock-domain-title (domain)
   (if (= domain "inst")

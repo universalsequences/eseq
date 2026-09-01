@@ -77,6 +77,21 @@ Do **not** design the library first. The sequence is:
   dsp.lisp` and the operator-fm postmortem). Corollary: factory macros take
   *signals*, never param names. `(mod X)` also requires a bare top-level
   param (patcher mod-sugar bug notes).
+- Param scoping rules, probe-verified 2026-09-01 (harness compile + manifest
+  inspection; exemplar: `content/instruments/factory/drift/dsp.lisp`):
+  - **Non-modulated `(param …)` declarations may live inside a macro body**
+    and keep their exact global names in the manifest (presets/UI bindings
+    unaffected). Declare each param inside the section macro that owns it —
+    this is what keeps the top-level patch free of a param wall. A macro
+    that declares params is single-instantiation by construction.
+  - A `@mod true` param declared inside a macro compiles but **silently
+    drops its modDestinations** — host-modulatable params must be declared
+    at top level.
+  - `(mod p)` written **nested in a macro-call argument** at top level is
+    the supported resolution pattern: modDestinations register correctly,
+    and the patcher renders it inline as `p~` on the consuming node (hidden
+    accessor, no box, no cable). Prefer it over `(def x (mod p))`, which
+    stays a visible box.
 - Macros must round-trip through the patcher: display labels, bracket
   attribute arrays (`@shape`/`@data`), and nested library-macro imports all
   have fixed bugs behind them — any remaining round-trip lossiness found

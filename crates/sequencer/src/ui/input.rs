@@ -1749,6 +1749,10 @@ pub(crate) fn note_from_key(c: char) -> Option<i32> {
 pub(crate) enum RecordingKeyOutcome {
     Ignored,
     Consumed,
+    /// A live key press fired at least one armed target. The host drops any
+    /// lingering widget focus (e.g. a number picker) so the player's next
+    /// keys keep reaching the live keyboard instead of the widget.
+    Triggered,
     Recorded,
     /// Notes were written into a pending take (takes spec 8.4): the live
     /// pattern is untouched, so no step-grid rebuild and no live-recording
@@ -1759,6 +1763,10 @@ pub(crate) enum RecordingKeyOutcome {
 impl RecordingKeyOutcome {
     pub(crate) fn consumed(self) -> bool {
         !matches!(self, Self::Ignored)
+    }
+
+    pub(crate) fn triggered_note(self) -> bool {
+        matches!(self, Self::Triggered)
     }
 
     pub(crate) fn recorded(self) -> bool {
@@ -2109,6 +2117,7 @@ pub(crate) fn handle_recording_key(
                 }
             }
 
+            let triggered = !targets.is_empty();
             held.push(HeldKeyboardNote {
                 key: c,
                 sequence_roll_code: None,
@@ -2116,7 +2125,11 @@ pub(crate) fn handle_recording_key(
                 press_time,
                 targets,
             });
-            RecordingKeyOutcome::Consumed
+            if triggered {
+                RecordingKeyOutcome::Triggered
+            } else {
+                RecordingKeyOutcome::Consumed
+            }
         }
         KeyEventKind::Release => {
             // Catch any note-on stamp that landed since the last frame drain

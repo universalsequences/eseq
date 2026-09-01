@@ -73,6 +73,7 @@
         ui-lego-badge-dark
         ui-lego-knob
         ui-lego-knob-s
+        ui-lego-log-knob-s
         ui-lego-big-knob-s
         ui-lego-num
         ui-lego-num-s
@@ -398,12 +399,13 @@
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
-(def ui-lego-knob-sized-s (section name title width height knob-size accent decimals)
+(def ui-lego-knob-taper-sized-s (section name title width height knob-size accent decimals taper)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
     (if p
       (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-knob-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
+            :taper taper
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals decimals
             :base-value (eseq.effects.custom-ui-runtime/custom-ui-param-base-value-prop p)
@@ -436,8 +438,16 @@
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
+(def ui-lego-knob-sized-s (section name title width height knob-size accent decimals)
+  (ui-lego-knob-taper-sized-s section name title width height knob-size accent decimals "linear"))
+
 (def ui-lego-knob-s (section name title width accent decimals)
   (ui-lego-knob-sized-s section name title width 3.12 3.12 accent decimals))
+
+;; Log-taper knob for frequency-style params (equal arc per octave); use for
+;; cutoffs and other wide Hz ranges where linear travel wastes the arc.
+(def ui-lego-log-knob-s (section name title width accent decimals)
+  (ui-lego-knob-taper-sized-s section name title width 3.12 3.12 accent decimals "log"))
 
 (def ui-lego-big-knob-s (section name title width accent decimals)
   (ui-lego-knob-sized-s section name title width 4.30 2.65 accent decimals))
@@ -596,11 +606,11 @@
             (dropdown :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
-              :bg-color :mixer-strip-selected-bg
+              :bg-color :mixer-control-bg
               :text-color accent
-              :chevron-color :black
-              :badge-color :dropdown-badge-bg
-              :border-color :border-inactive
+              :chevron-color accent
+              :badge-color :transparent
+              :border-color :mixer-strip-bg
               :border-width 0.05
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
