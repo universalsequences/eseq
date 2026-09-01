@@ -628,7 +628,8 @@
                   (ep/instrument-synth-button)
                   (ep/instrument-mods-toggle-button)
                   (ep/instrument-keys-button)
-                  (ep/instrument-sound-binding-badge inst))
+                  ;(ep/instrument-sound-binding-badge inst)
+                  )
                 (box :flex 1 :height 0.15)
                 (pf/instrument-header-actions-menu inst)
                 (box :debug-name "instrument-preset-button" :padding 0.0 :width 2 :align :center
@@ -655,8 +656,8 @@
           :drop-meta (if (= (get inst :rack-slot) nil)
             (dict :kind "instrument-panel" :track (get inst :track))
             (dict :kind "rack-selected-instrument"
-                  :track (get inst :rack-track)
-                  :slot (get inst :rack-slot)))
+              :track (get inst :rack-track)
+              :slot (get inst :rack-slot)))
           :drop-hover-border-color :mixer-strip-selected-border
           :on-drop (lambda (event)
             (if (= (get inst :rack-slot) nil)

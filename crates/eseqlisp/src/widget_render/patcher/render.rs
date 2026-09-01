@@ -52,10 +52,38 @@ use super::state::{
     PatcherPanState, PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
     get_patcher_interaction_state, get_patcher_pan_state, max_node_z_index, node_z_index,
     ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
-    set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
+    set_patcher_pan_state, set_selected_asset_for_key, source_connection_id,
+    sync_patcher_z_order,
 };
-use super::text::patcher_autocomplete_suggestions;
+use super::text::{patcher_autocomplete_ghost_text, patcher_autocomplete_suggestions};
 use super::text_metrics::{measured_cursor_offset, measured_text_width, wrap_measured_text};
+
+/// The `@file`/`@default-file` reference of the selected tensor node, when
+/// exactly one node is selected and it is file-backed. Feeds the sidebar's
+/// asset inspector via `set_selected_asset_for_key`.
+fn selected_file_asset_reference(
+    patch: &Patch,
+    state: &PatcherInteractionState,
+) -> Option<String> {
+    if state.selected_nodes.len() != 1 {
+        return None;
+    }
+    let id = state.selected_nodes.iter().next()?;
+    let node = patch.nodes.iter().find(|node| &node.id == id)?;
+    if !super::model::is_tensor_options_source(node) {
+        return None;
+    }
+    let reference = super::generate::label_attribute(&node.label, "@file")
+        .or_else(|| super::generate::label_attribute(&node.label, "@default-file"))?;
+    // Attribute values format as expressions, so a string reference keeps its
+    // quotes; the inspector wants the bare spelling.
+    let reference = reference
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(&reference)
+        .to_string();
+    (!reference.is_empty()).then_some(reference)
+}
 
 /// Horizontal inset of the selected-row bar from the panel edge, in cells.
 const AUTOCOMPLETE_ROW_INSET_CELLS: f32 = 0.22;
@@ -126,6 +154,13 @@ pub(super) fn build_primitives_for_patcher(
             let autocomplete_macros =
                 super::autocomplete_macros_for_patch(&node.props, Some(&patch));
             sync_patcher_z_order(&mut interaction_state, &view_key, &patch);
+            // Mirror the selected file-backed tensor for the sidebar's asset
+            // inspector: the render pass is the one place that holds both the
+            // effective patch and the selection every frame.
+            set_selected_asset_for_key(
+                key,
+                selected_file_asset_reference(&patch, &interaction_state),
+            );
             let content_size = patch_content_size(&patch);
             if pan_uninitialized && patcher_fit_enabled(&node.props) {
                 pan_state.zoom = fit_zoom(content_size, node.rect);
@@ -1329,6 +1364,8 @@ fn draw_patch_with_view_key(
         if let Some(edit) = active_edit {
             active_edit_panel = Some((rect, edit));
         }
+        let autocomplete_ghost = active_edit
+            .and_then(|edit| patcher_autocomplete_ghost_text(edit, &autocomplete_macros));
         let highlighted_inputs = highlighted_inputs_for_node(&interaction_state.drag, &node.id);
         let highlighted_outputs = highlighted_outputs_for_node(&interaction_state.drag, &node.id);
         push_node(
@@ -1346,6 +1383,7 @@ fn draw_patch_with_view_key(
             interaction_state.hovered_node.as_deref() == Some(node.id.as_str()),
             interaction_state.agentic_morph_nodes.get(&node.id),
             active_edit,
+            autocomplete_ghost.as_deref(),
             hovered_label_arg_index(interaction_state, &node.id),
             &highlighted_inputs,
             &highlighted_outputs,
@@ -1366,6 +1404,7 @@ fn draw_patch_with_view_key(
             node_rect,
             edit,
             &autocomplete_macros,
+            &interaction_state.autocomplete_asset_paths,
             viewport,
             zoom,
         );
@@ -1691,10 +1730,11 @@ fn push_autocomplete_panel(
     node_rect: Rect,
     edit: &PatcherTextEdit,
     local_macros: &[super::model::MacroPatch],
+    asset_paths: &[String],
     viewport: WidgetViewport,
     zoom: f32,
 ) {
-    let suggestions = patcher_autocomplete_suggestions(edit, local_macros);
+    let suggestions = patcher_autocomplete_suggestions(edit, local_macros, asset_paths);
     if suggestions.is_empty() {
         return;
     }
@@ -2121,6 +2161,7 @@ fn push_node(
     hovered: bool,
     morph: Option<&AgenticMorph>,
     edit: Option<&PatcherTextEdit>,
+    autocomplete_ghost: Option<&str>,
     hovered_arg: Option<usize>,
     highlighted_inputs: &[usize],
     highlighted_outputs: &[usize],
@@ -2219,7 +2260,16 @@ fn push_node(
         selection_prims,
     );
     let mut text_prims = Vec::new();
-    push_node_label(&mut text_prims, node, rect, text, edit, hovered_arg, zoom);
+    push_node_label(
+        &mut text_prims,
+        node,
+        rect,
+        text,
+        edit,
+        autocomplete_ghost,
+        hovered_arg,
+        zoom,
+    );
     if let Some(diagnostic) = &node.diagnostic {
         text_prims.push(GpuPrimitive::ProportionalText(
             GpuProportionalTextPrimitive {
@@ -2450,6 +2500,7 @@ fn push_node_label(
     rect: Rect,
     head_color: crate::backend::Color,
     edit: Option<&PatcherTextEdit>,
+    autocomplete_ghost: Option<&str>,
     hovered_arg: Option<usize>,
     zoom: f32,
 ) {
@@ -2474,6 +2525,28 @@ fn push_node_label(
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
         ));
+        if let Some(ghost) = autocomplete_ghost
+            && let Some(cursor_x) = measured_cursor_offset(
+                &edit.text,
+                font_size,
+                edit.state.cursor_pos.min(edit.text.chars().count()),
+            )
+        {
+            let ghost_col = text_col + cursor_x * zoom;
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
+                    row: text_row,
+                    col: ghost_col,
+                    align_width: (rect.col + rect.width - ghost_col - 0.92 * zoom).max(0.0),
+                    h_align: 0.0,
+                    text: ghost.to_string(),
+                    font_size,
+                    scale: zoom,
+                    fg: theme::PATCHER_TEXT_MUTED(),
+                    bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                },
+            ));
+        }
         return;
     }
     let label = node_display_label(node);

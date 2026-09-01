@@ -1,16 +1,15 @@
-;; Wavetable — Ableton Wavetable-inspired UI: one tabbed oscillator column with
-;; a live wavetable-viewer (selected wave in accent, warp/fold/morph reactive),
-;; plus filter / envelope / global columns.
+;; Wavetable — tabbed oscillators, live wave display, filter, envelopes, and
+;; global controls, all expressed through semantic colors from the active theme.
 
-(def wt-orange () (rgba 1.00 0.64 0.22 1.0))
-(def wt-blue   () (rgba 0.45 0.78 1.00 1.0))
-(def wt-cream  () (rgba 0.93 0.88 0.78 1.0))
-(def wt-grey   () (rgba 0.46 0.46 0.48 0.55))
+(def wt-orange () (eseq.effects.custom-ui-lego/ui-accent-orange))
+(def wt-blue   () (eseq.effects.custom-ui-lego/ui-accent-blue))
+(def wt-cream  () :fg)
+(def wt-grey   () :dim)
 
-(def wt-surf () (rgba 0.075 0.072 0.068 1.0))
-(def wt-surf-cool () (rgba 0.146 0.146 0.154 1.0))
-(def wt-bord () (rgba 0.30 0.24 0.12 0.060))
-(def wt-bord-cool () (rgba 0.14 0.30 0.44 0.060))
+(def wt-surf () :instrument-group-bg)
+(def wt-surf-cool () :instrument-group-bg)
+(def wt-bord () :border-inactive)
+(def wt-bord-cool () :border-inactive)
 
 (def wt-osc-h () (+ (eseq.effects.custom-ui-lego/ui-lego-dense-h) (eseq.effects.custom-ui-lego/ui-lego-dense-h) (eseq.effects.custom-ui-lego/ui-lego-small-h)
                     (eseq.effects.custom-ui-lego/ui-lego-gap) (eseq.effects.custom-ui-lego/ui-lego-gap)))
@@ -48,12 +47,16 @@
 
 (def wt-bank-file () "instruments/core/wavetable/waves/bank.json")
 
-(def wt-set-options ()
-  '("Basic Shapes" "Harmonics" "Sub" "Saw Dual" "Saw Harmonics" "Pulse PW"
-    "Quad Saw" "Beating" "5th Brutal" "Sync Additive" "Sync Digital"
-    "FM Feedback" "FM Fold" "FM Harmonics" "Primes" "No Primes"
-    "Galactica" "Squeeze" "Organ" "Noise" "Vowels" "Choir" "Throat"
-    "Talk Box" "Phoneme" "Vox Sync" "SFX Chaos" "Bit Vox"))
+(def wt-bank-metadata ()
+  (asset-metadata (wt-bank-file)))
+
+(def wt-set-options (metadata)
+  (let ((sets (if metadata (get metadata :sets) nil)))
+    (if (and sets (nth sets 0)) sets '("Bank"))))
+
+(def wt-waves-per-set (metadata)
+  (let ((waves-per-set (if metadata (get metadata :waves-per-set) nil)))
+    (if waves-per-set waves-per-set 1)))
 
 (def wt-fmode-options () '("LP" "BP" "HP"))
 
@@ -111,9 +114,9 @@
         :gain-max 12
         :q-min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min resonance-p)
         :q-max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max resonance-p)
-        :background-color (rgba 0.035 0.038 0.042 1.0)
+        :background-color :instrument-control-bg
         :corner-radius 5
-        :grid-color (rgba 0.34 0.34 0.36 0.40)
+        :grid-color :border-inactive
         :stroke-color (wt-blue)
         :point-color (wt-orange)
         :width :fill
@@ -121,7 +124,7 @@
         :on-action (wt-filter-curve-callback cutoff-p resonance-p))
       (label "missing filter params" :font-size 8 :color :red :bg :transparent))))
 
-(def wt-viewer (section set-name wave-name warp-name fold-name accent)
+(def wt-viewer (section set-name wave-name warp-name fold-name accent metadata)
   (let ((pset (eseq.effects.custom-ui-runtime/custom-ui-current-param set-name))
         (pwave (eseq.effects.custom-ui-runtime/custom-ui-current-param wave-name))
         (pwarp (eseq.effects.custom-ui-runtime/custom-ui-current-param warp-name))
@@ -129,33 +132,34 @@
     (if (and pset pwave)
       (wavetable-viewer
         :file (wt-bank-file)
-        :waves-per-set 16
+        :waves-per-set (wt-waves-per-set metadata)
         :set (eseq.effects.custom-ui-runtime/custom-ui-param-value pset)
         :wave (eseq.effects.custom-ui-runtime/custom-ui-param-value pwave)
         :warp (eseq.effects.custom-ui-runtime/custom-ui-param-value pwarp)
         :fold (eseq.effects.custom-ui-runtime/custom-ui-param-value pfold)
         :wave-color accent
         :inactive-color (wt-grey)
-        :background-color (rgba 0.035 0.038 0.042 1.0)
+        :background-color :instrument-control-bg
         :width :fill
         :height (wt-viewer-h))
       (label "missing wavetable params" :font-size 8 :color :red :bg :transparent))))
 
 (def wt-osc-content (section accent set-name wave-name warp-name fold-name
                      semi-name det-name gain-name extra)
-  (v-stack :width :fill :height :fill :gap 0.16 :align :start
-      (h-stack :gap 0.18 :align :end
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s section set-name "table" 7.6 (wt-set-options) accent)
-        extra
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s section semi-name "semi" 2.8 0 "st" (wt-cream))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s section det-name "det" 2.8 0 "ct" (wt-cream)))
-      (wt-viewer section set-name wave-name warp-name fold-name accent)
-      (h-stack :gap 0.30 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-knob-s section wave-name "wave" 3.7 accent 1)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-s section warp-name "warp" 3.7 accent 2)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-s section fold-name "fold" 3.7 accent 2)
-        (box :width 0.8)
-        (eseq.effects.custom-ui-lego/ui-lego-fader-s section gain-name 3.0 1.55 accent 1 "dB"))))
+  (let ((metadata (wt-bank-metadata)))
+    (v-stack :width :fill :height :fill :gap 0.16 :align :start
+        (h-stack :gap 0.18 :align :end
+          (eseq.effects.custom-ui-lego/ui-lego-micro-option-s section set-name "table" 7.6 (wt-set-options metadata) accent)
+          extra
+          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s section semi-name "semi" 2.8 0 "st" (wt-cream))
+          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s section det-name "det" 2.8 0 "ct" (wt-cream)))
+        (wt-viewer section set-name wave-name warp-name fold-name accent metadata)
+        (h-stack :gap 0.30 :align :start
+          (eseq.effects.custom-ui-lego/ui-lego-knob-s section wave-name "wave" 3.7 accent 1)
+          (eseq.effects.custom-ui-lego/ui-lego-knob-s section warp-name "warp" 3.7 accent 2)
+          (eseq.effects.custom-ui-lego/ui-lego-knob-s section fold-name "fold" 3.7 accent 2)
+          (box :width 0.8)
+          (eseq.effects.custom-ui-lego/ui-lego-fader-s section gain-name 3.0 1.55 accent 1 "dB")))))
 
 (def wt-osc-block ()
   (let ((show-2 (= (wt-selected-oscillator) 1))

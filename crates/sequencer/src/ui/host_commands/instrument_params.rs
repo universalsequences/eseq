@@ -72,36 +72,76 @@ pub(super) fn handle(
                                 "Edit neural override",
                             );
                         }
-                        if !wrote_neural_plock {
-                            app::apply_command(
-                                &mut app,
-                                app::AppCommand::SetInstrumentParam {
+                        let print_gesture = !wrote_neural_plock
+                            && neural_selection.is_empty()
+                            && selected_steps.lock().unwrap().is_empty()
+                            && state.is_playing()
+                            && ctx.shared.recording.load(Ordering::Relaxed);
+                        if print_gesture {
+                            // While record+play is active the knob is a
+                            // recorder: latch the already-clamped value and
+                            // leave the base value untouched. The reactive
+                            // tick writes p-locks onto passing triggers.
+                            let mut print = ctx.shared.step_print.lock().unwrap();
+                            print.latch(
+                                track,
+                                PrintTarget::Instrument { param_idx },
+                                stored,
+                            );
+                            // A cross-track touch may have replaced a Step
+                            // target, so clear or republish its engine-only
+                            // override at the same latch transition.
+                            print.publish_engine_override(&state);
+                            // Arm the print overlay on this knob only.
+                            let overlay_dirty =
+                                crate::step_print::sync_print_latch_rows(
+                                    editor.runtime_mut(),
+                                    &print,
+                                );
+                            drop(print);
+                            flush_reactive_display_edit(&mut editor, overlay_dirty);
+                            // The base write is skipped, so the knob's own
+                            // display binding has to follow the latch here or
+                            // it only moves when the playhead crosses a step.
+                            // Visual only — the sound stays step-quantized.
+                            sync_print_latch_display(
+                                &mut editor,
+                                &app,
+                                track,
+                                &[(PrintTarget::Instrument { param_idx }, stored)],
+                            );
+                        } else {
+                            if !wrote_neural_plock {
+                                app::apply_command(
+                                    &mut app,
+                                    app::AppCommand::SetInstrumentParam {
+                                        track,
+                                        param_idx,
+                                        value: stored,
+                                    },
+                                );
+                            }
+                            sync_instrument_param_authoring_display(
+                                &mut editor,
+                                InstrumentParamDisplaySync {
+                                    app: &app,
+                                    state: &state,
+                                    selected_steps: &selected_steps,
+                                    selection: &neural_selection,
+                                    expanded_step_projection: &expanded_step_projection,
                                     track,
+                                    current_track_idx: track,
                                     param_idx,
-                                    value: stored,
+                                    display_step: None,
+                                    sync_plock_list: wrote_neural_plock,
+                                    sync_plock_presence: false,
+                                    sync_sampler_times: true,
                                 },
                             );
-                        }
-                        sync_instrument_param_authoring_display(
-                            &mut editor,
-                            InstrumentParamDisplaySync {
-                                app: &app,
-                                state: &state,
-                                selected_steps: &selected_steps,
-                                selection: &neural_selection,
-                                expanded_step_projection: &expanded_step_projection,
-                                track,
-                                current_track_idx: track,
-                                param_idx,
-                                display_step: None,
-                                sync_plock_list: wrote_neural_plock,
-                                sync_plock_presence: false,
-                                sync_sampler_times: true,
-                            },
-                        );
-                        if param_change_needs_fx_rebuild(&desc) {
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
-                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            if param_change_needs_fx_rebuild(&desc) {
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -910,6 +950,51 @@ mod tests {
         )
     }
 
+    fn effect_option_payload(slot_idx: usize, node_id: u32, param_idx: usize, label: &str) -> Value {
+        Value::Map(
+            [
+                ("slot-idx".to_string(), Value::Number(slot_idx as f64)),
+                ("target-node-id".to_string(), Value::Number(node_id as f64)),
+                ("param-idx".to_string(), Value::Number(param_idx as f64)),
+                ("label".to_string(), Value::String(label.to_string())),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
+            .collect(),
+        )
+    }
+
+    fn effect_batch_payload(
+        slot_idx: usize,
+        node_id: u32,
+        updates: &[(usize, f32)],
+    ) -> Value {
+        let updates = updates
+            .iter()
+            .map(|(param_idx, value)| {
+                Rc::new(RefCell::new(Value::Map(
+                    [
+                        ("param-idx".to_string(), Value::Number(*param_idx as f64)),
+                        ("value".to_string(), Value::Number(*value as f64)),
+                    ]
+                    .into_iter()
+                    .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
+                    .collect(),
+                )))
+            })
+            .collect();
+        Value::Map(
+            [
+                ("slot-idx".to_string(), Value::Number(slot_idx as f64)),
+                ("target-node-id".to_string(), Value::Number(node_id as f64)),
+                ("updates".to_string(), Value::List(updates)),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
+            .collect(),
+        )
+    }
+
     fn reactive_number(editor: &Editor, field: &str) -> f64 {
         match editor.runtime().reactive_field_value("SEQ", field) {
             Some(Value::Number(n)) => *n,
@@ -926,7 +1011,7 @@ mod tests {
     /// rather than any sync helper, because both previous fixes for this bug
     /// were validated against helpers/mirrors and missed the real path.
     #[test]
-    fn set_instrument_plock_publishes_the_compact_step_plock_render_fields() {
+    fn device_param_commands_print_while_recording() {
         const TRACK: usize = 0;
         const STEP: usize = 3;
         const PARAM: usize = 0;
@@ -937,6 +1022,9 @@ mod tests {
         ));
         let descriptor = sequencer::effects::EffectDescriptor::builtin_filter();
         state.pattern.instrument_slots[TRACK].apply_descriptor(&descriptor, 1);
+        const EFFECT_NODE_ID: u32 = 42;
+        state.pattern.effect_chains[TRACK][0]
+            .apply_descriptor(&descriptor, EFFECT_NODE_ID);
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = app::App::new(
             state.clone(),
@@ -957,6 +1045,62 @@ mod tests {
         app.track_registry =
             sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.instrument_descriptors = vec![descriptor.clone()];
+        app.graph.effect_descriptors = vec![vec![descriptor.clone()]];
+
+        let midi_descriptor = sequencer::lisp_host::load_midi_fx_descriptor("arp")
+            .expect("builtin arp descriptor");
+        state.pattern.track_params[TRACK]
+            .set_midi_fx_chain(vec![midi_descriptor.name.clone()]);
+        state.pattern.midi_fx_slots[TRACK][0].apply_descriptor(&midi_descriptor, 43);
+
+        app.buses[0].effect_descriptors = vec![descriptor.clone()];
+        app.buses[0].effect_slots = vec![
+            sequencer::effects::EffectSlotSnapshot::new_default(&descriptor, 44),
+        ];
+
+        let sampler_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let mut rack_effect_slots =
+            sequencer::sequencer::RackSlotSnapshot::empty_effect_slots();
+        rack_effect_slots[0] =
+            sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(
+                &descriptor,
+                45,
+                0,
+            );
+        let mut rack_effect_descriptors =
+            sequencer::effects::EffectDescriptor::default_full_chain();
+        rack_effect_descriptors[0] = descriptor.clone();
+        state.set_rack_track_for_all_pattern_snapshots(
+            TRACK,
+            sequencer::sequencer::RackTrackSnapshot::new(
+                vec![sequencer::sequencer::RackSlotSnapshot {
+                    instrument_type: sequencer::sequencer::InstrumentType::Sampler,
+                    instrument_run_mode:
+                        sequencer::sequencer::CustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 8,
+                    param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
+                    instrument_slot:
+                        sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(
+                            &sampler_descriptor,
+                            46,
+                            0,
+                        ),
+                    effect_slots: rack_effect_slots,
+                    effect_descriptors: rack_effect_descriptors,
+                    custom_effect_names:
+                        sequencer::sequencer::RackSlotSnapshot::empty_effect_names(),
+                    track_sound_state: sequencer::sequencer::TrackSoundState::default(),
+                    sample_id: Some((1, "test.wav".to_string(), 44_100)),
+                }],
+                sequencer::sequencer::default_rack_macros(),
+            ),
+        );
 
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", Vec::new(), true);
@@ -1105,6 +1249,358 @@ mod tests {
                 Some(Value::Bool(true))
             ),
             "the per-step p-lock presence bool must stay in sync"
+        );
+
+        // With no selection, record+play diverts the normal base-param host
+        // command into the print latch. The base stays untouched and the tick
+        // writes only the triggered step under the playhead.
+        const PRINT_STEP: usize = 5;
+        selected_steps.lock().unwrap().clear();
+        state.pattern.patterns[TRACK].toggle_step(PRINT_STEP);
+        state.transport.track_playheads[TRACK].store(PRINT_STEP as u32, Ordering::Relaxed);
+        state.transport.playing.store(true, Ordering::Relaxed);
+        shared.recording.store(true, Ordering::Relaxed);
+        let default_before = state.pattern.instrument_slots[TRACK].defaults.get(PARAM);
+        let print_epochs_before = (
+            fx_epoch.load(Ordering::Relaxed),
+            ui_epoch.load(Ordering::Relaxed),
+        );
+        // Replay consecutive real handler updates from one drag before the
+        // frame tick. Only the latest held value should print, and the tick
+        // must enqueue one presence batch rather than rebuilding *fx*.
+        dispatch_custom_host_command(
+            "set-instrument-param",
+            number_payload(&[("param-idx", PARAM as f64), ("value", 0.73)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-instrument-param",
+            number_payload(&[("param-idx", PARAM as f64), ("value", 0.74)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert_eq!(
+            state.pattern.instrument_slots[TRACK].defaults.get(PARAM),
+            default_before,
+            "printing must never write the instrument base value"
+        );
+        // The print branch skips the base write, so it owes the touched
+        // control's own display binding the LATCHED value right now — before
+        // any playhead crossing runs `sync_fx_param_bindings_delta`. Without
+        // this the knob only moves once per step (very visible at slow BPM).
+        {
+            let param_name = descriptor.params[PARAM].name.clone();
+            let expected = descriptor.params[PARAM].stored_to_user(0.74) as f64;
+            for field in [
+                instrument_param_value_field(TRACK, PARAM, &param_name),
+                fx_instrument_param_value_field(PARAM, &param_name),
+            ] {
+                assert_eq!(
+                    reactive_number(&editor, &field),
+                    expected,
+                    "the knob's bound display field must follow the print latch \
+                     before any step crossing"
+                );
+            }
+        }
+        assert_eq!(
+            (
+                fx_epoch.load(Ordering::Relaxed),
+                ui_epoch.load(Ordering::Relaxed),
+            ),
+            print_epochs_before,
+            "the display-only latch mirror must not bump any epoch"
+        );
+        let tick = tick_step_print(&mut app, &shared, editor.runtime_mut());
+        assert!(tick.printed);
+        assert_eq!(
+            state.pattern.instrument_slots[TRACK].plocks.get(PRINT_STEP, PARAM),
+            Some(0.74)
+        );
+        // The scheduler resolves instrument p-locks from its published
+        // snapshot (a deep copy), not live SlotPLockData, so the tick must
+        // have republished the track — otherwise the printed gesture stays
+        // inaudible until the next transport restart.
+        assert_eq!(
+            state.latest_scheduler_snapshot().tracks[TRACK]
+                .instrument_slot
+                .plocks[PRINT_STEP][PARAM],
+            Some(0.74),
+            "printed instrument p-lock reaches the published scheduler snapshot",
+        );
+        assert_eq!(
+            (
+                fx_epoch.load(Ordering::Relaxed),
+                ui_epoch.load(Ordering::Relaxed),
+            ),
+            print_epochs_before,
+            "a printed drag must not rebuild the fx or whole UI trees"
+        );
+        assert_eq!(
+            shared.ui_invalidations.drain(),
+            vec![UiInvalidation::StepInvalidationBatch {
+                track: TRACK,
+                steps: vec![PRINT_STEP],
+                change: StepInvalidation::PlockPresence,
+            }],
+            "all printed params for one tick must share one targeted presence invalidation"
+        );
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_device_param_gesture(&state);
+        assert!(!shared.step_print.lock().unwrap().armed());
+
+        // Track-effect scalar, batch, and enum-option commands all use the
+        // same print gate. The stale reported index proves each latch keys on
+        // the slot resolved from the stable node id, not the payload index.
+        const EFFECT_SLOT: usize = 0;
+        const STALE_REPORTED_SLOT: usize = 7;
+        let effect_slot = &state.pattern.effect_chains[TRACK][EFFECT_SLOT];
+        let effect_default_before = effect_slot.defaults.get(2);
+        let epochs_before = (
+            fx_epoch.load(Ordering::Relaxed),
+            ui_epoch.load(Ordering::Relaxed),
+        );
+        dispatch_custom_host_command(
+            "set-effect-param",
+            number_payload(&[
+                ("slot-idx", STALE_REPORTED_SLOT as f64),
+                ("target-node-id", EFFECT_NODE_ID as f64),
+                ("param-idx", 2.0),
+                ("value", 1_800.0),
+            ]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert_eq!(effect_slot.defaults.get(2), effect_default_before);
+        // Same contract for a track effect knob: its bound field follows the
+        // latch immediately, in stored units (matching
+        // `sync_track_effect_param_value_field`), with no epoch bump.
+        assert_eq!(
+            reactive_number(
+                &editor,
+                &track_effect_param_value_field(
+                    TRACK,
+                    EFFECT_SLOT,
+                    2,
+                    &descriptor.params[2].name,
+                ),
+            ),
+            1_800.0,
+            "the effect knob's bound display field must follow the print latch \
+             before any step crossing"
+        );
+        assert_eq!(
+            (
+                fx_epoch.load(Ordering::Relaxed),
+                ui_epoch.load(Ordering::Relaxed),
+            ),
+            epochs_before,
+            "the effect display-only latch mirror must not bump any epoch"
+        );
+        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert_eq!(effect_slot.plocks.get(PRINT_STEP, 2), Some(1_800.0));
+        assert_eq!(
+            state.latest_scheduler_snapshot().tracks[TRACK].effect_slots
+                [EFFECT_SLOT]
+                .plocks[PRINT_STEP][2],
+            Some(1_800.0),
+            "printed effect p-lock reaches the published scheduler snapshot",
+        );
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_device_param_gesture(&state);
+
+        dispatch_custom_host_command(
+            "set-effect-param-batch",
+            effect_batch_payload(
+                STALE_REPORTED_SLOT,
+                EFFECT_NODE_ID,
+                &[(2, 2_200.0), (3, 0.8)],
+            ),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert_eq!(effect_slot.plocks.get(PRINT_STEP, 2), Some(2_200.0));
+        assert_eq!(effect_slot.plocks.get(PRINT_STEP, 3), Some(0.8));
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_device_param_gesture(&state);
+
+        dispatch_custom_host_command(
+            "set-effect-param-option",
+            effect_option_payload(
+                STALE_REPORTED_SLOT,
+                EFFECT_NODE_ID,
+                1,
+                "highpass",
+            ),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert_eq!(effect_slot.plocks.get(PRINT_STEP, 1), Some(1.0));
+        assert_eq!(effect_slot.defaults.get(1), descriptor.params[1].default);
+        assert_eq!(
+            (
+                fx_epoch.load(Ordering::Relaxed),
+                ui_epoch.load(Ordering::Relaxed),
+            ),
+            epochs_before,
+            "effect printing must not rebuild the fx or whole UI trees"
+        );
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_device_param_gesture(&state);
+
+        // Extended scalar targets share the same gate and one tick. Their
+        // defaults remain untouched while each family receives a p-lock.
+        let midi_default_before =
+            state.pattern.midi_fx_slots[TRACK][0].defaults.get(0);
+        let bus_default_before = app.buses[0].effect_slots[0].defaults[2];
+        let rack_before = state.pattern.rack_tracks.lock().unwrap()[TRACK]
+            .as_ref()
+            .unwrap()
+            .clone();
+        dispatch_custom_host_command(
+            "set-midi-fx-param",
+            number_payload(&[("slot-idx", 0.0), ("param-idx", 0.0), ("value", 6.0)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        // Tick the MIDI-FX print alone: the scheduler applies MIDI-FX p-locks
+        // from its published snapshot, not live slot state, so this tick must
+        // republish the track by itself (no rack target may piggyback the
+        // publish).
+        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert_eq!(
+            state.pattern.midi_fx_slots[TRACK][0].defaults.get(0),
+            midi_default_before,
+        );
+        assert_eq!(
+            state.pattern.midi_fx_slots[TRACK][0].plocks.get(PRINT_STEP, 0),
+            Some(6.0),
+        );
+        assert_eq!(
+            state.latest_scheduler_snapshot().tracks[TRACK].midi_fx_slots[0]
+                .plocks[PRINT_STEP][0],
+            Some(6.0),
+            "printed MIDI-FX p-lock reaches the published scheduler snapshot",
+        );
+        dispatch_custom_host_command(
+            "set-bus-effect-param",
+            number_payload(&[
+                ("bus", 0.0),
+                ("slot-idx", 0.0),
+                ("param-idx", 2.0),
+                ("value", 1_600.0),
+            ]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-rack-slot-gain",
+            number_payload(&[("track", 0.0), ("slot", 0.0), ("value", 1.5)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-rack-slot-instrument-param",
+            number_payload(&[
+                ("track", 0.0),
+                ("slot", 0.0),
+                ("param-idx", 8.0),
+                ("value", 22_050.0),
+            ]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-rack-slot-effect-param",
+            number_payload(&[
+                ("track", 0.0),
+                ("rack-slot", 0.0),
+                ("effect-slot", 0.0),
+                ("param", 2.0),
+                ("value", 1_200.0),
+            ]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        dispatch_custom_host_command(
+            "set-rack-macro-value",
+            number_payload(&[("track", 0.0), ("id", 0.0), ("value", 0.65)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert!(tick_step_print(&mut app, &shared, editor.runtime_mut()).printed);
+        assert_eq!(app.buses[0].effect_slots[0].defaults[2], bus_default_before);
+        assert_eq!(app.buses[0].effect_slots[0].plocks[PRINT_STEP][2], Some(1_600.0));
+        let racks = state.pattern.rack_tracks.lock().unwrap();
+        let rack = racks[TRACK].as_ref().unwrap();
+        assert_eq!(rack.slots[0].gain, rack_before.slots[0].gain);
+        assert_eq!(
+            rack.slots[0]
+                .param_plocks
+                .get(PRINT_STEP, sequencer::sequencer::RackSlotParam::Gain),
+            Some(1.5),
+        );
+        assert_eq!(
+            rack.slots[0].instrument_slot.defaults,
+            rack_before.slots[0].instrument_slot.defaults,
+        );
+        assert_eq!(
+            rack.slots[0].instrument_slot.plocks[PRINT_STEP][8],
+            Some(22_050.0),
+        );
+        assert_eq!(
+            rack.slots[0].effect_slots[0].defaults,
+            rack_before.slots[0].effect_slots[0].defaults,
+        );
+        assert_eq!(rack.slots[0].effect_slots[0].plocks[PRINT_STEP][2], Some(1_200.0));
+        assert_eq!(rack.macros[0].value, rack_before.macros[0].value);
+        assert_eq!(rack.macros[0].plocks[PRINT_STEP], Some(0.65));
+        drop(racks);
+        shared
+            .step_print
+            .lock()
+            .unwrap()
+            .release_device_param_gesture(&state);
+
+        // If the record gate races off, the same payload falls through to the
+        // normal base edit rather than being dropped.
+        shared.recording.store(false, Ordering::Relaxed);
+        dispatch_custom_host_command(
+            "set-instrument-param",
+            number_payload(&[("param-idx", PARAM as f64), ("value", 0.31)]),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert_eq!(
+            state.pattern.instrument_slots[TRACK].defaults.get(PARAM),
+            0.31
         );
     }
 }

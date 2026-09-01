@@ -178,9 +178,76 @@ pub struct ParamUiMetadata {
     pub env: Option<String>,
     pub role: Option<String>,
     pub tags: Vec<String>,
+    pub asset_options: Option<ParamAssetOptions>,
     /// The source-level name shown by DGenLisp. When it differs from the
     /// canonical host id, it is also the migration alias for saved data.
     pub display_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParamAssetOptions {
+    pub tensor: String,
+    pub file: String,
+    pub key: String,
+    pub asset_base: Option<std::path::PathBuf>,
+}
+
+/// The manifest echoes the `@file` spelling the compiler was handed, and the
+/// pre-compile library rewrite (`dylib_cache::rewrite_library_asset_references`)
+/// absolutizes library-tier references — but host-side label resolution
+/// (`asset-metadata` → patcher asset resolvers) accepts only relative
+/// references. Invert the rewrite: map an absolute options file back to the
+/// reference tier it came from. Unmappable absolute paths pass through and
+/// degrade to the integer-knob fallback downstream.
+fn relativize_asset_options_file(
+    file: &str,
+    asset_base: Option<&std::path::Path>,
+) -> (String, Option<std::path::PathBuf>) {
+    let paths = crate::app_paths::app_paths();
+    relativize_asset_options_file_with_roots(
+        file,
+        asset_base,
+        &[paths.user_assets_dir(), paths.factory_assets_dir()],
+    )
+}
+
+fn relativize_asset_options_file_with_roots(
+    file: &str,
+    asset_base: Option<&std::path::Path>,
+    library_roots: &[std::path::PathBuf],
+) -> (String, Option<std::path::PathBuf>) {
+    let file_path = std::path::Path::new(file);
+    if !file_path.is_absolute() {
+        // A draft-local reference resolves against the compile's asset base.
+        return (file.to_string(), asset_base.map(std::path::Path::to_path_buf));
+    }
+    // The rewrite stored canonical paths; canonicalize both sides so prefix
+    // stripping is not defeated by symlinks (macOS /tmp → /private/tmp).
+    let canonical_file = file_path
+        .canonicalize()
+        .unwrap_or_else(|_| file_path.to_path_buf());
+    for root in library_roots {
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        if let Ok(relative) = canonical_file.strip_prefix(&canonical_root) {
+            if let Some(reference) = relative.to_str() {
+                // Library tier: the plain reference resolves through the
+                // shared user→factory precedence with no explicit base.
+                return (reference.replace(std::path::MAIN_SEPARATOR, "/"), None);
+            }
+        }
+    }
+    if let Some(base) = asset_base {
+        let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+        if let Ok(relative) = canonical_file.strip_prefix(&canonical_base) {
+            if let Some(reference) = relative.to_str() {
+                return (
+                    reference.replace(std::path::MAIN_SEPARATOR, "/"),
+                    Some(base.to_path_buf()),
+                );
+            }
+        }
+    }
+    (file.to_string(), None)
 }
 
 impl ParamUiMetadata {
@@ -203,6 +270,7 @@ impl ParamUiMetadata {
                 env,
                 role,
                 tags,
+                asset_options: None,
                 display_name: None,
             })
         }
@@ -504,6 +572,136 @@ mod tests {
     };
     use crate::lisp_host::{TensorInit, TensorMeta};
     use crate::neural::ParamNodeId;
+
+    #[test]
+    fn tensor_backed_options_bake_enum_labels_from_the_asset() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-options-enum-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("waves")).unwrap();
+        std::fs::write(
+            root.join("waves/bank.json"),
+            r#"{"shape":[2,2],"data":[0,1,0,1],"sets":["Alpha","Beta"],"waves_per_set":1}"#,
+        )
+        .unwrap();
+        let registered = eseqlisp::widget_render::patcher::register_asset_source_root(&root);
+        let param = |file: &str| crate::lisp_host::DGenParam {
+            name: "table".to_string(),
+            display_name: "table".to_string(),
+            cell_id: 0,
+            cell_span: 1,
+            default: 0.0,
+            min: 0.0,
+            max: 1.0,
+            unit: None,
+            hidden: false,
+            group: None,
+            env: None,
+            role: None,
+            options: Some(crate::lisp_host::DGenParamOptions::Asset {
+                tensor: "bank".to_string(),
+                file: file.to_string(),
+                key: "sets".to_string(),
+            }),
+        };
+
+        // A resolvable reference bakes the asset's labels into an Enum, so
+        // the option host-commands and p-lock label display work like any
+        // builtin enum param.
+        let desc = EffectDescriptor::from_lisp_manifest_with_asset_base(
+            "patch",
+            &[param("waves/bank.json")],
+            Some(&registered),
+            0,
+            1,
+        );
+        match &desc.params[0].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(labels, &["Alpha".to_string(), "Beta".to_string()]);
+            }
+            other => panic!("expected Enum labels, got {other:?}"),
+        }
+
+        // An unresolvable reference degrades to Continuous (integer-knob
+        // fallback downstream) instead of an empty dropdown.
+        let desc = EffectDescriptor::from_lisp_manifest_with_asset_base(
+            "patch",
+            &[param("waves/missing.json")],
+            Some(&registered),
+            0,
+            1,
+        );
+        assert!(matches!(
+            desc.params[0].kind,
+            ParamKind::Continuous { .. }
+        ));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn relativize_asset_options_maps_absolute_files_back_to_references() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-relativize-options-{}",
+            std::process::id()
+        ));
+        let library = root.join("assets");
+        let draft = root.join("draft");
+        std::fs::create_dir_all(library.join("wavetables")).unwrap();
+        std::fs::create_dir_all(draft.join("waves")).unwrap();
+        let library_file = library.join("wavetables/bank.json");
+        let draft_file = draft.join("waves/local.json");
+        std::fs::write(&library_file, "{}").unwrap();
+        std::fs::write(&draft_file, "{}").unwrap();
+        let roots = vec![library.clone()];
+
+        // Library-tier absolute spelling (the pre-compile rewrite's output,
+        // canonical form included) strips to a plain reference with no base.
+        let canonical = library_file.canonicalize().unwrap();
+        assert_eq!(
+            super::relativize_asset_options_file_with_roots(
+                canonical.to_str().unwrap(),
+                Some(&draft),
+                &roots,
+            ),
+            ("wavetables/bank.json".to_string(), None)
+        );
+
+        // Draft-local absolute spelling strips against the asset base and
+        // keeps it, so registered-root resolution still works.
+        assert_eq!(
+            super::relativize_asset_options_file_with_roots(
+                draft_file.to_str().unwrap(),
+                Some(&draft),
+                &roots,
+            ),
+            ("waves/local.json".to_string(), Some(draft.clone()))
+        );
+
+        // Relative references pass through with the base intact.
+        assert_eq!(
+            super::relativize_asset_options_file_with_roots(
+                "waves/local.json",
+                Some(&draft),
+                &roots,
+            ),
+            ("waves/local.json".to_string(), Some(draft.clone()))
+        );
+
+        // An absolute path outside every root passes through (and degrades
+        // downstream) rather than being mis-relativized.
+        assert_eq!(
+            super::relativize_asset_options_file_with_roots(
+                "/nonexistent/elsewhere.json",
+                Some(&draft),
+                &roots,
+            ),
+            ("/nonexistent/elsewhere.json".to_string(), None)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn tensor_meta(name: &str, cell_offset: usize, shape: Vec<usize>, mutable: bool) -> TensorMeta {
         TensorMeta {
@@ -1458,6 +1656,7 @@ mod tests {
                 group: None,
                 env: None,
                 role: None,
+                options: None,
             }],
             0,
             1,
@@ -1486,6 +1685,7 @@ mod tests {
                 group: None,
                 env: None,
                 role: None,
+                options: None,
             }], 0, 1,
         );
         let new_desc = EffectDescriptor::from_lisp_manifest(
@@ -1503,6 +1703,7 @@ mod tests {
                 group: Some("filter".to_string()),
                 env: None,
                 role: None,
+                options: None,
             }], 0, 1,
         );
         let slot = EffectSlotState::new(&old_desc, 100);
@@ -1534,6 +1735,7 @@ mod tests {
                     group: Some("amp".to_string()),
                     env: Some("amp_env".to_string()),
                     role: Some("attack".to_string()),
+                    options: None,
                 },
                 crate::lisp_host::DGenParam {
                     name: "hidden_release".to_string(),
@@ -1548,6 +1750,7 @@ mod tests {
                     group: Some("amp".to_string()),
                     env: Some("amp_env".to_string()),
                     role: Some("release".to_string()),
+                    options: None,
                 },
             ],
             0,
@@ -7743,10 +7946,26 @@ impl EffectDescriptor {
         }
     }
 
-    /// Construct from a lisp effect manifest.
+    /// Construct from a lisp effect manifest without source-local assets.
     pub fn from_lisp_manifest(
         name: &str,
         params: &[crate::lisp_host::DGenParam],
+        input_channels: usize,
+        output_channels: usize,
+    ) -> Self {
+        Self::from_lisp_manifest_with_asset_base(
+            name,
+            params,
+            None,
+            input_channels,
+            output_channels,
+        )
+    }
+
+    pub fn from_lisp_manifest_with_asset_base(
+        name: &str,
+        params: &[crate::lisp_host::DGenParam],
+        asset_base: Option<&std::path::Path>,
         input_channels: usize,
         output_channels: usize,
     ) -> Self {
@@ -7758,8 +7977,34 @@ impl EffectDescriptor {
                 min: p.min,
                 max: p.max,
                 default: p.default,
-                kind: ParamKind::Continuous {
-                    unit: p.unit.clone(),
+                kind: match &p.options {
+                    Some(crate::lisp_host::DGenParamOptions::Labels(labels)) => {
+                        ParamKind::Enum { labels: labels.clone() }
+                    }
+                    // Tensor-backed options bake their labels here, at
+                    // manifest load: the tensor data was baked at compile
+                    // time, so labels matching that compile are the correct
+                    // ones, and an Enum descriptor is what the option
+                    // host-commands and p-lock label display key off.
+                    // Unresolvable references stay Continuous and the UI
+                    // degrades to an integer knob.
+                    Some(crate::lisp_host::DGenParamOptions::Asset { file, key, .. }) => {
+                        let (reference, base) =
+                            relativize_asset_options_file(file, asset_base);
+                        match eseqlisp::editor::asset_option_labels(
+                            &reference,
+                            base.as_deref(),
+                            key,
+                        ) {
+                            Some(labels) => ParamKind::Enum { labels },
+                            None => ParamKind::Continuous {
+                                unit: p.unit.clone(),
+                            },
+                        }
+                    }
+                    None => ParamKind::Continuous {
+                        unit: p.unit.clone(),
+                    },
                 },
                 scaling: ParamScaling::Linear,
                 node_param_idx: (crate::lisp_host::HEADER_SLOTS + p.cell_id) as u32,
@@ -7778,9 +8023,33 @@ impl EffectDescriptor {
                                 env: None,
                                 role: None,
                                 tags: Vec::new(),
+                                asset_options: None,
                                 display_name: None,
                             })
                             .display_name = Some(p.display_name.clone());
+                    }
+                    if let Some(crate::lisp_host::DGenParamOptions::Asset { tensor, file, key }) =
+                        &p.options
+                    {
+                        metadata
+                            .get_or_insert_with(|| ParamUiMetadata {
+                                group: None,
+                                env: None,
+                                role: None,
+                                tags: Vec::new(),
+                                asset_options: None,
+                                display_name: None,
+                            })
+                            .asset_options = Some({
+                                let (file, asset_base) =
+                                    relativize_asset_options_file(file, asset_base);
+                                ParamAssetOptions {
+                                    tensor: tensor.clone(),
+                                    file,
+                                    key: key.clone(),
+                                    asset_base,
+                                }
+                            });
                     }
                     metadata
                 },
@@ -8156,6 +8425,46 @@ impl SlotPLockData {
             return false;
         }
         self.step_count(step) > 0
+    }
+
+    /// Transpose of `or_step_plock_mask` (bead eseq-yr6w): which params carry
+    /// at least one p-lock on any step. `has_any_plock` short-circuits the
+    /// plock-free slot (the common case) to O(1), `step_count` skips
+    /// plock-free steps, and the running remainder stops the walk as soon as
+    /// every set cell has been seen.
+    pub fn params_with_any_plock(&self, num_params: usize) -> Vec<bool> {
+        let np = num_params.min(self.max_params);
+        let mut flags = vec![false; np];
+        if np == 0 || !self.has_any_plock() {
+            return flags;
+        }
+        let Some(cells) = self.cells() else {
+            return flags;
+        };
+        let mut remaining = self.plock_count.load(Ordering::Relaxed);
+        for step in 0..MAX_STEPS {
+            if remaining == 0 {
+                break;
+            }
+            let count = self.step_count(step);
+            if count == 0 {
+                continue;
+            }
+            remaining = remaining.saturating_sub(count);
+            let base = step * self.max_params;
+            for (param_idx, flag) in flags.iter_mut().enumerate() {
+                if *flag {
+                    continue;
+                }
+                let idx = base + param_idx;
+                if idx < cells.data.len()
+                    && !f32::from_bits(cells.data[idx].load(Ordering::Relaxed)).is_nan()
+                {
+                    *flag = true;
+                }
+            }
+        }
+        flags
     }
 }
 

@@ -6824,6 +6824,15 @@
     }
 
     fn load_param_grid_test_lisp(editor: &mut eseqlisp::Editor) {
+        editor.runtime_mut().register_native("asset-metadata", |args, _ctx| {
+            if args.first() != Some(&Value::String("waves/bank.json".to_string())) {
+                return Ok(Value::Nil);
+            }
+            Ok(Value::Map(HashMap::from([(
+                "sets".to_string(),
+                Rc::new(RefCell::new(test_string_list(&["Basic", "Metallic"]))),
+            )])))
+        });
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -9364,6 +9373,36 @@
     }
 
     #[test]
+    fn held_plock_value_holds_off_step_plocks_until_the_next_trigger() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        state.pattern.track_params[0].set_num_steps(16);
+        // Triggers on 0 and 8; off-step p-locks at 2 and 14.
+        state.pattern.patterns[0].toggle_step(0);
+        state.pattern.patterns[0].toggle_step(8);
+        let plocks: std::collections::HashMap<usize, f32> =
+            [(2, 500.0), (14, 900.0)].into_iter().collect();
+        let held = |step: usize| {
+            held_plock_value(&state, 0, step, true, |s| plocks.get(&s).copied())
+        };
+
+        assert_eq!(held(2), Some(500.0), "a step's own p-lock is in force");
+        assert_eq!(held(5), Some(500.0), "an off-step p-lock holds forward");
+        assert_eq!(
+            held(8),
+            None,
+            "an ON trigger without its own p-lock returns to base",
+        );
+        assert_eq!(held(9), None, "the base holds after the trigger");
+        assert_eq!(held(15), Some(900.0));
+        assert_eq!(
+            held(0),
+            None,
+            "the wrap does not carry a hold past the trigger on step 0",
+        );
+        assert_eq!(held(1), None);
+    }
+
+    #[test]
     fn displayed_plock_step_uses_selection_before_playback() {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let selected_steps = Arc::new(Mutex::new(HashSet::from([5, 2])));
@@ -9759,11 +9798,11 @@
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", vec![], true);
         runtime.register_reactive("SEQV", vec![], true);
-        let plocked = |runtime: &Runtime| {
+        let plocked = |runtime: &Runtime, field: &str| {
             let Some(Value::Map(map)) = runtime.global_value("SEQ") else {
                 return None;
             };
-            map.get(&field).and_then(|value| match &*value.borrow() {
+            map.get(field).and_then(|value| match &*value.borrow() {
                 Value::Bool(value) => Some(*value),
                 _ => None,
             })
@@ -9778,7 +9817,7 @@
             &selected_steps,
         );
         assert_eq!(
-            plocked(&runtime),
+            plocked(&runtime, &field),
             Some(false),
             "an unlocked step must publish an unlit expanded p-lock tick"
         );
@@ -9798,13 +9837,39 @@
             &selected_steps,
         );
         assert_eq!(
-            plocked(&runtime),
+            plocked(&runtime, &field),
             Some(true),
             "the first p-lock write must light the expanded lane's tick without an epoch bump"
         );
         assert!(
             reactive_number(&runtime, "SEQ", &kind_field).is_some_and(|kind| kind > 0.0),
             "the first p-lock write must publish a nonzero plock-kind for the expanded step shell"
+        );
+
+        // Live printing is gated on an empty selection, so it cannot use the
+        // selected-step helper above. Its coalesced PlockPresence batch flows
+        // through the structural batch sync and must still update the exact
+        // expanded slot that was printed.
+        const PRINT_STEP: usize = 3;
+        selected_steps.lock().unwrap().clear();
+        app.state.pattern.instrument_slots[0].set_plock(PRINT_STEP, cutoff_idx, 1_200.0);
+        sync_step_batch_structural_bindings(
+            &mut runtime,
+            &app.state,
+            &app,
+            0,
+            &[PRINT_STEP],
+            0,
+            &selected_steps,
+            &expanded_step_projection,
+        );
+        assert_eq!(
+            plocked(
+                &runtime,
+                &expanded_step_slot_plocked_field(TRACK_ID, PRINT_STEP),
+            ),
+            Some(true),
+            "a printed p-lock must light its expanded slot with no selected step"
         );
     }
 
@@ -11361,6 +11426,328 @@
             updated_map_button,
             "background-color",
             [0.27, 0.78, 0.43, 1.0],
+        );
+    }
+
+    // Beads eseq-4seq / eseq-yr6w. Deliberately asserts structure only —
+    // which wrapper the mode chain picked and whether the presence flag
+    // reached the box — never colours or geometry.
+    #[test]
+    fn print_latch_and_plock_presence_reach_the_param_wrappers() {
+        let mut editor = macro_controls_editor(0.25);
+        editor.set_layout_viewport(180, 20);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(0.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "effects",
+            test_list(vec![Value::Map(test_fx_map(
+                "track-fx",
+                0,
+                vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
+            ))]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "instrument-panel",
+            test_list(vec![Value::Map(test_instrument_map())]),
+        );
+        for (field, value) in [
+            ("track-plocks", test_list(vec![])),
+            ("track-plock-variants", test_list(vec![])),
+            ("track-plock-any", test_list(vec![])),
+            ("track-plock-printing", test_list(vec![])),
+        ] {
+            editor.runtime_mut().set_reactive("SEQ", field, value);
+        }
+        // The per-param projection namespace the *plock-sync* effects write
+        // into; the app registers it in `natives.rs`.
+        editor.runtime_mut().register_reactive("SEQV", vec![], true);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playing", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "recording", Value::Bool(true));
+        for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp"] {
+            let source = read_factory_source(path).expect("read param control UI source");
+            let overlays = editor.snapshot_file_backed_sources();
+            let report = editor.runtime_mut().eval_source_transactional(
+                Some(std::path::PathBuf::from(path)),
+                &source,
+                overlays,
+            );
+            assert!(report.success, "load {path}: {}", report.failure_message());
+            editor.process_lisp_reload_report(report);
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*plock-overlay-test*"
+                  (box :padding 0
+                    (h-stack :gap 1
+                      (eseq.effects.param-controls/instrument-param-mod-wrapper
+                        (nth (get (nth SEQ.instrument-panel 0) :synth) 0)
+                        "overlay-test-instrument"
+                        (box :debug-name "overlay-test-body" :width 6 :height 4))
+                      (let ((fx (nth SEQ.effects 0)))
+                        (eseq.effects.param-controls/param-mod-wrapper fx (nth (get fx :params) 0)
+                          "overlay-test-effect"
+                          (box :width 6 :height 4))))))
+                "#,
+            )
+            .expect("create p-lock overlay test buffer");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("p-lock overlay buffer status: {status}");
+        }
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*plock-overlay-test*")
+            .expect("p-lock overlay test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(180, 20);
+
+        let print_wrappers = |editor: &mut eseqlisp::Editor| -> usize {
+            let layout = editor.widget_layout().expect("overlay layout");
+            let mut nodes = Vec::new();
+            collect_layout_nodes_by_debug_name(&layout, "param-print-wrapper", &mut nodes);
+            nodes.len()
+        };
+        let flagged_boxes = |editor: &mut eseqlisp::Editor| -> usize {
+            fn walk(node: &eseqlisp::layout::LayoutNode, count: &mut usize) {
+                if layout_prop_number(node, "plock-any") == Some(1.0) {
+                    *count += 1;
+                }
+                for child in &node.children {
+                    walk(child, count);
+                }
+            }
+            let layout = editor.widget_layout().expect("overlay layout");
+            let mut count = 0;
+            walk(&layout, &mut count);
+            count
+        };
+
+        assert_eq!(print_wrappers(&mut editor), 0, "nothing is latched yet");
+        assert_eq!(flagged_boxes(&mut editor), 0, "no p-locks in the pattern yet");
+        // The overlay must not resize the control it wraps: a rectangle that
+        // appears on mouse-down and nudges the knob under the pointer is worse
+        // than no rectangle at all.
+        let body_rect = |editor: &mut eseqlisp::Editor| {
+            let layout = editor.widget_layout().expect("overlay layout");
+            let mut nodes = Vec::new();
+            collect_layout_nodes_by_debug_name(&layout, "overlay-test-body", &mut nodes);
+            assert_eq!(nodes.len(), 1);
+            nodes[0].rect
+        };
+        let unwrapped = body_rect(&mut editor);
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plock-printing",
+            Value::List(vec![plock_key_row("instrument", None, None, Some(0))]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plock-any",
+            Value::List(vec![plock_key_row("effect", Some(0), None, Some(0))]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            print_wrappers(&mut editor),
+            1,
+            "only the latched instrument param wears the print overlay"
+        );
+        assert_eq!(
+            body_rect(&mut editor),
+            unwrapped,
+            "the print overlay must not shift or resize the control it wraps"
+        );
+        assert_eq!(
+            flagged_boxes(&mut editor),
+            1,
+            "only the p-locked effect param wears the presence flag"
+        );
+
+        // Transport gate: the projection must retire both the overlay and its
+        // flag when record stops, even with the row list left standing.
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "recording", Value::Bool(false));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            print_wrappers(&mut editor),
+            0,
+            "a stale print row must not survive record-off"
+        );
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plock-any",
+            Value::List(vec![]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            flagged_boxes(&mut editor),
+            0,
+            "clearing the last p-lock must retire the presence flag"
+        );
+    }
+
+    // Bead eseq-1gy6. Structure only: which actions the knob's right-click
+    // menu offers, and the host command one of them emits. No colours, no
+    // placement.
+    #[test]
+    fn param_knob_right_click_offers_clear_plock_actions_only_for_locked_params() {
+        let mut editor = macro_controls_editor(0.25);
+        editor.set_layout_viewport(180, 20);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(0.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "effects",
+            test_list(vec![Value::Map(test_fx_map(
+                "track-fx",
+                0,
+                vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
+            ))]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "instrument-panel",
+            test_list(vec![Value::Map(test_instrument_map())]),
+        );
+        for (field, value) in [
+            ("track-plocks", test_list(vec![])),
+            ("track-plock-variants", test_list(vec![])),
+            ("track-plock-printing", test_list(vec![])),
+            // Only the effect's param 0 carries automation.
+            (
+                "track-plock-any",
+                Value::List(vec![plock_key_row("effect", Some(0), None, Some(0))]),
+            ),
+            // Two selected steps, so the selection-scoped item is offered.
+            (
+                "selected-steps",
+                test_bool_list(&[false, true, false, true]),
+            ),
+        ] {
+            editor.runtime_mut().set_reactive("SEQ", field, value);
+        }
+        editor.runtime_mut().register_reactive("SEQV", vec![], true);
+        for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp"] {
+            let source = read_factory_source(path).expect("read param control UI source");
+            let overlays = editor.snapshot_file_backed_sources();
+            let report = editor.runtime_mut().eval_source_transactional(
+                Some(std::path::PathBuf::from(path)),
+                &source,
+                overlays,
+            );
+            assert!(report.success, "load {path}: {}", report.failure_message());
+            editor.process_lisp_reload_report(report);
+        }
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.drain_host_commands();
+
+        // A param with no p-locks has nothing to clear: no menu opens.
+        assert_eq!(
+            editor.runtime_mut().eval_str(
+                r#"(eseq.effects.param-controls/open-param-plock-menu
+                     (dict :col 12 :row 5) false
+                     (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"#
+            ),
+            Ok(Some(Value::Bool(false))),
+            "right-click on an unlocked param must be a no-op"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (eseq.effects.param-controls/param-plock-menu-actions))"),
+            Ok(Some(Value::Number(0.0))),
+            "no menu means no actions"
+        );
+
+        // The p-locked effect param opens the menu with both actions.
+        assert_eq!(
+            editor.runtime_mut().eval_str(
+                r#"(let ((fx (nth SEQ.effects 0)))
+                     (eseq.effects.param-controls/open-param-plock-menu
+                       (dict :col 12 :row 5) fx (nth (get fx :params) 0)))"#
+            ),
+            Ok(Some(Value::Bool(true))),
+            "right-click on a p-locked param must open the menu"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (eseq.effects.param-controls/param-plock-menu-actions))"),
+            Ok(Some(Value::Number(2.0)))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str(
+                "(get (nth (eseq.effects.param-controls/param-plock-menu-actions) 0) :label)"
+            ),
+            Ok(Some(Value::String("Clear p-locks".to_string())))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str(
+                "(get (nth (eseq.effects.param-controls/param-plock-menu-actions) 1) :label)"
+            ),
+            Ok(Some(Value::String(
+                "Clear p-locks on 2 selected steps".to_string()
+            ))),
+            "the selection-scoped item names the live selection count"
+        );
+
+        // Selecting it clears through the bulk host command and closes.
+        editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.effects.param-controls/clear-param-plocks "selected")"#)
+            .expect("run the selection-scoped clear");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "clear-param-plocks");
+                let Value::Map(payload) = payload else {
+                    panic!("clear-param-plocks payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("target").map(|value| value.borrow().clone()),
+                    Some(Value::String("effect".to_string()))
+                );
+                assert_eq!(
+                    payload.get("slot-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("param-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("scope").map(|value| value.borrow().clone()),
+                    Some(Value::String("selected".to_string()))
+                );
+            }
+            other => panic!("expected clear-param-plocks host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (eseq.effects.param-controls/param-plock-menu-actions))"),
+            Ok(Some(Value::Number(0.0))),
+            "acting on the menu closes it"
         );
     }
 
@@ -14163,6 +14550,115 @@
             build_step_has_plocks(&app.state, 0, &app.graph.effect_descriptors),
             Value::List(values) if matches!(*values[3].borrow(), Value::Bool(true))
         ));
+    }
+
+    // Bead eseq-yr6w: the knob dot asks "is this param automated anywhere in
+    // the pattern", which is a different question from SEQ.track-plocks (the
+    // selected step). Rows must appear with no step selected and must name
+    // only the params that actually carry a lock.
+    #[test]
+    fn track_plock_any_rows_cover_instrument_and_effect_params_without_a_selection() {
+        let instrument = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = instrument
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let effect = sequencer::effects::EffectDescriptor::builtin_filter();
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![vec![sequencer::effects::EffectSlotState::new(&effect, 0)]],
+        ));
+        state.pattern.track_params[0].set_num_steps(16);
+        state.pattern.instrument_slots[0].apply_descriptor(&instrument, 0);
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            state.clone(),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app.graph.instrument_descriptors = vec![instrument.clone()];
+        app.graph.effect_descriptors = vec![vec![effect.clone()]];
+
+        assert!(
+            value_list_maps(&build_track_plock_any_value(&app, &state, 0)).is_empty(),
+            "a pattern with no p-locks must publish no presence rows"
+        );
+
+        state.pattern.instrument_slots[0].set_plock(2, cutoff_idx, 900.0);
+        state.pattern.effect_chains[0][0].set_plock(7, cutoff_idx, 1200.0);
+
+        let rows = value_list_maps(&build_track_plock_any_value(&app, &state, 0));
+        let instrument_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| value_map_string(row, "target").as_deref() == Some("instrument"))
+            .collect();
+        assert_eq!(instrument_rows.len(), 1, "rows={rows:?}");
+        assert_eq!(
+            value_map_number(instrument_rows[0], "param-idx"),
+            Some(cutoff_idx as f64)
+        );
+        assert_eq!(
+            value_map_number(instrument_rows[0], "slot-idx"),
+            None,
+            "instrument rows are slot-less, matching param-plock-projected-row-key"
+        );
+
+        let effect_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| value_map_string(row, "target").as_deref() == Some("effect"))
+            .collect();
+        assert_eq!(effect_rows.len(), 1, "rows={rows:?}");
+        assert_eq!(value_map_number(effect_rows[0], "slot-idx"), Some(0.0));
+        assert_eq!(
+            value_map_number(effect_rows[0], "param-idx"),
+            Some(cutoff_idx as f64)
+        );
+
+        state.pattern.instrument_slots[0]
+            .plocks
+            .clear_param(2, cutoff_idx);
+        assert!(
+            !value_list_maps(&build_track_plock_any_value(&app, &state, 0))
+                .iter()
+                .any(|row| value_map_string(row, "target").as_deref() == Some("instrument")),
+            "clearing the last lock on a param must retire its presence row"
+        );
+    }
+
+    #[test]
+    fn track_plock_any_rows_cover_rack_slot_effect_params() {
+        let app = test_app_with_rack_panel_and_slot_fx();
+        assert!(
+            value_list_maps(&build_track_plock_any_value(&app, &app.state, 0))
+                .iter()
+                .all(|row| value_map_string(row, "target").as_deref() != Some("rack-effect")),
+        );
+        assert!(app.state.update_rack_slot_in_current_pattern(0, 0, |slot| {
+            assert!(slot.effect_slots[0].set_plock(3, 0, 0.5));
+        }));
+
+        let rows = value_list_maps(&build_track_plock_any_value(&app, &app.state, 0));
+        let row = rows
+            .iter()
+            .find(|row| value_map_string(row, "target").as_deref() == Some("rack-effect"))
+            .expect("rack effect presence row");
+        assert_eq!(value_map_number(row, "rack-slot"), Some(0.0));
+        assert_eq!(value_map_number(row, "slot-idx"), Some(0.0));
+        assert_eq!(value_map_number(row, "param-idx"), Some(0.0));
     }
 
     #[test]
@@ -20943,6 +21439,81 @@
                 .unwrap(),
             Some(Value::String("gain2".to_string())),
             "macro rows should carry the drag payload name"
+        );
+    }
+
+    #[test]
+    fn metal_seq_patch_macros_sidebar_lists_tiered_assets_as_asset_drags() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*patch-macros*")
+            .expect("patch macros buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        let assets = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(list (dict :label "wavetables/basic-shapes.json"
+                               :name "wavetables/basic-shapes.json"
+                               :kind "patcher-asset"
+                               :detail "Factory"
+                               :file "wavetables/basic-shapes.json"
+                               :source-path "/factory/wavetables/basic-shapes.json"
+                               :drag-type "dgen-asset"
+                               :draggable true
+                               :drop-target false))"#,
+            )
+            .expect("build editor assets")
+            .expect("editor assets value");
+        let update = editor
+            .runtime_mut()
+            .set_reactive("SEQ", "editor-assets", assets);
+        assert!(update.effects_dirty, "asset publication must dirty the sidebar effect");
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (eseq.patch-macros/patch-macros-items) 0) :label)")
+                .unwrap(),
+            Some(Value::String("Assets".to_string()))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (eseq.patch-macros/patch-macros-items) 1) :detail)")
+                .unwrap(),
+            Some(Value::String("Factory".to_string()))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (eseq.patch-macros/patch-macros-items) 1) :drag-type)")
+                .unwrap(),
+            Some(Value::String("dgen-asset".to_string()))
+        );
+
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let widget_tree = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*patch-macros*")
+            .and_then(|buffer| buffer.widget_tree.as_ref())
+            .expect("patch macros widget tree after asset publication");
+        assert!(
+            value_contains_string(widget_tree, "wavetables/basic-shapes.json"),
+            "published asset must be present in the rendered sidebar tree"
+        );
+        let layout = eseqlisp::layout::LayoutEngine::new(32, 24, 1.0)
+            .layout(widget_tree)
+            .expect("patch macros asset layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            layout.rect.width > 0.0 && layout.rect.height > 0.0,
+            "asset sidebar root must measure nonzero: {:?}",
+            layout.rect
         );
     }
 
@@ -38947,6 +39518,7 @@
             env: Some("amp.envelope".to_string()),
             role: Some("attack".to_string()),
             tags: Vec::new(),
+            asset_options: None,
             display_name: Some("attack".to_string()),
         };
         let mut map = HashMap::new();
@@ -38965,6 +39537,95 @@
                 "{key} should retain its own manifest identity"
             );
         }
+    }
+
+    #[test]
+    fn param_ui_metadata_exposes_asset_option_reference() {
+        let metadata = sequencer::effects::ParamUiMetadata {
+            group: None,
+            env: None,
+            role: None,
+            tags: Vec::new(),
+            asset_options: Some(sequencer::effects::ParamAssetOptions {
+                tensor: "bank".to_string(),
+                file: "waves/bank.json".to_string(),
+                key: "sets".to_string(),
+                asset_base: Some(std::path::PathBuf::from("/trusted/instrument")),
+            }),
+            display_name: None,
+        };
+        let mut map = HashMap::new();
+
+        insert_param_ui_metadata(&mut map, Some(&metadata));
+
+        let Value::Map(options) = &*map
+            .get("options")
+            .expect("asset options should be surfaced")
+            .borrow()
+        else {
+            panic!("asset options should be a map");
+        };
+        for (key, expected) in [("tensor", "bank"), ("file", "waves/bank.json")] {
+            assert_eq!(
+                options.get(key).map(|value| value.borrow().clone()),
+                Some(Value::String(expected.to_string()))
+            );
+        }
+        assert_eq!(
+            options.get("key").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("sets".to_string()))
+        );
+        assert_eq!(
+            options.get("asset-base").map(|value| value.borrow().clone()),
+            Some(Value::String("/trusted/instrument".to_string()))
+        );
+    }
+
+    #[test]
+    fn param_grid_resolves_asset_options_and_degrades_missing_assets_to_integer_knobs() {
+        let asset_options = |file: &str| {
+            Rc::new(RefCell::new(Value::Map(HashMap::from([
+                (
+                    "tensor".to_string(),
+                    Rc::new(RefCell::new(Value::String("bank".to_string()))),
+                ),
+                (
+                    "file".to_string(),
+                    Rc::new(RefCell::new(Value::String(file.to_string()))),
+                ),
+                (
+                    "key".to_string(),
+                    Rc::new(RefCell::new(Value::Keyword("sets".to_string()))),
+                ),
+            ]))))
+        };
+
+        let mut resolved = test_param_map("bank", 0, 1.0, 0.0, 1.0);
+        resolved.insert("options".to_string(), asset_options("waves/bank.json"));
+        let editor = param_grid_test_editor(vec![Value::Map(resolved)]);
+        let layout = editor.widget_layout().expect("asset options layout");
+        let dropdown = find_layout_node_by_widget_type(&layout, "dropdown")
+            .expect("resolved asset options should render a dropdown");
+        assert!(matches!(
+            dropdown.props.get("options"),
+            Some(Value::List(labels))
+                if labels.iter().map(|label| label.borrow().clone()).collect::<Vec<_>>()
+                    == vec![Value::String("Basic".to_string()), Value::String("Metallic".to_string())]
+        ));
+        assert!(dropdown.rect.width.is_finite() && dropdown.rect.width > 0.0);
+        assert!(dropdown.rect.height.is_finite() && dropdown.rect.height > 0.0);
+
+        let mut missing = test_param_map("bank", 0, 1.0, 0.0, 7.0);
+        missing.insert("options".to_string(), asset_options("waves/missing.json"));
+        let editor = param_grid_test_editor(vec![Value::Map(missing)]);
+        let layout = editor.widget_layout().expect("missing asset options layout");
+        assert!(
+            find_layout_node_by_widget_type(&layout, "dropdown").is_none(),
+            "missing asset metadata must not leave a broken dropdown"
+        );
+        let fallback = find_layout_node_by_widget_type(&layout, "number-picker")
+            .expect("missing asset metadata should degrade to the numeric control");
+        assert_eq!(fallback.props.get("decimals"), Some(&Value::Number(0.0)));
     }
 
     #[test]
@@ -42911,6 +43572,8 @@
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
                 (defstate eseq.seq-core-state/selected-bus -1)
+                (def asset-metadata (path)
+                  (dict :sets '("Metadata Alpha" "Metadata Omega") :waves-per-set 7))
                 "#,
             )
             .expect("install fx test helpers");
@@ -42951,6 +43614,16 @@
                 && adsr_editor.rect.height <= 4.0,
             "ADSR editor should stay constrained in the medium detail panel, got {:?}",
             adsr_editor.rect
+        );
+
+        let osc1_set = find_stable_key_suffix(&layout, "osc1_set")
+            .expect("osc1 set control should be present in layout");
+        let osc1_set_dropdown = find_layout_node_by_widget_type(osc1_set, "dropdown")
+            .expect("osc1 set control should contain a dropdown");
+        assert_eq!(
+            osc1_set_dropdown.props.get("options"),
+            Some(&test_string_list(&["Metadata Alpha", "Metadata Omega"])),
+            "Triton set labels should come from the bank's asset metadata"
         );
 
         for suffix in [
@@ -44216,6 +44889,8 @@
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
                 (defstate eseq.seq-core-state/selected-bus -1)
+                (def asset-metadata (path)
+                  (dict :sets '("Metadata Alpha" "Metadata Omega") :waves-per-set 7))
                 "#,
             )
             .expect("install fx test helpers");
@@ -44256,6 +44931,20 @@
             viewer.rect.width > 10.0 && viewer.rect.height > 3.0 && viewer.rect.height < 4.2,
             "the single wavetable viewer should occupy visible space while leaving explicit room for the oscillator tabs, got {:?}",
             viewer.rect
+        );
+        assert_eq!(
+            viewer.props.get("waves-per-set"),
+            Some(&Value::Number(7.0)),
+            "wavetable viewer grouping should come from the bank's asset metadata"
+        );
+        let osc1_set = find_stable_key_suffix(&layout, "osc1_set")
+            .expect("osc1 set control should be present in layout");
+        let osc1_set_dropdown = find_layout_node_by_widget_type(osc1_set, "dropdown")
+            .expect("osc1 set control should contain a dropdown");
+        assert_eq!(
+            osc1_set_dropdown.props.get("options"),
+            Some(&test_string_list(&["Metadata Alpha", "Metadata Omega"])),
+            "wavetable set labels should come from the bank's asset metadata"
         );
         assert_eq!(
             count_widget_type(&layout, "wavetable-viewer"),

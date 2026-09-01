@@ -111,7 +111,7 @@
       :widget-knob-filled   '(0.30 0.70 0.82)
       :widget-knob-track    '(0.125 0.135 0.148)
       :widget-knob-mod-dot  '(1.00 0.78 0.32)
-      :sequencer-step-border          '(0.38 0.40 0.43)
+      :sequencer-step-border          '(0.12 0.12 0.13)
       :sequencer-step-selected-border '(0.96 0.97 0.99)
       :sequencer-step-off-fill        '(0.145 0.155 0.17)
       :sequencer-step-off-fill-alt    '(0.27 0.285 0.31)

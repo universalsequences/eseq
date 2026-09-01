@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "mobius-warp",
+  "params": [
+    "phase",
+    "amount"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "Möbius phase distortion for phasor phase 0..1 (the Wavetable synth's warp): bends the read curve with pinned endpoints; amount 0..1, 0 = identity.",
+  "tags": [
+    "phase",
+    "wavetable",
+    "waveshaper"
+  ]
+}

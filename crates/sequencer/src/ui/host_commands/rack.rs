@@ -429,6 +429,30 @@ pub(super) fn handle(
                     Some(param),
                     Some(value),
                 ) => {
+                    let print_value = rack_slot_effect_print_value(
+                        &app,
+                        track,
+                        rack_slot,
+                        effect_slot,
+                        param,
+                        value,
+                    );
+                    let value = print_value.unwrap_or(value);
+                    if print_value.is_some()
+                        && try_latch_param_print(
+                            ctx.shared,
+                            &mut editor,
+                            &app,
+                            track,
+                            &[(PrintTarget::RackSlotEffect {
+                                rack_slot_idx: rack_slot,
+                                effect_slot_idx: effect_slot,
+                                param_idx: param,
+                            }, value)],
+                        )
+                    {
+                        return;
+                    }
                     let outcome = app::try_apply_command(
                         &mut app,
                         app::AppCommand::SetRackSlotEffectParam {
@@ -571,13 +595,39 @@ pub(super) fn handle(
                     Some(param_idx),
                     Some(label),
                 ) => {
+                    let option_value = app.rack_slot_effect_option_value(
+                        track, rack_slot, effect_slot, param_idx, &label,
+                    );
+                    if !write_plock {
+                        if let Ok(value) = option_value.as_ref() {
+                            if let Some(value) = rack_slot_effect_print_value(
+                                &app,
+                                track,
+                                rack_slot,
+                                effect_slot,
+                                param_idx,
+                                *value,
+                            ) {
+                                if try_latch_param_print(
+                                    ctx.shared,
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &[(PrintTarget::RackSlotEffect {
+                                        rack_slot_idx: rack_slot,
+                                        effect_slot_idx: effect_slot,
+                                        param_idx,
+                                    }, value)],
+                                ) {
+                                    return;
+                                }
+                            }
+                        }
+                    }
                     let result = if write_plock {
                         let steps: Vec<usize> =
                             selected_steps.lock().unwrap().iter().copied().collect();
-                        app.rack_slot_effect_option_value(
-                            track, rack_slot, effect_slot, param_idx, &label,
-                        )
-                        .and_then(|value| {
+                        option_value.and_then(|value| {
                             let outcome = app::try_apply_command(
                                 &mut app,
                                 app::AppCommand::SetRackSlotEffectPlockMulti {
@@ -601,10 +651,7 @@ pub(super) fn handle(
                                 })
                         })
                     } else {
-                        app.rack_slot_effect_option_value(
-                            track, rack_slot, effect_slot, param_idx, &label,
-                        )
-                        .and_then(|value| {
+                        option_value.and_then(|value| {
                             app::try_apply_command(
                                 &mut app,
                                 app::AppCommand::SetRackSlotEffectParam {
@@ -805,6 +852,17 @@ pub(super) fn handle(
                     map_usize(map, "slot"),
                     map_number(map, "value").map(|value| value as f32),
                 ) {
+                    if try_latch_rack_slot_param_print(
+                        ctx.shared,
+                        &mut editor,
+                        &app,
+                        track,
+                        slot_idx,
+                        RackSlotParam::Gain,
+                        value,
+                    ) {
+                        return;
+                    }
                     app::apply_command(
                         &mut app,
                         app::AppCommand::SetRackSlotGain {
@@ -837,6 +895,17 @@ pub(super) fn handle(
                     map_usize(map, "slot"),
                     map_number(map, "value").map(|value| value as f32),
                 ) {
+                    if try_latch_rack_slot_param_print(
+                        ctx.shared,
+                        &mut editor,
+                        &app,
+                        track,
+                        slot_idx,
+                        RackSlotParam::Pan,
+                        value,
+                    ) {
+                        return;
+                    }
                     app::apply_command(
                         &mut app,
                         app::AppCommand::SetRackSlotPan {
@@ -867,12 +936,24 @@ pub(super) fn handle(
                 if let (Some(track), Some(slot_idx)) =
                     (map_usize(map, "track"), map_usize(map, "slot"))
                 {
+                    let value = map_bool(map, "value");
+                    if try_latch_rack_slot_param_print(
+                        ctx.shared,
+                        &mut editor,
+                        &app,
+                        track,
+                        slot_idx,
+                        RackSlotParam::Mute,
+                        if value { 1.0 } else { 0.0 },
+                    ) {
+                        return;
+                    }
                     app::apply_command(
                         &mut app,
                         app::AppCommand::SetRackSlotMute {
                             track,
                             slot_idx,
-                            value: map_bool(map, "value"),
+                            value,
                         },
                     );
                     // Without republishing the scheduler snapshot,
@@ -910,12 +991,24 @@ pub(super) fn handle(
                 if let (Some(track), Some(slot_idx)) =
                     (map_usize(map, "track"), map_usize(map, "slot"))
                 {
+                    let value = map_bool(map, "value");
+                    if try_latch_rack_slot_param_print(
+                        ctx.shared,
+                        &mut editor,
+                        &app,
+                        track,
+                        slot_idx,
+                        RackSlotParam::Solo,
+                        if value { 1.0 } else { 0.0 },
+                    ) {
+                        return;
+                    }
                     app::apply_command(
                         &mut app,
                         app::AppCommand::SetRackSlotSolo {
                             track,
                             slot_idx,
-                            value: map_bool(map, "value"),
+                            value,
                         },
                     );
                     ctx.gesture.rack_control_snapshot_dirty = true;
@@ -949,6 +1042,17 @@ pub(super) fn handle(
                     map_usize(map, "slot"),
                     map_usize(map, "value"),
                 ) {
+                    if try_latch_rack_slot_param_print(
+                        ctx.shared,
+                        &mut editor,
+                        &app,
+                        track,
+                        slot_idx,
+                        RackSlotParam::MaxPolyphony,
+                        value as f32,
+                    ) {
+                        return;
+                    }
                     app::apply_command(
                         &mut app,
                         app::AppCommand::SetRackSlotMaxPolyphony {
@@ -1012,6 +1116,17 @@ pub(super) fn handle(
                     map_usize(map, "slot"),
                     map_number(map, "value").map(|value| value as f32),
                 ) {
+                    if try_latch_rack_slot_param_print(
+                        ctx.shared,
+                        &mut editor,
+                        &app,
+                        track,
+                        slot_idx,
+                        RackSlotParam::BaseNote,
+                        value,
+                    ) {
+                        return;
+                    }
                     app::apply_command(
                         &mut app,
                         app::AppCommand::SetRackSlotBaseNoteOffset {
@@ -1069,6 +1184,21 @@ pub(super) fn handle(
         }
         "set-rack-macro-value" => {
             if let Value::Map(ref map) = payload {
+                if let (Some(track), Some(macro_idx), Some(value)) = (
+                    map_usize(map, "track"),
+                    map_usize(map, "id"),
+                    map_number(map, "value").map(|value| value as f32),
+                ) {
+                    if try_latch_param_print(
+                        ctx.shared,
+                        &mut editor,
+                        &app,
+                        track,
+                        &[(PrintTarget::RackMacro { macro_idx }, value.clamp(0.0, 1.0))],
+                    ) {
+                        return;
+                    }
+                }
                 apply_rack_macro_host_command(
                     &name,
                     map,
@@ -1304,6 +1434,26 @@ pub(super) fn handle(
                         .unwrap_or_else(|| "rack-instrument".to_string());
                     let label = map_string(map, "label")
                         .unwrap_or_else(|| "Set rack instrument parameters".to_string());
+                    if name == "set-rack-slot-instrument-param-batch" {
+                        let targets = commands
+                            .iter()
+                            .filter_map(|command| match command {
+                                app::AppCommand::SetRackSlotInstrumentParam {
+                                    slot_idx,
+                                    param_idx,
+                                    value,
+                                    ..
+                                } => Some((PrintTarget::RackSlotInstrument {
+                                    slot_idx: *slot_idx,
+                                    param_idx: *param_idx,
+                                }, *value)),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        if try_latch_param_print(ctx.shared, &mut editor, &app, track, &targets) {
+                            return;
+                        }
+                    }
                     let result = if name == "set-rack-slot-instrument-plock-batch" {
                         app::edit::apply_coalesced_device_plock_batch(
                             &mut app,
@@ -1355,6 +1505,18 @@ pub(super) fn handle(
                         {
                             let stored =
                                 desc.clamp(desc.user_input_to_stored(user_val));
+                            if try_latch_param_print(
+                                ctx.shared,
+                                &mut editor,
+                                &app,
+                                track,
+                                &[(PrintTarget::RackSlotInstrument {
+                                    slot_idx,
+                                    param_idx,
+                                }, stored)],
+                            ) {
+                                return;
+                            }
                             app::apply_command(
                                 &mut app,
                                 app::AppCommand::SetRackSlotInstrumentParam {
@@ -1481,6 +1643,18 @@ pub(super) fn handle(
                                 .unwrap_or(desc.default);
                             let next =
                                 desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                            if try_latch_param_print(
+                                ctx.shared,
+                                &mut editor,
+                                &app,
+                                track,
+                                &[(PrintTarget::RackSlotInstrument {
+                                    slot_idx,
+                                    param_idx,
+                                }, next)],
+                            ) {
+                                return;
+                            }
                             app::apply_command(
                                 &mut app,
                                 app::AppCommand::SetRackSlotInstrumentParam {
@@ -1594,13 +1768,26 @@ pub(super) fn handle(
                             if let Some(selected_idx) =
                                 labels.iter().position(|item| item == &label)
                             {
+                                let value = selected_idx as f32;
+                                if try_latch_param_print(
+                                    ctx.shared,
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &[(PrintTarget::RackSlotInstrument {
+                                        slot_idx,
+                                        param_idx,
+                                    }, value)],
+                                ) {
+                                    return;
+                                }
                                 app::apply_command(
                                     &mut app,
                                     app::AppCommand::SetRackSlotInstrumentParam {
                                         track,
                                         slot_idx,
                                         param_idx,
-                                        value: selected_idx as f32,
+                                        value,
                                     },
                                 );
                                 refresh_instrument_panel_reactive(
@@ -1797,4 +1984,46 @@ pub(super) fn handle(
         }
         _ => {}
     }
+}
+
+fn try_latch_rack_slot_param_print(
+    shared: &SharedHandles,
+    editor: &mut Editor,
+    app: &app::App,
+    track: usize,
+    slot_idx: usize,
+    param: RackSlotParam,
+    value: f32,
+) -> bool {
+    try_latch_param_print(
+        shared,
+        editor,
+        app,
+        track,
+        &[(PrintTarget::RackSlotParam { slot_idx, param }, param.clamp(value))],
+    )
+}
+
+fn rack_slot_effect_print_value(
+    app: &app::App,
+    track: usize,
+    rack_slot_idx: usize,
+    effect_slot_idx: usize,
+    param_idx: usize,
+    value: f32,
+) -> Option<f32> {
+    app.rack_slot_effect_snapshot(track, rack_slot_idx)
+        .ok()
+        .and_then(|slot| slot.effect_descriptors.get(effect_slot_idx).cloned())
+        .and_then(|descriptor| descriptor.params.get(param_idx).cloned())
+        .filter(|param| {
+            !matches!(
+                param.host_control,
+                Some(sequencer::effects::HostControl::FxSidechain { .. })
+            ) && !sequencer::instruments::voice_modulator::is_envelope_source_param_value(
+                param.node_param_idx,
+                value,
+            )
+        })
+        .map(|param| param.clamp(value))
 }

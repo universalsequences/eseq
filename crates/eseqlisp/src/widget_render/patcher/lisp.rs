@@ -676,6 +676,38 @@ fn param_label(items: &[Expression]) -> String {
     label
 }
 
+pub(super) fn replace_label_attribute(
+    label: &str,
+    attribute: &str,
+    replacement: Option<&str>,
+) -> Result<String, String> {
+    let source = format!("({})", normalize_editor_node_text(label));
+    let tokens = Parser::new(source)
+        .parse()
+        .map_err(|error| format!("failed to tokenize node label: {error:?}"))?;
+    let exprs = ASTParser::new(tokens)
+        .parse()
+        .map_err(|error| format!("failed to parse node label: {error:?}"))?;
+    let Some(Expression::List(items)) = exprs.first() else {
+        return Err("node label must be a call".to_string());
+    };
+    let mut rebuilt = Vec::with_capacity(items.len() + usize::from(replacement.is_some()) * 2);
+    let mut idx = 0;
+    while idx < items.len() {
+        if matches!(&items[idx], Expression::Symbol(key) if key == attribute) {
+            idx += attribute_span_len(items, idx);
+            continue;
+        }
+        rebuilt.push(items[idx].clone());
+        idx += 1;
+    }
+    if let Some(value) = replacement {
+        rebuilt.push(Expression::Symbol(attribute.to_string()));
+        rebuilt.push(Expression::Symbol(value.to_string()));
+    }
+    Ok(join_formatted(&rebuilt, format_patch_literal))
+}
+
 pub(super) fn format_patch_literal(expr: &Expression) -> String {
     match expr {
         Expression::Number(n) if *n == n.trunc() && n.abs() < 1e15 => {
@@ -699,8 +731,12 @@ pub(super) fn editor_node_port_shape(
     macro_signatures: &HashMap<String, MacroSignature>,
 ) -> OperatorPortShape {
     match kind {
-        NodeKind::In | NodeKind::Param => OperatorPortShape {
+        NodeKind::In => OperatorPortShape {
             input_count: 0,
+            output_count: 1,
+        },
+        NodeKind::Param => OperatorPortShape {
+            input_count: 1,
             output_count: 1,
         },
         NodeKind::Constant => OperatorPortShape {

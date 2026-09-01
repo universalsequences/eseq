@@ -209,6 +209,7 @@ pub(super) fn rebind_midi_fx_event_to_track(
     snapshot: &SequencerSnapshot,
     mut event: MidiFxEvent,
     target_track: usize,
+    print_overrides: Option<&crate::sequencer::DeviceParamPrintValues>,
 ) -> Option<MidiFxEvent> {
     if target_track >= snapshot.tracks.len() {
         if debug_routing_enabled() {
@@ -259,8 +260,10 @@ pub(super) fn rebind_midi_fx_event_to_track(
     event.track = target_track;
     event.step = target_step;
     event.midi_fx_params.clear();
-    event.effect_params = resolve_effect_params(snapshot, target_track, target_step);
-    event.instrument_params = resolve_instrument_params(snapshot, target_track, target_step);
+    event.effect_params =
+        resolve_effect_params(snapshot, target_track, target_step, print_overrides);
+    event.instrument_params =
+        resolve_instrument_params(snapshot, target_track, target_step, print_overrides);
     event.instrument_tensor_params =
         resolve_instrument_tensor_params(snapshot, target_track, target_step);
     event.sampler_params = resolve_sampler_params(snapshot, target_track, target_step);
@@ -776,7 +779,11 @@ pub(super) fn run_midi_fx_chain_for_track_inner(
                                 );
                             }
                         } else if let Some(routed) =
-                            rebind_midi_fx_event_to_track(snapshot, routed, target_track)
+                            // The recursive chain walker has no SequencerState
+                            // handle; a cross-track routed event misses the
+                            // device-print override for at most one frame
+                            // (the printed p-lock publish catches it up).
+                            rebind_midi_fx_event_to_track(snapshot, routed, target_track, None)
                         {
                             next.extend(run_midi_fx_chain_for_track_inner(
                                 runtime,
@@ -1118,6 +1125,7 @@ pub(super) fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 pan: 0.0,
                 chop: 1.0,
             };
+            let print_overrides = state.device_print_override.values_for_track(track_idx);
             let event = MidiFxEvent {
                 offset_beats: 0.0,
                 track: track_idx,
@@ -1132,8 +1140,12 @@ pub(super) fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 note_spans: Some(note_spans),
                 arp_phase_beats: rendered_total_beats as f32,
                 midi_fx_params: Vec::new(),
-                effect_params: resolve_effect_params(snapshot, track_idx, step),
-                instrument_params: resolve_instrument_params(snapshot, track_idx, step),
+                effect_params: resolve_effect_params(
+                    snapshot, track_idx, step, print_overrides.as_ref(),
+                ),
+                instrument_params: resolve_instrument_params(
+                    snapshot, track_idx, step, print_overrides.as_ref(),
+                ),
                 instrument_tensor_params: resolve_instrument_tensor_params(
                     snapshot, track_idx, step,
                 ),
@@ -1243,6 +1255,7 @@ pub(super) fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 pan: 0.0,
                 chop: 1.0,
             };
+            let print_overrides = state.device_print_override.values_for_track(track_idx);
             let event = MidiFxEvent {
                 offset_beats: 0.0,
                 track: track_idx,
@@ -1257,8 +1270,12 @@ pub(super) fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 note_spans: Some(note_spans),
                 arp_phase_beats: (rendered_total_beats + tick_offset_beats) as f32,
                 midi_fx_params: Vec::new(),
-                effect_params: resolve_effect_params(snapshot, track_idx, step),
-                instrument_params: resolve_instrument_params(snapshot, track_idx, step),
+                effect_params: resolve_effect_params(
+                    snapshot, track_idx, step, print_overrides.as_ref(),
+                ),
+                instrument_params: resolve_instrument_params(
+                    snapshot, track_idx, step, print_overrides.as_ref(),
+                ),
                 instrument_tensor_params: resolve_instrument_tensor_params(
                     snapshot, track_idx, step,
                 ),

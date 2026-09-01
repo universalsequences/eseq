@@ -126,11 +126,13 @@
 ;; the converted eseq.effects.instrument-modulation (imports us), so it is
 ;; public but needs no alias.
 
-(def ui-accent-blue () (rgba 0.00 0.48 0.95 1.0))
-(def ui-accent-cyan () (rgba 0.05 0.78 0.90 1.0))
-(def ui-accent-orange () (rgba 1.0 0.62 0.25 1.0))
-(def ui-accent-green () (rgba 0.30 0.82 0.48 1.0))
-(def ui-accent-violet () (rgba 0.62 0.45 0.95 1.0))
+;; Semantic aliases keep generated/custom UIs on the active theme while
+;; preserving the familiar accent vocabulary used by instrument authors.
+(def ui-accent-blue () :blue)
+(def ui-accent-cyan () :cyan)
+(def ui-accent-orange () :yellow)
+(def ui-accent-green () :green)
+(def ui-accent-violet () :purple)
 
 (def ui-lego-gap () 0.06125)
 (def ui-lego-small-h () 1.95)
@@ -284,31 +286,31 @@
   (ui-lego-surface-s title (ui-lego-full-h) accent section :instrument-group-bg body))
 
 (def ui-readout-block-small (title accent body)
-  (ui-lego-plain-surface (ui-lego-small-h) (rgba 0.055 0.058 0.064 1.0) body))
+  (ui-lego-plain-surface (ui-lego-small-h) :instrument-control-bg body))
 
 (def ui-readout-block-small-s (title accent section body)
-  (ui-lego-plain-surface-s (ui-lego-small-h) section (rgba 0.055 0.058 0.064 1.0) body))
+  (ui-lego-plain-surface-s (ui-lego-small-h) section :instrument-control-bg body))
 
 (def ui-readout-block-small-wide-s (title accent section body)
-  (ui-lego-plain-surface-width-s (ui-lego-wide-col-w) (ui-lego-small-h) section (rgba 0.055 0.058 0.064 1.0) body))
+  (ui-lego-plain-surface-width-s (ui-lego-wide-col-w) (ui-lego-small-h) section :instrument-control-bg body))
 
 (def ui-readout-block-dense-s (title accent section body)
-  (ui-lego-surface-s title (ui-lego-dense-h) accent section (rgba 0.055 0.058 0.064 1.0) body))
+  (ui-lego-surface-s title (ui-lego-dense-h) accent section :instrument-control-bg body))
 
 (def ui-readout-panel-small-s (section body)
-  (ui-lego-panel-s (ui-lego-small-h) section (rgba 0.055 0.058 0.064 1.0) body))
+  (ui-lego-panel-s (ui-lego-small-h) section :instrument-control-bg body))
 
 (def ui-readout-panel-dense-s (section body)
-  (ui-lego-panel-s (ui-lego-dense-h) section (rgba 0.055 0.058 0.064 1.0) body))
+  (ui-lego-panel-s (ui-lego-dense-h) section :instrument-control-bg body))
 
 (def ui-readout-panel-medium-s (section body)
-  (ui-lego-panel-s (ui-lego-large-h) section (rgba 0.055 0.058 0.064 1.0) body))
+  (ui-lego-panel-s (ui-lego-large-h) section :instrument-control-bg body))
 
 (def ui-readout-block-medium (title accent body)
-  (ui-lego-surface title (ui-lego-medium-h) accent (rgba 0.055 0.058 0.064 1.0) body))
+  (ui-lego-surface title (ui-lego-medium-h) accent :instrument-control-bg body))
 
 (def ui-readout-block-full (title accent body)
-  (ui-lego-surface title (ui-lego-full-h) accent (rgba 0.055 0.058 0.064 1.0) body))
+  (ui-lego-surface title (ui-lego-full-h) accent :instrument-control-bg body))
 
 (def ui-lego-column (a b c)
   (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap) a b c))
@@ -390,7 +392,7 @@
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
+	    :track-color :widget-knob-track
             :width width :height 2.82
             :value-align :center
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))
@@ -427,7 +429,7 @@
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
+	    :track-color :widget-knob-track
 	    :width width :height height :knob-size knob-size
             :value-align :center
 	    :arc-color accent
@@ -535,10 +537,10 @@
             (dropdown :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
-              :bg-color :instrument-control-bg
+              :bg-color :mixer-strip-selected-bg
               :text-color accent
               :chevron-color accent
-              :badge-color (rgba 0.16 0.17 0.20 1.0)
+              :badge-color :dropdown-badge-bg
               :border-color accent
               :border-width 0.05
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
@@ -564,10 +566,10 @@
             (dropdown :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
-              :bg-color :instrument-control-bg
+              :bg-color :mixer-strip-selected-bg
               :text-color accent
               :chevron-color accent
-              :badge-color (rgba 0.16 0.17 0.20 1.0)
+              :badge-color :dropdown-badge-bg
               :border-color accent
               :border-width 0.05
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
@@ -594,11 +596,11 @@
             (dropdown :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
-              :bg-color '(rgba 0.1 0.1 0.1 1) ;:instrument-control-bg
+              :bg-color :mixer-strip-selected-bg
               :text-color accent
-              :chevron-color accent
-              :badge-color (rgba 0.16 0.17 0.20 1.0)
-              :border-color (rgba 1.0 1.0 1.0 0.2) 
+              :chevron-color :black
+              :badge-color :dropdown-badge-bg
+              :border-color :border-inactive
               :border-width 0.05
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -852,7 +854,7 @@
 ;; for the compact title and the single A/D/S/R readout row.
 (def ui-detail-adsr-divider (debug-name)
   (box :width :fill :height 0.05
-       :background-color (rgba 1.0 1.0 1.0 0.14)
+       :background-color :button-highlight
        :debug-name debug-name))
 
 (def ui-detail-adsr-wide-content-s (section attack decay sustain release)
@@ -883,7 +885,7 @@
     (box :width :fill :height 0.96 :h-align :center :v-align :center
          :debug-name debug-name :on-click on-click
       (label title :font-size 9.2
-        :color (if selected accent (rgba 0.72 0.66 0.55 1.0))
+        :color (if selected accent :dim)
         :bg :transparent))
     (box :width :fill :height 0.06
       :background-color (if selected accent :transparent))))
@@ -895,7 +897,7 @@
     (str "adsr-tab-" title)))
 
 (def ui-detail-adsr-wide-s (width height section title attack decay sustain release)
-  (ui-lego-panel-width-s width height section (rgba 0.055 0.058 0.064 1.0)
+  (ui-lego-panel-width-s width height section :instrument-control-bg
     (v-stack :width :fill :height :fill :gap 0.0 :align :stretch
       (box :width :fill :height 1.02 :h-align :start :v-align :center
         (label title :font-size 9.2 :color (ui-accent-cyan) :bg :transparent))
@@ -910,7 +912,7 @@
   (let ((show-b (= eseq.vanilla/custom-ui-selected-section section-b))
         (tab-width (/ (- width 1.0) 2.0)))
     (box :width width :height height
-         :background-color (rgba 0.055 0.058 0.064 1.0)
+         :background-color :instrument-control-bg
          :corner-radius 7 :border-width 1 :padding 0.18
       (box :width :fill :height :fill :padding 0.04
         (v-stack :width :fill :height :fill :gap 0.0 :align :stretch
@@ -1003,7 +1005,7 @@
        :background-color surface
        :corner-radius 16
        :border-width 1
-       :border-color border-color
+       :border-color :transparent ;border-color
        :padding 0.18
        :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
     (h-stack :width :fill :height :fill :gap 0.24 :align :center
@@ -1042,7 +1044,7 @@
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :color :white
             :fill accent
-            :dot-color (rgba 0.16 0.16 0.18 1.0)
+            :dot-color :widget-slider-dot
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -1111,7 +1113,7 @@
 ;; section is selected, dark with accent text otherwise. Click selects.
 (def ui-lego-mode-tab-s (section text width height accent)
   (ui-lego-tab-s section text width height
-    (if (= eseq.vanilla/custom-ui-selected-section section) accent (rgba 0.13 0.135 0.15 1.0))
+    (if (= eseq.vanilla/custom-ui-selected-section section) accent :dim)
     (if (= eseq.vanilla/custom-ui-selected-section section) :black accent)))
 
 ;; Accent-tinted detail ADSR body — panel-less, for composing inside a larger
@@ -1148,7 +1150,7 @@
 
 ;; Hairline divider for sectioning a continuous panel.
 (def ui-lego-divider ()
-  (box :width :fill :height 0.05 :background-color (rgba 1.0 1.0 1.0 0.07) :corner-radius 1))
+  (box :width :fill :height 0.05 :background-color :border-inactive :corner-radius 1))
 
 ;; On/off chip: filled with accent when on, dark when off. Click toggles.
 (def ui-lego-chip-toggle-s (section name text width accent)

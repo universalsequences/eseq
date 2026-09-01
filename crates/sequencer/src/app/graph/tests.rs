@@ -438,6 +438,7 @@
     fn test_instrument_manifest() -> DGenManifest {
         DGenManifest {
             dylib_path: PathBuf::new(),
+            asset_base: None,
             version: 1,
             process_abi: String::new(),
             total_memory_slots: 1,
@@ -2767,6 +2768,7 @@
             group: None,
             env: None,
             role: None,
+            options: None,
         });
         let lib = lisp_host::test_loaded_dgen_lib();
         let mut app = test_app_with_track_count(&graph, 0);

@@ -85,5 +85,6 @@ sub-flavor rather than spanning the whole folder's range.
 | 30 | C64 Chip | Commodore 64 style chip waveforms | `AKWF_c604` |
 | 31 | Granular | Granular/textural single-cycle waves | `AKWF_granular` |
 
-Set names must match `wt-set-options`/dropdown ordering used by the Triton
-instrument's UI, and are max ~12 characters for the dropdown.
+The checked-in bank's `sets` metadata is generated from this list and is the
+Triton UI dropdown's source of truth. Names stay max ~12 characters for the
+dropdown.

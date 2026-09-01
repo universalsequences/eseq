@@ -620,15 +620,31 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
             }
             if !snapshot.tracks[trigger.track].steps[trigger.step].active {
+                // Off-step boundary: p-locks on an inactive step apply to the
+                // whole track at that boundary — instrument p-locks to every
+                // active voice, effect p-locks to the per-track chain — and
+                // then hold (voice/node params are sticky) until the next
+                // p-lock or the next ON trigger's full param stamp. The live
+                // device-print latch substitutes here too, so a held printing
+                // knob is heard on sparse patterns, not just on triggers.
                 let sample_time = scheduled_until_sample + trigger.offset as u64;
-                let send_params = resolve_track_send_params(snapshot, trigger.track, trigger.step);
-                if !send_params.is_empty() {
+                let print_overrides =
+                    state.device_print_override.values_for_track(trigger.track);
+                let mut off_step_effect_params =
+                    resolve_track_send_params(snapshot, trigger.track, trigger.step);
+                off_step_effect_params.extend(resolve_effect_plocks(
+                    snapshot,
+                    trigger.track,
+                    trigger.step,
+                    print_overrides.as_ref(),
+                ));
+                if !off_step_effect_params.is_empty() {
                     chunk_enqueued &= queue.push(ScheduledEvent {
                         pattern_epoch,
                         sample_time,
                         kind: ScheduledEventKind::EffectParams {
                             track: trigger.track,
-                            effect_params: send_params,
+                            effect_params: off_step_effect_params,
                         },
                     }).is_ok();
                 }
@@ -637,7 +653,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     pattern_epoch,
                     sample_time,
                     trigger.track,
-                    resolve_instrument_plocks(snapshot, trigger.track, trigger.step),
+                    resolve_instrument_plocks(
+                        snapshot,
+                        trigger.track,
+                        trigger.step,
+                        print_overrides.as_ref(),
+                    ),
                 );
                 if !chunk_enqueued {
                     break;
@@ -944,15 +965,25 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     AccumMode::from_u32(track.params.accum_mode),
                     &mut rs.reversed,
                 );
-                let mut effect_params =
-                    resolve_effect_params(snapshot, trigger.track, trigger.step);
+                let print_overrides =
+                    state.device_print_override.values_for_track(trigger.track);
+                let mut effect_params = resolve_effect_params(
+                    snapshot,
+                    trigger.track,
+                    trigger.step,
+                    print_overrides.as_ref(),
+                );
                 effect_params.extend(resolve_track_send_params(
                     snapshot,
                     trigger.track,
                     trigger.step,
                 ));
-                let mut instrument_params =
-                    resolve_instrument_params(snapshot, trigger.track, trigger.step);
+                let mut instrument_params = resolve_instrument_params(
+                    snapshot,
+                    trigger.track,
+                    trigger.step,
+                    print_overrides.as_ref(),
+                );
                 upsert_effect_params(&mut effect_params, process_overlay.effect_params.clone());
                 upsert_instrument_params(
                     &mut instrument_params,
@@ -1154,9 +1185,15 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                         instrument_fingerprint: 0,
                                     },
                                 };
-                                if let Some(event) =
-                                    rebind_midi_fx_event_to_track(snapshot, event, target_track)
-                                {
+                                if let Some(event) = rebind_midi_fx_event_to_track(
+                                    snapshot,
+                                    event,
+                                    target_track,
+                                    state
+                                        .device_print_override
+                                        .values_for_track(target_track)
+                                        .as_ref(),
+                                ) {
                                     accumulator_events.push(event);
                                 }
                             }
@@ -1268,14 +1305,25 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     continue;
                 }
                 let same_track_process_targets = target_track == trigger.track;
-                let mut effect_params = resolve_effect_params(snapshot, target_track, trigger.step);
+                let print_overrides =
+                    state.device_print_override.values_for_track(target_track);
+                let mut effect_params = resolve_effect_params(
+                    snapshot,
+                    target_track,
+                    trigger.step,
+                    print_overrides.as_ref(),
+                );
                 effect_params.extend(resolve_track_send_params(
                     snapshot,
                     target_track,
                     trigger.step,
                 ));
-                let mut instrument_params =
-                    resolve_instrument_params(snapshot, target_track, trigger.step);
+                let mut instrument_params = resolve_instrument_params(
+                    snapshot,
+                    target_track,
+                    trigger.step,
+                    print_overrides.as_ref(),
+                );
                 let midi_fx_params = if same_track_process_targets {
                     upsert_effect_params(&mut effect_params, process_overlay.effect_params.clone());
                     upsert_instrument_params(

@@ -135,6 +135,7 @@
       :widget-knob-filled     '(0.34 0.78 0.90)
       :widget-knob-track      '(0.1400 0.1800 0.2300)
       :widget-knob-mod-dot    '(1.00 0.78 0.32)
+      :widget-plock-accent    '(0.20 0.62 0.72)
       :widget-toggle-on       '(0.30 0.76 0.56)
       :widget-toggle-off      '(0.0850 0.1100 0.1400)
       :widget-toggle-knob-on  '(0.96 0.98 1.00)

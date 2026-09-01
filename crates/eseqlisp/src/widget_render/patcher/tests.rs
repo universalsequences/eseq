@@ -12,13 +12,16 @@ use super::interaction::*;
 use super::lisp::parse_editor_node_text;
 use super::metrics::*;
 use super::model::{
-    CableEndpoint, InputPortRef, InputPresentation, OutputPortRef,
+    CableEndpoint, ConnectionSourceTarget, InputPortRef, InputPresentation, OutputPortRef,
     connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
 use super::project::{dgenlisp_operator_documentation, dgenlisp_operator_names};
 use super::render::*;
 use super::state::*;
-use super::text::{apply_patcher_autocomplete, patcher_autocomplete_suggestions};
+use super::text::{
+    apply_patcher_autocomplete, patcher_autocomplete_ghost_text,
+    patcher_autocomplete_suggestions,
+};
 use super::text_metrics::{cache_text_widths, measured_cursor_offset, measured_text_width};
 use super::writeback::{
     WriteBackError, emit_patch_writeback, emit_patch_writeback_result,
@@ -177,7 +180,7 @@ fn dropping_macro_item_creates_macro_node_and_emits_writeback() {
     )]));
     assert!(
         handle_patcher_drop(&node, "sample", &payload, 40.0, 15.0).is_none(),
-        "non-macro drags must be rejected"
+        "unsupported drags must be rejected"
     );
 
     let output = handle_patcher_drop(&node, "dgen-macro", &payload, 40.0, 15.0)
@@ -207,6 +210,106 @@ fn dropping_macro_item_creates_macro_node_and_emits_writeback() {
         emitted.contains("(use-defmacro shape)"),
         "emitted source should import the dropped library macro:\n{emitted}"
     );
+}
+
+#[test]
+fn dropping_asset_item_reads_shape_and_creates_file_backed_tensor() {
+    let source = "(def input (in 1))\n(out input 1)";
+    let path = temp_patcher_dsp_path("patcher-asset-drop");
+    fs::write(&path, source).unwrap();
+    let asset_path = path.parent().unwrap().join("basic-shapes.json");
+    fs::write(
+        &asset_path,
+        r#"{"shape":[512,4],"data":[0.0,1.0]}"#,
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let payload = Value::Map(HashMap::from([
+        (
+            "file".to_string(),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::String(
+                "wavetables/basic-shapes.json".to_string(),
+            ))),
+        ),
+        (
+            "source-path".to_string(),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::String(
+                asset_path.display().to_string(),
+            ))),
+        ),
+    ]));
+
+    let output = handle_patcher_drop(&node, "dgen-asset", &payload, 40.0, 15.0)
+        .expect("asset drop should emit a writeback output");
+    let state = get_patcher_interaction_state(patcher_state_key(&node));
+    assert!(state.edit_state.nodes.values().any(|edit| {
+        edit.text
+            == "tensor @shape [512 4] @file \"wavetables/basic-shapes.json\""
+    }));
+
+    let Value::Map(payload) = &output.args[0] else {
+        panic!("writeback payload should be a map");
+    };
+    let Value::String(emitted) = payload.get("source").unwrap().borrow().clone() else {
+        panic!("payload source should be a string");
+    };
+    let patch = parse_patch_source(&emitted, PatcherIntent::Instrument).unwrap();
+    let tensor = patch.nodes.iter().find(|node| node.op == "tensor").unwrap();
+    assert!(
+        tensor
+            .label
+            .ends_with(" @shape [512 4] @file \"wavetables/basic-shapes.json\""),
+        "generated attributes must survive in node.label: {}",
+        tensor.label
+    );
+
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn os_file_drop_copies_asset_under_waves_without_overwriting_and_inserts_tensor() {
+    let source = "(def input (in 1))\n(out input 1)";
+    let path = temp_patcher_dsp_path("patcher-os-asset-drop");
+    fs::write(&path, source).unwrap();
+    let waves = path.parent().unwrap().join("waves");
+    fs::create_dir(&waves).unwrap();
+    fs::write(waves.join("bank.json"), r#"{"shape":[1],"data":[0.0]}"#).unwrap();
+    let dropped_dir = std::env::temp_dir().join(format!(
+        "eseqlisp-patcher-dropped-asset-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dropped_dir);
+    fs::create_dir(&dropped_dir).unwrap();
+    let dropped = dropped_dir.join("bank.json");
+    fs::write(&dropped, r#"{"shape":[512,4],"data":[0.0,1.0]}"#).unwrap();
+    let node = patcher_test_node(&path);
+
+    let imported = import_patcher_asset_file(&node, &dropped, 40.0, 15.0).unwrap();
+
+    assert_eq!(imported.destination, waves.join("bank-1.json"));
+    assert_eq!(
+        fs::read_to_string(waves.join("bank.json")).unwrap(),
+        r#"{"shape":[1],"data":[0.0]}"#,
+        "an existing draft asset must never be overwritten"
+    );
+    assert_eq!(
+        fs::read_to_string(&imported.destination).unwrap(),
+        fs::read_to_string(&dropped).unwrap()
+    );
+    let state = get_patcher_interaction_state(patcher_state_key(&node));
+    assert!(state.edit_state.nodes.values().any(|edit| {
+        edit.text == "tensor @shape [512 4] @file \"waves/bank-1.json\""
+    }));
+    let Value::Map(payload) = &imported.output.args[0] else {
+        panic!("writeback payload should be a map");
+    };
+    let Value::String(emitted) = payload.get("source").unwrap().borrow().clone() else {
+        panic!("payload source should be a string");
+    };
+    assert!(emitted.contains("@file \"waves/bank-1.json\""));
+
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    fs::remove_dir_all(dropped_dir).unwrap();
 }
 
 #[test]
@@ -6625,8 +6728,11 @@ fn source_metadata_tracks_history_compound_ownership_and_connections() {
         feedback_source.to_call,
         source_expr(SourceScopeId::Root, 3, &[])
     );
-    assert_eq!(feedback_source.to_arg.semantic_index, 1);
-    assert_eq!(feedback_source.to_arg.item_index, 2);
+    let ConnectionSourceTarget::Argument(feedback_arg) = &feedback_source.target else {
+        panic!("feedback destination should be positional");
+    };
+    assert_eq!(feedback_arg.semantic_index, 1);
+    assert_eq!(feedback_arg.item_index, 2);
 
     assert!(
         patch
@@ -6636,8 +6742,11 @@ fn source_metadata_tracks_history_compound_ownership_and_connections() {
                 && connection.kind == ConnectionKind::Forward
                 && connection.source.as_ref().is_some_and(|source| {
                     source.to_call == source_expr(SourceScopeId::Root, 2, &[2])
-                        && source.to_arg.semantic_index == 0
-                        && source.to_arg.item_index == 1
+                        && matches!(
+                            &source.target,
+                            ConnectionSourceTarget::Argument(arg)
+                                if arg.semantic_index == 0 && arg.item_index == 1
+                        )
                 }))
     );
 }
@@ -15784,6 +15893,216 @@ fn patcher_reports_text_capture_only_while_node_text_edit_is_active() {
 }
 
 #[test]
+fn patcher_autocomplete_completes_attributes_for_the_active_operator() {
+    let mut edit = PatcherTextEdit {
+        node_id: "draft".to_string(),
+        text: "tensor @".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 8,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    };
+
+    assert_eq!(
+        patcher_autocomplete_suggestions(&edit, &[], &[])
+            .into_iter()
+            .map(|suggestion| suggestion.name)
+            .collect::<Vec<_>>(),
+        vec!["@data", "@file", "@name", "@shape"]
+    );
+
+    edit.text = "tensor @sh".to_string();
+    edit.state.cursor_pos = 10;
+    assert_eq!(
+        patcher_autocomplete_suggestions(&edit, &[], &[])
+            .into_iter()
+            .map(|suggestion| suggestion.name)
+            .collect::<Vec<_>>(),
+        vec!["@shape"]
+    );
+    assert_eq!(
+        patcher_autocomplete_ghost_text(&edit, &[]).as_deref(),
+        Some("ape")
+    );
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
+    assert_eq!(edit.text, "tensor @shape ");
+    assert_eq!(edit.state.cursor_pos, 14);
+}
+
+#[test]
+fn patcher_attribute_autocomplete_is_filtered_by_operator_and_replaces_the_token() {
+    let mut edit = PatcherTextEdit {
+        node_id: "draft".to_string(),
+        text: "compressor @sh 0.5".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 14,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    };
+    assert!(patcher_autocomplete_suggestions(&edit, &[], &[]).is_empty());
+
+    edit.text = "tensor @fi [512]".to_string();
+    edit.state.cursor_pos = 10;
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
+    assert_eq!(
+        suggestions
+            .iter()
+            .map(|suggestion| suggestion.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["@file"]
+    );
+    assert!(
+        patcher_autocomplete_ghost_text(&edit, &[]).is_none(),
+        "ghost text must not obscure an authored suffix"
+    );
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
+    assert_eq!(edit.text, "tensor @file [512]");
+    assert_eq!(edit.state.cursor_pos, 13);
+}
+
+#[test]
+fn patcher_autocomplete_completes_file_attribute_values_after_bracketed_attributes() {
+    let asset_paths = vec![
+        "samples/kick.wav".to_string(),
+        "wavetables/basic-shapes.json".to_string(),
+        "wavetables/bright bank.json".to_string(),
+    ];
+    let text = "tensor @shape [512 448] @file \"wavetables/br".to_string();
+    let cursor_pos = text.chars().count();
+    let mut edit = PatcherTextEdit {
+        node_id: "draft".to_string(),
+        text,
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    };
+
+    assert_eq!(
+        patcher_autocomplete_suggestions(&edit, &[], &asset_paths)
+            .into_iter()
+            .map(|suggestion| suggestion.name)
+            .collect::<Vec<_>>(),
+        vec!["\"wavetables/bright bank.json\""]
+    );
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &asset_paths));
+    assert_eq!(
+        edit.text,
+        "tensor @shape [512 448] @file \"wavetables/bright bank.json\" "
+    );
+
+    edit.text = "tensor @shape [512 448] @default-file ".to_string();
+    edit.state.cursor_pos = edit.text.chars().count();
+    assert_eq!(
+        patcher_autocomplete_suggestions(&edit, &[], &asset_paths)
+            .into_iter()
+            .map(|suggestion| suggestion.name)
+            .collect::<Vec<_>>(),
+        vec![
+            "\"samples/kick.wav\"",
+            "\"wavetables/basic-shapes.json\"",
+            "\"wavetables/bright bank.json\"",
+        ]
+    );
+}
+
+#[test]
+fn patcher_asset_path_catalog_uses_draft_and_library_relative_spellings() {
+    let draft_source = temp_patcher_dsp_path("patcher-path-catalog-draft");
+    let user_source = temp_patcher_dsp_path("patcher-path-catalog-user");
+    let factory_source = temp_patcher_dsp_path("patcher-path-catalog-factory");
+    let draft_root = draft_source.parent().unwrap();
+    let user_root = user_source.parent().unwrap();
+    let factory_root = factory_source.parent().unwrap();
+    fs::create_dir_all(draft_root.join("waves")).unwrap();
+    fs::create_dir_all(user_root.join("wavetables")).unwrap();
+    fs::create_dir_all(factory_root.join("wavetables")).unwrap();
+    fs::write(&draft_source, "(out 0)").unwrap();
+    fs::write(draft_root.join("waves/draft.json"), "[]").unwrap();
+    fs::write(user_root.join("wavetables/shared.json"), "[]").unwrap();
+    fs::write(factory_root.join("wavetables/shared.json"), "[]").unwrap();
+    fs::write(factory_root.join("wavetables/factory.json"), "[]").unwrap();
+
+    let spellings = assets::collect_asset_path_spellings(
+        Some(draft_root),
+        Some(&draft_source),
+        &[user_root.to_path_buf(), factory_root.to_path_buf()],
+    );
+    assert_eq!(
+        spellings,
+        vec![
+            "waves/draft.json",
+            "wavetables/factory.json",
+            "wavetables/shared.json",
+        ]
+    );
+    assert!(!spellings.iter().any(|path| path.ends_with("dsp.lisp")));
+
+    fs::remove_dir_all(draft_root).unwrap();
+    fs::remove_dir_all(user_root).unwrap();
+    fs::remove_dir_all(factory_root).unwrap();
+}
+
+#[test]
+fn patcher_asset_sidebar_catalog_labels_tiers_and_requires_tensor_shape() {
+    let draft_source = temp_patcher_dsp_path("patcher-sidebar-draft");
+    let user_source = temp_patcher_dsp_path("patcher-sidebar-user");
+    let factory_source = temp_patcher_dsp_path("patcher-sidebar-factory");
+    let draft_root = draft_source.parent().unwrap();
+    let user_root = user_source.parent().unwrap();
+    let factory_root = factory_source.parent().unwrap();
+    for directory in [
+        draft_root.join("waves"),
+        user_root.join("wavetables"),
+        factory_root.join("wavetables"),
+    ] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    fs::write(draft_root.join("waves/draft.json"), r#"{"shape":[8]}"#).unwrap();
+    fs::write(
+        user_root.join("wavetables/user.json"),
+        r#"{"shape":[16,2]}"#,
+    )
+    .unwrap();
+    fs::write(
+        factory_root.join("wavetables/factory.json"),
+        r#"{"shape":[512,4]}"#,
+    )
+    .unwrap();
+    fs::write(factory_root.join("wavetables/not-a-tensor.json"), "[]").unwrap();
+
+    let entries = assets::collect_asset_sidebar_entries(
+        Some(draft_root),
+        Some(user_root),
+        Some(factory_root),
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.tier, entry.reference.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("Draft", "waves/draft.json"),
+            ("User", "wavetables/user.json"),
+            ("Factory", "wavetables/factory.json"),
+        ]
+    );
+
+    fs::remove_dir_all(draft_root).unwrap();
+    fs::remove_dir_all(user_root).unwrap();
+    fs::remove_dir_all(factory_root).unwrap();
+}
+
+#[test]
 fn patcher_autocomplete_documents_adsrexp_preamble_macro() {
     let mut edit = PatcherTextEdit {
         node_id: "draft".to_string(),
@@ -15796,7 +16115,7 @@ fn patcher_autocomplete_documents_adsrexp_preamble_macro() {
         },
         autocomplete_selected: 0,
     };
-    let suggestions = patcher_autocomplete_suggestions(&edit, &[]);
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
     let adsrexp = suggestions
         .iter()
         .find(|suggestion| suggestion.name == "adsrexp")
@@ -15829,7 +16148,7 @@ fn patcher_autocomplete_documents_adsrexp_preamble_macro() {
             "fall_curve",
         ]
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
     assert_eq!(edit.text, "adsrexp ");
 }
 
@@ -15846,7 +16165,7 @@ fn patcher_autocomplete_documents_patcher_only_history_node() {
         },
         autocomplete_selected: 0,
     };
-    let suggestions = patcher_autocomplete_suggestions(&edit, &[]);
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[], &[]);
     let history = suggestions
         .iter()
         .find(|suggestion| suggestion.name == "history")
@@ -15867,7 +16186,7 @@ fn patcher_autocomplete_documents_patcher_only_history_node() {
         !dgenlisp_operator_names().contains("history"),
         "history is a patcher graph convenience, not a DGenLisp operator"
     );
-    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert!(apply_patcher_autocomplete(&mut edit, &[], &[]));
     assert_eq!(edit.text, "history ");
 }
 
@@ -18964,6 +19283,83 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
 }
 
 #[test]
+fn active_attribute_autocomplete_expands_the_node_to_fit_ghost_text() {
+    let measurer = FixedWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    cache_text_widths("tensor @sh".to_string(), NODE_FONT_SIZE, &measure_ctx);
+    cache_text_widths("tensor @shape".to_string(), NODE_FONT_SIZE, &measure_ctx);
+
+    let mut state = PatcherInteractionState::default();
+    let created_id = allocate_created_node(&mut state, "root", (2.0, 2.0));
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: created_id.clone(),
+        text: "tensor @sh".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 10,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    });
+
+    let patch = patch_with_interaction_state(Patch::default(), &state, "root");
+    let node = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == created_id)
+        .expect("edited node");
+    let (width, _) = node_size_for_ports(node, 0, node.outputs.len());
+    let completed_width = node_autogenerated_width_for_label(node, "tensor @shape");
+    assert!(
+        width >= completed_width,
+        "node width {width} must contain completed label width {completed_width}"
+    );
+
+    let mut prims = Vec::new();
+    draw_patch(
+        &mut prims,
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        &PatcherPanState::default(),
+        &state,
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                GpuPrimitive::ProportionalText(text)
+                    if text.text == "ape" && text.fg == theme::PATCHER_TEXT_MUTED()
+            )
+        }),
+        "the selected attribute remainder should render as muted inline ghost text"
+    );
+}
+
+#[test]
 fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
     let mut state = PatcherInteractionState::default();
     let created_id = allocate_created_node(&mut state, "root", (2.0, 2.0));
@@ -21325,7 +21721,7 @@ fn patcher_undo_gesture_coalescing_skips_noop_transitions() {
     // A text-edit gesture that ends back at its base (cancelled created node)
     // records nothing either.
     let created = allocate_created_node(&mut state, "root", (1.0, 1.0));
-    text::begin_patcher_text_edit(&mut state, created, String::new(), 0);
+    text::begin_patcher_text_edit(&mut state, created, String::new(), 0, Vec::new());
     set_patcher_interaction_state(key, state.clone());
     cancel_patcher_text_edit(&mut state, "root");
     set_patcher_interaction_state(key, state);
@@ -22510,6 +22906,125 @@ fn tensor_data_attribute_survives_writeback_round_trip() {
     assert!(
         generated.contains("@shape [3 3]") && generated.contains("@data [0 1 0 1 -4 1 0 1 0]"),
         "generated source lost the attribute arrays:\n{generated}"
+    );
+}
+
+#[test]
+fn tensor_param_options_attribute_projects_as_a_cable_and_round_trips() {
+    let source = "(def bank (tensor @shape [512 4] @file \"waves/basic.json\"))\n\
+(param table @options bank @default 0)\n";
+    let patch = parse(source);
+    let tensor = patch.nodes.iter().find(|node| node.id == "bank").unwrap();
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.param.as_ref().is_some_and(|param| param.name == "table"))
+        .unwrap();
+    let options = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == param.id)
+        .expect("@options tensor reference should project as a cable");
+    assert_eq!(options.from_node, tensor.id);
+    assert_eq!(options.to_input, super::model::PARAM_OPTIONS_INPUT);
+    assert!(
+        !node_display_label(param).contains("@options"),
+        "the cable is the patcher surface for the binding-valued attribute"
+    );
+    assert_eq!(patch_input_indices(&patch).get(&param.id), Some(&vec![0]));
+
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+    let tensor_pos = generated.find("(def bank (tensor").unwrap();
+    let param_pos = generated
+        .find("(param table @default 0 @options bank)")
+        .unwrap_or_else(|| panic!("options binding was not emitted:\n{generated}"));
+    assert!(
+        tensor_pos < param_pos,
+        "options tensor must be defined before the param resolves it:\n{generated}"
+    );
+    assert_generation_roundtrip(
+        "tensor-param-options",
+        source,
+        PatcherIntent::Instrument,
+        None,
+    );
+}
+
+#[test]
+fn dragging_tensor_to_param_emits_options_and_deleting_the_cable_removes_it() {
+    let source = "(def bank (tensor @shape [512 4] @file \"waves/basic.json\"))\n\
+(param table @default 0)\n";
+    let root = parse(source);
+    let param_id = root
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Param)
+        .unwrap()
+        .id
+        .clone();
+    let mut state = PatcherInteractionState::default();
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: "bank".to_string(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: param_id.clone(),
+            input_index: super::model::PARAM_OPTIONS_INPUT,
+        },
+    );
+    let written = emit_patch_writeback(source, PatcherIntent::Instrument, &state)
+        .expect("surgical writeback options cable");
+    assert!(written.contains("@options bank"), "{written}");
+
+    let visible = sidecar::root_patch_with_interaction(&root, &state);
+    let generated = super::generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate options cable")
+        .source;
+    assert!(
+        generated.contains("(param table @default 0 @options bank)"),
+        "created cable did not emit @options with the claimed binding:\n{generated}"
+    );
+
+    let imported = parse(&generated);
+    let options = imported
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == param_id)
+        .unwrap();
+    let mut deleted = PatcherInteractionState::default();
+    deleted
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", &source_connection_id(options)));
+    let surgically_deleted = emit_patch_writeback(&generated, PatcherIntent::Instrument, &deleted)
+        .expect("surgical deletion of options cable");
+    assert!(!surgically_deleted.contains("@options"), "{surgically_deleted}");
+
+    let visible = sidecar::root_patch_with_interaction(&imported, &deleted);
+    let regenerated = super::generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate after deleting options cable")
+        .source;
+    assert!(!regenerated.contains("@options"), "{regenerated}");
+}
+
+#[test]
+fn inline_param_options_remain_an_attribute_without_a_cable() {
+    let source = "(param mode @options [\"lowpass\" \"highpass\"] @default 0)\n";
+    let patch = parse(source);
+    assert!(patch.connections.is_empty());
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .expect("generate inline options")
+        .source;
+    assert!(
+        generated.contains("@options")
+            && generated.contains("\"lowpass\"")
+            && generated.contains("\"highpass\""),
+        "{generated}"
     );
 }
 

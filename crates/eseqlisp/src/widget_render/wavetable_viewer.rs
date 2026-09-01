@@ -20,6 +20,7 @@ pub static WAVETABLE_VIEWER_WIDGET: WavetableViewerWidget = WavetableViewerWidge
 pub struct WavetableBank {
     pub frame_len: usize,
     pub wave_count: usize,
+    pub waves_per_set: Option<usize>,
     pub data: Arc<Vec<f32>>,
     pub revision: u64,
 }
@@ -58,6 +59,7 @@ pub fn publish_bank(key: impl Into<String>, frame_len: usize, data: Arc<Vec<f32>
         Arc::new(WavetableBank {
             frame_len,
             wave_count: data.len() / frame_len,
+            waves_per_set: None,
             data,
             revision,
         }),
@@ -128,9 +130,16 @@ fn read_bank_file(path: &str) -> Option<WavetableBank> {
     let resolved = crate::hot_reload::resolve_content_relative_asset(path);
     let text = std::fs::read_to_string(&resolved).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let (shape, data) = match &json {
-        serde_json::Value::Object(map) => (map.get("shape"), map.get("data")?),
-        serde_json::Value::Array(_) => (None, &json),
+    let (shape, data, waves_per_set) = match &json {
+        serde_json::Value::Object(map) => (
+            map.get("shape"),
+            map.get("data")?,
+            map.get("waves_per_set")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|value| *value > 0)
+                .and_then(|value| usize::try_from(value).ok()),
+        ),
+        serde_json::Value::Array(_) => (None, &json, None),
         _ => return None,
     };
     let data: Vec<f32> = data
@@ -150,6 +159,7 @@ fn read_bank_file(path: &str) -> Option<WavetableBank> {
     Some(WavetableBank {
         frame_len,
         wave_count,
+        waves_per_set,
         data: Arc::new(data),
         revision: 0,
     })
@@ -172,6 +182,15 @@ fn prop_str(props: &HashMap<String, Value>, key: &str) -> Option<String> {
         Some(Value::String(s)) => Some(s.clone()),
         _ => None,
     }
+}
+
+fn waves_per_set(props: &HashMap<String, Value>, bank: &WavetableBank) -> usize {
+    props
+        .get("waves-per-set")
+        .and_then(value_num)
+        .map(|value| value.max(1.0) as usize)
+        .or(bank.waves_per_set)
+        .unwrap_or(16)
 }
 
 /// Möbius phase bend; identity at warp 0, energy pushed toward the cycle
@@ -307,7 +326,7 @@ impl WidgetDefinition for WavetableViewerWidget {
             return primitives;
         }
 
-        let waves_per_set = prop_num(&node.props, "waves-per-set", 16.0).max(1.0) as usize;
+        let waves_per_set = waves_per_set(&node.props, &bank);
         let set_count = (bank.wave_count / waves_per_set).max(1);
         let set = (prop_num(&node.props, "set", 0.0).round() as usize).min(set_count - 1);
         let waves_in_set = waves_per_set.min(bank.wave_count - set * waves_per_set);
@@ -349,6 +368,82 @@ impl WidgetDefinition for WavetableViewerWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_viewport() -> WidgetViewport {
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 800.0,
+            vp_h: 600.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 24.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        }
+    }
+
+    #[test]
+    fn file_metadata_defaults_waves_per_set_when_the_prop_is_absent() {
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-wavetable-viewer-metadata-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        std::fs::write(
+            &path,
+            r#"{"shape":[2,4],"waves_per_set":2,"data":[0,1,1,0,0,-1,-1,0]}"#,
+        )
+        .expect("write wavetable fixture");
+        let path = path.to_str().expect("UTF-8 temp path");
+        let bank = read_bank_file(path).expect("read bank");
+        assert_eq!(bank.waves_per_set, Some(2));
+
+        let node = LayoutNode {
+            widget_id: 7,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "wavetable-viewer".to_string(),
+            rect: crate::layout::Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 20.0,
+                height: 4.0,
+            },
+            props: HashMap::from([
+                ("file".to_string(), Value::String(path.to_string())),
+                ("set".to_string(), Value::Number(1.0)),
+            ]),
+            children: Vec::new(),
+            focusable: false,
+            animation: Default::default(),
+        };
+        let primitive = WAVETABLE_VIEWER_WIDGET
+            .build_primitives("wavetable-viewer", &node, test_viewport())
+            .into_iter()
+            .find_map(|primitive| match primitive {
+                GpuPrimitive::Wavetable(wavetable) => Some(wavetable),
+                _ => None,
+            })
+            .expect("wavetable primitive");
+        std::fs::remove_file(path).expect("remove wavetable fixture");
+
+        assert_eq!(primitive.set_base, 2);
+        assert_eq!(primitive.waves_in_set, 2);
+
+        assert_eq!(
+            waves_per_set(
+                &HashMap::from([("waves-per-set".to_string(), Value::Number(4.0))]),
+                &bank,
+            ),
+            4,
+            "an explicit prop must override file metadata"
+        );
+    }
 
     #[test]
     fn published_banks_replace_data_with_a_new_revision() {
@@ -420,23 +515,10 @@ mod tests {
     }
 
     fn color_test_primitives(extra: &[(&str, Value)]) -> (Color, GpuWavetablePrimitive) {
-        let viewport = WidgetViewport {
-            cell_w: 10.0,
-            cell_h: 20.0,
-            vp_w: 800.0,
-            vp_h: 600.0,
-            time_seconds: 0.0,
-            focused_widget_id: None,
-            focused_branch: false,
-            overlay_viewport_bottom: 24.0,
-            scroll_top: 0.0,
-            scroll_left: 0.0,
-            inherited_hover: false,
-        };
         let primitives = WAVETABLE_VIEWER_WIDGET.build_primitives(
             "wavetable-viewer",
             &color_test_node(extra),
-            viewport,
+            test_viewport(),
         );
         let background = primitives
             .iter()

@@ -439,6 +439,7 @@ impl AppPaths {
             self.sounds_dir(),
             self.user_instruments_dir(),
             self.user_effects_dir(),
+            self.user_assets_dir(),
             self.sample_assets_dir(),
             self.user_filter_tables_dir(),
             self.user_presets_dir(),
@@ -580,6 +581,14 @@ impl AppPaths {
     }
     pub fn user_instruments_dir(&self) -> PathBuf {
         self.user_data_root().join("instruments")
+    }
+    /// Immutable assets distributed with the application.
+    pub fn factory_assets_dir(&self) -> PathBuf {
+        self.factory_root().join("assets")
+    }
+    /// Mutable shared assets installed by the user.
+    pub fn user_assets_dir(&self) -> PathBuf {
+        self.user_data_root().join("assets")
     }
 
     pub fn effect_dirs(&self) -> Vec<PathBuf> {
@@ -888,13 +897,18 @@ pub fn init_dev() -> io::Result<()> {
     Ok(())
 }
 
-/// Hand eseqlisp the roots it cannot derive itself: the defmacro library and
-/// the relative-`(load …)` fallback roots. User scratch buffers load factory
-/// scripts with paths like `scripts/sequencers/x.lisp` (or the migrated
-/// `content/scripts/…` form); those resolved against the crate-dir cwd before
+/// Hand eseqlisp the roots it cannot derive itself: the defmacro library,
+/// patcher asset libraries, and relative-`(load …)` fallback roots. User
+/// scratch buffers load factory scripts with paths like
+/// `scripts/sequencers/x.lisp` (or the migrated `content/scripts/…` form); those resolved against the crate-dir cwd before
 /// the content/ split and must now fall back to the factory content root.
 fn configure_eseqlisp_roots(paths: &AppPaths) {
     eseqlisp::defmacro_library::set_default_library_root(paths.defmacros_dir());
+    eseqlisp::widget_render::patcher::set_asset_roots(
+        paths.factory_root(),
+        paths.user_assets_dir(),
+        paths.factory_assets_dir(),
+    );
     let factory_root = paths.factory_root();
     let mut roots = vec![factory_root.clone()];
     if let Some(parent) = factory_root.parent() {
@@ -997,6 +1011,8 @@ mod tests {
             paths.instruments_dir(),
             paths.user_effects_dir(),
             paths.user_instruments_dir(),
+            paths.factory_assets_dir(),
+            paths.user_assets_dir(),
             paths.dgen_asset_fallback_base(),
             paths.dgen_cache_root(),
             paths.convolution_ir_cache_dir(),
@@ -1119,6 +1135,8 @@ mod tests {
         assert_eq!(paths.ui_dir(), PathBuf::from("/ws/content/ui"));
         assert_eq!(paths.effects_dir(), PathBuf::from("/ws/content/effects"));
         assert_eq!(paths.instruments_dir(), PathBuf::from("/ws/content/instruments"));
+        assert_eq!(paths.factory_assets_dir(), PathBuf::from("/ws/content/assets"));
+        assert_eq!(paths.user_assets_dir(), PathBuf::from("/ws/.local/assets"));
         assert_eq!(paths.projects_dir(), PathBuf::from("/ws/.local/projects"));
         assert_eq!(paths.sample_db_path(), PathBuf::from("/ws/.local/samples.db"));
         assert_eq!(paths.sample_facts_path(), PathBuf::from("/ws/.local/samples.jsonl"));
@@ -1154,6 +1172,21 @@ mod tests {
             paths.ir_prep_dir(),
             std::env::temp_dir().join("sequencer_ir_prep")
         );
+    }
+
+    #[test]
+    fn factory_basic_shapes_asset_has_declared_tensor_shape() {
+        let path = app_paths()
+            .factory_assets_dir()
+            .join("wavetables/basic-shapes.json");
+        let value: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&path).unwrap_or_else(|error| {
+                panic!("read factory asset {}: {error}", path.display())
+            }),
+        )
+        .expect("parse factory basic-shapes asset");
+        assert_eq!(value["shape"], serde_json::json!([512, 4]));
+        assert_eq!(value["data"].as_array().map(Vec::len), Some(512 * 4));
     }
 
     #[test]
@@ -1226,6 +1259,11 @@ mod tests {
             paths.user_instruments_dir(),
             PathBuf::from("/Support/instruments")
         );
+        assert_eq!(
+            paths.factory_assets_dir(),
+            PathBuf::from("/App/Contents/Resources/assets")
+        );
+        assert_eq!(paths.user_assets_dir(), PathBuf::from("/Support/assets"));
         assert_eq!(paths.projects_dir(), PathBuf::from("/Support/projects"));
         assert_eq!(paths.samples_dir(), PathBuf::from("/Support/samples"));
         assert_eq!(paths.sample_db_path(), PathBuf::from("/Support/samples.db"));
@@ -1269,6 +1307,7 @@ mod tests {
             paths.sounds_dir(),
             paths.user_instruments_dir(),
             paths.user_effects_dir(),
+            paths.user_assets_dir(),
             paths.packages_dir(),
             paths.local_modules_dir(),
         ] {

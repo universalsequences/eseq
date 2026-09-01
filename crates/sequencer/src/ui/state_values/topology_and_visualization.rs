@@ -80,6 +80,8 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "process-library", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plocks", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-plock-any", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-plock-printing", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plock-variants", Value::List(vec![]));
         for param in [StepParam::Velocity, StepParam::Duration, StepParam::Transpose] {
             rt.set_reactive(

@@ -2309,7 +2309,7 @@ fragment float4 live_spectrogram_frag(
         pending_move: Option<Event>,
         pending_magnify: VecDeque<(f64, (f32, f32))>,
         pending_scroll: VecDeque<((f32, f32), (f32, f32))>,
-        pending_file_drops: VecDeque<Vec<PathBuf>>,
+        pending_file_drops: VecDeque<(Vec<PathBuf>, Option<(f32, f32)>)>,
         close_requested: bool,
         suppress_scroll_until: Option<Instant>,
         modifiers: KeyModifiers,
@@ -6019,15 +6019,42 @@ fragment float4 live_spectrogram_frag(
                 self.backend_poll_profile.note_immediate();
                 return Some(BackendEvent::Quit);
             }
-            if let Some(paths) = self.pending_file_drops.pop_front() {
+            if let Some((paths, position)) = self.pending_file_drops.pop_front() {
                 self.backend_poll_profile.note_immediate();
-                return Some(BackendEvent::FileDrop(paths));
+                return Some(BackendEvent::FileDrop(paths, position));
             }
             let terminal_event = self.poll_event_with_redraw(timeout, redraw);
             if std::mem::take(&mut self.close_requested) {
                 Some(BackendEvent::Quit)
             } else {
                 terminal_event.map(BackendEvent::Terminal)
+            }
+        }
+
+        /// Current pointer position in precise cell coordinates, queried from
+        /// AppKit rather than from tracked CursorMoved events. Needed at OS
+        /// file-drop time, when no CursorMoved has fired since the drag began.
+        fn pointer_cell_position(&self, cell_size: (f64, f64)) -> Option<(f32, f32)> {
+            let window = self.window.as_ref()?;
+            let handle = window.window_handle().ok()?;
+            let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+                return None;
+            };
+            let scale = window.scale_factor();
+            unsafe {
+                let ns_view = &*(appkit.ns_view.as_ptr() as *mut NSView);
+                let ns_window = ns_view.window()?;
+                let point = ns_window.mouseLocationOutsideOfEventStream();
+                // winit's NSView is flipped, so converting into it yields
+                // top-left-origin logical points, matching CursorMoved once
+                // scaled to physical pixels.
+                let local = ns_view.convertPoint_fromView(point, None);
+                let x = local.x * scale;
+                let y = local.y * scale;
+                Some((
+                    (x / cell_size.0).max(0.0) as f32,
+                    (y / cell_size.1).max(0.0) as f32,
+                ))
             }
         }
 
@@ -6065,6 +6092,7 @@ fragment float4 live_spectrogram_frag(
                 .unwrap_or((8.0, 16.0));
             let wake_at = Instant::now() + timeout;
             let mut dropped_paths = Vec::new();
+            let mut dropped_position: Option<(f32, f32)> = None;
             let pump_started = Instant::now();
             event_loop.pump_events(Some(timeout), |event, elwt| {
                 elwt.set_control_flow(if timeout.is_zero() {
@@ -6102,6 +6130,10 @@ fragment float4 live_spectrogram_frag(
                         self.pending.push_back(Event::Resize(0, 0));
                     }
                     WindowEvent::DroppedFile(path) => {
+                        // macOS sends no CursorMoved during an external drag,
+                        // so the tracked cursor position is stale here; ask
+                        // AppKit where the pointer actually is.
+                        dropped_position = self.pointer_cell_position(cell_size);
                         dropped_paths.push(path);
                     }
                     WindowEvent::ModifiersChanged(mods) => {
@@ -6217,7 +6249,8 @@ fragment float4 live_spectrogram_frag(
             self.event_loop = Some(event_loop);
             let pump_elapsed = pump_started.elapsed();
             if !dropped_paths.is_empty() {
-                self.pending_file_drops.push_back(dropped_paths);
+                self.pending_file_drops
+                    .push_back((dropped_paths, dropped_position));
             }
             let result = if let Some(ev) = self.pending.pop_front() {
                 if matches!(ev, Event::Mouse(_)) {

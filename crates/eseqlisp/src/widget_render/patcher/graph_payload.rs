@@ -94,6 +94,8 @@ enum ArgEntry {
 struct ParamEntry {
     name: String,
     modulatable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    options_tensor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -328,6 +330,7 @@ fn node_entry(node: &PatchNode) -> NodeEntry {
         param: node.param.as_ref().map(|param| ParamEntry {
             name: param.name.clone(),
             modulatable: param.modulatable,
+            options_tensor: param.options_tensor.clone(),
         }),
         synthesized: node.synthesized
             || matches!(
@@ -372,6 +375,7 @@ fn patch_node(entry: &NodeEntry) -> PatchNode {
         param: entry.param.as_ref().map(|param| ParamNodeInfo {
             name: param.name.clone(),
             modulatable: param.modulatable,
+            options_tensor: param.options_tensor.clone(),
         }),
         // Recomputed by `resolve_node_operators` once the macro set is
         // settled; a serialized diagnostic would outlive the condition that

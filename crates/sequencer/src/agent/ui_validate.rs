@@ -576,6 +576,7 @@ mod tests {
     fn manifest_with_params(names: &[&str]) -> DGenManifest {
         DGenManifest {
             dylib_path: std::path::PathBuf::new(),
+            asset_base: None,
             version: 2,
             process_abi: "dgen-host-abi-v1".to_string(),
             total_memory_slots: 0,
@@ -594,6 +595,7 @@ mod tests {
                     group: None,
                     env: None,
                     role: None,
+                    options: None,
                 })
                 .collect(),
             groups: Vec::new(),

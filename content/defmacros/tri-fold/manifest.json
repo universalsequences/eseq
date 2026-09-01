@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "tri-fold",
+  "params": [
+    "input",
+    "drive"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "Branchless triangle wavefolder (the Wavetable synth's fold): signal beyond ±1 reflects back instead of clipping; drive 0..1, 0 = transparent.",
+  "tags": [
+    "waveshaper",
+    "distortion",
+    "wavetable"
+  ]
+}

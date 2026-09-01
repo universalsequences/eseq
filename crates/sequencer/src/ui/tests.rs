@@ -2494,6 +2494,18 @@
     }
 
     #[test]
+    #[ignore = "eseq-oja8: release-mode perf probe: one p-lock printing frame (play+record, no selection) from a real set-instrument-param dispatch through tick_step_print, invalidation apply, reactive cycle, frame and retained update, against the same knob tick with recording off"]
+    fn project_92_full_layout_print_plock_knob_drag_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-full-layout-print-plock-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::PrintPlockKnobDrag))
+            .expect("spawn project 92 print-plock knob probe")
+            .join()
+            .expect("project 92 print-plock knob probe should pass");
+    }
+
+    #[test]
     #[ignore = "eseq-eeng: release-mode perf probe: real core/triton adsr-editor handle drag (production instrument load, real set-instrument-param-batch dispatch seam), cold press + first drag versus warm drags, under the real production multi-pane layout"]
     fn project_92_full_layout_triton_adsr_drag_end_to_end_perf() {
         std::thread::Builder::new()
@@ -2603,6 +2615,15 @@
         /// costs the other probes deliberately pay outside their clocks are
         /// exactly what this probe measures.
         InstrumentKnobColdFocusDrag,
+        /// One p-lock PRINTING frame (eseq-oja8): transport playing, record
+        /// armed, no selection, so `set-instrument-param` stops authoring a
+        /// base value and latches a print target instead, and every UI frame
+        /// writes device p-locks onto the steps the playhead crossed. The
+        /// same knob tick with recording OFF is measured in the same run as
+        /// the control, so the report shows the printing tax directly. The
+        /// fixture is seeded to the reported sluggish state: ~56 entries in
+        /// the focused track's p-lock variant registry.
+        PrintPlockKnobDrag,
         /// The checked-in core/triton custom instrument UI's real
         /// `adsr-editor`, added as a new track through the production
         /// compile/load path and dragged by a real handle (eseq-eeng). Each
@@ -2664,6 +2685,7 @@
                 | Project92UiProbe::GroupTrackSelection
                 | Project92UiProbe::GroupTrackSelectionSmoke
                 | Project92UiProbe::InstrumentKnobColdFocusDrag
+                | Project92UiProbe::PrintPlockKnobDrag
                 | Project92UiProbe::TritonAdsrDrag
                 | Project92UiProbe::DriftTrackSwitch
                 | Project92UiProbe::DriftTrackSwitchSmoke
@@ -2730,6 +2752,7 @@
         } else if matches!(
             probe,
             Project92UiProbe::InstrumentKnobColdFocusDrag
+                | Project92UiProbe::PrintPlockKnobDrag
                 | Project92UiProbe::TritonAdsrDrag
                 | Project92UiProbe::ExpandedStepSliderDrag
         ) {
@@ -5054,14 +5077,19 @@
         // ---------------------------------------------------------------
         if matches!(
             probe,
-            Project92UiProbe::InstrumentKnobColdFocusDrag | Project92UiProbe::TritonAdsrDrag
+            Project92UiProbe::InstrumentKnobColdFocusDrag
+                | Project92UiProbe::TritonAdsrDrag
+                | Project92UiProbe::PrintPlockKnobDrag
         ) {
             const STEP_COUNT: usize = 64;
             const ROUNDS: usize = 6;
             const WARM_PER_ROUND: usize = 12;
             let triton_probe = probe == Project92UiProbe::TritonAdsrDrag;
+            let print_probe = probe == Project92UiProbe::PrintPlockKnobDrag;
             let probe_prefix = if triton_probe {
                 "project-92-fullayout-triton-adsr"
+            } else if print_probe {
+                "project-92-fullayout-print-plock"
             } else {
                 "project-92-fullayout-cold-knob"
             };
@@ -5721,6 +5749,928 @@
                 );
                 (down_col, down_row, widget_id)
             };
+
+            // ---------------------------------------------------------------
+            // eseq-oja8 phase 1: the p-lock PRINTING frame.
+            //
+            // While the transport plays and record is armed with no step
+            // selected, `set-instrument-param` no longer authors the base
+            // value: it latches a print target (cheap — no apply_command, no
+            // epoch bump) and the *frame* does the work. `tick_step_print`
+            // writes a device p-lock onto every step boundary the playhead
+            // crossed, republishes the scheduler track, and pushes one
+            // `PlockPresence` step batch, whose apply reconciles the whole
+            // 256-step variant registry. This probe times exactly that frame,
+            // and the identical knob tick with recording OFF as the control.
+            //
+            // The timed region starts at the REAL `dispatch_custom_host_command`
+            // seam (the knob's Lisp `on-change` reaches `set-instrument-param`
+            // there; the pointer hit-test half of the gesture is identical in
+            // both scenarios and is measured by the sibling cold/warm knob
+            // probe) and ends after the reactive cycle, side effects, layout
+            // refresh, tiled frame build and retained primitive update.
+            // ---------------------------------------------------------------
+            if print_probe {
+                const WARMUPS: usize = 5;
+                const SAMPLES: usize = 20;
+                const SEED_FIRST_STEP: usize = 8;
+
+                // Which instrument parameter does the on-screen sampler knob
+                // actually drive? Ask the real widget rather than parsing its
+                // stable key: press it once and read the emitted command.
+                let (down_col, down_row, _knob_widget_id) = locate_target(&mut editor);
+                editor.handle_tiled_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Down(MouseButton::Left),
+                        down_col.floor() as u16,
+                        down_row.floor() as u16,
+                    ),
+                    down_col,
+                    down_row,
+                    0,
+                );
+                let _ = editor.drain_host_commands();
+                editor.handle_tiled_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        down_col.floor() as u16,
+                        (down_row + 1.2).floor() as u16,
+                    ),
+                    down_col,
+                    down_row + 1.2,
+                    0,
+                );
+                let discovery = editor.drain_host_commands();
+                let param_idx = discovery
+                    .iter()
+                    .find_map(|command| match command {
+                        HostCommand::Custom { name, payload }
+                            if name == "set-instrument-param" =>
+                        {
+                            match payload {
+                                Value::Map(map) => map_usize(map, "param-idx"),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
+                    .expect("the fx sampler knob must emit set-instrument-param");
+                editor.handle_tiled_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Up(MouseButton::Left),
+                        down_col.floor() as u16,
+                        (down_row + 1.2).floor() as u16,
+                    ),
+                    down_col,
+                    down_row + 1.2,
+                    0,
+                );
+                let _ = editor.drain_host_commands();
+                app::edit::finish_active_gesture(&mut app);
+
+                let descriptor = app
+                    .graph
+                    .instrument_descriptors
+                    .get(track)
+                    .and_then(|descriptor| descriptor.params.get(param_idx))
+                    .cloned()
+                    .expect("the dragged knob's parameter descriptor");
+                assert!(
+                    matches!(descriptor.kind, sequencer::effects::ParamKind::Continuous { .. }),
+                    "the printing probe needs a continuous knob parameter, got {:?}",
+                    descriptor.kind
+                );
+                let range = descriptor.max - descriptor.min;
+                assert!(range > 0.0, "the knob parameter must have a usable range");
+                let stored_for = |fraction: f32| descriptor.min + range * fraction;
+
+                // A realistic pattern under the playhead: a trigger every
+                // fourth step (device p-locks print on off steps too, but the
+                // held-value walk and the scheduler stamp both care).
+                for step in 0..STEP_COUNT {
+                    let active = state.pattern.patterns[track].is_active(step);
+                    if active != (step % 4 == 0) {
+                        state.pattern.patterns[track].toggle_step(step);
+                    }
+                }
+
+                // Reproduce the reported sluggish state: ~56 distinct p-lock
+                // variants on the focused track (the user's screenshot runs
+                // the alphabet out into A'..W'), each step carrying SEVERAL
+                // locked params so the *step* panel's p-lock TABLE
+                // (content/ui/effects/track-panels.lisp `track-plocks-panel`,
+                // hosted by content/ui/effects/step-buffer.lisp) renders real
+                // rows — a label + number-picker + label per locked param —
+                // rather than the "No locks" placeholder.
+                let seeded_params: Vec<usize> = app.graph.instrument_descriptors[track]
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, param)| {
+                        *idx != param_idx
+                            && param.max > param.min
+                            && matches!(
+                                param.kind,
+                                sequencer::effects::ParamKind::Continuous { .. }
+                            )
+                    })
+                    .map(|(idx, _)| idx)
+                    .take(5)
+                    .chain(std::iter::once(param_idx))
+                    .collect();
+                assert!(
+                    seeded_params.len() >= 2,
+                    "the printing probe needs several lockable knob params, got {seeded_params:?}"
+                );
+                for step in SEED_FIRST_STEP..STEP_COUNT {
+                    for (slot, seeded) in seeded_params.iter().enumerate() {
+                        let seed_descriptor =
+                            &app.graph.instrument_descriptors[track].params[*seeded];
+                        let seed_range = seed_descriptor.max - seed_descriptor.min;
+                        let fraction = 0.001
+                            + 0.002 * (step - SEED_FIRST_STEP) as f32
+                            + 0.13 * slot as f32;
+                        assert!(
+                            app.print_instrument_plock(
+                                track,
+                                step,
+                                *seeded,
+                                seed_descriptor.min + seed_range * fraction,
+                            ),
+                            "seeding step {step} param {seeded} must write an instrument p-lock"
+                        );
+                    }
+                }
+                state.publish_scheduler_track(track);
+
+                // Play BEFORE the epoch-driven resync, exactly like the real
+                // app: `displayed_plock_step` (state_values/expanded_step.rs
+                // :760-766) falls back to the playhead step only while
+                // playing, so the transport-flip branch is what populates
+                // `SEQ.track-plocks` with the rows under the playhead. Parking
+                // the playhead on a seeded step first is what a user pressing
+                // Play over an already-p-locked pattern gets.
+                state.transport.playing.store(true, Ordering::Relaxed);
+                assert!(state.is_playing(), "the printing gate needs the transport playing");
+                state.transport.track_playheads[track]
+                    .store((STEP_COUNT / 2) as u32, Ordering::Relaxed);
+                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                let _ = finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+
+                let variants_seeded = state.plock_variant_registry_snapshot(track).entries.len();
+                assert!(
+                    (48..=60).contains(&variants_seeded),
+                    "precondition: the focused track must hold ~48-56 p-lock variants, got \
+                     {variants_seeded}"
+                );
+                assert!(
+                    selected_steps.lock().unwrap().is_empty(),
+                    "printing only happens with an empty step selection"
+                );
+
+                // The p-lock TABLE must actually be on screen with rows, or
+                // the probe would be measuring a layout without the panel the
+                // report is about.
+                let track_plock_rows = |editor: &Editor| -> usize {
+                    match editor.runtime().reactive_field_value("SEQ", "track-plocks") {
+                        Some(Value::List(items)) => items.len(),
+                        _ => 0,
+                    }
+                };
+                let seeded_plock_rows = track_plock_rows(&editor);
+                let seeded_pattern_epoch =
+                    state.transport.pattern_epoch.load(Ordering::Relaxed);
+                // The p-lock TABLE is structurally empty during printing, and
+                // this asserts it rather than assuming it:
+                // `build_track_plocks_value` (state_values/plocks.rs:860-862)
+                // returns an empty list unless `selected_plock_step` is Some,
+                // i.e. unless a step is SELECTED. It never consults
+                // `displayed_plock_step`, so the table does not follow the
+                // playhead. Printing requires an empty selection
+                // (host_commands/instrument_params.rs:75-79), so the table can
+                // only ever render the "No locks" placeholder while printing.
+                // The chip strip is track-scoped and DOES render, so the panel
+                // under test is genuinely on screen.
+                assert_eq!(
+                    seeded_plock_rows, 0,
+                    "with no selection the *step* p-lock table is empty by construction; if this \
+                     ever becomes nonzero the probe must be re-scoped"
+                );
+                let step_panel_widgets = {
+                    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                        &mut editor,
+                        vp_cols as usize,
+                        vp_rows as usize,
+                    );
+                    let step_tile = frame
+                        .tiles
+                        .iter()
+                        .find(|tile| tile.frame.buffer_name == "*step*")
+                        .expect("the production layout must show the *step* panel");
+                    let layout = step_tile
+                        .frame
+                        .widget_layout
+                        .as_ref()
+                        .expect("the *step* tile must have a widget layout");
+                    let mut table = Vec::new();
+                    collect_layout_nodes(
+                        layout,
+                        &mut |node| {
+                            node.stable_key
+                                .as_deref()
+                                .is_some_and(|key| key.ends_with("/track-plock-table")
+                                    || key == "track-plock-table")
+                        },
+                        &mut table,
+                    );
+                    let mut chips = Vec::new();
+                    collect_layout_nodes(
+                        layout,
+                        &mut |node| {
+                            node.stable_key
+                                .as_deref()
+                                .is_some_and(|key| key.ends_with("/track-plock-variant-strip")
+                                    || key == "track-plock-variant-strip")
+                        },
+                        &mut chips,
+                    );
+                    let mut chip_nodes = Vec::new();
+                    collect_layout_nodes(
+                        layout,
+                        &mut |node| {
+                            node.stable_key
+                                .as_deref()
+                                .is_some_and(|key| key.contains("track-plock-chip-"))
+                        },
+                        &mut chip_nodes,
+                    );
+                    let mut pickers = Vec::new();
+                    collect_layout_nodes(
+                        layout,
+                        &mut |node| node.widget_type == "number-picker",
+                        &mut pickers,
+                    );
+                    assert_eq!(
+                        table.len(),
+                        0,
+                        "no selection means no p-lock table rows (see the assertion above)"
+                    );
+                    assert_eq!(
+                        chips.len(),
+                        1,
+                        "the rendered *step* tile must contain the variant chip strip"
+                    );
+                    assert!(
+                        chip_nodes.len() >= 48,
+                        "the variant chip strip must render one chip per seeded variant, got {}",
+                        chip_nodes.len()
+                    );
+                    (chip_nodes.len(), pickers.len())
+                };
+                eprintln!(
+                    "[{probe_prefix}-panels] step_tile_visible=1 track_tile_visible={} \
+                     step_tile_variant_strip=1 step_tile_variant_chip_nodes={} \
+                     step_tile_plock_table_nodes=0 step_tile_number_pickers={} \
+                     track_plocks_rows={seeded_plock_rows} seeded_params_per_step={}",
+                    u8::from(editor_has_visible_buffer(&editor, "*track*")),
+                    step_panel_widgets.0,
+                    step_panel_widgets.1,
+                    seeded_params.len(),
+                );
+
+                struct PrintSamples {
+                    total: Vec<f64>,
+                    /// `total` minus the wgpu-parity full primitive re-collect
+                    /// the macOS retained path never pays. Both scenarios pay
+                    /// it identically, so it only dilutes the printing ratio.
+                    total_excl_scene: Vec<f64>,
+                    dispatch: Vec<f64>,
+                    print: Vec<f64>,
+                    take: Vec<f64>,
+                    playhead: Vec<f64>,
+                    tick_sync: Vec<f64>,
+                    invalidation: Vec<f64>,
+                    reactive: Vec<f64>,
+                    frame: Vec<f64>,
+                    retained: Vec<f64>,
+                    scene: Vec<f64>,
+                }
+                impl PrintSamples {
+                    fn new() -> Self {
+                        Self {
+                            total: Vec::new(),
+                            total_excl_scene: Vec::new(),
+                            dispatch: Vec::new(),
+                            print: Vec::new(),
+                            take: Vec::new(),
+                            playhead: Vec::new(),
+                            tick_sync: Vec::new(),
+                            invalidation: Vec::new(),
+                            reactive: Vec::new(),
+                            frame: Vec::new(),
+                            retained: Vec::new(),
+                            scene: Vec::new(),
+                        }
+                    }
+                }
+
+                let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                    samples.sort_by(|a, b| a.total_cmp(b));
+                    let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                    samples[index]
+                };
+
+                // Attribution helpers, all measured OUTSIDE the timed region:
+                // each is an idempotent repeat of work the printing frame
+                // already did, so its cost is attributable without adding a
+                // timing seam to production code.
+                let mut publish_track_ms: Vec<f64> = Vec::new();
+                let mut variant_reconcile_ms: Vec<f64> = Vec::new();
+                let mut variants_value_ms: Vec<f64> = Vec::new();
+                let mut step_batch_apply_ms: Vec<f64> = Vec::new();
+
+                let mut control = PrintSamples::new();
+                let mut printing = PrintSamples::new();
+                let mut printing_work = eseqlisp::runtime::UiWorkCounters::default();
+                let mut control_work = eseqlisp::runtime::UiWorkCounters::default();
+                let mut printing_layout_refreshes = 0usize;
+                let mut control_layout_refreshes = 0usize;
+                let mut new_chip_samples = 0usize;
+                let mut presence_batches_checked = 0usize;
+                let mut last_printed_step = 0usize;
+                let mut variants_before_printing = 0usize;
+
+                for scenario in [false, true] {
+                    recording.store(scenario, Ordering::Relaxed);
+                    if !scenario {
+                        shared.step_print.lock().unwrap().disarm();
+                        state.step_print_override.clear();
+                        state.device_print_override.clear();
+                    }
+                    let mut playhead = 0usize;
+                    state.transport.track_playheads[track]
+                        .store(playhead as u32, Ordering::Relaxed);
+                    let mut playhead_fx_revision: Option<super::loop_ctx::ParamSyncRevision> =
+                        None;
+                    let epochs_before =
+                        (ui_epoch.load(Ordering::Relaxed), fx_epoch.load(Ordering::Relaxed));
+                    if scenario {
+                        variants_before_printing =
+                            state.plock_variant_registry_snapshot(track).entries.len();
+                    }
+
+                    for iteration in 0..(WARMUPS + SAMPLES) {
+                        let measured = iteration >= WARMUPS;
+                        // A fresh value every tick: the user's knob sweeps, so
+                        // every printed step mints a NEW variant key. That is
+                        // the reported state, not a synthetic one.
+                        let fraction = 0.15
+                            + 0.7 * (iteration as f32)
+                                / ((WARMUPS + SAMPLES).saturating_sub(1) as f32);
+                        let stored = stored_for(fraction);
+                        let user_value = descriptor.stored_to_user(stored);
+                        let payload = Value::Map(
+                            [
+                                ("param-idx".to_string(), Value::Number(param_idx as f64)),
+                                ("value".to_string(), Value::Number(user_value as f64)),
+                            ]
+                            .into_iter()
+                            .map(|(key, value)| {
+                                (key, std::rc::Rc::new(std::cell::RefCell::new(value)))
+                            })
+                            .collect(),
+                        );
+                        let next_playhead = (playhead + 1) % STEP_COUNT;
+                        let keys_before: std::collections::BTreeSet<_> = if scenario && measured {
+                            state
+                                .plock_variant_registry_snapshot(track)
+                                .entries
+                                .iter()
+                                .map(|entry| entry.key.clone())
+                                .collect()
+                        } else {
+                            Default::default()
+                        };
+                        let work_before = editor.runtime().ui_work_counters();
+
+                        // --- timed region -------------------------------------
+                        let started = Instant::now();
+                        apply_host_commands(
+                            &mut editor,
+                            &mut app,
+                            vec![HostCommand::Custom {
+                                name: "set-instrument-param".to_string(),
+                                payload,
+                            }],
+                        );
+                        let dispatch_done = Instant::now();
+                        // The audio thread advanced the transport one step
+                        // between frames: this is the boundary that prints.
+                        state.transport.track_playheads[track]
+                            .store(next_playhead as u32, Ordering::Relaxed);
+                        let tick = tick_step_print(&mut app, &shared, editor.runtime_mut());
+                        let print_done = Instant::now();
+                        if tick.printed {
+                            app.mark_recording_take_changed();
+                        }
+                        if tick.display_dirty {
+                            editor.runtime_mut().run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            editor.refresh_visible_layouts_for_buffer_named("*step*");
+                        }
+                        let take_done = Instant::now();
+                        if scenario && !measured {
+                            // Warmups own the structural assertion so the
+                            // measured samples never pay for it (the queue is
+                            // drained by the visible update below, so this has
+                            // to happen here and put the items back).
+                            let invalidations = ui_invalidations.drain();
+                            let presence = invalidations
+                                .iter()
+                                .filter(|invalidation| {
+                                    matches!(
+                                        invalidation,
+                                        UiInvalidation::StepInvalidationBatch {
+                                            change: StepInvalidation::PlockPresence,
+                                            ..
+                                        }
+                                    )
+                                })
+                                .count();
+                            assert_eq!(
+                                presence, 1,
+                                "one printing tick must push exactly one PlockPresence batch, \
+                                 got {invalidations:?}"
+                            );
+                            presence_batches_checked += 1;
+                            for invalidation in invalidations {
+                                ui_invalidations.push(invalidation);
+                            }
+                        }
+                        // The reactive tick's own playhead branch: p-lock
+                        // presence on either side of the crossing re-syncs the
+                        // displayed (held) parameter values.
+                        {
+                            let rt = editor.runtime_mut();
+                            let _ = sync_playhead_field_delta(
+                                rt,
+                                playhead,
+                                next_playhead,
+                                STEP_COUNT,
+                            );
+                            // The rest of the real tick's per-frame playing
+                            // work that moves with the playhead.
+                            rt.set_reactive(
+                                "SEQ",
+                                "transport-playhead",
+                                Value::Number(
+                                    state.transport.playhead.load(Ordering::Relaxed) as f64,
+                                ),
+                            );
+                        }
+                        let _ = sync_piano_roll_playhead(
+                            editor.runtime_mut(),
+                            &app,
+                            track,
+                            next_playhead,
+                        );
+                        let binding_change = playhead_transition_changes_param_bindings(
+                            &state,
+                            track,
+                            &app.graph.effect_descriptors,
+                            &selected_steps,
+                            playhead,
+                            next_playhead,
+                        );
+                        if binding_change {
+                            let rt = editor.runtime_mut();
+                            let _ = sync_track_selection_param_binding_fields(
+                                rt,
+                                &state,
+                                track,
+                                &selected_steps,
+                            );
+                            let _ = sync_selected_track_bus_send_binding_fields(
+                                rt,
+                                &app,
+                                &state,
+                                track,
+                                &selected_steps,
+                            );
+                        }
+                        let _ = sync_track_plock_variant_preview(
+                            editor.runtime_mut(),
+                            &app,
+                            &state,
+                            track,
+                            &selected_steps,
+                            None,
+                        );
+                        if binding_change && fx_visible {
+                            let mut sorted_steps: Vec<usize> =
+                                selected_steps.lock().unwrap().iter().copied().collect();
+                            sorted_steps.sort_unstable();
+                            let revision = super::loop_ctx::ParamSyncRevision {
+                                track,
+                                scene: state.current_scene_index(),
+                                pattern_epoch: state
+                                    .transport
+                                    .pattern_epoch
+                                    .load(Ordering::Relaxed),
+                                song_row_mirror_epoch: app.song_row_mirror_epoch,
+                                ui_epoch: ui_epoch.load(Ordering::Relaxed),
+                                fx_epoch: fx_epoch.load(Ordering::Relaxed),
+                                sound_binding_epoch: app.sound_binding_epoch,
+                                display_step: displayed_plock_step(
+                                    &state,
+                                    track,
+                                    sorted_steps.first().copied(),
+                                ),
+                                selected_steps: sorted_steps,
+                                selected_neural_neurons: neural.iter().copied().collect(),
+                            };
+                            if claim_param_sync_revision(&mut playhead_fx_revision, &revision) {
+                                let _ = sync_fx_param_binding_fields_with_neural_selection(
+                                    editor.runtime_mut(),
+                                    &app,
+                                    &state,
+                                    track,
+                                    &selected_steps,
+                                    Some(&neural),
+                                );
+                            }
+                        }
+                        let playhead_done = Instant::now();
+                        let update =
+                            finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                        let total = duration_ms(started.elapsed());
+                        // --- end timed region ---------------------------------
+
+                        let work = editor.runtime().ui_work_counters();
+                        let work_delta = eseqlisp::runtime::UiWorkCounters {
+                            full_buffer_reruns: work.full_buffer_reruns
+                                - work_before.full_buffer_reruns,
+                            subtree_reruns: work.subtree_reruns - work_before.subtree_reruns,
+                            reevaluated_subtree_roots: work.reevaluated_subtree_roots
+                                - work_before.reevaluated_subtree_roots,
+                            relayout_reused: work.relayout_reused - work_before.relayout_reused,
+                            relayout_full: work.relayout_full - work_before.relayout_full,
+                            relayout_subtree: work.relayout_subtree
+                                - work_before.relayout_subtree,
+                        };
+
+                        assert_eq!(
+                            (ui_epoch.load(Ordering::Relaxed), fx_epoch.load(Ordering::Relaxed)),
+                            epochs_before,
+                            "a knob tick (recording={scenario}) must not bump the ui/fx epochs"
+                        );
+
+                        if scenario {
+                            assert!(
+                                tick.printed,
+                                "iteration {iteration}: the printing frame must write a p-lock"
+                            );
+                            assert_eq!(
+                                state.pattern.instrument_slots[track]
+                                    .plocks
+                                    .get(next_playhead, param_idx),
+                                Some(stored),
+                                "iteration {iteration}: step {next_playhead} must hold the \
+                                 printed value"
+                            );
+                            last_printed_step = next_playhead;
+                            if measured {
+                                let printed_key = sequencer::plock_variants::live_track_variant_key(
+                                    state.as_ref(),
+                                    track,
+                                    next_playhead,
+                                )
+                                .expect("the printed step must have a variant key");
+                                if !keys_before.contains(&printed_key) {
+                                    new_chip_samples += 1;
+                                }
+                            }
+                        } else {
+                            assert!(
+                                !tick.printed,
+                                "iteration {iteration}: recording off must not print"
+                            );
+                            assert_eq!(
+                                state.pattern.instrument_slots[track].defaults.get(param_idx),
+                                stored,
+                                "iteration {iteration}: the control path authors the base value"
+                            );
+                        }
+
+                        let target = if scenario { &mut printing } else { &mut control };
+                        if measured {
+                            target.total.push(total);
+                            target.dispatch.push(duration_ms(dispatch_done - started));
+                            target.print.push(duration_ms(print_done - dispatch_done));
+                            target.take.push(duration_ms(take_done - print_done));
+                            target.playhead.push(duration_ms(playhead_done - take_done));
+                            target.tick_sync.push(update.tick_sync_ms);
+                            target.invalidation.push(update.invalidation_ms);
+                            target.reactive.push(update.reactive_ms);
+                            target.frame.push(update.frame_ms);
+                            target.retained.push(update.retained_ms);
+                            target.scene.push(update.scene_ms);
+                            target.total_excl_scene.push(total - update.scene_ms);
+                            let (counters, refreshes) = if scenario {
+                                (&mut printing_work, &mut printing_layout_refreshes)
+                            } else {
+                                (&mut control_work, &mut control_layout_refreshes)
+                            };
+                            counters.full_buffer_reruns += work_delta.full_buffer_reruns;
+                            counters.subtree_reruns += work_delta.subtree_reruns;
+                            counters.reevaluated_subtree_roots +=
+                                work_delta.reevaluated_subtree_roots;
+                            counters.relayout_reused += work_delta.relayout_reused;
+                            counters.relayout_full += work_delta.relayout_full;
+                            counters.relayout_subtree += work_delta.relayout_subtree;
+                            *refreshes += update.layout_refresh_count;
+
+                            if scenario {
+                                let at = Instant::now();
+                                state.publish_scheduler_track(track);
+                                publish_track_ms.push(duration_ms(at.elapsed()));
+                                let at = Instant::now();
+                                let render = plock_variant_step_render_values(&state, track);
+                                variant_reconcile_ms.push(duration_ms(at.elapsed()));
+                                assert_eq!(
+                                    render[next_playhead].kind, 2,
+                                    "the printed step must project as a variant"
+                                );
+                                let at = Instant::now();
+                                let _ = build_track_plock_variants_value(
+                                    &state,
+                                    track,
+                                    &selected_steps,
+                                );
+                                variants_value_ms.push(duration_ms(at.elapsed()));
+                                let at = Instant::now();
+                                let _ = sync_step_batch_structural_bindings(
+                                    editor.runtime_mut(),
+                                    &state,
+                                    &app,
+                                    track,
+                                    &[next_playhead],
+                                    track,
+                                    &selected_steps,
+                                    &expanded_step_projection,
+                                );
+                                step_batch_apply_ms.push(duration_ms(at.elapsed()));
+                            }
+                        }
+
+                        playhead = next_playhead;
+                        if measured && scenario {
+                            assert_eq!(
+                                work_delta.full_buffer_reruns, 0,
+                                "a printing frame must not re-run a whole buffer root"
+                            );
+                        }
+                    }
+                }
+
+                // The variant projection the compact grid binds must show the
+                // printed step's new variant, not a stale tick.
+                let kind_field = track_step_plock_kind_field(track, last_printed_step);
+                assert!(
+                    matches!(
+                        editor.runtime().reactive_field_value("SEQ", &kind_field),
+                        Some(Value::Number(kind)) if *kind == 2.0
+                    ),
+                    "the printed step's variant projection must reach SEQ.{kind_field}, got {:?}",
+                    editor.runtime().reactive_field_value("SEQ", &kind_field)
+                );
+                let variants_after = state.plock_variant_registry_snapshot(track).entries.len();
+                let final_plock_rows = track_plock_rows(&editor);
+                // Evidence for the "does the table resync while printing?"
+                // question: `SEQ.track-plocks` is only rebuilt by
+                // `sync_track_params_delta`, which reactive_tick.rs calls from
+                // the neural-selection (:419), track-switch (:481),
+                // transport-flip (:618), pattern-epoch (:1275) and ui_epoch
+                // (:1445) branches. The playhead branch (:1032-1096) is not
+                // one of them, and `publish_scheduler_track` only READS
+                // `pattern_epoch` (publish.rs:311) rather than bumping it, so
+                // no printing frame can reach a rebuild.
+                eprintln!(
+                    "[{probe_prefix}-table] track_plocks_rows_before={seeded_plock_rows} \
+                     track_plocks_rows_after={final_plock_rows} \
+                     pattern_epoch_moved={} note=table_is_stale_while_printing",
+                    state.transport.pattern_epoch.load(Ordering::Relaxed) != seeded_pattern_epoch,
+                );
+
+                // Scaling check. The reported gesture drags a custom SYNTH
+                // knob; project 92's track 0 is a sampler with two effects,
+                // which is the small end of the two primitives that own the
+                // printing tax. Both scale with the track's device surface:
+                // `capture_live_track` deep-copies every slot's p-lock
+                // storage, and `live_track_variant_keys` walks all 256 steps
+                // x every device x every parameter. Add the checked-in
+                // core/triton instrument as a real track, seed it to the same
+                // ~56 variants, and re-time both primitives there so the
+                // report can say how the tax grows with device size.
+                let device_surface = |app: &app::App, probe_track: usize| -> (usize, usize, usize) {
+                    let instrument_params = app
+                        .graph
+                        .instrument_descriptors
+                        .get(probe_track)
+                        .map_or(0, |descriptor| descriptor.params.len());
+                    let effect_slots = app
+                        .graph
+                        .effect_descriptors
+                        .get(probe_track)
+                        .map_or(0, |slots| {
+                            slots.iter().filter(|slot| !slot.params.is_empty()).count()
+                        });
+                    let effect_params = app
+                        .graph
+                        .effect_descriptors
+                        .get(probe_track)
+                        .map_or(0, |slots| {
+                            slots.iter().map(|slot| slot.params.len()).sum::<usize>()
+                        });
+                    (instrument_params, effect_slots, effect_params)
+                };
+                let heavy_track = app
+                    .add_saved_instrument_track_sync("core/triton")
+                    .expect("add the checked-in core/triton instrument as a track");
+                *record_armed.lock().unwrap() = vec![false; app.tracks.len()];
+                app.sync_track_sound_bindings();
+                state.pattern.track_params[heavy_track].set_num_steps(STEP_COUNT);
+                let heavy_param = app
+                    .graph
+                    .instrument_descriptors
+                    .get(heavy_track)
+                    .and_then(|descriptor| {
+                        descriptor.params.iter().position(|param| {
+                            matches!(
+                                param.kind,
+                                sequencer::effects::ParamKind::Continuous { .. }
+                            ) && param.max > param.min
+                        })
+                    })
+                    .expect("core/triton must expose a continuous parameter");
+                let heavy_descriptor = app.graph.instrument_descriptors[heavy_track]
+                    .params[heavy_param]
+                    .clone();
+                let heavy_range = heavy_descriptor.max - heavy_descriptor.min;
+                for step in SEED_FIRST_STEP..STEP_COUNT {
+                    let fraction = 0.001 + 0.002 * (step - SEED_FIRST_STEP) as f32;
+                    assert!(
+                        app.print_instrument_plock(
+                            heavy_track,
+                            step,
+                            heavy_param,
+                            heavy_descriptor.min + heavy_range * fraction,
+                        ),
+                        "seeding heavy-track step {step} must write an instrument p-lock"
+                    );
+                }
+                let heavy_variants = state
+                    .plock_variant_registry_snapshot(heavy_track)
+                    .entries
+                    .len();
+                let mut heavy_publish_ms: Vec<f64> = Vec::new();
+                let mut heavy_reconcile_ms: Vec<f64> = Vec::new();
+                let mut heavy_variants_value_ms: Vec<f64> = Vec::new();
+                for _ in 0..(WARMUPS + SAMPLES) {
+                    let at = Instant::now();
+                    state.publish_scheduler_track(heavy_track);
+                    heavy_publish_ms.push(duration_ms(at.elapsed()));
+                    let at = Instant::now();
+                    let _ = plock_variant_step_render_values(&state, heavy_track);
+                    heavy_reconcile_ms.push(duration_ms(at.elapsed()));
+                    let at = Instant::now();
+                    let _ = build_track_plock_variants_value(
+                        &state,
+                        heavy_track,
+                        &selected_steps,
+                    );
+                    heavy_variants_value_ms.push(duration_ms(at.elapsed()));
+                }
+                let (light_inst_params, light_effect_slots, light_effect_params) =
+                    device_surface(&app, track);
+                let (heavy_inst_params, heavy_effect_slots, heavy_effect_params) =
+                    device_surface(&app, heavy_track);
+                eprintln!(
+                    "[{probe_prefix}-scaling] light_track={track} \
+                     light_instrument_params={light_inst_params} \
+                     light_effect_slots={light_effect_slots} \
+                     light_effect_params={light_effect_params} \
+                     heavy_track={heavy_track} instrument=core/triton \
+                     heavy_instrument_params={heavy_inst_params} \
+                     heavy_effect_slots={heavy_effect_slots} \
+                     heavy_effect_params={heavy_effect_params} \
+                     heavy_variants={heavy_variants} \
+                     heavy_publish_scheduler_track_ms={:.3} \
+                     heavy_variant_reconcile_ms={:.3} \
+                     heavy_track_plock_variants_value_ms={:.3}",
+                    percentile(&mut heavy_publish_ms, 0.5),
+                    percentile(&mut heavy_reconcile_ms, 0.5),
+                    percentile(&mut heavy_variants_value_ms, 0.5),
+                );
+
+                let mut printing_total = printing.total.clone();
+                let mut control_total = control.total.clone();
+                let mut printing_core = printing.total_excl_scene.clone();
+                let mut control_core = control.total_excl_scene.clone();
+                let printing_median = percentile(&mut printing_total, 0.5);
+                let printing_p95 = percentile(&mut printing_total, 0.95);
+                let control_median = percentile(&mut control_total, 0.5);
+                let control_p95 = percentile(&mut control_total, 0.95);
+                let printing_core_median = percentile(&mut printing_core, 0.5);
+                let printing_core_p95 = percentile(&mut printing_core, 0.95);
+                let control_core_median = percentile(&mut control_core, 0.5);
+                let control_core_p95 = percentile(&mut control_core, 0.95);
+                eprintln!(
+                    "[{probe_prefix}-printing] median_ms={printing_median:.3} \
+                     p95_ms={printing_p95:.3} median_excl_scene_ms={printing_core_median:.3} \
+                     p95_excl_scene_ms={printing_core_p95:.3} samples={SAMPLES} \
+                     warmups={WARMUPS}"
+                );
+                eprintln!(
+                    "[{probe_prefix}-control] median_ms={control_median:.3} \
+                     p95_ms={control_p95:.3} median_excl_scene_ms={control_core_median:.3} \
+                     p95_excl_scene_ms={control_core_p95:.3} samples={SAMPLES} \
+                     warmups={WARMUPS}"
+                );
+                eprintln!(
+                    "[{probe_prefix}-tax] printing_minus_control_ms={:.3} ratio={:.2}x \
+                     excl_scene_delta_ms={:.3} excl_scene_ratio={:.2}x",
+                    printing_median - control_median,
+                    printing_median / control_median.max(f64::MIN_POSITIVE),
+                    printing_core_median - control_core_median,
+                    printing_core_median / control_core_median.max(f64::MIN_POSITIVE),
+                );
+                let phase_line = |label: &str, samples: &PrintSamples| {
+                    let mut dispatch = samples.dispatch.clone();
+                    let mut print = samples.print.clone();
+                    let mut take = samples.take.clone();
+                    let mut playhead = samples.playhead.clone();
+                    let mut tick_sync = samples.tick_sync.clone();
+                    let mut invalidation = samples.invalidation.clone();
+                    let mut reactive = samples.reactive.clone();
+                    let mut frame = samples.frame.clone();
+                    let mut retained = samples.retained.clone();
+                    let mut scene = samples.scene.clone();
+                    eprintln!(
+                        "[{probe_prefix}-{label}-phases] dispatch_ms={:.3} \
+                         tick_step_print_ms={:.3} record_take_ms={:.3} \
+                         playhead_sync_ms={:.3} tick_sync_ms={:.3} invalidation_ms={:.3} \
+                         reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3} scene_ms={:.3}",
+                        percentile(&mut dispatch, 0.5),
+                        percentile(&mut print, 0.5),
+                        percentile(&mut take, 0.5),
+                        percentile(&mut playhead, 0.5),
+                        percentile(&mut tick_sync, 0.5),
+                        percentile(&mut invalidation, 0.5),
+                        percentile(&mut reactive, 0.5),
+                        percentile(&mut frame, 0.5),
+                        percentile(&mut retained, 0.5),
+                        percentile(&mut scene, 0.5),
+                    );
+                };
+                phase_line("printing", &printing);
+                phase_line("control", &control);
+                eprintln!(
+                    "[{probe_prefix}-attribution] publish_scheduler_track_ms={:.3} \
+                     variant_reconcile_ms={:.3} track_plock_variants_value_ms={:.3} \
+                     step_batch_apply_ms={:.3}",
+                    percentile(&mut publish_track_ms, 0.5),
+                    percentile(&mut variant_reconcile_ms, 0.5),
+                    percentile(&mut variants_value_ms, 0.5),
+                    percentile(&mut step_batch_apply_ms, 0.5),
+                );
+                eprintln!(
+                    "[{probe_prefix}-work] variants_seeded={variants_seeded} \
+                     variants_before_printing={variants_before_printing} \
+                     variants_after={variants_after} new_chip_samples={new_chip_samples}/{SAMPLES} \
+                     presence_batches_checked={presence_batches_checked} \
+                     printing_subtree_reruns={} printing_full_reruns={} \
+                     printing_relayout_subtree={} printing_relayout_full={} \
+                     printing_relayout_reused={} printing_layout_refreshes={} \
+                     control_subtree_reruns={} control_relayout_subtree={} \
+                     control_layout_refreshes={}",
+                    printing_work.subtree_reruns,
+                    printing_work.full_buffer_reruns,
+                    printing_work.relayout_subtree,
+                    printing_work.relayout_full,
+                    printing_work.relayout_reused,
+                    printing_layout_refreshes,
+                    control_work.subtree_reruns,
+                    control_work.relayout_subtree,
+                    control_layout_refreshes,
+                );
+                assert_eq!(
+                    presence_batches_checked, WARMUPS,
+                    "every printing warmup must have been checked for its presence batch"
+                );
+                return;
+            }
 
             // Maps a set-instrument-param-batch payload to (attack, decay,
             // sustain, release) user values via the descriptor param names.

@@ -1,20 +1,19 @@
-;; Drift — warm analog character: orange/ice/pink palette, source tabs with
-;; vertical gain faders, accent-striped tinted panels
-;; (built on the ui-lego-panel-x / tab / fader pieces).
+;; Drift — warm analog character expressed through semantic theme colors,
+;; with source tabs, vertical gain faders, and accent-striped panels.
 
-(def drift-orange () (rgba 1.00 0.55 0.18 1.0))
-(def drift-ice    () (rgba 0.45 0.78 1.00 1.0))
-(def drift-pink   () (rgba 1.00 0.36 0.46 1.0))
-(def drift-cream  () (rgba 0.93 0.88 0.78 1.0))
-(def drift-violet () (rgba 0.72 0.55 1.00 1.0))
+(def drift-orange () (eseq.effects.custom-ui-lego/ui-accent-orange))
+(def drift-ice    () (eseq.effects.custom-ui-lego/ui-accent-cyan))
+(def drift-pink   () :red)
+(def drift-cream  () :fg)
+(def drift-violet () (eseq.effects.custom-ui-lego/ui-accent-violet))
 
-(def drift-surf-warm () (rgba 0.096 0.082 0.070 1.0))
-(def drift-surf-cool () (rgba 0.146 0.146 0.154 1.0))
-(def drift-surf-dark () (rgba 0.055 0.058 0.064 1.0))
+(def drift-surf-warm () :instrument-group-bg)
+(def drift-surf-cool () :instrument-group-bg)
+(def drift-surf-dark () :instrument-control-bg)
 
-(def drift-bord-warm () (rgba 0.42 0.26 0.10 0.060))
-(def drift-bord-cool () (rgba 0.14 0.30 0.44 0.060))
-(def drift-bord-dark () (rgba 0.22 0.22 0.26 0.060))
+(def drift-bord-warm () :border-inactive)
+(def drift-bord-cool () :border-inactive)
+(def drift-bord-dark () :border-inactive)
 
 (def drift-panel-dense (section surface border stripe body)
   (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-dense-h) surface border stripe body))

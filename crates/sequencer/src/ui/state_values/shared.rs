@@ -173,6 +173,34 @@ pub(super) fn insert_param_ui_metadata(
     if let Some(display_name) = &metadata.display_name {
         insert_string_prop(map, "display-name", display_name);
     }
+    // Resolved tensor-backed options are baked into ParamKind::Enum at
+    // manifest load, and the Enum arm has already inserted its label list as
+    // "options" — the raw asset reference map is only surfaced for params
+    // whose reference did NOT resolve (the UI's degrade path), so it must
+    // never clobber resolved labels.
+    if map.contains_key("options") {
+        return;
+    }
+    if let Some(options) = &metadata.asset_options {
+        let mut option_map = HashMap::new();
+        insert_string_prop(&mut option_map, "tensor", &options.tensor);
+        insert_string_prop(&mut option_map, "file", &options.file);
+        option_map.insert(
+            "key".to_string(),
+            Rc::new(RefCell::new(Value::Keyword(options.key.clone()))),
+        );
+        if let Some(asset_base) = &options.asset_base {
+            insert_string_prop(
+                &mut option_map,
+                "asset-base",
+                asset_base.to_string_lossy(),
+            );
+        }
+        map.insert(
+            "options".to_string(),
+            Rc::new(RefCell::new(Value::Map(option_map))),
+        );
+    }
 }
 
 pub(super) fn instrument_slot_param_value(
@@ -222,6 +250,47 @@ pub(super) fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDesc
     matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. })
         || matches!(pdesc.kind, sequencer::effects::ParamKind::Enum { .. })
         || pdesc.name.eq_ignore_ascii_case("enabled")
+}
+
+/// The p-lock value audibly in force at `step` for one parameter, honoring
+/// off-step p-lock hold semantics: the step's own p-lock wins; otherwise, on
+/// an OFF step, walk back (wrap-aware) to the nearest preceding p-lock — an
+/// off-step p-lock is track-level automation that holds until the next p-lock
+/// or the next ON trigger's full param stamp, so a triggered step without its
+/// own p-lock ends the walk and the base value is in force. Mirrors the
+/// scheduler's off-step p-lock application, so the knob shows what is heard.
+///
+/// `has_any` is an O(1) gate for the whole p-lock table the closure reads: when
+/// the table holds no p-lock at all the walk can only return `None`, so skip it
+/// rather than scanning every step (this runs per parameter on the meter poll).
+pub(super) fn held_plock_value(
+    state: &SequencerState,
+    track: usize,
+    step: usize,
+    has_any: bool,
+    mut plock_at: impl FnMut(usize) -> Option<f32>,
+) -> Option<f32> {
+    if !has_any {
+        return None;
+    }
+    let num_steps = state
+        .pattern
+        .track_params
+        .get(track)?
+        .get_num_steps()
+        .clamp(1, sequencer::sequencer::MAX_STEPS);
+    let pattern = state.pattern.patterns.get(track)?;
+    let mut s = step % num_steps;
+    for _ in 0..num_steps {
+        if let Some(value) = plock_at(s) {
+            return Some(value);
+        }
+        if pattern.is_active(s) {
+            return None;
+        }
+        s = if s == 0 { num_steps - 1 } else { s - 1 };
+    }
+    None
 }
 
 pub(super) fn slot_param_stored_value(

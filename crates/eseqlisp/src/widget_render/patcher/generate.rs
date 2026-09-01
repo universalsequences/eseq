@@ -14,11 +14,12 @@ use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
 use super::lisp::{
     attribute_span_len, attribute_value_items, is_attribute_key, label_attributes_suffix,
-    normalize_editor_node_text,
+    normalize_editor_node_text, replace_label_attribute,
 };
 use super::model::{
     ArgValue, ConnectionKind, HostModulatorInput, MacroOrigin, NodeKind, Patch, PatchConnection,
-    PatchNode, PatcherIntent, hidden_inline_node_ids, orphaned_inline_mod_node_ids,
+    PatchNode, PatcherIntent, hidden_inline_node_ids, is_param_options_connection,
+    options_connection_is_valid, orphaned_inline_mod_node_ids,
 };
 use super::project::{
     dgenlisp_constant_names, dgenlisp_operator_names, dgenlisp_preamble_macro_arities,
@@ -293,6 +294,8 @@ struct ScopeEmitter<'a> {
     /// `param~` draw no port at all (geometry.rs `patch_input_indices`), so a
     /// summed slot is always made of cables only.
     inbound: BTreeMap<(&'a str, usize), Vec<&'a PatchConnection>>,
+    /// The one tensor binding cable supplying each param's `@options` attribute.
+    param_options: HashMap<&'a str, &'a PatchConnection>,
     /// binding (or reference) name per node id.
     names: HashMap<String, String>,
     /// destructured output names for multi-output value nodes.
@@ -353,7 +356,26 @@ impl<'a> ScopeEmitter<'a> {
                 connection.from_output,
             )
         });
+        let mut param_options = HashMap::new();
         for connection in sorted_connections {
+            if is_param_options_connection(patch, connection) {
+                if !options_connection_is_valid(patch, connection) {
+                    return Err(format!(
+                        "param options cable must originate from tensor outlet 0: '{}:{}' -> '{}'",
+                        connection.from_node, connection.from_output, connection.to_node
+                    ));
+                }
+                if param_options
+                    .insert(connection.to_node.as_str(), connection)
+                    .is_some()
+                {
+                    return Err(format!(
+                        "param '{}' has more than one options cable",
+                        connection.to_node
+                    ));
+                }
+                continue;
+            }
             inbound
                 .entry((connection.to_node.as_str(), connection.to_input))
                 .or_default()
@@ -368,6 +390,7 @@ impl<'a> ScopeEmitter<'a> {
             omitted,
             nodes,
             inbound,
+            param_options,
             names: HashMap::new(),
             output_names: HashMap::new(),
             used_names: HashSet::new(),
@@ -484,11 +507,32 @@ impl<'a> ScopeEmitter<'a> {
         mut self,
         renames: &mut HashMap<(String, String), String>,
     ) -> Result<EmittedScope, String> {
+        let ordered_values = self.topological_value_order();
+        let option_source_ids = self
+            .param_options
+            .values()
+            .map(|connection| connection.from_node.as_str())
+            .collect::<HashSet<_>>();
+        // Binding-valued attributes are resolved while the param is compiled,
+        // so their tensor defs must precede the param declaration even when the
+        // options cable is the tensor's only fan-out.
+        let mut option_defs = Vec::new();
+        for node_id in ordered_values
+            .iter()
+            .filter(|node_id| option_source_ids.contains(node_id.as_str()))
+        {
+            let node = self.nodes[node_id.as_str()];
+            let line = self.emit_value_def(node)?;
+            option_defs.append(&mut self.hoisted_lines);
+            option_defs.push(line);
+        }
         let params = self.emit_role_lines(NodeRole::Param)?;
         let inputs = self.emit_role_lines(NodeRole::Input)?;
-        let ordered_values = self.topological_value_order();
         let mut defs = Vec::new();
-        for node_id in &ordered_values {
+        for node_id in ordered_values
+            .iter()
+            .filter(|node_id| !option_source_ids.contains(node_id.as_str()))
+        {
             let node = self.nodes[node_id.as_str()];
             let line = self.emit_value_def(node)?;
             defs.append(&mut self.hoisted_lines);
@@ -499,6 +543,7 @@ impl<'a> ScopeEmitter<'a> {
         if self.is_macro {
             scope.macro_params = self.macro_param_list();
             let mut body = Vec::new();
+            body.extend(option_defs);
             body.extend(params);
             body.extend(inputs.clone());
             body.extend(defs);
@@ -507,7 +552,7 @@ impl<'a> ScopeEmitter<'a> {
             scope.body_lines = body;
         } else {
             let outs = self.emit_root_out_lines()?;
-            scope.root_groups = vec![params, inputs, defs, writes, outs];
+            scope.root_groups = vec![option_defs, params, inputs, defs, writes, outs];
         }
         self.record_renames(renames);
         Ok(scope)
@@ -540,6 +585,19 @@ impl<'a> ScopeEmitter<'a> {
                         label,
                         node.param.as_ref().is_some_and(|param| param.modulatable),
                     );
+                    let options = self.param_options.get(node.id.as_str()).copied();
+                    let label = if let Some(connection) = options {
+                        let binding = self.reference_expr(connection)?;
+                        replace_label_attribute(&label, "@options", Some(&binding))?
+                    } else if node
+                        .param
+                        .as_ref()
+                        .is_some_and(|param| param.options_tensor.is_some())
+                    {
+                        replace_label_attribute(&label, "@options", None)?
+                    } else {
+                        label
+                    };
                     // `(mod name)` only resolves against top-level `param`
                     // forms, so params whose identity matches the param name
                     // are emitted bare; def-wrapping is kept only for params

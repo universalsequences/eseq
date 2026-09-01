@@ -1105,18 +1105,9 @@ fn fingerprint_source_assets(
     asset_base: Option<&Path>,
 ) -> Result<Vec<AssetFingerprint>, String> {
     let references = asset_references(source)?;
-    let base = match asset_base {
-        Some(path) => path.to_path_buf(),
-        None => crate::app_paths::app_paths().dgen_asset_fallback_base(),
-    };
     let mut by_path = BTreeMap::<PathBuf, String>::new();
     for reference in references {
-        let path = PathBuf::from(&reference);
-        let resolved = if path.is_absolute() {
-            path
-        } else {
-            base.join(path)
-        };
+        let resolved = resolve_asset_reference(&reference, asset_base)?;
         by_path.entry(resolved).or_insert(reference);
     }
 
@@ -1156,10 +1147,15 @@ fn fingerprint_source_assets(
 #[derive(Debug, PartialEq, Eq)]
 enum Token {
     Symbol(String),
-    String(String),
+    String {
+        value: String,
+        /// Character offsets covering the complete quoted literal.
+        start: usize,
+        end: usize,
+    },
 }
 
-pub(crate) fn asset_references(source: &str) -> Result<Vec<String>, String> {
+fn asset_reference_tokens(source: &str) -> Result<Vec<(String, usize, usize)>, String> {
     let tokens = tokenize_lisp(source)?;
     let mut refs = Vec::new();
     let mut idx = 0;
@@ -1172,18 +1168,185 @@ pub(crate) fn asset_references(source: &str) -> Result<Vec<String>, String> {
             let Some(next) = tokens.get(idx + 1) else {
                 return Err("DGenLisp asset keyword missing string path".to_string());
             };
-            let Token::String(reference) = next else {
+            let Token::String { value, start, end } = next else {
                 return Err("DGenLisp asset keyword must be followed by a string path".to_string());
             };
-            refs.push(reference.clone());
+            refs.push((value.clone(), *start, *end));
             idx += 2;
         } else {
             idx += 1;
         }
     }
+    Ok(refs)
+}
+
+pub(crate) fn asset_references(source: &str) -> Result<Vec<String>, String> {
+    let mut refs = asset_reference_tokens(source)?
+        .into_iter()
+        .map(|(reference, _, _)| reference)
+        .collect::<Vec<_>>();
     refs.sort();
     refs.dedup();
     Ok(refs)
+}
+
+/// Which tier of the shared precedence a reference resolved through. The
+/// rewrite pass keys off this so its decision is always the resolver's
+/// decision, never a re-derived copy of the precedence rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssetOrigin {
+    /// Absolute spelling, passed through untouched (including letting
+    /// DGenLisp report a missing absolute file).
+    Absolute,
+    /// Found relative to the asset base (patch-local).
+    Local,
+    /// Found in the user or factory asset library.
+    Library,
+}
+
+/// The base DGenLisp resolves relative references against when the compile
+/// supplies no explicit asset base; the same value is passed as
+/// `--asset-base` so the compiler and the host resolver always agree.
+pub(crate) fn effective_asset_base(asset_base: Option<&Path>) -> PathBuf {
+    effective_asset_base_with_paths(asset_base, crate::app_paths::app_paths())
+}
+
+fn effective_asset_base_with_paths(
+    asset_base: Option<&Path>,
+    paths: &crate::app_paths::AppPaths,
+) -> PathBuf {
+    asset_base
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| paths.dgen_asset_fallback_base())
+}
+
+/// Resolve a DGenLisp `@file` reference with exactly the same precedence used
+/// by compilation and cache fingerprinting: patch-local, user library, then
+/// factory library. Absolute references retain their existing pass-through
+/// behavior, including letting DGenLisp report a missing absolute file.
+pub fn resolve_asset_reference(
+    reference: &str,
+    asset_base: Option<&Path>,
+) -> Result<PathBuf, String> {
+    resolve_asset_reference_with_paths(reference, asset_base, crate::app_paths::app_paths())
+        .map(|(path, _)| path)
+}
+
+pub(crate) fn resolve_asset_reference_with_paths(
+    reference: &str,
+    asset_base: Option<&Path>,
+    paths: &crate::app_paths::AppPaths,
+) -> Result<(PathBuf, AssetOrigin), String> {
+    let reference_path = Path::new(reference);
+    if reference_path.is_absolute() {
+        return Ok((reference_path.to_path_buf(), AssetOrigin::Absolute));
+    }
+
+    let base = effective_asset_base_with_paths(asset_base, paths);
+    let local = base.join(reference_path);
+    if local.is_file() {
+        return Ok((canonical_or_absolute(&local), AssetOrigin::Local));
+    }
+
+    let mut reachable_library_root = false;
+    for root in [paths.user_assets_dir(), paths.factory_assets_dir()] {
+        if let Some(candidate) = join_library_reference(&root, reference_path) {
+            reachable_library_root = true;
+            if candidate.is_file() {
+                return Ok((canonical_or_absolute(&candidate), AssetOrigin::Library));
+            }
+        }
+    }
+
+    if !reachable_library_root {
+        return Err(format!(
+            "DGenLisp asset reference '{reference}' was not found at asset base {} and cannot \
+             map into a library root (it must not escape the library root)",
+            base.display(),
+        ));
+    }
+    Err(format!(
+        "DGenLisp asset reference '{reference}' was not found; searched asset base {}, user assets {}, and factory assets {}",
+        base.display(),
+        paths.user_assets_dir().display(),
+        paths.factory_assets_dir().display()
+    ))
+}
+
+/// Rewrite only library-backed relative references. Patch-local and absolute
+/// spellings remain byte-for-byte authored; the returned source is the
+/// transient compiler input and is never persisted to `dsp.lisp`.
+pub(crate) fn rewrite_library_asset_references(
+    source: &str,
+    asset_base: Option<&Path>,
+) -> Result<String, String> {
+    let paths = crate::app_paths::app_paths();
+    rewrite_library_asset_references_with_paths(source, asset_base, paths)
+}
+
+fn rewrite_library_asset_references_with_paths(
+    source: &str,
+    asset_base: Option<&Path>,
+    paths: &crate::app_paths::AppPaths,
+) -> Result<String, String> {
+    let base = effective_asset_base_with_paths(asset_base, paths);
+    let mut replacements = Vec::new();
+    for (reference, start, end) in asset_reference_tokens(source)? {
+        let (resolved, origin) =
+            resolve_asset_reference_with_paths(&reference, Some(&base), paths)?;
+        if origin != AssetOrigin::Library {
+            continue;
+        }
+        replacements.push((start, end, lisp_string(&resolved.to_string_lossy())));
+    }
+    if replacements.is_empty() {
+        return Ok(source.to_string());
+    }
+
+    let chars = source.chars().collect::<Vec<_>>();
+    let mut rewritten = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in replacements {
+        rewritten.extend(chars[cursor..start].iter());
+        rewritten.push_str(&replacement);
+        cursor = end;
+    }
+    rewritten.extend(chars[cursor..].iter());
+    Ok(rewritten)
+}
+
+fn join_library_reference(root: &Path, reference: &Path) -> Option<PathBuf> {
+    let mut relative = PathBuf::new();
+    for component in reference.components() {
+        match component {
+            std::path::Component::Normal(part) => relative.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !relative.pop() {
+                    return None;
+                }
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    Some(root.join(relative))
+}
+
+fn lisp_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn tokenize_lisp(source: &str) -> Result<Vec<Token>, String> {
@@ -1192,19 +1355,23 @@ fn tokenize_lisp(source: &str) -> Result<Vec<Token>, String> {
     let mut idx = 0;
     while idx < chars.len() {
         match chars[idx] {
-            ';' => {
+            // DGenLisp accepts both `;` and `#` line comments.
+            ';' | '#' => {
                 idx += 1;
                 while idx < chars.len() && chars[idx] != '\n' {
                     idx += 1;
                 }
             }
             '"' => {
+                let start = idx;
                 idx += 1;
                 let mut value = String::new();
+                let mut terminated = false;
                 while idx < chars.len() {
                     match chars[idx] {
                         '"' => {
                             idx += 1;
+                            terminated = true;
                             break;
                         }
                         '\\' => {
@@ -1226,7 +1393,10 @@ fn tokenize_lisp(source: &str) -> Result<Vec<Token>, String> {
                         }
                     }
                 }
-                tokens.push(Token::String(value));
+                if !terminated {
+                    return Err("unterminated DGenLisp string".to_string());
+                }
+                tokens.push(Token::String { value, start, end: idx });
             }
             '(' | ')' | '[' | ']' | '{' | '}' => {
                 idx += 1;
@@ -1238,7 +1408,7 @@ fn tokenize_lisp(source: &str) -> Result<Vec<Token>, String> {
                 let start = idx;
                 while idx < chars.len()
                     && !chars[idx].is_whitespace()
-                    && !matches!(chars[idx], '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';')
+                    && !matches!(chars[idx], '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';' | '#')
                 {
                     idx += 1;
                 }
@@ -1338,6 +1508,7 @@ mod tests {
         let refs = asset_references(
             r#"
             ; (tensor @file "ignored.json")
+            # (tensor @file "hash-ignored.json")
             (def s "not @file \"also-ignored.json\"")
             (def t (tensor @shape [4] @file "a.json"))
             (def w (tensor-param @default-file "waves/b.json"))
@@ -1345,6 +1516,87 @@ mod tests {
         )
         .expect("scan references");
         assert_eq!(refs, vec!["a.json".to_string(), "waves/b.json".to_string()]);
+    }
+
+    /// An odd number of quotes inside a `#` comment must not open a string
+    /// that swallows the rest of the source and trips the unterminated-string
+    /// error; DGenLisp itself discards the whole line.
+    #[test]
+    fn hash_comment_with_odd_quote_does_not_open_a_string() {
+        let refs = asset_references(
+            "# room is 12\" wide\n(def t (tensor @shape [4] @file \"a.json\"))",
+        )
+        .expect("scan references");
+        assert_eq!(refs, vec!["a.json".to_string()]);
+    }
+
+    #[test]
+    fn library_asset_resolution_and_rewrite_follow_shared_precedence() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-asset-resolution-test-{}-{}",
+            process_id(),
+            now_unix_ms()
+        ));
+        let workspace = root.join("workspace");
+        let paths = crate::app_paths::AppPaths::dev(
+            workspace.join("crates/sequencer"),
+            workspace.clone(),
+            root.join("config"),
+        );
+        let local = root.join("draft");
+        let reference = Path::new("wavetables/shared.json");
+        for directory in [
+            local.join("wavetables"),
+            paths.user_assets_dir().join("wavetables"),
+            paths.factory_assets_dir().join("wavetables"),
+        ] {
+            std::fs::create_dir_all(directory).expect("create asset test directory");
+        }
+        let local_asset = local.join(reference);
+        let user_asset = paths.user_assets_dir().join(reference);
+        let factory_asset = paths.factory_assets_dir().join(reference);
+        std::fs::write(&factory_asset, "factory").unwrap();
+        std::fs::write(&user_asset, "user").unwrap();
+        std::fs::write(&local_asset, "local").unwrap();
+
+        assert_eq!(
+            resolve_asset_reference_with_paths("wavetables/shared.json", Some(&local), &paths)
+                .unwrap(),
+            (local_asset.canonicalize().unwrap(), AssetOrigin::Local)
+        );
+        let source = r#"(tensor @shape [1] @file "wavetables/shared.json")"#;
+        assert_eq!(
+            rewrite_library_asset_references_with_paths(source, Some(&local), &paths).unwrap(),
+            source,
+            "patch-local references retain their authored spelling"
+        );
+        std::fs::remove_file(&local_asset).unwrap();
+        assert_eq!(
+            resolve_asset_reference_with_paths("wavetables/shared.json", Some(&local), &paths)
+                .unwrap(),
+            (user_asset.canonicalize().unwrap(), AssetOrigin::Library)
+        );
+
+        let rewritten =
+            rewrite_library_asset_references_with_paths(source, Some(&local), &paths).unwrap();
+        let canonical_user_asset = user_asset.canonicalize().unwrap();
+        assert!(rewritten.contains(canonical_user_asset.to_string_lossy().as_ref()));
+        assert!(!rewritten.contains("\"wavetables/shared.json\""));
+
+        std::fs::remove_file(&user_asset).unwrap();
+        assert_eq!(
+            resolve_asset_reference_with_paths("wavetables/shared.json", Some(&local), &paths)
+                .unwrap(),
+            (factory_asset.canonicalize().unwrap(), AssetOrigin::Library)
+        );
+        let error = resolve_asset_reference_with_paths("missing.json", Some(&local), &paths)
+            .expect_err("missing reference must fail before compilation");
+        for searched in [&local, &paths.user_assets_dir(), &paths.factory_assets_dir()] {
+            assert!(error.contains(&searched.display().to_string()), "{error}");
+        }
+        assert!(resolve_asset_reference_with_paths("../escape.json", Some(&local), &paths)
+            .is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1431,6 +1683,98 @@ mod tests {
 
         assert_ne!(first.key, second.key);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Removes its directories even when the test panics; a failed assert
+    /// must not leak files into the real user asset library the feature
+    /// enumerates in the UI.
+    struct DirCleanup {
+        remove_all: Vec<PathBuf>,
+        remove_if_empty: Vec<PathBuf>,
+    }
+
+    impl Drop for DirCleanup {
+        fn drop(&mut self) {
+            for path in &self.remove_all {
+                let _ = std::fs::remove_dir_all(path);
+            }
+            for path in &self.remove_if_empty {
+                let _ = std::fs::remove_dir(path);
+            }
+        }
+    }
+
+    #[test]
+    fn editing_user_library_asset_compiles_a_new_cache_entry() {
+        if !staged_toolchain_present() || !dgenlisp_tool_path().exists() {
+            eprintln!("skipping: DGenLisp tool or staged toolchain not present");
+            return;
+        }
+        let unique = format!("cache-test-{}-{}", process_id(), now_unix_ms());
+        let tests_root = crate::app_paths::app_paths().user_assets_dir().join("__tests");
+        let library_dir = tests_root.join(&unique);
+        std::fs::create_dir_all(&library_dir).expect("create user asset test directory");
+        let asset = library_dir.join("wave.json");
+        std::fs::write(&asset, "[0.0]").expect("write first library asset");
+        let reference = format!("__tests/{unique}/wave.json");
+        let source = format!(
+            "(def t (tensor @shape [1] @file \"{reference}\"))\n(out (peek t 0) 1 @name out)"
+        );
+        let cache_root = std::env::temp_dir().join(format!("eseq-library-cache-{unique}"));
+        let empty_asset_base = std::env::temp_dir().join(format!("eseq-library-base-{unique}"));
+        std::fs::create_dir_all(&empty_asset_base).unwrap();
+        let _cleanup = DirCleanup {
+            remove_all: vec![
+                library_dir.clone(),
+                cache_root.clone(),
+                empty_asset_base.clone(),
+            ],
+            remove_if_empty: vec![tests_root],
+        };
+        let manager = DylibCacheManager::new(cache_root.clone());
+
+        let first = manager
+            .acquire(
+                DGenCompileKind::Effect,
+                DGenSourceOrigin::Draft,
+                &source,
+                44_100,
+                Some(&empty_asset_base),
+            )
+            .expect("compile with first library asset contents");
+        let first_key_dir = first
+            .lease
+            .as_ref()
+            .unwrap()
+            .artifact_dir()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        drop(first);
+
+        std::fs::write(&asset, "[1.0]").expect("edit library asset");
+        let second = manager
+            .acquire(
+                DGenCompileKind::Effect,
+                DGenSourceOrigin::Draft,
+                &source,
+                44_100,
+                Some(&empty_asset_base),
+            )
+            .expect("recompile after library asset edit");
+        let second_key_dir = second
+            .lease
+            .as_ref()
+            .unwrap()
+            .artifact_dir()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_ne!(
+            first_key_dir, second_key_dir,
+            "asset edit must change the cache key"
+        );
+        drop(second);
     }
 
     /// eseq-599 regression: two simultaneous acquires of identical source

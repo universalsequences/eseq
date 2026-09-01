@@ -1,6 +1,7 @@
 mod commands;
 mod minibuffer;
 mod natives;
+pub use natives::{asset_metadata_lisp_value, asset_option_labels};
 pub(crate) mod widget_focus;
 mod widget_interaction;
 
@@ -642,6 +643,7 @@ pub struct Editor {
     save_prompt: Option<SavePrompt>,
     completion: Option<CompletionState>,
     last_mouse_precise: Option<(f32, f32)>,
+    last_pointer_screen: Option<(f32, f32)>,
     active_tile_resize_drag: Option<TileResizeDrag>,
     eval_flash: Option<SExpFlash>,
     mark: Option<Mark>,
@@ -812,6 +814,7 @@ impl Editor {
             save_prompt: None,
             completion: None,
             last_mouse_precise: None,
+            last_pointer_screen: None,
             active_tile_resize_drag: None,
             eval_flash: None,
             mark: None,
@@ -2013,6 +2016,8 @@ impl Editor {
         precise_row: f32,
         border_inset: u16,
     ) {
+        self.last_pointer_screen = Some((precise_col, precise_row));
+
         // Inspect mode outranks the overlay intercept: inspecting a modal's
         // widgets needs the raw hover/click, and the inspect path does its
         // own modal-subtree hit-testing. Without an overlay the inspect
@@ -3040,6 +3045,50 @@ impl Editor {
             && precise_row < status_row + 1.0
             && precise_col >= rect.col
             && precise_col < rect.col + STATUS_TOGGLE_WIDTH
+    }
+
+    /// Imports one tensor JSON file when the OS drop lands on a patcher canvas.
+    /// `Ok(None)` means the drop is not a single-`.json` drop over a patcher
+    /// and lets the host route it to its ordinary sample importer.
+    pub fn handle_patcher_file_drop(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        drop_position: Option<(f32, f32)>,
+        border_inset: u16,
+    ) -> Result<Option<usize>, String> {
+        // Prefer the backend-reported drop position: during an external OS
+        // drag no mouse events reach the editor, so the tracked pointer is
+        // wherever the cursor last was before the drag started.
+        let Some((screen_col, screen_row)) = drop_position.or(self.last_pointer_screen) else {
+            return Ok(None);
+        };
+        let Some(tile_id) = self.tile_at_screen(screen_col, screen_row) else {
+            return Ok(None);
+        };
+        let Some((content_col, content_row, _, _)) =
+            self.tile_content_area(tile_id, border_inset)
+        else {
+            return Ok(None);
+        };
+        let (event_col, event_row) = self
+            .tile_content_precise_event_position(
+                tile_id,
+                border_inset,
+                content_col,
+                content_row,
+                screen_col,
+                screen_row,
+            )
+            .unwrap_or((screen_col, screen_row));
+        self.route_event_to_tile(tile_id, border_inset, false, |editor| {
+            editor.import_external_patcher_asset_at(
+                paths,
+                content_col,
+                content_row,
+                event_col,
+                event_row,
+            )
+        })
     }
 
     fn route_event_to_tile<R>(

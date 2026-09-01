@@ -19,6 +19,14 @@ pub(crate) enum UiInvalidation {
         step: usize,
         change: StepInvalidation,
     },
+    /// The same targeted step change landed on several cells of one track.
+    /// Keeping it as one queue entry lets high-rate writers share derived
+    /// p-lock/render work and take the selection lock once per frame.
+    StepInvalidationBatch {
+        track: usize,
+        steps: Vec<usize>,
+        change: StepInvalidation,
+    },
     /// Structural state for several cells changed in one mutation. Applying
     /// this as a batch shares selection locks and derived plock/color lanes.
     StepBatch {
@@ -315,6 +323,57 @@ impl UiInvalidationQueue {
         {
             return;
         }
+        if let UiInvalidation::StepInvalidationBatch {
+            track,
+            steps,
+            change,
+        } = invalidation
+        {
+            if steps.is_empty() {
+                return;
+            }
+            let batch = UiInvalidation::StepInvalidationBatch {
+                track,
+                steps: steps.clone(),
+                change: change.clone(),
+            };
+            if pending
+                .iter()
+                .any(|entry| invalidation_supersedes(entry, &batch))
+            {
+                return;
+            }
+            let previous = pending.iter().find_map(|entry| match entry {
+                UiInvalidation::StepInvalidationBatch {
+                    track: queued_track,
+                    steps,
+                    change: queued_change,
+                } if *queued_track == track && *queued_change == change => Some(steps.clone()),
+                _ => None,
+            });
+            if previous.is_some() {
+                pending.retain(|entry| {
+                    !matches!(entry, UiInvalidation::StepInvalidationBatch {
+                        track: queued_track,
+                        change: queued_change,
+                        ..
+                    } if *queued_track == track && *queued_change == change)
+                });
+            }
+            let mut combined = previous
+                .into_iter()
+                .flatten()
+                .chain(steps)
+                .collect::<Vec<_>>();
+            combined.sort_unstable();
+            combined.dedup();
+            pending.insert(UiInvalidation::StepInvalidationBatch {
+                track,
+                steps: combined,
+                change,
+            });
+            return;
+        }
         if let UiInvalidation::StepSelection {
             track,
             changed_steps,
@@ -390,6 +449,7 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackParamPanel { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::ProcessChain { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::Step { .. })
+        | (UiInvalidation::TrackTopology(_), UiInvalidation::StepInvalidationBatch { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::StepSelection { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::ExpandedStepViewport { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::Instrument { .. })
@@ -398,12 +458,16 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
         (
             UiInvalidation::Pattern(PatternInvalidation::AllTracks),
             UiInvalidation::Step { .. }
+            | UiInvalidation::StepInvalidationBatch { .. }
             | UiInvalidation::StepSelection { .. }
             | UiInvalidation::ExpandedStepViewport { .. },
         ) => true,
         (
             UiInvalidation::Pattern(PatternInvalidation::WholeTrack { track }),
             UiInvalidation::Step {
+                track: old_track, ..
+            }
+            | UiInvalidation::StepInvalidationBatch {
                 track: old_track, ..
             }
             | UiInvalidation::StepSelection {
@@ -576,6 +640,30 @@ mod tests {
                     changed_steps: vec![1],
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn step_invalidation_batches_merge_steps_per_track_and_change() {
+        let queue = UiInvalidationQueue::new();
+        queue.push(UiInvalidation::StepInvalidationBatch {
+            track: 2,
+            steps: vec![7, 3],
+            change: StepInvalidation::PlockPresence,
+        });
+        queue.push(UiInvalidation::StepInvalidationBatch {
+            track: 2,
+            steps: vec![5, 3],
+            change: StepInvalidation::PlockPresence,
+        });
+
+        assert_eq!(
+            queue.drain(),
+            vec![UiInvalidation::StepInvalidationBatch {
+                track: 2,
+                steps: vec![3, 5, 7],
+                change: StepInvalidation::PlockPresence,
+            }]
         );
     }
 

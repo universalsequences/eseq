@@ -477,7 +477,7 @@ pub struct WgpuAppBackend {
     /// Consumers use it to start inertial scrolling — Linux compositors leave
     /// momentum to applications. Mouse wheels never report an end phase.
     scroll_phase_ended: bool,
-    pending_file_drops: VecDeque<Vec<PathBuf>>,
+    pending_file_drops: VecDeque<(Vec<PathBuf>, Option<(f32, f32)>)>,
     pending_resize: bool,
     /// Scale factor delivered by `WindowEvent::ScaleFactorChanged`, applied
     /// after the winit pump returns (atlas rebuilds need `&mut self`).
@@ -2892,8 +2892,8 @@ impl Backend for WgpuAppBackend {
         if std::mem::take(&mut self.close_requested) {
             return Some(BackendEvent::Quit);
         }
-        if let Some(paths) = self.pending_file_drops.pop_front() {
-            return Some(BackendEvent::FileDrop(paths));
+        if let Some((paths, position)) = self.pending_file_drops.pop_front() {
+            return Some(BackendEvent::FileDrop(paths, position));
         }
         let terminal_event = self.poll_event(timeout);
         if std::mem::take(&mut self.close_requested) {
@@ -3090,7 +3090,9 @@ impl Backend for WgpuAppBackend {
             }
         });
         if !dropped_paths.is_empty() {
-            self.pending_file_drops.push_back(dropped_paths);
+            // No pointer query here: X11/Wayland file drops fall back to the
+            // editor's last tracked mouse position.
+            self.pending_file_drops.push_back((dropped_paths, None));
         }
         if let Some(scale) = self.pending_scale_factor.take() {
             self.apply_scale_factor(scale);

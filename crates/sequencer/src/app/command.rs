@@ -1252,6 +1252,186 @@ pub fn apply_command(app: &mut App, cmd: AppCommand) {
     }
 }
 
+impl App {
+    /// Write one live-recorded instrument p-lock without opening device-edit
+    /// history or publishing a scheduler snapshot. `SlotPLockData` is atomic
+    /// and audio-visible; the surrounding recording transaction owns undo.
+    pub fn print_instrument_plock(
+        &mut self,
+        track: usize,
+        step: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        let Some(value) = self
+            .graph
+            .instrument_descriptors
+            .get(track)
+            .and_then(|descriptor| descriptor.params.get(param_idx))
+            .map(|descriptor| descriptor.clamp(value))
+        else {
+            return false;
+        };
+        let Some(slot) = self.state.pattern.instrument_slots.get(track) else {
+            return false;
+        };
+        slot.set_plock(step, param_idx, value);
+        sync_instrument_mod_active_plock(self, track, step, param_idx);
+        true
+    }
+
+    /// Write one live-recorded track-effect p-lock without opening
+    /// device-edit history or publishing a scheduler snapshot. The resolved
+    /// slot index is part of the print target, and `set_plock` stamps the
+    /// current effect identity into the atomic p-lock data.
+    pub fn print_effect_plock(
+        &mut self,
+        track: usize,
+        step: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        let Some(value) = self
+            .graph
+            .effect_descriptors
+            .get(track)
+            .and_then(|descriptors| descriptors.get(slot_idx))
+            .and_then(|descriptor| descriptor.params.get(param_idx))
+            .map(|descriptor| descriptor.clamp(value))
+        else {
+            return false;
+        };
+        let Some(slot) = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+        else {
+            return false;
+        };
+        slot.set_plock(step, param_idx, value);
+        sync_effect_mod_active_plock(self, track, step, slot_idx, param_idx);
+        true
+    }
+
+    pub fn print_bus_effect_plock(
+        &mut self,
+        bus_idx: usize,
+        step: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        self.set_bus_effect_plock(bus_idx, slot_idx, step, param_idx, value)
+            .is_ok()
+    }
+
+    pub fn print_midi_fx_plock(
+        &mut self,
+        track: usize,
+        step: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        let Some(value) = self
+            .state
+            .pattern
+            .track_params
+            .get(track)
+            .and_then(|params| params.midi_fx_chain().get(slot_idx).cloned())
+            .and_then(|name| crate::lisp_host::load_midi_fx_descriptor(&name))
+            .and_then(|descriptor| descriptor.params.get(param_idx).cloned())
+            .map(|param| param.clamp(value))
+        else {
+            return false;
+        };
+        let Some(slot) = self
+            .state
+            .pattern
+            .midi_fx_slots
+            .get(track)
+            .and_then(|slots| slots.get(slot_idx))
+        else {
+            return false;
+        };
+        slot.set_plock(step, param_idx, value);
+        true
+    }
+
+    pub fn print_rack_slot_param_plock(
+        &mut self,
+        track: usize,
+        step: usize,
+        slot_idx: usize,
+        param: RackSlotParam,
+        value: f32,
+    ) -> bool {
+        self.set_rack_slot_param_plock(track, slot_idx, step, param, value)
+    }
+
+    pub fn print_rack_slot_instrument_plock(
+        &mut self,
+        track: usize,
+        step: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        let Some(value) = self
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(slot_idx))
+            .and_then(|slot| self.rack_slot_instrument_descriptor(slot))
+            .and_then(|descriptor| descriptor.params.get(param_idx).cloned())
+            .map(|param| param.clamp(value))
+        else {
+            return false;
+        };
+        self.set_rack_slot_instrument_plock(track, slot_idx, step, param_idx, value)
+    }
+
+    pub fn print_rack_slot_effect_plock(
+        &mut self,
+        track: usize,
+        step: usize,
+        rack_slot_idx: usize,
+        effect_slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        self.set_rack_slot_effect_plocks_no_publish(
+            track,
+            rack_slot_idx,
+            effect_slot_idx,
+            &[step],
+            param_idx,
+            value,
+        )
+        .is_ok()
+    }
+
+    pub fn print_rack_macro_plock(
+        &mut self,
+        track: usize,
+        step: usize,
+        macro_idx: usize,
+        value: f32,
+    ) -> bool {
+        let Some(id) = crate::sequencer::RackMacroId::from_index(macro_idx) else {
+            return false;
+        };
+        self.set_rack_macro_plock(track, id, step, value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -1926,6 +2106,135 @@ mod tests {
             slot.tensor_params.plock_values(3, 0).unwrap(),
             vec![0.1, 0.85, 0.3, 0.4]
         );
+    }
+
+    #[test]
+    fn printed_instrument_plock_clamps_stamps_and_syncs_mod_active_without_changing_defaults() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_instrument_descriptor(desc.clone());
+        let defaults_before: Vec<f32> = (0..desc.params.len())
+            .map(|param_idx| app.state.pattern.instrument_slots[0].defaults.get(param_idx))
+            .collect();
+
+        assert!(app.print_instrument_plock(0, 3, 2, 9.0));
+
+        let slot = &app.state.pattern.instrument_slots[0];
+        let defaults_after: Vec<f32> = (0..desc.params.len())
+            .map(|param_idx| slot.defaults.get(param_idx))
+            .collect();
+        assert_eq!(defaults_after, defaults_before);
+        assert_eq!(slot.plocks.get(3, 2), Some(1.0), "value is descriptor-clamped");
+        assert_eq!(slot.plocks.get(3, 1), Some(1.0), "mod-active lock is synced");
+        assert_eq!(
+            slot.plocks.get_id(3, 2),
+            slot.param_node_id(2),
+            "the print write carries the current ParamNodeId stamp"
+        );
+    }
+
+    #[test]
+    fn printed_effect_plock_clamps_stamps_and_syncs_mod_active_without_changing_defaults() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc.clone());
+        app.state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
+        let defaults_before: Vec<f32> = (0..desc.params.len())
+            .map(|param_idx| app.state.pattern.effect_chains[0][0].defaults.get(param_idx))
+            .collect();
+
+        assert!(app.print_effect_plock(0, 3, 0, 2, 9.0));
+
+        let slot = &app.state.pattern.effect_chains[0][0];
+        let defaults_after: Vec<f32> = (0..desc.params.len())
+            .map(|param_idx| slot.defaults.get(param_idx))
+            .collect();
+        assert_eq!(defaults_after, defaults_before);
+        assert_eq!(slot.plocks.get(3, 2), Some(1.0), "value is descriptor-clamped");
+        assert_eq!(slot.plocks.get(3, 1), Some(1.0), "mod-active lock is synced");
+        assert_eq!(
+            slot.plocks.get_id(3, 2),
+            slot.param_node_id(2),
+            "the print write carries the current ParamNodeId stamp"
+        );
+    }
+
+    #[test]
+    fn printed_midi_fx_plock_clamps_stamps_and_keeps_default() {
+        let mut app = test_app_with_effect_descriptor(EffectDescriptor::builtin_filter());
+        let desc = crate::lisp_host::load_midi_fx_descriptor("arp")
+            .expect("builtin arp descriptor");
+        app.state.pattern.track_params[0].set_midi_fx_chain(vec![desc.name.clone()]);
+        app.state.pattern.midi_fx_slots[0][0].apply_descriptor(&desc, 91);
+        let default_before = app.state.pattern.midi_fx_slots[0][0].defaults.get(0);
+
+        assert!(app.print_midi_fx_plock(0, 3, 0, 0, f32::MAX));
+
+        let slot = &app.state.pattern.midi_fx_slots[0][0];
+        assert_eq!(slot.defaults.get(0), default_before);
+        assert_eq!(slot.plocks.get(3, 0), Some(desc.params[0].max));
+        assert_eq!(slot.plocks.get_id(3, 0), slot.param_node_id(0));
+    }
+
+    #[test]
+    fn printed_bus_effect_plock_clamps_without_changing_defaults() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_bus_effect_descriptor(desc.clone());
+        let defaults_before = app.buses[0].effect_slots[0].defaults.clone();
+
+        assert!(app.print_bus_effect_plock(0, 3, 0, 2, 9.0));
+
+        let slot = &app.buses[0].effect_slots[0];
+        assert_eq!(slot.defaults, defaults_before);
+        assert_eq!(slot.plocks[3][2], Some(1.0), "value is descriptor-clamped");
+        assert_eq!(slot.plocks[3][1], Some(1.0), "mod-active lock is synced");
+    }
+
+    #[test]
+    fn printed_rack_plocks_cover_direct_instrument_effect_and_macro_targets() {
+        let mut app = test_app_with_rack_sampler_slot();
+        let effect_desc = effect_mod_test_descriptor();
+        assert!(app.state.update_rack_slot_in_current_pattern(0, 0, |slot| {
+            slot.effect_slots[0] = EffectSlotSnapshot::new_default_with_modulator(
+                &effect_desc,
+                88,
+                0,
+            );
+            slot.effect_descriptors[0] = effect_desc.clone();
+        }));
+        let before = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+
+        assert!(app.print_rack_slot_param_plock(
+            0,
+            3,
+            0,
+            RackSlotParam::Gain,
+            9.0,
+        ));
+        assert!(app.print_rack_slot_instrument_plock(0, 3, 0, 8, 96_000.0));
+        assert!(app.print_rack_slot_effect_plock(0, 3, 0, 0, 2, 9.0));
+        assert!(app.print_rack_macro_plock(0, 3, 0, 9.0));
+
+        let racks = app.state.pattern.rack_tracks.lock().unwrap();
+        let rack = racks[0].as_ref().unwrap();
+        let slot = &rack.slots[0];
+        assert_eq!(slot.gain, before.slots[0].gain, "direct base stays unchanged");
+        assert_eq!(slot.param_plocks.get(3, RackSlotParam::Gain), Some(2.0));
+        assert_eq!(
+            slot.instrument_slot.defaults,
+            before.slots[0].instrument_slot.defaults,
+            "instrument defaults stay unchanged",
+        );
+        assert_eq!(slot.instrument_slot.plocks[3][8], Some(44_100.0));
+        assert_eq!(
+            slot.effect_slots[0].defaults,
+            before.slots[0].effect_slots[0].defaults,
+            "effect defaults stay unchanged",
+        );
+        assert_eq!(slot.effect_slots[0].plocks[3][2], Some(1.0));
+        assert_eq!(rack.macros[0].value, before.macros[0].value);
+        assert_eq!(rack.macros[0].plocks[3], Some(1.0));
     }
 
     #[test]

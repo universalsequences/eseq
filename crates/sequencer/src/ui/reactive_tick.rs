@@ -250,12 +250,11 @@ pub(crate) fn reactive_tick_and_render(
         editor.mark_needs_redraw();
     }
 
-    // Live step-param printing (bead eseq-jc9): while playing+recording, an
-    // armed *step*-buffer param latch writes onto each trigger step the
-    // playhead passes. The tick pushes targeted Step invalidations (drained
-    // below in this same frame) instead of bumping ui_epoch; the writes ride
-    // the open "Record take" undo transaction like live note recording.
-    let step_print_tick = tick_step_print(ctx.shared, editor.runtime_mut());
+    // Live param printing: while playing+recording, an armed target writes
+    // onto each trigger step the playhead passes. Step targets push targeted
+    // invalidations; instrument targets update atomic p-lock storage directly.
+    // Both ride the open "Record take" transaction like live note recording.
+    let step_print_tick = tick_step_print(&mut app, ctx.shared, editor.runtime_mut());
     if step_print_tick.printed {
         app.mark_recording_take_changed();
     }
@@ -1317,6 +1316,7 @@ pub(crate) fn reactive_tick_and_render(
                 "step-has-plocks",
                 build_step_has_plocks(&ctx.shared.state, ct, &app.graph.effect_descriptors),
             );
+            sync_track_plock_any_field(rt, &app, &ctx.shared.state, ct);
             sync_sidebar_browser(rt, &app, ct);
             sync_plocks_sidebar_elapsed = started.elapsed();
             if profile_switch {
@@ -1494,6 +1494,7 @@ pub(crate) fn reactive_tick_and_render(
                     "step-has-plocks",
                     build_step_has_plocks(&ctx.shared.state, ct, &app.graph.effect_descriptors),
                 );
+                sync_track_plock_any_field(rt, &app, &ctx.shared.state, ct);
             }
             // Sync recording state
             let rec_on = ctx.shared.recording.load(Ordering::Relaxed);
@@ -1727,10 +1728,22 @@ pub(crate) fn reactive_tick_and_render(
                     .as_ref()
                     .map(|session| session.last_valid_source.as_str())
             });
+        let editor_patch_path = ctx
+            .sessions
+            .instrument_edit_session
+            .as_ref()
+            .map(|session| session.path.as_path())
+            .or_else(|| {
+                ctx.sessions
+                    .effect_edit_session
+                    .as_ref()
+                    .map(|session| session.path.as_path())
+            });
         let sidebar_fingerprint = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             editor_patch_source.hash(&mut hasher);
+            editor_patch_path.hash(&mut hasher);
             hasher.finish()
         };
         if sidebar_fingerprint != ctx.frame.prev_editor_macro_sidebar_fingerprint {
@@ -1742,6 +1755,7 @@ pub(crate) fn reactive_tick_and_render(
             } else {
                 Vec::new()
             };
+            let assets = eseqlisp::widget_render::patcher::asset_sidebar_entries(editor_patch_path);
             let rt = editor.runtime_mut();
             rt.set_reactive(
                 "SEQ",
@@ -1752,6 +1766,11 @@ pub(crate) fn reactive_tick_and_render(
                 "SEQ",
                 "editor-library-macros",
                 build_library_macro_sidebar_value(&library_macros, &scan.imports),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "editor-assets",
+                build_asset_sidebar_value(&assets),
             );
             ctx.frame.prev_editor_macro_sidebar_fingerprint = sidebar_fingerprint;
             needs_reactive_cycle = true;
@@ -1778,6 +1797,41 @@ pub(crate) fn reactive_tick_and_render(
                 Value::String(open_macro.clone()),
             );
             ctx.frame.prev_editor_open_macro = open_macro;
+            needs_reactive_cycle = true;
+        }
+
+        // The sidebar's asset inspector mirrors the single selected
+        // file-backed tensor node. The render pass maintains the reference
+        // per patcher key; metadata is re-read (through the mtime-keyed
+        // header cache) only when the reference changes.
+        let selected_asset =
+            editor_patch_path.and_then(eseqlisp::widget_render::patcher::selected_asset_for_path);
+        if selected_asset != ctx.frame.prev_editor_selected_asset {
+            let value = selected_asset
+                .as_deref()
+                .map(|reference| {
+                    let draft_root = editor_patch_path.and_then(std::path::Path::parent);
+                    let metadata =
+                        eseqlisp::editor::asset_metadata_lisp_value(reference, draft_root);
+                    let mut fields = match metadata {
+                        Value::Map(fields) => fields,
+                        // Unresolvable or invalid: the inspector still shows
+                        // the reference with no metadata rows.
+                        _ => std::collections::HashMap::new(),
+                    };
+                    fields.insert(
+                        "reference".to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::String(
+                            reference.to_string(),
+                        ))),
+                    );
+                    Value::Map(fields)
+                })
+                .unwrap_or(Value::Nil);
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "editor-selected-asset", value);
+            ctx.frame.prev_editor_selected_asset = selected_asset;
             needs_reactive_cycle = true;
         }
 

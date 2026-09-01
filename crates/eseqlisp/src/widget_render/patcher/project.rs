@@ -9,11 +9,12 @@ use super::lisp::{
     attribute_span_len, attribute_symbol_value, attribute_value, connection_kind_for_op,
     default_outputs, format_patch_literal, is_attribute_key, is_numeric_literal,
     is_unsupported_call_head, node_kind_for_op, node_label, normalize_legacy_tensor_call,
-    param_reference_name, symbol_at,
+    param_reference_name, replace_label_attribute, symbol_at,
 };
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
-    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, InputPresentation, MacroOrigin,
+    ConnectionKind, ConnectionSource, ConnectionSourceTarget, ExprPath, ExprPathSegment,
+    InputPresentation, MacroOrigin,
     MacroPatch, MacroSignature, NodeKind, NodeSource, OperatorPortShape, ParamNodeInfo, Patch,
     PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId, SourceFormId,
     SourceOwner, SourceScopeId, refresh_patch_inline_inputs,
@@ -789,7 +790,7 @@ impl Projector {
             source: Some(ConnectionSource {
                 from_expr: Some(value_arg.expr.clone()),
                 to_call: source_expr.clone(),
-                to_arg: value_arg.clone(),
+                target: ConnectionSourceTarget::Argument(value_arg.clone()),
                 previous_arg: self.source_arg_value(value, &value_arg),
             }),
             authored_reference: None,
@@ -895,7 +896,7 @@ impl Projector {
                             source: Some(ConnectionSource {
                                 from_expr: None,
                                 to_call: source_expr.clone(),
-                                to_arg: arg_source.clone(),
+                                target: ConnectionSourceTarget::Argument(arg_source.clone()),
                                 previous_arg: SourceArgValue::SymbolReference {
                                     expr: arg_source.expr.clone(),
                                     symbol: name.clone(),
@@ -940,7 +941,7 @@ impl Projector {
                             source: Some(ConnectionSource {
                                 from_expr: Some(arg_source.expr.clone()),
                                 to_call: source_expr.clone(),
-                                to_arg: arg_source.clone(),
+                                target: ConnectionSourceTarget::Argument(arg_source.clone()),
                                 previous_arg: SourceArgValue::NestedExpression(
                                     arg_source.expr.clone(),
                                 ),
@@ -971,7 +972,80 @@ impl Projector {
             .collect();
         let id = node.id.clone();
         self.patch.nodes.push(node);
+        if kind == NodeKind::Param {
+            self.project_param_options_connection(&id, &source_expr, &call_shape, items);
+        }
         Some(id)
+    }
+
+    fn project_param_options_connection(
+        &mut self,
+        param_node_id: &str,
+        source_expr: &SourceExprId,
+        call_shape: &CallSourceShape,
+        items: &[Expression],
+    ) {
+        let Some(attribute) = call_shape
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == "@options")
+            .cloned()
+        else {
+            return;
+        };
+        let Some(Expression::Symbol(authored_name)) = items.get(attribute.value_item_index) else {
+            return;
+        };
+        let Some(resolved_name) = self.resolved_symbol_name(authored_name) else {
+            return;
+        };
+        let Some((from_node, from_output)) = self.symbol_sources.get(&resolved_name).cloned() else {
+            return;
+        };
+        if !self
+            .patch
+            .nodes
+            .iter()
+            .find(|node| node.id == from_node)
+            .is_some_and(super::model::is_tensor_options_source)
+        {
+            return;
+        }
+        let resolved_binding = self.symbol_bindings.get(&resolved_name).cloned();
+        if let Some(node) = self
+            .patch
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == param_node_id)
+        {
+            if let Some(param) = node.param.as_mut() {
+                param.options_tensor = Some(authored_name.clone());
+            }
+            if let Ok(label) = replace_label_attribute(&node.label, "@options", None) {
+                node.label = label;
+            }
+        }
+        self.patch.connections.push(PatchConnection {
+            from_node,
+            from_output,
+            to_node: param_node_id.to_string(),
+            to_input: super::model::PARAM_OPTIONS_INPUT,
+            kind: ConnectionKind::Forward,
+            segment: None,
+            presentation: InputPresentation::Cable,
+            presentation_override: None,
+            source: Some(ConnectionSource {
+                from_expr: None,
+                to_call: source_expr.clone(),
+                target: ConnectionSourceTarget::Attribute(attribute.clone()),
+                previous_arg: SourceArgValue::SymbolReference {
+                    expr: attribute.value,
+                    symbol: authored_name.clone(),
+                    resolved_binding,
+                },
+            }),
+            authored_reference: None,
+        });
     }
 
     fn default_outputs_for_node(&self, op: &str, kind: NodeKind) -> Vec<String> {
@@ -1022,7 +1096,7 @@ impl Projector {
                 source: Some(ConnectionSource {
                     from_expr: Some(arg_source.expr.clone()),
                     to_call,
-                    to_arg: arg_source.clone(),
+                    target: ConnectionSourceTarget::Argument(arg_source.clone()),
                     previous_arg: SourceArgValue::Literal(arg_source.expr.clone()),
                 }),
                 authored_reference: None,
@@ -1304,6 +1378,7 @@ fn param_node_info(op: &str, items: &[Expression]) -> Option<ParamNodeInfo> {
     Some(ParamNodeInfo {
         name: param_reference_name(items)?,
         modulatable: param_is_modulatable(items),
+        options_tensor: None,
     })
 }
 
@@ -1452,6 +1527,42 @@ pub(super) struct OperatorPortDocumentation {
     pub(super) required: Option<bool>,
     pub(super) index: Option<usize>,
     pub(super) summary: Option<String>,
+}
+
+pub(super) fn dgenlisp_operator_attributes() -> &'static HashMap<String, Vec<String>> {
+    static OPERATOR_ATTRIBUTES: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+    OPERATOR_ATTRIBUTES.get_or_init(|| {
+        let metadata = crate::dgenlisp::manifest();
+        let operators = metadata
+            .get("operators")
+            .and_then(serde_json::Value::as_array)
+            .expect("bundled dgenlisp-operators.json must contain an operators array");
+
+        let mut attributes = HashMap::new();
+        for operator in operators {
+            let Some(name) = operator.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let names = operator
+                .get("attributes")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            attributes.insert(name.to_string(), names.clone());
+            if let Some(aliases) = operator
+                .get("aliases")
+                .and_then(serde_json::Value::as_array)
+            {
+                for alias in aliases.iter().filter_map(serde_json::Value::as_str) {
+                    attributes.insert(alias.to_string(), names.clone());
+                }
+            }
+        }
+        attributes
+    })
 }
 
 pub(super) fn dgenlisp_operator_documentation() -> &'static HashMap<String, OperatorDocumentation> {

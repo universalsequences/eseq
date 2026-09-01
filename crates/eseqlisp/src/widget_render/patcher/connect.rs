@@ -13,8 +13,8 @@ use super::display::node_display_label;
 use super::geometry::patch_input_indices;
 use super::lisp::{is_numeric_literal, parse_editor_node_text};
 use super::model::{
-    ArgValue, InputPortRef, InputPresentation, MacroSignature, OutputPortRef, Patch, PatchNode,
-    hidden_inline_node_ids,
+    ArgValue, InputPortRef, InputPresentation, MacroSignature, NodeKind, OutputPortRef, Patch,
+    PatchNode, PARAM_OPTIONS_INPUT, hidden_inline_node_ids, is_tensor_options_source,
 };
 use super::project::dgenlisp_operator_documentation;
 use super::state::{
@@ -130,7 +130,12 @@ pub(super) fn arg_occupancies(
     drawn_ports: &HashMap<String, Vec<usize>>,
 ) -> Vec<ArgOccupancy> {
     let drawn = drawn_ports.get(&node.id).cloned().unwrap_or_default();
-    (0..node.args.len())
+    let slot_count = if node.kind == NodeKind::Param {
+        1
+    } else {
+        node.args.len()
+    };
+    (0..slot_count)
         .map(|idx| {
             if let Some(connection) = patch.connections.iter().find(|connection| {
                 connection.to_node == node.id
@@ -229,6 +234,9 @@ pub(super) fn connect_context(
 /// The inlet's name as the port tooltip would show it: a macro parameter, an
 /// operator's documented port, or the symbol the argument already reads.
 fn inlet_name(patch: &Patch, node: &PatchNode, index: usize) -> String {
+    if node.kind == NodeKind::Param && index == PARAM_OPTIONS_INPUT {
+        return "options".to_string();
+    }
     let named = if node.kind == super::model::NodeKind::MacroInstance {
         patch
             .macros
@@ -395,7 +403,10 @@ fn validate_op(
             target.id
         ));
     }
-    if op.to_arg() >= target.args.len() {
+    let targets_param_options = target.kind == NodeKind::Param
+        && op.to_arg() == PARAM_OPTIONS_INPUT
+        && matches!(op, PatcherConnectOp::Connect { .. });
+    if !targets_param_options && op.to_arg() >= target.args.len() {
         return Err(format!(
             "argument {} is out of range for `{}`",
             op.to_arg(),
@@ -414,10 +425,26 @@ fn validate_op(
     }
     // The claim is only recorded once the op is known to be valid: an op that
     // fails below must not poison the slot for a later valid op in the plan.
-    let occupancy = arg_occupancies(patch, target, drawn_ports)
-        .into_iter()
-        .nth(op.to_arg())
-        .unwrap_or(ArgOccupancy::Occupied);
+    let occupancy = if targets_param_options {
+        patch
+            .connections
+            .iter()
+            .find(|connection| {
+                connection.to_node == target.id
+                    && connection.to_input == PARAM_OPTIONS_INPUT
+                    && connection.presentation == InputPresentation::Cable
+            })
+            .map(|connection| ArgOccupancy::Cabled {
+                from_node: connection.from_node.clone(),
+                from_output: connection.from_output,
+            })
+            .unwrap_or(ArgOccupancy::Free)
+    } else {
+        arg_occupancies(patch, target, drawn_ports)
+            .into_iter()
+            .nth(op.to_arg())
+            .unwrap_or(ArgOccupancy::Occupied)
+    };
     // A cabled inlet still accepts another cable — the slot sums. Everything
     // else (a literal, an inline param, a nested expression) has no drawn port
     // and is not a wiring target at all.
@@ -452,6 +479,14 @@ fn validate_op(
                 return Err(format!(
                     "outlet {from_outlet} is out of range for `{from_node}`"
                 ));
+            }
+            if targets_param_options {
+                if *from_outlet != 0 || !is_tensor_options_source(source) {
+                    return Err("param options must be connected from tensor outlet 0".to_string());
+                }
+                if matches!(occupancy, ArgOccupancy::Cabled { .. }) {
+                    return Err("param already has an options cable".to_string());
+                }
             }
             // A slot sums its cables, so a duplicate edge would silently double
             // the signal rather than add anything.

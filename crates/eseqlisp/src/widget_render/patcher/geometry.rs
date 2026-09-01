@@ -103,6 +103,12 @@ pub(super) fn patch_input_indices(patch: &Patch) -> HashMap<String, Vec<usize>> 
         if hidden_node_ids.contains(&node.id) {
             continue;
         }
+        if node.kind == super::model::NodeKind::Param {
+            indices
+                .entry(node.id.clone())
+                .or_default()
+                .push(super::model::PARAM_OPTIONS_INPUT);
+        }
         for (idx, arg) in node.args.iter().enumerate() {
             if node
                 .inline_inputs

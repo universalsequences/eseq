@@ -122,6 +122,14 @@ pub struct Theme {
     /// ring at the param's current post-modulation value. Purely a display
     /// accent — it is never the drag target.
     pub widget_knob_mod_dot: Color,
+    /// P-lock accent (beads eseq-4seq / eseq-yr6w): the print-overlay
+    /// rectangle drawn around a knob whose value is being printed onto
+    /// passing steps, and the corner dot marking a param that already has a
+    /// p-lock somewhere in the pattern. Deliberately NOT macro green — the
+    /// macro-mapping rectangle and macro-owned dot own that hue. Kept in the
+    /// muted teal register the map-mode and mods-tab borders sit in — the
+    /// bright p-lock readout cyan reads as a highlighter next to them.
+    pub widget_plock_accent: Color,
     pub widget_toggle_on: Color,
     pub widget_toggle_off: Color,
     pub widget_toggle_knob_on: Color,
@@ -677,6 +685,11 @@ theme_slots!(
         widget_knob_mod_dot,
         WIDGET_KNOB_MOD_DOT,
         Color::from_hex(0x5a, 0xe6, 0xff)
+    ),
+    (
+        widget_plock_accent,
+        WIDGET_PLOCK_ACCENT,
+        Color::from_hex(0x33, 0x9e, 0xb8)
     ),
     (
         widget_toggle_on,

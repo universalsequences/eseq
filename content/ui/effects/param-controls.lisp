@@ -33,6 +33,7 @@
         fx-param-value-for
         fx-param-text-value-for
         param-plock-active?
+        param-plock-context-menu
         param-plock-default
         param-plock-color-r
         param-plock-color-g
@@ -625,6 +626,102 @@
     (and (not (param-mods-open? fx))
          (param-plock-field-on? fx p))))
 
+;; Automation presence (bead eseq-yr6w): this param carries a p-lock on SOME
+;; step of the pattern, not necessarily the selected one. Drives the corner dot,
+;; never the value readout.
+(def param-plock-any? (fx p)
+  (if (= (get p :idx) nil)
+    false
+    (= (reactive-get "SEQV" (str (param-plock-control-key fx p) "-any")) 1)))
+
+;; --- Right-click "clear p-locks" menu (bead eseq-1gy6) ---------------------
+;; One menu state shared by every param control: nil, or the key tuple of the
+;; param whose knob was right-clicked plus the anchor the menu opens at. The
+;; menu itself (param-plock-context-menu) is rendered once, by the buffer that
+;; hosts the knobs — an overlay has to live in the active tile.
+;;
+;; A param with no p-locks has nothing to offer, so its right-click is a no-op
+;; and no empty menu opens. The wrappers only bind :on-right-click on the
+;; branches that already draw a box, which is every branch that can carry the
+;; presence dot; the bare-body fast path stays free of a wrapper.
+
+(defstate param-plock-menu nil)
+(defstate param-plock-menu-col 0)
+(defstate param-plock-menu-row 0)
+
+;; Key tuple the host command clears by. Mirrors param-plock-control-key's
+;; families, but spells out the real slot indices: the projection key can say
+;; "any"/"x" because it only has to match rows, while the clear has to name
+;; storage.
+(def param-plock-menu-target (fx p)
+  (dict :target (param-plock-row-target fx)
+        :slot-idx (if fx (get fx :slot-idx) 0)
+        :rack-slot (if (and fx (get fx :rack-fx)) (get fx :rack-slot) 0)
+        :param-idx (get p :idx)))
+
+(def open-param-plock-menu (event fx p)
+  (if (param-plock-any? fx p)
+    (do
+      (set! param-plock-menu (param-plock-menu-target fx p))
+      (set! param-plock-menu-col (get event :col))
+      (set! param-plock-menu-row (get event :row))
+      true)
+    false))
+
+(def close-param-plock-menu ()
+  (set! param-plock-menu nil))
+
+;; Live count of selected steps. Read only while the menu is open, so the
+;; hosting buffer does not subscribe to the selection the rest of the time.
+(def param-plock-selected-step-count ()
+  (len (filter |selected| selected SEQ.selected-steps)))
+
+(def param-plock-selection-label (count)
+  (if (= count 1)
+    "Clear p-locks on 1 selected step"
+    (str "Clear p-locks on " count " selected steps")))
+
+(def param-plock-menu-actions ()
+  (if param-plock-menu
+    (let ((count (param-plock-selected-step-count)))
+      (if (> count 0)
+        (list (dict :id "all" :label "Clear p-locks")
+              (dict :id "selected" :label (param-plock-selection-label count)))
+        (list (dict :id "all" :label "Clear p-locks"))))
+    (list)))
+
+(def clear-param-plocks (scope)
+  (let ((target param-plock-menu))
+    (do
+      (close-param-plock-menu)
+      (if target
+        (host-command "clear-param-plocks"
+          (dict :target (get target :target)
+                :slot-idx (get target :slot-idx)
+                :rack-slot (get target :rack-slot)
+                :param-idx (get target :param-idx)
+                :scope scope))
+        false))))
+
+(def param-plock-context-menu ()
+  (context-menu :is-open (if param-plock-menu true false)
+    :anchor-col param-plock-menu-col
+    :anchor-row param-plock-menu-row
+    :on-close (lambda () (close-param-plock-menu))
+    (each (param-plock-menu-actions) |action|
+      (menu-item (get action :label)
+        :key (str "param-plock-menu-" (get action :id))
+        :on-select (lambda (event) (clear-param-plocks (get action :id)))))))
+
+;; Live print latch (bead eseq-4seq): this param is the one being held while
+;; play+record writes its value onto passing steps. The *plock-print-sync*
+;; projection only publishes these while the transport gate holds, so a control
+;; never has to subscribe to SEQ.playing / SEQ.recording itself.
+(def param-print-latched? (fx p)
+  (if (= (get p :idx) nil)
+    false
+    (= (reactive-get "SEQV" (str (param-plock-control-key fx p) "-print")) 1)))
+
 (def param-plock-default (fx p)
   (if (param-plock-field-on? fx p)
     (reactive-get "SEQV" (str (param-plock-control-key fx p) "-def"))
@@ -769,6 +866,7 @@
             :padding 0.08
             :capture-pointer true
             :on-click (lambda (info) (param-macro-map fx p))
+            :on-right-click (lambda (event) (open-param-plock-menu event fx p))
             body)))
       body)
     (if (and (not (param-mods-open? fx))
@@ -780,8 +878,10 @@
           :corner-radius 8
           :border-width 0
           :macro-owned 1
+          :plock-any (if (param-plock-any? fx p) 1 0)
           :capture-pointer true
           :on-click (lambda (info) false)
+          :on-right-click (lambda (event) (open-param-plock-menu event fx p))
           body))
       (if (process-map-active?)
         (if (process-param-bindable? fx p)
@@ -793,18 +893,48 @@
               :padding 0.08
               :capture-pointer true
               :on-click (lambda (info) (process-bind-param-target fx p))
+              :on-right-click (lambda (event) (open-param-plock-menu event fx p))
               body))
           body)
-        (if (and (param-mods-open? fx) (get p :modulatable))
-          (subtree :key key
-            (box :background-color (param-mod-bg fx p)
-              :border-color (param-mod-border fx p)
+        ;; Print overlay outranks the mods-tab box: while the knob is being
+        ;; recorded onto passing steps that is the only thing worth saying
+        ;; about it. Same box treatment as macro map mode, p-lock accent.
+        (if (param-print-latched? fx p)
+          (subtree :key (str key "-plock-print")
+            (box :debug-name "param-print-wrapper"
+              :background-color (rgba 0.04 0.20 0.26 0.92)
               :corner-radius 8
               :border-width 1
-              :padding 0.08
-              :on-double-click (lambda (info) (param-toggle-modulation fx p))
+              :border-color :widget-plock-accent
+              :plock-any (if (param-plock-any? fx p) 1 0)
+              :padding 0
+              :on-right-click (lambda (event) (open-param-plock-menu event fx p))
               body))
-          body)))))
+          (if (and (param-mods-open? fx) (get p :modulatable))
+            (subtree :key key
+              (box :background-color (param-mod-bg fx p)
+                :border-color (param-mod-border fx p)
+                :corner-radius 8
+                :border-width 1
+                :plock-any (if (param-plock-any? fx p) 1 0)
+                :padding 0.08
+                :on-double-click (lambda (info) (param-toggle-modulation fx p))
+                :on-right-click (lambda (event) (open-param-plock-menu event fx p))
+                body))
+            ;; Neutral state: only pay for a wrapper box when there is a dot
+            ;; to draw on it. That box is also the right-click target: a param
+            ;; with no p-locks has nothing to clear, so the fast path needs no
+            ;; handler either.
+            (if (param-plock-any? fx p)
+              (subtree :key (str key "-plock-any")
+                (box :debug-name "param-plock-any-wrapper"
+                  :background-color :transparent
+                  :corner-radius 8
+                  :border-width 0
+                  :plock-any 1
+                  :on-right-click (lambda (event) (open-param-plock-menu event fx p))
+                  body))
+              body)))))))
 
 (def fx-param-numeric-value (p)
   (reactive-value (fx-param-value p)))
@@ -1057,6 +1187,7 @@
                :padding 0.08
                :capture-pointer true
                :on-click (lambda (info) (param-macro-map false p))
+               :on-right-click (lambda (event) (open-param-plock-menu event false p))
             body)))
       body)
   (if (and (not st/instrument-mods-open)
@@ -1068,8 +1199,10 @@
            :corner-radius 8
            :border-width 0
            :macro-owned 1
+           :plock-any (if (param-plock-any? false p) 1 0)
            :capture-pointer true
            :on-click (lambda (info) false)
+           :on-right-click (lambda (event) (open-param-plock-menu event false p))
         body))
   (if (process-map-active?)
     (if (process-param-bindable? false p)
@@ -1081,17 +1214,41 @@
              :padding 0.0
              :capture-pointer true
              :on-click (lambda (info) (process-bind-param-target false p))
+             :on-right-click (lambda (event) (open-param-plock-menu event false p))
           body))
       body)
-    (if (and st/instrument-mods-open (get p :modulatable))
-      (subtree :key key
-        (box :background-color (instrument-param-mod-bg p)
+    ;; See param-mod-wrapper: printing outranks the mods-tab box.
+    (if (param-print-latched? false p)
+      (subtree :key (str key "-plock-print")
+        (box :debug-name "param-print-wrapper"
+             :background-color (rgba 0.04 0.20 0.26 0.92)
              :corner-radius 8
              :border-width 1
-             :padding 0.08
-             :on-double-click (lambda (info) (instrument-toggle-param-modulation p))
+             :border-color :widget-plock-accent
+             :plock-any (if (param-plock-any? false p) 1 0)
+             :padding 0
+             :on-right-click (lambda (event) (open-param-plock-menu event false p))
           body))
-      body)))))
+      (if (and st/instrument-mods-open (get p :modulatable))
+        (subtree :key key
+          (box :background-color (instrument-param-mod-bg p)
+               :corner-radius 8
+               :border-width 1
+               :plock-any (if (param-plock-any? false p) 1 0)
+               :padding 0.08
+               :on-double-click (lambda (info) (instrument-toggle-param-modulation p))
+               :on-right-click (lambda (event) (open-param-plock-menu event false p))
+            body))
+        (if (param-plock-any? false p)
+          (subtree :key (str key "-plock-any")
+            (box :debug-name "param-plock-any-wrapper"
+                 :background-color :transparent
+                 :corner-radius 8
+                 :border-width 0
+                 :plock-any 1
+                 :on-right-click (lambda (event) (open-param-plock-menu event false p))
+              body))
+          body)))))))
 
 ;; --- P-lock presence projection effect ------------------------------------
 ;; The single reader of SEQ.track-plocks / SEQ.track-plock-variants on behalf
@@ -1155,4 +1312,69 @@
         (if (= param-plock-published-keys keys)
           false
           (set! param-plock-published-keys keys))))
+    nil))
+
+;; --- P-lock automation-presence projection ---------------------------------
+;; Same fan-out as *plock-sync*, one namespace over: SEQ.track-plock-any lists
+;; the params that carry a p-lock on ANY step of the pattern (bead eseq-yr6w),
+;; so a knob can show an automation dot without every control subscribing to
+;; the whole row list. Republished by the Rust side alongside
+;; SEQ.step-has-plocks — i.e. wherever a p-lock is written, cleared, or the
+;; pattern under the panel changes.
+
+(defstate param-plock-any-published-keys '())
+
+(effect-buffer "*plock-any-sync*"
+  (do
+    (let ((keys
+            (reverse
+              (reduce |acc row|
+                (let ((key (if (= (get row :param-idx) nil)
+                             (str "plk-t-" (get row :target))
+                             (param-plock-projected-row-key row))))
+                  (do
+                    (reactive-set "SEQV" (str key "-any") 1)
+                    (cons key acc)))
+                '()
+                SEQ.track-plock-any))))
+      (do
+        (each param-plock-any-published-keys |key idx|
+          (if (param-plock-key-member? keys key)
+            false
+            (reactive-set "SEQV" (str key "-any") 0)))
+        (if (= param-plock-any-published-keys keys)
+          false
+          (set! param-plock-any-published-keys keys))))
+    nil))
+
+;; --- Live print-latch projection -------------------------------------------
+;; SEQ.track-plock-printing carries the device params currently held under a
+;; print latch (bead eseq-4seq). The transport gate lives HERE rather than in
+;; each control: one effect subscribes to SEQ.playing / SEQ.recording, and a
+;; stale row list can never light an overlay because a failing gate projects
+;; the empty set and clears every published flag.
+
+(defstate param-plock-print-published-keys '())
+
+(effect-buffer "*plock-print-sync*"
+  (do
+    (let ((rows (if (and SEQ.playing SEQ.recording) SEQ.track-plock-printing '()))
+          (published param-plock-print-published-keys))
+      (let ((keys
+              (reverse
+                (reduce |acc row|
+                  (let ((key (param-plock-projected-row-key row)))
+                    (do
+                      (reactive-set "SEQV" (str key "-print") 1)
+                      (cons key acc)))
+                  '()
+                  rows))))
+        (do
+          (each published |key idx|
+            (if (param-plock-key-member? keys key)
+              false
+              (reactive-set "SEQV" (str key "-print") 0)))
+          (if (= param-plock-print-published-keys keys)
+            false
+            (set! param-plock-print-published-keys keys)))))
     nil))

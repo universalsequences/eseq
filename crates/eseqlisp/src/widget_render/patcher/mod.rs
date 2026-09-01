@@ -1,4 +1,5 @@
 mod alignment;
+mod assets;
 mod connect;
 mod display;
 mod emit;
@@ -23,6 +24,7 @@ mod writeback;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -31,11 +33,18 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use crate::defmacro_library::{DefmacroLibrary, DefmacroPackage};
 use crate::ui::platform::has_primary_shortcut_modifier;
 
+pub use assets::{
+    PatcherAssetSidebarEntry, asset_sidebar_entries, register_asset_source_root, set_asset_roots,
+};
+pub(crate) use assets::{resolve_asset_reference, resolve_registered_asset_reference};
+#[cfg(test)]
+pub(crate) use assets::resolve_asset_reference_with_fallback_roots;
 pub use connect::{PatcherConnectOp, PatcherConnectReport};
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CableSegmentInfo,
-    CallSourceShape, ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroOrigin,
+    CallSourceShape, ConnectionKind, ConnectionSource, ConnectionSourceTarget, ExprPath,
+    ExprPathSegment, MacroOrigin,
     MacroPatch, NodeKind, NodeSource, Patch, PatchConnection, PatchNode, PatcherIntent,
     SourceArgValue, SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
 };
@@ -310,6 +319,15 @@ pub fn active_macro_view_for_path(path: impl AsRef<std::path::Path>) -> Option<S
     state::patcher_keys_for_path(path.as_ref())
         .into_iter()
         .find_map(state::active_macro_for_key)
+}
+
+/// The `@file` reference of the single selected file-backed tensor node in
+/// the patcher for `path`, mirrored by the render pass. Feeds the macro
+/// sidebar's asset inspector.
+pub fn selected_asset_for_path(path: impl AsRef<std::path::Path>) -> Option<String> {
+    state::patcher_keys_for_path(path.as_ref())
+        .into_iter()
+        .find_map(state::selected_asset_for_key)
 }
 
 /// Navigate the patcher for `path` to a macro view (or the root with None),
@@ -730,28 +748,232 @@ pub fn patcher_has_text_edit(node: &crate::layout::LayoutNode) -> bool {
         || state::answering_agentic_bubble_id(&state).is_some()
 }
 
-/// Drag type accepted by the patcher canvas: macro items dragged from the
-/// macro sidebar. Dropping one creates a node calling that macro.
+/// Drag types accepted from the patcher sidebar. Macro drops create a call;
+/// asset drops create a file-backed tensor with shape read from the asset.
 pub const PATCHER_MACRO_DRAG_TYPE: &str = "dgen-macro";
+pub const PATCHER_ASSET_DRAG_TYPE: &str = "dgen-asset";
 
 pub fn patcher_accepts_drop(node: &LayoutNode, drag_type: &str) -> bool {
-    node.widget_type == "patcher" && drag_type == PATCHER_MACRO_DRAG_TYPE
+    node.widget_type == "patcher"
+        && matches!(
+            drag_type,
+            PATCHER_MACRO_DRAG_TYPE | PATCHER_ASSET_DRAG_TYPE
+        )
 }
 
-fn macro_drop_payload_name(payload: &Value) -> Option<String> {
+fn drop_payload_string(payload: &Value, key: &str) -> Option<String> {
     let Value::Map(map) = payload else {
         return None;
     };
-    let name = map.get("name").or_else(|| map.get("label"))?;
-    match &*name.borrow() {
-        Value::String(name) if !name.trim().is_empty() => Some(name.trim().to_string()),
+    let value = map.get(key)?;
+    match &*value.borrow() {
+        Value::String(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
         _ => None,
     }
 }
 
-/// Drop a macro item onto the patcher canvas: allocate a created node whose
-/// text is the macro call at the drop point, then emit the standard writeback
-/// payload so the host persists and recompiles exactly as for a typed node.
+fn macro_drop_payload_name(payload: &Value) -> Option<String> {
+    drop_payload_string(payload, "name").or_else(|| drop_payload_string(payload, "label"))
+}
+
+fn asset_drop_node_text(payload: &Value) -> Option<String> {
+    let reference = drop_payload_string(payload, "file")?;
+    let reference_path = Path::new(&reference);
+    if reference_path.is_absolute()
+        || !reference_path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        || reference
+            .chars()
+            .any(|character| character == '"' || character.is_control())
+    {
+        return None;
+    }
+    let source_path = PathBuf::from(drop_payload_string(payload, "source-path")?);
+    let shape = assets::read_tensor_asset_shape(&source_path)?;
+    let shape = shape
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let quoted_reference = serde_json::to_string(&reference).ok()?;
+    Some(lisp::normalize_editor_node_text(&format!(
+        "tensor @shape [{shape}] @file {quoted_reference}"
+    )))
+}
+
+pub(crate) struct ImportedPatcherAsset {
+    pub(crate) output: super::EventOutput,
+    pub(crate) destination: PathBuf,
+}
+
+fn files_equal(left: &Path, right: &Path) -> std::io::Result<bool> {
+    if std::fs::metadata(left)?.len() != std::fs::metadata(right)?.len() {
+        return Ok(false);
+    }
+    let mut left = std::io::BufReader::new(std::fs::File::open(left)?);
+    let mut right = std::io::BufReader::new(std::fs::File::open(right)?);
+    let mut left_buffer = [0_u8; 64 * 1024];
+    let mut right_buffer = [0_u8; 64 * 1024];
+    loop {
+        let left_len = left.read(&mut left_buffer)?;
+        let right_len = right.read(&mut right_buffer)?;
+        if left_len != right_len || left_buffer[..left_len] != right_buffer[..right_len] {
+            return Ok(false);
+        }
+        if left_len == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn copy_asset_without_overwriting(
+    source: &Path,
+    waves_dir: &Path,
+) -> Result<(PathBuf, bool), String> {
+    let filename = source
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("Dropped asset has no file name: {}", source.display()))?;
+    let filename_path = Path::new(filename);
+    let stem = filename_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| {
+            format!(
+                "Dropped asset file name is not valid UTF-8: {}",
+                source.display()
+            )
+        })?;
+    let extension = filename_path.extension().and_then(|extension| extension.to_str());
+
+    std::fs::create_dir_all(waves_dir)
+        .map_err(|error| format!("Could not create {}: {error}", waves_dir.display()))?;
+    for suffix in 0_u64.. {
+        let candidate_name = if suffix == 0 {
+            filename.to_owned()
+        } else if let Some(extension) = extension {
+            format!("{stem}-{suffix}.{extension}").into()
+        } else {
+            format!("{stem}-{suffix}").into()
+        };
+        let destination = waves_dir.join(candidate_name);
+        if destination.exists() {
+            if files_equal(source, &destination).unwrap_or(false) {
+                return Ok((destination, false));
+            }
+            continue;
+        }
+
+        let mut input = std::fs::File::open(source).map_err(|error| {
+            format!(
+                "Could not open dropped asset {}: {error}",
+                source.display()
+            )
+        })?;
+        let mut output = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Could not create imported asset {}: {error}",
+                    destination.display()
+                ));
+            }
+        };
+        if let Err(error) = std::io::copy(&mut input, &mut output).and_then(|_| output.flush()) {
+            drop(output);
+            let _ = std::fs::remove_file(&destination);
+            return Err(format!(
+                "Could not copy dropped asset to {}: {error}",
+                destination.display()
+            ));
+        }
+        return Ok((destination, true));
+    }
+    unreachable!("u64 asset-name suffix space exhausted")
+}
+
+/// Copies an OS-dropped tensor asset under the patch's `waves/` directory and
+/// stages the same normalized tensor-node writeback used by sidebar drops.
+pub(crate) fn import_patcher_asset_file(
+    node: &LayoutNode,
+    source: &Path,
+    local_col: f32,
+    local_row: f32,
+) -> Result<ImportedPatcherAsset, String> {
+    if !source
+        .metadata()
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+    {
+        return Err(format!("Dropped asset is not a regular file: {}", source.display()));
+    }
+    assets::read_tensor_asset_shape(source).ok_or_else(|| {
+        format!(
+            "Dropped file is not a tensor JSON asset with a non-empty positive shape: {}",
+            source.display()
+        )
+    })?;
+    let patch_path = prop_str(&node.props, "path")
+        .or_else(|| prop_str(&node.props, "file"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "Patcher has no source path for asset import".to_string())?;
+    let draft_dir = patch_path.parent().ok_or_else(|| {
+        format!(
+            "Patcher source has no parent directory: {}",
+            patch_path.display()
+        )
+    })?;
+    let (destination, created_file) =
+        copy_asset_without_overwriting(source, &draft_dir.join("waves"))?;
+    let filename = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "Imported asset name is not valid UTF-8: {}",
+                destination.display()
+            )
+        })?;
+    let reference = format!("waves/{filename}");
+    let payload = Value::Map(HashMap::from([
+        (
+            "file".to_string(),
+            Rc::new(RefCell::new(Value::String(reference))),
+        ),
+        (
+            "source-path".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                destination.to_string_lossy().into_owned(),
+            ))),
+        ),
+    ]));
+    let Some(output) = handle_patcher_drop(
+        node,
+        PATCHER_ASSET_DRAG_TYPE,
+        &payload,
+        local_col,
+        local_row,
+    ) else {
+        if created_file {
+            let _ = std::fs::remove_file(&destination);
+        }
+        return Err("Could not insert a tensor node for the imported asset".to_string());
+    };
+    Ok(ImportedPatcherAsset {
+        output,
+        destination,
+    })
+}
+
+/// Drop a sidebar item onto the patcher canvas, then emit the standard
+/// writeback payload so the host persists and recompiles exactly as for a
+/// typed node.
 pub fn handle_patcher_drop(
     node: &LayoutNode,
     drag_type: &str,
@@ -762,12 +984,18 @@ pub fn handle_patcher_drop(
     if !patcher_accepts_drop(node, drag_type) {
         return None;
     }
-    let macro_name = macro_drop_payload_name(payload)?;
+    let node_text = match drag_type {
+        PATCHER_MACRO_DRAG_TYPE => macro_drop_payload_name(payload)?,
+        PATCHER_ASSET_DRAG_TYPE => asset_drop_node_text(payload)?,
+        _ => return None,
+    };
     let key = state::patcher_state_key(node);
     let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
     let mut state = state::get_patcher_interaction_state(key);
     // A macro view must not gain a node calling the macro it defines.
-    if state.active_macro.as_deref() == Some(macro_name.as_str()) {
+    if drag_type == PATCHER_MACRO_DRAG_TYPE
+        && state.active_macro.as_deref() == Some(node_text.as_str())
+    {
         return None;
     }
     let view_key = state::active_patcher_view_key(&state);
@@ -787,7 +1015,7 @@ pub fn handle_patcher_drop(
         .edit_state
         .nodes
         .get_mut(&state::node_edit_key(&view_key, &created_id))?
-        .text = macro_name;
+        .text = lisp::normalize_editor_node_text(&node_text);
     state::set_patcher_interaction_state(key, state);
     patcher_change_output(node, patcher_writeback_payload(node))
 }
@@ -1172,6 +1400,7 @@ impl WidgetDefinition for PatcherWidget {
         let mut state = get_patcher_interaction_state(key);
         let view_key = active_patcher_view_key(&state);
         let autocomplete_macros = autocomplete_macros_for_state(node, &state, &view_key);
+        let autocomplete_asset_paths = state.autocomplete_asset_paths.clone();
         if let Ok((path, _)) = load_patch_from_props(&node.props) {
             state::register_patcher_path_key(path, key);
         }
@@ -1424,29 +1653,51 @@ impl WidgetDefinition for PatcherWidget {
             }
             KeyCode::Tab if state.text_edit.is_some() => {
                 if let Some(edit) = state.text_edit.as_mut() {
-                    apply_patcher_autocomplete(edit, &autocomplete_macros);
+                    apply_patcher_autocomplete(
+                        edit,
+                        &autocomplete_macros,
+                        &autocomplete_asset_paths,
+                    );
                 }
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Down
                 if state.text_edit.as_ref().is_some_and(|edit| {
-                    patcher_autocomplete_is_open(edit, &autocomplete_macros)
+                    patcher_autocomplete_is_open(
+                        edit,
+                        &autocomplete_macros,
+                        &autocomplete_asset_paths,
+                    )
                 }) =>
             {
                 if let Some(edit) = state.text_edit.as_mut() {
-                    move_patcher_autocomplete_selection(edit, &autocomplete_macros, 1);
+                    move_patcher_autocomplete_selection(
+                        edit,
+                        &autocomplete_macros,
+                        &autocomplete_asset_paths,
+                        1,
+                    );
                 }
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Up
                 if state.text_edit.as_ref().is_some_and(|edit| {
-                    patcher_autocomplete_is_open(edit, &autocomplete_macros)
+                    patcher_autocomplete_is_open(
+                        edit,
+                        &autocomplete_macros,
+                        &autocomplete_asset_paths,
+                    )
                 }) =>
             {
                 if let Some(edit) = state.text_edit.as_mut() {
-                    move_patcher_autocomplete_selection(edit, &autocomplete_macros, -1);
+                    move_patcher_autocomplete_selection(
+                        edit,
+                        &autocomplete_macros,
+                        &autocomplete_asset_paths,
+                        -1,
+                    );
                 }
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
@@ -1486,6 +1737,7 @@ impl WidgetDefinition for PatcherWidget {
                         clamp_patcher_autocomplete_selection_with_macros(
                             edit,
                             &autocomplete_macros,
+                            &autocomplete_asset_paths,
                         );
                         set_patcher_interaction_state(key, state);
                         Some(WidgetEvent::Custom(Value::Nil))

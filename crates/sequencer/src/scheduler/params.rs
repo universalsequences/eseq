@@ -269,13 +269,31 @@ pub(super) fn delayed_step_sample_time(
     base_sample_time.saturating_add(step_delay_samples(step_params, samples_per_step))
 }
 
+/// The latched print value for one device target, if the live device-param
+/// print latch (bead eseq-prm) holds it. Substituted at resolution time —
+/// mirroring `StepPrintOverride` — because every trigger stamps all device
+/// params from the snapshot, so without this a held printing knob is actively
+/// reset to its stale snapshot value on each passing step and the gesture is
+/// only heard one loop later.
+fn device_print_value(
+    overrides: Option<&crate::sequencer::DeviceParamPrintValues>,
+    target: crate::sequencer::DeviceParamPrintTarget,
+) -> Option<f32> {
+    overrides?
+        .entries
+        .iter()
+        .find(|(entry, _)| *entry == target)
+        .map(|(_, value)| *value)
+}
+
 pub(super) fn resolve_effect_params(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
     step_idx: usize,
+    print_overrides: Option<&crate::sequencer::DeviceParamPrintValues>,
 ) -> Vec<ScheduledEffectParam> {
     let mut params = Vec::new();
-    for slot in &snapshot.tracks[track_idx].effect_slots {
+    for (slot_idx, slot) in snapshot.tracks[track_idx].effect_slots.iter().enumerate() {
         if slot.node_id == 0 {
             continue;
         }
@@ -298,7 +316,11 @@ pub(super) fn resolve_effect_params(
             } else {
                 (slot.node_id as u64, raw_idx as u64)
             };
-            let value = resolved_slot_param_value(slot, step_idx, param_idx, 0.0);
+            let value = device_print_value(
+                print_overrides,
+                crate::sequencer::DeviceParamPrintTarget::Effect { slot_idx, param_idx },
+            )
+            .unwrap_or_else(|| resolved_slot_param_value(slot, step_idx, param_idx, 0.0));
             if !value.is_finite() {
                 continue;
             }
@@ -313,6 +335,7 @@ pub(super) fn resolve_instrument_params(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
     step_idx: usize,
+    print_overrides: Option<&crate::sequencer::DeviceParamPrintValues>,
 ) -> ScheduledInstrumentParams {
     let slot = &snapshot.tracks[track_idx].instrument_slot;
     let num_params = slot.num_params as usize;
@@ -335,7 +358,11 @@ pub(super) fn resolve_instrument_params(
         } else {
             (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
         };
-        let value = resolved_slot_param_value(slot, step_idx, param_idx, 0.0);
+        let value = device_print_value(
+            print_overrides,
+            crate::sequencer::DeviceParamPrintTarget::Instrument { param_idx },
+        )
+        .unwrap_or_else(|| resolved_slot_param_value(slot, step_idx, param_idx, 0.0));
         if !value.is_finite() {
             continue;
         }
@@ -515,19 +542,93 @@ pub(super) fn resolve_effect_defaults(
     params
 }
 
+/// Plock-only effect resolution for inactive steps: an off-step effect p-lock
+/// applies to the track's per-track effect chain at that step boundary, the
+/// effect analog of the off-step instrument p-lock path. Untouched params emit
+/// nothing, so values hold until the next p-lock or the next ON trigger's full
+/// stamp. `print_overrides` (the live device-print latch) beats stored p-locks
+/// and also emits for latched params with no stored p-lock yet, so a held
+/// printing knob is audible on off-step boundaries too.
+pub(super) fn resolve_effect_plocks(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+    print_overrides: Option<&crate::sequencer::DeviceParamPrintValues>,
+) -> Vec<ScheduledEffectParam> {
+    let mut params = Vec::new();
+    for (slot_idx, slot) in snapshot.tracks[track_idx].effect_slots.iter().enumerate() {
+        if slot.node_id == 0 {
+            continue;
+        }
+        let num_params = slot.num_params as usize;
+        for param_idx in 0..num_params {
+            let printed = device_print_value(
+                print_overrides,
+                crate::sequencer::DeviceParamPrintTarget::Effect { slot_idx, param_idx },
+            );
+            let value = match printed {
+                Some(value) => value,
+                None => {
+                    let Some(value) = slot
+                        .plocks
+                        .get(step_idx)
+                        .and_then(|step| step.get(param_idx))
+                        .copied()
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    if !slot_has_explicit_plock(slot, step_idx, param_idx) {
+                        continue;
+                    }
+                    value
+                }
+            };
+            let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+                continue;
+            };
+            if raw_idx == u32::MAX {
+                continue;
+            }
+            let (logical_id, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
+                if slot.modulator_node_id == 0 {
+                    continue;
+                }
+                (
+                    slot.modulator_node_id as u64,
+                    raw_idx as u64 - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64,
+                )
+            } else {
+                (slot.node_id as u64, raw_idx as u64)
+            };
+            if !value.is_finite() {
+                continue;
+            }
+            params.push(ScheduledEffectParam::fixed(logical_id, idx, value));
+        }
+    }
+    params.sort_by_key(|param| (param.logical_id, param.idx));
+    params
+}
+
 pub(super) fn resolve_instrument_plocks(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
     step_idx: usize,
+    print_overrides: Option<&crate::sequencer::DeviceParamPrintValues>,
 ) -> ScheduledInstrumentParams {
     let slot = &snapshot.tracks[track_idx].instrument_slot;
     let num_params = slot.num_params as usize;
-    let Some(step_plocks) = slot.plocks.get(step_idx) else {
-        return ScheduledInstrumentParams::new();
-    };
+    let step_plocks = slot.plocks.get(step_idx);
     let mut params = ScheduledInstrumentParams::new();
     for param_idx in 0..num_params {
-        let Some(value) = step_plocks.get(param_idx).copied().flatten() else {
+        let printed = device_print_value(
+            print_overrides,
+            crate::sequencer::DeviceParamPrintTarget::Instrument { param_idx },
+        );
+        let Some(value) = printed.or_else(|| {
+            step_plocks.and_then(|step| step.get(param_idx).copied().flatten())
+        }) else {
             continue;
         };
         if !value.is_finite() {
@@ -550,9 +651,14 @@ pub(super) fn resolve_instrument_plocks(
         } else {
             (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
         };
-        let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
-        if !plock_identity_matches(&slot.plock_param_ids, step_idx, param_idx, expected_id) {
-            continue;
+        // A latched print value carries no stored p-lock id — only stored
+        // p-locks are subject to the stale-device identity check.
+        if printed.is_none() {
+            let expected_id =
+                slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
+            if !plock_identity_matches(&slot.plock_param_ids, step_idx, param_idx, expected_id) {
+                continue;
+            }
         }
         params.push(ScheduledInstrumentParam {
             target,

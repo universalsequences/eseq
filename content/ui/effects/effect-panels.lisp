@@ -156,7 +156,6 @@
 
 (def instrument-header-tab-button (text active width click)
   (v-stack :height 0.9 :gap 0
-    (box :height 0.15)
     (button text
       :width (* 1.5 width)
       :height 2.0
@@ -165,7 +164,7 @@
       :shape :tab
       :active (if active 1 0)
       :background-color :transparent
-      :active-background-color :black
+      :active-background-color :bg
       :color :dim
       :active-color :white
       :border-color :transparent

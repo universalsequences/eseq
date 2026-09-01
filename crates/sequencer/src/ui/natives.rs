@@ -3099,6 +3099,17 @@ pub(crate) fn init_runtime(
                     },
                 ),
                 (
+                    "track-plock-any",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_track_plock_any_value(&app, &state, 0)
+                    },
+                ),
+                // Print latches are per-gesture; nothing can be armed at
+                // startup (bead eseq-4seq).
+                ("track-plock-printing", Value::List(vec![])),
+                (
                     "track-plock-variants",
                     if track_count == 0 {
                         Value::List(vec![])
@@ -3181,6 +3192,8 @@ pub(crate) fn init_runtime(
                 ("learn-error", Value::String(String::new())),
                 ("editor-patch-macros", Value::List(vec![])),
                 ("editor-library-macros", Value::List(vec![])),
+                ("editor-assets", Value::List(vec![])),
+                ("editor-selected-asset", Value::Nil),
                 ("editor-open-macro", Value::String(String::new())),
                 (
                     "editor-instrument-run-mode",

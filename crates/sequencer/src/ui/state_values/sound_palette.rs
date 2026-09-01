@@ -1501,12 +1501,14 @@ mod rack_glyph_tests {
             group: None,
             env: None,
             role: None,
+            options: None,
         }
     }
 
     fn manifest(params: Vec<DGenParam>) -> DGenManifest {
         DGenManifest {
             dylib_path: std::path::PathBuf::new(),
+            asset_base: None,
             version: 2,
             process_abi: "dgen-host-abi-v1".to_string(),
             total_memory_slots: 0,

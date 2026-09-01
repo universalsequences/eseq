@@ -6,10 +6,15 @@ use std::time::Duration;
 use crate::layout::LayoutNode;
 use crossterm::event::Event;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum BackendEvent {
     Terminal(Event),
-    FileDrop(Vec<PathBuf>),
+    /// OS files dropped on the window, with the pointer position of the drop
+    /// in precise cell coordinates when the backend can report it. macOS
+    /// delivers no CursorMoved events during an external drag, so the last
+    /// tracked mouse position is stale at drop time; backends that can query
+    /// the pointer at the drop supply it here.
+    FileDrop(Vec<PathBuf>, Option<(f32, f32)>),
     /// The window system requested that the application close.
     Quit,
 }

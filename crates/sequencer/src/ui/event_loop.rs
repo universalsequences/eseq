@@ -193,6 +193,7 @@ pub(crate) fn run_event_loop(
         prev_editor_macro_action_fingerprint: u64::MAX,
         prev_editor_macro_sidebar_fingerprint: u64::MAX,
         prev_editor_open_macro: String::new(),
+        prev_editor_selected_asset: None,
         prev_playing: false,
         prev_bpm: 0,
         prev_playhead: u32::MAX,
@@ -665,26 +666,40 @@ pub(crate) fn run_event_loop(
             let event_started = Instant::now();
             match event {
                 BackendEvent::Quit => editor.request_quit(),
-                BackendEvent::FileDrop(paths) => {
-                    match SampleImportSession::from_drop(
-                        paths,
-                        &sequencer::app_paths::app_paths().sample_db_path(),
-                    ) {
-                        Ok(session) => {
-                            if session.is_empty() {
-                                editor.show_transient_message(
-                                    "No supported audio files found in dropped items",
-                                );
-                            } else {
-                                sample_import_session = Some(session);
-                                if let Some(session) = sample_import_session.as_ref() {
-                                    session.render_into_editor(&mut editor);
-                                }
-                                editor.show_transient_message("Sample import staged");
-                            }
+                BackendEvent::FileDrop(paths, drop_position) => {
+                    match editor.handle_patcher_file_drop(&paths, drop_position, 0) {
+                        Ok(Some(imported)) => {
+                            editor.show_transient_message(format!(
+                                "Imported {imported} tensor asset into the patch draft"
+                            ));
                         }
                         Err(error) => {
-                            editor.show_transient_message(format!("Sample import failed: {error}"));
+                            editor.show_transient_message(format!("Asset import failed: {error}"));
+                        }
+                        Ok(None) => {
+                            match SampleImportSession::from_drop(
+                                paths,
+                                &sequencer::app_paths::app_paths().sample_db_path(),
+                            ) {
+                                Ok(session) => {
+                                    if session.is_empty() {
+                                        editor.show_transient_message(
+                                            "No supported audio files found in dropped items",
+                                        );
+                                    } else {
+                                        sample_import_session = Some(session);
+                                        if let Some(session) = sample_import_session.as_ref() {
+                                            session.render_into_editor(&mut editor);
+                                        }
+                                        editor.show_transient_message("Sample import staged");
+                                    }
+                                }
+                                Err(error) => {
+                                    editor.show_transient_message(format!(
+                                        "Sample import failed: {error}"
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
@@ -1482,6 +1497,7 @@ pub(crate) fn run_event_loop(
                             rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
                             rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
                             rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "track-plock-any", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
@@ -1559,6 +1575,7 @@ pub(crate) fn run_event_loop(
                                     &app.graph.effect_descriptors,
                                 ),
                             );
+                            sync_track_plock_any_field(rt, &app, &shared.state, ct);
                             sync_sidebar_browser(rt, &app, ct);
                         }
 
@@ -1613,6 +1630,19 @@ pub(crate) fn run_event_loop(
             gesture.rack_control_snapshot_dirty = false;
         }
         if pointer_released_this_loop {
+            // Device-param print is a hold gesture. It shares the same
+            // pointer-release boundary as coalesced knob-edit history, but
+            // does not create a device-p-lock gesture entry of its own.
+            {
+                let mut print = shared.step_print.lock().unwrap();
+                print.release_device_param_gesture(&shared.state);
+                // The print overlay is a hold indicator: drop it on the same
+                // release that ends the gesture, without waiting for the next
+                // print tick (which may not run at all).
+                let dirty = sync_print_latch_rows(editor.runtime_mut(), &print);
+                drop(print);
+                flush_reactive_display_edit(&mut editor, dirty);
+            }
             app::edit::finish_active_gesture(&mut app);
         } else if !pointer_is_down {
             app::edit::finish_active_gesture_if_idle(&mut app);

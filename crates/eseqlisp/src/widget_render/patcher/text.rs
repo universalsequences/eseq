@@ -1,12 +1,14 @@
 use crate::layout::Rect;
+use crate::parser::{ASTParser, Expression, Parser, Token};
 use std::collections::HashMap;
 
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
+use super::lisp::{attribute_span_len, is_attribute_key};
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
 use super::model::MacroPatch;
 use super::project::{
-    OperatorDocumentation, OperatorPortDocumentation, dgenlisp_operator_documentation,
-    dgenlisp_operator_names,
+    OperatorDocumentation, OperatorPortDocumentation, dgenlisp_operator_attributes,
+    dgenlisp_operator_documentation, dgenlisp_operator_names,
 };
 use super::state::{
     PatcherInteractionState, PatcherNodeOrigin, PatcherTextEdit, debug_log_edit_event,
@@ -62,6 +64,7 @@ pub(super) fn begin_patcher_text_edit(
     node_id: String,
     text: String,
     cursor_pos: usize,
+    asset_paths: Vec<String>,
 ) {
     state.selected_nodes.clear();
     state.selected_nodes.insert(node_id.clone());
@@ -79,6 +82,7 @@ pub(super) fn begin_patcher_text_edit(
         },
         autocomplete_selected: 0,
     });
+    state.autocomplete_asset_paths = asset_paths;
     state.hover_back_button = false;
     debug_log_edit_event("begin-text-edit", state);
 }
@@ -86,8 +90,9 @@ pub(super) fn begin_patcher_text_edit(
 pub(super) fn patcher_autocomplete_matches(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
 ) -> Vec<String> {
-    patcher_autocomplete_suggestions(edit, local_macros)
+    patcher_autocomplete_suggestions(edit, local_macros, asset_paths)
         .into_iter()
         .map(|suggestion| suggestion.name)
         .collect()
@@ -96,25 +101,52 @@ pub(super) fn patcher_autocomplete_matches(
 pub(super) fn patcher_autocomplete_suggestions(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
 ) -> Vec<PatcherAutocompleteSuggestion> {
-    let Some(prefix) = autocomplete_prefix(&edit.text) else {
+    let Some(context) = autocomplete_context(edit) else {
         return Vec::new();
     };
-    let prefix = prefix.to_lowercase();
-    let docs = dgenlisp_operator_documentation();
-    let mut candidates: HashMap<String, Option<OperatorDocumentation>> = dgenlisp_operator_names()
-        .iter()
-        .filter(|name| name.to_lowercase().starts_with(&prefix))
-        .map(|name| (name.clone(), docs.get(name).cloned()))
-        .collect();
-    if "history".starts_with(&prefix) {
-        candidates.insert("history".to_string(), Some(patcher_history_documentation()));
-    }
-    for macro_patch in local_macros {
-        if macro_patch.name.to_lowercase().starts_with(&prefix) {
-            candidates.insert(
-                macro_patch.name.clone(),
-                Some(local_macro_documentation(macro_patch)),
+    let prefix = context.prefix.to_lowercase();
+    let mut candidates = HashMap::new();
+    match context.kind {
+        AutocompleteKind::Operator => {
+            let docs = dgenlisp_operator_documentation();
+            candidates.extend(
+                dgenlisp_operator_names()
+                    .iter()
+                    .filter(|name| name.to_lowercase().starts_with(&prefix))
+                    .map(|name| (name.clone(), docs.get(name).cloned())),
+            );
+            if "history".starts_with(&prefix) {
+                candidates.insert("history".to_string(), Some(patcher_history_documentation()));
+            }
+            for macro_patch in local_macros {
+                if macro_patch.name.to_lowercase().starts_with(&prefix) {
+                    candidates.insert(
+                        macro_patch.name.clone(),
+                        Some(local_macro_documentation(macro_patch)),
+                    );
+                }
+            }
+        }
+        AutocompleteKind::Attribute { operator } => {
+            if let Some(attributes) = dgenlisp_operator_attributes().get(operator) {
+                candidates.extend(
+                    attributes
+                        .iter()
+                        .filter(|name| name.to_lowercase().starts_with(&prefix))
+                        .map(|name| (name.clone(), None)),
+                );
+            }
+        }
+        AutocompleteKind::AssetPath => {
+            let path_prefix = prefix.strip_prefix('"').unwrap_or(&prefix);
+            let path_prefix = path_prefix.strip_suffix('"').unwrap_or(path_prefix);
+            candidates.extend(
+                asset_paths
+                    .iter()
+                    .filter(|path| path.to_lowercase().starts_with(path_prefix))
+                    .map(|path| (format!("\"{path}\""), None)),
             );
         }
     }
@@ -201,16 +233,18 @@ fn local_macro_documentation(macro_patch: &MacroPatch) -> OperatorDocumentation 
 pub(super) fn patcher_autocomplete_is_open(
     edit: &PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
 ) -> bool {
-    !patcher_autocomplete_matches(edit, local_macros).is_empty()
+    !patcher_autocomplete_matches(edit, local_macros, asset_paths).is_empty()
 }
 
 pub(super) fn move_patcher_autocomplete_selection(
     edit: &mut PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
     delta: isize,
 ) -> bool {
-    let matches = patcher_autocomplete_matches(edit, local_macros);
+    let matches = patcher_autocomplete_matches(edit, local_macros, asset_paths);
     if matches.is_empty() {
         edit.autocomplete_selected = 0;
         return false;
@@ -224,17 +258,19 @@ pub(super) fn move_patcher_autocomplete_selection(
 pub(super) fn apply_patcher_autocomplete(
     edit: &mut PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
 ) -> bool {
-    let matches = patcher_autocomplete_matches(edit, local_macros);
+    let Some(context) = autocomplete_context(edit) else {
+        return false;
+    };
+    let (start, end) = (context.start, context.end);
+    let matches = patcher_autocomplete_matches(edit, local_macros, asset_paths);
     if matches.is_empty() {
         edit.autocomplete_selected = 0;
         return false;
     }
     let selected = edit.autocomplete_selected.min(matches.len() - 1);
     let replacement = &matches[selected];
-    let Some((start, end)) = first_token_byte_span(&edit.text) else {
-        return false;
-    };
     let mut completed = String::with_capacity(edit.text.len() + replacement.len() + 1);
     completed.push_str(&edit.text[..start]);
     completed.push_str(replacement);
@@ -247,22 +283,50 @@ pub(super) fn apply_patcher_autocomplete(
     }
     completed.push_str(&edit.text[end..]);
     edit.text = completed;
-    edit.state.cursor_pos = edit.text[..start].chars().count() + replacement.chars().count() + 1;
+    edit.state.cursor_pos = edit.text[..start].chars().count()
+        + replacement.chars().count()
+        + 1;
     edit.state.selection_anchor = None;
     edit.state.selecting = false;
     edit.autocomplete_selected = 0;
     true
 }
 
+/// The untyped tail of the selected completion, for rendering immediately
+/// after the caret. Ghost text is intentionally limited to a trailing token:
+/// drawing it inside authored suffix text would obscure that text rather than
+/// preview the result that Tab will produce.
+pub(super) fn patcher_autocomplete_ghost_text(
+    edit: &PatcherTextEdit,
+    local_macros: &[MacroPatch],
+) -> Option<String> {
+    if edit.state.selection_anchor.is_some() {
+        return None;
+    }
+    let context = autocomplete_context(edit)?;
+    if !matches!(context.kind, AutocompleteKind::Attribute { .. })
+        || context.cursor != context.end
+        || context.end != edit.text.len()
+    {
+        return None;
+    }
+    let matches = patcher_autocomplete_matches(edit, local_macros, &[]);
+    let selected = matches.get(edit.autocomplete_selected.min(matches.len().saturating_sub(1)))?;
+    let prefix_chars = context.prefix.chars().count();
+    let remainder = selected.chars().skip(prefix_chars).collect::<String>();
+    (!remainder.is_empty()).then_some(remainder)
+}
+
 pub(super) fn clamp_patcher_autocomplete_selection(edit: &mut PatcherTextEdit) {
-    clamp_patcher_autocomplete_selection_with_macros(edit, &[]);
+    clamp_patcher_autocomplete_selection_with_macros(edit, &[], &[]);
 }
 
 pub(super) fn clamp_patcher_autocomplete_selection_with_macros(
     edit: &mut PatcherTextEdit,
     local_macros: &[MacroPatch],
+    asset_paths: &[String],
 ) {
-    let len = patcher_autocomplete_matches(edit, local_macros).len();
+    let len = patcher_autocomplete_matches(edit, local_macros, asset_paths).len();
     if len == 0 {
         edit.autocomplete_selected = 0;
     } else {
@@ -270,17 +334,166 @@ pub(super) fn clamp_patcher_autocomplete_selection_with_macros(
     }
 }
 
-fn autocomplete_prefix(text: &str) -> Option<&str> {
-    let (start, end) = first_token_byte_span(text)?;
-    if text[end..].chars().next().is_some_and(char::is_whitespace) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutocompleteKind<'a> {
+    Operator,
+    Attribute { operator: &'a str },
+    AssetPath,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AutocompleteContext<'a> {
+    kind: AutocompleteKind<'a>,
+    prefix: &'a str,
+    start: usize,
+    end: usize,
+    cursor: usize,
+}
+
+fn autocomplete_context(edit: &PatcherTextEdit) -> Option<AutocompleteContext<'_>> {
+    let cursor = char_to_byte_index(&edit.text, edit.state.cursor_pos);
+    if let Some((start, end)) = asset_path_value_span_at_cursor(&edit.text, cursor) {
+        return Some(AutocompleteContext {
+            kind: AutocompleteKind::AssetPath,
+            prefix: &edit.text[start..cursor],
+            start,
+            end,
+            cursor,
+        });
+    }
+
+    let (start, end) = token_byte_span_at_cursor(&edit.text, cursor)?;
+    let prefix = &edit.text[start..cursor];
+    if prefix.is_empty() {
         return None;
     }
-    let prefix = &text[start..end];
-    if prefix.is_empty() {
-        None
+    let first_token = first_token_byte_span(&edit.text)?;
+    let kind = if (start, end) == first_token {
+        AutocompleteKind::Operator
     } else {
-        Some(prefix)
+        if !prefix.starts_with('@') {
+            return None;
+        }
+        AutocompleteKind::Attribute {
+            operator: &edit.text[first_token.0..first_token.1],
+        }
+    };
+    Some(AutocompleteContext {
+        kind,
+        prefix,
+        start,
+        end,
+        cursor,
+    })
+}
+
+/// Returns the source span of the `@file`/`@default-file` value under the
+/// cursor. Attribute traversal deliberately uses `attribute_span_len`: a
+/// preceding bracketed value may occupy several parser items, and treating
+/// every attribute as a key/value pair would misidentify its tail as a path.
+fn asset_path_value_span_at_cursor(text: &str, cursor: usize) -> Option<(usize, usize)> {
+    let source = format!("({text})");
+    let tokens = Parser::new(source).parse().ok()?;
+    let expressions = ASTParser::new(tokens).parse().ok()?;
+    let Expression::List(items) = expressions.first()? else {
+        return None;
+    };
+    let item_spans = top_level_item_byte_spans(text)?;
+    if items.len() != item_spans.len() {
+        return None;
     }
+
+    let mut idx = 1;
+    while idx < items.len() {
+        if !is_attribute_key(&items[idx]) {
+            idx += 1;
+            continue;
+        }
+        let span = attribute_span_len(items, idx);
+        let is_file_attribute = matches!(
+            &items[idx],
+            Expression::Symbol(key) if key == "@file" || key == "@default-file"
+        );
+        if is_file_attribute {
+            if span > 1 {
+                let value_span = item_spans[idx + 1];
+                if value_span.0 <= cursor && cursor <= value_span.1 {
+                    return Some(value_span);
+                }
+            } else {
+                let key_end = item_spans[idx].1;
+                if key_end <= cursor && text[key_end..cursor].chars().all(char::is_whitespace) {
+                    return Some((cursor, cursor));
+                }
+            }
+        }
+        idx += span;
+    }
+    None
+}
+
+fn top_level_item_byte_spans(text: &str) -> Option<Vec<(usize, usize)>> {
+    let tokens = Parser::new(text.to_string()).parse_spanned().ok()?;
+    let mut spans = Vec::new();
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let start = tokens[idx].span.start_byte;
+        let end_idx = token_expression_end(&tokens, idx)?;
+        spans.push((start, tokens[end_idx].span.end_byte));
+        idx = end_idx + 1;
+    }
+    Some(spans)
+}
+
+fn token_expression_end(tokens: &[crate::parser::SpannedToken], start: usize) -> Option<usize> {
+    match tokens.get(start)?.token {
+        Token::Quote | Token::Backtick | Token::Comma | Token::CommaAt => {
+            token_expression_end(tokens, start + 1)
+        }
+        Token::LeftParen => {
+            let mut idx = start + 1;
+            while idx < tokens.len() && !matches!(tokens[idx].token, Token::RightParen) {
+                idx = token_expression_end(tokens, idx)? + 1;
+            }
+            Some(idx.min(tokens.len().saturating_sub(1)))
+        }
+        _ => Some(start),
+    }
+}
+
+fn char_to_byte_index(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(byte_index, _)| byte_index)
+        .unwrap_or(text.len())
+}
+
+fn token_byte_span_at_cursor(text: &str, cursor: usize) -> Option<(usize, usize)> {
+    let cursor_char = text[cursor..].chars().next();
+    let previous_char = text[..cursor].chars().next_back();
+    if cursor_char.is_none_or(char::is_whitespace)
+        && previous_char.is_none_or(char::is_whitespace)
+    {
+        return None;
+    }
+    let anchor = if cursor_char.is_some_and(|ch| !ch.is_whitespace()) {
+        cursor
+    } else {
+        text[..cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)?
+    };
+    let start = text[..anchor]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(index + ch.len_utf8()))
+        .unwrap_or(0);
+    let end = text[anchor..]
+        .char_indices()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(anchor + index))
+        .unwrap_or(text.len());
+    Some((start, end))
 }
 
 fn first_token_byte_span(text: &str) -> Option<(usize, usize)> {

@@ -1912,6 +1912,51 @@ impl Editor {
         )
     }
 
+    pub(super) fn import_external_patcher_asset_at(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Result<Option<usize>, String> {
+        // Only a single .json file is a candidate tensor-asset import; anything
+        // else (audio files, multi-file drops) falls through to the host's
+        // sample importer even when the pointer is over a patcher.
+        let [path] = paths else {
+            return Ok(None);
+        };
+        if !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        {
+            return Ok(None);
+        }
+        let Some(layout) = self.runtime.current_layout.as_ref() else {
+            return Ok(None);
+        };
+        let local_col = precise_col - content_col as f32 + self.widget_layout_scroll_left();
+        let local_row = precise_row - content_row as f32 + self.total_scroll_top();
+        let Some((target, hit_row, hit_col)) = deepest_drop_target(
+            layout,
+            local_row,
+            local_col,
+            widget_render::patcher::PATCHER_ASSET_DRAG_TYPE,
+        ) else {
+            return Ok(None);
+        };
+        let imported =
+            widget_render::patcher::import_patcher_asset_file(&target, path, hit_col, hit_row)?;
+        if !self.apply_widget_output(Some(imported.output)) {
+            return Err(format!(
+                "Imported {} but could not apply the patcher writeback",
+                imported.destination.display()
+            ));
+        }
+        Ok(Some(1))
+    }
+
     pub(super) fn dispatch_widget_drop_event(
         &self,
         gesture: &WidgetGesture,
