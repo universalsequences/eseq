@@ -9382,7 +9382,7 @@
         let plocks: std::collections::HashMap<usize, f32> =
             [(2, 500.0), (14, 900.0)].into_iter().collect();
         let held = |step: usize| {
-            held_plock_value(&state, 0, step, |s| plocks.get(&s).copied())
+            held_plock_value(&state, 0, step, true, |s| plocks.get(&s).copied())
         };
 
         assert_eq!(held(2), Some(500.0), "a step's own p-lock is in force");

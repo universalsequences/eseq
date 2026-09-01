@@ -223,10 +223,17 @@ fn asset_metadata_value(header: TensorAssetHeader) -> Value {
     let waves_per_set = header
         .waves_per_set
         .and_then(|value| usize::try_from(value).ok());
-    let set_count = waves_per_set
-        .map(|value| wave_count / value)
-        .unwrap_or(1)
-        .max(1);
+    let set_count = match waves_per_set {
+        Some(value) => (wave_count / value).max(1),
+        // `waves_per_set` is independently optional: with no grouping declared,
+        // the declared label list itself is the set count. Never truncate valid labels.
+        None => header
+            .sets
+            .as_ref()
+            .map(|sets| sets.len())
+            .unwrap_or(1)
+            .max(1),
+    };
     let fields = HashMap::from([
         (
             "shape".to_string(),
@@ -2060,6 +2067,28 @@ mod asset_metadata_tests {
         assert_eq!(map_number(&map, "set-count"), 2.0);
         assert_eq!(list_strings(map.get("sets").unwrap()), ["A", "B"]);
         assert_eq!(list_strings(map.get("wave-names").unwrap()).len(), 5);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_metadata_keeps_all_sets_when_waves_per_set_is_absent() {
+        let root = temp_root("asset-metadata-sets-without-waves-per-set");
+        let path = root.join("bank.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "shape": [4, 2],
+                "data": [0, 1, 2, 3, 4, 5, 6, 7],
+                "sets": ["A", "B"]
+            }"#,
+        )
+        .unwrap();
+
+        let Value::Map(map) = asset_metadata_value(load_asset_metadata(&path).unwrap()) else {
+            panic!("expected metadata map");
+        };
+        assert_eq!(map_number(&map, "set-count"), 2.0);
+        assert_eq!(list_strings(map.get("sets").unwrap()), ["A", "B"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -847,7 +847,17 @@ pub(crate) fn tick_step_print(
     // the separately published bus runtime. Coalesce each publication once
     // per tick after all writes land; never publish once per target/step.
     if track_snapshot_dirty {
-        shared.state.publish_scheduler_track(printed.track);
+        if roll_publish_pending {
+            // Same deferral contract as the step-param publish above: a held
+            // roll owns the track snapshot until its release grace window, so
+            // publishing here would make its written steps audible early. Mark
+            // the track dirty and let a later tick (or the roll's own release
+            // publish) carry the printed p-locks along.
+            shared.step_print.lock().unwrap().dirty_unpublished_tracks |=
+                1u64 << printed.track.min(sequencer::sequencer::MAX_TRACKS - 1);
+        } else {
+            shared.state.publish_scheduler_track(printed.track);
+        }
     }
     if bus_runtime_dirty {
         app.publish_bus_effect_runtime();

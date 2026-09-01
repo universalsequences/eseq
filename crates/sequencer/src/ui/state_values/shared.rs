@@ -259,12 +259,20 @@ pub(super) fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDesc
 /// or the next ON trigger's full param stamp, so a triggered step without its
 /// own p-lock ends the walk and the base value is in force. Mirrors the
 /// scheduler's off-step p-lock application, so the knob shows what is heard.
+///
+/// `has_any` is an O(1) gate for the whole p-lock table the closure reads: when
+/// the table holds no p-lock at all the walk can only return `None`, so skip it
+/// rather than scanning every step (this runs per parameter on the meter poll).
 pub(super) fn held_plock_value(
     state: &SequencerState,
     track: usize,
     step: usize,
+    has_any: bool,
     mut plock_at: impl FnMut(usize) -> Option<f32>,
 ) -> Option<f32> {
+    if !has_any {
+        return None;
+    }
     let num_steps = state
         .pattern
         .track_params
