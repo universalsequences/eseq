@@ -20,6 +20,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-track-plock-entry",
     "set-track-plock-entry-option",
     "clear-track-plock-entry",
+    "clear-param-plocks",
     "preview-plock-variant",
     "stamp-plock-variant",
     "clear-step-variant-locks",
@@ -511,7 +512,12 @@ pub(super) fn handle(
             let was_latched = print.armed();
             let ended = print.unlatch(param);
             print.publish_engine_override(&state);
+            // A step-param release can end the whole latch, which must also
+            // drop any device-param print overlay it was holding.
+            let overlay_dirty =
+                crate::step_print::sync_print_latch_rows(editor.runtime_mut(), &print);
             drop(print);
+            flush_reactive_display_edit(editor, overlay_dirty);
             if was_latched && ended {
                 // The whole latch ended here (not in the tick's gate check),
                 // so restore all picker readouts to the cursor step now.
@@ -1581,6 +1587,109 @@ pub(super) fn handle(
                 }
             }
         }
+        // Bulk p-lock delete from the knob's right-click menu (bead eseq-1gy6).
+        // One `AppCommand::Clear*PlockMulti` carrying every affected step, so
+        // the whole sweep is a single history entry: one undo restores all of
+        // it. `scope` picks the step set — "selected" means the current step
+        // selection, anything else means the entire pattern, including the
+        // off-step rows that carry track-level automation.
+        "clear-param-plocks" => {
+            let Value::Map(ref map) = payload else {
+                return;
+            };
+            let Some(target) = map_string(map, "target") else {
+                return;
+            };
+            let slot_idx = map_usize(map, "slot-idx");
+            let rack_slot = map_usize(map, "rack-slot");
+            let Some(param_idx) = map_usize(map, "param-idx") else {
+                return;
+            };
+            let steps: Vec<usize> = if map_string(map, "scope").as_deref() == Some("selected") {
+                let mut steps: Vec<usize> = selected_steps
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .filter(|step| *step < MAX_STEPS)
+                    .collect();
+                steps.sort_unstable();
+                steps
+            } else {
+                (0..MAX_STEPS).collect()
+            };
+            if steps.is_empty() {
+                return;
+            }
+            let track = current_track.load(Ordering::Relaxed);
+            let command = match target.as_str() {
+                "instrument" => Some(app::AppCommand::ClearInstrumentPlockMulti {
+                    track,
+                    steps,
+                    param_idx,
+                }),
+                "effect" => slot_idx.map(|slot_idx| app::AppCommand::ClearEffectPlockMulti {
+                    track,
+                    steps,
+                    slot_idx,
+                    param_idx,
+                }),
+                "midi-fx" => slot_idx.map(|slot_idx| app::AppCommand::ClearMidiFxPlockMulti {
+                    track,
+                    steps,
+                    slot_idx,
+                    param_idx,
+                }),
+                "rack-effect" => match (rack_slot, slot_idx) {
+                    (Some(rack_slot_idx), Some(effect_slot_idx)) => {
+                        Some(app::AppCommand::ClearRackSlotEffectPlockMulti {
+                            track,
+                            steps,
+                            rack_slot_idx,
+                            effect_slot_idx,
+                            param_idx,
+                        })
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(command) = command else {
+                return;
+            };
+            let changed = app::try_apply_command(&mut app, command)
+                .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
+            if !changed {
+                return;
+            }
+            // Same refresh arms the per-step clear uses, plus the automation
+            // presence field so the knob's dot goes out with the locks.
+            let selection = selected_neural_neurons.lock().unwrap().clone();
+            {
+                let rt = editor.runtime_mut();
+                sync_track_plocks_for_neural_selection(
+                    rt,
+                    &app,
+                    &state,
+                    track,
+                    &selected_steps,
+                    &selection,
+                );
+                sync_instrument_plock_presence_display_fields(
+                    rt,
+                    &state,
+                    &app,
+                    &ctx.shared.expanded_step_projection,
+                    track,
+                    &selected_steps,
+                );
+                rt.run_reactive_cycle();
+            }
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+            fx_epoch.fetch_add(1, Ordering::Relaxed);
+            ui_epoch.fetch_add(1, Ordering::Relaxed);
+        }
         "preview-plock-variant" => {
             if let Value::Map(ref map) = payload {
                 if let Some(label) = map_string(map, "label") {
@@ -1863,6 +1972,36 @@ mod tests {
                 ui_epoch,
                 ui_invalidations,
             }
+        }
+
+        /// Give the track a real instrument descriptor, so instrument p-lock
+        /// commands pass `validate_device_command_target` the way they do
+        /// against a loaded instrument.
+        fn with_instrument_descriptor(
+            &mut self,
+            desc: &sequencer::effects::EffectDescriptor,
+        ) {
+            self.state.pattern.instrument_slots[TRACK].apply_descriptor(desc, 0);
+            self.app.graph.instrument_descriptors = vec![desc.clone()];
+        }
+
+        /// Run one host command through the real dispatcher.
+        fn dispatch(&mut self, name: &str, payload: Value) {
+            let mut ctx = LoopCtx {
+                sessions: &mut self.sessions,
+                meters: &mut self.meters,
+                frame: &mut self.frame,
+                gesture: &mut self.gesture,
+                track_names: &mut self.track_names,
+                shared: &self.shared,
+            };
+            dispatch_custom_host_command(
+                name,
+                payload,
+                &mut self.app,
+                &mut self.editor,
+                &mut ctx,
+            );
         }
 
         /// The real seam: `dispatch_custom_host_command` -> this module's
@@ -2364,6 +2503,136 @@ mod tests {
         assert!(
             harness.ui_invalidations.drain().is_empty(),
             "arming alone queues no invalidations; the tick's writes do"
+        );
+    }
+
+    fn clear_param_plocks_payload(scope: &str, param_idx: usize) -> Value {
+        Value::Map(
+            [
+                (
+                    "target".to_string(),
+                    Rc::new(RefCell::new(Value::String("instrument".to_string()))),
+                ),
+                (
+                    "slot-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(0.0))),
+                ),
+                (
+                    "rack-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(0.0))),
+                ),
+                (
+                    "param-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(param_idx as f64))),
+                ),
+                (
+                    "scope".to_string(),
+                    Rc::new(RefCell::new(Value::String(scope.to_string()))),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    /// Bead eseq-1gy6. "Clear p-locks" from the knob's right-click menu wipes
+    /// the param across the whole pattern — including the off-step rows that
+    /// carry track-level automation — and does it as ONE history entry, so a
+    /// single undo brings every lock back.
+    #[test]
+    fn clear_param_plocks_wipes_the_whole_pattern_in_one_undo_entry() {
+        let mut harness = Harness::new();
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let other_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name != "cutoff")
+            .expect("filter descriptor should have a second param");
+        harness.with_instrument_descriptor(&desc);
+        let slot = &harness.state.pattern.instrument_slots[TRACK];
+        // Two in-range steps, plus one past `num_steps` (16): an off-step lock
+        // is the same storage and has to go too.
+        for step in [2usize, 9, 40] {
+            slot.set_plock(step, cutoff_idx, 900.0 + step as f32);
+        }
+        slot.set_plock(2, other_idx, 0.25);
+
+        let undo_before = harness.app.history.undo_len();
+        harness.dispatch("clear-param-plocks", clear_param_plocks_payload("all", cutoff_idx));
+
+        let slot = &harness.state.pattern.instrument_slots[TRACK];
+        for step in [2usize, 9, 40] {
+            assert_eq!(
+                slot.plocks.get(step, cutoff_idx),
+                None,
+                "step {step} must lose its cutoff p-lock"
+            );
+        }
+        assert_eq!(
+            slot.plocks.get(2, other_idx),
+            Some(0.25),
+            "a sibling param's lock on the same step must survive"
+        );
+        assert_eq!(
+            harness.app.history.undo_len(),
+            undo_before + 1,
+            "the whole sweep must be a single history entry"
+        );
+
+        assert!(matches!(
+            app::edit::undo(&mut harness.app),
+            app::history::HistoryReplay::Applied(_)
+        ));
+        let slot = &harness.state.pattern.instrument_slots[TRACK];
+        for step in [2usize, 9, 40] {
+            assert_eq!(
+                slot.plocks.get(step, cutoff_idx),
+                Some(900.0 + step as f32),
+                "one undo must restore step {step}"
+            );
+        }
+    }
+
+    /// The selection-scoped item clears only the steps the user has selected.
+    #[test]
+    fn clear_param_plocks_scoped_to_the_selection_leaves_other_steps_alone() {
+        let mut harness = Harness::new();
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        harness.with_instrument_descriptor(&desc);
+        let slot = &harness.state.pattern.instrument_slots[TRACK];
+        for step in [1usize, 3, 7] {
+            slot.set_plock(step, cutoff_idx, 900.0 + step as f32);
+        }
+        harness.selected_steps.lock().unwrap().extend([1usize, 7]);
+
+        let undo_before = harness.app.history.undo_len();
+        harness.dispatch(
+            "clear-param-plocks",
+            clear_param_plocks_payload("selected", cutoff_idx),
+        );
+
+        let slot = &harness.state.pattern.instrument_slots[TRACK];
+        assert_eq!(slot.plocks.get(1, cutoff_idx), None);
+        assert_eq!(slot.plocks.get(7, cutoff_idx), None);
+        assert_eq!(
+            slot.plocks.get(3, cutoff_idx),
+            Some(903.0),
+            "an unselected step must keep its p-lock"
+        );
+        assert_eq!(
+            harness.app.history.undo_len(),
+            undo_before + 1,
+            "the selection sweep is also a single history entry"
         );
     }
 }

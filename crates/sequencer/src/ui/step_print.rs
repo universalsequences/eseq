@@ -207,6 +207,65 @@ impl StepPrintState {
     }
 }
 
+/// The p-lock projection rows for the device params currently held under a
+/// print latch (bead eseq-4seq). The *plock-sync* projection in
+/// content/ui/effects/param-controls.lisp turns each row into a per-param
+/// `plk-…-print` SEQV scalar, so a param control subscribes only to its own
+/// latch flag — the same fan-out the `plk-…-on` lock flags use.
+///
+/// Only families whose controls can derive that key are emitted. Step params
+/// have their own pickers (and their own held-value display path); bus effects,
+/// rack slot params, rack slot instruments and rack macros have no target in
+/// the Lisp key scheme, so a row for them could never be read — and for bus
+/// effects a row would be actively wrong, since "effect" + slot index would
+/// address the same-numbered slot of the TRACK chain.
+pub(crate) fn print_latch_rows(targets: &[(PrintTarget, f32)]) -> Value {
+    let mut rows = Vec::new();
+    for (target, _) in targets {
+        let row = match target {
+            PrintTarget::Instrument { param_idx } => {
+                plock_key_row("instrument", None, None, Some(*param_idx))
+            }
+            PrintTarget::Effect {
+                slot_idx,
+                param_idx,
+            } => plock_key_row("effect", Some(*slot_idx), None, Some(*param_idx)),
+            PrintTarget::MidiFx {
+                slot_idx,
+                param_idx,
+            } => plock_key_row("midi-fx", Some(*slot_idx), None, Some(*param_idx)),
+            PrintTarget::RackSlotEffect {
+                rack_slot_idx,
+                effect_slot_idx,
+                param_idx,
+            } => plock_key_row(
+                "rack-effect",
+                Some(*effect_slot_idx),
+                Some(*rack_slot_idx),
+                Some(*param_idx),
+            ),
+            PrintTarget::Step(_)
+            | PrintTarget::BusEffect { .. }
+            | PrintTarget::RackSlotParam { .. }
+            | PrintTarget::RackSlotInstrument { .. }
+            | PrintTarget::RackMacro { .. } => continue,
+        };
+        rows.push(row);
+    }
+    Value::List(rows)
+}
+
+/// Publish the current print latch as projection rows. Idempotent — the
+/// reactive registry's unchanged-value fast path makes a repeat publish free,
+/// so this can be called from every latch/unlatch/disarm seam without
+/// bookkeeping. Publishing the empty list is what clears every previously
+/// latched param's overlay, including the targets a cross-track re-latch
+/// dropped in `StepPrintState::latch`.
+pub(crate) fn sync_print_latch_rows(rt: &mut Runtime, print: &StepPrintState) -> bool {
+    let result = rt.set_reactive("SEQ", "track-plock-printing", print_latch_rows(&print.values));
+    result.effects_dirty || result.widgets_dirty
+}
+
 /// The reactive display field(s) a device print target's own control binds to,
 /// paired with the latched value rendered the way that control's normal sync
 /// path renders it (instrument and rack-instrument params are published in
@@ -435,6 +494,10 @@ pub(crate) fn try_latch_param_print(
         // A cross-track touch may have replaced a Step target, so clear or
         // republish its engine-only override at the same latch transition.
         print.publish_engine_override(&shared.state);
+        // Arm the print overlay on the held control(s) — and only those.
+        let dirty = sync_print_latch_rows(editor.runtime_mut(), &print);
+        drop(print);
+        flush_reactive_display_edit(editor, dirty);
     }
     // The latch replaces the base-value write, so the control's own display
     // binding has to follow the latch or the knob only moves once per step.
@@ -610,7 +673,7 @@ pub(crate) fn tick_step_print(
     let recording = shared.recording.load(Ordering::Relaxed);
     let focused_track = shared.current_track.load(Ordering::Relaxed);
     let printed = print_pass(&shared.state, &mut print, focused_track, recording);
-    let display_dirty = if print.armed() {
+    let mut display_dirty = if print.armed() {
         sync_print_display_fields(rt, &print)
     } else if was_armed {
         // Gate just failed: give the readouts back to the cursor step.
@@ -618,6 +681,10 @@ pub(crate) fn tick_step_print(
     } else {
         false
     };
+    // Covers the disarms that happen inside `print_pass` (transport stop,
+    // record off, focus move) as well as a cross-track re-latch: the overlay
+    // has to leave every control the latch no longer holds.
+    display_dirty |= sync_print_latch_rows(rt, &print);
     let roll_publish_pending = shared
         .roll_record
         .lock()
@@ -808,8 +875,8 @@ pub(crate) fn tick_step_print(
 #[cfg(test)]
 mod step_print_tests {
     use super::{
-        print_pass, restore_cursor_display_fields, sync_print_display_fields, PrintTarget,
-        StepPrintState,
+        print_pass, restore_cursor_display_fields, sync_print_display_fields,
+        sync_print_latch_rows, PrintTarget, StepPrintState,
     };
     use eseqlisp::vm::Value;
     use eseqlisp::Runtime;
@@ -1140,6 +1207,91 @@ mod step_print_tests {
             ),
             "after disarm the picker must show the cursor step's value again"
         );
+    }
+
+    // Bead eseq-4seq: the print overlay is held-only, so the published row
+    // list must name exactly the device params under the latch — and go empty
+    // again the moment the latch ends, including the targets a cross-track
+    // re-latch silently dropped.
+    #[test]
+    fn print_latch_rows_publish_the_held_device_params_and_clear_on_disarm() {
+        let mut rt = Runtime::new();
+        rt.register_reactive("SEQ", Vec::new(), true);
+        let mut print = StepPrintState::default();
+
+        sync_print_latch_rows(&mut rt, &print);
+        assert_eq!(
+            print_latch_row_keys(&rt),
+            Vec::<(String, Option<f64>, Option<f64>, Option<f64>)>::new(),
+            "an unarmed latch publishes no overlay rows"
+        );
+
+        print.latch(0, PrintTarget::Instrument { param_idx: 3 }, 0.5);
+        print.latch(
+            0,
+            PrintTarget::Effect {
+                slot_idx: 1,
+                param_idx: 2,
+            },
+            0.25,
+        );
+        // Step params drive their own pickers and have no wrapper key.
+        print.latch(0, StepParam::Velocity, 0.9);
+        sync_print_latch_rows(&mut rt, &print);
+        assert_eq!(
+            print_latch_row_keys(&rt),
+            vec![
+                ("instrument".to_string(), None, None, Some(3.0)),
+                ("effect".to_string(), Some(1.0), None, Some(2.0)),
+            ]
+        );
+
+        // A touch on another track restarts the latch, which must retire the
+        // first track's rows rather than leaving them lit.
+        print.latch(1, PrintTarget::MidiFx { slot_idx: 0, param_idx: 4 }, 0.1);
+        sync_print_latch_rows(&mut rt, &print);
+        assert_eq!(
+            print_latch_row_keys(&rt),
+            vec![("midi-fx".to_string(), Some(0.0), None, Some(4.0))]
+        );
+
+        print.disarm();
+        sync_print_latch_rows(&mut rt, &print);
+        assert!(
+            print_latch_row_keys(&rt).is_empty(),
+            "disarm must clear every previously latched overlay row"
+        );
+    }
+
+    /// (target, slot-idx, rack-slot, param-idx) per published row — the exact
+    /// tuple `param-plock-projected-row-key` keys the SEQV field on.
+    fn print_latch_row_keys(rt: &Runtime) -> Vec<(String, Option<f64>, Option<f64>, Option<f64>)> {
+        let Some(Value::List(rows)) = rt.reactive_field_value("SEQ", "track-plock-printing") else {
+            return Vec::new();
+        };
+        rows.iter()
+            .map(|row| {
+                let row = row.borrow();
+                let Value::Map(map) = &*row else {
+                    panic!("print latch row should be a dict, got {row:?}");
+                };
+                let number = |key: &str| match map.get(key).map(|cell| cell.borrow().clone()) {
+                    Some(Value::Number(value)) => Some(value),
+                    _ => None,
+                };
+                let Some(Value::String(target)) =
+                    map.get("target").map(|cell| cell.borrow().clone())
+                else {
+                    panic!("print latch row should name a target");
+                };
+                (
+                    target,
+                    number("slot-idx"),
+                    number("rack-slot"),
+                    number("param-idx"),
+                )
+            })
+            .collect()
     }
 
     #[test]

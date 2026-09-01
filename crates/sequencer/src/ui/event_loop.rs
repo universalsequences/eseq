@@ -1497,6 +1497,7 @@ pub(crate) fn run_event_loop(
                             rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
                             rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
                             rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "track-plock-any", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
@@ -1574,6 +1575,7 @@ pub(crate) fn run_event_loop(
                                     &app.graph.effect_descriptors,
                                 ),
                             );
+                            sync_track_plock_any_field(rt, &app, &shared.state, ct);
                             sync_sidebar_browser(rt, &app, ct);
                         }
 
@@ -1631,11 +1633,16 @@ pub(crate) fn run_event_loop(
             // Device-param print is a hold gesture. It shares the same
             // pointer-release boundary as coalesced knob-edit history, but
             // does not create a device-p-lock gesture entry of its own.
-            shared
-                .step_print
-                .lock()
-                .unwrap()
-                .release_device_param_gesture(&shared.state);
+            {
+                let mut print = shared.step_print.lock().unwrap();
+                print.release_device_param_gesture(&shared.state);
+                // The print overlay is a hold indicator: drop it on the same
+                // release that ends the gesture, without waiting for the next
+                // print tick (which may not run at all).
+                let dirty = sync_print_latch_rows(editor.runtime_mut(), &print);
+                drop(print);
+                flush_reactive_display_edit(&mut editor, dirty);
+            }
             app::edit::finish_active_gesture(&mut app);
         } else if !pointer_is_down {
             app::edit::finish_active_gesture_if_idle(&mut app);

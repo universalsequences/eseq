@@ -112,6 +112,7 @@ pub(super) fn sync_after_instrument_track_apply_with_selection(
         "step-has-plocks",
         build_step_has_plocks(state, selected_track, &app.graph.effect_descriptors),
     );
+    sync_track_plock_any_field(rt, app, state, selected_track);
     sync_sidebar_browser(rt, app, selected_track);
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
@@ -368,6 +369,7 @@ pub(super) fn sync_rack_slot_instrument_authoring_display(
         track,
         selected_steps,
     );
+    dirty |= sync_track_plock_any_field(rt, app, state, track);
     flush_reactive_display_edit(editor, dirty);
 }
 
@@ -692,6 +694,7 @@ pub(super) fn sync_single_track_sequencer_state(
         dirty |= rt
             .set_reactive("SEQ", "step-has-plocks", step_has_plocks)
             .effects_dirty;
+        dirty |= sync_track_plock_any_field(rt, app, state, track);
         dirty |= rt
             .set_reactive("SEQ", "step-plock-kinds", step_plock_kinds)
             .effects_dirty;
@@ -1114,6 +1117,25 @@ pub(super) fn sync_track_plock_variant_preview(
     dirty
 }
 
+/// Republish the per-param "this param carries a p-lock somewhere in the
+/// pattern" row list (bead eseq-yr6w), which drives the presence dot on the
+/// knob. Belongs beside every current-track `SEQ.step-has-plocks` publish:
+/// those are exactly the points where a p-lock was added or removed, or where
+/// the pattern under the panel changed.
+pub(super) fn sync_track_plock_any_field(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+) -> bool {
+    rt.set_reactive(
+        "SEQ",
+        "track-plock-any",
+        build_track_plock_any_value(app, state, track),
+    )
+    .effects_dirty
+}
+
 pub(super) fn sync_instrument_plock_presence_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1344,6 +1366,7 @@ pub(super) fn sync_instrument_plock_presence_display_fields(
         track,
         selected_steps,
     );
+    dirty |= sync_track_plock_any_field(rt, app, state, track);
     let steps: Vec<usize> = selected_steps.lock().unwrap().iter().copied().collect();
     dirty |= sync_expanded_step_plocked_fields_for_steps(
         rt,
@@ -1469,6 +1492,7 @@ pub(super) fn sync_instrument_param_batch_display(
             track,
             selected_steps,
         );
+        ui_dirty |= sync_track_plock_any_field(editor.runtime_mut(), app, state, track);
     }
     // A batch can name any track; only the current one owns the visible *fx*
     // panel's current-track-relative fields (cf. `apply_ui_invalidations`).
@@ -2292,6 +2316,8 @@ pub(super) fn apply_ui_invalidations(
                                 track,
                                 selected_steps,
                             );
+                            needs_reactive_cycle |=
+                                sync_track_plock_any_field(rt, app, state, track);
                         }
                     }
                     InstrumentInvalidation::BaseNote => {
@@ -2348,6 +2374,8 @@ pub(super) fn apply_ui_invalidations(
                                 build_step_has_plocks(state, track, &app.graph.effect_descriptors),
                             )
                             .effects_dirty;
+                        needs_reactive_cycle |=
+                            sync_track_plock_any_field(rt, app, state, track);
                     }
                 }
                 TrackFxInvalidation::Topology | TrackFxInvalidation::PanelTree => {
@@ -2372,6 +2400,12 @@ pub(super) fn apply_ui_invalidations(
                         displayed_plock_step(state, track, selected_plock_step(selected_steps));
                     needs_reactive_cycle |=
                         sync_midi_fx_param_value_field(rt, state, track, slot, param, display_step);
+                    if track == current_track_idx {
+                        // A MIDI-FX p-lock write arrives on this same arm, so
+                        // the automation dot has to be re-derived here too.
+                        needs_reactive_cycle |=
+                            sync_track_plock_any_field(rt, app, state, track);
+                    }
                 }
                 MidiFxInvalidation::Topology => {
                     if fx_visible && track == current_track_idx {

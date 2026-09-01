@@ -3099,6 +3099,17 @@ pub(crate) fn init_runtime(
                     },
                 ),
                 (
+                    "track-plock-any",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_track_plock_any_value(&app, &state, 0)
+                    },
+                ),
+                // Print latches are per-gesture; nothing can be armed at
+                // startup (bead eseq-4seq).
+                ("track-plock-printing", Value::List(vec![])),
+                (
                     "track-plock-variants",
                     if track_count == 0 {
                         Value::List(vec![])

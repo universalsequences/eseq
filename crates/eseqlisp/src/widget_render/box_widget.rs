@@ -262,7 +262,7 @@ impl WidgetDefinition for BoxWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["selected", "muted", "macro-owned"]
+        &["selected", "muted", "macro-owned", "plock-any"]
     }
 
     fn completion_props(&self) -> &'static [&'static str] {
@@ -772,24 +772,42 @@ impl WidgetDefinition for BoxWidget {
             ));
         }
 
-        if box_state_active(&node.props, "macro-owned") {
+        // Corner state dots. `macro-owned` marks a param a macro drives;
+        // `plock-any` (bead eseq-yr6w) marks a param that has at least one
+        // p-lock somewhere in the pattern. Both can be true at once, so the
+        // p-lock dot steps one slot to the right when the macro dot is there.
+        let macro_owned = box_state_active(&node.props, "macro-owned");
+        let plock_any = box_state_active(&node.props, "plock-any");
+        if macro_owned || plock_any {
             let outer_px = super::ui_design_px(12.0);
             let inner_px = super::ui_design_px(8.0);
             let margin_px = super::ui_design_px(2.5);
-            let center = [
-                node.rect.col + (margin_px + outer_px * 0.5) / viewport.cell_w.max(1.0),
-                node.rect.row + (margin_px + outer_px * 0.5) / viewport.cell_h.max(1.0),
-            ];
-            for (radius_px, color) in [
-                (outer_px * 0.5, Color::rgba(0.02, 0.04, 0.025, 1.0)),
-                (inner_px * 0.5, Color::rgba(0.12, 0.95, 0.38, 1.0)),
-            ] {
-                prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
-                    center,
-                    radius_px,
-                    color,
-                    visible_half: GpuCircleVisibleHalf::Full,
-                }));
+            let mut push_dot = |slot: f32, inner: Color| {
+                let center = [
+                    node.rect.col
+                        + (margin_px + outer_px * (0.5 + slot)) / viewport.cell_w.max(1.0),
+                    node.rect.row + (margin_px + outer_px * 0.5) / viewport.cell_h.max(1.0),
+                ];
+                for (radius_px, color) in [
+                    (outer_px * 0.5, Color::rgba(0.02, 0.04, 0.025, 1.0)),
+                    (inner_px * 0.5, inner),
+                ] {
+                    prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
+                        center,
+                        radius_px,
+                        color,
+                        visible_half: GpuCircleVisibleHalf::Full,
+                    }));
+                }
+            };
+            if macro_owned {
+                push_dot(0.0, Color::rgba(0.12, 0.95, 0.38, 1.0));
+            }
+            if plock_any {
+                push_dot(
+                    if macro_owned { 1.0 } else { 0.0 },
+                    crate::theme::WIDGET_PLOCK_ACCENT(),
+                );
             }
         }
 

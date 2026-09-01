@@ -1316,6 +1316,7 @@ pub(crate) fn reactive_tick_and_render(
                 "step-has-plocks",
                 build_step_has_plocks(&ctx.shared.state, ct, &app.graph.effect_descriptors),
             );
+            sync_track_plock_any_field(rt, &app, &ctx.shared.state, ct);
             sync_sidebar_browser(rt, &app, ct);
             sync_plocks_sidebar_elapsed = started.elapsed();
             if profile_switch {
@@ -1493,6 +1494,7 @@ pub(crate) fn reactive_tick_and_render(
                     "step-has-plocks",
                     build_step_has_plocks(&ctx.shared.state, ct, &app.graph.effect_descriptors),
                 );
+                sync_track_plock_any_field(rt, &app, &ctx.shared.state, ct);
             }
             // Sync recording state
             let rec_on = ctx.shared.recording.load(Ordering::Relaxed);

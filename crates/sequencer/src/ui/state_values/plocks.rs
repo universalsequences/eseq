@@ -1690,3 +1690,198 @@ pub(crate) fn playhead_transition_changes_param_bindings(
     track_step_has_plock(state, track, descriptors, previous_step)
         || track_step_has_plock(state, track, descriptors, current_step)
 }
+
+/// One row of the p-lock key projections (beads eseq-4seq / eseq-yr6w).
+///
+/// Carries only the fields the Lisp side keys on — `param-plock-projected-row-key`
+/// in content/ui/effects/param-controls.lisp derives the per-param SEQV field
+/// name from exactly (target, slot-idx, rack-slot, param-idx). Reusing the row
+/// shape of `SEQ.track-plocks` means the presence and print projections build
+/// their field names with the same helper the lock projection already uses, so
+/// the three namespaces can never drift apart.
+pub(crate) fn plock_key_row(
+    target: &str,
+    slot_idx: Option<usize>,
+    rack_slot: Option<usize>,
+    param_idx: Option<usize>,
+) -> Rc<RefCell<Value>> {
+    use std::collections::HashMap;
+
+    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    map.insert(
+        "target".to_string(),
+        value_cell(Value::String(target.to_string())),
+    );
+    if let Some(slot_idx) = slot_idx {
+        map.insert(
+            "slot-idx".to_string(),
+            value_cell(Value::Number(slot_idx as f64)),
+        );
+    }
+    if let Some(rack_slot) = rack_slot {
+        map.insert(
+            "rack-slot".to_string(),
+            value_cell(Value::Number(rack_slot as f64)),
+        );
+    }
+    if let Some(param_idx) = param_idx {
+        map.insert(
+            "param-idx".to_string(),
+            value_cell(Value::Number(param_idx as f64)),
+        );
+    }
+    value_cell(Value::Map(map))
+}
+
+/// Params on `track` that carry at least one p-lock on ANY step of the current
+/// pattern (bead eseq-yr6w) — the Ableton-style "this control is automated"
+/// indicator, as opposed to `SEQ.track-plocks`, which only ever describes the
+/// selected step.
+///
+/// The traversal mirrors `track_step_plock_mask` family for family; this is its
+/// transpose (per param rather than per step). `SlotPLockData::has_any_plock`
+/// makes a lock-free slot O(1), which is the overwhelmingly common case, so the
+/// whole build costs nothing on a pattern with no automation. Runs at publish
+/// time, never per frame.
+///
+/// Deliberately excludes `step-param` rows: velocity/duration/transpose deviate
+/// from their defaults on almost every pattern, so a presence dot there would
+/// be permanently lit and carry no information. Rack slot params and rack slot
+/// instrument params are excluded too — the Lisp key scheme has no target for
+/// them, so no control could read the field.
+pub(crate) fn build_track_plock_any_value(
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+) -> Value {
+    if track >= state.pattern.track_params.len() {
+        return Value::List(vec![]);
+    }
+    let mut items = Vec::new();
+
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .clamp(1, MAX_STEPS);
+    for (target, has_any) in [
+        ("timebase", (0..num_steps).any(|step| state.pattern.timebase_plocks[track].has_plock(step))),
+        ("swing", (0..num_steps).any(|step| state.pattern.swing_plocks[track].has_plock(step))),
+        (
+            "swing-resolution",
+            (0..num_steps)
+                .any(|step| state.pattern.swing_resolution_plocks[track].has_plock(step)),
+        ),
+    ] {
+        if has_any {
+            items.push(plock_key_row(target, None, None, None));
+        }
+    }
+
+    let send_locks = state.pattern.track_send_plocks[track].snapshot();
+    let mut send_buses: Vec<usize> = Vec::new();
+    for step in 0..num_steps {
+        for send in send_locks.get(step).into_iter().flatten() {
+            let Some(bus_idx) = app
+                .buses
+                .iter()
+                .position(|bus| bus.id == send.destination)
+            else {
+                continue;
+            };
+            if !send_buses.contains(&bus_idx) {
+                send_buses.push(bus_idx);
+            }
+        }
+    }
+    for bus_idx in send_buses {
+        items.push(plock_key_row("bus-send", None, None, Some(bus_idx)));
+    }
+
+    if let Some(desc) = app.graph.instrument_descriptors.get(track) {
+        let flags = state.pattern.instrument_slots[track]
+            .plocks
+            .params_with_any_plock(desc.params.len());
+        for (param_idx, _) in flags.iter().enumerate().filter(|(_, set)| **set) {
+            items.push(plock_key_row("instrument", None, None, Some(param_idx)));
+        }
+    }
+
+    if let Some(descs) = app.graph.effect_descriptors.get(track) {
+        for (slot_idx, desc) in descs.iter().enumerate() {
+            let Some(slot) = state.pattern.effect_chains[track].get(slot_idx) else {
+                continue;
+            };
+            let flags = slot.plocks.params_with_any_plock(desc.params.len());
+            for (param_idx, _) in flags.iter().enumerate().filter(|(_, set)| **set) {
+                items.push(plock_key_row(
+                    "effect",
+                    Some(slot_idx),
+                    None,
+                    Some(param_idx),
+                ));
+            }
+        }
+    }
+
+    if let Some(Some(rack)) = state.pattern.rack_tracks.lock().unwrap().get(track) {
+        for rack_macro in &rack.macros {
+            if rack_macro
+                .plocks
+                .iter()
+                .take(num_steps)
+                .any(Option::is_some)
+            {
+                items.push(plock_key_row(
+                    "rack-macro",
+                    None,
+                    None,
+                    Some(rack_macro.id.index()),
+                ));
+            }
+        }
+        for (rack_slot_idx, rack_slot) in rack.slots.iter().enumerate() {
+            for (effect_slot_idx, (descriptor, effect_slot)) in rack_slot
+                .effect_descriptors
+                .iter()
+                .zip(&rack_slot.effect_slots)
+                .enumerate()
+            {
+                if effect_slot.node_id == 0 {
+                    continue;
+                }
+                for param_idx in 0..descriptor.params.len() {
+                    if effect_slot.plocks.iter().take(num_steps).any(|row| {
+                        row.get(param_idx).copied().flatten().is_some()
+                    }) {
+                        items.push(plock_key_row(
+                            "rack-effect",
+                            Some(effect_slot_idx),
+                            Some(rack_slot_idx),
+                            Some(param_idx),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let midi_chain = state.pattern.track_params[track].midi_fx_chain();
+    for (slot_idx, slot) in state.pattern.midi_fx_slots[track].iter().enumerate() {
+        let Some(desc) = midi_chain
+            .get(slot_idx)
+            .and_then(|name| sequencer::lisp_host::load_midi_fx_descriptor(name))
+        else {
+            continue;
+        };
+        let flags = slot.plocks.params_with_any_plock(desc.params.len());
+        for (param_idx, _) in flags.iter().enumerate().filter(|(_, set)| **set) {
+            items.push(plock_key_row(
+                "midi-fx",
+                Some(slot_idx),
+                None,
+                Some(param_idx),
+            ));
+        }
+    }
+
+    Value::List(items)
+}

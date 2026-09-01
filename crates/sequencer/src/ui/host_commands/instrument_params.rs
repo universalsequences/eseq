@@ -92,7 +92,14 @@ pub(super) fn handle(
                             // target, so clear or republish its engine-only
                             // override at the same latch transition.
                             print.publish_engine_override(&state);
+                            // Arm the print overlay on this knob only.
+                            let overlay_dirty =
+                                crate::step_print::sync_print_latch_rows(
+                                    editor.runtime_mut(),
+                                    &print,
+                                );
                             drop(print);
+                            flush_reactive_display_edit(&mut editor, overlay_dirty);
                             // The base write is skipped, so the knob's own
                             // display binding has to follow the latch here or
                             // it only moves when the playhead crosses a step.

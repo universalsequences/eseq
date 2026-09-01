@@ -8426,6 +8426,46 @@ impl SlotPLockData {
         }
         self.step_count(step) > 0
     }
+
+    /// Transpose of `or_step_plock_mask` (bead eseq-yr6w): which params carry
+    /// at least one p-lock on any step. `has_any_plock` short-circuits the
+    /// plock-free slot (the common case) to O(1), `step_count` skips
+    /// plock-free steps, and the running remainder stops the walk as soon as
+    /// every set cell has been seen.
+    pub fn params_with_any_plock(&self, num_params: usize) -> Vec<bool> {
+        let np = num_params.min(self.max_params);
+        let mut flags = vec![false; np];
+        if np == 0 || !self.has_any_plock() {
+            return flags;
+        }
+        let Some(cells) = self.cells() else {
+            return flags;
+        };
+        let mut remaining = self.plock_count.load(Ordering::Relaxed);
+        for step in 0..MAX_STEPS {
+            if remaining == 0 {
+                break;
+            }
+            let count = self.step_count(step);
+            if count == 0 {
+                continue;
+            }
+            remaining = remaining.saturating_sub(count);
+            let base = step * self.max_params;
+            for (param_idx, flag) in flags.iter_mut().enumerate() {
+                if *flag {
+                    continue;
+                }
+                let idx = base + param_idx;
+                if idx < cells.data.len()
+                    && !f32::from_bits(cells.data[idx].load(Ordering::Relaxed)).is_nan()
+                {
+                    *flag = true;
+                }
+            }
+        }
+        flags
+    }
 }
 
 pub struct SlotKeyLockData {

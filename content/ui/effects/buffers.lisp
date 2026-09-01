@@ -244,7 +244,11 @@
         ;(fx-track-accumulator-panel)
         ))))
 
+;; The knob right-click menu (bead eseq-1gy6) is an overlay, so it has to be
+;; rendered by the tile that owns the knobs — this buffer. Zero footprint when
+;; closed; the wrapper boxes only set the shared menu state.
 (effect-buffer "*fx*"
+  (h-stack :debug-name "fx-buffer-root" :gap 0 :height :fill
   (if (pw/has-selected-bus?)
     (let ((gidx (selected-rack)))
       (if (>= gidx 0)
@@ -262,7 +266,8 @@
     (if (pc/process-map-active?)
       (box :debug-name "fx-param-map-active-root" :padding 0
         (track-selection-panel))
-      (track-selection-panel))))))
+      (track-selection-panel)))))
+  (subtree :key "fx-param-plock-menu" (pc/param-plock-context-menu))))
 
 (def copy-selected-effect ()
   (seq-copy-selected-effect))
