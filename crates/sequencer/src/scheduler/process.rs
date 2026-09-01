@@ -1094,8 +1094,11 @@ pub(super) fn step_event_with_process_overlay(
     resolved: ResolvedStep,
     overlay: &ProcessTargetOverlay,
 ) -> StepEvent {
-    let mut effect_params = resolve_effect_params(snapshot, track, step);
-    let mut instrument_params = resolve_instrument_params(snapshot, track, step);
+    // Process-materialized events (ratchets) have no SequencerState handle to
+    // consult the device-print override; a printing hold misses these hits
+    // for at most one frame until the printed p-lock publish catches up.
+    let mut effect_params = resolve_effect_params(snapshot, track, step, None);
+    let mut instrument_params = resolve_instrument_params(snapshot, track, step, None);
     upsert_effect_params(&mut effect_params, overlay.effect_params.clone());
     upsert_instrument_params(&mut instrument_params, overlay.instrument_params.clone());
     let mut event = step_event_from_resolved(

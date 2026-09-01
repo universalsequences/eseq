@@ -70,8 +70,19 @@ rack — from `EffectSlotSnapshot` deep copies captured at publish time, so an
 unpublished print is inaudible until the next unrelated publish or transport
 restart. `tick_step_print` therefore coalesces one copy-on-write
 `publish_scheduler_track` per tick whenever any track-scoped p-lock printed
-(and one bus-runtime publish for bus targets). `override_roll_hit` applies
-only to the `Step` arm
+(and one bus-runtime publish for bus targets).
+
+The publish alone is still one loop late for the *live* half of the promise:
+the scheduler stamps ALL device params per trigger from the snapshot, so
+passing steps actively reset a held knob to its stale value. Instrument and
+effect targets therefore also ride `DeviceParamPrintOverride`
+(`state/core.rs`, published from `publish_engine_override`), the device analog
+of `StepPrintOverride`: the scheduler substitutes latched values at trigger
+resolution (`resolve_instrument_params` / `resolve_effect_params`), so the
+gesture is heard as it is made. Extended targets (bus/MIDI-FX/rack) do not yet
+have live-override coverage — their prints are correct but only audible once
+the per-tick publish reaches newly scheduled steps. `override_roll_hit`
+applies only to the `Step` arm
 (roll + param print composes naturally: rolled hits land as triggers, the
 p-lock prints onto them on the same pass).
 

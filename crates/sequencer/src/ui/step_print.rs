@@ -19,7 +19,7 @@ device-edit gesture history.
 */
 
 use super::*;
-use sequencer::sequencer::RollHitRecorded;
+use sequencer::sequencer::{DeviceParamPrintTarget, RollHitRecorded};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrintTarget {
@@ -122,23 +122,27 @@ impl StepPrintState {
 
     /// Pointer release ends device-param print gestures. Step targets have
     /// their own picker-specific release command, so a release must not erase
-    /// an unrelated step-param hold.
-    pub(crate) fn release_device_param_gesture(&mut self) {
+    /// an unrelated step-param hold. Republishes the engine override so the
+    /// scheduler stops substituting the released device values.
+    pub(crate) fn release_device_param_gesture(&mut self, state: &SequencerState) {
         self.values
             .retain(|(target, _)| matches!(target, PrintTarget::Step(_)));
         if self.values.is_empty() {
             self.disarm();
         }
+        self.publish_engine_override(state);
     }
 
-    /// Mirror the latch into the engine-side override so the scheduler plays
-    /// the latched values on the armed track immediately (the pattern write
-    /// lands behind the playhead, so without this the print would only be
+    /// Mirror the latch into the engine-side overrides so the scheduler plays
+    /// the latched values on the armed track immediately (the pattern/p-lock
+    /// writes land behind the playhead — and every trigger stamps device
+    /// params from the snapshot — so without this the print would only be
     /// heard one loop later). Call after every latch change; `print_pass`
     /// clears the engine side on disarm.
     pub(crate) fn publish_engine_override(&self, state: &SequencerState) {
         if !self.armed() {
             state.step_print_override.clear();
+            state.device_print_override.clear();
             return;
         }
         let value = |param: StepParam| {
@@ -157,6 +161,27 @@ impl StepPrintState {
                 .step_print_override
                 .set(self.track, velocity, duration, transpose);
         }
+        // Device-param analog: latched instrument/effect values substitute at
+        // the scheduler's trigger resolution. An empty entry list disarms.
+        let device_entries = self
+            .values
+            .iter()
+            .filter_map(|(target, value)| match target {
+                PrintTarget::Instrument { param_idx } => Some((
+                    DeviceParamPrintTarget::Instrument { param_idx: *param_idx },
+                    *value,
+                )),
+                PrintTarget::Effect { slot_idx, param_idx } => Some((
+                    DeviceParamPrintTarget::Effect {
+                        slot_idx: *slot_idx,
+                        param_idx: *param_idx,
+                    },
+                    *value,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        state.device_print_override.set(self.track, device_entries);
     }
 
     /// Rolled hits recorded while print mode is armed take the latched
@@ -227,6 +252,7 @@ pub(crate) fn print_pass(
         // engine-side override dies with the latch.
         print.disarm();
         state.step_print_override.clear();
+        state.device_print_override.clear();
         return PrintedSteps::default();
     }
     let track = print.track;
@@ -744,12 +770,13 @@ mod step_print_tests {
             "instrument printing must not use the step engine override"
         );
 
-        print.release_device_param_gesture();
+        print.release_device_param_gesture(&state);
         assert!(!print.armed());
     }
 
     #[test]
     fn device_gesture_release_removes_instrument_and_effect_targets_only() {
+        let state = playing_state();
         let mut print = StepPrintState::default();
         print.latch(0, StepParam::Velocity, 0.5);
         print.latch(0, PrintTarget::Instrument { param_idx: 2 }, 0.6);
@@ -761,13 +788,38 @@ mod step_print_tests {
             },
             0.7,
         );
+        print.publish_engine_override(&state);
+        let device = state
+            .device_print_override
+            .values_for_track(0)
+            .expect("held device params arm the scheduler-side override");
+        assert_eq!(
+            device.entries,
+            vec![
+                (
+                    sequencer::sequencer::DeviceParamPrintTarget::Instrument { param_idx: 2 },
+                    0.6,
+                ),
+                (
+                    sequencer::sequencer::DeviceParamPrintTarget::Effect {
+                        slot_idx: 1,
+                        param_idx: 3,
+                    },
+                    0.7,
+                ),
+            ],
+        );
 
-        print.release_device_param_gesture();
+        print.release_device_param_gesture(&state);
 
         assert!(print.armed(), "the independent step-param hold remains armed");
         assert_eq!(
             print.values,
             vec![(PrintTarget::Step(StepParam::Velocity), 0.5)]
+        );
+        assert!(
+            state.device_print_override.values_for_track(0).is_none(),
+            "release must disarm the scheduler-side device override",
         );
     }
 

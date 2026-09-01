@@ -1307,7 +1307,7 @@ mod tests {
             .step_print
             .lock()
             .unwrap()
-            .release_device_param_gesture();
+            .release_device_param_gesture(&state);
         assert!(!shared.step_print.lock().unwrap().armed());
 
         // Track-effect scalar, batch, and enum-option commands all use the
@@ -1347,7 +1347,7 @@ mod tests {
             .step_print
             .lock()
             .unwrap()
-            .release_device_param_gesture();
+            .release_device_param_gesture(&state);
 
         dispatch_custom_host_command(
             "set-effect-param-batch",
@@ -1367,7 +1367,7 @@ mod tests {
             .step_print
             .lock()
             .unwrap()
-            .release_device_param_gesture();
+            .release_device_param_gesture(&state);
 
         dispatch_custom_host_command(
             "set-effect-param-option",
@@ -1396,7 +1396,7 @@ mod tests {
             .step_print
             .lock()
             .unwrap()
-            .release_device_param_gesture();
+            .release_device_param_gesture(&state);
 
         // Extended scalar targets share the same gate and one tick. Their
         // defaults remain untouched while each family receives a p-lock.
@@ -1516,7 +1516,7 @@ mod tests {
             .step_print
             .lock()
             .unwrap()
-            .release_device_param_gesture();
+            .release_device_param_gesture(&state);
 
         // If the record gate races off, the same payload falls through to the
         // normal base edit rather than being dropped.

@@ -5234,7 +5234,7 @@
         state.pattern.effect_chains[track][0].set_plock(step, 1, 1.0);
 
         let snapshot = state.publish_scheduler_snapshot();
-        let params = resolve_effect_params(&snapshot, track, step);
+        let params = resolve_effect_params(&snapshot, track, step, None);
 
         assert_eq!(
             params,
@@ -5247,6 +5247,40 @@
                 ),
             ]
         );
+
+        // Device-param print (bead eseq-prm): while a print latch is armed,
+        // its values beat both the p-lock and the default at resolution time
+        // — every trigger stamps all device params from the snapshot, so
+        // without the substitution a held printing knob is actively reset to
+        // its stale snapshot value on each passing step.
+        state.device_print_override.set(
+            track,
+            vec![(
+                crate::sequencer::DeviceParamPrintTarget::Effect {
+                    slot_idx: 0,
+                    param_idx: 0,
+                },
+                0.25,
+            )],
+        );
+        let overrides = state.device_print_override.values_for_track(track);
+        let params = resolve_effect_params(&snapshot, track, step, overrides.as_ref());
+        assert_eq!(params[0], ScheduledEffectParam::fixed(42, 12, 0.25));
+        assert_eq!(
+            params[1],
+            ScheduledEffectParam::fixed(
+                77,
+                crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
+                1.0,
+            ),
+            "untouched params keep their p-lock/default resolution",
+        );
+        assert!(
+            state.device_print_override.values_for_track(track + 1).is_none(),
+            "the override is track-scoped",
+        );
+        state.device_print_override.clear();
+        assert!(state.device_print_override.values_for_track(track).is_none());
     }
 
     // eseq-ur4: a stale/legacy pool copy of an effect slot can carry an empty
@@ -5289,7 +5323,7 @@
         let stale_track = Arc::make_mut(&mut snapshot.tracks[track]);
         stale_track.effect_slots[0].param_node_indices.clear();
 
-        assert!(resolve_effect_params(&snapshot, track, step).is_empty());
+        assert!(resolve_effect_params(&snapshot, track, step, None).is_empty());
         assert!(resolve_effect_defaults(&snapshot, track).is_empty());
     }
 

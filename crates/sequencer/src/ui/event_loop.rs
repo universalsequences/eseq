@@ -193,6 +193,7 @@ pub(crate) fn run_event_loop(
         prev_editor_macro_action_fingerprint: u64::MAX,
         prev_editor_macro_sidebar_fingerprint: u64::MAX,
         prev_editor_open_macro: String::new(),
+        prev_editor_selected_asset: None,
         prev_playing: false,
         prev_bpm: 0,
         prev_playhead: u32::MAX,
@@ -1634,7 +1635,7 @@ pub(crate) fn run_event_loop(
                 .step_print
                 .lock()
                 .unwrap()
-                .release_device_param_gesture();
+                .release_device_param_gesture(&shared.state);
             app::edit::finish_active_gesture(&mut app);
         } else if !pointer_is_down {
             app::edit::finish_active_gesture_if_idle(&mut app);

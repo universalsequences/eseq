@@ -45,6 +45,7 @@ pub use state::{
     ActiveNoteActivity, AudibleSongRowApplied, RuntimeSong, RuntimeSongRow, SongChunkPlan,
     SongPlaybackCommand, SongPlaybackMailbox, SongPlaybackNotice, SongPlaybackRuntime,
     SongPositionShared,
+    DeviceParamPrintOverride, DeviceParamPrintTarget, DeviceParamPrintValues,
     EffectInstanceId, InstrumentDeviceValuesSnapshot, InstrumentSlotResetSummary,
     GeneratorTickErrorNotice, MidiFxInstanceId, PatternId, PatternSnapshot, ProjectScenes, PublishedSequencer, RackMacro, RackMacroCurve,
     ResolvedSceneSlot, SceneSlotStore, SCENE_SLOT_SOFT_SERIALIZED_BYTES,

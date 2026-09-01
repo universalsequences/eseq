@@ -388,12 +388,78 @@ impl StepPrintOverride {
     }
 }
 
+/// One live device-param print target, addressed the way the UI latch keys it
+/// (resolved slot/param indices on the armed track).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceParamPrintTarget {
+    Instrument { param_idx: usize },
+    Effect { slot_idx: usize, param_idx: usize },
+}
+
+#[derive(Default, Clone)]
+pub struct DeviceParamPrintValues {
+    pub track: usize,
+    pub entries: Vec<(DeviceParamPrintTarget, f32)>,
+}
+
+/// Engine-side live override for device-param printing (bead eseq-prm), the
+/// device analog of [`StepPrintOverride`]: while a print latch holds
+/// instrument/effect params, the scheduler substitutes the latched values when
+/// resolving per-trigger params. Without it the gesture is inaudible while it
+/// is being made — every trigger stamps ALL device params from the published
+/// snapshot, so passing steps actively reset a held knob to its old value and
+/// the printed p-locks (which land behind the already-scheduled playhead) are
+/// only heard one loop later.
+///
+/// Written by the control thread on latch changes/disarm, read per scheduled
+/// trigger by the scheduler thread (not the audio thread), so a mutex behind
+/// an armed fast-path flag is fine.
+#[derive(Default)]
+pub struct DeviceParamPrintOverride {
+    armed: AtomicBool,
+    values: Mutex<DeviceParamPrintValues>,
+}
+
+impl DeviceParamPrintOverride {
+    /// Publish the full latch state; an empty entry list disarms.
+    pub fn set(&self, track: usize, entries: Vec<(DeviceParamPrintTarget, f32)>) {
+        if entries.is_empty() {
+            self.clear();
+            return;
+        }
+        *self.values.lock().unwrap() = DeviceParamPrintValues { track, entries };
+        self.armed.store(true, Ordering::Release);
+    }
+
+    pub fn clear(&self) {
+        self.armed.store(false, Ordering::Release);
+        self.values.lock().unwrap().entries.clear();
+    }
+
+    /// The latched device overrides for `track`; `None` when disarmed or
+    /// armed for a different track. Clones the (small) entry list so the
+    /// caller holds no lock while resolving a trigger.
+    pub fn values_for_track(&self, track: usize) -> Option<DeviceParamPrintValues> {
+        if !self.armed.load(Ordering::Acquire) {
+            return None;
+        }
+        let values = self.values.lock().unwrap();
+        if values.track != track || values.entries.is_empty() {
+            return None;
+        }
+        Some(values.clone())
+    }
+}
+
 pub struct SequencerState {
     pub pattern: PatternState,
     pub transport: TransportState,
     /// Live step-param print override (bead eseq-jc9): scheduler-side
     /// substitution so the printed value is audible the moment it is touched.
     pub step_print_override: StepPrintOverride,
+    /// Device-param analog of `step_print_override` (bead eseq-prm): latched
+    /// instrument/effect print values the scheduler substitutes per trigger.
+    pub device_print_override: DeviceParamPrintOverride,
     pub runtime: RuntimeBindingState,
     pub(super) scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     pub(super) scheduler_snapshot_version: AtomicU64,
