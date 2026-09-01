@@ -9373,6 +9373,36 @@
     }
 
     #[test]
+    fn held_plock_value_holds_off_step_plocks_until_the_next_trigger() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        state.pattern.track_params[0].set_num_steps(16);
+        // Triggers on 0 and 8; off-step p-locks at 2 and 14.
+        state.pattern.patterns[0].toggle_step(0);
+        state.pattern.patterns[0].toggle_step(8);
+        let plocks: std::collections::HashMap<usize, f32> =
+            [(2, 500.0), (14, 900.0)].into_iter().collect();
+        let held = |step: usize| {
+            held_plock_value(&state, 0, step, |s| plocks.get(&s).copied())
+        };
+
+        assert_eq!(held(2), Some(500.0), "a step's own p-lock is in force");
+        assert_eq!(held(5), Some(500.0), "an off-step p-lock holds forward");
+        assert_eq!(
+            held(8),
+            None,
+            "an ON trigger without its own p-lock returns to base",
+        );
+        assert_eq!(held(9), None, "the base holds after the trigger");
+        assert_eq!(held(15), Some(900.0));
+        assert_eq!(
+            held(0),
+            None,
+            "the wrap does not carry a hold past the trigger on step 0",
+        );
+        assert_eq!(held(1), None);
+    }
+
+    #[test]
     fn displayed_plock_step_uses_selection_before_playback() {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let selected_steps = Arc::new(Mutex::new(HashSet::from([5, 2])));

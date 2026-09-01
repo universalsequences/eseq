@@ -3,7 +3,7 @@
         enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, invoke_process_cascade,
         midi_fx_window_events_from_step, process_device_write_value, quantized_live_tick_sample,
         reconcile_graph_runtimes, resolve_effect_defaults, resolve_effect_params,
-        resolve_instrument_plocks,
+        resolve_effect_plocks, resolve_instrument_plocks,
         reconcile_playing_topology_change, resolve_sampler_params, resolve_track_send_params,
         resolved_slot_param_value, run_midi_fx_chain_for_track, schedule_playing_lookahead,
         should_reload_neural_runtime, topology_edit_frontier_drained,
@@ -4969,6 +4969,96 @@
         ));
     }
 
+    // Off-step effect p-locks are track-level automation: they apply to the
+    // per-track chain at that boundary and hold until the next ON trigger's
+    // full stamp. Untouched params emit nothing, and the live device-print
+    // latch both beats stored p-locks and emits for latched params with no
+    // stored p-lock yet.
+    #[test]
+    fn resolve_effect_plocks_returns_off_step_plocks_and_print_overrides() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor {
+            name: "off-step effect".to_string(),
+            input_channels: 6,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                ParamDescriptor {
+                    name: "cutoff".to_string(),
+                    min: 0.0,
+                    max: 20_000.0,
+                    default: 1_000.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 12,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "res".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 13,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+            ],
+        };
+        state.pattern.effect_chains[track][0].apply_descriptor_with_modulator(&desc, 42, 0);
+        state.pattern.effect_chains[track][0].set_plock(step, 0, 200.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        assert!(!snapshot.tracks[track].steps[step].active);
+
+        let params = resolve_effect_plocks(&snapshot, track, step, None);
+        assert_eq!(
+            params,
+            vec![ScheduledEffectParam::fixed(42, 12, 200.0)],
+            "only the plocked param emits; untouched params hold",
+        );
+
+        // A held print latch beats the stored p-lock and emits for a latched
+        // param that has no stored p-lock on this step.
+        state.device_print_override.set(
+            track,
+            vec![
+                (
+                    crate::sequencer::DeviceParamPrintTarget::Effect {
+                        slot_idx: 0,
+                        param_idx: 0,
+                    },
+                    500.0,
+                ),
+                (
+                    crate::sequencer::DeviceParamPrintTarget::Effect {
+                        slot_idx: 0,
+                        param_idx: 1,
+                    },
+                    0.9,
+                ),
+            ],
+        );
+        let overrides = state.device_print_override.values_for_track(track);
+        let params = resolve_effect_plocks(&snapshot, track, step, overrides.as_ref());
+        assert_eq!(
+            params,
+            vec![
+                ScheduledEffectParam::fixed(42, 12, 500.0),
+                ScheduledEffectParam::fixed(42, 13, 0.9),
+            ],
+        );
+        state.device_print_override.clear();
+    }
+
     #[test]
     fn resolve_instrument_plocks_returns_only_plocked_params_on_inactive_steps() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
@@ -4982,7 +5072,7 @@
         let snapshot = state.publish_scheduler_snapshot();
         assert!(!snapshot.tracks[track].steps[step].active);
 
-        let params = resolve_instrument_plocks(&snapshot, track, step);
+        let params = resolve_instrument_plocks(&snapshot, track, step, None);
 
         assert_eq!(
             params.as_slice(),
@@ -5015,7 +5105,7 @@
             .set(step, 12, 2.0);
 
         let snapshot = state.publish_scheduler_snapshot();
-        let params = resolve_instrument_plocks(&snapshot, track, step);
+        let params = resolve_instrument_plocks(&snapshot, track, step, None);
 
         assert!(params.is_empty());
     }
@@ -5835,7 +5925,7 @@
         state.pattern.instrument_slots[track].set_plock(step, 1, 1.0);
 
         let snapshot = state.publish_scheduler_snapshot();
-        let params = resolve_instrument_plocks(&snapshot, track, step);
+        let params = resolve_instrument_plocks(&snapshot, track, step, None);
 
         assert_eq!(
             params.as_slice(),

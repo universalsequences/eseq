@@ -244,6 +244,39 @@ pub(super) fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDesc
         || pdesc.name.eq_ignore_ascii_case("enabled")
 }
 
+/// The p-lock value audibly in force at `step` for one parameter, honoring
+/// off-step p-lock hold semantics: the step's own p-lock wins; otherwise, on
+/// an OFF step, walk back (wrap-aware) to the nearest preceding p-lock — an
+/// off-step p-lock is track-level automation that holds until the next p-lock
+/// or the next ON trigger's full param stamp, so a triggered step without its
+/// own p-lock ends the walk and the base value is in force. Mirrors the
+/// scheduler's off-step p-lock application, so the knob shows what is heard.
+pub(super) fn held_plock_value(
+    state: &SequencerState,
+    track: usize,
+    step: usize,
+    mut plock_at: impl FnMut(usize) -> Option<f32>,
+) -> Option<f32> {
+    let num_steps = state
+        .pattern
+        .track_params
+        .get(track)?
+        .get_num_steps()
+        .clamp(1, sequencer::sequencer::MAX_STEPS);
+    let pattern = state.pattern.patterns.get(track)?;
+    let mut s = step % num_steps;
+    for _ in 0..num_steps {
+        if let Some(value) = plock_at(s) {
+            return Some(value);
+        }
+        if pattern.is_active(s) {
+            return None;
+        }
+        s = if s == 0 { num_steps - 1 } else { s - 1 };
+    }
+    None
+}
+
 pub(super) fn slot_param_stored_value(
     slot: &sequencer::effects::EffectSlotState,
     pdesc: &sequencer::effects::ParamDescriptor,

@@ -21,7 +21,13 @@ fn instrument_param_display_value(
                     )
                 });
                 let stored = neural_value
-                    .or_else(|| display_step.and_then(|step| slot.plocks.get(step, param_idx)))
+                    .or_else(|| {
+                        display_step.and_then(|step| {
+                            held_plock_value(&app.state, track, step, |s| {
+                                slot.plocks.get(s, param_idx)
+                            })
+                        })
+                    })
                     .or_else(|| app.effective_instrument_param_value(track, param_idx))
                     .unwrap_or_else(|| {
                         slot_param_stored_value(slot, pdesc, param_idx, display_step)
@@ -849,7 +855,13 @@ pub(crate) fn sync_track_effect_param_value_field_with_neural_selection(
                         )
                     });
                     let stored = neural_value
-                        .or_else(|| display_step.and_then(|step| slot.plocks.get(step, param_idx)))
+                        .or_else(|| {
+                            display_step.and_then(|step| {
+                                held_plock_value(&app.state, track, step, |s| {
+                                    slot.plocks.get(s, param_idx)
+                                })
+                            })
+                        })
                         .or_else(|| app.effective_slot_param_value(track, slot_idx, param_idx))
                         .unwrap_or_else(|| {
                             slot_param_stored_value(slot, pdesc, param_idx, display_step)

@@ -620,15 +620,31 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
             }
             if !snapshot.tracks[trigger.track].steps[trigger.step].active {
+                // Off-step boundary: p-locks on an inactive step apply to the
+                // whole track at that boundary — instrument p-locks to every
+                // active voice, effect p-locks to the per-track chain — and
+                // then hold (voice/node params are sticky) until the next
+                // p-lock or the next ON trigger's full param stamp. The live
+                // device-print latch substitutes here too, so a held printing
+                // knob is heard on sparse patterns, not just on triggers.
                 let sample_time = scheduled_until_sample + trigger.offset as u64;
-                let send_params = resolve_track_send_params(snapshot, trigger.track, trigger.step);
-                if !send_params.is_empty() {
+                let print_overrides =
+                    state.device_print_override.values_for_track(trigger.track);
+                let mut off_step_effect_params =
+                    resolve_track_send_params(snapshot, trigger.track, trigger.step);
+                off_step_effect_params.extend(resolve_effect_plocks(
+                    snapshot,
+                    trigger.track,
+                    trigger.step,
+                    print_overrides.as_ref(),
+                ));
+                if !off_step_effect_params.is_empty() {
                     chunk_enqueued &= queue.push(ScheduledEvent {
                         pattern_epoch,
                         sample_time,
                         kind: ScheduledEventKind::EffectParams {
                             track: trigger.track,
-                            effect_params: send_params,
+                            effect_params: off_step_effect_params,
                         },
                     }).is_ok();
                 }
@@ -637,7 +653,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     pattern_epoch,
                     sample_time,
                     trigger.track,
-                    resolve_instrument_plocks(snapshot, trigger.track, trigger.step),
+                    resolve_instrument_plocks(
+                        snapshot,
+                        trigger.track,
+                        trigger.step,
+                        print_overrides.as_ref(),
+                    ),
                 );
                 if !chunk_enqueued {
                     break;

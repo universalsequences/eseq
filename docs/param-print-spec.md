@@ -30,8 +30,22 @@ gesture is laid into the passing steps as p-locks.
    release the base value stays where it was before the touch; the gesture
    lives entirely in the p-locks. Steps the playhead did not pass are
    untouched.
-3. **Triggered steps only.** Printing never creates triggers; steps without an
-   active trigger are skipped (same as step-param print).
+3. **Printing never creates triggers.** Step-param prints land on triggered
+   steps only (a velocity with no trigger is meaningless). Device p-lock
+   prints land on **every passed step**, off steps included — an off-step
+   device p-lock is track-level automation (user-ratified 2026-08-31):
+   - At an off-step boundary, its p-locks apply to the WHOLE track —
+     instrument p-locks to every active voice, effect p-locks to the
+     per-track chain — and then hold (voice/node params are sticky) until
+     the next p-lock or the next ON trigger.
+   - An ON trigger stamps its full param set per-voice: its own p-lock if
+     present, else the base value. On-step p-locks keep their per-voice
+     power; only off-step p-locks are track-wide.
+   - The knob display mirrors this: on an off step it shows the held value
+     (`held_plock_value`, wrap-aware walk-back), not the base.
+   - Explicit selection editing writes off-step p-locks the same way
+     (select an off step, turn a knob), which previously only sampler host
+     params (warp) honored audibly.
 4. **Branch ordering.** Selection active ⇒ today's explicit plock-on-selection
    edit, unchanged. Not recording or not playing ⇒ normal base-value edit,
    unchanged. The neural-override diversion (`record_selected_neural_*_plock`)

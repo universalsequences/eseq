@@ -639,7 +639,9 @@ pub(crate) fn read_mod_display_values(
                     return 0.0;
                 };
                 display_step
-                    .and_then(|step| slot.plocks.get(step, idx))
+                    .and_then(|step| {
+                        held_plock_value(state, track, step, |s| slot.plocks.get(s, idx))
+                    })
                     .or_else(|| app.effective_slot_param_value(track, slot_idx, idx))
                     .unwrap_or_else(|| slot_param_stored_value(slot, pdesc, idx, display_step))
             };
@@ -1027,7 +1029,9 @@ fn read_instrument_mod_values_for_track(
             return 0.0;
         };
         display_step
-            .and_then(|step| slot.plocks.get(step, idx))
+            .and_then(|step| {
+                held_plock_value(&app.state, track, step, |s| slot.plocks.get(s, idx))
+            })
             .or_else(|| app.effective_instrument_param_value(track, idx))
             .unwrap_or_else(|| slot_param_stored_value(slot, pdesc, idx, display_step))
     };

@@ -66,10 +66,16 @@ pub(crate) struct StepPrintState {
 }
 
 /// One frame's print result: which steps on which track took which params.
+/// `steps` holds every step boundary the playhead passed; `triggered` is the
+/// parallel active-trigger flag — step-param prints land only on triggered
+/// steps, device p-lock prints land on every passed step (an off-step device
+/// p-lock is track-level automation: it applies to all voices at that
+/// boundary and holds until the next p-lock or ON trigger).
 #[derive(Default)]
 pub(crate) struct PrintedSteps {
     pub(crate) track: usize,
     pub(crate) steps: Vec<usize>,
+    pub(crate) triggered: Vec<bool>,
     pub(crate) targets: Vec<(PrintTarget, f32)>,
 }
 
@@ -286,32 +292,35 @@ pub(crate) fn print_pass(
     print.last_step = Some(playhead);
     print.touch_dirty = false;
     let mut printed = Vec::new();
+    let mut triggered = Vec::new();
+    let mut wrote_step_params = false;
     for step in boundary_steps {
-        // Trigger steps only — printing never creates triggers.
-        if !state.pattern.patterns[track].is_active(step) {
-            continue;
-        }
-        for (target, value) in &print.values {
-            if let PrintTarget::Step(param) = target {
-                state.set_step_param_no_publish(track, step, *param, *value);
+        // Printing never creates triggers. Step params write onto triggered
+        // steps only; device p-locks land on every passed step (off-step
+        // p-locks are track-level automation — see `PrintedSteps`).
+        let active = state.pattern.patterns[track].is_active(step);
+        if active {
+            for (target, value) in &print.values {
+                if let PrintTarget::Step(param) = target {
+                    state.set_step_param_no_publish(track, step, *param, *value);
+                    wrote_step_params = true;
+                }
             }
         }
         printed.push(step);
+        triggered.push(active);
     }
     if printed.is_empty() {
         return PrintedSteps::default();
     }
-    if print
-        .values
-        .iter()
-        .any(|(target, _)| matches!(target, PrintTarget::Step(_)))
-    {
+    if wrote_step_params {
         print.dirty_unpublished_tracks |=
             1u64 << track.min(sequencer::sequencer::MAX_TRACKS - 1);
     }
     PrintedSteps {
         track,
         steps: printed,
+        triggered,
         targets: print.values.clone(),
     }
 }
@@ -426,11 +435,16 @@ pub(crate) fn tick_step_print(
     let mut track_snapshot_dirty = false;
     let mut bus_runtime_dirty = false;
     let mut plock_presence_steps = Vec::new();
-    for step in &printed.steps {
+    for (step, step_triggered) in printed.steps.iter().zip(printed.triggered.iter()) {
         let mut wrote_plock = false;
         for (target, value) in &printed.targets {
             match target {
                 PrintTarget::Step(param) => {
+                    // Step params only land on triggered steps (print_pass
+                    // skipped the write on off steps).
+                    if !*step_triggered {
+                        continue;
+                    }
                     wrote = true;
                     shared.ui_invalidations.push(UiInvalidation::Step {
                         track: printed.track,
@@ -666,16 +680,25 @@ mod step_print_tests {
         let mut print = StepPrintState::default();
         print.latch(0, StepParam::Duration, 3.0);
         let printed = print_pass(&state, &mut print, 0, true);
-        assert!(printed.steps.is_empty(), "step 13 has no trigger");
+        // Every passed step is reported (device p-lock prints land on off
+        // steps too), but step 13 is not triggered, so step params skip it.
+        assert_eq!(printed.steps, vec![13]);
+        assert_eq!(printed.triggered, vec![false]);
+        let default_duration = StepParam::Duration.default_value();
+        assert_eq!(
+            state.pattern.step_data[0].get(13, StepParam::Duration),
+            default_duration,
+            "step 13 has no trigger, so the step param stays default",
+        );
         // Frame gap: playhead moved 13 -> 1 across the wrap; the latch (not
         // a fresh touch) prints every passed trigger step.
         set_playhead(&state, 1);
         let printed = print_pass(&state, &mut print, 0, true);
-        assert_eq!(printed.steps, vec![14, 1]);
+        assert_eq!(printed.steps, vec![14, 15, 0, 1]);
+        assert_eq!(printed.triggered, vec![true, false, false, true]);
         assert_eq!(state.pattern.step_data[0].get(14, StepParam::Duration), 3.0);
         assert_eq!(state.pattern.step_data[0].get(1, StepParam::Duration), 3.0);
         // Trigger-less steps stay at their defaults.
-        let default_duration = StepParam::Duration.default_value();
         assert_eq!(
             state.pattern.step_data[0].get(15, StepParam::Duration),
             default_duration
