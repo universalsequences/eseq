@@ -217,49 +217,65 @@
         (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 1 "lp_mod2_src" "src2" 4.2 (drift-src-options) (drift-text))
         (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "lp_mod2_amt" "amt2" 2.7 1 false (drift-text)))))))
 
-;; Modulation column: LFO and MOD as dense rows, PITCH as a one-line row.
+;; Pitch modulation as its own full-height column: wide source dropdowns
+;; up top, amount/drift knobs (a size between the regular and filter knobs).
+(def drift-pitch-col-w () 16.0)
+(def drift-pitch-knob (name title decimals)
+  (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 1 name title 4.8 4.9 4.9 (drift-knob) decimals))
+
+(def drift-pitch-column ()
+  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s 1 (drift-pitch-col-w)
+    (+ (* 2 (eseq.effects.custom-ui-lego/ui-lego-dense-h)) (eseq.effects.custom-ui-lego/ui-lego-small-h) (* 2 (eseq.effects.custom-ui-lego/ui-lego-gap)))
+    (drift-surf-cool) (drift-bord-cool) false
+    (box :width :fill :height :fill :v-align :center
+      (v-stack :width :fill :gap 0.5 :align :start
+        (h-stack :gap 0.22 :align :end
+          (eseq.effects.custom-ui-lego/ui-lego-header-s 1 "PITCH" 3.2 (drift-head))
+          (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 1 "pitch_mod1_src" "src1" 5.4 (drift-src-options) (drift-text))
+          (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 1 "pitch_mod2_src" "src2" 5.4 (drift-src-options) (drift-text)))
+        (h-stack :gap 0.10 :align :start
+          (drift-pitch-knob "pitch_mod1_amt" "amt1" 1)
+          (drift-pitch-knob "pitch_mod2_amt" "amt2" 1)
+          (drift-pitch-knob "drift" "drift" 2))))))
+
+;; LFO and MOD share one column as two tall rows, with dropdowns wide
+;; enough for their longest option ("env2", "o1 gain", "lp frq").
 (def drift-mod-col-w () 22.0)
-(def drift-mod-panel (height body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s 2 (drift-mod-col-w) height (drift-surf-cool) (drift-bord-cool) false
+(def drift-mod-row-h ()
+  (/ (- (+ (* 2 (eseq.effects.custom-ui-lego/ui-lego-dense-h)) (eseq.effects.custom-ui-lego/ui-lego-small-h) (* 2 (eseq.effects.custom-ui-lego/ui-lego-gap)))
+        (eseq.effects.custom-ui-lego/ui-lego-gap))
+     2))
+(def drift-mod-panel (body)
+  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s 2 (drift-mod-col-w) (drift-mod-row-h) (drift-surf-cool) (drift-bord-cool) false
     (box :width :fill :height :fill :v-align :center body)))
 
 (def drift-lfo-block ()
-  (drift-mod-panel (eseq.effects.custom-ui-lego/ui-lego-dense-h)
-    (v-stack :width :fill :gap 0.30 :align :start
+  (drift-mod-panel
+    (v-stack :width :fill :gap 0.40 :align :start
       (h-stack :gap 0.22 :align :end
         (eseq.effects.custom-ui-lego/ui-lego-header-s 2 "LFO" 2.6 (drift-head))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo_wave" "wave" 4.4 (drift-lfo-wave-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo_mode" "mode" 4.0 (drift-lfo-mode-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo_retrig" "retrig" 4.0 (drift-retrig-options) (drift-text)))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo_wave" "wave" 5.0 (drift-lfo-wave-options) (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo_mode" "mode" 4.6 (drift-lfo-mode-options) (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo_retrig" "retrig" 4.6 (drift-retrig-options) (drift-text)))
       (h-stack :gap 0.22 :align :end
         (box :width 2.6 :height 0.1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo_rate_hz" "rate" 4.4 2 "Hz" (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo_ratio" "ratio" 4.0 2 false (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo_amount" "amt" 4.0 2 false (drift-text))))))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo_rate_hz" "rate" 5.0 2 "Hz" (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo_ratio" "ratio" 4.6 2 false (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo_amount" "amt" 4.6 2 false (drift-text))))))
 
 (def drift-matrix-block ()
-  (drift-mod-panel (eseq.effects.custom-ui-lego/ui-lego-dense-h)
-    (v-stack :width :fill :gap 0.30 :align :start
+  (drift-mod-panel
+    (v-stack :width :fill :gap 0.40 :align :start
       (h-stack :gap 0.22 :align :end
         (eseq.effects.custom-ui-lego/ui-lego-header-s 2 "MOD" 2.6 (drift-head))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm1_src" "src1" 4.2 (drift-src-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm1_dest" "dst1" 5.0 (drift-dest-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "mm1_amt" "amt1" 2.8 2 false (drift-text)))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm1_src" "src1" 5.2 (drift-src-options) (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm1_dest" "dst1" 6.0 (drift-dest-options) (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "mm1_amt" "amt1" 3.0 2 false (drift-text)))
       (h-stack :gap 0.22 :align :end
         (box :width 2.6 :height 0.1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm2_src" "src2" 4.2 (drift-src-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm2_dest" "dst2" 5.0 (drift-dest-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "mm2_amt" "amt2" 2.8 2 false (drift-text))))))
-
-(def drift-pitch-block ()
-  (drift-mod-panel (eseq.effects.custom-ui-lego/ui-lego-small-h)
-    (h-stack :gap 0.20 :align :end
-      (eseq.effects.custom-ui-lego/ui-lego-header-s 1 "PITCH" 3.0 (drift-head))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 1 "pitch_mod1_src" "src1" 4.2 (drift-src-options) (drift-text))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "pitch_mod1_amt" "amt1" 2.6 1 false (drift-text))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 1 "pitch_mod2_src" "src2" 4.2 (drift-src-options) (drift-text))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "pitch_mod2_amt" "amt2" 2.6 1 false (drift-text))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "drift" "drift" 2.6 2 false (drift-text)))))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm2_src" "src2" 5.2 (drift-src-options) (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm2_dest" "dst2" 6.0 (drift-dest-options) (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "mm2_amt" "amt2" 3.0 2 false (drift-text))))))
 
 (defsynth-ui
   (h-stack :width :fill :gap 0.30 :align :stretch
@@ -284,7 +300,7 @@
     ; )
     (drift-filter-column)
     (drift-detail-column)
+    (drift-pitch-column)
     (v-stack :width (drift-mod-col-w) :gap (eseq.effects.custom-ui-lego/ui-lego-gap)
       (drift-lfo-block)
-      (drift-matrix-block)
-      (drift-pitch-block))))
+      (drift-matrix-block))))
