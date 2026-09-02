@@ -44,9 +44,9 @@
 (def drift-filter-knob-w () 6.0)
 (def drift-filter-knob-h () 4.9)
 (def drift-filter-knob (name title decimals)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 1 name title (drift-filter-knob-w) (drift-filter-knob-h) (drift-filter-knob-h) (drift-knob) decimals))
+  (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 3 name title (drift-filter-knob-w) (drift-filter-knob-h) (drift-filter-knob-h) (drift-knob) decimals))
 (def drift-filter-log-knob (name title decimals)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-taper-sized-s 1 name title (drift-filter-knob-w) (drift-filter-knob-h) (drift-filter-knob-h) (drift-knob) decimals "log"))
+  (eseq.effects.custom-ui-lego/ui-lego-knob-taper-sized-s 3 name title (drift-filter-knob-w) (drift-filter-knob-h) (drift-filter-knob-h) (drift-knob) decimals "log"))
 (def drift-panel-column (section surface border stripe body)
   (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (drift-filter-col-w)
     (+ (* 2 (eseq.effects.custom-ui-lego/ui-lego-dense-h)) (eseq.effects.custom-ui-lego/ui-lego-small-h) (* 2 (eseq.effects.custom-ui-lego/ui-lego-gap)))
@@ -189,33 +189,95 @@
         (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "volume_db" "vol" 5.0 1 "dB" (drift-text))
         (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "vel_to_vol" "vel" 4.0 2 false (drift-text))))))
 
+;; Filter response in place of the envelope plot while the filter column
+;; (section 3) is selected. Band 0 is the resonant lowpass (lp_freq / lp_res,
+;; draggable); band 1 is the highpass (hp_freq, fixed q). Bindings, not value
+;; reads, so a drag repaints only this widget (see core/wavetable ui.lisp).
+(def drift-filter-detail ()
+  (let ((cut-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "lp_freq"))
+        (res-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "lp_res"))
+        (hp-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "hp_freq"))
+        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+    (eseq.effects.custom-ui-lego/ui-readout-panel-medium-s 3
+      (v-stack :width :fill :height :fill :gap 0.22 :align :stretch
+        (box :width :fill :height 0.72 :h-align :start :v-align :center
+          (h-stack (box :width 0.4)
+            (label "FILTER" :font-size 8.4 :color :dim :bg :transparent)))
+        (if (and cut-p res-p hp-p)
+          (response-curve-editor
+            :mode :filter
+            :bands (list
+              (dict :id 0 :type "lowpass"
+                :freq (eseq.effects.custom-ui-runtime/custom-ui-param-binding cut-p)
+                :freq-min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min cut-p)
+                :freq-max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max cut-p)
+                :gain 0 :gain-min -12 :gain-max 12
+                :q (eseq.effects.custom-ui-runtime/custom-ui-param-binding res-p)
+                :q-min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min res-p)
+                :q-max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max res-p)
+                :enabled true :selected true)
+              (dict :id 1 :type "highpass"
+                :freq (eseq.effects.custom-ui-runtime/custom-ui-param-binding hp-p)
+                :freq-min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min hp-p)
+                :freq-max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max hp-p)
+                :gain 0 :gain-min -12 :gain-max 12
+                :q 0.2 :q-min 0 :q-max 1
+                :enabled true :selected false))
+            :freq-min 10
+            :freq-max 18000
+            :gain-min -12
+            :gain-max 12
+            :q-min 0
+            :q-max 1
+            :background-color :instrument-control-bg
+            :corner-radius 5
+            :grid-color :border-inactive
+            :stroke-color (drift-knob)
+            :point-color (drift-head)
+            :width :fill
+            :height 4.0
+            :on-action (lambda (event)
+              (if (or (= (get event :type) :change-band)
+                      (= (get event :type) :commit-band))
+                (do
+                  (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope 3)
+                  (if (= (get event :id) 1)
+                    (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope hp-p (get event :freq))
+                    (do
+                      (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope cut-p (get event :freq))
+                      (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope res-p (get event :q)))))
+                nil)))
+          (label "missing filter params" :font-size 8 :color :red :bg :transparent))))))
+
 (def drift-detail-column ()
   (v-stack :width (eseq.effects.custom-ui-lego/ui-lego-col-w) :gap (eseq.effects.custom-ui-lego/ui-lego-gap)
     (drift-cyc-block)
-    (drift-env-detail)
+    (if (= eseq.vanilla/custom-ui-selected-section 3)
+      (drift-filter-detail)
+      (drift-env-detail))
     (drift-global-block)))
 
 ;; Filter column, directly right of the oscillators (VCO -> Filter): the
 ;; filter itself on top, its modulation routing below, one full-height panel.
 (def drift-filter-column ()
-  (drift-panel-column 1 (drift-surf-cool) (drift-bord-cool) false
+  (drift-panel-column 3 (drift-surf-cool) (drift-bord-cool) false
     (box :width :fill :height :fill :v-align :center
       (v-stack :width :fill :gap 0.4 :align :start
       (h-stack :gap 0.22 :align :end
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 1 "FILTER" 3.6 (drift-head))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 1 "filter_type" "type" 4.4 (drift-ftype-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "keytrack" "key" 3.0 2 false (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "hp_freq" "hp" 3.4 0 "Hz" (drift-text)))
+        (eseq.effects.custom-ui-lego/ui-lego-header-s 3 "FILTER" 3.6 (drift-head))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 3 "filter_type" "type" 4.4 (drift-ftype-options) (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "keytrack" "key" 3.0 2 false (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "hp_freq" "hp" 3.4 0 "Hz" (drift-text)))
       (h-stack :gap 0.10 :align :start
         (drift-filter-log-knob "lp_freq" "cut" 0)
         (drift-filter-knob "lp_res" "res" 2)
         (drift-filter-knob "filter_drive" "drive" 2))
       (h-stack :gap 0.22 :align :end
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 1 "FMOD" 3.0 (drift-head))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 1 "lp_mod1_src" "src1" 4.2 (drift-src-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "lp_mod1_amt" "amt1" 2.7 1 false (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 1 "lp_mod2_src" "src2" 4.2 (drift-src-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "lp_mod2_amt" "amt2" 2.7 1 false (drift-text)))))))
+        (eseq.effects.custom-ui-lego/ui-lego-header-s 3 "FMOD" 3.0 (drift-head))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 3 "lp_mod1_src" "src1" 4.2 (drift-src-options) (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "lp_mod1_amt" "amt1" 2.7 1 false (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 3 "lp_mod2_src" "src2" 4.2 (drift-src-options) (drift-text))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "lp_mod2_amt" "amt2" 2.7 1 false (drift-text)))))))
 
 ;; Pitch modulation as its own full-height column: wide source dropdowns
 ;; up top, amount/drift knobs (a size between the regular and filter knobs).
