@@ -205,14 +205,11 @@
 ;; reads, so a drag repaints only this widget (see core/wavetable ui.lisp).
 (def drift-filter-detail ()
   (let ((cut-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "lp_freq"))
-        (res-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "lp_res"))
-        (hp-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "hp_freq"))
-        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+      (res-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "lp_res"))
+      (hp-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "hp_freq"))
+      (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (eseq.effects.custom-ui-lego/ui-readout-panel-medium-s 3
       (v-stack :width :fill :height :fill :gap 0.22 :align :stretch
-        (box :width :fill :height 0.72 :h-align :start :v-align :center
-          (h-stack (box :width 0.4)
-            (label "FILTER" :font-size 8.4 :color :dim :bg :transparent)))
         (if (and cut-p res-p hp-p)
           (response-curve-editor
             :mode :filter
@@ -251,10 +248,10 @@
             :stroke-width 4.5
             :point-color (drift-head)
             :width :fill
-            :height 4.0
+            :height 5.5
             :on-action (lambda (event)
               (if (or (= (get event :type) :change-band)
-                      (= (get event :type) :commit-band))
+                  (= (get event :type) :commit-band))
                 (do
                   (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope 3)
                   (if (= (get event :id) 1)
@@ -306,8 +303,8 @@
   (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 1 name title 4.8 4.9 4.9 (drift-knob) decimals))
 
 (def drift-pitch-column ()
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s 1 (drift-pitch-col-w)
-    (+ (* 2 (eseq.effects.custom-ui-lego/ui-lego-dense-h)) (eseq.effects.custom-ui-lego/ui-lego-small-h) (* 2 (eseq.effects.custom-ui-lego/ui-lego-gap)))
+  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s 1 (* 1.05 (drift-pitch-col-w))
+    (+ (* 2.0 (eseq.effects.custom-ui-lego/ui-lego-dense-h)) (eseq.effects.custom-ui-lego/ui-lego-small-h) (* 2 (eseq.effects.custom-ui-lego/ui-lego-gap)))
     (drift-surf-cool) (drift-bord-cool) false
     (box :width :fill :height :fill :v-align :start
       (v-stack :width :fill :gap 0.3 :align :start
@@ -370,7 +367,7 @@
         (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "mm2_amt" "amt2" 6.0 2 false (drift-text))))))
 
 (defsynth-ui
-  (h-stack :width :fill :gap 0.30 :align :stretch
+  (h-stack :width :fill :gap 0.10 :align :stretch
     ;(eseq.effects.custom-ui-lego/ui-lego-column
     (box :padding 0.1 :corner-radius 11 :background-color  :mixer-control-bg
       ;; Three knob rows in the column height: row padding and gaps stay

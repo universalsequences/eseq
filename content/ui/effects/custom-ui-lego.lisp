@@ -192,7 +192,7 @@
 (def ui-lego-panel-s (height section surface body)
   (box :width (ui-lego-col-w) :height height
        :background-color (if (= surface :instrument-group-bg) (eseq.effects.custom-ui-sections/ui-panel-bg section) surface)
-       :corner-radius 16
+       :corner-radius 12
        :border-width 1
        :padding 0.18
        :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
@@ -201,7 +201,7 @@
 (def ui-lego-panel-width-s (width height section surface body)
   (box :width width :height height
        :background-color (if (= surface :instrument-group-bg) (eseq.effects.custom-ui-sections/ui-panel-bg section) surface)
-       :corner-radius 7
+       :corner-radius 12
        :border-width 1
        :padding 0.18
        :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
@@ -210,7 +210,7 @@
 (def ui-lego-plain-surface (height surface body)
   (box :width (ui-lego-col-w) :height height
        :background-color surface
-       :corner-radius 7
+       :corner-radius 12
        :border-width 1
        :padding 0.16
        :debug-name "ui-lego-plain-surface"
@@ -223,7 +223,7 @@
 (def ui-lego-plain-surface-s (height section surface body)
   (box :width (ui-lego-col-w) :height height
        :background-color surface
-       :corner-radius 24
+       :corner-radius 12
        :border-width 1
        :padding 0.16
        :debug-name "ui-lego-plain-surface"
@@ -1135,7 +1135,7 @@
 (def ui-lego-panel-x-s (section width height surface border-color stripe-color body)
   (box :width width :height height
        :background-color surface
-       :corner-radius 16
+       :corner-radius 8
        :border-width 1
        :border-color :transparent ;border-color
        :padding 0.18

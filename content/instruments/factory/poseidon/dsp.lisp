@@ -39,9 +39,13 @@
 ; ======================================================================
 
 (param osc1_wave @default 0 @min 0 @max 15 @mod true @mod-mode additive @mod-depth-min -15 @mod-depth-max 15)
+(param osc1_warp @default 0 @min 0 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
+(param osc1_fold @default 0 @min 0 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
 (param osc1_gain_db @default -6 @min -36 @max 12 @unit dB @mod true @mod-mode additive @mod-depth-min -24 @mod-depth-max 24 @mod-unit dB)
 (param osc2_wave @default 0 @min 0 @max 15 @mod true @mod-mode additive @mod-depth-min -15 @mod-depth-max 15)
 (param osc2_detune @default 0 @min -24 @max 24 @unit st @mod true @mod-mode additive @mod-depth-min -12 @mod-depth-max 12 @mod-unit st)
+(param osc2_warp @default 0 @min 0 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
+(param osc2_fold @default 0 @min 0 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
 (param osc2_gain_db @default -6 @min -36 @max 12 @unit dB @mod true @mod-mode additive @mod-depth-min -24 @mod-depth-max 24 @mod-unit dB)
 (param cutoff @default 3500 @min 20 @max 18000 @unit Hz @mod true @mod-mode additive @mod-depth-min -8000 @mod-depth-max 8000 @mod-unit Hz)
 (param resonance @default 0.25 @min 0 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
@@ -158,7 +162,10 @@
 ; into a 32x16 single-cycle ROM read. Phase is free-running — the old
 ; per-trigger phase reset was a click source once the amp EG retriggers
 ; from its current (nonzero) value.
-(defmacro pcm-osc (bank_t set_idx wave_target freq trig)
+; warp_v (0..1): Möbius phase warp before the table read; fold_v (0..1):
+; triangle wavefold after it. Same math as core/wavetable, which the
+; wavetable-viewer widget mirrors for its display.
+(defmacro pcm-osc (bank_t set_idx wave_target freq warp_v fold_v trig)
   (make-history scan_hist)
   (def scan_prev (read-history scan_hist))
   (def scan_coeff (- 1.0 (exp (/ -1.0 (* 0.008 samplerate)))))
@@ -167,7 +174,12 @@
               (+ scan_prev (* scan_coeff (- wave_target scan_prev)))))
   (write-history scan_hist scan)
   (def idx (+ (* (clip (floor set_idx) 0 31) 16) (clip scan 0 15)))
-  (wavetable-read bank_t idx (phasor freq)))
+  (def phase_raw (phasor freq))
+  (def k (+ 1 (* 6 (clip warp_v 0 1))))
+  (def phase (/ (* k phase_raw) (+ 1 (* (- k 1) phase_raw))))
+  (def raw (wavetable-read bank_t idx phase))
+  (def foldg (+ 1 (* 6 (clip fold_v 0 1))))
+  (- 1 (abs (- (wrap (+ (* raw foldg) 1) 0 4) 2))))
 
 ; ======================================================================
 ; section macros (one collapsed node each at the top level)
@@ -278,7 +290,7 @@
   (* base_hz (semi-ratio (+ peg_st (* ams_pitch 12) lfo1_pitch_st))))
 
 ; Oscillator 1: PCM set/wave with velocity wave switching.
-(defmacro osc-one (bank_t common_hz wave_v vel ams_wav trig)
+(defmacro osc-one (bank_t common_hz wave_v warp_v fold_v vel ams_wav trig)
   (param osc1_set @default 0 @min 0 @max 31)
   (param osc1_octave @default 0 @min -2 @max 2 @unit oct)
   (param osc1_tune @default 0 @min -50 @max 50 @unit cents)
@@ -286,17 +298,17 @@
   (def target (clip (+ wave_v (* vel osc1_vel_wave) (* ams_wav 15)) 0 15))
   (def freq (* common_hz (semi-ratio (+ (* (clip (round osc1_octave) -2 2) 12)
                                         (/ osc1_tune 100.0)))))
-  (pcm-osc bank_t osc1_set target freq trig))
+  (pcm-osc bank_t osc1_set target freq warp_v fold_v trig))
 
 ; Oscillator 2: PCM set/wave with detune and velocity wave switching.
-(defmacro osc-two (bank_t common_hz wave_v detune_v vel ams_wav trig)
+(defmacro osc-two (bank_t common_hz wave_v warp_v fold_v detune_v vel ams_wav trig)
   (param osc2_set @default 0 @min 0 @max 31)
   (param osc2_octave @default -1 @min -2 @max 2 @unit oct)
   (param osc2_vel_wave @default 0 @min -15 @max 15)
   (def target (clip (+ wave_v (* vel osc2_vel_wave) (* ams_wav 15)) 0 15))
   (def freq (* common_hz (semi-ratio (+ (* (clip (round osc2_octave) -2 2) 12)
                                         (clip detune_v -24 24)))))
-  (pcm-osc bank_t osc2_set target freq trig))
+  (pcm-osc bank_t osc2_set target freq warp_v fold_v trig))
 
 ; Mixer: dB gain staging with osc2 on/off.
 (defmacro source-mixer (o1 o2 gain1_db gain2_db)
@@ -369,9 +381,10 @@
 
 (def common_hz (pitch-mods base_pitch peg_st lfo1_pitch_st ams_pitch))
 
-(def osc1 (osc-one bank common_hz (mod osc1_wave) velocity ams_wav1 trigger))
-(def osc2 (osc-two bank common_hz (mod osc2_wave) (mod osc2_detune)
-                   velocity ams_wav2 trigger))
+(def osc1 (osc-one bank common_hz (mod osc1_wave) (mod osc1_warp) (mod osc1_fold)
+                   velocity ams_wav1 trigger))
+(def osc2 (osc-two bank common_hz (mod osc2_wave) (mod osc2_warp) (mod osc2_fold)
+                   (mod osc2_detune) velocity ams_wav2 trigger))
 
 (def mixed (source-mixer osc1 osc2 (mod osc1_gain_db) (mod osc2_gain_db)))
 

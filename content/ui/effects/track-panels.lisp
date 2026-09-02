@@ -171,17 +171,17 @@
         )
       :border-width (if current 0.75 0.35)
       :border-color (if current c :mixer-strip-selected-bg)
-      :corner-radius 8
+      :corner-radius 4
       :on-click |x y r| (plock-chip-click chip)
       (h-stack :gap 0.16 :align :baseline
-        (box :width 0.18 :height 0.58
+        (box :width 0.18 :height 0.28
           :corner-radius 2
           :background-color (if def-chip :transparent c)
           :border-width (if def-chip 1 0)
           :border-color c)
         (label (plock-chip-label chip)
-          :font-size 12.0 :color (if current :black :dim) :bg :transparent)
-        (box :width 0.1 )
+          :font-size 10.0 :color (if current :black :dim) :bg :transparent)
+        (box :width 0.2 )
         ))))
 
 (def plock-domain-title (domain)

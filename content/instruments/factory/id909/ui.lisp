@@ -97,7 +97,7 @@
         (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 0 "hpf" "HPF" 4.2 (eseq.effects.custom-ui-lego/ui-accent-blue) 0)))))
 
 (defsynth-ui
-  (h-stack :width :fill :gap 0.35 :align :stretch
+  (h-stack :width :fill :gap 0.05 :align :stretch
     (eseq.effects.custom-ui-lego/ui-lego-column-2
       (id909-pitch-block)
       (id909-env-block))
