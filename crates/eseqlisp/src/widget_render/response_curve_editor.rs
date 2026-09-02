@@ -71,6 +71,17 @@ struct ResponseBand {
     /// resonance): its handle sits at the plot's vertical midpoint and a
     /// drag only moves the cutoff.
     lock_y: bool,
+    /// Maps the band's q *parameter* onto the Q the drawn response uses:
+    /// display_q = q_curve_offset + q_curve_scale * q. Lets a 0..1 resonance
+    /// knob draw the peak its DSP actually produces (e.g. Q = 0.5 + 8 * res).
+    q_curve_scale: f32,
+    q_curve_offset: f32,
+}
+
+impl ResponseBand {
+    fn display_q(&self) -> f32 {
+        (self.q_curve_offset + self.q_curve_scale * self.q).max(0.001)
+    }
 }
 
 fn value_string(value: &Value) -> Option<&str> {
@@ -158,6 +169,8 @@ fn prop_bands(props: &HashMap<String, Value>) -> Vec<ResponseBand> {
                 enabled: map_bool(&map, "enabled", true),
                 selected: map_bool(&map, "selected", false),
                 lock_y: map_bool(&map, "lock-y", false),
+                q_curve_scale: map_num(&map, "q-curve-scale", 1.0),
+                q_curve_offset: map_num(&map, "q-curve-offset", 0.0),
             })
         })
         .collect()
@@ -605,7 +618,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
                     (
                         band_type_code(&other.band_type) + 1.0,
                         freq_to_t(other.freq, other.freq_min, other.freq_max),
-                        other.q,
+                        other.display_q(),
                         band_octave_span(other),
                     )
                 })
@@ -625,7 +638,12 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
                         q_to_t(band.q, band.q_min, band.q_max),
                     ],
                     uniform_b: [idx as f32, total, band.gain, filter_mode],
-                    uniform_c: [band.q, band_octave_span(band), other_type, other_freq_t],
+                    uniform_c: [
+                        band.display_q(),
+                        band_octave_span(band),
+                        other_type,
+                        other_freq_t,
+                    ],
                     uniform_d: [handle_inset_x, handle_inset_y, other_q, other_span],
                     color_a: curve_color.to_rgba(),
                     color_b: bg_color.to_rgba(),
@@ -983,6 +1001,40 @@ mod tests {
         assert!(freq > 1_000.0);
         assert_eq!(gain, band.gain);
         assert_eq!(q, band.q);
+    }
+
+    #[test]
+    fn q_curve_mapping_feeds_the_drawn_response_not_the_raw_parameter() {
+        let mut node = test_node("filter");
+        let mut band = band_value(0, 1_000.0, 0.0, 0.9, true);
+        if let Value::Map(map) = &mut band {
+            map.insert(
+                "q-min".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.0))),
+            );
+            map.insert(
+                "q-max".to_string(),
+                Rc::new(RefCell::new(Value::Number(1.0))),
+            );
+            map.insert(
+                "q-curve-scale".to_string(),
+                Rc::new(RefCell::new(Value::Number(8.0))),
+            );
+            map.insert(
+                "q-curve-offset".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.5))),
+            );
+        }
+        node.props.insert(
+            "bands".to_string(),
+            Value::List(vec![Rc::new(RefCell::new(band))]),
+        );
+        let band = prop_bands(&node.props).remove(0);
+        assert!((band.display_q() - 7.7).abs() < 1e-4);
+        assert!(
+            (band.q - 0.9).abs() < 1e-6,
+            "the parameter itself is untouched"
+        );
     }
 
     #[test]

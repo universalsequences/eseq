@@ -216,13 +216,16 @@
                 :q (eseq.effects.custom-ui-runtime/custom-ui-param-binding res-p)
                 :q-min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min res-p)
                 :q-max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max res-p)
+                ;; Type I is (svf cut (+ 0.5 (* res 8))): draw that Q, not raw res.
+                :q-curve-offset 0.5 :q-curve-scale 8.0
                 :enabled true :selected true)
               (dict :id 1 :type "highpass"
                 :freq (eseq.effects.custom-ui-runtime/custom-ui-param-binding hp-p)
                 :freq-min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min hp-p)
                 :freq-max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max hp-p)
                 :gain 0 :gain-min -12 :gain-max 12
-                :q 0.2 :q-min 0 :q-max 1
+                ;; the DSP highpass is a fixed-Q svf; draw it Butterworth-flat.
+                :q 0.707 :q-min 0 :q-max 1
                 :lock-y true
                 :enabled true :selected false))
             :freq-min 10
