@@ -25,9 +25,14 @@
 ;; The dark oscillator column stacks three equal rows (osc1 / osc2 / noise)
 ;; in the same height the other columns use, so its knobs are a touch
 ;; shorter than the 3.36 full-height cells elsewhere.
-(def drift-row-knob-h () 3.0)
+;; Osc rows are 3.2 tall; the lighter noise row is 2.6 so the three rows
+;; read as balanced rather than one sparse row matching two dense ones.
+(def drift-row-knob-h () 3.2)
+(def drift-noise-knob-h () 2.6)
 (def drift-row-knob (name title accent decimals)
   (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 name title 4.2 (drift-row-knob-h) (drift-row-knob-h) accent decimals))
+(def drift-noise-knob (name title accent decimals)
+  (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 name title 4.2 (drift-noise-knob-h) (drift-noise-knob-h) accent decimals))
 
 (def drift-panel-dense (section surface border stripe body)
   (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-dense-h) surface border stripe body))
@@ -92,39 +97,32 @@
                   (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p (if on 0 1))))))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
 
+;; Shape mod (osc1_shape_src/amt), voice_pan and spread stay in the DSP but
+;; are not exposed here: shape is @mod and has a MOD-matrix destination, so
+;; the dedicated slot only duplicated that.
 (def drift-osc1-block ()
-  ;(drift-panel-dense 0 (drift-surf-warm) (drift-bord-warm) (drift-orange)
   (h-stack :width :fill :height :fill :gap 0.30 :align :center
     (v-stack :width 8.8 :gap 0.18 :align :start
       (h-stack :gap 0.20 :align :end
         (drift-osc-tab "osc1_on" "1" (drift-orange))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc1_wave" "wave" 4.8 (drift-wave1-options) (drift-text))
-        )
-      (h-stack :gap 0.20 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc1_route" "route" 3.4 (drift-route-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc1_shape_src" "shp src" 4.4 (drift-src-options) (drift-text))))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc1_wave" "wave" 4.8 (drift-wave1-options) (drift-text)))
+      (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc1_route" "route" 3.4 (drift-route-options) (drift-text)))
     (h-stack :gap 0.10 :align :start
       (drift-row-knob "osc1_octave" "octave" (drift-orange) 0)
       (drift-row-knob "osc1_shape" "shape" (drift-orange) 2)
-      (drift-row-knob "osc1_shape_amt" "shp A" (drift-orange) 2))
-    (eseq.effects.custom-ui-lego/ui-lego-fader-s 0 "osc1_gain_db" 2.3 1.85 (drift-orange) 1 false)))
+      (drift-row-knob "osc1_gain_db" "gain" (drift-orange) 1))))
 
 (def drift-osc2-block ()
-  ;(drift-panel-dense 0 (drift-surf-warm) (drift-bord-warm) (drift-ice)
   (h-stack :width :fill :height :fill :gap 0.30 :align :center
     (v-stack :width 8.8 :gap 0.18 :align :start
       (h-stack :gap 0.20 :align :end
         (drift-osc-tab "osc2_on" "2" (drift-ice))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc2_wave" "wave" 4.4 (drift-wave2-options) (drift-text))
-        )
-      (h-stack :gap 0.20 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc2_route" "route" 3.4 (drift-route-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "voice_pan" "pan" 3.1 2 false (drift-text))))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc2_wave" "wave" 4.4 (drift-wave2-options) (drift-text)))
+      (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc2_route" "route" 3.4 (drift-route-options) (drift-text)))
     (h-stack :gap 0.10 :align :start
       (drift-row-knob "osc2_octave" "octave" (drift-ice) 0)
       (drift-row-knob "osc2_detune" "det" (drift-ice) 1)
-      (drift-row-knob "spread" "sprd" (drift-ice) 2))
-    (eseq.effects.custom-ui-lego/ui-lego-fader-s 0 "osc2_gain_db" 2.3 1.85 (drift-ice) 1 false)))
+      (drift-row-knob "osc2_gain_db" "gain" (drift-ice) 1))))
 
 (def drift-source-block ()
   (h-stack :width :fill :height :fill :gap 0.30 :align :center
@@ -134,7 +132,7 @@
           (eseq.effects.custom-ui-lego/ui-lego-tab-s 0 "N" 1.3 0.92 (drift-pink) :black))
         (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "noise_route" "route" 3.4 (drift-route-options) (drift-text))))
     (h-stack :gap 0.10 :align :start
-      (drift-row-knob "noise_gain_db" "noise" (drift-pink) 0))))
+      (drift-noise-knob "noise_gain_db" "noise" (drift-pink) 0))))
 
 
 (def drift-cyc-block ()
