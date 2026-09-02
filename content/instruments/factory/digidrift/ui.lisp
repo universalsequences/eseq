@@ -239,6 +239,7 @@
             :corner-radius 5
             :grid-color :border-inactive
             :stroke-color (drift-knob)
+            :stroke-width 2.5
             :point-color (drift-head)
             :width :fill
             :height 4.0

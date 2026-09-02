@@ -601,6 +601,13 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
             super::get_f32_prop(&node.props, "corner-radius", 0.0),
         );
         let (handle_inset_x, handle_inset_y) = handle_insets(pixel_aspect);
+        // `stroke-width` is in px; the shader wants the half-width in
+        // plot-height units. 0 (unset) keeps the historical hairline.
+        let stroke_half = if px_h > 0.0 {
+            super::get_f32_prop(&node.props, "stroke-width", 0.0).max(0.0) * 0.5 / px_h
+        } else {
+            0.0
+        };
         let total = bands.len().max(1) as f32;
         let mut primitives = Vec::new();
         // Two filter bands (e.g. highpass + lowpass) render as one combined
@@ -643,7 +650,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
                         band_y_t(band, filter_mode > 0.5),
                         q_to_t(band.q, band.q_min, band.q_max),
                     ],
-                    uniform_b: [idx as f32, total, band.gain, filter_mode],
+                    uniform_b: [idx as f32, total, stroke_half, filter_mode],
                     uniform_c: [
                         band.display_q(),
                         band_octave_span(band),
@@ -672,7 +679,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
                     orientation: filter_mode,
                     itime: viewport.time_seconds,
                     uniform_a: [5.0, 0.5, 0.5, 0.0],
-                    uniform_b: [0.0, 1.0, 0.0, filter_mode],
+                    uniform_b: [0.0, 1.0, stroke_half, filter_mode],
                     uniform_c: [1.0, 9.97, 0.0, 0.0],
                     uniform_d: [handle_inset_x, handle_inset_y, 0.0, 0.0],
                     color_a: curve_color.to_rgba(),
@@ -785,6 +792,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float qT = clamp(in.uniform_a.w, 0.0, 1.0);
     float bandIndex = in.uniform_b.x;
     float isFilter = in.uniform_b.w;
+    float strokeHalf = (in.uniform_b.z <= 0.0) ? 0.004 : in.uniform_b.z;
     float filterQ = max(in.uniform_c.x, 0.001);
     float octaveSpan = max(in.uniform_c.y, 0.001);
     float otherType = (isFilter > 0.5) ? in.uniform_c.z : 0.0;
@@ -836,7 +844,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         float2 b = rce_plot(float2(x, y));
         float d = rce_sdSegment(float2(uv.x * aspect, uv.y), float2(a.x * aspect, a.y), float2(b.x * aspect, b.y));
         float aa = max(fwidth(d), 0.001);
-        lineMask = max(lineMask, smoothstep(0.006 + aa, 0.002, d));
+        lineMask = max(lineMask, smoothstep(strokeHalf + aa, max(strokeHalf - aa, 0.0), d));
         prevX = x;
         prevY = y;
     }
@@ -1076,6 +1084,37 @@ mod tests {
         let band = prop_bands(&node.props).remove(0);
         // 0.5 + 6.7 * 0.5^3 = 1.3375: a ~2 dB bump, not a spike.
         assert!((band.display_q() - 1.3375).abs() < 1e-4);
+    }
+
+    #[test]
+    fn stroke_width_prop_reaches_the_shader_in_plot_height_units() {
+        let mut node = test_node("filter");
+        node.props
+            .insert("stroke-width".to_string(), Value::Number(3.0));
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 640.0,
+            vp_h: 360.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 18.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let prims =
+            RESPONSE_CURVE_EDITOR_WIDGET.build_primitives("response-curve-editor", &node, viewport);
+        let instance = prims
+            .iter()
+            .find_map(|p| match p {
+                GpuPrimitive::WidgetInstance { instance, .. } => Some(instance),
+                _ => None,
+            })
+            .expect("curve instance");
+        let px_h = node.rect.height * viewport.cell_h;
+        assert!((instance.uniform_b[2] - 1.5 / px_h).abs() < 1e-6);
     }
 
     #[test]

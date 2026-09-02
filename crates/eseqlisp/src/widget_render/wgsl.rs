@@ -932,6 +932,9 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var qT: f32 = clamp(input.uniform_a.w, 0.0, 1.0);
     var bandIndex: f32 = input.uniform_b.x;
     var isFilter: f32 = input.uniform_b.w;
+    // Curve stroke half-width in plot-height units (from the stroke-width
+    // prop, in px); 0 falls back to the widget's historical hairline.
+    var strokeHalf: f32 = select(input.uniform_b.z, 0.004, input.uniform_b.z <= 0.0);
     var filterQ: f32 = max(input.uniform_c.x, 0.001);
     var octaveSpan: f32 = max(input.uniform_c.y, 0.001);
     var otherType: f32 = select(0.0, input.uniform_c.z, isFilter > 0.5);
@@ -985,7 +988,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         var b: vec2<f32> = rce_plot(vec2<f32>(x, y));
         var d: f32 = rce_sdSegment(vec2<f32>(uv.x * aspect, uv.y), vec2<f32>(a.x * aspect, a.y), vec2<f32>(b.x * aspect, b.y));
         var aa: f32 = max(fwidth(d), 0.001);
-        lineMask = max(lineMask, smoothstep(0.006 + aa, 0.002, d));
+        lineMask = max(lineMask, smoothstep(strokeHalf + aa, max(strokeHalf - aa, 0.0), d));
         prevX = x;
         prevY = y;
     }
