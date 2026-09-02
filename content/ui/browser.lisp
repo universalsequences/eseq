@@ -955,13 +955,18 @@
 (def loading-instrument? ()
   (not (= sbrowser-loading-instrument-name "")))
 
+;; The row keeps its height while idle so the tree below does not jump when a
+;; load starts or finishes; only the contents swap.
 (def instrument-loading-row ()
-  (if (loading-instrument?)
-    (box :key "instrument-loading-row" :width :fill :padding 0.25
-      (editor-status-row
-        (str "Loading " sbrowser-loading-instrument-name "...")
-        :gray))
-    (box :height 0)))
+  (box :key "instrument-loading-row" :width :fill :height 0.8 :padding 0
+    (if (loading-instrument?)
+      (h-stack :width :fill :height 0.8 :gap 0.4 :align :center
+        (editor-spinner :width 2.0 :height 0.7)
+        (label (str "Loading " sbrowser-loading-instrument-name "...")
+          :font-size 9
+          :color :gray
+          :bg :transparent))
+      (box :width :fill :height 0.8))))
 
 (def create-picker ()
   (v-stack :key "create-picker-panel" :width :fill :gap 0.5 :flex 1
@@ -1281,23 +1286,8 @@
             :color :white))))
     (tabbed-content)))
 
-(def instruments-toolbar ()
-  (box :width :fill :padding 0.25
-    (h-stack :width :fill :gap 0.5 :align :center
-      (button
-        (if (= selected-instrument-name "")
-          "Fork…"
-          (str "Fork " selected-instrument-name))
-        :variant :secondary
-        :flex 1
-        :height 1.3
-        :font-size 10.5
-        :on-click |x y r| (fork-selected-instrument)
-        :color :white))))
-
 (def instruments-panel ()
-  (v-stack :key "instrument-tab-panel" :width :fill :gap 0.5 :flex 1
-    (instruments-toolbar)
+  (v-stack :key "instrument-tab-panel" :width :fill :gap 0.1 :flex 1
     (instrument-loading-row)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "instruments-tab-scroll" :width :fill :flex 1

@@ -5542,6 +5542,46 @@
     }
 
     #[test]
+    fn metal_seq_browser_idle_loading_row_reserves_its_height() {
+        // The loading row must occupy the same space whether or not a load is
+        // in flight, so the tree below does not jump when a load starts.
+        let mut editor = browser_editor_on_instrument_tab();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(48, 24);
+        let layout = editor.widget_layout().expect("idle instrument browser layout");
+        let idle_row = find_layout_node_by_stable_key_suffix(&layout, "/instrument-loading-row")
+            .expect("idle browser should still render the loading row placeholder");
+        assert_finite_nonzero_rect(idle_row, "idle instrument loading row");
+        let idle_height = idle_row.rect.height;
+        let idle_tree_y = find_layout_node_by_stable_key_suffix(&layout, "/instruments-tab-tree")
+            .expect("instrument tree")
+            .rect
+            .row;
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set! eseq.vanilla/sbrowser-loading-instrument-name "core/triton")"#)
+            .expect("mark instrument as loading");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("loading instrument browser layout");
+        let loading_row = find_layout_node_by_stable_key_suffix(&layout, "/instrument-loading-row")
+            .expect("loading row");
+        assert!(
+            (loading_row.rect.height - idle_height).abs() < 0.01,
+            "loading row height changed from {idle_height} to {}",
+            loading_row.rect.height
+        );
+        let loading_tree_y = find_layout_node_by_stable_key_suffix(&layout, "/instruments-tab-tree")
+            .expect("instrument tree while loading")
+            .rect
+            .row;
+        assert!(
+            (loading_tree_y - idle_tree_y).abs() < 0.01,
+            "instrument tree moved from row={idle_tree_y} to row={loading_tree_y} when loading began"
+        );
+    }
+
+    #[test]
     fn metal_seq_browser_builtin_instrument_rows_queue_rack_tracks() {
         let mut editor = browser_editor_on_instrument_tab();
         editor

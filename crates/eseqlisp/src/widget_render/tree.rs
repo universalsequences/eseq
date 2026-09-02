@@ -23,10 +23,19 @@ use crate::theme;
 
 // ── Tree state ───────────────────────────────────────────────────────────────
 
+/// Identity of one tree node, used to key the expanded set. Expansion is keyed
+/// by identity rather than by child index so that rows inserted or removed
+/// elsewhere in the tree (a new "Engines" section appearing above the
+/// instrument library, say) do not shift open state onto a neighbouring folder.
+type NodeIdPath = Vec<String>;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct TreeState {
-    expanded: HashSet<Vec<usize>>,
+    expanded: HashSet<NodeIdPath>,
     cursor_row: usize,
+    /// Identity of the row under the cursor, so the cursor can be re-resolved
+    /// when rows are inserted or removed above it (see `NodeIdPath`).
+    cursor_id: Option<NodeIdPath>,
     cursor_view_active: bool,
     external_selected_row: Option<usize>,
     synced_selection: Option<String>,
@@ -70,6 +79,7 @@ struct TreeRow {
     draggable: bool,
     drop_target: bool,
     path: Vec<usize>,
+    id_path: NodeIdPath,
     item_value: Value,
 }
 
@@ -129,6 +139,19 @@ fn item_is_header(item: &Value) -> bool {
     matches!(item_string_field(item, "kind").as_deref(), Some("header"))
 }
 
+/// Stable identity segment for one item: the first of `:path`, `:folder`,
+/// `:name`, or the label. Sibling-unique in every tree the app builds.
+fn item_identity(item: &Value, label: &str) -> String {
+    for key in ["path", "folder", "name"] {
+        if let Some(value) = item_string_field(item, key)
+            && !value.is_empty()
+        {
+            return format!("{key}:{value}");
+        }
+    }
+    format!("label:{label}")
+}
+
 /// Walk nested items, producing a flat list of visible rows.
 /// When `expand_all` is true, all folder nodes are treated as expanded regardless
 /// of the `expanded` set — used when a search filter is active so every matching
@@ -137,7 +160,19 @@ fn flatten_items(
     items: &Value,
     depth: usize,
     parent_path: &[usize],
-    expanded: &HashSet<Vec<usize>>,
+    expanded: &HashSet<NodeIdPath>,
+    expand_all: bool,
+    rows: &mut Vec<TreeRow>,
+) {
+    flatten_items_inner(items, depth, parent_path, &[], expanded, expand_all, rows);
+}
+
+fn flatten_items_inner(
+    items: &Value,
+    depth: usize,
+    parent_path: &[usize],
+    parent_id_path: &[String],
+    expanded: &HashSet<NodeIdPath>,
     expand_all: bool,
     rows: &mut Vec<TreeRow>,
 ) {
@@ -166,8 +201,10 @@ fn flatten_items(
 
         let mut path = parent_path.to_vec();
         path.push(i);
+        let mut id_path = parent_id_path.to_vec();
+        id_path.push(item_identity(&item, &label));
 
-        let is_expanded = has_children && (expand_all || expanded.contains(&path));
+        let is_expanded = has_children && (expand_all || expanded.contains(&id_path));
         rows.push(TreeRow {
             depth,
             label,
@@ -179,12 +216,21 @@ fn flatten_items(
             draggable: item_bool_field(&item, "draggable", !is_header),
             drop_target: item_bool_field(&item, "drop-target", !is_header),
             path: path.clone(),
+            id_path: id_path.clone(),
             item_value: item.clone(),
         });
 
         if is_expanded {
             if let Some(ref children_val) = children {
-                flatten_items(children_val, depth + 1, &path, expanded, expand_all, rows);
+                flatten_items_inner(
+                    children_val,
+                    depth + 1,
+                    &path,
+                    &id_path,
+                    expanded,
+                    expand_all,
+                    rows,
+                );
             }
         }
     }
@@ -269,8 +315,14 @@ fn item_to_map(item: &Value) -> Value {
     }
 }
 
+/// Move the cursor to `row_idx`, remembering the row's identity.
+fn set_cursor_row(state: &mut TreeState, rows: &[TreeRow], row_idx: usize) {
+    state.cursor_row = row_idx;
+    state.cursor_id = rows.get(row_idx).map(|row| row.id_path.clone());
+}
+
 /// Toggle a tree node's expand/collapse state.
-fn toggle_expand(state: &mut TreeState, path: &[usize]) {
+fn toggle_expand(state: &mut TreeState, path: &[String]) {
     let path_vec = path.to_vec();
     if state.expanded.contains(&path_vec) {
         state.expanded.remove(&path_vec);
@@ -286,12 +338,14 @@ fn get_string_prop(props: &HashMap<String, Value>, key: &str) -> Option<String> 
     }
 }
 
+/// Locate an item by field value, returning its index path and identity path.
 fn find_item_path_by_field(
     items: &Value,
     field: &str,
     needle: &str,
     parent_path: &[usize],
-) -> Option<Vec<usize>> {
+    parent_id_path: &[String],
+) -> Option<(Vec<usize>, NodeIdPath)> {
     let Value::List(list) = items else {
         return None;
     };
@@ -299,6 +353,16 @@ fn find_item_path_by_field(
         let item = item_rc.borrow();
         let mut path = parent_path.to_vec();
         path.push(i);
+        let label = match get_item_field(&item, "label") {
+            Some(Value::String(s)) => s,
+            Some(other) => crate::vm::format_lisp_value(&other),
+            None => match &*item {
+                Value::String(s) => s.clone(),
+                _ => String::new(),
+            },
+        };
+        let mut id_path = parent_id_path.to_vec();
+        id_path.push(item_identity(&item, &label));
 
         let field_matches = match get_item_field(&item, field) {
             Some(Value::String(s)) => s == needle,
@@ -310,11 +374,11 @@ fn find_item_path_by_field(
             None => false,
         };
         if field_matches {
-            return Some(path);
+            return Some((path, id_path));
         }
 
         if let Some(children) = get_item_field(&item, "children")
-            && let Some(found) = find_item_path_by_field(&children, field, needle, &path)
+            && let Some(found) = find_item_path_by_field(&children, field, needle, &path, &id_path)
         {
             return Some(found);
         }
@@ -322,7 +386,7 @@ fn find_item_path_by_field(
     None
 }
 
-fn ancestor_paths(path: &[usize]) -> HashSet<Vec<usize>> {
+fn ancestor_paths(path: &[String]) -> HashSet<NodeIdPath> {
     let mut expanded = HashSet::new();
     for depth in 1..path.len() {
         expanded.insert(path[..depth].to_vec());
@@ -461,16 +525,16 @@ fn sync_state_with_external_selection(
 
     state.external_selected_row = None;
     state.cursor_view_active = false;
-    if let Some(path) = find_item_path_by_field(items, field, &needle, &[]) {
+    if let Some((path, id_path)) = find_item_path_by_field(items, field, &needle, &[], &[]) {
         if !expand_all {
-            state.expanded.extend(ancestor_paths(&path));
+            state.expanded.extend(ancestor_paths(&id_path));
         }
         let mut rows = Vec::new();
         flatten_items(items, 0, &[], &state.expanded, expand_all, &mut rows);
         if let Some(row_idx) = rows.iter().position(|row| row.path == path) {
             if row_is_interactive(&rows[row_idx]) {
                 state.external_selected_row = Some(row_idx);
-                state.cursor_row = row_idx;
+                set_cursor_row(state, &rows, row_idx);
             }
         }
     }
@@ -524,6 +588,14 @@ fn normalize_state_for_visible_rows(widget_id: u64, state: &mut TreeState, rows:
     }
 
     let original_state = state.clone();
+    // Rows above the cursor may have appeared or vanished since the cursor was
+    // placed: follow the row's identity rather than its old index.
+    if let Some(cursor_id) = &state.cursor_id
+        && rows.get(state.cursor_row).map(|row| &row.id_path) != Some(cursor_id)
+        && let Some(row_idx) = rows.iter().position(|row| &row.id_path == cursor_id)
+    {
+        state.cursor_row = row_idx;
+    }
     state.cursor_row = state.cursor_row.min(rows.len() - 1);
     if matches!(state.external_selected_row, Some(row) if row >= rows.len() || !row_is_interactive(&rows[row]))
     {
@@ -532,6 +604,7 @@ fn normalize_state_for_visible_rows(widget_id: u64, state: &mut TreeState, rows:
     if let Some(row) = nearest_interactive_row(rows, state.cursor_row) {
         state.cursor_row = row;
     }
+    state.cursor_id = rows.get(state.cursor_row).map(|row| row.id_path.clone());
 
     if *state != original_state {
         set_tree_state(widget_id, state.clone());
@@ -722,9 +795,9 @@ impl WidgetDefinition for TreeWidget {
         let mut expanded = get_last_known_expanded(tree_state_key_from_value(node));
         if !expand_all
             && let Some((_, field, needle)) = external_selection_key_from_value(node)
-            && let Some(path) = find_item_path_by_field(&items, field, &needle, &[])
+            && let Some((_, id_path)) = find_item_path_by_field(&items, field, &needle, &[], &[])
         {
-            expanded.extend(ancestor_paths(&path));
+            expanded.extend(ancestor_paths(&id_path));
         }
         flatten_items(&items, 0, &[], &expanded, expand_all, &mut rows);
 
@@ -752,9 +825,9 @@ impl WidgetDefinition for TreeWidget {
         let mut expanded = get_last_known_expanded(None);
         if !expand_all
             && let Some((_, field, needle)) = external_selection_key(props)
-            && let Some(path) = find_item_path_by_field(&items, field, &needle, &[])
+            && let Some((_, id_path)) = find_item_path_by_field(&items, field, &needle, &[], &[])
         {
-            expanded.extend(ancestor_paths(&path));
+            expanded.extend(ancestor_paths(&id_path));
         }
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &expanded, expand_all, &mut rows);
@@ -875,8 +948,8 @@ impl WidgetDefinition for TreeWidget {
         }
 
         if row.has_children {
-            toggle_expand(&mut state, &row.path);
-            state.cursor_row = row_idx;
+            toggle_expand(&mut state, &row.id_path);
+            set_cursor_row(&mut state, &rows, row_idx);
             state.cursor_view_active = true;
             set_tree_state(widget_key, state);
             MouseEventOutcome::Dispatch(WidgetEvent::Custom(make_action_value(
@@ -884,7 +957,7 @@ impl WidgetDefinition for TreeWidget {
                 &row.item_value,
             )))
         } else {
-            state.cursor_row = row_idx;
+            set_cursor_row(&mut state, &rows, row_idx);
             state.cursor_view_active = true;
             set_tree_state(widget_key, state);
             MouseEventOutcome::Dispatch(WidgetEvent::Custom(make_action_value(
@@ -940,7 +1013,7 @@ impl WidgetDefinition for TreeWidget {
                 let Some(row_idx) = previous_interactive_row(&rows, state.cursor_row) else {
                     return None;
                 };
-                state.cursor_row = row_idx;
+                set_cursor_row(&mut state, &rows, row_idx);
                 state.cursor_view_active = true;
                 let row = rows[state.cursor_row].clone();
                 set_tree_state(widget_key, state);
@@ -953,7 +1026,7 @@ impl WidgetDefinition for TreeWidget {
                 let Some(row_idx) = next_interactive_row(&rows, state.cursor_row) else {
                     return None;
                 };
-                state.cursor_row = row_idx;
+                set_cursor_row(&mut state, &rows, row_idx);
                 state.cursor_view_active = true;
                 let row = rows[state.cursor_row].clone();
                 set_tree_state(widget_key, state);
@@ -965,7 +1038,7 @@ impl WidgetDefinition for TreeWidget {
             KeyCode::Right => {
                 let row = &rows[state.cursor_row.min(rows.len() - 1)];
                 if row.has_children && !row.expanded {
-                    toggle_expand(&mut state, &row.path);
+                    toggle_expand(&mut state, &row.id_path);
                     state.cursor_view_active = true;
                     let row = row.clone();
                     set_tree_state(widget_key, state);
@@ -978,7 +1051,7 @@ impl WidgetDefinition for TreeWidget {
                     let Some(row_idx) = next_interactive_row(&rows, state.cursor_row) else {
                         return None;
                     };
-                    state.cursor_row = row_idx;
+                    set_cursor_row(&mut state, &rows, row_idx);
                     state.cursor_view_active = true;
                     let row = rows[state.cursor_row].clone();
                     set_tree_state(widget_key, state);
@@ -993,7 +1066,7 @@ impl WidgetDefinition for TreeWidget {
             KeyCode::Left => {
                 let row = &rows[state.cursor_row.min(rows.len() - 1)];
                 if row.has_children && row.expanded {
-                    toggle_expand(&mut state, &row.path);
+                    toggle_expand(&mut state, &row.id_path);
                     state.cursor_view_active = true;
                     let row = row.clone();
                     set_tree_state(widget_key, state);
@@ -1005,7 +1078,7 @@ impl WidgetDefinition for TreeWidget {
                     // Move to parent
                     let parent_path: Vec<usize> = row.path[..row.path.len() - 1].to_vec();
                     if let Some(parent_idx) = rows.iter().position(|r| r.path == parent_path) {
-                        state.cursor_row = parent_idx;
+                        set_cursor_row(&mut state, &rows, parent_idx);
                         state.cursor_view_active = true;
                         let row = rows[parent_idx].clone();
                         set_tree_state(widget_key, state);
@@ -1023,7 +1096,7 @@ impl WidgetDefinition for TreeWidget {
             KeyCode::Enter => {
                 let row = &rows[state.cursor_row.min(rows.len() - 1)];
                 if row.has_children {
-                    toggle_expand(&mut state, &row.path);
+                    toggle_expand(&mut state, &row.id_path);
                     state.cursor_view_active = true;
                     set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(make_action_value(
@@ -1077,7 +1150,7 @@ impl WidgetDefinition for TreeWidget {
         if row.has_children && !activate_parents(&node.props) {
             return None;
         }
-        state.cursor_row = row_idx;
+        set_cursor_row(&mut state, &rows, row_idx);
         state.cursor_view_active = true;
         set_tree_state(widget_key, state);
         Some(WidgetEvent::Custom(make_action_value(
@@ -1400,13 +1473,13 @@ impl WidgetDefinition for TreeWidget {
 // without stable IDs (for example simple TUI tests).
 
 thread_local! {
-    static LAST_EXPANDED: RefCell<HashMap<u64, HashSet<Vec<usize>>>> =
+    static LAST_EXPANDED: RefCell<HashMap<u64, HashSet<NodeIdPath>>> =
         RefCell::new(HashMap::new());
-    static LAST_EXPANDED_FALLBACK: RefCell<Option<HashSet<Vec<usize>>>> =
+    static LAST_EXPANDED_FALLBACK: RefCell<Option<HashSet<NodeIdPath>>> =
         const { RefCell::new(None) };
 }
 
-fn get_last_known_expanded(widget_key: Option<u64>) -> HashSet<Vec<usize>> {
+fn get_last_known_expanded(widget_key: Option<u64>) -> HashSet<NodeIdPath> {
     if let Some(widget_key) = widget_key {
         return LAST_EXPANDED
             .with(|cell| cell.borrow().get(&widget_key).cloned().unwrap_or_default());
@@ -1414,7 +1487,7 @@ fn get_last_known_expanded(widget_key: Option<u64>) -> HashSet<Vec<usize>> {
     LAST_EXPANDED_FALLBACK.with(|cell| cell.borrow().clone().unwrap_or_default())
 }
 
-fn update_last_known_expanded(widget_key: u64, expanded: &HashSet<Vec<usize>>) {
+fn update_last_known_expanded(widget_key: u64, expanded: &HashSet<NodeIdPath>) {
     LAST_EXPANDED.with(|cell| {
         cell.borrow_mut().insert(widget_key, expanded.clone());
     });
@@ -1452,7 +1525,8 @@ impl WidgetDefinition for TreeRowBgWidget {
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-const TREE_CHEVRON_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+const TREE_CHEVRON_SHADER: super::ShaderSources = super::ShaderSources::both(
+    r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -1501,7 +1575,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return float4(col.rgb, col.a * mask);
 }
-"#, super::wgsl::TREE_CHEVRON_SHADER);
+"#,
+    super::wgsl::TREE_CHEVRON_SHADER,
+);
 
 /// Find the scroll offset from the nearest parent scroll container.
 fn find_parent_scroll_offset(_node: &LayoutNode) -> f32 {
@@ -1524,3 +1600,141 @@ fn row_height_from_props(props: &HashMap<String, Value>) -> f32 {
 
 const DEFAULT_ROW_HEIGHT: f32 = 1.25;
 const MIN_ROW_HEIGHT: f32 = 1.0;
+
+#[cfg(test)]
+mod expansion_identity_tests {
+    use super::*;
+    use std::rc::Rc;
+
+    fn item(label: &str, kind: &str, children: Vec<Value>) -> Value {
+        let mut map = HashMap::new();
+        let put = |map: &mut HashMap<String, Rc<RefCell<Value>>>, k: &str, v: Value| {
+            map.insert(k.to_string(), Rc::new(RefCell::new(v)));
+        };
+        put(&mut map, "label", Value::String(label.to_string()));
+        put(&mut map, "kind", Value::String(kind.to_string()));
+        if kind == "folder" {
+            put(&mut map, "folder", Value::String(label.to_string()));
+        }
+        if !children.is_empty() {
+            let list = children
+                .into_iter()
+                .map(|c| Rc::new(RefCell::new(c)))
+                .collect();
+            put(&mut map, "children", Value::List(list));
+        }
+        Value::Map(map)
+    }
+
+    fn list(items: Vec<Value>) -> Value {
+        Value::List(
+            items
+                .into_iter()
+                .map(|v| Rc::new(RefCell::new(v)))
+                .collect(),
+        )
+    }
+
+    fn library() -> Vec<Value> {
+        vec![
+            item("Library", "header", vec![]),
+            item(
+                "emulations",
+                "folder",
+                vec![item("md-hat", "instrument", vec![])],
+            ),
+            item(
+                "factory",
+                "folder",
+                vec![item("digiwave", "instrument", vec![])],
+            ),
+        ]
+    }
+
+    fn open_folders(rows: &[TreeRow]) -> Vec<String> {
+        rows.iter()
+            .filter(|r| r.has_children && r.expanded)
+            .map(|r| r.label.clone())
+            .collect()
+    }
+
+    #[test]
+    fn expansion_survives_rows_inserted_above_the_folder() {
+        let mut state = TreeState::default();
+
+        // Open "factory" while there is no Engines section.
+        let mut rows = Vec::new();
+        flatten_items(&list(library()), 0, &[], &state.expanded, false, &mut rows);
+        let factory = rows.iter().find(|r| r.label == "factory").unwrap();
+        toggle_expand(&mut state, &factory.id_path);
+
+        // Loading an instrument prepends an Engines header + engine row.
+        let mut with_engines = vec![
+            item("Engines", "header", vec![]),
+            item("digiwave", "instrument", vec![]),
+        ];
+        with_engines.extend(library());
+        let mut rows = Vec::new();
+        flatten_items(
+            &list(with_engines),
+            0,
+            &[],
+            &state.expanded,
+            false,
+            &mut rows,
+        );
+
+        assert_eq!(open_folders(&rows), vec!["factory".to_string()]);
+        assert!(rows.iter().any(|r| r.label == "digiwave" && r.depth == 1));
+    }
+
+    #[test]
+    fn cursor_follows_the_clicked_row_when_rows_are_inserted_above() {
+        let mut state = TreeState::default();
+        let mut rows = Vec::new();
+        flatten_items(&list(library()), 0, &[], &state.expanded, false, &mut rows);
+        let factory = rows.iter().find(|r| r.label == "factory").unwrap();
+        toggle_expand(&mut state, &factory.id_path);
+        let mut rows = Vec::new();
+        flatten_items(&list(library()), 0, &[], &state.expanded, false, &mut rows);
+        let digiwave_idx = rows.iter().position(|r| r.label == "digiwave").unwrap();
+        set_cursor_row(&mut state, &rows, digiwave_idx);
+
+        // Loading the instrument prepends an Engines section; the cursor
+        // must stay on the row that was clicked, not on its old index.
+        let mut with_engines = vec![
+            item("Engines", "header", vec![]),
+            item("digiwave", "instrument", vec![]),
+        ];
+        with_engines.extend(library());
+        let mut rows = Vec::new();
+        flatten_items(
+            &list(with_engines),
+            0,
+            &[],
+            &state.expanded,
+            false,
+            &mut rows,
+        );
+        normalize_state_for_visible_rows(0, &mut state, &rows);
+
+        let cursor = &rows[state.cursor_row];
+        assert_eq!(cursor.label, "digiwave");
+        assert_eq!(
+            cursor.depth, 1,
+            "cursor should stay on the library copy, not the engine row"
+        );
+    }
+
+    #[test]
+    fn external_selection_expands_ancestors_by_identity() {
+        let items = list(library());
+        let (path, id_path) =
+            find_item_path_by_field(&items, "label", "digiwave", &[], &[]).unwrap();
+        assert_eq!(path, vec![2, 0]);
+        let expanded = ancestor_paths(&id_path);
+        let mut rows = Vec::new();
+        flatten_items(&items, 0, &[], &expanded, false, &mut rows);
+        assert_eq!(open_folders(&rows), vec!["factory".to_string()]);
+    }
+}
