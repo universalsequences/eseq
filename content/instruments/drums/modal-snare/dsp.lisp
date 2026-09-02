@@ -204,6 +204,16 @@
   0.1191 -0.0315 0.0991 0.1820 -0.0647 0.2415
   0.0431 -0.2428 0.0386 0.2439 -0.0966 -0.1071
 ]))
+; |bat-mic| (baked): weights for the BRIGHT tilt normalisation
+(def bat-mic-abs (tensor @shape [6 6] @data [
+  0.6082 0.4341 0.0815 0.2720 0.1958 0.0082
+  0.2886 0.0297 0.2524 0.2228 0.1457 0.0896
+  0.2560 0.3264 0.0259 0.0509 0.2578 0.3406
+  0.1018 0.0691 0.1736 0.0775 0.0129 0.0612
+  0.1191 0.0315 0.0991 0.1820 0.0647 0.2415
+  0.0431 0.2428 0.0386 0.2439 0.0966 0.1071
+]))
+
 ; reso bank shares the batter's 36-mode tables (same geometry); only its
 ; mic and wire-strip readouts differ:
 ; reso36 modes (m,n) in order: [(0, 1), (1, 1), (2, 1), (0, 2), (3, 1), (1, 2), (4, 1), (2, 2), (0, 3), (5, 1), (3, 2), (6, 1), (1, 3), (4, 2), (7, 1), (2, 3)]
@@ -298,7 +308,13 @@
 (write-history stickv stick-v-next)
 ; modal injection is a FORCE; a 2-pole integrates it with the physical 1/w
 ; gain, so this scale is much smaller than the grid version's.
-(def strike-force (* stick-f -1 (+ 1 (* scrape-v (noise))) 0.3))
+; SPEED loudness compensation: the drum gets louder ~linearly with speed
+; (+9 dB from 0.02 to 0.2, measured; 1/speed holds RMS flat within 0.5 dB),
+; so a faster stick made the drum LOUDER more than harder. Cancel it on the param (not the velocity,
+; which shares stick-v) so SPEED sets the attack character and velocity /
+; STROKE keep the dynamics.
+(def speed-comp (pow (/ 0.02 (max stick-speed-v 0.002)) 1))
+(def strike-force (* stick-f -1 (+ 1 (* scrape-v (noise))) 0.3 speed-comp))
 
 ; peak-held stick force: pitch glide + rimshot stick-pivot press (~150 ms)
 (def benv (max (* (read-history bendenv) 0.999) (* stick-f 60)))
@@ -509,11 +525,22 @@
 ; radiation tilt (velocity-like readout): a displacement bank's 1/w gain
 ; buries everything under the fundamental otherwise. Proxies use the (0,n)
 ; entries of the same mic tables.
-(def mic-top (* 14 (+ (sum (* bat-nextc bat-mic (pow bat-r bright-v)))
+; BRIGHT is a spectral TILT, not a gain: ratio^bright alone multiplies the
+; top partials (ratio ~8) by ~190x at bright=2.5 and the whole drum slams the
+; shaper. Normalise the tilted weights by their total so the mic's summed
+; sensitivity is the same at every bright setting; the fundamental gets
+; quieter as the overtones come up instead of everything getting louder.
+(def bright-w (pow bat-r bright-v))
+; partial normalisation (exponent 0.15, fitted with tools/audition): the
+; upper modes are excited less and decay faster than their mic weight says,
+; so the full weight ratio over-corrects by ~10 dB at bright=2.5; 0.15 holds
+; RMS flat within 1 dB from 0 to 2.5
+(def bright-norm (pow (/ 5.8923 (max (sum (* bat-mic-abs bright-w)) 0.001)) 0.15))
+(def mic-top (* 14 bright-norm (+ (sum (* bat-nextc bat-mic bright-w))
                       (* bq1 0.6082)
                       (* bq2 -0.2720 (pow r2s bright-v))
                       (* bq3 -0.2524 (pow r3s bright-v)))))
-(def mic-bot (* 14 (+ (sum (* res-nextc res-mic (pow bat-r bright-v)))
+(def mic-bot (* 14 bright-norm (+ (sum (* res-nextc res-mic bright-w))
                       (* zp1 0.6699)
                       (* zp2 -0.1684 (pow r2s bright-v))
                       (* zp3 -0.3563 (pow r3s bright-v)))))
