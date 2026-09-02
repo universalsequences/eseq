@@ -470,6 +470,23 @@ fn is_exclusive_arm_shortcut(key: &crossterm::event::KeyEvent) -> bool {
     ) && is_exact_primary_shortcut_modifier(key.modifiers)
 }
 
+fn is_open_instrument_ui_source_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    is_open_instrument_ui_source_shortcut_for(key, CURRENT_SHORTCUT_PLATFORM)
+}
+
+fn is_open_instrument_ui_source_shortcut_for(
+    key: &crossterm::event::KeyEvent,
+    platform: ShortcutPlatform,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut modifiers_without_alt = key.modifiers;
+    modifiers_without_alt.remove(KeyModifiers::ALT);
+    matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I'))
+        && key.modifiers.contains(KeyModifiers::ALT)
+        && is_exact_primary_shortcut_modifier_for(modifiers_without_alt, platform)
+}
+
 fn is_new_instrument_shortcut(key: &crossterm::event::KeyEvent) -> bool {
     is_new_instrument_shortcut_for(key, CURRENT_SHORTCUT_PLATFORM)
 }
@@ -1579,6 +1596,13 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
             _ if editor.focused_widget_id().is_some() => {}
             (KeyCode::Char('h') | KeyCode::Char('H'), KeyModifiers::CONTROL) => {
                 let _ = editor.runtime_mut().eval_str("(eseq.sequencer/collapse-all-tracks)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            _ if is_open_instrument_ui_source_shortcut(key) => {
+                let _ = editor.runtime_mut().eval_str(
+                    "(host-command \"open-current-instrument-ui-source\" (dict))",
+                );
                 editor.refresh_runtime_side_effects();
                 return true;
             }
@@ -4649,6 +4673,35 @@ mod live_keyboard_tests {
                 HostCommand::Custom { name, .. } if name == "agent-open-probe"
             )),
             "C-x a should reach agent-open, got {commands:?}"
+        );
+    }
+
+    #[test]
+    fn platform_primary_alt_i_queues_current_instrument_ui_source() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+        let modifiers = primary_shortcut_modifier() | KeyModifiers::ALT;
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('i'), modifiers),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                HostCommand::Custom { name, .. } if name == "open-current-instrument-ui-source"
+            )),
+            "Cmd/Ctrl+Alt+I should queue instrument UI source navigation: {commands:?}"
         );
     }
 

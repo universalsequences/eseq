@@ -5342,6 +5342,57 @@ impl Editor {
         )
     }
 
+    /// Open an ESeqLisp source file in the dedicated right-side source pane.
+    ///
+    /// The pane is shared with inspect mode: repeated source navigation reuses
+    /// the same tile instead of growing a new split for every file.
+    pub fn open_eseqlisp_file_in_source_pane(
+        &mut self,
+        path: impl Into<PathBuf>,
+    ) -> Result<BufferId, EditorError> {
+        let source_buffer_id =
+            self.upsert_inactive_file_buffer_with_mode(path.into(), BufferMode::ESeqLisp)?;
+        let source_buffer_idx = self.buffer_idx_for_id(source_buffer_id).ok_or_else(|| {
+            EditorError::Message("opened source buffer is unavailable".to_string())
+        })?;
+        self.present_buffer_in_source_pane(source_buffer_id, source_buffer_idx);
+        self.sync_runtime_context();
+        Ok(source_buffer_id)
+    }
+
+    fn present_buffer_in_source_pane(
+        &mut self,
+        source_buffer_id: BufferId,
+        source_buffer_idx: usize,
+    ) {
+        self.buffers[source_buffer_idx].view_mode = ViewMode::TextOnly;
+
+        if let Some(tile_id) = self.visible_tile_for_buffer_id(source_buffer_id) {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} already visible in tile {tile_id:?}; switching"
+            ));
+            self.switch_active_tile(tile_id);
+            self.inspect_source_tile_id = Some(tile_id);
+        } else if let Some(tile_id) = self
+            .inspect_source_tile_id
+            .filter(|tile_id| self.tile_root.find_leaf(*tile_id).is_some())
+        {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} not visible; reusing inspect source tile {tile_id:?}"
+            ));
+            self.replace_tile_buffer_and_activate(tile_id, source_buffer_idx);
+        } else {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} not visible; splitting root to the right"
+            ));
+            let source_tile = self.split_root_right_with_buffer(source_buffer_idx);
+            self.inspect_source_tile_id = Some(source_tile);
+            inspect_debug_log(format!(
+                "new root-right source tile {source_tile:?}; switching"
+            ));
+        }
+    }
+
     fn open_source_for_inspected_node(
         &mut self,
         node: &crate::layout::LayoutNode,
@@ -5411,32 +5462,7 @@ impl Editor {
                 ));
             }
         }
-        self.buffers[source_buffer_idx].view_mode = ViewMode::TextOnly;
-
-        if let Some(tile_id) = self.visible_tile_for_buffer_id(source_buffer_id) {
-            inspect_debug_log(format!(
-                "source buffer id {source_buffer_id} already visible in tile {tile_id:?}; switching"
-            ));
-            self.switch_active_tile(tile_id);
-            self.inspect_source_tile_id = Some(tile_id);
-        } else if let Some(tile_id) = self
-            .inspect_source_tile_id
-            .filter(|tile_id| self.tile_root.find_leaf(*tile_id).is_some())
-        {
-            inspect_debug_log(format!(
-                "source buffer id {source_buffer_id} not visible; reusing inspect source tile {tile_id:?}"
-            ));
-            self.replace_tile_buffer_and_activate(tile_id, source_buffer_idx);
-        } else {
-            inspect_debug_log(format!(
-                "source buffer id {source_buffer_id} not visible; splitting root to the right"
-            ));
-            let source_tile = self.split_root_right_with_buffer(source_buffer_idx);
-            self.inspect_source_tile_id = Some(source_tile);
-            inspect_debug_log(format!(
-                "new root-right source tile {source_tile:?}; switching"
-            ));
-        }
+        self.present_buffer_in_source_pane(source_buffer_id, source_buffer_idx);
         let source_span = inspect_node_source_span(node);
         let source_symbol = inspect_node_source_symbol(node);
         let source_text = self.active_buffer().text();

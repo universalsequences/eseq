@@ -1,6 +1,7 @@
 use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
+    "open-current-instrument-ui-source",
     "enter-new-instrument-editor",
     "enter-fork-instrument-editor",
     "enter-fork-effect-editor",
@@ -45,6 +46,54 @@ pub(super) fn handle(
     let record_armed = ctx.shared.record_armed.clone();
     let accumulator_names = ctx.shared.accumulator_names.clone();
     match name {
+        "open-current-instrument-ui-source" => {
+            let track = current_track.load(Ordering::Relaxed);
+            if app.graph.track_instrument_types.get(track)
+                != Some(&sequencer::sequencer::InstrumentType::Custom)
+            {
+                editor.handle_host_event(HostEvent::Error(
+                    "The current track does not have a custom instrument UI source".to_string(),
+                ));
+                return;
+            }
+            let Some(instrument_name) =
+                crate::state_values::current_custom_instrument_name(&app, track)
+            else {
+                editor.handle_host_event(HostEvent::Error(
+                    "The current track's instrument could not be resolved".to_string(),
+                ));
+                return;
+            };
+            let ui_path = match sequencer::lisp_host::instrument_ui_path(&instrument_name) {
+                Ok(path) if path.is_file() => path,
+                Ok(path) => {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Instrument '{}' has no ui.lisp source at {}",
+                        display_instrument_name(&instrument_name),
+                        path.display()
+                    )));
+                    return;
+                }
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Could not resolve the UI source for instrument '{}': {error}",
+                        display_instrument_name(&instrument_name)
+                    )));
+                    return;
+                }
+            };
+            match editor.open_eseqlisp_file_in_source_pane(&ui_path) {
+                Ok(_) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Opened UI source for instrument '{}'",
+                    display_instrument_name(&instrument_name)
+                ))),
+                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                    "Could not open instrument UI source '{}': {error:?}",
+                    ui_path.display()
+                ))),
+            }
+        }
+
         "enter-new-instrument-editor" => {
             if ctx.sessions.editor_mode.is_some() || ctx.sessions.instrument_edit_session.is_some() {
                 editor.handle_host_event(HostEvent::Error(

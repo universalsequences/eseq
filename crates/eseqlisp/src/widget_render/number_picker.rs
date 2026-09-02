@@ -94,6 +94,8 @@ mod tests {
             &[
                 "value",
                 "active",
+                "border-width",
+                "corner-radius",
                 "plock-active",
                 "plock-color-r",
                 "plock-color-g",
@@ -181,6 +183,97 @@ mod tests {
         assert_eq!(instance.color_c, [0.8, 0.85, 0.9, 0.2]);
         assert_eq!(instance.color_d, [0.0, 0.0, 0.0, 0.3]);
         assert!(instance.corner_radius > 0.0);
+    }
+
+    #[test]
+    fn slider_mode_renders_normalized_fill_without_triangle() {
+        let node = test_number_picker_node(HashMap::from([
+            ("mode".to_string(), Value::Keyword("slider".to_string())),
+            ("value".to_string(), Value::Number(25.0)),
+            ("min".to_string(), Value::Number(0.0)),
+            ("max".to_string(), Value::Number(100.0)),
+            ("corner-radius".to_string(), Value::Number(0.0)),
+            ("border-width".to_string(), Value::Number(2.5)),
+            (
+                "fill-color".to_string(),
+                color_value(0.1, 0.6, 0.7, 0.8),
+            ),
+        ]));
+
+        let focus_color = [1.0, 0.7, 0.2, 1.0];
+        let focused_viewport = WidgetViewport {
+            focused_widget_id: Some(node.widget_id),
+            ..test_viewport()
+        };
+        let mut node = node;
+        node.props.insert(
+            "focus-color".to_string(),
+            color_value(1.0, 0.7, 0.2, 1.0),
+        );
+        let primitives =
+            NumberPickerWidget.build_primitives("number-picker", &node, focused_viewport);
+        let fill = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                GpuPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } if widget_type == "number-picker-slider" => Some(instance),
+                _ => None,
+            })
+            .expect("slider mode should emit a fill primitive");
+
+        assert!((fill.value_t - 0.25).abs() < f32::EPSILON);
+        assert_eq!(fill.color_b, focus_color);
+        assert_eq!(fill.color_c, [0.1, 0.6, 0.7, 0.8]);
+        assert_eq!(fill.uniform_a[0], 2.5);
+        assert_eq!(fill.uniform_a[1], 0.0);
+        assert_eq!(fill.corner_radius, 0.001);
+        assert_eq!(
+            primitives
+                .iter()
+                .filter(|primitive| matches!(
+                    primitive,
+                    GpuPrimitive::WidgetInstance { widget_type, .. }
+                        if widget_type == "number-picker"
+                ))
+                .count(),
+            0,
+            "focused slider mode should not render the button surface or its outer focus ring"
+        );
+        assert!(primitives.iter().all(|primitive| !matches!(
+            primitive,
+            GpuPrimitive::WidgetInstance { widget_type, .. }
+                if widget_type == "number-picker-tri"
+        )));
+    }
+
+    #[test]
+    fn bipolar_slider_mode_uses_zero_as_the_fill_origin() {
+        let node = test_number_picker_node(HashMap::from([
+            ("mode".to_string(), Value::Keyword("slider".to_string())),
+            ("value".to_string(), Value::Number(-5.0)),
+            ("min".to_string(), Value::Number(-10.0)),
+            ("max".to_string(), Value::Number(10.0)),
+        ]));
+
+        let primitives =
+            NumberPickerWidget.build_primitives("number-picker", &node, test_viewport());
+        let slider = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                GpuPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } if widget_type == "number-picker-slider" => Some(instance),
+                _ => None,
+            })
+            .expect("bipolar slider mode should emit a slider primitive");
+
+        assert!((slider.value_t - 0.25).abs() < f32::EPSILON);
+        assert!((slider.uniform_a[1] - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -445,6 +538,17 @@ fn number_picker_shadow(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "shadow-color", theme::BUTTON_SHADOW())
 }
 
+fn number_picker_slider_mode(props: &HashMap<String, Value>) -> bool {
+    matches!(
+        props.get("mode"),
+        Some(Value::Keyword(mode) | Value::String(mode)) if mode == "slider"
+    )
+}
+
+fn number_picker_fill(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(props, "fill-color", theme::WIDGET_SLIDER_FILLED())
+}
+
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.001;
@@ -460,7 +564,11 @@ pub static NUMBER_PICKER_WIDGET: NumberPickerWidget = NumberPickerWidget;
 
 impl WidgetDefinition for NumberPickerWidget {
     fn names(&self) -> &'static [&'static str] {
-        &["number-picker", "number-picker-tri"]
+        &[
+            "number-picker",
+            "number-picker-tri",
+            "number-picker-slider",
+        ]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -471,6 +579,8 @@ impl WidgetDefinition for NumberPickerWidget {
         &[
             "value",
             "active",
+            "border-width",
+            "corner-radius",
             "plock-active",
             "plock-color-r",
             "plock-color-g",
@@ -481,10 +591,10 @@ impl WidgetDefinition for NumberPickerWidget {
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "value", "min", "max", "step", "decimals", "unit", "value-scale", "width",
-            "height", "font-size", "noui", "text-align", "text-color", "active-color",
+            "height", "font-size", "noui", "mode", "text-align", "text-color", "active-color",
             "background-color", "bg-color", "border-color", "cursor-color", "edit-color",
-            "focus-color", "highlight-color", "ring-color", "shadow-color", "tri-color",
-            "active", "on-change", "on-release", "plock-active", "plock-color-r",
+            "fill-color", "focus-color", "highlight-color", "ring-color", "shadow-color",
+            "tri-color", "border-width", "corner-radius", "active", "on-change", "on-release", "plock-active", "plock-color-r",
             "plock-color-g", "plock-color-b",
         ]
     }
@@ -731,7 +841,11 @@ impl WidgetDefinition for NumberPickerWidget {
         } else {
             format!("{value_text} {unit}")
         };
-        let text = format!("▶ {display_value}");
+        let text = if number_picker_slider_mode(props) {
+            display_value
+        } else {
+            format!("▶ {display_value}")
+        };
         let fg = resolve_named_color(props, "text-color", theme::BUTTON_SECONDARY_FG());
         let row = rect.row.round() as u16;
         let col_start = rect.col.round() as u16;
@@ -757,6 +871,7 @@ impl WidgetDefinition for NumberPickerWidget {
         match widget_type {
             "number-picker" => super::button::BUTTON_SURFACE_SHADER.source(backend),
             "number-picker-tri" => NUMBER_PICKER_TRI_SHADER.source(backend),
+            "number-picker-slider" => NUMBER_PICKER_SLIDER_SHADER.source(backend),
             _ => None,
         }
     }
@@ -784,6 +899,8 @@ impl WidgetDefinition for NumberPickerWidget {
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
         let effective_focused = is_focused || state.editing;
         let noui = get_bool_prop(&node.props, "noui", false);
+        let slider_mode = number_picker_slider_mode(&node.props);
+        let corner_radius = get_f32_prop(&node.props, "corner-radius", 12.0);
         let unit = match node.props.get("unit") {
             Some(Value::String(unit)) => unit.as_str(),
             _ => "",
@@ -811,6 +928,7 @@ impl WidgetDefinition for NumberPickerWidget {
             resolve_named_color(&node.props, "text-color", theme::BUTTON_SECONDARY_FG())
         };
         let edit_color = number_picker_edit_color(&node.props);
+        let focus_color = resolve_named_color(&node.props, "focus-color", edit_color);
         let cursor_color = resolve_named_color(
             &node.props,
             "cursor-color",
@@ -829,7 +947,9 @@ impl WidgetDefinition for NumberPickerWidget {
             let ring_color = resolve_named_color(&node.props, "ring-color", theme::DROPDOWN_RING());
             let tri_color =
                 resolve_named_color(&node.props, "tri-color", theme::BUTTON_SECONDARY_FG());
-            let border_color = if plocked {
+            let border_color = if slider_mode && effective_focused {
+                focus_color
+            } else if plocked {
                 plock_color
             } else {
                 number_picker_border(&node.props)
@@ -838,7 +958,7 @@ impl WidgetDefinition for NumberPickerWidget {
             let shadow_color = number_picker_shadow(&node.props);
 
             // ── Focus ring ──
-            if effective_focused {
+            if effective_focused && !slider_mode {
                 let ring_v = RING_WIDTH;
                 let ring_h = RING_WIDTH * viewport.cell_h / viewport.cell_w;
                 let ring_rect = Rect {
@@ -866,15 +986,16 @@ impl WidgetDefinition for NumberPickerWidget {
                         color_b: [0.0; 4],
                         color_c: [0.0; 4],
                         color_d: [0.0; 4],
-                        corner_radius: normalized_corner_radius(ring_rect, viewport, 12.0),
+                        corner_radius: normalized_corner_radius(ring_rect, viewport, corner_radius),
                         pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
                     },
                     is_background: true,
                 });
             }
 
-            // ── Background ──
-            {
+            // Slider mode uses one flat surface primitive below. The standard
+            // mode keeps the softly lit button surface.
+            if !slider_mode {
                 let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
                 let px_w = node.rect.width * viewport.cell_w;
                 let px_h = node.rect.height * viewport.cell_h;
@@ -894,15 +1015,62 @@ impl WidgetDefinition for NumberPickerWidget {
                         color_b: border_color.to_rgba(),
                         color_c: highlight_color.to_rgba(),
                         color_d: shadow_color.to_rgba(),
-                        corner_radius: normalized_corner_radius(node.rect, viewport, 12.0),
+                        corner_radius: normalized_corner_radius(node.rect, viewport, corner_radius),
                         pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
                     },
                     is_background: true,
                 });
             }
 
-            // ── Triangle indicator ──
-            {
+            if slider_mode {
+                let min = get_f32_prop(&node.props, "min", 0.0);
+                let max = get_f32_prop(&node.props, "max", 1.0);
+                let range = max - min;
+                let normalized_value = if range > 0.0 {
+                    ((value - min) / range).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let fill_origin = if min < 0.0 && max > 0.0 {
+                    (-min / range).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
+                let px_w = node.rect.width * viewport.cell_w;
+                let px_h = node.rect.height * viewport.cell_h;
+                prims.push(GpuPrimitive::WidgetInstance {
+                    widget_type: "number-picker-slider".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t: normalized_value,
+                        orientation: 0.0,
+                        itime: viewport.time_seconds,
+                        uniform_a: [
+                            get_f32_prop(&node.props, "border-width", 2.0).max(0.0),
+                            fill_origin,
+                            0.0,
+                            0.0,
+                        ],
+                        uniform_b: [0.0; 4],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
+                        color_a: bg_color.to_rgba(),
+                        color_b: border_color.to_rgba(),
+                        color_c: number_picker_fill(&node.props).to_rgba(),
+                        color_d: [0.0; 4],
+                        corner_radius: normalized_corner_radius(
+                            node.rect,
+                            viewport,
+                            corner_radius,
+                        ),
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: true,
+                });
+            } else {
+                // ── Triangle indicator ──
                 let tri_h = node.rect.height * 0.5;
                 let tri_w = tri_h * 1.5;
                 let tri_rect = Rect {
@@ -939,7 +1107,7 @@ impl WidgetDefinition for NumberPickerWidget {
         }
 
         // ── Value text ──
-        let base_text_col = if noui {
+        let base_text_col = if noui || slider_mode {
             node.rect.col + TEXT_PADDING_H
         } else {
             node.rect.col + TEXT_PADDING_H + TRIANGLE_WIDTH
@@ -1028,7 +1196,62 @@ impl WidgetDefinition for NumberPickerWidget {
     }
 }
 
-// ── Metal shaders ────────────────────────────────────────────────────────────
+// ── GPU shaders ──────────────────────────────────────────────────────────────
+
+const NUMBER_PICKER_SLIDER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+float number_picker_slider_rounded_rect(float2 p, float2 size, float radius)
+{
+    float2 q = abs(p) - (size - float2(radius));
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.001);
+    float2 p = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+    float2 size = float2(aspect, 1.0);
+    float radius = min(in.corner_radius, min(aspect, 1.0));
+
+    float outer_distance = number_picker_slider_rounded_rect(p, size, radius);
+    float outer_edge = fwidth(outer_distance) * 1.2;
+    float outer_mask = smoothstep(outer_edge, -outer_edge, outer_distance);
+
+    float px = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+    float border_width = in.uniform_a.x * px;
+    float2 inner_size = max(size - float2(border_width), float2(0.001));
+    float inner_distance = number_picker_slider_rounded_rect(
+        p,
+        inner_size,
+        max(radius - border_width, 0.0)
+    );
+    float inner_edge = fwidth(inner_distance) * 1.2;
+    float inner_mask = smoothstep(inner_edge, -inner_edge, inner_distance);
+    float border_mask = clamp(outer_mask - inner_mask, 0.0, 1.0);
+
+    float cutoff_edge = max(fwidth(in.uv.x), 0.0005);
+    float segment_start = min(in.value_t, in.uniform_a.y);
+    float segment_end = max(in.value_t, in.uniform_a.y);
+    float left_mask = smoothstep(segment_start - cutoff_edge, segment_start + cutoff_edge, in.uv.x);
+    float right_mask = smoothstep(segment_end + cutoff_edge, segment_end - cutoff_edge, in.uv.x);
+    float segment_mask = left_mask * right_mask * step(0.0001, abs(in.value_t - in.uniform_a.y));
+    float fill_alpha = in.color_c.a * segment_mask;
+    float inner_alpha = fill_alpha + in.color_a.a * (1.0 - fill_alpha);
+    float3 inner_rgb = (
+        in.color_c.rgb * fill_alpha
+        + in.color_a.rgb * in.color_a.a * (1.0 - fill_alpha)
+    ) / max(inner_alpha, 0.0001);
+
+    float surface_alpha = inner_alpha * inner_mask;
+    float border_alpha = in.color_b.a * border_mask;
+    float out_alpha = border_alpha + surface_alpha * (1.0 - border_alpha);
+    if (out_alpha < 0.002) { discard_fragment(); }
+    float3 out_rgb = (
+        in.color_b.rgb * border_alpha
+        + inner_rgb * surface_alpha * (1.0 - border_alpha)
+    ) / out_alpha;
+    return float4(out_rgb, out_alpha);
+}
+"#, super::wgsl::NUMBER_PICKER_SLIDER_SHADER);
 
 const NUMBER_PICKER_TRI_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float number_picker_segment_distance(float2 p, float2 a, float2 b)

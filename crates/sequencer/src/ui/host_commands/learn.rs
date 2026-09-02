@@ -55,7 +55,7 @@ pub(super) fn handle(
             );
             let path = extract_string_from_payload(&payload, "path")
                 .filter(|path| !path.is_empty())
-                .map(PathBuf::from);
+                .map(|path| sequencer::app_paths::resolve_sample_ref(Path::new(&path)));
             let target_name = path.as_ref().map(|path| {
                 extract_string_from_payload(&payload, "name")
                     .map(|name| name.trim().to_string())

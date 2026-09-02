@@ -41709,6 +41709,18 @@
 
     #[test]
     fn metal_seq_fx_lisp_lays_out_custom_instrument_ui_without_unbounded_width() {
+        fn collect_number_pickers<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+        ) {
+            if node.widget_type == "number-picker" {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect_number_pickers(child, out);
+            }
+        }
+
         fn assert_finite_layout(node: &eseqlisp::layout::LayoutNode) {
             assert!(
                 node.rect.width.is_finite()
@@ -41740,7 +41752,7 @@
                   (eseq.effects.custom-ui-sections/ui-panel "CUSTOM_OK" 0
                     (h-stack :gap 0.25
                       (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "cut"))))
-                (eseq.effects.custom-ui-lego/ui-adsr "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
+                (eseq.effects.custom-ui-lego/ui-detail-adsr-s 0 "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
             "#
             .to_string(),
         )));
@@ -41800,6 +41812,20 @@
         editor.set_layout_viewport(120, 18);
         let layout = editor.widget_layout().expect("custom instrument fx layout");
         assert_finite_layout_tree(&layout);
+        let mut adsr_pickers = Vec::new();
+        collect_number_pickers(&layout, &mut adsr_pickers);
+        assert_eq!(adsr_pickers.len(), 4, "detail ADSR should expose four numeric readouts");
+        for picker in adsr_pickers {
+            assert_eq!(
+                picker.props.get("noui"),
+                Some(&Value::Bool(true)),
+                "detail ADSR numeric readouts must stay in noui mode"
+            );
+            assert!(
+                !matches!(picker.props.get("mode"), Some(Value::Keyword(mode)) if mode == "slider"),
+                "detail ADSR numeric readouts must not use slider mode"
+            );
+        }
         let tree = editor
             .active_buffer()
             .widget_tree
@@ -53560,3 +53586,4 @@
             "only the loose tracks keep their step grids while the rack is collapsed"
         );
     }
+
