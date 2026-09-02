@@ -880,6 +880,14 @@ fn rce_filterResponseY(bandType: f32, x: f32, freqT: f32, q: f32, octaveSpan: f3
     return 0.5 + decibels / 48.0;
 }
 
+// Contribution (in plot units, 0 at unity) of a second filter band so two
+// bands (e.g. highpass + lowpass) draw as one combined response curve.
+// otherType is the band type code + 1; 0 means no second band.
+fn rce_otherY(otherType: f32, x: f32, otherFreqT: f32, otherQ: f32, otherSpan: f32) -> f32 {
+    if (otherType < 0.5) { return 0.0; }
+    return rce_filterResponseY(otherType - 1.0, x, otherFreqT, otherQ, otherSpan) - 0.5;
+}
+
 fn rce_curveY(bandType: f32, x: f32, freqT: f32, yT: f32, qT: f32, isFilter: f32, filterQ: f32, octaveSpan: f32) -> f32 {
     var dist: f32 = x - freqT;
     var q: f32 = mix(0.22, 0.045, qT);
@@ -926,6 +934,13 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var isFilter: f32 = input.uniform_b.w;
     var filterQ: f32 = max(input.uniform_c.x, 0.001);
     var octaveSpan: f32 = max(input.uniform_c.y, 0.001);
+    var otherType: f32 = select(0.0, input.uniform_c.z, isFilter > 0.5);
+    var otherFreqT: f32 = clamp(input.uniform_c.w, 0.0, 1.0);
+    var otherQ: f32 = max(input.uniform_d.z, 0.001);
+    var otherSpan: f32 = max(input.uniform_d.w, 0.001);
+    // With a combined curve only the first instance draws it; the others
+    // contribute just their handle.
+    var drawCurve: f32 = select(1.0, step(bandIndex, 0.5), otherType > 0.5);
 
     var col: vec4<f32> = vec4<f32>(0.0);
     var clipMask: f32 = 1.0;
@@ -959,11 +974,13 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     const steps: i32 = 96;
     var prevX: f32 = 0.0;
     var prevY: f32 = rce_curveY(
-        bandType, 0.0, freqT, yT, qT, isFilter, filterQ, octaveSpan);
+        bandType, 0.0, freqT, yT, qT, isFilter, filterQ, octaveSpan)
+        + rce_otherY(otherType, 0.0, otherFreqT, otherQ, otherSpan);
     for (var i: i32 = 1; i <= steps; i = i + 1) {
         var x: f32 = f32(i) / f32(steps);
         var y: f32 = rce_curveY(
-            bandType, x, freqT, yT, qT, isFilter, filterQ, octaveSpan);
+            bandType, x, freqT, yT, qT, isFilter, filterQ, octaveSpan)
+            + rce_otherY(otherType, x, otherFreqT, otherQ, otherSpan);
         var a: vec2<f32> = rce_plot(vec2<f32>(prevX, prevY));
         var b: vec2<f32> = rce_plot(vec2<f32>(x, y));
         var d: f32 = rce_sdSegment(vec2<f32>(uv.x * aspect, uv.y), vec2<f32>(a.x * aspect, a.y), vec2<f32>(b.x * aspect, b.y));
@@ -972,6 +989,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         prevX = x;
         prevY = y;
     }
+    lineMask = lineMask * drawCurve;
 
     var handle_pos: vec2<f32> = rce_plot(vec2<f32>(freqT, yT));
     var handleInset: vec2<f32> = clamp(input.uniform_d.xy, vec2<f32>(0.0), vec2<f32>(0.49));
