@@ -97,6 +97,7 @@
         ui-adsr-switch
         ui-detail-adsr-s
         ui-detail-adsr-switch-s
+        ui-detail-adsr-tabs-s
         ui-detail-adsr-divider
         ui-lego-underline-tab
         ui-detail-adsr-wide-switch-s
@@ -930,6 +931,49 @@
   (if (= eseq.vanilla/custom-ui-selected-section section-b)
     (ui-detail-adsr-s section-b title-b attack-b decay-b sustain-b release-b)
     (ui-detail-adsr-s section-a title-a attack-a decay-a sustain-a release-a)))
+
+;; Two-envelope detail panel switched by a pair of tab buttons above the plot
+;; (the selected one filled with the accent) instead of a title label, so
+;; both envelopes are visibly present and clickable. tab-w sizes the tabs;
+;; the titles are the tab texts ("1" / "2", "AMP" / "FLT").
+(def ui-detail-adsr-tabs-s (tab-w accent
+                            section-a title-a attack-a decay-a sustain-a release-a
+                            section-b title-b attack-b decay-b sustain-b release-b)
+  (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope))
+        (b-selected (= eseq.vanilla/custom-ui-selected-section section-b)))
+    (let ((section (if b-selected section-b section-a))
+          (attack (if b-selected attack-b attack-a))
+          (decay (if b-selected decay-b decay-a))
+          (sustain (if b-selected sustain-b sustain-a))
+          (release (if b-selected release-b release-a)))
+      (ui-readout-panel-medium-s section
+        (v-stack :width :fill :height :fill :gap 0.22 :align :stretch
+          (h-stack :width :fill :height 0.72 :gap 0.12 :align :center
+            (box :width 0.4)
+            (ui-lego-tab-s section-a title-a tab-w 0.68
+              (if b-selected :mixer-control-bg accent)
+              (if b-selected :dim :black))
+            (ui-lego-tab-s section-b title-b tab-w 0.68
+              (if b-selected accent :mixer-control-bg)
+              (if b-selected :black :dim)))
+          (adsr-editor
+            :attack (eseq.effects.custom-ui-controls/ui-param-bound-value attack 5)
+            :decay (eseq.effects.custom-ui-controls/ui-param-bound-value decay 120)
+            :sustain (eseq.effects.custom-ui-controls/ui-param-bound-value sustain 0.7)
+            :release (eseq.effects.custom-ui-controls/ui-param-bound-value release 120)
+            :width :fill :height 2.82
+            :background-color :instrument-control-bg
+            :on-change (lambda (env)
+              (do
+                (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope section)
+                (eseq.effects.custom-ui-sections/custom-ui-set-active-adsr scope section (get env :active))
+                (eseq.effects.custom-ui-runtime/custom-ui-set-adsr-in-scope scope attack decay sustain release env))))
+          (h-stack :width :fill :height 1.0 :gap 0.24 :align :start
+            (box :width 1)
+            (ui-lego-micro-num-stage-s section :attack attack "atk" 5.1 0 "ms" (ui-accent-cyan))
+            (ui-lego-micro-num-stage-s section :decay decay "dec" 5.1 0 "ms" (ui-accent-cyan))
+            (ui-lego-micro-num-stage-s section :sustain sustain "sus" 5.1 2 false (ui-accent-cyan))
+            (ui-lego-micro-num-stage-s section :release release "rel" 5.1 0 "ms" (ui-accent-cyan))))))))
 
 ;; Full-height envelope surface for instruments that dedicate a complete
 ;; horizontal slice to envelope editing. The plot owns all space not reserved

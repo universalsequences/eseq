@@ -121,9 +121,9 @@
         (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "peg_decay_ms" "dec" 4.0 0 "ms" (tri-text))))))
 
 (def tri-env-detail ()
-  (eseq.effects.custom-ui-lego/ui-detail-adsr-switch-s
-    0 "AMP EG" "aeg_attack_ms" "aeg_decay_ms" "aeg_sustain" "aeg_release_ms"
-    1 "FILTER EG" "feg_attack_ms" "feg_decay_ms" "feg_sustain" "feg_release_ms"))
+  (eseq.effects.custom-ui-lego/ui-detail-adsr-tabs-s 2.4 (tri-head)
+    0 "AMP" "aeg_attack_ms" "aeg_decay_ms" "aeg_sustain" "aeg_release_ms"
+    1 "FLT" "feg_attack_ms" "feg_decay_ms" "feg_sustain" "feg_release_ms"))
 
 (def tri-stage-block ()
   (tri-panel-small 0 (tri-surf-cool) (tri-bord-dark) false

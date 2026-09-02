@@ -174,9 +174,9 @@
         (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "cyc_hold" "hold" 4.0 2 false (drift-text))))))
 
 (def drift-env-detail ()
-  (eseq.effects.custom-ui-lego/ui-detail-adsr-switch-s
-    0 "ENV1 AMP" "env1_attack" "env1_decay" "env1_sustain" "env1_release"
-    1 "ENV2 MOD" "env2_attack" "env2_decay" "env2_sustain" "env2_release"))
+  (eseq.effects.custom-ui-lego/ui-detail-adsr-tabs-s 1.3 (drift-head)
+    0 "1" "env1_attack" "env1_decay" "env1_sustain" "env1_release"
+    1 "2" "env2_attack" "env2_decay" "env2_sustain" "env2_release"))
 
 (def drift-global-block ()
   (drift-panel-small 0 (drift-surf-cool) (drift-bord-dark) false
