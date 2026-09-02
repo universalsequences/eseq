@@ -7234,7 +7234,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
     assert_eq!(base_count, 1);
     assert_eq!(range_uniforms.len(), 2);
     assert_eq!(range_uniforms[0], [0.956, 0.5, 0.375, 0.0]);
-    assert!((range_uniforms[1][0] - 0.895).abs() < 0.000_01);
+    assert!((range_uniforms[1][0] - 0.905).abs() < 0.000_01);
     assert_eq!(&range_uniforms[1][1..], &[0.5, 0.75, 1.0]);
     assert!(
         text.contains(&"cut"),
@@ -7448,6 +7448,42 @@ fn hidden_ui_only_status_bar_reappears_in_inspect_mode() {
     let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
     assert!(!frame.tiles[0].show_status);
     assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
+}
+
+#[test]
+fn explicit_source_navigation_reuses_the_inspect_source_pane() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "eseqlisp-source-pane-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let first = dir.join("first.lisp");
+    let second = dir.join("second.lisp");
+    std::fs::write(&first, "(label \"first\")").unwrap();
+    std::fs::write(&second, "(label \"second\")").unwrap();
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let original_tile = editor.active_tile;
+
+    editor.open_eseqlisp_file_in_source_pane(&first).unwrap();
+    let source_tile = editor.active_tile;
+    assert_ne!(source_tile, original_tile);
+    assert_eq!(editor.tile_root.leaf_ids().len(), 2);
+    assert_eq!(editor.active_buffer().path.as_deref(), Some(first.as_path()));
+    assert_eq!(editor.active_buffer().view_mode, super::ViewMode::TextOnly);
+
+    editor.switch_active_tile(original_tile);
+    editor.open_eseqlisp_file_in_source_pane(&second).unwrap();
+    assert_eq!(editor.active_tile, source_tile);
+    assert_eq!(editor.tile_root.leaf_ids().len(), 2);
+    assert_eq!(editor.active_buffer().path.as_deref(), Some(second.as_path()));
+
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

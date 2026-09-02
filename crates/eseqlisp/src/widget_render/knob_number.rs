@@ -501,7 +501,7 @@ mod tests {
             width: 8.0,
             height: 6.0,
         };
-        let ring_outer_radius = knob_rect.width * 0.331;
+        let ring_outer_radius = knob_rect.width * 0.361;
         let open_sector_left = knob_rect.col + knob_rect.width * 0.5
             - ring_outer_radius * std::f32::consts::FRAC_1_SQRT_2;
         let pocket =
@@ -580,9 +580,71 @@ mod tests {
         assert_rect_contains(node.rect, label_band);
         assert_rect_contains(node.rect, layout.knob_rect);
         assert_rect_contains(node.rect, value_band);
-        assert!(label_band.row + label_band.height <= layout.knob_rect.row);
-        assert!(layout.knob_rect.row + layout.knob_rect.height <= value_band.row);
+        // Label and value may tuck into the arc-free top and bottom of the
+        // knob square (above the ring, below the 45-degree arc endpoints), but
+        // no further.
+        let label_overlap = label_band.row + label_band.height - layout.knob_rect.row;
+        assert!(
+            label_overlap <= layout.knob_rect.height * 0.08 + 0.000_01,
+            "label band overlaps the drawn ring: {layout:?}"
+        );
+        let knob_bottom = layout.knob_rect.row + layout.knob_rect.height;
+        let overlap = knob_bottom - value_band.row;
+        assert!(
+            overlap <= layout.knob_rect.height * 0.12 + 0.000_01,
+            "value band overlaps the drawn arcs: {layout:?}"
+        );
         assert_eq!(layout.value_h_align, 0.5);
+    }
+
+    #[test]
+    fn centered_value_band_reclaims_the_arc_free_bottom_of_a_tall_knob() {
+        let mut node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("cut".to_string())),
+            ("font-size".to_string(), Value::Number(10.8)),
+            ("label-font-size".to_string(), Value::Number(9.6)),
+            ("knob-size".to_string(), Value::Number(30.0)),
+            (
+                "value-align".to_string(),
+                Value::Keyword("center".to_string()),
+            ),
+        ]));
+        node.rect.width = 4.2;
+        node.rect.height = 3.36;
+        let viewport = test_viewport();
+        let layout = knob_number_component_layout(&node, viewport, "cut", "2500", "18000", true);
+        let value_band = layout.value_band.expect("value band");
+
+        assert_rect_contains(node.rect, layout.knob_rect);
+        assert_rect_contains(node.rect, value_band);
+        let knob_bottom = layout.knob_rect.row + layout.knob_rect.height;
+        // The one-pixel component gap still separates the square from the band.
+        let overlap = knob_bottom - value_band.row + 1.0 / viewport.cell_h;
+        assert!(
+            overlap > 0.0,
+            "value band should tuck into the knob square: {layout:?}"
+        );
+        assert!(
+            (overlap - layout.knob_rect.height * 0.12).abs() < 0.000_1,
+            "{layout:?}"
+        );
+        let label_band = layout.label_band.expect("label band");
+        let label_overlap =
+            label_band.row + label_band.height - layout.knob_rect.row + 1.0 / viewport.cell_h;
+        assert!(
+            (label_overlap - layout.knob_rect.height * 0.08).abs() < 0.000_1,
+            "{layout:?}"
+        );
+        // The reclaimed height goes to the knob: it is taller than the plain
+        // stack (content minus label and value rows) would allow.
+        let content_height = node.rect.height - 2.0 / viewport.cell_h;
+        let label_band = layout.label_band.expect("label band");
+        let plain_stack_knob =
+            content_height - label_band.height - value_band.height - 2.0 / viewport.cell_h;
+        assert!(
+            layout.knob_rect.height > plain_stack_knob + 0.05,
+            "{layout:?}"
+        );
     }
 
     #[test]
@@ -605,8 +667,7 @@ mod tests {
             ),
         ]));
 
-        let primitives =
-            KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
+        let primitives = KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
         let base_instances = primitives
             .iter()
             .filter_map(|primitive| match primitive {
@@ -641,7 +702,7 @@ mod tests {
         assert_eq!(base_instances[0].uniform_b[0], 0.0);
         assert_eq!(range_instances.len(), 2);
         assert_eq!(range_instances[0].uniform_b, [0.94, 0.5, 0.75, 1.0]);
-        assert!((range_instances[1].uniform_b[0] - 0.895).abs() < 0.000_01);
+        assert!((range_instances[1].uniform_b[0] - 0.905).abs() < 0.000_01);
         assert_eq!(&range_instances[1].uniform_b[1..], &[0.5, 0.375, 0.0]);
         assert!(
             text.contains(&"cut"),
@@ -821,8 +882,7 @@ mod tests {
             ("max".to_string(), Value::Number(1.0)),
             ("origin".to_string(), Value::Number(0.0)),
         ]));
-        let primitives =
-            KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
+        let primitives = KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
         let instance = primitives
             .iter()
             .find_map(|primitive| match primitive {
@@ -856,8 +916,7 @@ mod tests {
             ),
         ]));
 
-        let primitives =
-            KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
+        let primitives = KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
         let range = primitives
             .iter()
             .find_map(|primitive| match primitive {
@@ -894,8 +953,7 @@ mod tests {
             ),
         ]));
 
-        let primitives =
-            KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
+        let primitives = KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
         let base = primitives
             .iter()
             .find_map(|primitive| match primitive {
@@ -919,7 +977,11 @@ mod tests {
             })
             .expect("mod range arc");
 
-        assert!((base.value_t - 0.5).abs() < 0.001, "value_t = {}", base.value_t);
+        assert!(
+            (base.value_t - 0.5).abs() < 0.001,
+            "value_t = {}",
+            base.value_t
+        );
         assert!((range.uniform_b[1] - 0.5).abs() < 0.001);
         assert!((range.uniform_b[2] - 1.0).abs() < 0.001);
     }
@@ -1114,7 +1176,7 @@ fn mod_slot_color(slot: i32, selected: bool) -> Color {
 /// Radius the live modulation dot rides, matching the knob shader's own
 /// ring so the dot reads as a marker on the same arc as the base pointer. Keep
 /// in sync with `knobRadius` in the knob shaders below.
-const MOD_DOT_RING_RADIUS: f32 = 0.58;
+const MOD_DOT_RING_RADIUS: f32 = 0.64;
 
 /// Arc travel below which the live dot is suppressed: at rest (or with the
 /// modulator momentarily at zero) the effective value equals the base value and
@@ -1145,7 +1207,9 @@ fn mod_range_ring_half_width(selected: bool) -> f32 {
 
 fn mod_range_ring_radius(range_index: usize, selected: bool) -> f32 {
     const OUTER_EDGE_MARGIN: f32 = 0.004;
-    let preferred = (0.98 - (range_index.min(4) as f32 * 0.085)).max(0.64);
+    // Rings step inward from the outer edge and stop just outside the knob's
+    // own active arc (outer edge 0.722 with `knobRadius` 0.64).
+    let preferred = (0.98 - (range_index.min(3) as f32 * 0.075)).max(0.76);
     preferred.min(1.0 - mod_range_ring_half_width(selected) - OUTER_EDGE_MARGIN)
 }
 
@@ -1389,8 +1453,32 @@ fn knob_number_component_layout(
         value_height *= scale;
     }
 
+    // The arc's open sector leaves the bottom of the square knob primitive
+    // empty: the outermost mod-range ring (radius 0.98) ends 45 degrees off
+    // the bottom axis, at 0.98 * sin(45) = 0.69 below centre, i.e. 0.846 of
+    // the primitive's height. A centred value band may therefore climb this
+    // far into the primitive without touching any drawn arc, which hands the
+    // reclaimed height to the knob itself.
+    const CENTER_VALUE_OVERLAP_FRACTION: f32 = 0.12;
+    // The top of the square is emptier still: the knob's own arc peaks at
+    // 0.722 of the half-size, so the top 14% holds nothing but the outermost
+    // mod-range ring. The label tucks a little way into that band so it sits
+    // tight against the arc instead of floating above the square.
+    const CENTER_LABEL_OVERLAP_FRACTION: f32 = 0.08;
+    let value_overlap_fraction = if center_value && has_value {
+        CENTER_VALUE_OVERLAP_FRACTION
+    } else {
+        0.0
+    };
+    let label_overlap_fraction = if center_value && has_label {
+        CENTER_LABEL_OVERLAP_FRACTION
+    } else {
+        0.0
+    };
     let available_knob_height =
-        (content.height - label_height - label_gap - value_gap - value_height).max(0.0);
+        ((content.height - label_height - label_gap - value_gap - value_height)
+            / (1.0 - value_overlap_fraction - label_overlap_fraction))
+            .max(0.0);
     let available_knob_width_as_height = content.width * cell_w / cell_h;
     let max_knob_size = available_knob_height.min(available_knob_width_as_height);
     let requested_knob_size = node
@@ -1404,7 +1492,11 @@ fn knob_number_component_layout(
         .max(0.0);
     let knob_size = requested_knob_size.min(max_knob_size);
     let knob_width = knob_size * cell_h / cell_w;
-    let stack_height = label_height + label_gap + knob_size + value_gap + value_height;
+    let value_overlap = knob_size * value_overlap_fraction;
+    let label_overlap = knob_size * label_overlap_fraction;
+    let stack_height = label_height + label_gap - label_overlap + knob_size - value_overlap
+        + value_gap
+        + value_height;
     let mut row = content.row + (content.height - stack_height).max(0.0) * 0.5;
 
     let label_band = has_label.then(|| {
@@ -1414,7 +1506,7 @@ fn knob_number_component_layout(
             width: text_rect.width,
             height: label_height,
         };
-        row += label_height + label_gap;
+        row += label_height + label_gap - label_overlap;
         band
     });
     let knob_rect = Rect {
@@ -1423,12 +1515,12 @@ fn knob_number_component_layout(
         width: knob_width,
         height: knob_size,
     };
-    row += knob_size + value_gap;
+    row += knob_size - value_overlap + value_gap;
     const VALUE_KNOB_OVERHANG_PX: f32 = 4.0;
     const VALUE_BOTTOM_INSET_PX: f32 = 5.0;
-    // Shader `activeRing` reaches p=0.662. Since p spans -1..1, its outer
-    // radius occupies 0.331 of the square knob primitive.
-    const RING_OUTER_RADIUS_FRACTION: f32 = 0.331;
+    // Shader `activeRing` reaches p=0.722. Since p spans -1..1, its outer
+    // radius occupies 0.361 of the square knob primitive.
+    const RING_OUTER_RADIUS_FRACTION: f32 = 0.361;
 
     let overlay_top = if has_label {
         knob_rect.row
@@ -1527,7 +1619,11 @@ pub static KNOB_NUMBER_WIDGET: KnobNumberWidget = KnobNumberWidget;
 
 impl WidgetDefinition for KnobNumberWidget {
     fn names(&self) -> &'static [&'static str] {
-        &["knob-number", "knob-number-mod-range", "knob-number-mod-dot"]
+        &[
+            "knob-number",
+            "knob-number-mod-range",
+            "knob-number-mod-dot",
+        ]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -2241,7 +2337,8 @@ impl WidgetDefinition for KnobNumberWidget {
     }
 }
 
-const KNOB_NUMBER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+const KNOB_NUMBER_SHADER: super::ShaderSources = super::ShaderSources::both(
+    r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -2260,7 +2357,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float fillSpan = fillHi - fillLo;
     float active = step(fillLo, rel) * step(rel, fillHi) * step(0.001, fillSpan);
 
-    float knobRadius = 0.58;
+    float knobRadius = 0.64;
     float ring = abs(r - knobRadius) - 0.070;
     float activeRing = abs(r - knobRadius) - 0.082;
     float aa = max(fwidth(r), 0.0015);
@@ -2276,7 +2373,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float notchMask = smoothstep(aa, -aa, notch);
     float lineAlong = dot(p, n);
     float lineAcross = abs(p.x * n.y - p.y * n.x);
-    float lineSegment = step(0.0, lineAlong) * step(lineAlong, 0.52);
+    float lineSegment = step(0.0, lineAlong) * step(lineAlong, 0.58);
     float line = lineAcross - 0.070;
     float lineMask = smoothstep(aa, -aa, line) * lineSegment;
     float defaultAngle = start + sweep * clamp(in.uniform_a.z, 0.0, 1.0);
@@ -2296,13 +2393,16 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }
-"#, super::wgsl::KNOB_NUMBER_SHADER);
+"#,
+    super::wgsl::KNOB_NUMBER_SHADER,
+);
 
 /// Live modulation marker (eseq-hpc): one small dot on the knob's ring at
 /// the effective value's arc position. `uniform_b.x` is the normalized value,
 /// `uniform_b.y` the ring radius (kept equal to the knob shader's `knobRadius`
 /// so the dot rides the same arc as the base pointer).
-const KNOB_NUMBER_MOD_DOT_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+const KNOB_NUMBER_MOD_DOT_SHADER: super::ShaderSources = super::ShaderSources::both(
+    r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -2323,9 +2423,12 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }
-"#, super::wgsl::KNOB_NUMBER_MOD_DOT_SHADER);
+"#,
+    super::wgsl::KNOB_NUMBER_MOD_DOT_SHADER,
+);
 
-const KNOB_NUMBER_MOD_RANGE_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+const KNOB_NUMBER_MOD_RANGE_SHADER: super::ShaderSources = super::ShaderSources::both(
+    r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -2354,4 +2457,6 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }
-"#, super::wgsl::KNOB_NUMBER_MOD_RANGE_SHADER);
+"#,
+    super::wgsl::KNOB_NUMBER_MOD_RANGE_SHADER,
+);

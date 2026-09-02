@@ -73,11 +73,16 @@
         ui-lego-badge-dark
         ui-lego-knob
         ui-lego-knob-s
+        ui-lego-knob-track-s
+        ui-lego-knob-full-s
+        ui-lego-log-knob-full-s
+        ui-lego-knob-track-full-s
         ui-lego-log-knob-s
         ui-lego-big-knob-s
         ui-lego-num
         ui-lego-num-s
         ui-lego-micro-num-s
+        ui-lego-micro-num-step-s
         ui-lego-matrix-s
         ui-lego-option
         ui-lego-option-s
@@ -352,6 +357,7 @@
     (badge title
       :width width :height 0.82 :padding 0 :font-size 9.2
       :border-color :transparent
+      :corner-radius 0
       :variant :secondary
       :color accent)))
 
@@ -393,19 +399,20 @@
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-	    :track-color :widget-knob-track
+	    :track-color track
             :width width :height 2.82
             :value-align :center
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
-(def ui-lego-knob-taper-sized-s (section name title width height knob-size accent decimals taper)
+(def ui-lego-knob-taper-track-sized-s (section name title width height knob-size accent decimals taper track)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
     (if p
       (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-knob-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
             :taper taper
+            :step (if (= decimals 0) 1 nil)
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals decimals
             :base-value (eseq.effects.custom-ui-runtime/custom-ui-param-base-value-prop p)
@@ -431,15 +438,23 @@
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
-	    :track-color :widget-knob-track
-	    :width width :height height :knob-size knob-size
+            	    :track-color track
+            	    :width width :height height :knob-size knob-size
             :value-align :center
-	    :arc-color accent
+            	    :arc-color accent
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
+(def ui-lego-knob-taper-sized-s (section name title width height knob-size accent decimals taper)
+  (ui-lego-knob-taper-track-sized-s section name title width height knob-size accent decimals taper :widget-knob-track))
+
 (def ui-lego-knob-sized-s (section name title width height knob-size accent decimals)
   (ui-lego-knob-taper-sized-s section name title width height knob-size accent decimals "linear"))
+
+;; Knob with an explicit ring-track color, for dark panels where the default
+;; near-black :widget-knob-track disappears (e.g. :mixer-strip-bg).
+(def ui-lego-knob-track-s (section name title width accent decimals track)
+  (ui-lego-knob-taper-track-sized-s section name title width 3.12 3.12 accent decimals "linear" track))
 
 (def ui-lego-knob-s (section name title width accent decimals)
   (ui-lego-knob-sized-s section name title width 3.12 3.12 accent decimals))
@@ -448,6 +463,21 @@
 ;; cutoffs and other wide Hz ranges where linear travel wastes the arc.
 (def ui-lego-log-knob-s (section name title width accent decimals)
   (ui-lego-knob-taper-sized-s section name title width 3.12 3.12 accent decimals "log"))
+
+;; Full-height knobs for the untitled dense/large panels (ui-lego-panel-s):
+;; those leave 3.36 cells of body height, so the knob cell claims all of it
+;; instead of the 3.12 the titled surfaces can afford. Pair with a width of
+;; ~4.2 so the square knob is not width-limited.
+(def ui-lego-knob-full-h () 3.36)
+
+(def ui-lego-knob-full-s (section name title width accent decimals)
+  (ui-lego-knob-sized-s section name title width (ui-lego-knob-full-h) (ui-lego-knob-full-h) accent decimals))
+
+(def ui-lego-log-knob-full-s (section name title width accent decimals)
+  (ui-lego-knob-taper-sized-s section name title width (ui-lego-knob-full-h) (ui-lego-knob-full-h) accent decimals "log"))
+
+(def ui-lego-knob-track-full-s (section name title width accent decimals track)
+  (ui-lego-knob-taper-track-sized-s section name title width (ui-lego-knob-full-h) (ui-lego-knob-full-h) accent decimals "linear" track))
 
 (def ui-lego-big-knob-s (section name title width accent decimals)
   (ui-lego-knob-sized-s section name title width 4.30 2.65 accent decimals))
@@ -494,33 +524,75 @@
               :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
-(def ui-lego-micro-num-stage-s (section stage name title width decimals unit accent)
+(def ui-lego-micro-num-control-s (section stage name title width decimals unit accent slider)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
     (if p
       (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "custom-ui-lego-micro-num-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-micro-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.0 :gap 0.06 :align :start
-            (label title :font-size 7.4 :width width :height 0.68 :color :dim :bg :transparent)
+            (label title :font-size 9.0 :width width :height (if slider 0.78 0.68) :color :dim :bg :transparent)
             (number-picker :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals decimals
               :unit unit
-              :noui true :font-size 9.0
+              :mode (if slider :slider :plain)
+              :fill-color (rgba 0.1 0.2 0.6 1)
+              :noui (if slider false true)
+              :corner-radius 0
+              :border-color :black
+              :background-color :mixer-strip-bg
+              :font-size 9.5
               :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
               :active (if stage
-                        (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding section stage)
-                        false)
+                (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding section stage)
+                false)
               :active-color (ui-accent-cyan)
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
               :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
               :text-align :left
-              :width width :height 0.50
+              :width width :height (if slider 0.80 0.50)
               :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
 
+;; ADSR readouts stay visually subordinate to the envelope plot.
+(def ui-lego-micro-num-stage-s (section stage name title width decimals unit accent)
+  (ui-lego-micro-num-control-s section stage name title width decimals unit accent false))
+
 (def ui-lego-micro-num-s (section name title width decimals unit accent)
-  (ui-lego-micro-num-stage-s section false name title width decimals unit accent))
+  (ui-lego-micro-num-control-s section false name title width decimals unit accent true))
+
+;; micro-num with an explicit drag/edit quantization step (e.g. 0.5),
+;; overriding the decimals-derived granularity.
+(def ui-lego-micro-num-step-s (section name title width decimals step unit accent)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+    (if p
+      (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "custom-ui-lego-micro-num-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-micro-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
+          (v-stack :width width :height 1.0 :gap 0.06 :align :start
+            (label title :font-size 9.0 :width width :height 0.78 :color :dim :bg :transparent)
+            (number-picker :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
+              :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals decimals
+              :step step
+              :unit unit
+              :mode :slider
+              :corner-radius 0
+              :fill-color (rgba 0.1 0.2 0.6 1)
+              :border-color :black
+              :background-color :mixer-strip-bg
+              :noui false 
+              :font-size 9.5
+              :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :active false
+              :active-color (ui-accent-cyan)
+              :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+              :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+              :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+              :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+              :text-align :left
+              :width width :height 0.80
+              :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
 
 (def ui-lego-matrix-s (section name title width height accent)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-tensor-param name)))
@@ -628,15 +700,15 @@
 
 (def ui-lego-micro-toggle-s (section name width accent)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
-        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+      (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (if p
       (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
         (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
           (str "custom-ui-lego-micro-toggle-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
           (subtree :key (str "custom-ui-lego-micro-toggle-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
-                             "-" (if on 1 0) "-" name)
+              "-" (if on 1 0) "-" name)
             (box :debug-name (str "custom-ui-lego-micro-toggle-" name)
-                 :width width :height 1.18 :v-align :end
+              :width width :height 1.18 :v-align :end
               (toggle
                 :value on
                 :color accent
@@ -654,11 +726,11 @@
     (if p
       (subtree :key (str "custom-ui-lego-micro-base-note-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name))
         (v-stack :width width :height 1.18 :gap 0.16 :align :start
-          (label "note" :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
+          (label "note" :font-size 9.0 :width width :height 0.62 :color :dim :bg :transparent)
           (number-picker :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals 0
             :step 1
-            :noui true :font-size 9.0
+            :noui true :font-size 10.0
             :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)

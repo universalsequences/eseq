@@ -1824,7 +1824,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var fillSpan: f32 = fillHi - fillLo;
     var is_active: f32 = step(fillLo, rel) * step(rel, fillHi) * step(0.001, fillSpan);
 
-    var knobRadius: f32 = 0.58;
+    var knobRadius: f32 = 0.64;
     var ring: f32 = abs(r - knobRadius) - 0.070;
     var activeRing: f32 = abs(r - knobRadius) - 0.082;
     var aa: f32 = max(fwidth(r), 0.0015);
@@ -1840,7 +1840,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var notchMask: f32 = smoothstep(aa, -aa, notch);
     var lineAlong: f32 = dot(p, n);
     var lineAcross: f32 = abs(p.x * n.y - p.y * n.x);
-    var lineSegment: f32 = step(0.0, lineAlong) * step(lineAlong, 0.52);
+    var lineSegment: f32 = step(0.0, lineAlong) * step(lineAlong, 0.58);
     var line: f32 = lineAcross - 0.070;
     var lineMask: f32 = smoothstep(aa, -aa, line) * lineSegment;
     var defaultAngle: f32 = start + sweep * clamp(input.uniform_a.z, 0.0, 1.0);
@@ -1978,6 +1978,67 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     col = vec4<f32>((mix(col.rgb, input.color_a.rgb, fill)), col.a);
     return col;
 }"#;
+
+pub const NUMBER_PICKER_SLIDER_SHADER: &str = r#"
+fn number_picker_slider_rounded_rect(p: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
+    var q: vec2<f32> = abs(p) - (size - vec2<f32>(radius));
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+@fragment
+fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
+{
+    var aspect: f32 = max(input.aspect, 0.001);
+    var p: vec2<f32> = vec2<f32>((input.uv.x - 0.5) * 2.0 * aspect, (input.uv.y - 0.5) * 2.0);
+    var size: vec2<f32> = vec2<f32>(aspect, 1.0);
+    var radius: f32 = min(input.corner_radius, min(aspect, 1.0));
+
+    var outer_distance: f32 = number_picker_slider_rounded_rect(p, size, radius);
+    var outer_edge: f32 = fwidth(outer_distance) * 1.2;
+    var outer_mask: f32 = smoothstep(outer_edge, -outer_edge, outer_distance);
+
+    var px: f32 = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+    var border_width: f32 = input.uniform_a.x * px;
+    var inner_size: vec2<f32> = max(size - vec2<f32>(border_width), vec2<f32>(0.001));
+    var inner_distance: f32 = number_picker_slider_rounded_rect(
+        p,
+        inner_size,
+        max(radius - border_width, 0.0));
+    var inner_edge: f32 = fwidth(inner_distance) * 1.2;
+    var inner_mask: f32 = smoothstep(inner_edge, -inner_edge, inner_distance);
+    var border_mask: f32 = clamp(outer_mask - inner_mask, 0.0, 1.0);
+
+    var cutoff_edge: f32 = max(fwidth(input.uv.x), 0.0005);
+    var segment_start: f32 = min(input.value_t, input.uniform_a.y);
+    var segment_end: f32 = max(input.value_t, input.uniform_a.y);
+    var left_mask: f32 = smoothstep(
+        segment_start - cutoff_edge,
+        segment_start + cutoff_edge,
+        input.uv.x);
+    var right_mask: f32 = smoothstep(
+        segment_end + cutoff_edge,
+        segment_end - cutoff_edge,
+        input.uv.x);
+    var segment_mask: f32 = left_mask * right_mask
+        * step(0.0001, abs(input.value_t - input.uniform_a.y));
+    var fill_alpha: f32 = input.color_c.a * segment_mask;
+    var inner_alpha: f32 = fill_alpha + input.color_a.a * (1.0 - fill_alpha);
+    var inner_rgb: vec3<f32> = (
+        input.color_c.rgb * fill_alpha
+        + input.color_a.rgb * input.color_a.a * (1.0 - fill_alpha)
+    ) / max(inner_alpha, 0.0001);
+
+    var surface_alpha: f32 = inner_alpha * inner_mask;
+    var border_alpha: f32 = input.color_b.a * border_mask;
+    var out_alpha: f32 = border_alpha + surface_alpha * (1.0 - border_alpha);
+    if (out_alpha < 0.002) { discard; }
+    var out_rgb: vec3<f32> = (
+        input.color_b.rgb * border_alpha
+        + inner_rgb * surface_alpha * (1.0 - border_alpha)
+    ) / out_alpha;
+    return vec4<f32>(out_rgb, out_alpha);
+}
+"#;
 
 pub const NUMBER_PICKER_TRI_SHADER: &str = r#"
 fn number_picker_segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
