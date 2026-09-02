@@ -76,11 +76,16 @@ struct ResponseBand {
     /// knob draw the peak its DSP actually produces (e.g. Q = 0.5 + 8 * res).
     q_curve_scale: f32,
     q_curve_offset: f32,
+    /// Exponent applied to q before scaling (display_q = offset + scale *
+    /// q^power), so a 0..1 resonance knob can stay gentle through its middle
+    /// and only sharpen near the top, the way Ableton's Drift plot does.
+    q_curve_power: f32,
 }
 
 impl ResponseBand {
     fn display_q(&self) -> f32 {
-        (self.q_curve_offset + self.q_curve_scale * self.q).max(0.001)
+        let shaped = self.q.max(0.0).powf(self.q_curve_power.max(0.001));
+        (self.q_curve_offset + self.q_curve_scale * shaped).max(0.001)
     }
 }
 
@@ -171,6 +176,7 @@ fn prop_bands(props: &HashMap<String, Value>) -> Vec<ResponseBand> {
                 lock_y: map_bool(&map, "lock-y", false),
                 q_curve_scale: map_num(&map, "q-curve-scale", 1.0),
                 q_curve_offset: map_num(&map, "q-curve-offset", 0.0),
+                q_curve_power: map_num(&map, "q-curve-power", 1.0),
             })
         })
         .collect()
@@ -1035,6 +1041,41 @@ mod tests {
             (band.q - 0.9).abs() < 1e-6,
             "the parameter itself is untouched"
         );
+    }
+
+    #[test]
+    fn q_curve_power_keeps_mid_resonance_gentle() {
+        let mut node = test_node("filter");
+        let mut band = band_value(0, 1_000.0, 0.0, 0.5, true);
+        if let Value::Map(map) = &mut band {
+            map.insert(
+                "q-min".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.0))),
+            );
+            map.insert(
+                "q-max".to_string(),
+                Rc::new(RefCell::new(Value::Number(1.0))),
+            );
+            map.insert(
+                "q-curve-scale".to_string(),
+                Rc::new(RefCell::new(Value::Number(6.7))),
+            );
+            map.insert(
+                "q-curve-offset".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.5))),
+            );
+            map.insert(
+                "q-curve-power".to_string(),
+                Rc::new(RefCell::new(Value::Number(3.0))),
+            );
+        }
+        node.props.insert(
+            "bands".to_string(),
+            Value::List(vec![Rc::new(RefCell::new(band))]),
+        );
+        let band = prop_bands(&node.props).remove(0);
+        // 0.5 + 6.7 * 0.5^3 = 1.3375: a ~2 dB bump, not a spike.
+        assert!((band.display_q() - 1.3375).abs() < 1e-4);
     }
 
     #[test]

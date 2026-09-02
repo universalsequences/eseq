@@ -216,8 +216,9 @@
                 :q (eseq.effects.custom-ui-runtime/custom-ui-param-binding res-p)
                 :q-min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min res-p)
                 :q-max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max res-p)
-                ;; Type I is (svf cut (+ 0.5 (* res 8))): draw that Q, not raw res.
-                :q-curve-offset 0.5 :q-curve-scale 8.0
+                ;; Ableton Drift-style resonance plot: gentle through the middle
+                ;; (res 0.5 ~ +2 dB), sharp only near the top (res 1 ~ Q 7).
+                :q-curve-offset 0.5 :q-curve-scale 6.7 :q-curve-power 3.0
                 :enabled true :selected true)
               (dict :id 1 :type "highpass"
                 :freq (eseq.effects.custom-ui-runtime/custom-ui-param-binding hp-p)
