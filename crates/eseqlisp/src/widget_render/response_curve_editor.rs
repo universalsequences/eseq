@@ -67,6 +67,10 @@ struct ResponseBand {
     q_max: f32,
     enabled: bool,
     selected: bool,
+    /// The band has no vertical parameter (e.g. a highpass with no
+    /// resonance): its handle sits at the plot's vertical midpoint and a
+    /// drag only moves the cutoff.
+    lock_y: bool,
 }
 
 fn value_string(value: &Value) -> Option<&str> {
@@ -153,6 +157,7 @@ fn prop_bands(props: &HashMap<String, Value>) -> Vec<ResponseBand> {
                 q_max: band_q_max,
                 enabled: map_bool(&map, "enabled", true),
                 selected: map_bool(&map, "selected", false),
+                lock_y: map_bool(&map, "lock-y", false),
             })
         })
         .collect()
@@ -240,7 +245,9 @@ fn is_filter_mode(props: &HashMap<String, Value>) -> bool {
 }
 
 fn band_y_t(band: &ResponseBand, filter_mode: bool) -> f32 {
-    if filter_mode {
+    if band.lock_y {
+        0.5
+    } else if filter_mode {
         q_to_t(band.q, band.q_min, band.q_max)
     } else {
         gain_to_t(band.gain, band.gain_min, band.gain_max)
@@ -320,7 +327,9 @@ fn changed_band_values(
     let (x_t, y_t) = data_from_local(node.rect, col, row);
     let freq = freq_from_t(x_t, band.freq_min, band.freq_max);
     let filter_mode = is_filter_mode(&node.props);
-    let (gain, q) = if filter_mode {
+    let (gain, q) = if band.lock_y {
+        (band.gain, band.q)
+    } else if filter_mode {
         (
             band.gain,
             q_from_t(y_t, band.q_min, band.q_max).clamp(band.q_min, band.q_max),
@@ -950,6 +959,30 @@ mod tests {
         assert!(map_number(&event, "freq") > 500.0);
         assert!(map_number(&event, "gain") > 0.0);
         assert_eq!(map_number(&event, "q"), 1.0);
+    }
+
+    #[test]
+    fn lock_y_band_keeps_its_q_and_sits_at_the_vertical_midpoint() {
+        let mut node = test_node("filter");
+        let mut band = band_value(0, 1_000.0, 0.0, 2.0, true);
+        if let Value::Map(map) = &mut band {
+            map.insert(
+                "lock-y".to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            );
+        }
+        node.props.insert(
+            "bands".to_string(),
+            Value::List(vec![Rc::new(RefCell::new(band))]),
+        );
+        let band = prop_bands(&node.props).remove(0);
+        assert!(band.lock_y);
+        assert_eq!(band_y_t(&band, true), 0.5);
+        // Dragging to the top edge changes only the frequency.
+        let (freq, gain, q) = changed_band_values(&node, &band, node.rect.width * 0.75, 0.0);
+        assert!(freq > 1_000.0);
+        assert_eq!(gain, band.gain);
+        assert_eq!(q, band.q);
     }
 
     #[test]

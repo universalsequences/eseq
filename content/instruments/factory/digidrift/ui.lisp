@@ -191,7 +191,8 @@
 
 ;; Filter response in place of the envelope plot while the filter column
 ;; (section 3) is selected. Band 0 is the resonant lowpass (lp_freq / lp_res,
-;; draggable); band 1 is the highpass (hp_freq, fixed q). Bindings, not value
+;; draggable); band 1 is the highpass (hp_freq only: no resonance, so its
+;; handle is y-locked at the midpoint). Bindings, not value
 ;; reads, so a drag repaints only this widget (see core/wavetable ui.lisp).
 (def drift-filter-detail ()
   (let ((cut-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "lp_freq"))
@@ -222,6 +223,7 @@
                 :freq-max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max hp-p)
                 :gain 0 :gain-min -12 :gain-max 12
                 :q 0.2 :q-min 0 :q-max 1
+                :lock-y true
                 :enabled true :selected false))
             :freq-min 10
             :freq-max 18000
