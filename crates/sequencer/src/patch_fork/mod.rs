@@ -141,6 +141,29 @@ pub fn fork_patch_files(source_dir: &Path, draft_dir: &Path) -> Result<(), Strin
 /// to copy; their layout sidecar and preset bank are name-adjacent files, and
 /// the fork is normalized into the folder layout every new draft uses.
 pub fn fork_patch_source(source_dsp: &Path, draft_dir: &Path) -> Result<(), String> {
+    fork_patch_source_files(source_dsp, draft_dir)?;
+    stage_user_preset_overlay(source_dsp, draft_dir)
+}
+
+/// A factory instrument's user-saved presets live in a user-tier overlay bank,
+/// not next to the factory source, so the sibling-bank staging above misses
+/// them. Merge that overlay into the staged bank so the fork carries the same
+/// list the user saw (user entries shadowing factory ones by name).
+fn stage_user_preset_overlay(source_dsp: &Path, draft_dir: &Path) -> Result<(), String> {
+    let Some(overlay) = crate::lisp_host::user_preset_overlay_for_factory_source(source_dsp)
+    else {
+        return Ok(());
+    };
+    let staged = draft_dir.join(STAGED_PRESET_BANK_FILE);
+    crate::lisp_host::merge_preset_overlay_into_bank_file(&staged, &overlay).map_err(|error| {
+        format!(
+            "Failed to merge user preset bank '{}' into the fork: {error}",
+            overlay.display()
+        )
+    })
+}
+
+fn fork_patch_source_files(source_dsp: &Path, draft_dir: &Path) -> Result<(), String> {
     if source_dsp.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
         let Some(parent) = source_dsp.parent() else {
             return Err(format!(

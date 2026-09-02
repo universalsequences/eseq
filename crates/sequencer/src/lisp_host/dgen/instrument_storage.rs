@@ -16,7 +16,7 @@ use super::super::*;
 use crate::sequencer::MAX_INSTRUMENT_ENGINES;
 use crate::audio::MAX_VOICES;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstrumentPreset {
     pub id: String,
     pub name: String,
@@ -428,15 +428,55 @@ pub(in crate::lisp_host) fn source_name_from_path(kind: &CompileKind, path: &Pat
 
 /// Preset banks are user data, not instrument source: saving presets on a
 /// factory instrument must not require forking it. Factory-qualified ids keep
-/// their bank in the user tier under the same logical path — exactly where
-/// legacy bare names wrote it — so a factory id without a factory-shipped
-/// bank falls through to that user-tier location on load.
+/// their writable bank in the user tier under the same logical path — exactly
+/// where legacy bare names wrote it. On load that user bank is an *overlay* on
+/// the factory-shipped bank: the two are merged by preset name, user entries
+/// shadowing factory ones (see [`merge_preset_banks`]).
 fn user_tier_preset_path(paths: &crate::app_paths::AppPaths, logical_name: &str) -> PathBuf {
     paths
         .user_instruments_dir()
         .join(format!("{logical_name}.presets"))
 }
 
+/// The bank files that make up one instrument's preset list.
+///
+/// `base` is the bank next to the resolved source (the factory-shipped bank for
+/// factory ids, the instrument's own bank otherwise). `user_overlay` is the
+/// user-tier bank for factory ids — the file saves go to — and `None` for
+/// instruments whose `base` is already writable.
+struct PresetBankPaths {
+    base: PathBuf,
+    user_overlay: Option<PathBuf>,
+}
+
+impl PresetBankPaths {
+    fn all(&self) -> Vec<PathBuf> {
+        let mut paths = vec![self.base.clone()];
+        if let Some(overlay) = &self.user_overlay {
+            paths.push(overlay.clone());
+        }
+        paths
+    }
+}
+
+fn instrument_preset_bank_paths_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<PresetBankPaths> {
+    let base = resolve_instrument_storage_path_with_paths(paths, name, "presets")?;
+    // The overlay is wherever a save would go, whenever that is not the bank
+    // the read resolved to. That covers explicit `factory:` ids *and* legacy
+    // bare names (the engine-registry form, e.g. `factory/digiwave/`), which
+    // resolve factory-first on read yet save into the user tier: without this
+    // a bare-named factory instrument's saved presets never show up on load.
+    let user_overlay =
+        Some(instrument_preset_save_path_with_paths(paths, name)?).filter(|overlay| *overlay != base);
+    Ok(PresetBankPaths { base, user_overlay })
+}
+
+/// The factory-shipped (or, for user instruments, the only) bank path. The
+/// user overlay for factory ids is *not* consulted here; use
+/// [`load_instrument_presets_shared`] for the merged list.
 pub(in crate::lisp_host) fn instrument_preset_path(name: &str) -> io::Result<PathBuf> {
     instrument_preset_path_with_paths(crate::app_paths::app_paths(), name)
 }
@@ -445,19 +485,42 @@ fn instrument_preset_path_with_paths(
     paths: &crate::app_paths::AppPaths,
     name: &str,
 ) -> io::Result<PathBuf> {
-    let resolved = resolve_instrument_storage_path_with_paths(paths, name, "presets")?;
-    // A factory instrument's writable bank lives in the user tier (see
-    // [`user_tier_preset_path`]); once it exists it is the authoritative bank,
-    // even when a factory-shipped bank also resolves. Checking the user tier
-    // first (not only when the factory resolution misses) is what makes saves
-    // visible on load.
-    if let Some((InstrumentTier::Factory, logical_name)) = parse_instrument_id(name)? {
-        let user = user_tier_preset_path(paths, logical_name);
-        if user.is_file() {
-            return Ok(user);
+    Ok(instrument_preset_bank_paths_with_paths(paths, name)?.base)
+}
+
+/// Read one bank file. `Ok(None)` when the file does not exist.
+fn read_preset_bank(path: &Path) -> io::Result<Option<Vec<InstrumentPreset>>> {
+    match std::fs::read_to_string(path) {
+        Ok(src) => {
+            let bank: InstrumentPresetBank = serde_json::from_str(&src).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to parse preset bank '{}': {e}", path.display()),
+                )
+            })?;
+            Ok(Some(bank.presets))
         }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
-    Ok(resolved)
+}
+
+/// Merge a factory bank with the user overlay: the result is `base ∪ overlay`
+/// with an overlay preset replacing the base preset of the same name, sorted by
+/// name like every saved bank. Factory presets are never deleted by the overlay
+/// (there is no delete path today; tombstones would live here if one lands).
+pub fn merge_preset_banks(
+    base: &[InstrumentPreset],
+    overlay: &[InstrumentPreset],
+) -> Vec<InstrumentPreset> {
+    let mut merged = base
+        .iter()
+        .map(|preset| (preset.name.clone(), preset.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for preset in overlay {
+        merged.insert(preset.name.clone(), preset.clone());
+    }
+    merged.into_values().collect()
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -466,60 +529,61 @@ struct PresetBankCacheKey {
     instrument_name: String,
 }
 
-/// Preset banks keyed by resolved path, with no freshness check on a warm hit:
-/// a hit costs one hash lookup and an `Arc` clone, never a `stat`. Staleness is
-/// therefore handled by *explicit* invalidation — every write path in this
-/// process (preset saves, instrument-source saves, instrument moves, and the
-/// patch-fork bank materialization via
-/// [`invalidate_instrument_preset_bank_cache_at`]) drops the affected entry.
+/// Merged preset lists keyed by instrument, with no freshness check on a warm
+/// hit: a hit costs one hash lookup and an `Arc` clone, never a `stat`.
+/// Staleness is therefore handled by *explicit* invalidation — every write path
+/// in this process (preset saves, instrument-source saves, instrument moves,
+/// and the patch-fork bank materialization via
+/// [`invalidate_instrument_preset_bank_cache_at`]) drops every entry that read
+/// the written file. Each entry remembers *all* the files it was merged from
+/// (factory base plus user overlay), so invalidating either one drops it.
 /// Edits made by another process to a bank this process has already read are
-/// not observed until something invalidates it. Missing banks are deliberately
-/// *not* cached, so a bank that appears later (a fork, an external copy) is
-/// picked up without an invalidation hook.
+/// not observed until something invalidates it. Instruments with no bank on
+/// disk at all are deliberately *not* cached, so a bank that appears later (a
+/// fork, an external copy) is picked up without an invalidation hook.
 #[derive(Default)]
 struct PresetBankCache {
-    resolved_paths: std::collections::HashMap<PresetBankCacheKey, PathBuf>,
-    banks: std::collections::HashMap<PathBuf, std::sync::Arc<Vec<InstrumentPreset>>>,
+    entries: std::collections::HashMap<PresetBankCacheKey, PresetBankCacheEntry>,
+}
+
+struct PresetBankCacheEntry {
+    paths: Vec<PathBuf>,
+    presets: std::sync::Arc<Vec<InstrumentPreset>>,
 }
 
 impl PresetBankCache {
     fn get(&self, key: &PresetBankCacheKey) -> Option<std::sync::Arc<Vec<InstrumentPreset>>> {
-        self.resolved_paths
-            .get(key)
-            .and_then(|path| self.banks.get(path))
-            .cloned()
+        self.entries.get(key).map(|entry| entry.presets.clone())
     }
 
     fn insert(
         &mut self,
         key: PresetBankCacheKey,
-        path: PathBuf,
+        paths: Vec<PathBuf>,
         presets: std::sync::Arc<Vec<InstrumentPreset>>,
     ) {
-        self.resolved_paths.insert(key, path.clone());
-        self.banks.insert(path, presets);
+        self.entries.insert(key, PresetBankCacheEntry { paths, presets });
     }
 
     fn invalidate_path(&mut self, path: &Path) {
-        self.banks.remove(path);
-        self.resolved_paths.retain(|_, resolved| resolved != path);
+        self.entries
+            .retain(|_, entry| !entry.paths.iter().any(|p| p == path));
     }
 
     fn invalidate_key_and_path(&mut self, key: &PresetBankCacheKey, path: Option<&Path>) {
-        let mut invalidated_paths = Vec::with_capacity(2);
-        if let Some(resolved) = self.resolved_paths.remove(key) {
-            invalidated_paths.push(resolved);
-        }
+        let removed = self.entries.remove(key);
+        let mut invalidated_paths = removed.map(|entry| entry.paths).unwrap_or_default();
         if let Some(path) = path {
-            if !invalidated_paths.iter().any(|resolved| resolved == path) {
+            if !invalidated_paths.iter().any(|p| p == path) {
                 invalidated_paths.push(path.to_path_buf());
             }
         }
-        for path in &invalidated_paths {
-            self.banks.remove(path);
-        }
-        self.resolved_paths
-            .retain(|_, resolved| !invalidated_paths.contains(resolved));
+        self.entries.retain(|_, entry| {
+            !entry
+                .paths
+                .iter()
+                .any(|p| invalidated_paths.contains(p))
+        });
     }
 }
 
@@ -551,27 +615,23 @@ fn cached_instrument_presets_with_paths(
 
     // Resolve and read while holding the cache lock so a concurrent save cannot
     // publish a new bank and then have this load install stale contents over it.
-    let path = instrument_preset_path_with_paths(paths, name)?;
-    let presets = match std::fs::read_to_string(&path) {
-        Ok(src) => {
-            let bank: InstrumentPresetBank = serde_json::from_str(&src).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Failed to parse preset bank '{}': {e}", path.display()),
-                )
-            })?;
-            bank.presets
-        }
-        // An absent bank is not cached: there is no entry to invalidate later,
-        // so caching it would make "this instrument has no presets" permanent
-        // for the life of the process even after a bank appears on disk.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(std::sync::Arc::new(Vec::new()));
-        }
-        Err(e) => return Err(e),
+    let bank_paths = instrument_preset_bank_paths_with_paths(paths, name)?;
+    let base = read_preset_bank(&bank_paths.base)?;
+    let overlay = match &bank_paths.user_overlay {
+        Some(overlay) => read_preset_bank(overlay)?,
+        None => None,
+    };
+    let presets = match (base, overlay) {
+        // No bank anywhere is not cached: there is no entry to invalidate
+        // later, so caching it would make "this instrument has no presets"
+        // permanent for the life of the process even after a bank appears.
+        (None, None) => return Ok(std::sync::Arc::new(Vec::new())),
+        (Some(base), None) => base,
+        (None, Some(overlay)) => overlay,
+        (Some(base), Some(overlay)) => merge_preset_banks(&base, &overlay),
     };
     let presets = std::sync::Arc::new(presets);
-    cache.insert(key, path, presets.clone());
+    cache.insert(key, bank_paths.all(), presets.clone());
     Ok(presets)
 }
 
@@ -579,27 +639,97 @@ fn cached_instrument_presets(name: &str) -> io::Result<std::sync::Arc<Vec<Instru
     cached_instrument_presets_with_paths(crate::app_paths::app_paths(), name)
 }
 
-/// Shared, read-only view of an instrument's preset bank. Prefer this over
-/// [`load_instrument_presets`] wherever the bank is only read: a warm call is an
-/// `Arc` clone instead of a deep clone of every preset's parameter maps.
+/// Shared, read-only view of an instrument's preset list: for factory
+/// instruments this is the factory bank merged with the user's overlay bank.
+/// Prefer this over [`load_instrument_presets`] wherever the list is only
+/// read: a warm call is an `Arc` clone instead of a deep clone of every
+/// preset's parameter maps.
 pub fn load_instrument_presets_shared(
     name: &str,
 ) -> io::Result<std::sync::Arc<Vec<InstrumentPreset>>> {
     cached_instrument_presets(name)
 }
 
-/// Owned copy of an instrument's preset bank, for callers that mutate it before
-/// saving it back. Read-only callers want [`load_instrument_presets_shared`].
+/// Owned copy of the merged preset list. Read-only callers want
+/// [`load_instrument_presets_shared`]. Callers that mutate presets and save
+/// them back want [`load_user_instrument_presets`]: saving this merged list
+/// would copy every factory preset into the user bank.
 pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> {
     Ok(cached_instrument_presets(name)?.as_ref().clone())
 }
 
-/// Drop any cached preset bank read from `path`. Write paths that bypass
-/// [`save_instrument_presets`] (the patch-fork bank materialization) must call
-/// this after writing, so cache correctness does not depend on some other call
-/// in the same sequence happening to invalidate the same key first.
+fn load_user_instrument_presets_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<Vec<InstrumentPreset>> {
+    let path = instrument_preset_save_path_with_paths(paths, name)?;
+    Ok(read_preset_bank(&path)?.unwrap_or_default())
+}
+
+/// The contents of the *writable* bank only — what [`save_instrument_presets`]
+/// will overwrite. For factory instruments that is the user overlay (possibly
+/// empty even when the merged list is not); for user instruments it is the
+/// whole bank. Load-mutate-save cycles must start from this, not from the
+/// merged list.
+pub fn load_user_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> {
+    load_user_instrument_presets_with_paths(crate::app_paths::app_paths(), name)
+}
+
+/// Drop any cached preset list that was read from `path`. Write paths that
+/// bypass [`save_instrument_presets`] (the patch-fork bank materialization)
+/// must call this after writing, so cache correctness does not depend on some
+/// other call in the same sequence happening to invalidate the same key first.
 pub fn invalidate_instrument_preset_bank_cache_at(path: &Path) {
     preset_bank_cache().lock().unwrap().invalidate_path(path);
+}
+
+/// The user overlay bank for a *factory* instrument source path, if one exists
+/// on disk. `None` for user-tier sources (their bank is already writable) and
+/// for factory sources with no saved user presets. Used by the patch fork so a
+/// fork of a factory instrument carries the merged list the user saw, not just
+/// the factory-shipped bank.
+pub fn user_preset_overlay_for_factory_source(source_dsp: &Path) -> Option<PathBuf> {
+    user_preset_overlay_for_factory_source_with_paths(crate::app_paths::app_paths(), source_dsp)
+}
+
+fn user_preset_overlay_for_factory_source_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    source_dsp: &Path,
+) -> Option<PathBuf> {
+    let factory_root = InstrumentTier::Factory.root(paths);
+    let rel = source_dsp.strip_prefix(&factory_root).ok()?;
+    let logical = if rel.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
+        rel.parent()?.to_path_buf()
+    } else {
+        rel.with_extension("")
+    };
+    let logical = logical.to_string_lossy().replace('\\', "/");
+    if logical.is_empty() {
+        return None;
+    }
+    Some(user_tier_preset_path(paths, &logical)).filter(|path| path.is_file())
+}
+
+/// Merge the user overlay bank at `overlay` into the bank file at `target`
+/// (which may not exist yet), writing the merged bank back to `target`. The
+/// patch fork uses this on its staged bank; `engine_name`/`source_file` are
+/// placeholders the fork rewrites at finalize.
+pub fn merge_preset_overlay_into_bank_file(target: &Path, overlay: &Path) -> io::Result<()> {
+    let base = read_preset_bank(target)?.unwrap_or_default();
+    let overlay_presets = read_preset_bank(overlay)?.unwrap_or_default();
+    let bank = InstrumentPresetBank {
+        version: 1,
+        engine_name: String::new(),
+        source_file: String::new(),
+        presets: merge_preset_banks(&base, &overlay_presets),
+    };
+    let json = serde_json::to_string_pretty(&bank).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to serialize preset bank '{}': {e}", target.display()),
+        )
+    })?;
+    std::fs::write(target, json)
 }
 
 pub fn load_instrument_preset_names(name: &str) -> io::Result<Vec<String>> {
@@ -639,11 +769,27 @@ fn save_instrument_presets_with_paths(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // The user overlay only needs to hold what differs from the factory bank.
+    // Dropping entries identical to their factory counterpart keeps a later
+    // factory update visible, and heals banks written before overlays existed
+    // (the old single-authoritative-bank save copied the whole factory bank
+    // into the user file on the first save).
+    let mut presets = presets.to_vec();
+    let bank_paths = instrument_preset_bank_paths_with_paths(paths, name)?;
+    if bank_paths.user_overlay.as_deref() == Some(path.as_path()) {
+        if let Some(factory) = read_preset_bank(&bank_paths.base)? {
+            presets.retain(|preset| {
+                !factory
+                    .iter()
+                    .any(|shipped| shipped.name == preset.name && shipped == preset)
+            });
+        }
+    }
     let bank = InstrumentPresetBank {
         version: 1,
         engine_name: name.to_string(),
         source_file: format!("instruments/{name}.lisp"),
-        presets: presets.to_vec(),
+        presets,
     };
     let json = serde_json::to_string_pretty(&bank).map_err(|e| {
         io::Error::new(
@@ -1205,36 +1351,188 @@ mod tier_id_tests {
         std::fs::write(path, serde_json::to_string_pretty(&bank).unwrap()).unwrap();
     }
 
+    fn names(presets: &[InstrumentPreset]) -> Vec<&str> {
+        presets.iter().map(|preset| preset.name.as_str()).collect()
+    }
+
     #[test]
-    fn a_user_tier_bank_shadows_a_factory_bank_for_factory_ids() {
-        let (paths, root) = test_paths("user-bank-shadows-factory");
-        let instrument_name = "factory:shadowed";
-        std::fs::create_dir_all(paths.factory_root().join("instruments")).unwrap();
-        write_folder_instrument(&paths.factory_root().join("instruments"), "shadowed", "factory");
+    fn factory_and_user_banks_merge_with_user_presets_shadowing_by_name() {
+        let (paths, root) = test_paths("factory-user-merge");
+        let instrument_name = "factory:merged";
+        std::fs::create_dir_all(paths.instruments_dir()).unwrap();
+        write_folder_instrument(&paths.instruments_dir(), "merged", "factory");
         write_preset_bank(
-            &paths.factory_root().join("instruments/shadowed.presets"),
+            &paths.instruments_dir().join("merged.presets"),
             instrument_name,
-            &["Factory Only"],
+            &["Bright", "Dark"],
         );
 
-        // No user bank yet: the factory-shipped bank resolves.
+        // No user bank yet: the factory-shipped bank alone.
         assert_eq!(
-            cached_instrument_presets_with_paths(&paths, instrument_name).unwrap()[0].name,
-            "Factory Only"
+            names(&cached_instrument_presets_with_paths(&paths, instrument_name).unwrap()),
+            vec!["Bright", "Dark"]
+        );
+        assert!(load_user_instrument_presets_with_paths(&paths, instrument_name)
+            .unwrap()
+            .is_empty());
+
+        // Saving routes to the user tier and only that bank is written; the
+        // read side is the union, sorted by name.
+        save_instrument_presets_with_paths(&paths, instrument_name, &[preset("Custom")]).unwrap();
+        let user_bank = paths.user_instruments_dir().join("merged.presets");
+        assert!(user_bank.is_file());
+        assert_eq!(
+            names(&cached_instrument_presets_with_paths(&paths, instrument_name).unwrap()),
+            vec!["Bright", "Custom", "Dark"],
+            "the merged list must show factory and user presets together"
+        );
+        assert_eq!(
+            names(&load_user_instrument_presets_with_paths(&paths, instrument_name).unwrap()),
+            vec!["Custom"],
+            "the writable bank holds only the user's presets"
         );
 
-        // Saving routes to the user tier (factory content is read-only), and
-        // from then on the user bank is the authoritative one on load.
-        save_instrument_presets_with_paths(&paths, instrument_name, &[preset("Saved")]).unwrap();
+        // A user preset with a factory name shadows the factory one.
+        let mut shadow = preset("Dark");
+        shadow.base_note_offset = 12.0;
+        save_instrument_presets_with_paths(
+            &paths,
+            instrument_name,
+            &[preset("Custom"), shadow.clone()],
+        )
+        .unwrap();
+        let merged = cached_instrument_presets_with_paths(&paths, instrument_name).unwrap();
+        assert_eq!(names(&merged), vec!["Bright", "Custom", "Dark"]);
+        let dark = merged.iter().find(|p| p.name == "Dark").unwrap();
+        assert_eq!(dark.base_note_offset, 12.0, "user copy must win over the factory one");
+
+        // Factory presets are not deletable: a user bank that omits them does
+        // not remove them from the merged list.
+        save_instrument_presets_with_paths(&paths, instrument_name, &[]).unwrap();
+        assert_eq!(
+            names(&cached_instrument_presets_with_paths(&paths, instrument_name).unwrap()),
+            vec!["Bright", "Dark"]
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_bare_name_for_a_factory_instrument_merges_its_user_tier_saves() {
+        // Engine registries hand out bare ids (`factory/digiwave/`), not
+        // `factory:`-qualified ones. Those resolve factory-first on read but
+        // save into the user tier; the saved presets must still be visible.
+        let (paths, root) = test_paths("bare-name-overlay");
+        std::fs::create_dir_all(paths.instruments_dir().join("factory")).unwrap();
+        write_folder_instrument(&paths.instruments_dir(), "factory/bare", "factory");
+        write_preset_bank(
+            &paths.instruments_dir().join("factory/bare.presets"),
+            "factory/bare/",
+            &["init"],
+        );
+        let bare = "factory/bare/";
+        assert_eq!(
+            names(&cached_instrument_presets_with_paths(&paths, bare).unwrap()),
+            vec!["init"]
+        );
+
+        save_instrument_presets_with_paths(&paths, bare, &[preset("testsave")]).unwrap();
         assert!(paths
             .user_instruments_dir()
-            .join("shadowed.presets")
+            .join("factory/bare.presets")
             .is_file());
         assert_eq!(
-            cached_instrument_presets_with_paths(&paths, instrument_name).unwrap()[0].name,
-            "Saved",
-            "a saved preset must be visible on the next load even when a factory bank exists"
+            names(&cached_instrument_presets_with_paths(&paths, bare).unwrap()),
+            vec!["init", "testsave"],
+            "a preset saved under a bare factory name must show up on the next load"
         );
+        assert_eq!(
+            names(&load_user_instrument_presets_with_paths(&paths, bare).unwrap()),
+            vec!["testsave"]
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saving_prunes_user_presets_identical_to_factory_ones() {
+        let (paths, root) = test_paths("prune-factory-copies");
+        let instrument_name = "factory:pruned";
+        std::fs::create_dir_all(paths.instruments_dir()).unwrap();
+        write_folder_instrument(&paths.instruments_dir(), "pruned", "factory");
+        write_preset_bank(
+            &paths.instruments_dir().join("pruned.presets"),
+            instrument_name,
+            &["Init"],
+        );
+
+        // The old single-authoritative-bank save copied the factory bank into
+        // the user file; saving that shape again heals it.
+        let mut changed = preset("Init");
+        changed.base_note_offset = 5.0;
+        save_instrument_presets_with_paths(
+            &paths,
+            instrument_name,
+            &[preset("Init"), preset("Mine")],
+        )
+        .unwrap();
+        assert_eq!(
+            names(&load_user_instrument_presets_with_paths(&paths, instrument_name).unwrap()),
+            vec!["Mine"],
+            "a user preset identical to the factory one is not stored"
+        );
+
+        // A genuinely different preset of the same name is kept as a shadow.
+        save_instrument_presets_with_paths(&paths, instrument_name, &[changed, preset("Mine")])
+            .unwrap();
+        assert_eq!(
+            names(&load_user_instrument_presets_with_paths(&paths, instrument_name).unwrap()),
+            vec!["Init", "Mine"]
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_fork_of_a_factory_instrument_carries_the_user_preset_overlay() {
+        let (paths, root) = test_paths("fork-overlay");
+        std::fs::create_dir_all(paths.instruments_dir()).unwrap();
+        write_folder_instrument(&paths.instruments_dir(), "core/forked", "factory");
+        let source_dsp = paths.instruments_dir().join("core/forked/dsp.lisp");
+        assert_eq!(
+            user_preset_overlay_for_factory_source_with_paths(&paths, &source_dsp),
+            None,
+            "no user bank, no overlay"
+        );
+        save_instrument_presets_with_paths(&paths, "factory:core/forked", &[preset("Mine")])
+            .unwrap();
+        let overlay = user_preset_overlay_for_factory_source_with_paths(&paths, &source_dsp)
+            .expect("the user bank is the overlay for the factory source");
+        assert_eq!(
+            overlay,
+            paths.user_instruments_dir().join("core/forked.presets")
+        );
+        // User-tier sources have no overlay: their bank is already writable.
+        write_folder_instrument(&paths.user_instruments_dir(), "own", "user");
+        assert_eq!(
+            user_preset_overlay_for_factory_source_with_paths(
+                &paths,
+                &paths.user_instruments_dir().join("own/dsp.lisp")
+            ),
+            None
+        );
+
+        let staged = root.join("staged.presets");
+        write_preset_bank(&staged, "factory:core/forked", &["Factory"]);
+        merge_preset_overlay_into_bank_file(&staged, &overlay).unwrap();
+        assert_eq!(
+            names(&read_preset_bank(&staged).unwrap().unwrap()),
+            vec!["Factory", "Mine"]
+        );
+        // With no staged factory bank the overlay alone becomes the bank.
+        let fresh = root.join("fresh.presets");
+        merge_preset_overlay_into_bank_file(&fresh, &overlay).unwrap();
+        assert_eq!(names(&read_preset_bank(&fresh).unwrap().unwrap()), vec!["Mine"]);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1433,19 +1731,19 @@ mod tier_id_tests {
         );
         std::fs::create_dir_all(save_path.parent().unwrap()).unwrap();
         std::fs::write(&save_path, "user bank").unwrap();
-        assert_eq!(
-            instrument_preset_path_with_paths(&paths, "factory:core/drift").unwrap(),
-            save_path
-        );
 
-        // Once a factory-shipped bank exists it does NOT win on load: the
-        // user-tier bank is the writable, authoritative one (saves route
-        // there), so it shadows the factory copy.
+        // The user bank is an overlay on the factory bank, not a replacement:
+        // the base path stays the factory location whether or not a factory
+        // bank exists, and the user bank rides along as the overlay.
         let factory_bank = paths.instruments_dir().join("core/drift.presets");
+        let bank_paths =
+            instrument_preset_bank_paths_with_paths(&paths, "factory:core/drift").unwrap();
+        assert_eq!(bank_paths.base, factory_bank);
+        assert_eq!(bank_paths.user_overlay.as_deref(), Some(save_path.as_path()));
         std::fs::write(&factory_bank, "factory bank").unwrap();
         assert_eq!(
             instrument_preset_path_with_paths(&paths, "factory:core/drift").unwrap(),
-            save_path
+            factory_bank
         );
 
         // User-tier instruments keep their bank next to the source.

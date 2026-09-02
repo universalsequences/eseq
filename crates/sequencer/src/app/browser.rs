@@ -338,24 +338,30 @@ impl App {
             key_locks: crate::effects::capture_key_locks_by_param_name(slot, &desc),
         };
 
-        let mut presets = match lisp_host::load_instrument_presets(&instrument_name) {
+        // The name check runs against the merged list (factory ∪ user), but the
+        // mutation runs against the writable user bank only: for a factory
+        // instrument the user bank is an overlay, and saving the merged list
+        // would copy every factory preset into it.
+        let name_taken = lisp_host::load_instrument_preset_names(&instrument_name)
+            .unwrap_or_default()
+            .iter()
+            .any(|name| name == preset_name);
+        if name_taken && !overwrite {
+            self.editor.status_message = Some((
+                format!("Preset '{}' already exists", preset_name),
+                Instant::now(),
+            ));
+            return Err(format!("Preset '{preset_name}' already exists"));
+        }
+        let mut presets = match lisp_host::load_user_instrument_presets(&instrument_name) {
             Ok(p) => p,
             Err(e) => {
                 self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
                 return Err(e.to_string());
             }
         };
-
         if let Some(existing_idx) = presets.iter().position(|p| p.name == preset_name) {
-            if overwrite {
-                presets[existing_idx] = preset;
-            } else {
-                self.editor.status_message = Some((
-                    format!("Preset '{}' already exists", preset_name),
-                    Instant::now(),
-                ));
-                return Err(format!("Preset '{preset_name}' already exists"));
-            }
+            presets[existing_idx] = preset;
         } else {
             presets.push(preset);
             presets.sort_by(|a, b| a.name.cmp(&b.name));

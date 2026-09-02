@@ -3302,8 +3302,10 @@ impl App {
         let desc = self
             .current_instrument_descriptor()
             .ok_or_else(|| "No current instrument descriptor is available.".to_string())?;
+        // Writable bank only (the user overlay for factory instruments); the
+        // merged factory ∪ user list must not be written back into it.
         let existing =
-            crate::lisp_host::load_instrument_presets(instrument_name).map_err(|error| {
+            crate::lisp_host::load_user_instrument_presets(instrument_name).map_err(|error| {
                 format!(
                     "Failed to load preset bank for '{}': {error}",
                     instrument_name
