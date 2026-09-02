@@ -23,11 +23,14 @@
   (def ph (gswitch (gt trig 0.5) 0.0 next))
   (write-history p ph)
   ph)
-(defmacro md-ping (exc freq t60_ms)
+(defmacro md-ping-n (exc freq t60_ms)
   (make-history y1)
   (make-history y2)
   (def r (exp (/ -6.907755 (max 1.0 (* t60_ms 0.001 samplerate)))))
-  (def y (- (+ exc (* 2 r (cos (* twopi (/ (clip freq 8 19000) samplerate))) (read-history y1))) (* r r (read-history y2))))
+  ; input normalized by resonator bandwidth so ring amplitude tracks the
+  ; excitation instead of blowing up ~1/(1-r) at long decays
+  (def g (* 2.2 (sqrt (max 0.00001 (- 1.0 r)))))
+  (def y (- (+ (* exc g) (* 2 r (cos (* twopi (/ (clip freq 8 19000) samplerate))) (read-history y1))) (* r r (read-history y2))))
   (write-history y2 (read-history y1))
   (write-history y1 y)
   y)
@@ -81,7 +84,7 @@
 (param mfrq @default 4200 @min 100 @max 12000 @unit Hz @mod true @mod-mode additive)
 (param mdec @default 120 @min 1 @max 1200 @unit ms)
 (param fb @default 0.62 @min 0 @max 1 @mod true @mod-mode additive)
-(param hpf @default 7600 @min 500 @max 15000 @unit Hz @mod true @mod-mode additive)
+(param hpf @default 1400 @min 500 @max 15000 @unit Hz @mod true @mod-mode additive)
 
 (param hard @default 0.55 @min 0 @max 1 @mod true @mod-mode additive)
 (param clsn @default 0.35 @min 0 @max 1 @mod true @mod-mode additive)
@@ -113,24 +116,57 @@
 
 (make-history fmfb)
 (def fm_env (md-env trigger (clip mdec 1 1200)))
-(def fm_m (sin (+ (* (retrig-phasor (clip (mod mfrq) 100 12000) trigger) twopi) (* (read-history fmfb) (mod fb) 8.0))))
+(def fm_m (sin (+ (* (retrig-phasor (clip (mod mfrq) 100 12000) trigger) twopi) (* (read-history fmfb) (mod fb) (mod fb) 5.0))))
 (write-history fmfb (clip fm_m -1 1))
-(def efm_cy (svf (* (sin (+ (* (retrig-phasor (clip (* pitch (semi (mod ptch)) 16) 300 15000) trigger) twopi) (* fm_m fm_env (mod mod_amt) 18))) cy_env) (clip (mod hpf) 500 15000) 0.7 2))
+; squared index taper keeps the low half of mod_amt usable instead of
+; saturating into noise by 0.35
+(def efm_idx (* (mod mod_amt) (mod mod_amt) 14))
+(def efm_car (sin (+ (* (retrig-phasor (clip (* pitch (semi (mod ptch)) 6) 60 15000) trigger) twopi) (* fm_m fm_env efm_idx))))
+(def efm_cy (* 0.28 (svf (* efm_car cy_env) (clip (mod hpf) 500 15000) 0.7 2)))
 
 (def energy (md-env trigger (clip (mod dec) 60 4000)))
-(def collide (gt (noise) (- 1 (* (mod clsn) energy 0.7))))
-(def exc (+ (* (noise) (md-env trigger (+ 1 (* (- 1 (mod hard)) 9)))) (* (noise) (gswitch collide energy 0.0))))
+; sparse random re-strikes (~a few hundred per second max), not a noise bed
+(def collide (gt (noise) (- 1 (* (mod clsn) energy 0.012))))
+(def wn (noise))
+(make-history wn1)
+(def hn (* 0.7 (- wn (read-history wn1))))
+(write-history wn1 wn)
+; hard blends toward differentiated (bright) noise and a shorter burst
+(def strike_n (+ (* wn (- 1 (* (mod hard) 0.8))) (* hn (mod hard) 1.8)))
+(def strike (* strike_n (md-env trigger (+ 0.6 (* (- 1 (mod hard)) 9))) (+ 0.5 (* (mod hard) 1.6))))
+(def exc (+ (* strike 1.6) (* (noise) (gswitch collide energy 0.0) 1.4) (* wn energy 0.10)))
 (def damp (* (- 1 (* (mod grab) 0.86)) (+ 0.35 (* (mod ring) 1.2))))
-(def pf (clip (* pitch (semi (mod ptch)) (+ 5 (* (mod size) -2))) 240 2400))
-(def pi_rc (+ (md-ping exc (* pf 1.00) (* (mod dec) damp 1.3))
-              (md-ping exc (* pf 1.19) (* (mod dec) damp 1.1))
-              (md-ping exc (* pf 1.41) (* (mod dec) damp 0.95))
-              (md-ping exc (* pf 1.73) (* (mod dec) damp 0.80))
-              (md-ping exc (* pf 2.10) (* (mod dec) damp 0.72))
-              (md-ping exc (* pf 2.56) (* (mod dec) damp 0.62))
-              (md-ping exc (* pf 3.18) (* (mod dec) damp 0.52))
-              (md-ping exc (* pf 3.87) (* (mod dec) damp 0.44))))
-(def pi_cc (+ (* 0.68 pi_rc) (* (svf (noise) 8800 1.0 2) energy (mod hard) 0.65)))
+(def pf (clip (* pitch (semi (mod ptch)) (+ 8 (* (mod size) -3.5))) 400 3600))
+; dense bank of close-spaced (detuned-pair) inharmonic modes: the pairs beat
+; against each other, which is the metallic swirl a sparse bank can't make;
+; flat-ish weights keep any single mode from reading as a wine glass
+(def pi_body (+ (* 0.13 (md-ping-n exc (* pf 1.00) (* (mod dec) damp 1.30)))
+                (* 0.11 (md-ping-n exc (* pf 1.09) (* (mod dec) damp 1.15)))
+                (* 0.14 (md-ping-n exc (* pf 1.48) (* (mod dec) damp 1.00)))
+                (* 0.12 (md-ping-n exc (* pf 1.60) (* (mod dec) damp 0.90)))
+                (* 0.16 (md-ping-n exc (* pf 2.04) (* (mod dec) damp 0.80)))
+                (* 0.14 (md-ping-n exc (* pf 2.19) (* (mod dec) damp 0.74)))
+                (* 0.15 (md-ping-n exc (* pf 2.73) (* (mod dec) damp 0.66)))
+                (* 0.13 (md-ping-n exc (* pf 2.95) (* (mod dec) damp 0.60)))
+                (* 0.13 (md-ping-n exc (* pf 3.42) (* (mod dec) damp 0.54)))
+                (* 0.11 (md-ping-n exc (* pf 3.71) (* (mod dec) damp 0.49)))
+                (* 0.11 (md-ping-n exc (* pf 4.36) (* (mod dec) damp 0.44)))
+                (* 0.09 (md-ping-n exc (* pf 4.71) (* (mod dec) damp 0.40)))
+                (* 0.09 (md-ping-n exc (* pf 5.52) (* (mod dec) damp 0.35)))
+                (* 0.08 (md-ping-n exc (* pf 5.98) (* (mod dec) damp 0.31)))
+                (* 0.07 (md-ping-n exc (* pf 7.11) (* (mod dec) damp 0.27)))
+                (* 0.06 (md-ping-n exc (* pf 7.68) (* (mod dec) damp 0.24)))))
+; wash: mostly tanh intermodulation of the dense bank (tonal shimmer — the
+; pairs intermodulate into yet more beating partials); only a little
+; noise ring-mod on top, or it reads as sand
+(def ringm (* pi_body (svf (noise) 6300 2.5 1) 3.0))
+(def wash (svf (+ (* 0.30 ringm) (* 0.70 (tanh (* pi_body 5.5)))) 5200 0.7 2))
+(def pi_rc (* 0.80 (+ pi_body (* wash (+ 0.5 (* (mod hard) 0.6))))))
+; crash: wash-dominated with the body buried, a broadband explosion on the
+; attack, and a wide sustained sizzle bed that blooms with the decay env
+(def cc_burst (* (noise) (md-env trigger (+ 12 (* (mod hard) 28))) 0.55))
+(def cc_sizzle (* (svf (noise) 7400 0.8 1) energy 0.40))
+(def pi_cc (* 0.60 (+ (* 0.42 pi_body) (* wash (+ 0.9 (* (mod hard) 0.5))) cc_burst cc_sizzle)))
 
 (def voice (selector eng trx_cy efm_cy pi_rc pi_cc))
 (out (* (md-out voice) vel (clip (mod level) 0 1)) 1 @name audio)

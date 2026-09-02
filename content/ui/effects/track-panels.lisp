@@ -174,13 +174,13 @@
       :corner-radius 8
       :on-click |x y r| (plock-chip-click chip)
       (h-stack :gap 0.16 :align :baseline
-        (box :width 0.18 :height 0.38
+        (box :width 0.18 :height 0.58
           :corner-radius 2
           :background-color (if def-chip :transparent c)
           :border-width (if def-chip 1 0)
           :border-color c)
         (label (plock-chip-label chip)
-          :font-size 8.0 :color (if current :black :dim) :bg :transparent)
+          :font-size 12.0 :color (if current :black :dim) :bg :transparent)
         (box :width 0.1 )
         ))))
 
@@ -285,8 +285,12 @@
 (def track-plocks-panel ()
   (box :debug-name "track-plocks-panel" :padding 0.72
     (v-stack :gap 0.30
+      (if (> (len SEQ.track-plock-variants) 0)
+        (label "p-locks" :height 1 :bg :transparent :color :dim :font-size 8)
+        )
+      
       (wrap :key "track-plock-variant-strip"
-            :width :fill :gap 0.18 :row-gap 0.14 :align :start
+        :width :fill :gap 0.18 :row-gap 0.14 :align :start
         (each SEQ.track-plock-variants |chip idx|
           (plock-chip chip)))
       (if (> (len SEQ.track-plocks) 0)
@@ -304,10 +308,7 @@
           (plock-group "seq")
           (plock-group "fx")
           (plock-group "neural"))
-        (label (if (> (len SEQ.selected-neural-neurons) 0)
-                 "no p-locks for selected neurons"
-                 "No locks")
-          :font-size 9 :color :dim :bg :transparent)))))
+        ))))
 
 (def step-param-value (mode)
   (let ((values (eseq.seqv-track-params/seqv-current-param-values mode))

@@ -1550,7 +1550,7 @@
   (set! preset-save-mode ""))
 
 (def preset-save-header ()
-  (box :width :fill :padding 0.25
+  (box :width :fill :padding 0.55
     (v-stack :width :fill :gap 0.4
       (h-stack :width :fill :gap 0.5 :align :center
         (label "Save Preset"

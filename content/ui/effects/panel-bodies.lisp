@@ -250,7 +250,7 @@
 (def instrument-key-lock-control-panel (inst)
   (box :width instrument-key-panel-outer-width :background-color :black :corner-radius 16 :padding 1
     (v-stack  :debug-name "instrument-key-lock-control-panel" :width instrument-key-panel-width :height st/fx-panel-body-content-height :gap 0.35 :padding instrument-key-panel-padding
-      (h-stack :gap 0.35 :height 1.2 :align :baseline
+      (h-stack :gap 0.35 :height 1.2 :align :center
         (button "<" :width 2 :height 1.1 :padding 0 :font-size 10
           :on-click |x y r| (set! st/instrument-key-lock-octave (max -1 (- st/instrument-key-lock-octave 1))))
         (label (str "OCT " st/instrument-key-lock-octave) :font-size 10 :width 5.2 :color :dim :bg :transparent)
