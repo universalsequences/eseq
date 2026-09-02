@@ -446,9 +446,11 @@ fn instrument_preset_path_with_paths(
     name: &str,
 ) -> io::Result<PathBuf> {
     let resolved = resolve_instrument_storage_path_with_paths(paths, name, "presets")?;
-    if resolved.is_file() {
-        return Ok(resolved);
-    }
+    // A factory instrument's writable bank lives in the user tier (see
+    // [`user_tier_preset_path`]); once it exists it is the authoritative bank,
+    // even when a factory-shipped bank also resolves. Checking the user tier
+    // first (not only when the factory resolution misses) is what makes saves
+    // visible on load.
     if let Some((InstrumentTier::Factory, logical_name)) = parse_instrument_id(name)? {
         let user = user_tier_preset_path(paths, logical_name);
         if user.is_file() {
@@ -1204,6 +1206,40 @@ mod tier_id_tests {
     }
 
     #[test]
+    fn a_user_tier_bank_shadows_a_factory_bank_for_factory_ids() {
+        let (paths, root) = test_paths("user-bank-shadows-factory");
+        let instrument_name = "factory:shadowed";
+        std::fs::create_dir_all(paths.factory_root().join("instruments")).unwrap();
+        write_folder_instrument(&paths.factory_root().join("instruments"), "shadowed", "factory");
+        write_preset_bank(
+            &paths.factory_root().join("instruments/shadowed.presets"),
+            instrument_name,
+            &["Factory Only"],
+        );
+
+        // No user bank yet: the factory-shipped bank resolves.
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name).unwrap()[0].name,
+            "Factory Only"
+        );
+
+        // Saving routes to the user tier (factory content is read-only), and
+        // from then on the user bank is the authoritative one on load.
+        save_instrument_presets_with_paths(&paths, instrument_name, &[preset("Saved")]).unwrap();
+        assert!(paths
+            .user_instruments_dir()
+            .join("shadowed.presets")
+            .is_file());
+        assert_eq!(
+            cached_instrument_presets_with_paths(&paths, instrument_name).unwrap()[0].name,
+            "Saved",
+            "a saved preset must be visible on the next load even when a factory bank exists"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn warm_preset_name_cache_does_not_touch_the_filesystem() {
         let (paths, root) = test_paths("warm-preset-cache");
         let instrument_name = "user:cache/warm";
@@ -1402,13 +1438,14 @@ mod tier_id_tests {
             save_path
         );
 
-        // A factory-shipped bank still wins on load, matching the legacy
-        // factory-first root order for bare names.
+        // Once a factory-shipped bank exists it does NOT win on load: the
+        // user-tier bank is the writable, authoritative one (saves route
+        // there), so it shadows the factory copy.
         let factory_bank = paths.instruments_dir().join("core/drift.presets");
         std::fs::write(&factory_bank, "factory bank").unwrap();
         assert_eq!(
             instrument_preset_path_with_paths(&paths, "factory:core/drift").unwrap(),
-            factory_bank
+            save_path
         );
 
         // User-tier instruments keep their bank next to the source.

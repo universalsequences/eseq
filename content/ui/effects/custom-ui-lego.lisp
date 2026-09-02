@@ -142,7 +142,7 @@
 (def ui-accent-violet () :purple)
 
 (def ui-lego-gap () 0.06125)
-(def ui-lego-small-h () 1.95)
+(def ui-lego-small-h () 2.0)
 (def ui-lego-medium-h () 4.08)
 (def ui-lego-large-h () 5.58)
 (def ui-lego-dense-h () 3.8)
@@ -354,7 +354,7 @@
       :color accent)))
 
 (def ui-lego-badge-s (section title width accent)
-  (box :width width :height 1.18 :v-align :end
+  (box :width width :height 0.82 :v-align :end
     (badge title
       :width width :height 0.82 :padding 0 :font-size 9.2
       :border-color :transparent
@@ -937,43 +937,49 @@
 ;; both envelopes are visibly present and clickable. tab-w sizes the tabs;
 ;; the titles are the tab texts ("1" / "2", "AMP" / "FLT").
 (def ui-detail-adsr-tabs-s (tab-w accent
-                            section-a title-a attack-a decay-a sustain-a release-a
-                            section-b title-b attack-b decay-b sustain-b release-b)
+    section-a title-a attack-a decay-a sustain-a release-a
+    section-b title-b attack-b decay-b sustain-b release-b)
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope))
-        (b-selected (= eseq.vanilla/custom-ui-selected-section section-b)))
+      (b-selected (= eseq.vanilla/custom-ui-selected-section section-b)))
     (let ((section (if b-selected section-b section-a))
-          (attack (if b-selected attack-b attack-a))
-          (decay (if b-selected decay-b decay-a))
-          (sustain (if b-selected sustain-b sustain-a))
-          (release (if b-selected release-b release-a)))
+        (attack (if b-selected attack-b attack-a))
+        (decay (if b-selected decay-b decay-a))
+        (sustain (if b-selected sustain-b sustain-a))
+        (release (if b-selected release-b release-a)))
       (ui-readout-panel-medium-s section
         (v-stack :width :fill :height :fill :gap 0.22 :align :stretch
-          (h-stack :width :fill :height 0.72 :gap 0.12 :align :center
-            (box :width 0.4)
-            (ui-lego-tab-s section-a title-a tab-w 0.68
-              (if b-selected :mixer-control-bg accent)
-              (if b-selected :dim :black))
-            (ui-lego-tab-s section-b title-b tab-w 0.68
-              (if b-selected accent :mixer-control-bg)
-              (if b-selected :black :dim)))
-          (adsr-editor
-            :attack (eseq.effects.custom-ui-controls/ui-param-bound-value attack 5)
-            :decay (eseq.effects.custom-ui-controls/ui-param-bound-value decay 120)
-            :sustain (eseq.effects.custom-ui-controls/ui-param-bound-value sustain 0.7)
-            :release (eseq.effects.custom-ui-controls/ui-param-bound-value release 120)
-            :width :fill :height 2.82
-            :background-color :instrument-control-bg
-            :on-change (lambda (env)
-              (do
-                (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope section)
-                (eseq.effects.custom-ui-sections/custom-ui-set-active-adsr scope section (get env :active))
-                (eseq.effects.custom-ui-runtime/custom-ui-set-adsr-in-scope scope attack decay sustain release env))))
+          (h-stack :width :fill
+            (v-stack :gap 1 :width :fill :height 0.72 :gap 0.3 :align :center
+              (box :height 0.4)
+              (ui-lego-tab-s section-a title-a tab-w 0.68
+                (if b-selected :mixer-control-bg accent)
+                (if b-selected :dim :black))
+              (ui-lego-tab-s section-b title-b tab-w 0.68
+                (if b-selected accent :mixer-control-bg)
+                (if b-selected :black :dim)))
+            (adsr-editor
+              :attack (eseq.effects.custom-ui-controls/ui-param-bound-value attack 5)
+              :decay (eseq.effects.custom-ui-controls/ui-param-bound-value decay 120)
+              :sustain (eseq.effects.custom-ui-controls/ui-param-bound-value sustain 0.7)
+              :release (eseq.effects.custom-ui-controls/ui-param-bound-value release 120)
+              :flex 1
+              :height 3.22
+              :background-color :instrument-control-bg
+              :on-change (lambda (env)
+                (do
+                  (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope section)
+                  (eseq.effects.custom-ui-sections/custom-ui-set-active-adsr scope section (get env :active))
+                  (eseq.effects.custom-ui-runtime/custom-ui-set-adsr-in-scope scope attack decay sustain release env)))
+              )
+            )
           (h-stack :width :fill :height 1.0 :gap 0.24 :align :start
             (box :width 1)
             (ui-lego-micro-num-stage-s section :attack attack "atk" 5.1 0 "ms" (ui-accent-cyan))
             (ui-lego-micro-num-stage-s section :decay decay "dec" 5.1 0 "ms" (ui-accent-cyan))
             (ui-lego-micro-num-stage-s section :sustain sustain "sus" 5.1 2 false (ui-accent-cyan))
-            (ui-lego-micro-num-stage-s section :release release "rel" 5.1 0 "ms" (ui-accent-cyan))))))))
+            (ui-lego-micro-num-stage-s section :release release "rel" 5.1 0 "ms" (ui-accent-cyan)))))))
+  )
+
 
 ;; Full-height envelope surface for instruments that dedicate a complete
 ;; horizontal slice to envelope editing. The plot owns all space not reserved
@@ -1143,20 +1149,23 @@
 ;; Solid colored tab block (Ableton-style source tag like "1" / "2" / "N").
 (def ui-lego-tab-s (section text width height color text-color)
   (button text :width width :height height
-       :font-size 8.8 :color text-color
-       :background-color color
-       :corner-radius 3
-       :h-align :center :v-align :center
-       :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
-   ; (label text :font-size 8.8 :color text-color :bg :transparent)
+    :font-size 8.8 :color text-color
+    :background-color color
+    :corner-radius 3
+    :border-color :transparent
+    :h-align :center :v-align :center
+    :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
+    ; (label text :font-size 8.8 :color text-color :bg :transparent)
     ))
 
 ;; Accent text header with underline — alternative to ui-lego-badge-s.
 (def ui-lego-header-s (section title width accent)
-  (box :width width :height 1.18 :v-align :end :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
+  (box :width width :height 0.6 :v-align :end :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
     (v-stack :width width :gap 0.14 :align :start
       (label title :font-size 9.2 :width width :color accent :bg :transparent)
-      (box :width width :height 0.10 :background-color accent :corner-radius 1))))
+      )
+    )
+  )
 
 ;; Param-bound vertical fader.
 (def ui-lego-vfader-s (section name width height accent)

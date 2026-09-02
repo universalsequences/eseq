@@ -890,8 +890,8 @@ pub(super) fn handle(
                             value: clamped,
                         },
                     );
-                    sync_instrument_base_note_value_field(
-                        editor.runtime_mut(),
+                    sync_current_instrument_base_note_authoring_display(
+                        &mut editor,
                         &app,
                         track,
                     );
@@ -924,6 +924,20 @@ pub(super) fn handle(
         }
         _ => {}
     }
+}
+
+/// Publish both the track-qualified binding and the current FX panel's
+/// track-relative binding, then process the reactive edit immediately.  The
+/// base-note control is authored from the FX panel, so updating only the
+/// track-qualified field leaves its visible knob stale until a later full
+/// panel sync (for example, a transport restart).
+fn sync_current_instrument_base_note_authoring_display(
+    editor: &mut Editor,
+    app: &app::App,
+    track: usize,
+) {
+    let dirty = sync_fx_instrument_base_note_value_field(editor.runtime_mut(), app, track);
+    flush_reactive_display_edit(editor, dirty);
 }
 
 #[cfg(test)]
@@ -1000,6 +1014,69 @@ mod tests {
             Some(Value::Number(n)) => *n,
             other => panic!("SEQ.{field} should be a number, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn base_note_authoring_sync_repaints_the_current_instrument_knob_immediately() {
+        const TRACK: usize = 0;
+        const VALUE: f32 = 7.0;
+
+        let state = Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            state,
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+
+        let track_field = instrument_base_note_value_field(TRACK);
+        let fx_field = fx_instrument_base_note_value_field();
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                (track_field.as_str(), Value::Number(0.0)),
+                (fx_field, Value::Number(0.0)),
+            ],
+            true,
+        );
+        runtime
+            .eval_str(
+                r#"(effect
+                     (label "base note"
+                       :active (bind "SEQ" "fx-instrument-base-note")))"#,
+            )
+            .expect("mount a widget bound to the visible base-note field");
+        let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
+        editor.clear_needs_redraw();
+
+        app.state.pattern.instrument_base_note_offsets[TRACK]
+            .store(VALUE.to_bits(), Ordering::Relaxed);
+        sync_current_instrument_base_note_authoring_display(&mut editor, &app, TRACK);
+
+        assert_eq!(reactive_number(&editor, &track_field), VALUE as f64);
+        assert_eq!(reactive_number(&editor, fx_field), VALUE as f64);
+        assert!(
+            editor.needs_redraw(),
+            "the bound knob must be redrawn in the same authoring dispatch"
+        );
     }
 
     /// The compact step-sequencer grid binds its p-lock tick to
