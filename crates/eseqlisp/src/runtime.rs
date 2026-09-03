@@ -1941,6 +1941,8 @@ impl Runtime {
             ("fmt", "(fmt template value ...)", "Format values into {} placeholders in template."),
             ("abs", "(abs x)", "Return the absolute value."),
             ("sqrt", "(sqrt x)", "Return the square root."),
+            ("log", "(log x)", "Return the natural logarithm."),
+            ("exp", "(exp x)", "Return e raised to x."),
             ("sin", "(sin x)", "Return sine in radians."),
             ("cos", "(cos x)", "Return cosine in radians."),
             ("floor", "(floor x)", "Round down to an integer value."),

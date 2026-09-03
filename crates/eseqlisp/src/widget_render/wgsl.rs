@@ -359,7 +359,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 
     var normal: vec3<f32> = button_surface_normal(p, size, r, shape, max(px * 1.5, 0.004));
     var view_dir: vec3<f32> = vec3<f32>(0.0, 0.0, 1.0);
-    var key_light: vec3<f32> = normalize(vec3<f32>(-0.72, -0.92, 1.30));
+    var key_light: vec3<f32> = normalize(vec3<f32>(-0.12, -0.32, 1.30));
     var bounce_light: vec3<f32> = normalize(vec3<f32>(0.82, 0.78, 1.10));
     var key_diffuse: f32 = max(0.0, dot(normal, key_light));
     var bounce_diffuse: f32 = max(0.0, dot(normal, bounce_light));
@@ -777,6 +777,92 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     return col;
 }"#;
 
+pub const LFO_CURVE_SHADER: &str = r#"
+fn lc_sdSegment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    var pa: vec2<f32> = p - a;
+    var ba: vec2<f32> = b - a;
+    var h: f32 = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+fn lc_plot(data: vec2<f32>) -> vec2<f32> {
+    var pad: vec2<f32> = vec2<f32>(0.04, 0.14);
+    return vec2<f32>(
+        pad.x + data.x * (1.0 - pad.x * 2.0),
+        pad.y + (1.0 - (data.y * 0.5 + 0.5)) * (1.0 - pad.y * 2.0));
+}
+
+fn lc_shape(shape: i32, x: f32, pw: f32) -> f32 {
+    var phase: f32 = x - floor(x);
+    if (shape == 1) {
+        return sin(6.28318530718 * phase);
+    } else if (shape == 2) {
+        return select(-1.0, 1.0, phase < clamp(pw, 0.05, 0.95));
+    } else if (shape == 3) {
+        return phase * 2.0 - 1.0;
+    }
+    var peak: f32 = clamp(pw, 0.05, 0.95);
+    return select(1.0 - 2.0 * (phase - peak) / (1.0 - peak), -1.0 + 2.0 * phase / peak, phase < peak);
+}
+
+@fragment
+fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
+{
+    var uv: vec2<f32> = input.uv;
+    var aspect: f32 = max(input.aspect, 0.0001);
+    var shape: i32 = i32(round(clamp(input.uniform_a.x, 0.0, 3.0)));
+    var pw: f32 = input.uniform_a.y;
+    var offset: f32 = input.uniform_a.z;
+    var markerPhase: f32 = input.uniform_a.w;
+
+    var col: vec4<f32> = input.color_b;
+
+    // A single faint zero line; no other grid.
+    var zero: vec2<f32> = lc_plot(vec2<f32>(0.0, 0.0));
+    var zeroDist: f32 = abs(uv.y - zero.y);
+    var zeroMask: f32 = smoothstep(0.006, 0.002, zeroDist);
+    col = vec4<f32>((mix(col.rgb, input.color_c.rgb, zeroMask * input.color_c.a * 0.5)), col.a);
+
+    // Fill between the zero line and the curve.
+    var dataX: f32 = clamp((uv.x - 0.04) / 0.92, 0.0, 1.0);
+    var curveAtX: f32 = lc_shape(shape, dataX + offset, pw);
+    var curveY: f32 = lc_plot(vec2<f32>(dataX, curveAtX)).y;
+    var between: f32 = step(min(curveY, zero.y) - 0.002, uv.y) * step(uv.y, max(curveY, zero.y) + 0.002);
+    col = vec4<f32>((mix(col.rgb, input.color_d.rgb, between * input.color_d.a)), col.a);
+
+    var lineMask: f32 = 0.0;
+    const steps: i32 = 96;
+    var prevX: f32 = 0.0;
+    var prevY: f32 = lc_shape(shape, offset, pw);
+    for (var i: i32 = 1; i <= steps; i = i + 1) {
+        var x: f32 = f32(i) / f32(steps);
+        var y: f32 = lc_shape(shape, x + offset, pw);
+        var a: vec2<f32> = lc_plot(vec2<f32>(prevX, prevY));
+        var b: vec2<f32> = lc_plot(vec2<f32>(x, y));
+        var d: f32 = lc_sdSegment(vec2<f32>(uv.x * aspect, uv.y), vec2<f32>(a.x * aspect, a.y), vec2<f32>(b.x * aspect, b.y));
+        var aa: f32 = max(fwidth(d), 0.001);
+        lineMask = max(lineMask, smoothstep(0.009 + aa, 0.003, d));
+        prevX = x;
+        prevY = y;
+    }
+
+    col = vec4<f32>((mix(col.rgb, input.color_a.rgb, lineMask * input.color_a.a)), col.a);
+    col.a = max(col.a, max(lineMask * input.color_a.a, input.color_b.a));
+
+    if (markerPhase >= 0.0) {
+        var running: f32 = markerPhase - offset;
+        var markerX: f32 = clamp(running - floor(running), 0.0, 1.0);
+        var marker: vec2<f32> = lc_plot(vec2<f32>(markerX, lc_shape(shape, markerX + offset, pw)));
+        var markerDist: f32 = length(vec2<f32>((uv.x - marker.x) * aspect, uv.y - marker.y));
+        var outer: f32 = smoothstep(0.058, 0.042, markerDist);
+        var inner: f32 = smoothstep(0.036, 0.022, markerDist);
+        col = vec4<f32>((mix(col.rgb, vec3<f32>(0.02, 0.025, 0.03), outer)), col.a);
+        col = vec4<f32>((mix(col.rgb, input.color_a.rgb, inner)), col.a);
+        col.a = max(col.a, outer);
+    }
+    return col;
+}"#;
+
 pub const MULTIBAND_METER_SHADER: &str = r#"
 @fragment
 fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
@@ -883,11 +969,6 @@ fn rce_filterResponseY(bandType: f32, x: f32, freqT: f32, q: f32, octaveSpan: f3
 // Contribution (in plot units, 0 at unity) of a second filter band so two
 // bands (e.g. highpass + lowpass) draw as one combined response curve.
 // otherType is the band type code + 1; 0 means no second band.
-fn rce_otherY(otherType: f32, x: f32, otherFreqT: f32, otherQ: f32, otherSpan: f32) -> f32 {
-    if (otherType < 0.5) { return 0.0; }
-    return rce_filterResponseY(otherType - 1.0, x, otherFreqT, otherQ, otherSpan) - 0.5;
-}
-
 fn rce_curveY(bandType: f32, x: f32, freqT: f32, yT: f32, qT: f32, isFilter: f32, filterQ: f32, octaveSpan: f32) -> f32 {
     var dist: f32 = x - freqT;
     var q: f32 = mix(0.22, 0.045, qT);
@@ -921,6 +1002,16 @@ fn rce_curveY(bandType: f32, x: f32, freqT: f32, yT: f32, qT: f32, isFilter: f32
     return mix(0.5, yT, peak);
 }
 
+// Filter mode: (otherQ, otherSpan) = display Q + octave span; eq mode
+// (`:combine true`): (otherQ, otherSpan) = gain t + q t.
+fn rce_otherY(otherType: f32, x: f32, otherFreqT: f32, otherQ: f32, otherSpan: f32, isFilter: f32) -> f32 {
+    if (otherType < 0.5) { return 0.0; }
+    if (isFilter > 0.5) {
+        return rce_filterResponseY(otherType - 1.0, x, otherFreqT, otherQ, otherSpan) - 0.5;
+    }
+    return rce_curveY(otherType - 1.0, x, otherFreqT, clamp(otherQ, 0.0, 1.0), clamp(otherSpan, 0.0, 1.0), 0.0, 1.0, 1.0) - 0.5;
+}
+
 @fragment
 fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 {
@@ -937,10 +1028,10 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var strokeHalf: f32 = select(input.uniform_b.z, 0.004, input.uniform_b.z <= 0.0);
     var filterQ: f32 = max(input.uniform_c.x, 0.001);
     var octaveSpan: f32 = max(input.uniform_c.y, 0.001);
-    var otherType: f32 = select(0.0, input.uniform_c.z, isFilter > 0.5);
+    var otherType: f32 = input.uniform_c.z;
     var otherFreqT: f32 = clamp(input.uniform_c.w, 0.0, 1.0);
-    var otherQ: f32 = max(input.uniform_d.z, 0.001);
-    var otherSpan: f32 = max(input.uniform_d.w, 0.001);
+    var otherQ: f32 = select(input.uniform_d.z, max(input.uniform_d.z, 0.001), isFilter > 0.5);
+    var otherSpan: f32 = select(input.uniform_d.w, max(input.uniform_d.w, 0.001), isFilter > 0.5);
     // With a combined curve only the first instance draws it; the others
     // contribute just their handle.
     var drawCurve: f32 = select(1.0, step(bandIndex, 0.5), otherType > 0.5);
@@ -978,12 +1069,12 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var prevX: f32 = 0.0;
     var prevY: f32 = rce_curveY(
         bandType, 0.0, freqT, yT, qT, isFilter, filterQ, octaveSpan)
-        + rce_otherY(otherType, 0.0, otherFreqT, otherQ, otherSpan);
+        + rce_otherY(otherType, 0.0, otherFreqT, otherQ, otherSpan, isFilter);
     for (var i: i32 = 1; i <= steps; i = i + 1) {
         var x: f32 = f32(i) / f32(steps);
         var y: f32 = rce_curveY(
             bandType, x, freqT, yT, qT, isFilter, filterQ, octaveSpan)
-            + rce_otherY(otherType, x, otherFreqT, otherQ, otherSpan);
+            + rce_otherY(otherType, x, otherFreqT, otherQ, otherSpan, isFilter);
         var a: vec2<f32> = rce_plot(vec2<f32>(prevX, prevY));
         var b: vec2<f32> = rce_plot(vec2<f32>(x, y));
         var d: f32 = rce_sdSegment(vec2<f32>(uv.x * aspect, uv.y), vec2<f32>(a.x * aspect, a.y), vec2<f32>(b.x * aspect, b.y));

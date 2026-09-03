@@ -69,7 +69,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     float3 normal = button_surface_normal(p, size, r, shape, max(px * 1.5, 0.004));
     float3 view_dir = float3(0.0, 0.0, 1.0);
-    float3 key_light = normalize(float3(-0.72, -0.92, 1.30));
+    float3 key_light = normalize(float3(-0.12, -0.32, 1.30));
     float3 bounce_light = normalize(float3(0.82, 0.78, 1.10));
     float key_diffuse = max(0.0, dot(normal, key_light));
     float bounce_diffuse = max(0.0, dot(normal, bounce_light));

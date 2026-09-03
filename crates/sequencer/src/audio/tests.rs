@@ -11,27 +11,25 @@ use std::sync::Arc;
 use super::{
     apply_rack_macros_at_step, clear_active_keyboard_note_by_lid,
     collect_rack_choke_group_track_releases, collect_rack_choke_group_voice_releases,
-    for_each_custom_voice_route_update,
-    free_patch_transport_route_cache_is_fresh, free_patch_transport_route_target,
-    instrument_sound_fingerprint, key_locked_live_instrument_params, mix_metronome,
+    for_each_custom_voice_route_update, free_patch_transport_route_cache_is_fresh,
+    free_patch_transport_route_target, instrument_sound_fingerprint,
+    key_locked_live_instrument_params, live_key_release_cuts_voice, mix_metronome,
     mute_group_winner_for_block_events, remap_route_after_track_delete,
-    resolve_live_instrument_defaults,
-    live_key_release_cuts_voice, resolve_live_keyboard_transpose,
-    resolve_snapshot_instrument_defaults,
-    resolve_slice, resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
-    select_output_channels, select_output_config, select_output_config_with_preferred_rate,
-    store_active_keyboard_note,
-    swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
-    ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
-    BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
-    FixedOutputBlocks, FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent,
-    GateOffTarget, HostTransportClockRuntime, MetronomeState, OutputBlockSizeObservation,
-    OutputBlockSizeVerifier, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
+    resolve_live_instrument_defaults, resolve_live_keyboard_transpose, resolve_slice,
+    resolve_snapshot_instrument_defaults, resolved_chord_transpose, resolved_slot_param_value,
+    sampler_warp_runtime, select_output_channels, select_output_config,
+    select_output_config_with_preferred_rate, store_active_keyboard_note, swing_delay_samples,
+    take_active_keyboard_note, track_accepts_scheduled_trigger, ActiveKeyboardNote,
+    ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent, BlockEventKind, CountdownEvent,
+    CountdownEventKind, CustomEnginePool, FixedOutputBlocks, FreePatchTransportRouteState,
+    FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget, HostTransportClockRuntime,
+    MetronomeState, OutputBlockSizeObservation, OutputBlockSizeVerifier, OutputDeviceConfig,
+    OutputFormatRange, RackSlotNoteOff, RetrigCustomVoice, RetrigEvent, RetrigTarget,
     SliceTriggerVerdict, FALLBACK_SAMPLE_RATE,
 };
 use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
-use crate::sequencer::MAX_TRACKS;
 use crate::analysis::{pack_ptr, OnsetTableShared};
+use crate::sequencer::MAX_TRACKS;
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -39,7 +37,9 @@ use crate::analysis::{pack_ptr, OnsetTableShared};
 fn linux_cpal_output_stream_starts_and_renders_callbacks() {
     let engine = super::engine::init_engine().expect("Linux output stream should start");
     std::thread::sleep(std::time::Duration::from_millis(500));
-    let super::engine::Engine { _stream, lg_ptr, .. } = engine;
+    let super::engine::Engine {
+        _stream, lg_ptr, ..
+    } = engine;
     drop(_stream);
     unsafe {
         crate::audiograph::clear_os_workgroup();
@@ -220,7 +220,10 @@ fn fixed_output_blocks_renders_exact_blocks_for_odd_device_requests() {
     );
     // Nothing is dropped or repeated: the device sees the rendered stream verbatim.
     let expected: Vec<f32> = (0..served.len()).map(|index| index as f32).collect();
-    assert_eq!(served, expected, "adapter must not drop or duplicate samples");
+    assert_eq!(
+        served, expected,
+        "adapter must not drop or duplicate samples"
+    );
 }
 
 // A host that already delivers exactly the requested block (CoreAudio) must not
@@ -294,6 +297,7 @@ fn track_delete_remaps_flat_and_rack_custom_routes_without_touching_survivors() 
         crate::sequencer::rack_slot_pool_index(2, 4),
     );
 }
+use super::{preview, VoicePool};
 use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
     ParamScaling, TensorParamDescriptor,
@@ -303,15 +307,13 @@ use crate::scheduled_event::{
     ScheduledInstrumentParams, ScheduledInstrumentTensorParams, ScheduledSamplerParams,
 };
 use crate::sequencer::{
-    default_rack_macros, CustomInstrumentRunMode, InstrumentType, RackMacroCurve,
-    RackMacroMapping, RackMacroTarget, RackSlotParam, RackSlotParamPlocks,
-    RackSlotSnapshot, RackTrackSnapshot, SequencerState, SwingResolution, TrackSoundState,
+    default_rack_macros, CustomInstrumentRunMode, InstrumentType, RackMacroCurve, RackMacroMapping,
+    RackMacroTarget, RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot,
+    SequencerState, SwingResolution, TrackSoundState,
 };
-use super::{preview, VoicePool};
 
 fn active_keyboard_notes_fixture(
-) -> [[Option<ActiveKeyboardNote>; crate::audio::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
-{
+) -> [[Option<ActiveKeyboardNote>; crate::audio::MAX_VOICES]; crate::sequencer::MAX_TRACKS] {
     [[None; crate::audio::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
 }
 
@@ -380,10 +382,7 @@ fn rack_routing_test_slot() -> RackSlotSnapshot {
 
 #[test]
 fn rack_macro_is_effective_default_beneath_target_plock() {
-    let mut rack = RackTrackSnapshot::new(
-        vec![rack_routing_test_slot()],
-        default_rack_macros(),
-    );
+    let mut rack = RackTrackSnapshot::new(vec![rack_routing_test_slot()], default_rack_macros());
     rack.macros[0].value = 0.75;
     rack.macros[0].mappings.push(RackMacroMapping {
         target: RackMacroTarget::SlotParam {
@@ -412,10 +411,7 @@ fn rack_macro_is_effective_default_beneath_target_plock() {
 #[test]
 fn published_rack_snapshot_observes_live_macro_defaults_and_plocks() {
     let state = SequencerState::new(1, vec![Vec::new()]);
-    let mut rack = RackTrackSnapshot::new(
-        vec![rack_routing_test_slot()],
-        default_rack_macros(),
-    );
+    let mut rack = RackTrackSnapshot::new(vec![rack_routing_test_slot()], default_rack_macros());
     rack.macros[0].mappings.push(RackMacroMapping {
         target: RackMacroTarget::SlotParam {
             slot: 0,
@@ -507,8 +503,7 @@ fn key_locked_live_instrument_params_apply_per_note_after_base_offset() {
     let base_params = resolve_live_instrument_defaults(&state, 0);
     let c4_params = key_locked_live_instrument_params(&state, 0, 0.0, 0.0, None, &base_params);
     let d4_params = key_locked_live_instrument_params(&state, 0, 2.0, 0.0, None, &base_params);
-    let offset_params =
-        key_locked_live_instrument_params(&state, 0, 0.0, 12.0, None, &base_params);
+    let offset_params = key_locked_live_instrument_params(&state, 0, 0.0, 12.0, None, &base_params);
 
     assert_eq!(param_value(&c4_params, 1), Some(-12.0));
     assert_eq!(param_value(&d4_params, 1), Some(-7.0));
@@ -820,16 +815,16 @@ fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
     // choke group 1 — same group number, different rack.
     let state = SequencerState::new(
         4,
-        (0..4).map(|_| crate::sequencer::default_empty_effect_chain()).collect(),
+        (0..4)
+            .map(|_| crate::sequencer::default_empty_effect_chain())
+            .collect(),
     );
     let key = crate::sequencer::rack_choke_key(3, 1);
     state.runtime.rack_choke_keys[0].store(key, Ordering::Release);
     state.runtime.rack_choke_keys[1].store(key, Ordering::Release);
     state.runtime.rack_choke_keys[2].store(0, Ordering::Release);
-    state.runtime.rack_choke_keys[3].store(
-        crate::sequencer::rack_choke_key(4, 1),
-        Ordering::Release,
-    );
+    state.runtime.rack_choke_keys[3]
+        .store(crate::sequencer::rack_choke_key(4, 1), Ordering::Release);
     for track in [0usize, 2, 3] {
         state.runtime.instrument_type_flags[track]
             .store(InstrumentType::Sampler.runtime_flag(), Ordering::Relaxed);
@@ -968,7 +963,9 @@ fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
 fn rack_v2_choke_clears_held_keyboard_notes_on_choked_tracks() {
     let state = SequencerState::new(
         2,
-        (0..2).map(|_| crate::sequencer::default_empty_effect_chain()).collect(),
+        (0..2)
+            .map(|_| crate::sequencer::default_empty_effect_chain())
+            .collect(),
     );
     let key = crate::sequencer::rack_choke_key(3, 1);
     state.runtime.rack_choke_keys[0].store(key, Ordering::Release);
@@ -1368,6 +1365,8 @@ fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 chord: ScheduledChordData {
                     count: 0,
@@ -1408,6 +1407,8 @@ fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 chord: ScheduledChordData {
                     count: 0,
@@ -1588,7 +1589,10 @@ fn sampler_warp_repitch_mode_needs_no_analysis() {
         174.0,
     );
     assert!(enabled > 0.5);
-    assert_eq!(mode.round() as i32, crate::instruments::sampler::WARP_MODE_REPITCH);
+    assert_eq!(
+        mode.round() as i32,
+        crate::instruments::sampler::WARP_MODE_REPITCH
+    );
     // 174 BPM sample in a 120 BPM project: the read head must consume
     // source slower, at 120/174 ≈ 0.69 source frames per host frame.
     assert!((ratio - (120.0 / 174.0)).abs() < 0.0001);
@@ -2039,7 +2043,7 @@ fn countdown_gate_off_cancel_removes_matching_pending_lids() {
 }
 
 #[test]
-fn chop_cancel_preserves_scheduled_triggers_for_later_mute_group_winner() {
+fn retrig_cancel_preserves_scheduled_triggers_for_later_mute_group_winner() {
     let scheduled_countdown = match test_block_trigger(0, 1).kind {
         BlockEventKind::Scheduled(event) => event,
         _ => unreachable!(),
@@ -2059,10 +2063,11 @@ fn chop_cancel_preserves_scheduled_triggers_for_later_mute_group_winner() {
             repeats: 1,
             pattern_epoch: 1,
             seq: 1,
-            kind: CountdownEventKind::Chop(ChopEvent {
+            kind: CountdownEventKind::Retrig(RetrigEvent {
                 track_idx: 1,
                 step: 0,
-                chop_gate: 16.0,
+                gate: 16.0,
+                target: RetrigTarget::Step,
             }),
         },
     ];
@@ -2071,15 +2076,16 @@ fn chop_cancel_preserves_scheduled_triggers_for_later_mute_group_winner() {
         BlockEvent {
             frame_offset: 20,
             seq: 3,
-            kind: BlockEventKind::Chop(ChopEvent {
+            kind: BlockEventKind::Retrig(RetrigEvent {
                 track_idx: 1,
                 step: 0,
-                chop_gate: 16.0,
+                gate: 16.0,
+                target: RetrigTarget::Step,
             }),
         },
     ];
 
-    super::cancel_chops_for_track(&mut countdown_events, &mut block_events, 1);
+    super::cancel_retrigs_for_track(&mut countdown_events, &mut block_events, 1);
 
     assert_eq!(countdown_events.len(), 1);
     assert!(matches!(
@@ -2207,4 +2213,215 @@ fn scheduled_triggers_fire_while_track_is_muted_by_solo() {
     assert!(track_accepts_scheduled_trigger(&state, 0));
     assert!(track_accepts_scheduled_trigger(&state, 1));
     assert!(track_accepts_scheduled_trigger(&state, 2));
+}
+
+// ── Step retrig (Machinedrum RTRG/RTIM), docs/step-retrig-spec.md ──
+
+fn retrig_test_step(retrig: f32, retrig_rate: f32) -> ResolvedStep {
+    ResolvedStep {
+        duration: 1.0,
+        velocity: 1.0,
+        speed: 1.0,
+        aux_a: 0.0,
+        aux_b: 0.0,
+        transpose: 0.0,
+        pan: 0.0,
+        chop: 1.0,
+        retrig,
+        retrig_rate,
+    }
+}
+
+/// Collect every in-block hit offset a burst produces, walking whole blocks
+/// until it runs out (or `max_blocks` is reached, for the infinite case).
+fn retrig_hit_offsets(
+    first_offset: f64,
+    period: f64,
+    repeats: u32,
+    nframes: usize,
+    max_blocks: usize,
+) -> (Vec<u64>, Option<u32>) {
+    let mut hits = Vec::new();
+    let mut offset = first_offset;
+    let mut remaining = repeats;
+    for block in 0..max_blocks {
+        let block_base = (block * nframes) as u64;
+        let leftover =
+            super::walk_repeating_offsets(offset, period, remaining, nframes, |frame_offset| {
+                hits.push(block_base + frame_offset as u64)
+            });
+        match leftover {
+            Some((next_offset, next_repeats)) => {
+                offset = next_offset;
+                remaining = next_repeats;
+            }
+            None => return (hits, None),
+        }
+    }
+    (hits, Some(remaining))
+}
+
+#[test]
+fn retrig_interval_is_tempo_relative_retrigs_per_beat() {
+    // 120 BPM at 48k: one beat is 24000 samples, so 8 retrigs/beat is 3000
+    // samples apart and 4/beat (the default, 16ths) is 6000.
+    let step = retrig_test_step(3.0, 8.0);
+    assert_eq!(
+        super::retrig_interval_samples(&step, 48_000.0, 120.0),
+        3_000.0
+    );
+    let default_rate = retrig_test_step(3.0, 4.0);
+    assert_eq!(
+        super::retrig_interval_samples(&default_rate, 48_000.0, 120.0),
+        6_000.0
+    );
+    // Halving the tempo doubles the interval: rolls stay in time.
+    assert_eq!(
+        super::retrig_interval_samples(&step, 48_000.0, 60.0),
+        6_000.0
+    );
+    // A zero rate cannot schedule anything (the MD's "RTIM 0 disables RTRG").
+    assert!(
+        !super::retrig_interval_samples(&retrig_test_step(3.0, 0.0), 48_000.0, 120.0).is_finite()
+    );
+}
+
+#[test]
+fn retrig_three_repeats_land_on_exact_sample_offsets() {
+    let step = retrig_test_step(3.0, 8.0);
+    let repeats = super::retrig_repeats_from_resolved(&step);
+    assert_eq!(repeats, 3, "Retrig counts repeats after the initial hit");
+    let period = super::retrig_interval_samples(&step, 48_000.0, 120.0);
+    // The initial hit is the trigger itself at 0; the burst adds three more,
+    // one interval apart, and then finishes.
+    let (hits, remaining) = retrig_hit_offsets(period, period, repeats, 512, 64);
+    assert_eq!(remaining, None, "a finite burst must terminate");
+    assert_eq!(hits, vec![3_000, 6_000, 9_000]);
+}
+
+#[test]
+fn retrig_infinite_keeps_scheduling_until_the_track_fires_again() {
+    let step = retrig_test_step(crate::sequencer::RETRIG_INFINITE, 8.0);
+    assert_eq!(super::retrig_repeats_from_resolved(&step), u32::MAX);
+
+    let period = super::retrig_interval_samples(&step, 48_000.0, 120.0);
+    let (hits, remaining) = retrig_hit_offsets(period, period, u32::MAX, 512, 64);
+    assert!(
+        remaining.is_some(),
+        "RTRG 127 must still have repeats pending after many blocks"
+    );
+    assert_eq!(hits.len(), 10, "10 hits fit in 64 blocks of 512 frames");
+
+    // The next trig on the track is what ends it: firing cancels the burst.
+    let mut countdown_events = vec![CountdownEvent {
+        remaining_samples: 100.0,
+        period_samples: period,
+        repeats: u32::MAX,
+        pattern_epoch: 1,
+        seq: 0,
+        kind: CountdownEventKind::Retrig(RetrigEvent {
+            track_idx: 2,
+            step: 0,
+            gate: 128.0,
+            target: RetrigTarget::Step,
+        }),
+    }];
+    let mut block_events = vec![BlockEvent {
+        frame_offset: 8,
+        seq: 1,
+        kind: BlockEventKind::Retrig(RetrigEvent {
+            track_idx: 2,
+            step: 0,
+            gate: 128.0,
+            target: RetrigTarget::Step,
+        }),
+    }];
+    super::cancel_retrigs_for_track(&mut countdown_events, &mut block_events, 2);
+    assert!(countdown_events.is_empty());
+    assert!(block_events.is_empty());
+}
+
+#[test]
+fn retrig_custom_track_refires_the_same_logical_voices() {
+    let mut voices = [RetrigCustomVoice::default(); crate::audio::MAX_VOICES];
+    voices[0] = RetrigCustomVoice {
+        logical_id: 77,
+        pitch_hz: 440.0,
+        velocity: 0.8,
+    };
+    voices[1] = RetrigCustomVoice {
+        logical_id: 78,
+        pitch_hz: 554.0,
+        velocity: 0.8,
+    };
+    let target = RetrigTarget::Custom {
+        voices,
+        count: 2,
+        engine_id: 0,
+        free_patch: false,
+        gated: true,
+    };
+    assert_eq!(super::armed_retrig_repeats(3, &target), 3);
+
+    // Every repeat carries the identical voice identities, so a dgen voice is
+    // re-excited in place instead of a fresh voice being stolen per hit.
+    let event = RetrigEvent {
+        track_idx: 0,
+        step: 0,
+        gate: 3_000.0,
+        target,
+    };
+    for _ in 0..3 {
+        let RetrigTarget::Custom { voices, count, .. } = event.target else {
+            panic!("custom track must keep a custom retrig target");
+        };
+        assert_eq!(count, 2);
+        assert_eq!(voices[0].logical_id, 77);
+        assert_eq!(voices[1].logical_id, 78);
+    }
+
+    // A custom track that allocated no voice has nothing to re-excite.
+    let empty = RetrigTarget::Custom {
+        voices: [RetrigCustomVoice::default(); crate::audio::MAX_VOICES],
+        count: 0,
+        engine_id: 0,
+        free_patch: false,
+        gated: true,
+    };
+    assert_eq!(super::armed_retrig_repeats(3, &empty), 0);
+    // Sampler / modulator tracks always arm; they re-allocate from the step.
+    assert_eq!(super::armed_retrig_repeats(3, &RetrigTarget::Step), 3);
+}
+
+#[test]
+fn retrig_hit_gate_butts_hits_together_without_shortening_lone_hits() {
+    // No repeats: the hit keeps the whole step gate.
+    assert_eq!(super::retrig_hit_gate(12_000.0, 0, 3_000.0), 12_000.0);
+    // Repeats due before the step ends: each hit is gated to the interval.
+    assert_eq!(super::retrig_hit_gate(12_000.0, 3, 3_000.0), 3_000.0);
+    // A slow burst never lengthens the hit past the step's own duration.
+    assert_eq!(super::retrig_hit_gate(1_000.0, 3, 3_000.0), 1_000.0);
+}
+
+#[test]
+fn sixteen_tracks_rolling_at_max_rate_fit_in_one_block_of_scratch() {
+    // Worst case from the spec's budget: 16 tracks holding an infinite burst
+    // at the top of the rate range (1024 retrigs/beat) through one 512-frame
+    // block at 120 BPM / 48k.
+    let step = retrig_test_step(crate::sequencer::RETRIG_INFINITE, 1_024.0);
+    let period = super::retrig_interval_samples(&step, 48_000.0, 120.0);
+    assert!(period > 1.0, "the top rate must still be above one sample");
+
+    let mut pushed = 0usize;
+    for _ in 0..16 {
+        super::walk_repeating_offsets(period, period, u32::MAX, 512, |_| pushed += 1);
+    }
+    assert!(
+        pushed <= super::SCHEDULED_BLOCK_SCRATCH_CAPACITY,
+        "16 rolling tracks pushed {pushed} block events, over the \
+         {} slot scratch capacity",
+        super::SCHEDULED_BLOCK_SCRATCH_CAPACITY
+    );
+    // Documented headroom: the burst is a small fraction of the scratch.
+    assert!(pushed < super::SCHEDULED_BLOCK_SCRATCH_CAPACITY / 4);
 }

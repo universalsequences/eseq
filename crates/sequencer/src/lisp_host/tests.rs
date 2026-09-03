@@ -7301,6 +7301,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 2.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 vec![0.0, 4.0, 7.0],
                 vec![1.0, 1.0, 1.0],
@@ -7380,6 +7382,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 Vec::new(),
                 Vec::new(),
@@ -7449,6 +7453,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 vec![0.0, 4.0, 7.0],
                 vec![1.0, 1.0, 1.0],
@@ -7548,6 +7554,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 vec![0.0, 4.0, 7.0],
                 vec![6.0, 6.0, 6.0],
@@ -7614,6 +7622,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 vec![0.0, 4.0, 7.0],
                 vec![0.0, 0.0, 0.0],
@@ -7672,6 +7682,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 Vec::new(),
                 Vec::new(),
@@ -7932,6 +7944,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 Vec::new(),
                 Vec::new(),
@@ -8048,6 +8062,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 5.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 Vec::new(),
                 Vec::new(),
@@ -8137,6 +8153,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 5.0,
                     pan: 0.25,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 Vec::new(),
                 Vec::new(),
@@ -8208,6 +8226,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 Vec::new(),
                 Vec::new(),
@@ -8287,6 +8307,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 vec![0.0, 4.0, 7.0],
                 vec![8.0, 8.0, 8.0],
@@ -8357,6 +8379,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 5.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 vec![0.0],
                 vec![1.0],
@@ -8396,6 +8420,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 5.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 vec![0.0],
                 vec![1.0],
@@ -8455,6 +8481,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 Vec::new(),
                 Vec::new(),
@@ -12605,6 +12633,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 transpose: 5.0,
                 pan: 0.0,
                 chop: 1.0,
+                retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
             },
         }
     }
@@ -14572,6 +14602,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 transpose: 1.0,
                 pan: 0.0,
                 chop: 0.0,
+                retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
             },
         };
         let result = scratch
@@ -14880,6 +14912,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                         transpose: 0.0,
                         pan: 0.0,
                         chop: 1.0,
+                        retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                        retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     vec![0.0, 4.0, 7.0],
                     vec![1.0, 1.0, 1.0],
@@ -14968,6 +15002,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                         transpose: 0.0,
                         pan: 0.0,
                         chop: 1.0,
+                        retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                        retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     vec![0.0],
                     vec![1.0],
@@ -15041,6 +15077,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     transpose: 2.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 Vec::new(),
                 Vec::new(),
@@ -16284,6 +16322,36 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             report.rms > 0.001,
             "expected audible rms, got report: {report:?}"
         );
+    }
+
+    #[test]
+    fn factory_digiwave_renders_audible_signal_at_defaults() {
+        let name = "factory/digiwave/";
+        let source = super::load_instrument_source(name).unwrap();
+        let asset_base = super::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let report = super::render_instrument_source_for_test(
+            &source,
+            asset_base.as_deref(),
+            &super::InstrumentRenderOptions {
+                sample_rate: 44_100,
+                block_size: 128,
+                frames: 4096,
+                midi_note: 69.0,
+                velocity: 1.0,
+                gate_frames: 4096,
+                voice_index: 0,
+                param_overrides: Vec::new(),
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.non_finite_samples, 0, "finite output, got {report:?}");
+        assert!(report.peak > 0.01, "expected audible peak, got report: {report:?}");
+        assert!(report.rms > 0.001, "expected audible rms, got report: {report:?}");
     }
 
     #[test]

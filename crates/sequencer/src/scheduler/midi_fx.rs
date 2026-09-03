@@ -1124,6 +1124,8 @@ pub(super) fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 transpose: chord[0],
                 pan: 0.0,
                 chop: 1.0,
+                retrig: StepParam::Retrig.default_value(),
+                retrig_rate: StepParam::RetrigRate.default_value(),
             };
             let print_overrides = state.device_print_override.values_for_track(track_idx);
             let event = MidiFxEvent {
@@ -1254,6 +1256,8 @@ pub(super) fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 transpose: first_transpose,
                 pan: 0.0,
                 chop: 1.0,
+                retrig: StepParam::Retrig.default_value(),
+                retrig_rate: StepParam::RetrigRate.default_value(),
             };
             let print_overrides = state.device_print_override.values_for_track(track_idx);
             let event = MidiFxEvent {

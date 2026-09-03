@@ -63,6 +63,14 @@ pub(super) fn step_snapshot_to_value(step: usize, snapshot: StepSnapshot) -> EVa
         lisp_number(snapshot.params[StepParam::Delay.index()] as f64),
     );
     map.insert(
+        "retrig".to_string(),
+        lisp_number(snapshot.params[StepParam::Retrig.index()] as f64),
+    );
+    map.insert(
+        "retrig-rate".to_string(),
+        lisp_number(snapshot.params[StepParam::RetrigRate.index()] as f64),
+    );
+    map.insert(
         "chord".to_string(),
         lisp_value(lisp_list(
             snapshot

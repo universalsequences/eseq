@@ -173,14 +173,18 @@
         (decay (source-param section "decay"))
         (sustain (source-param section "sustain"))
         (release (source-param section "release")))
-    (lego/ui-readout-panel-medium-s 0
-      (h-stack :width :fill :height :fill :gap 0.24 :align :stretch
+    (lego/ui-lego-panel-s 7.0 0 :instrument-control-bg
+      (v-stack :debug-name "instrument-env-source-editor"
+               :width :fill :height :fill :gap 0.2 :align :start
         (adsr-editor
           :attack (source-param-value attack 5)
           :decay (source-param-value decay 120)
           :sustain (source-param-value sustain 0.7)
           :release (source-param-value release 120)
-          :width 13.2 :height :fill
+          :attack-max (if attack (get attack :max) 20000)
+          :decay-max (if decay (get decay :max) 20000)
+          :release-max (if release (get release :max) 20000)
+          :width :fill :height 4.5
           :background-color :instrument-control-bg
           :on-change (lambda (env)
             (do
@@ -188,37 +192,61 @@
               (source-set-param-value decay (get env :decay))
               (source-set-param-value sustain (get env :sustain))
               (source-set-param-value release (get env :release)))))
-        (v-stack :width 8.2 :height :fill :gap 0.10 :align :start
-          (lego/ui-lego-badge-dark "env" 7.7 (lego/ui-accent-blue))
-          (h-stack :gap 0.14 :align :start
-            (source-adsr-number attack "atk" 0 "ms")
-            (source-adsr-number decay "dec" 0 "ms"))
-          (h-stack :gap 0.14 :align :start
-            (source-adsr-number sustain "sus" 2 false)
-            (source-adsr-number release "rel" 0 "ms")))))))
+        (h-stack :width :fill :gap 0.3 :align :start
+          (source-adsr-number attack "atk" 0 "ms")
+          (source-adsr-number decay "dec" 0 "ms")
+          (source-adsr-number sustain "sus" 2 false)
+          (source-adsr-number release "rel" 0 "ms"))))))
 
+(def lfo-shape-curve (section shape pulse-width phase width height)
+  (lfo-curve
+    :width width :height height
+    :shape (source-param-value shape 0)
+    :pw (source-param-value pulse-width 0.5)
+    :phase-offset (source-param-value phase 0)
+    :phase (if (get section :phase-field) (bind-seq (get section :phase-field)) -1)
+    :background-color :instrument-control-bg
+    :grid-color :dim
+    :curve-color (lego/ui-accent-orange)
+    :fill-color (rgba 1.0 0.48 0.18 0.16)))
+
+;; The section's params are already filtered by the host
+;; (`selected_source_param_indices`): with sync on the rate is absent and the
+;; division present, and pulse width only exists for the pulse shape. So each
+;; control is drawn only when its param is, instead of as an empty widget.
 (def lfo-source-editor (section)
   (let ((rate (source-param section "rate"))
         (sync (source-param section "sync"))
         (division (source-param section "division"))
         (shape (source-param section "shape"))
+        (phase (source-param section "phase"))
         (pulse-width (source-param section "pulse width"))
         (retrigger (source-param section "retrigger")))
-    (lego/ui-readout-panel-medium-s 0
+    (lego/ui-lego-panel-s 7.0 0 :instrument-control-bg
       (h-stack :debug-name "instrument-lfo-source-editor"
                :width :fill :height :fill :gap 0.38 :align :start
-        (v-stack :width 13.8 :height :fill :gap 0.12 :align :start
+        (v-stack :width 11.8 :height :fill :gap 0.12 :align :start
           (h-stack :gap 0.25 :align :start
-            (source-number rate "rate" 2 false 6.4)
+            (if division
+              (source-dropdown division "division" 6.4)
+              (source-number rate "rate" 2 "Hz" 6.4))
             (source-button sync "sync" 5.0))
           (h-stack :gap 0.25 :align :start
-            (source-dropdown division "division" 6.4)
-            (source-dropdown shape "shape" 5.0)))
-        (v-stack :width 5.0 :height :fill :gap 0.18 :align :center
-          (source-compact-knob pulse-width "pw" 2)
-          (box :debug-name "instrument-lfo-retrigger-button"
-               :width 4.4 :height 1.55 :padding 0
-            (source-button retrigger "retrig" 4.4)))))))
+            (source-dropdown shape "shape" 6.4)
+            (source-number phase "phase" 0 "°" 5.0))
+          (h-stack :gap 0.25 :align :start
+            (box :debug-name "instrument-lfo-retrigger-button"
+                 :width 4.4 :height 1.72 :padding 0
+              (source-button retrigger "retrig" 4.4))
+            (if pulse-width
+              (source-compact-knob pulse-width
+                (if (= (reactive-value (source-param-value shape 0)) 0) "peak" "pw") 2)
+              (box :width 4.4 :height 1.72))))
+        (box :debug-name "instrument-lfo-curve-wrapper"
+             :width 12.2 :height 5.7 :padding 0.22
+             :background-color :black
+             :corner-radius 8
+          (lfo-shape-curve section shape pulse-width phase 11.7 5.25))))))
 
 (def source-type (section)
   (let ((source-p (get section :source-param)))

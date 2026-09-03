@@ -103,6 +103,8 @@ pub(super) fn process_step_param_from_name(name: &str) -> Option<StepParam> {
         StepParam::Transpose,
         StepParam::Pan,
         StepParam::Chop,
+        StepParam::Retrig,
+        StepParam::RetrigRate,
     ]
     .into_iter()
     .find(|param| {
@@ -120,6 +122,10 @@ pub(super) fn process_step_param_from_name(name: &str) -> Option<StepParam> {
                 StepParam::Transpose => normalized == "transpose",
                 StepParam::Pan => normalized == "pan",
                 StepParam::Chop => normalized == "chop",
+                StepParam::Retrig => normalized == "retrig",
+                StepParam::RetrigRate => {
+                    normalized == "retrig-rate" || normalized == "retrig_rate"
+                }
                 StepParam::Sync | StepParam::Delay => false,
             }
     })
@@ -135,6 +141,8 @@ pub(super) fn resolved_step_param(resolved: &ResolvedStep, param: StepParam) -> 
         StepParam::Transpose => resolved.transpose,
         StepParam::Pan => resolved.pan,
         StepParam::Chop => resolved.chop,
+        StepParam::Retrig => resolved.retrig,
+        StepParam::RetrigRate => resolved.retrig_rate,
         StepParam::Sync => 0.0,
         StepParam::Delay => 0.0,
     }
@@ -151,6 +159,8 @@ pub(super) fn set_resolved_step_param(resolved: &mut ResolvedStep, param: StepPa
         StepParam::Transpose => resolved.transpose = value,
         StepParam::Pan => resolved.pan = value,
         StepParam::Chop => resolved.chop = value,
+        StepParam::Retrig => resolved.retrig = value,
+        StepParam::RetrigRate => resolved.retrig_rate = value,
         StepParam::Sync | StepParam::Delay => unreachable!("unsupported process step param"),
     }
 }
@@ -2039,4 +2049,68 @@ pub(super) fn enqueue_network_trigger<const QUEUE_CAP: usize>(
         );
     }
     enqueued
+}
+
+#[cfg(test)]
+mod retrig_process_param_tests {
+    use super::*;
+
+    fn neutral_step() -> ResolvedStep {
+        ResolvedStep {
+            duration: 1.0,
+            velocity: 1.0,
+            speed: 1.0,
+            aux_a: 0.0,
+            aux_b: 0.0,
+            transpose: 0.0,
+            pan: 0.0,
+            chop: 1.0,
+            retrig: StepParam::Retrig.default_value(),
+            retrig_rate: StepParam::RetrigRate.default_value(),
+        }
+    }
+
+    /// A Lisp process writing the roll knobs must reach the resolved step
+    /// (the Machinedrum "slide RTIM into the downbeat" trick), not the
+    /// `unreachable!()` arm that unsupported params take.
+    #[test]
+    fn processes_can_read_and_write_retrig_step_params() {
+        let mut resolved = neutral_step();
+
+        set_resolved_step_param(&mut resolved, StepParam::Retrig, 5.0);
+        set_resolved_step_param(&mut resolved, StepParam::RetrigRate, 96.0);
+        assert_eq!(resolved.retrig, 5.0);
+        assert_eq!(resolved.retrig_rate, 96.0);
+        assert_eq!(resolved_step_param(&resolved, StepParam::Retrig), 5.0);
+        assert_eq!(resolved_step_param(&resolved, StepParam::RetrigRate), 96.0);
+
+        // Writes clamp to the param's range rather than storing nonsense.
+        set_resolved_step_param(&mut resolved, StepParam::Retrig, 999.0);
+        assert_eq!(resolved.retrig, crate::sequencer::RETRIG_INFINITE);
+        set_resolved_step_param(&mut resolved, StepParam::RetrigRate, 0.0);
+        assert_eq!(resolved.retrig_rate, StepParam::RetrigRate.min());
+
+        // And the DSL's name lookup reaches them by their authored spellings.
+        let mut resolved = neutral_step();
+        assert_eq!(
+            process_apply_step_param_write(
+                &mut resolved,
+                "retrig",
+                crate::process::ProcessTargetOp::Set,
+                3.0,
+            ),
+            Some((StepParam::Retrig, 3.0))
+        );
+        assert_eq!(
+            process_apply_step_param_write(
+                &mut resolved,
+                "retrig-rate",
+                crate::process::ProcessTargetOp::Add,
+                8.0,
+            ),
+            Some((StepParam::RetrigRate, 12.0))
+        );
+        assert_eq!(resolved.retrig, 3.0);
+        assert_eq!(resolved.retrig_rate, 12.0);
+    }
 }

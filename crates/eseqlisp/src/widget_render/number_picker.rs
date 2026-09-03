@@ -14,6 +14,8 @@ use crate::layout::{
 use crate::theme;
 use crate::vm::Value;
 
+use super::knob_number::{knob_taper, taper_denormalize, taper_normalize};
+
 use super::{
     FocusCornerStyle, FocusDecoration, GpuPrimitive, GpuProportionalTextPrimitive,
     GpuRectPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
@@ -136,6 +138,69 @@ mod tests {
         assert!((quantize_value(0.125, -0.5, 0.5, step) - 0.13).abs() < f32::EPSILON);
     }
 
+    fn drag_to(
+        props: HashMap<String, Value>,
+        start_value: f64,
+        start_row: f32,
+        to_row: f32,
+    ) -> f32 {
+        let node = test_number_picker_node(props);
+        let gesture = Value::List(vec![
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(start_value))),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(start_row as f64))),
+        ]);
+        let outcome = NUMBER_PICKER_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Drag(MouseButton::Left),
+            0.0,
+            to_row,
+            None,
+            Some(&gesture),
+            KeyModifiers::empty(),
+            10.0,
+            10.0,
+        );
+        let MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(value))) = outcome else {
+            panic!("drag should dispatch a value");
+        };
+        value as f32
+    }
+
+    /// Linear pickers keep their historical feel: no taper, no drag-rows,
+    /// five rows of travel from a short strip spans the whole range.
+    #[test]
+    fn linear_drag_from_a_short_strip_spans_the_range_in_five_rows() {
+        let mut props = HashMap::new();
+        props.insert("min".to_string(), Value::Number(0.0));
+        props.insert("max".to_string(), Value::Number(100.0));
+        props.insert("decimals".to_string(), Value::Number(0.0));
+        assert_eq!(drag_to(props.clone(), 0.0, 1.0, -4.0), 100.0);
+        assert_eq!(drag_to(props, 0.0, 1.0, -1.5), 50.0);
+    }
+
+    /// A log picker walks normalized position, and `:drag-rows` pins the
+    /// full-travel distance regardless of where in the strip the drag began.
+    #[test]
+    fn log_taper_with_drag_rows_moves_geometrically_over_the_pinned_distance() {
+        let mut props = HashMap::new();
+        props.insert("min".to_string(), Value::Number(1.0));
+        props.insert("max".to_string(), Value::Number(1024.0));
+        props.insert("decimals".to_string(), Value::Number(0.0));
+        props.insert("taper".to_string(), Value::String("log".to_string()));
+        props.insert("drag-rows".to_string(), Value::Number(20.0));
+        // From 1 (t = 0): half the pinned travel is the geometric midpoint.
+        assert_eq!(drag_to(props.clone(), 1.0, 1.0, -9.0), 32.0);
+        // Five rows, which used to be the whole range, is now 1 -> 32^(1/2)·..:
+        // t = 0.25 -> 1024^0.25 ≈ 5.66 -> snapped to 6.
+        assert_eq!(drag_to(props.clone(), 1.0, 1.0, -4.0), 6.0);
+        // The top of the pinned travel still reaches max.
+        assert_eq!(drag_to(props.clone(), 1.0, 1.0, -19.0), 1024.0);
+        // Dragging down from 32 (t = 0.5): half the travel halves the
+        // position (t = 0.25 -> 6), the full travel lands on min.
+        assert_eq!(drag_to(props.clone(), 32.0, 1.0, 11.0), 6.0);
+        assert_eq!(drag_to(props, 32.0, 1.0, 21.0), 1.0);
+    }
+
     #[test]
     fn explicit_step_snaps_decimal_values() {
         let props = HashMap::from([
@@ -164,8 +229,7 @@ mod tests {
             ("shadow-color".to_string(), color_value(0.0, 0.0, 0.0, 0.3)),
         ]));
 
-        let prims =
-            NumberPickerWidget.build_primitives("number-picker", &node, test_viewport());
+        let prims = NumberPickerWidget.build_primitives("number-picker", &node, test_viewport());
         let instance = prims
             .iter()
             .find_map(|prim| match prim {
@@ -194,10 +258,7 @@ mod tests {
             ("max".to_string(), Value::Number(100.0)),
             ("corner-radius".to_string(), Value::Number(0.0)),
             ("border-width".to_string(), Value::Number(2.5)),
-            (
-                "fill-color".to_string(),
-                color_value(0.1, 0.6, 0.7, 0.8),
-            ),
+            ("fill-color".to_string(), color_value(0.1, 0.6, 0.7, 0.8)),
         ]));
 
         let focus_color = [1.0, 0.7, 0.2, 1.0];
@@ -206,10 +267,8 @@ mod tests {
             ..test_viewport()
         };
         let mut node = node;
-        node.props.insert(
-            "focus-color".to_string(),
-            color_value(1.0, 0.7, 0.2, 1.0),
-        );
+        node.props
+            .insert("focus-color".to_string(), color_value(1.0, 0.7, 0.2, 1.0));
         let primitives =
             NumberPickerWidget.build_primitives("number-picker", &node, focused_viewport);
         let fill = primitives
@@ -429,7 +488,7 @@ pub fn handle_number_picker_edit_key(
 ) -> Option<NumberPickerEditOutcome> {
     match key.code {
         KeyCode::Char(c)
-            if (c.is_ascii_digit() || c == '.' || c == '-')
+            if (c.is_ascii_digit() || c == '-' || (state.editing && c == '.'))
                 && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
         {
             if !state.editing {
@@ -564,11 +623,7 @@ pub static NUMBER_PICKER_WIDGET: NumberPickerWidget = NumberPickerWidget;
 
 impl WidgetDefinition for NumberPickerWidget {
     fn names(&self) -> &'static [&'static str] {
-        &[
-            "number-picker",
-            "number-picker-tri",
-            "number-picker-slider",
-        ]
+        &["number-picker", "number-picker-tri", "number-picker-slider"]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -590,12 +645,43 @@ impl WidgetDefinition for NumberPickerWidget {
 
     fn completion_props(&self) -> &'static [&'static str] {
         &[
-            "value", "min", "max", "step", "decimals", "unit", "value-scale", "width",
-            "height", "font-size", "noui", "mode", "text-align", "text-color", "active-color",
-            "background-color", "bg-color", "border-color", "cursor-color", "edit-color",
-            "fill-color", "focus-color", "highlight-color", "ring-color", "shadow-color",
-            "tri-color", "border-width", "corner-radius", "active", "on-change", "on-release", "plock-active", "plock-color-r",
-            "plock-color-g", "plock-color-b",
+            "value",
+            "min",
+            "max",
+            "step",
+            "decimals",
+            "unit",
+            "value-scale",
+            "taper",
+            "drag-rows",
+            "width",
+            "height",
+            "font-size",
+            "noui",
+            "mode",
+            "text-align",
+            "text-color",
+            "active-color",
+            "background-color",
+            "bg-color",
+            "border-color",
+            "cursor-color",
+            "edit-color",
+            "fill-color",
+            "focus-color",
+            "highlight-color",
+            "ring-color",
+            "shadow-color",
+            "tri-color",
+            "border-width",
+            "corner-radius",
+            "active",
+            "on-change",
+            "on-release",
+            "plock-active",
+            "plock-color-r",
+            "plock-color-g",
+            "plock-color-b",
         ]
     }
 
@@ -716,18 +802,31 @@ impl WidgetDefinition for NumberPickerWidget {
 
                 // Dynamic sensitivity: dragging up to the content-area top
                 // (start_row rows above) reaches max; equal distance below → min.
-                // Minimum of 5 rows to avoid division-by-near-zero.
-                let room = start_row.max(5.0);
+                // Minimum of 5 rows to avoid division-by-near-zero. `:drag-rows`
+                // pins the full-travel distance instead, for pickers that sit
+                // in a short strip but span a wide range (the *step* panel's
+                // retrig pickers): there the content-area rule made five rows
+                // of motion cover the whole range.
+                let room = match get_f32_prop(&node.props, "drag-rows", 0.0) {
+                    rows if rows > 0.0 => rows,
+                    _ => start_row.max(5.0),
+                };
 
-                let new_value = if delta_rows >= 0.0 {
+                // `:taper` (see knob_number): the drag walks normalized
+                // position, so a log/cube picker spends its travel where the
+                // musical action is instead of racing to max.
+                let taper = knob_taper(&node.props);
+                let start_t = taper_normalize(taper, min, max, start_value);
+                let new_t = if delta_rows >= 0.0 {
                     // Dragging up → towards max
                     let frac = (delta_rows / room).min(1.0);
-                    start_value + frac * (max - start_value)
+                    start_t + frac * (1.0 - start_t)
                 } else {
                     // Dragging down → towards min
                     let frac = ((-delta_rows) / room).min(1.0);
-                    start_value - frac * (start_value - min)
+                    start_t - frac * start_t
                 };
+                let new_value = taper_denormalize(taper, min, max, new_t);
                 let new_value = quantize_value(new_value, min, max, step);
 
                 MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(new_value as f64)))
@@ -1060,11 +1159,7 @@ impl WidgetDefinition for NumberPickerWidget {
                         color_b: border_color.to_rgba(),
                         color_c: number_picker_fill(&node.props).to_rgba(),
                         color_d: [0.0; 4],
-                        corner_radius: normalized_corner_radius(
-                            node.rect,
-                            viewport,
-                            corner_radius,
-                        ),
+                        corner_radius: normalized_corner_radius(node.rect, viewport, corner_radius),
                         pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
                     },
                     is_background: true,
@@ -1198,7 +1293,8 @@ impl WidgetDefinition for NumberPickerWidget {
 
 // ── GPU shaders ──────────────────────────────────────────────────────────────
 
-const NUMBER_PICKER_SLIDER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+const NUMBER_PICKER_SLIDER_SHADER: super::ShaderSources = super::ShaderSources::both(
+    r#"
 float number_picker_slider_rounded_rect(float2 p, float2 size, float radius)
 {
     float2 q = abs(p) - (size - float2(radius));
@@ -1251,9 +1347,12 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     ) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#, super::wgsl::NUMBER_PICKER_SLIDER_SHADER);
+"#,
+    super::wgsl::NUMBER_PICKER_SLIDER_SHADER,
+);
 
-const NUMBER_PICKER_TRI_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+const NUMBER_PICKER_TRI_SHADER: super::ShaderSources = super::ShaderSources::both(
+    r#"
 float number_picker_segment_distance(float2 p, float2 a, float2 b)
 {
     float2 pa = p - a;
@@ -1295,4 +1394,6 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#, super::wgsl::NUMBER_PICKER_TRI_SHADER);
+"#,
+    super::wgsl::NUMBER_PICKER_TRI_SHADER,
+);

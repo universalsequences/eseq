@@ -190,6 +190,14 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 take_active_keyboard_note(&mut data.active_keyboard_notes, kt.track, kt.transpose)
             {
                 if live_key_release_cuts_voice(&data.state, kt.track) {
+                    // A released key must stop an infinite retrig roll on this
+                    // track (docs/step-retrig-spec.md): the burst is owned by
+                    // the voice the key is holding open.
+                    cancel_retrigs_for_track(
+                        &mut data.countdown_events,
+                        &mut data.block_events,
+                        kt.track,
+                    );
                     release_active_keyboard_note(data, active_note, 0, block_end_sample);
                 }
             }

@@ -248,7 +248,7 @@
 ;; rendered by the tile that owns the knobs — this buffer. Zero footprint when
 ;; closed; the wrapper boxes only set the shared menu state.
 (effect-buffer "*fx*"
-  (h-stack :debug-name "fx-buffer-root" :gap 0 :height :fill
+  (h-stack :debug-name "fx-buffer-root" :gap 0 :width :fill :height :fill
   (if (pw/has-selected-bus?)
     (let ((gidx (selected-rack)))
       (if (>= gidx 0)

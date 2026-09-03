@@ -57,6 +57,7 @@
         ui-readout-panel-small-s
         ui-readout-panel-dense-s
         ui-readout-panel-medium-s
+        ui-lego-panel-s
         ui-readout-block-medium
         ui-readout-block-full
         ui-lego-column
@@ -679,11 +680,11 @@
             (dropdown :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
-              :bg-color :mixer-control-bg
+              :bg-color :buffer-bg
               :text-color accent
               :chevron-color accent
               :badge-color :transparent
-              :border-color :mixer-strip-bg
+              :border-color :black
               :border-width 0.05
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -965,6 +966,7 @@
               :flex 1
               :height 3.22
               :background-color :instrument-control-bg
+              :curve-color accent
               :on-change (lambda (env)
                 (do
                   (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope section)
@@ -974,10 +976,10 @@
             )
           (h-stack :width :fill :height 1.0 :gap 0.24 :align :start
             (box :width 1)
-            (ui-lego-micro-num-stage-s section :attack attack "atk" 5.1 0 "ms" (ui-accent-cyan))
-            (ui-lego-micro-num-stage-s section :decay decay "dec" 5.1 0 "ms" (ui-accent-cyan))
-            (ui-lego-micro-num-stage-s section :sustain sustain "sus" 5.1 2 false (ui-accent-cyan))
-            (ui-lego-micro-num-stage-s section :release release "rel" 5.1 0 "ms" (ui-accent-cyan)))))))
+            (ui-lego-micro-num-stage-s section :attack attack "atk" 5.1 0 "ms" accent)
+            (ui-lego-micro-num-stage-s section :decay decay "dec" 5.1 0 "ms" accent)
+            (ui-lego-micro-num-stage-s section :sustain sustain "sus" 5.1 2 false accent)
+            (ui-lego-micro-num-stage-s section :release release "rel" 5.1 0 "ms" accent))))))
   )
 
 
@@ -1135,7 +1137,7 @@
 (def ui-lego-panel-x-s (section width height surface border-color stripe-color body)
   (box :width width :height height
        :background-color surface
-       :corner-radius 8
+       :corner-radius 12
        :border-width 1
        :border-color :transparent ;border-color
        :padding 0.18

@@ -15286,8 +15286,8 @@
         let (_, published) =
             super::sync_effect_mod_offset_field_delta(&mut runtime, &[], &[modulated.clone()]);
         assert_eq!(
-            published, 6,
-            "a first sample publishes all three fields of both destinations"
+            published, 10,
+            "a first sample publishes all three fields of both destinations plus the four slot phases"
         );
         let frame_field = super::effect_mod_value_field(node_id, FRAME);
         let cutoff_field = super::effect_mod_value_field(node_id, CUTOFF);

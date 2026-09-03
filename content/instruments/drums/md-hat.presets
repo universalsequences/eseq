@@ -7,6 +7,7 @@
     {"id": "808 OH", "name": "808 OH", "base_note_offset": 0.0, "params": {"engine": 1, "gap": 0.45, "dec": 420, "hpf": 6400, "lpf": 16000, "mtal": 0.28}},
     {"id": "606 Crisp", "name": "606 Crisp", "base_note_offset": 0.0, "params": {"engine": 1, "tune": 4, "gap": 0.30, "dec": 72, "hpf": 9200, "lpf": 17000, "mtal": 0.12}},
     {"id": "EFM Sizzle", "name": "EFM Sizzle", "base_note_offset": 0.0, "params": {"engine": 2, "dec": 120, "trem": 0.42, "tfrq": 180, "mod_amt": 0.86, "mfrq": 4200, "mdec": 34, "fb": 0.82}},
-    {"id": "PI Loose Pair", "name": "PI Loose Pair", "base_note_offset": 0.0, "params": {"engine": 3, "dec": 520, "clsn": 0.58, "ring": 0.72, "ag": 0.45, "br": 0.35, "clos": 90}}
+    {"id": "PI Tight CH", "name": "PI Tight CH", "base_note_offset": 0.0, "params": {"engine": 3, "dec": 60, "clsn": 0.15, "ring": 0.35, "ag": 0.40, "au": 0.15, "clos": 70}},
+    {"id": "PI Loose Pair", "name": "PI Loose Pair", "base_note_offset": 0.0, "params": {"engine": 3, "dec": 520, "clsn": 0.58, "ring": 0.72, "ag": 0.45, "br": 0.35, "clos": 15}}
   ]
 }

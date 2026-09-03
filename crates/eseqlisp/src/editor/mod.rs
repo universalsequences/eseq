@@ -3792,6 +3792,95 @@ impl Editor {
     }
 
     fn find_definition(&self, symbol: &str) -> Option<DefinitionLocation> {
+        // `module/name`: resolve the module to its file first, then look the
+        // bare name up there. A definition is spelled `(def name …)` inside a
+        // `(module module)` file, so the qualified spelling never matches a
+        // def head verbatim.
+        if let Some((module, name)) = crate::modules::split_qualified(symbol) {
+            if let Some(location) = self.find_qualified_definition(module, name) {
+                return Some(location);
+            }
+            return self.find_unqualified_definition(name);
+        }
+        self.find_unqualified_definition(symbol)
+    }
+
+    fn find_qualified_definition(&self, module: &str, name: &str) -> Option<DefinitionLocation> {
+        for buffer in &self.buffers {
+            let text = buffer.text();
+            if !text_declares_module(&text, module) {
+                continue;
+            }
+            if let Some(cursor) = find_definition_in_text(&text, name) {
+                return Some(DefinitionLocation {
+                    path: buffer.path.clone(),
+                    buffer_id: Some(buffer.id),
+                    cursor,
+                });
+            }
+        }
+
+        let open_paths: HashSet<PathBuf> = self
+            .buffers
+            .iter()
+            .filter_map(|buffer| buffer.path.clone())
+            .collect();
+        let mut tried = HashSet::new();
+        let mut roots = Vec::new();
+        if let Some(path) = self.active_buffer().path.as_ref() {
+            let mut ancestor = path.parent();
+            while let Some(dir) = ancestor {
+                roots.push(dir.to_path_buf());
+                ancestor = dir.parent();
+            }
+        } else if let Ok(cwd) = std::env::current_dir() {
+            roots.push(cwd);
+        }
+        let candidates = crate::modules::module_relative_file_candidates(module);
+        for root in roots {
+            for candidate in &candidates {
+                let path = root.join(candidate);
+                if open_paths.contains(&path) || !tried.insert(path.clone()) {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                if !text_declares_module(&text, module) {
+                    continue;
+                }
+                if let Some(cursor) = find_definition_in_text(&text, name) {
+                    return Some(DefinitionLocation {
+                        path: Some(path),
+                        buffer_id: None,
+                        cursor,
+                    });
+                }
+            }
+        }
+
+        for path in self.definition_search_paths() {
+            if open_paths.contains(&path) || !tried.insert(path.clone()) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if !text_declares_module(&text, module) {
+                continue;
+            }
+            if let Some(cursor) = find_definition_in_text(&text, name) {
+                return Some(DefinitionLocation {
+                    path: Some(path),
+                    buffer_id: None,
+                    cursor,
+                });
+            }
+        }
+        None
+    }
+
+    fn find_unqualified_definition(&self, symbol: &str) -> Option<DefinitionLocation> {
         for buffer in self
             .buffers
             .iter()
@@ -9772,6 +9861,24 @@ fn collect_lisp_files(root: &std::path::Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// True when `text` carries a top-level `(module <module>)` declaration.
+fn text_declares_module(text: &str, module: &str) -> bool {
+    let mut search = 0usize;
+    while let Some(found) = text[search..].find("(module") {
+        let after = search + found + "(module".len();
+        search = after;
+        if !text[after..].starts_with(|c: char| c.is_whitespace()) {
+            continue;
+        }
+        let name_start = skip_ws_and_comments(text, after);
+        let name_end = advance_symbol(text, name_start);
+        if &text[name_start..name_end] == module {
+            return true;
+        }
+    }
+    false
 }
 
 fn find_definition_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {

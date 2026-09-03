@@ -15482,3 +15482,41 @@ fn routed_input_does_not_relayout_at_a_non_reference_window_scale() {
         "a routed event on an unchanged tree must not relayout, at any window scale"
     );
 }
+
+#[test]
+fn meta_period_opens_qualified_definition_in_module_file() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let dir = std::env::temp_dir().join(format!(
+        "eseqlisp-goto-qualified-definition-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    // Caller lives in a subdirectory; the module file is a sibling of that
+    // directory, so a parent-dir-only scan would miss it.
+    let ui_dir = dir.join("ui");
+    let effects_dir = ui_dir.join("effects");
+    std::fs::create_dir_all(&effects_dir).unwrap();
+    let module_path = ui_dir.join("seqv-track-params.lisp");
+    let caller_path = effects_dir.join("panel.lisp");
+    std::fs::write(
+        &module_path,
+        "(module eseq.seqv-track-params)\n(def seqv-param-name 1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &caller_path,
+        "(eseq.seqv-track-params/seqv-param-name)\n",
+    )
+    .unwrap();
+
+    editor.open_file_buffer(&caller_path).unwrap();
+    editor.active_buffer_mut().cursor = (0, 30);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT));
+
+    assert_eq!(editor.active_buffer().path.as_ref(), Some(&module_path));
+    assert_eq!(editor.active_buffer().cursor, (1, 5));
+}

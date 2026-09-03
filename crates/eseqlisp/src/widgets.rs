@@ -26,6 +26,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "meter",
     "mixer-meter",
     "modulator-curve",
+    "lfo-curve",
     "text-input",
     "textbox",
     "number-picker",

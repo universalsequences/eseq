@@ -4,8 +4,8 @@ Note firing: turning a resolved trigger into sound.
 `fire_resolved` is the heart of the module (~700 lines): given a resolved
 step/keyboard/network trigger it allocates or steals voices, resolves and
 pushes parameter bundles, emits note-on graph events for sampler and custom
-engines, and registers gate-offs and chops. `dispatch_chop_event` retriggers
-voices for chop/roll playback. Rack-specific variants live in `rack`.
+engines, and registers gate-offs and retrigs. `dispatch_retrig_event` re-fires
+voices for retrig/roll playback (see `docs/step-retrig-spec.md`). Rack-specific variants live in `rack`.
 */
 
 #[allow(unused_imports)]
@@ -99,8 +99,7 @@ pub(super) fn fire_resolved(
     // Drum rack v2 choke: a sequenced pad hit releases the other member tracks
     // in its choke group before its own note goes out. Every sequenced trigger
     // path (block events and countdown events alike) lands here.
-    let choke_release_sample =
-        data.rendered_samples.load(Ordering::Acquire) + frame_offset as u64;
+    let choke_release_sample = data.rendered_samples.load(Ordering::Acquire) + frame_offset as u64;
     release_rack_choke_group_track_voices(data, track_idx, choke_release_sample, frame_offset);
     let tp = &data.state.pattern.track_params[track_idx];
     let instrument_type = InstrumentType::from_runtime_flag(
@@ -143,11 +142,21 @@ pub(super) fn fire_resolved(
         return;
     }
 
-    let chop = resolved.chop.round() as u32;
-    let chop = chop.max(1);
+    // Machinedrum RTRG/RTIM (docs/step-retrig-spec.md). `Chop` is no longer
+    // consulted here: it fought retrig for the same countdown slot and only
+    // ever covered samplers. The burst is owned by the voice, so it keeps
+    // rolling past the step until the next trig on this track cancels it.
+    let retrig_repeats = retrig_repeats_from_resolved(&resolved);
+    let retrig_interval_samples = retrig_interval_samples(
+        &resolved,
+        data.sample_rate,
+        data.scheduler_snapshot.transport.bpm as f64,
+    );
 
     let total_gate = (resolved.duration as f64 * samples_per_step) as f32;
-    let chop_gate = total_gate / chop as f32;
+    // Each hit is gated to the interval when a repeat is due before the step's
+    // own duration runs out, so hits butt together instead of overlapping.
+    let hit_gate = retrig_hit_gate(total_gate, retrig_repeats, retrig_interval_samples);
 
     let fallback_sampler_params = || {
         let inst_slot = &data.state.pattern.instrument_slots[track_idx];
@@ -211,15 +220,30 @@ pub(super) fn fire_resolved(
             slice_mode: inst_slot
                 .plocks
                 .get(step, crate::instruments::sampler::SLOT_PARAM_SLICE_MODE)
-                .unwrap_or_else(|| inst_slot.defaults.get(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE)),
+                .unwrap_or_else(|| {
+                    inst_slot
+                        .defaults
+                        .get(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE)
+                }),
             slice_sensitivity: inst_slot
                 .plocks
-                .get(step, crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY)
-                .unwrap_or_else(|| inst_slot.defaults.get(crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY)),
+                .get(
+                    step,
+                    crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
+                )
+                .unwrap_or_else(|| {
+                    inst_slot
+                        .defaults
+                        .get(crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY)
+                }),
             slice_base: inst_slot
                 .plocks
                 .get(step, crate::instruments::sampler::SLOT_PARAM_SLICE_BASE)
-                .unwrap_or_else(|| inst_slot.defaults.get(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE)),
+                .unwrap_or_else(|| {
+                    inst_slot
+                        .defaults
+                        .get(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE)
+                }),
             start_point_locked: inst_slot.plocks.get(step, 2).is_some(),
             end_point_locked: inst_slot.plocks.get(step, 3).is_some(),
             warp_preserve: live_slot_resolved_node_param_value(
@@ -249,7 +273,11 @@ pub(super) fn fire_resolved(
             "[srange] trigger dispatch track={} step={} source={} start={} end={}",
             track_idx,
             step,
-            if scheduled_source { "scheduled" } else { "fallback" },
+            if scheduled_source {
+                "scheduled"
+            } else {
+                "fallback"
+            },
             sampler_params.start_point,
             sampler_params.end_point,
         );
@@ -317,28 +345,20 @@ pub(super) fn fire_resolved(
                 lid,
                 frame_offset,
                 seq,
-                chop_gate,
+                hit_gate,
                 resolved.velocity,
             );
         }
-        if chop > 1 {
-            schedule_chop_events(
-                data,
-                track_idx,
-                frame_offset,
-                chop_gate as f64,
-                chop_gate as f64,
-                chop - 1,
-                step,
-                chop_gate,
-            );
-        } else {
-            cancel_chops_for_track(
-                &mut data.countdown_events,
-                &mut data.block_events,
-                track_idx,
-            );
-        }
+        arm_step_retrig(
+            data,
+            track_idx,
+            frame_offset,
+            step,
+            retrig_repeats,
+            retrig_interval_samples,
+            hit_gate,
+            RetrigTarget::Step,
+        );
         data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
         return;
     }
@@ -355,6 +375,12 @@ pub(super) fn fire_resolved(
     let free_patch = is_custom
         && track_custom_run_mode(&data.state, track_idx) == CustomInstrumentRunMode::FreePatch;
 
+    // Custom (dgen) voices a retrig burst must re-excite. Collected as the
+    // initial hit allocates them so each repeat re-fires the SAME logical
+    // voice with the gate held, rather than stealing a fresh one.
+    let mut retrig_custom_voices = [RetrigCustomVoice::default(); MAX_VOICES];
+    let mut retrig_custom_count = 0usize;
+
     // Check chord data: if chord has notes, trigger each note on its own voice
     let mut sampler_voice_fired = false;
     let chord_count = chord.count;
@@ -366,7 +392,8 @@ pub(super) fn fire_resolved(
             } else {
                 total_gate
             };
-            let note_chop_gate = note_total_gate / chop as f32;
+            let note_hit_gate =
+                retrig_hit_gate(note_total_gate, retrig_repeats, retrig_interval_samples);
             let transpose =
                 resolved_chord_transpose(chord.notes[n], step_transpose, resolved.transpose);
             if is_custom {
@@ -485,6 +512,14 @@ pub(super) fn fire_resolved(
                 unsafe {
                     send_custom_trigger(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity);
                 }
+                if retrig_custom_count < MAX_VOICES {
+                    retrig_custom_voices[retrig_custom_count] = RetrigCustomVoice {
+                        logical_id: lid,
+                        pitch_hz,
+                        velocity,
+                    };
+                    retrig_custom_count += 1;
+                }
                 if gate_mode > 0.5 {
                     schedule_gate_off_event(
                         data,
@@ -553,7 +588,7 @@ pub(super) fn fire_resolved(
                         sampler_seq,
                         velocity,
                         resolved.speed * playback_speed,
-                        note_chop_gate,
+                        note_hit_gate,
                         attack_samples,
                         release_samples,
                         gate_mode,
@@ -708,6 +743,14 @@ pub(super) fn fire_resolved(
             unsafe {
                 send_custom_trigger(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity);
             }
+            if retrig_custom_count < MAX_VOICES {
+                retrig_custom_voices[retrig_custom_count] = RetrigCustomVoice {
+                    logical_id: lid,
+                    pitch_hz,
+                    velocity,
+                };
+                retrig_custom_count += 1;
+            }
             if gate_mode > 0.5 {
                 schedule_gate_off_event(
                     data,
@@ -776,7 +819,7 @@ pub(super) fn fire_resolved(
                     sampler_seq,
                     velocity,
                     resolved.speed * playback_speed,
-                    chop_gate,
+                    hit_gate,
                     attack_samples,
                     release_samples,
                     gate_mode,
@@ -836,30 +879,173 @@ pub(super) fn fire_resolved(
 
     data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
 
-    // Setup chop re-triggers (sampler only — custom instruments handle gate duration internally)
-    if !is_custom && chop > 1 {
-        schedule_chop_events(
-            data,
-            track_idx,
-            frame_offset,
-            samples_per_step / chop as f64,
-            samples_per_step / chop as f64,
-            chop - 1,
-            step,
-            chop_gate,
-        );
+    // Arm the retrig burst. Unlike the retired chop path this runs for custom
+    // (dgen) tracks too: `retrig_target` carries the logical voices the initial
+    // hit allocated so each repeat re-excites the *same* voice.
+    let retrig_target = if let (true, Some(engine_id)) = (is_custom, engine_id) {
+        RetrigTarget::Custom {
+            voices: retrig_custom_voices,
+            count: retrig_custom_count,
+            engine_id,
+            free_patch,
+            gated: gate_mode > 0.5,
+        }
+    } else if is_custom {
+        // No engine resolved: nothing was allocated above, so nothing to re-fire.
+        RetrigTarget::Custom {
+            voices: retrig_custom_voices,
+            count: 0,
+            engine_id: 0,
+            free_patch,
+            gated: gate_mode > 0.5,
+        }
     } else {
-        cancel_chops_for_track(
+        RetrigTarget::Step
+    };
+    let retrig_repeats = armed_retrig_repeats(retrig_repeats, &retrig_target);
+    arm_step_retrig(
+        data,
+        track_idx,
+        frame_offset,
+        step,
+        retrig_repeats,
+        retrig_interval_samples,
+        hit_gate,
+        retrig_target,
+    );
+}
+
+/// Repeats after the initial hit. `RETRIG_INFINITE` rolls until the next trig
+/// on the track cancels the burst.
+pub(super) fn retrig_repeats_from_resolved(resolved: &crate::accumulator::ResolvedStep) -> u32 {
+    if resolved.retrig >= crate::sequencer::RETRIG_INFINITE {
+        u32::MAX
+    } else {
+        resolved.retrig.max(0.0).round() as u32
+    }
+}
+
+/// Samples between two retrigs: the rate is retrigs *per beat*, so the interval
+/// is tempo-relative exactly like the Machinedrum's RTIM.
+pub(super) fn retrig_interval_samples(
+    resolved: &crate::accumulator::ResolvedStep,
+    sample_rate: f64,
+    bpm: f64,
+) -> f64 {
+    let rate = resolved.retrig_rate as f64;
+    if !(rate > 0.0) || !(bpm > 0.0) {
+        return f64::INFINITY;
+    }
+    (sample_rate * 60.0 / bpm) / rate
+}
+
+/// Gate for one hit of a burst: the step's own gate, shortened to the retrig
+/// interval when a repeat is due before it ends.
+pub(super) fn retrig_hit_gate(total_gate: f32, repeats: u32, interval_samples: f64) -> f32 {
+    if repeats == 0 || !interval_samples.is_finite() {
+        return total_gate;
+    }
+    total_gate.min(interval_samples as f32)
+}
+
+/// Repeats actually armed for a fired step. A custom track that allocated no
+/// voice (pool exhausted, missing graph nodes) has nothing to re-excite, so its
+/// burst stays cancelled rather than firing into a dead logical id.
+pub(super) fn armed_retrig_repeats(repeats: u32, target: &RetrigTarget) -> u32 {
+    match target {
+        RetrigTarget::Custom { count: 0, .. } => 0,
+        _ => repeats,
+    }
+}
+
+/// Arm (or, with no repeats, clear) the track's retrig burst.
+fn arm_step_retrig(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    frame_offset: u32,
+    step: usize,
+    repeats: u32,
+    interval_samples: f64,
+    gate: f32,
+    target: RetrigTarget,
+) {
+    if repeats == 0 || !interval_samples.is_finite() {
+        cancel_retrigs_for_track(
             &mut data.countdown_events,
             &mut data.block_events,
             track_idx,
         );
+        return;
     }
+    schedule_retrig_events(
+        data,
+        track_idx,
+        frame_offset,
+        interval_samples,
+        interval_samples,
+        repeats,
+        step,
+        gate,
+        target,
+    );
 }
 
-pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent, frame_offset: u32) {
+pub(super) fn dispatch_retrig_event(
+    data: &mut AudioCallbackData,
+    event: RetrigEvent,
+    frame_offset: u32,
+) {
     let track_idx = event.track_idx;
     if track_idx >= data.state.active_track_count() {
+        return;
+    }
+    if let RetrigTarget::Custom {
+        voices,
+        count,
+        engine_id,
+        free_patch,
+        gated,
+    } = event.target
+    {
+        // Custom voices are re-excited in place: gatepitch turns each trigger
+        // into a fresh pulse while the gate stays held, so envelopes keyed on
+        // `(max gate_rising trigger)` restart and one-shots re-fire.
+        for voice in voices.iter().take(count) {
+            if voice.logical_id == 0 {
+                continue;
+            }
+            let seq = next_event_sequence_from(&mut data.event_seq);
+            unsafe {
+                send_custom_trigger(
+                    data.lg.0,
+                    voice.logical_id,
+                    frame_offset,
+                    seq,
+                    voice.pitch_hz,
+                    voice.velocity,
+                );
+            }
+            if gated {
+                // A repeat that lands after the step's own gate-off re-opens
+                // the gate (the note-on sets gate high in gatepitch), so it
+                // must bring its own gate-off or the voice hangs open once the
+                // burst ends. `schedule_gate_off_event` also cancels the
+                // previous pending gate-off for this lid, which is what makes
+                // consecutive hits butt together.
+                schedule_gate_off_event(
+                    data,
+                    track_idx,
+                    voice.logical_id,
+                    frame_offset,
+                    event.gate as f64,
+                    GateOffTarget::Custom {
+                        engine_id,
+                        free_patch,
+                    },
+                );
+            }
+        }
+        data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
         return;
     }
     if InstrumentType::from_runtime_flag(
@@ -898,7 +1084,7 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
                     fvalue: fall,
                 },
             );
-            trigger_modulator_pulse(data.lg.0, lid, frame_offset, seq, event.chop_gate, velocity);
+            trigger_modulator_pulse(data.lg.0, lid, frame_offset, seq, event.gate, velocity);
         }
         data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
         return;
@@ -1080,7 +1266,7 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
             sampler_seq,
             sd.get(event.step, StepParam::Velocity),
             sd.get(event.step, StepParam::Speed) * chop_playback_speed,
-            event.chop_gate,
+            event.gate,
             attack_samples,
             release_samples,
             gate_mode,

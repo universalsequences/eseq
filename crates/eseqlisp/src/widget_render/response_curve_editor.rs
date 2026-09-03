@@ -613,9 +613,12 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
         // Two filter bands (e.g. highpass + lowpass) render as one combined
         // response: each instance also carries the *other* band so the shader
         // can sum the two, and only the first instance draws the curve.
+        // `:combine true` opts an :eq editor into the same summing (e.g. a
+        // low shelf + high shelf drawn as one damping curve).
+        let combine = matches!(node.props.get("combine"), Some(Value::Bool(true)));
         let enabled: Vec<&ResponseBand> = bands.iter().filter(|band| band.enabled).collect();
         let combined_partner = |band: &ResponseBand| -> Option<&ResponseBand> {
-            if filter_mode > 0.5 && enabled.len() == 2 {
+            if (filter_mode > 0.5 || combine) && enabled.len() == 2 {
                 enabled.iter().copied().find(|other| other.id != band.id)
             } else {
                 None
@@ -626,14 +629,25 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
             if !band.enabled {
                 continue;
             }
+            // In filter mode the partner carries (display Q, octave span); in
+            // eq mode it carries (gain t, q t) — the shader picks by mode.
             let (other_type, other_freq_t, other_q, other_span) = combined_partner(band)
                 .map(|other| {
-                    (
-                        band_type_code(&other.band_type) + 1.0,
-                        freq_to_t(other.freq, other.freq_min, other.freq_max),
-                        other.display_q(),
-                        band_octave_span(other),
-                    )
+                    if filter_mode > 0.5 {
+                        (
+                            band_type_code(&other.band_type) + 1.0,
+                            freq_to_t(other.freq, other.freq_min, other.freq_max),
+                            other.display_q(),
+                            band_octave_span(other),
+                        )
+                    } else {
+                        (
+                            band_type_code(&other.band_type) + 1.0,
+                            freq_to_t(other.freq, other.freq_min, other.freq_max),
+                            band_y_t(other, false),
+                            q_to_t(other.q, other.q_min, other.q_max),
+                        )
+                    }
                 })
                 .unwrap_or((0.0, 0.0, 0.0, 0.0));
             primitives.push(GpuPrimitive::WidgetInstance {
@@ -735,10 +749,7 @@ float rce_filterResponseY(float bandType, float x, float freqT, float q, float o
     return 0.5 + decibels / 48.0;
 }
 
-float rce_otherY(float otherType, float x, float otherFreqT, float otherQ, float otherSpan) {
-    if (otherType < 0.5) { return 0.0; }
-    return rce_filterResponseY(otherType - 1.0, x, otherFreqT, otherQ, otherSpan) - 0.5;
-}
+float rce_otherY(float otherType, float x, float otherFreqT, float otherQ, float otherSpan, float isFilter);
 
 float rce_curveY(
     float bandType,
@@ -782,6 +793,17 @@ float rce_curveY(
     return mix(0.5, yT, peak);
 }
 
+// Contribution (plot units, 0 at unity) of a second band so two bands draw as
+// one combined curve. Filter mode: (otherQ, otherSpan) = display Q + octave
+// span; eq mode: (otherQ, otherSpan) = gain t + q t.
+float rce_otherY(float otherType, float x, float otherFreqT, float otherQ, float otherSpan, float isFilter) {
+    if (otherType < 0.5) { return 0.0; }
+    if (isFilter > 0.5) {
+        return rce_filterResponseY(otherType - 1.0, x, otherFreqT, otherQ, otherSpan) - 0.5;
+    }
+    return rce_curveY(otherType - 1.0, x, otherFreqT, clamp(otherQ, 0.0, 1.0), clamp(otherSpan, 0.0, 1.0), 0.0, 1.0, 1.0) - 0.5;
+}
+
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -795,10 +817,10 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float strokeHalf = (in.uniform_b.z <= 0.0) ? 0.004 : in.uniform_b.z;
     float filterQ = max(in.uniform_c.x, 0.001);
     float octaveSpan = max(in.uniform_c.y, 0.001);
-    float otherType = (isFilter > 0.5) ? in.uniform_c.z : 0.0;
+    float otherType = in.uniform_c.z;
     float otherFreqT = clamp(in.uniform_c.w, 0.0, 1.0);
-    float otherQ = max(in.uniform_d.z, 0.001);
-    float otherSpan = max(in.uniform_d.w, 0.001);
+    float otherQ = (isFilter > 0.5) ? max(in.uniform_d.z, 0.001) : in.uniform_d.z;
+    float otherSpan = (isFilter > 0.5) ? max(in.uniform_d.w, 0.001) : in.uniform_d.w;
     float drawCurve = (otherType > 0.5) ? step(bandIndex, 0.5) : 1.0;
 
     float4 col = float4(0.0);
@@ -834,12 +856,12 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float prevX = 0.0;
     float prevY = rce_curveY(
         bandType, 0.0, freqT, yT, qT, isFilter, filterQ, octaveSpan)
-        + rce_otherY(otherType, 0.0, otherFreqT, otherQ, otherSpan);
+        + rce_otherY(otherType, 0.0, otherFreqT, otherQ, otherSpan, isFilter);
     for (int i = 1; i <= steps; i++) {
         float x = float(i) / float(steps);
         float y = rce_curveY(
             bandType, x, freqT, yT, qT, isFilter, filterQ, octaveSpan)
-            + rce_otherY(otherType, x, otherFreqT, otherQ, otherSpan);
+            + rce_otherY(otherType, x, otherFreqT, otherQ, otherSpan, isFilter);
         float2 a = rce_plot(float2(prevX, prevY));
         float2 b = rce_plot(float2(x, y));
         float d = rce_sdSegment(float2(uv.x * aspect, uv.y), float2(a.x * aspect, a.y), float2(b.x * aspect, b.y));
@@ -1115,6 +1137,63 @@ mod tests {
             .expect("curve instance");
         let px_h = node.rect.height * viewport.cell_h;
         assert!((instance.uniform_b[2] - 1.5 / px_h).abs() < 1e-6);
+    }
+
+    #[test]
+    fn eq_mode_combines_two_bands_only_when_opted_in() {
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 640.0,
+            vp_h: 360.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 18.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let bands = || {
+            Value::List(vec![
+                Rc::new(RefCell::new(band_value(0, 250.0, -6.0, 0.7, true))),
+                Rc::new(RefCell::new(band_value(1, 6000.0, -12.0, 0.7, false))),
+            ])
+        };
+        let partner_codes = |node: &LayoutNode| -> Vec<f32> {
+            RESPONSE_CURVE_EDITOR_WIDGET
+                .build_primitives("response-curve-editor", node, viewport)
+                .iter()
+                .filter_map(|p| match p {
+                    GpuPrimitive::WidgetInstance { instance, .. } => Some(instance.uniform_c[2]),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Plain :eq mode keeps drawing each band on its own.
+        let mut node = test_node("eq");
+        node.props.insert("bands".to_string(), bands());
+        assert_eq!(partner_codes(&node), vec![0.0, 0.0]);
+
+        // `:combine true` sums them into one curve; the partner carries its
+        // gain t / q t in the slots filter mode uses for Q / octave span.
+        node.props
+            .insert("combine".to_string(), Value::Bool(true));
+        let prims =
+            RESPONSE_CURVE_EDITOR_WIDGET.build_primitives("response-curve-editor", &node, viewport);
+        let instances: Vec<&WidgetInstance> = prims
+            .iter()
+            .filter_map(|p| match p {
+                GpuPrimitive::WidgetInstance { instance, .. } => Some(instance),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(instances.len(), 2);
+        assert!(instances[0].uniform_c[2] > 0.5);
+        assert!(instances[1].uniform_c[2] > 0.5);
+        assert!((instances[0].uniform_d[2] - gain_to_t(-12.0, -12.0, 12.0)).abs() < 1e-3);
+        assert!((instances[1].uniform_d[2] - gain_to_t(-6.0, -12.0, 12.0)).abs() < 1e-3);
     }
 
     #[test]

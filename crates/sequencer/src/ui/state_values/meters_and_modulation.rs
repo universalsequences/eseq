@@ -314,6 +314,62 @@ pub(crate) struct EffectModValues {
     /// One entry per modulation destination the descriptor declares, ascending
     /// by param index.
     pub values: Vec<ParamModValue>,
+    /// Per modulator slot, the source's cycle position for the source editor's
+    /// waveform marker (`STATE_DISPLAY_SLOT_PHASE`), `-1.0` when the source has
+    /// none or the node is not being sampled.
+    pub slot_phases: [f64; sequencer::instruments::voice_modulator::SLOT_COUNT],
+}
+
+/// Reactive field carrying one modulator slot's cycle position (1-based
+/// `slot_number`, matching the panel's `:slot`). Published for every sampled
+/// modulator node, assigned or not, so the source editor can show the LFO the
+/// user is designing before anything is routed to it.
+pub(crate) fn effect_mod_slot_phase_field(node_id: i32, slot_number: usize) -> String {
+    format!("fx-mod-slot-phase-{node_id}-{slot_number}")
+}
+
+/// Marker-less default for every slot phase field.
+pub(crate) const NO_SLOT_PHASES: [f64; sequencer::instruments::voice_modulator::SLOT_COUNT] =
+    [sequencer::instruments::voice_modulator::DISPLAY_PHASE_NONE as f64;
+        sequencer::instruments::voice_modulator::SLOT_COUNT];
+
+/// Whether any modulator slot's source is switched on. Effects default every
+/// slot to Off, so a source being on is the signal that the user is designing
+/// that slot's LFO in the source editor and wants its marker moving before
+/// anything is routed to it. (Instrument slots default to LFO/env/rand/drift,
+/// so an instrument is always sampled while its panel is live.)
+fn any_slot_source_on(
+    desc: &sequencer::effects::EffectDescriptor,
+    value_of: &dyn Fn(usize) -> f32,
+) -> bool {
+    desc.params.iter().enumerate().any(|(idx, param)| {
+        sequencer::instruments::voice_modulator::source_type_name_from_param_name(&param.name)
+            == Some("source")
+            && value_of(idx).round() > 0.5
+    })
+}
+
+fn quantize_display_phase(phase: f32) -> f64 {
+    if phase < 0.0 {
+        sequencer::instruments::voice_modulator::DISPLAY_PHASE_NONE as f64
+    } else {
+        quantize_modulator_unit_value(phase)
+    }
+}
+
+/// One modulator node's display tail: the last output per slot and the cycle
+/// position per slot.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ModulatorSlotDisplay {
+    values: [f32; sequencer::instruments::voice_modulator::SLOT_COUNT],
+    phases: [f64; sequencer::instruments::voice_modulator::SLOT_COUNT],
+}
+
+impl ModulatorSlotDisplay {
+    const NONE: Self = Self {
+        values: [0.0; sequencer::instruments::voice_modulator::SLOT_COUNT],
+        phases: NO_SLOT_PHASES,
+    };
 }
 
 /// Reactive field carrying one param's modulation *offset* — how far the live
@@ -355,11 +411,11 @@ fn quantize_effective_value(pdesc: &sequencer::effects::ParamDescriptor, value: 
 fn read_effect_modulator_slot_values(
     lg: sequencer::audiograph::LiveGraphPtr,
     modulator_node_id: i32,
-) -> [f32; sequencer::instruments::voice_modulator::SLOT_COUNT] {
+) -> ModulatorSlotDisplay {
     use sequencer::instruments::voice_modulator as vm;
     const STATE_LEN: usize = vm::STATE_SIZE;
     const STATE_BYTES: usize = STATE_LEN * std::mem::size_of::<f32>();
-    let mut slots = [0.0_f32; vm::SLOT_COUNT];
+    let mut slots = ModulatorSlotDisplay::NONE;
     if modulator_node_id <= 0 {
         return slots;
     }
@@ -377,8 +433,9 @@ fn read_effect_modulator_slot_values(
     if !copied || state_size < STATE_BYTES {
         return slots;
     }
-    for (slot, value) in slots.iter_mut().enumerate() {
-        *value = state[vm::STATE_DISPLAY_SLOT_VALUE + slot];
+    for slot in 0..vm::SLOT_COUNT {
+        slots.values[slot] = state[vm::STATE_DISPLAY_SLOT_VALUE + slot];
+        slots.phases[slot] = quantize_display_phase(state[vm::STATE_DISPLAY_SLOT_PHASE + slot]);
     }
     slots
 }
@@ -560,7 +617,11 @@ fn effect_mod_values_for_lanes(
             scale,
         });
     }
-    EffectModValues { node_id, values }
+    EffectModValues {
+        node_id,
+        values,
+        slot_phases: NO_SLOT_PHASES,
+    }
 }
 
 fn effect_mod_values_for_slot(
@@ -570,23 +631,30 @@ fn effect_mod_values_for_slot(
     modulator_node_id: i32,
     value_of: &dyn Fn(usize) -> f32,
     live: bool,
+    editor_visible: bool,
     wanted: &mut HashSet<i32>,
 ) -> EffectModValues {
-    use sequencer::instruments::voice_modulator::SLOT_COUNT;
     // An unmodulated effect costs nothing new — no watchlist entry, no engine
     // state read, and all-zero slot values make the pure half return exactly
     // the base values. The lanes are resolved once and shared with the
     // arithmetic below, so the gate and the values can never disagree about
-    // what is modulated.
+    // what is modulated. The one exception is the chain whose source editor
+    // is on screen: its modulator is sampled even while nothing is routed, so
+    // the editor's waveform marker moves while the user designs the LFO.
     let lanes = destination_lanes(desc, value_of);
-    let modulated = live && modulator_node_id > 0 && lanes.iter().any(|(_, lanes)| lanes.is_some());
-    let slot_values = if modulated {
+    let modulated = lanes.iter().any(|(_, lanes)| lanes.is_some());
+    let sampled = live
+        && modulator_node_id > 0
+        && (modulated || (editor_visible && any_slot_source_on(desc, value_of)));
+    let display = if sampled {
         wanted.insert(modulator_node_id);
         read_effect_modulator_slot_values(lg, modulator_node_id)
     } else {
-        [0.0_f32; SLOT_COUNT]
+        ModulatorSlotDisplay::NONE
     };
-    effect_mod_values_for_lanes(desc, node_id, value_of, &slot_values, &lanes)
+    let mut out = effect_mod_values_for_lanes(desc, node_id, value_of, &display.values, &lanes);
+    out.slot_phases = display.phases;
+    out
 }
 
 /// Sample every live effect instance's effective parameter values.
@@ -654,6 +722,7 @@ pub(crate) fn read_mod_display_values(
                 slot.modulator_node_id.load(Ordering::Relaxed) as i32,
                 &value_of,
                 live,
+                selected_track == Some(track),
                 &mut wanted,
             ));
         }
@@ -687,6 +756,7 @@ pub(crate) fn read_mod_display_values(
                 slot.modulator_node_id as i32,
                 &value_of,
                 live,
+                true,
                 &mut wanted,
             ));
         }
@@ -745,6 +815,8 @@ pub(crate) fn read_mod_display_values(
 pub(crate) struct InstrumentModValues {
     pub track: usize,
     pub values: Vec<ParamModValue>,
+    /// See `EffectModValues::slot_phases`.
+    pub slot_phases: [f64; sequencer::instruments::voice_modulator::SLOT_COUNT],
 }
 
 /// Reactive field carrying one instrument param's modulation offset. Matches
@@ -764,6 +836,17 @@ pub(crate) fn fx_instrument_mod_value_field(param_idx: usize) -> String {
 /// `effect_mod_scale_field`.
 pub(crate) fn fx_instrument_mod_scale_field(param_idx: usize) -> String {
     format!("fx-instrument-mod-scale-{param_idx}")
+}
+
+/// One modulator slot's cycle position for the FX-tile instrument panel's
+/// source editor; see `effect_mod_slot_phase_field`.
+pub(crate) fn fx_instrument_mod_slot_phase_field(slot_number: usize) -> String {
+    format!("fx-instrument-mod-slot-phase-{slot_number}")
+}
+
+/// Track-keyed twin of `fx_instrument_mod_slot_phase_field`.
+pub(crate) fn instrument_mod_slot_phase_field(track: usize, slot_number: usize) -> String {
+    format!("instrument-mod-slot-phase-{track}-{slot_number}")
 }
 
 /// Track-keyed variants, for the sampler panel. It is a separate builder whose
@@ -791,6 +874,8 @@ pub(crate) struct RackSlotModValues {
     pub track: usize,
     pub slot_idx: usize,
     pub values: Vec<ParamModValue>,
+    /// See `EffectModValues::slot_phases`.
+    pub slot_phases: [f64; sequencer::instruments::voice_modulator::SLOT_COUNT],
 }
 
 /// Reactive fields for a rack slot's params, keyed by track *and* slot the way
@@ -805,6 +890,16 @@ pub(crate) fn rack_slot_mod_value_field(track: usize, slot_idx: usize, param_idx
 
 pub(crate) fn rack_slot_mod_scale_field(track: usize, slot_idx: usize, param_idx: usize) -> String {
     format!("rack-mod-scale-{track}-{slot_idx}-{param_idx}")
+}
+
+/// One modulator slot's cycle position for the rack slot's source editor; see
+/// `effect_mod_slot_phase_field`.
+pub(crate) fn rack_slot_mod_slot_phase_field(
+    track: usize,
+    slot_idx: usize,
+    slot_number: usize,
+) -> String {
+    format!("rack-mod-slot-phase-{track}-{slot_idx}-{slot_number}")
 }
 
 /// Sample the selected track's selected rack slot, if it declares any
@@ -823,7 +918,6 @@ fn read_rack_slot_mod_values(
     live: bool,
     wanted: &mut HashSet<i32>,
 ) -> Option<RackSlotModValues> {
-    use sequencer::instruments::voice_modulator::SLOT_COUNT;
     // Borrow the snapshot rather than cloning it: a rack track owns every
     // slot's p-lock grid and effect descriptors (~100 String-bearing params
     // each), which is far too much to copy on a 50 ms meter poll. Nothing under
@@ -854,9 +948,6 @@ fn read_rack_slot_mod_values(
         super::rack_panel::rack_slot_param_value(rack, slot_idx, slot, desc, idx, selected_step)
     };
     let lanes = destination_lanes(desc, &value_of);
-    if lanes.is_empty() {
-        return None;
-    }
     // A track or slot that has gone out of range simply has no modulator to
     // read; it must never index-panic the UI thread.
     let modulator_node_id = state
@@ -866,15 +957,20 @@ fn read_rack_slot_mod_values(
         .and_then(|slots| slots.get(slot_idx))
         .map(|node_id| node_id.load(Ordering::Relaxed) as i32)
         .unwrap_or(0);
-    let modulated = live && modulator_node_id > 0 && lanes.iter().any(|(_, lanes)| lanes.is_some());
-    let slot_values = if modulated {
+    // The selected slot's source editor is on screen, so its modulator is
+    // sampled whether or not anything is routed yet (waveform marker).
+    let sampled = live && modulator_node_id > 0 && any_slot_source_on(desc, &value_of);
+    if lanes.is_empty() && !sampled {
+        return None;
+    }
+    let display = if sampled {
         wanted.insert(modulator_node_id);
         read_effect_modulator_slot_values(lg, modulator_node_id)
     } else {
-        [0.0_f32; SLOT_COUNT]
+        ModulatorSlotDisplay::NONE
     };
     // Rack slot panels display user-domain values like the instrument panel.
-    let stored = effect_mod_values_for_lanes(desc, 0, &value_of, &slot_values, &lanes);
+    let stored = effect_mod_values_for_lanes(desc, 0, &value_of, &display.values, &lanes);
     let values = stored
         .values
         .into_iter()
@@ -894,6 +990,7 @@ fn read_rack_slot_mod_values(
         track,
         slot_idx,
         values,
+        slot_phases: display.phases,
     })
 }
 
@@ -945,12 +1042,30 @@ pub(crate) fn sync_rack_slot_mod_offset_field_delta(
                         .effects_dirty;
                 }
             }
+            let (dirty, count) = publish_slot_phases(
+                rt,
+                Some(&previous.slot_phases),
+                &NO_SLOT_PHASES,
+                |slot| rack_slot_mod_slot_phase_field(previous.track, previous.slot_idx, slot),
+            );
+            effects_dirty |= dirty;
+            published += count;
         }
         return (effects_dirty, published);
     };
     let previous = previous.filter(|previous| {
         previous.track == current.track && previous.slot_idx == current.slot_idx
     });
+    {
+        let (dirty, count) = publish_slot_phases(
+            rt,
+            previous.map(|previous| &previous.slot_phases),
+            &current.slot_phases,
+            |slot| rack_slot_mod_slot_phase_field(current.track, current.slot_idx, slot),
+        );
+        effects_dirty |= dirty;
+        published += count;
+    }
     for sampled in &current.values {
         let was = previous.and_then(|previous| {
             previous
@@ -1016,7 +1131,6 @@ fn read_instrument_mod_values_for_track(
     live: bool,
     wanted: &mut HashSet<i32>,
 ) -> Option<InstrumentModValues> {
-    use sequencer::instruments::voice_modulator::SLOT_COUNT;
     let desc = app.graph.instrument_descriptors.get(track)?;
     if desc.instrument_modulation_targets.is_empty() {
         return None;
@@ -1041,9 +1155,6 @@ fn read_instrument_mod_values_for_track(
     };
 
     let lanes = destination_lanes(desc, &value_of);
-    if lanes.is_empty() {
-        return None;
-    }
     // A track that has gone out of range simply has no modulator to read; it
     // must never index-panic the UI thread.
     let modulator_node_id = state
@@ -1052,19 +1163,24 @@ fn read_instrument_mod_values_for_track(
         .get(track)
         .map(|node_id| node_id.load(Ordering::Relaxed) as i32)
         .unwrap_or(0);
-    let modulated = live && modulator_node_id > 0 && lanes.iter().any(|(_, lanes)| lanes.is_some());
-    let slot_values = if modulated {
+    // The selected track's source editor is on screen, so its modulator is
+    // sampled whether or not anything is routed yet (waveform marker).
+    let sampled = live && modulator_node_id > 0 && any_slot_source_on(desc, &value_of);
+    if lanes.is_empty() && !sampled {
+        return None;
+    }
+    let display = if sampled {
         wanted.insert(modulator_node_id);
         read_effect_modulator_slot_values(lg, modulator_node_id)
     } else {
-        [0.0_f32; SLOT_COUNT]
+        ModulatorSlotDisplay::NONE
     };
     // The shared arithmetic works in the stored domain; the instrument panel
     // displays user-domain values (percent params are stored 0..1 and shown
     // 0..100), so scale the offset on the way out. `stored_to_user` is linear,
     // so scaling a difference is the same as differencing two scaled values,
     // and a zero offset stays exactly zero.
-    let stored = effect_mod_values_for_lanes(desc, 0, &value_of, &slot_values, &lanes);
+    let stored = effect_mod_values_for_lanes(desc, 0, &value_of, &display.values, &lanes);
     let values = stored
         .values
         .into_iter()
@@ -1083,7 +1199,33 @@ fn read_instrument_mod_values_for_track(
             })
         })
         .collect();
-    Some(InstrumentModValues { track, values })
+    Some(InstrumentModValues {
+        track,
+        values,
+        slot_phases: display.phases,
+    })
+}
+
+/// Publish the slot phases that changed since `previous` (all of them when
+/// `previous` is `None`, i.e. the sampled node changed or sampling started).
+fn publish_slot_phases(
+    rt: &mut Runtime,
+    previous: Option<&[f64; sequencer::instruments::voice_modulator::SLOT_COUNT]>,
+    current: &[f64; sequencer::instruments::voice_modulator::SLOT_COUNT],
+    field: impl Fn(usize) -> String,
+) -> (bool, usize) {
+    let mut effects_dirty = false;
+    let mut published = 0usize;
+    for (slot, &phase) in current.iter().enumerate() {
+        if previous.is_some_and(|previous| previous[slot] == phase) {
+            continue;
+        }
+        published += 1;
+        effects_dirty |= rt
+            .set_reactive("SEQ", &field(slot + 1), Value::Number(phase))
+            .effects_dirty;
+    }
+    (effects_dirty, published)
 }
 
 /// Publish the changed instrument offsets. Same delta contract as the effect
@@ -1125,10 +1267,40 @@ pub(crate) fn sync_instrument_mod_offset_field_delta(
                         .effects_dirty;
                 }
             }
+            let (dirty, count) = publish_slot_phases(
+                rt,
+                Some(&previous.slot_phases),
+                &NO_SLOT_PHASES,
+                fx_instrument_mod_slot_phase_field,
+            );
+            effects_dirty |= dirty;
+            published += count;
+            let (dirty, count) =
+                publish_slot_phases(rt, Some(&previous.slot_phases), &NO_SLOT_PHASES, |slot| {
+                    instrument_mod_slot_phase_field(previous.track, slot)
+                });
+            effects_dirty |= dirty;
+            published += count;
         }
         return (effects_dirty, published);
     };
     let previous = previous.filter(|previous| previous.track == current.track);
+    {
+        let was = previous.map(|previous| &previous.slot_phases);
+        let (dirty, count) = publish_slot_phases(
+            rt,
+            was,
+            &current.slot_phases,
+            fx_instrument_mod_slot_phase_field,
+        );
+        effects_dirty |= dirty;
+        published += count;
+        let (dirty, count) = publish_slot_phases(rt, was, &current.slot_phases, |slot| {
+            instrument_mod_slot_phase_field(current.track, slot)
+        });
+        effects_dirty |= dirty;
+        published += count;
+    }
     for sampled in &current.values {
         let was = previous.and_then(|previous| {
             previous
@@ -1194,6 +1366,14 @@ pub(crate) fn sync_effect_mod_offset_field_delta(
         let prev = previous
             .iter()
             .find(|candidate| candidate.node_id == response.node_id);
+        let (dirty, count) = publish_slot_phases(
+            rt,
+            prev.map(|prev| &prev.slot_phases),
+            &response.slot_phases,
+            |slot| effect_mod_slot_phase_field(response.node_id, slot),
+        );
+        effects_dirty |= dirty;
+        published += count;
         for sampled in &response.values {
             let was = prev.and_then(|prev| {
                 prev.values

@@ -1,6 +1,9 @@
 use super::*;
 
-pub(crate) const PROCESS_LANE_MODE_OFFSET: usize = 7;
+/// Modes 0..8 are the built-in step params (see `metal_step_param_for_mode`);
+/// process lanes start after them. MUST match `seqv-process-lane-mode-offset`
+/// in content/ui/seqv-track-params.lisp.
+pub(crate) const PROCESS_LANE_MODE_OFFSET: usize = 9;
 
 #[derive(Clone, Debug)]
 pub(super) struct ProcessLaneUiEntry {

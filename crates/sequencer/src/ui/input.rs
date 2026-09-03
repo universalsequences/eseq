@@ -765,6 +765,8 @@ fn metal_step_param_for_mode(mode: usize) -> Option<StepParam> {
         3 => Some(StepParam::Transpose),
         4 => Some(StepParam::Pan),
         6 => Some(StepParam::Delay),
+        7 => Some(StepParam::Retrig),
+        8 => Some(StepParam::RetrigRate),
         // Sync is rendered as a label in the step footer, not a numeric picker.
         _ => None,
     }
@@ -779,6 +781,8 @@ fn metal_mode_for_step_param(param: StepParam) -> Option<usize> {
         StepParam::Pan => Some(4),
         StepParam::Sync => Some(5),
         StepParam::Delay => Some(6),
+        StepParam::Retrig => Some(7),
+        StepParam::RetrigRate => Some(8),
         _ => None,
     }
 }
@@ -5387,7 +5391,7 @@ mod live_keyboard_tests {
                 r#"
                 (def eseq.seq-core-state/seq-has-selected-bus? () false)
                 (def eseq.sequencer/current-selected-step () 2)
-                (def eseq.sequencer/current-param-mode () 7)
+                (def eseq.sequencer/current-param-mode () 9)
                 (def eseq.sequencer/current-number-picker-key () "seqv-expanded-param-number-picker-0")
                 (defstate cursor-toggle-count 0)
                 (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
@@ -5468,7 +5472,7 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-7-2")"#)
+                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-9-2")"#)
                 .unwrap(),
             Some(Value::Number(2.0)),
             "soft edit commit should update the visible process lane slider slot immediately"

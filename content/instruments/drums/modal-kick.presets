@@ -1,0 +1,128 @@
+{
+  "version": 1,
+  "engine_name": "drums/modal-kick/",
+  "source_file": "instruments/drums/modal-kick/.lisp",
+  "presets": [
+    {
+      "id": "Studio",
+      "name": "Studio",
+      "base_note_offset": 0.0,
+      "params": {}
+    },
+    {
+      "id": "Open",
+      "name": "Open",
+      "base_note_offset": 0.0,
+      "params": {
+        "muffle": 0.0,
+        "port": 0.0,
+        "release": 800.0,
+        "release2": 950.0,
+        "bottom_mix": 0.8,
+        "bend": 0.7
+      }
+    },
+    {
+      "id": "Tight",
+      "name": "Tight",
+      "base_note_offset": 0.0,
+      "params": {
+        "muffle": 0.5,
+        "port": 0.7,
+        "release": 260.0,
+        "release2": 300.0,
+        "click": 0.9,
+        "punch": 0.5
+      }
+    },
+    {
+      "id": "Wood Beater",
+      "name": "Wood Beater",
+      "base_note_offset": 0.0,
+      "params": {
+        "beater_hard": 0.004,
+        "click": 1.2,
+        "bright": 0.8,
+        "shell_level": 0.5
+      }
+    },
+    {
+      "id": "Big 24",
+      "name": "Big 24",
+      "base_note_offset": 0.0,
+      "params": {
+        "tune": -39.0,
+        "pitch2_ratio": 0.95,
+        "release": 900.0,
+        "release2": 1100.0,
+        "stretch": 0.8,
+        "bend": 1.3,
+        "bend_time": 60.0,
+        "bottom_mix": 0.7,
+        "level": 0.15
+      }
+    },
+    {
+      "id": "Jazz 18",
+      "name": "Jazz 18",
+      "base_note_offset": 0.0,
+      "params": {
+        "tune": -30.0,
+        "release": 700.0,
+        "release2": 800.0,
+        "muffle": 0.0,
+        "port": 0.0,
+        "bend": 0.4,
+        "bottom_mix": 0.9,
+        "click": 0.3,
+        "shell_pitch": 240.0
+      }
+    },
+    {
+      "id": "Rock",
+      "name": "Rock",
+      "base_note_offset": 0.0,
+      "params": {
+        "muffle": 0.4,
+        "port": 1.0,
+        "punch": 0.6,
+        "drive": 0.35,
+        "shell_level": 0.5,
+        "click": 0.8,
+        "release": 380.0
+      }
+    },
+    {
+      "id": "Dead",
+      "name": "Dead",
+      "base_note_offset": 0.0,
+      "params": {
+        "muffle": 1.0,
+        "port": 1.0,
+        "release": 200.0,
+        "release2": 200.0,
+        "click": 0.6,
+        "bend": 0.3,
+        "shell_level": 0.05,
+        "level": 0.15
+      }
+    },
+    {
+      "id": "Sub",
+      "name": "Sub",
+      "base_note_offset": 0.0,
+      "params": {
+        "tune": -42.0,
+        "bright": 0.0,
+        "click": 0.15,
+        "bend": 0.3,
+        "release": 1200.0,
+        "release2": 1200.0,
+        "muffle": 0.0,
+        "port": 0.2,
+        "shell_level": 0.0,
+        "tone": -0.5
+      }
+    }
+  ]
+}

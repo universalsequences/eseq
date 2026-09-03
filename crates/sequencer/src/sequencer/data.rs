@@ -20,7 +20,7 @@ pub const MAX_INSTRUMENT_ENGINES: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
 pub const MAX_SAMPLER_POOLS: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
 pub const MAX_STEPS: usize = 256;
 pub const STEPS_PER_PAGE: usize = 16;
-pub const NUM_PARAMS: usize = 10;
+pub const NUM_PARAMS: usize = 12;
 pub const DEFAULT_BPM: u32 = 120;
 pub const TRACK_PATTERN_WORDS: usize = MAX_STEPS / 64;
 pub const MIX_BUS_ID: u64 = 0;
@@ -116,7 +116,11 @@ impl TrackSendPLockData {
     }
 
     pub fn get(&self, step: usize, destination: BusId) -> Option<f32> {
-        self.steps.lock().unwrap().get(step)?.iter()
+        self.steps
+            .lock()
+            .unwrap()
+            .get(step)?
+            .iter()
             .find(|send| send.destination == destination)
             .map(|send| send.amount)
     }
@@ -589,7 +593,27 @@ pub enum StepParam {
     Chop = 7,
     Sync = 8,
     Delay = 9,
+    /// Machinedrum RTRG: number of *repeats* after the initial hit.
+    /// `RETRIG_INFINITE` (127) rolls until the next trig on the track.
+    Retrig = 10,
+    /// Machinedrum RTIM, stored musically: retrigs per beat. Continuous and
+    /// log-sliderd so the top of the range sweeps into audio-rate pitch.
+    RetrigRate = 11,
 }
+
+/// `Retrig` value that means "repeat until the next trig on this track".
+pub const RETRIG_INFINITE: f32 = 127.0;
+
+/// Above this rate the repeats are heard as pitch rather than rhythm, so the
+/// number picker switches from unit steps to semitone-geometric steps.
+pub const RETRIG_RATE_PITCH_THRESHOLD: f32 = 32.0;
+
+/// One equal-tempered semitone, the geometric step used above the threshold.
+pub const RETRIG_RATE_SEMITONE: f32 = 1.059_463_1;
+
+/// Fraction of the lane slider's throw given to the rhythmic range
+/// `1..RETRIG_RATE_PITCH_THRESHOLD`; the pitched range gets the remainder.
+pub const RETRIG_RATE_SPLIT_POSITION: f32 = 0.7;
 
 impl StepParam {
     pub const ALL: [StepParam; NUM_PARAMS] = [
@@ -603,9 +627,11 @@ impl StepParam {
         StepParam::Chop,
         StepParam::Sync,
         StepParam::Delay,
+        StepParam::Retrig,
+        StepParam::RetrigRate,
     ];
 
-    pub const VISIBLE: [StepParam; 7] = [
+    pub const VISIBLE: [StepParam; 9] = [
         StepParam::Duration,
         StepParam::Velocity,
         StepParam::Delay,
@@ -613,6 +639,8 @@ impl StepParam {
         StepParam::Transpose,
         StepParam::Pan,
         StepParam::Sync,
+        StepParam::Retrig,
+        StepParam::RetrigRate,
     ];
 
     pub fn default_value(self) -> f32 {
@@ -627,6 +655,8 @@ impl StepParam {
             StepParam::Chop => 1.0,
             StepParam::Sync => 0.0,
             StepParam::Delay => 0.0,
+            StepParam::Retrig => 0.0,
+            StepParam::RetrigRate => 4.0,
         }
     }
 
@@ -642,6 +672,8 @@ impl StepParam {
             StepParam::Chop => 1.0,
             StepParam::Sync => 0.0,
             StepParam::Delay => 0.0,
+            StepParam::Retrig => 0.0,
+            StepParam::RetrigRate => 1.0,
         }
     }
 
@@ -657,6 +689,8 @@ impl StepParam {
             StepParam::Chop => 8.0,
             StepParam::Sync => (SYNC_COUNT - 1) as f32,
             StepParam::Delay => 1.0,
+            StepParam::Retrig => RETRIG_INFINITE,
+            StepParam::RetrigRate => 1024.0,
         }
     }
 
@@ -672,6 +706,23 @@ impl StepParam {
             StepParam::Chop => 1.0,
             StepParam::Sync => 1.0,
             StepParam::Delay => 0.05,
+            StepParam::Retrig => 1.0,
+            // Below the pitch threshold the picker walks whole retrigs/beat;
+            // above it `increment_at` takes over with semitone steps.
+            StepParam::RetrigRate => 1.0,
+        }
+    }
+
+    /// The increment to use when nudging away from `value`. Only `RetrigRate`
+    /// differs from the flat [`Self::increment`]: above
+    /// [`RETRIG_RATE_PITCH_THRESHOLD`] it steps geometrically by one semitone
+    /// so a drag sweeps pitch evenly instead of crawling.
+    pub fn increment_at(self, value: f32) -> f32 {
+        match self {
+            StepParam::RetrigRate if value >= RETRIG_RATE_PITCH_THRESHOLD => {
+                (value * (RETRIG_RATE_SEMITONE - 1.0)).max(1.0)
+            }
+            _ => self.increment(),
         }
     }
 
@@ -687,6 +738,8 @@ impl StepParam {
             StepParam::Chop => "Chop",
             StepParam::Sync => "Sync",
             StepParam::Delay => "Delay",
+            StepParam::Retrig => "Retrig",
+            StepParam::RetrigRate => "Rate",
         }
     }
 
@@ -702,17 +755,48 @@ impl StepParam {
             StepParam::Chop => "chp",
             StepParam::Sync => "syn",
             StepParam::Delay => "dly",
+            StepParam::Retrig => "rtrg",
+            StepParam::RetrigRate => "rate",
         }
     }
 
     pub fn normalize(self, val: f32) -> f32 {
-        if self == StepParam::Duration {
-            let val = val.clamp(self.slider_min(), self.slider_max());
-            return if val <= 2.0 {
-                val / 4.0
-            } else {
-                0.5 + 0.5 * ((val - 2.0) / 30.0).powf(0.25)
-            };
+        match self {
+            StepParam::Duration => {
+                let val = val.clamp(self.slider_min(), self.slider_max());
+                return if val <= 2.0 {
+                    val / 4.0
+                } else {
+                    0.5 + 0.5 * ((val - 2.0) / 30.0).powf(0.25)
+                };
+            }
+            StepParam::Retrig => {
+                // Cube curve (same as the picker's `:taper "cube"`): half the
+                // lane covers 0..16 repeats, the top still reaches 127 = inf.
+                // Dual-maintained with `retrig-slider-position` in
+                // content/ui/step-grid-interactions.lisp.
+                let val = val.clamp(self.slider_min(), self.slider_max());
+                return (val / self.slider_max()).cbrt().clamp(0.0, 1.0);
+            }
+            StepParam::RetrigRate => {
+                // Two-segment log curve: the rhythmic range 1..32 takes the
+                // bottom `RETRIG_RATE_SPLIT_POSITION` of the throw so rolls
+                // are easy to dial in; the pitched range 32..1024 takes the
+                // rest. Dual-maintained with `retrig-rate-slider-position`
+                // in content/ui/step-grid-interactions.lisp.
+                let val = val.clamp(self.slider_min(), self.slider_max());
+                let split = RETRIG_RATE_PITCH_THRESHOLD;
+                let split_pos = RETRIG_RATE_SPLIT_POSITION;
+                return if val <= split {
+                    split_pos * (val.ln() / split.ln())
+                } else {
+                    split_pos
+                        + (1.0 - split_pos)
+                            * ((val / split).ln() / (self.slider_max() / split).ln())
+                }
+                .clamp(0.0, 1.0);
+            }
+            _ => {}
         }
         let min = self.slider_min();
         let max = self.slider_max();
@@ -724,12 +808,31 @@ impl StepParam {
 
     pub fn denormalize_slider(self, normalized: f32) -> f32 {
         let normalized = normalized.clamp(0.0, 1.0);
-        if self == StepParam::Duration {
-            return if normalized <= 0.5 {
-                normalized * 4.0
-            } else {
-                2.0 + 30.0 * ((normalized - 0.5) * 2.0).powf(4.0)
-            };
+        match self {
+            StepParam::Duration => {
+                return if normalized <= 0.5 {
+                    normalized * 4.0
+                } else {
+                    2.0 + 30.0 * ((normalized - 0.5) * 2.0).powf(4.0)
+                };
+            }
+            StepParam::Retrig => {
+                return (self.slider_max() * normalized * normalized * normalized)
+                    .clamp(self.slider_min(), self.slider_max());
+            }
+            StepParam::RetrigRate => {
+                let split = RETRIG_RATE_PITCH_THRESHOLD;
+                let split_pos = RETRIG_RATE_SPLIT_POSITION;
+                return if normalized <= split_pos {
+                    split.powf(normalized / split_pos)
+                } else {
+                    split
+                        * (self.slider_max() / split)
+                            .powf((normalized - split_pos) / (1.0 - split_pos))
+                }
+                .clamp(self.slider_min(), self.slider_max());
+            }
+            _ => {}
         }
         self.slider_min() + normalized * (self.slider_max() - self.slider_min())
     }
@@ -759,6 +862,14 @@ impl StepParam {
                 }
             }
             StepParam::Delay => format!("{:.2}", val),
+            StepParam::Retrig => {
+                if val >= RETRIG_INFINITE {
+                    "inf".to_string()
+                } else {
+                    format!("{:.0}", val)
+                }
+            }
+            StepParam::RetrigRate => format_retrig_rate(val),
             _ => format!("{:.2}", val),
         }
     }
@@ -793,6 +904,8 @@ impl StepParam {
             StepParam::Chop => 'c',
             StepParam::Sync => 'y',
             StepParam::Delay => 'l',
+            StepParam::Retrig => 'r',
+            StepParam::RetrigRate => 'e',
         }
     }
 
@@ -806,6 +919,8 @@ impl StepParam {
             't' => Some(StepParam::Transpose),
             'p' => Some(StepParam::Pan),
             'y' => Some(StepParam::Sync),
+            'r' => Some(StepParam::Retrig),
+            'e' => Some(StepParam::RetrigRate),
             _ => None,
         }
     }
@@ -822,7 +937,42 @@ impl StepParam {
             StepParam::Chop => ("", "c", "hp"),
             StepParam::Sync => ("s", "y", "n"),
             StepParam::Delay => ("d", "l", "y"),
+            StepParam::Retrig => ("", "r", "trg"),
+            StepParam::RetrigRate => ("ra", "t", "e"),
         }
+    }
+}
+
+/// Retrig interval in Hz for a rate in retrigs/beat at `bpm`.
+pub fn retrig_rate_hz(rate: f32, bpm: f32) -> f32 {
+    rate * bpm / 60.0
+}
+
+/// Musical detents on the rhythmic half of the `RetrigRate` range. Rates that
+/// land on one of these render with the familiar note name appended.
+const RETRIG_RATE_DETENTS: [(f32, &str); 6] = [
+    (2.0, "8th"),
+    (3.0, "8T"),
+    (4.0, "16th"),
+    (6.0, "16T"),
+    (8.0, "32nd"),
+    (12.0, "32T"),
+];
+
+/// Render a `RetrigRate` without a tempo in hand: retrigs per beat, with the
+/// note name at exact rhythmic detents. Callers that know the BPM and want the
+/// pitched reading above [`RETRIG_RATE_PITCH_THRESHOLD`] use
+/// [`retrig_rate_hz`] instead.
+pub fn format_retrig_rate(rate: f32) -> String {
+    for (detent, name) in RETRIG_RATE_DETENTS {
+        if (rate - detent).abs() < 1e-3 {
+            return format!("{detent:.0}/b {name}");
+        }
+    }
+    if rate < 10.0 {
+        format!("{rate:.1}/b")
+    } else {
+        format!("{rate:.0}/b")
     }
 }
 
@@ -1498,10 +1648,20 @@ impl ChordSnapshot {
 /// note-offs and rate switches in order.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RollCommand {
-    NoteOn { track: usize, transpose: f32 },
-    NoteOff { track: usize, transpose: f32 },
-    SetRate { rate: Timebase },
-    SequenceRoll { on: bool },
+    NoteOn {
+        track: usize,
+        transpose: f32,
+    },
+    NoteOff {
+        track: usize,
+        transpose: f32,
+    },
+    SetRate {
+        rate: Timebase,
+    },
+    SequenceRoll {
+        on: bool,
+    },
     /// Roll mode toggled off, transport stop, panic: clear all held rolls.
     ClearAll,
 }
@@ -1782,7 +1942,10 @@ impl SwingResolutionPLockData {
 
 #[cfg(test)]
 mod tests {
-    use super::{LiveTriggerStampRing, PatternStepGeometry, StepParam, Timebase};
+    use super::{
+        retrig_rate_hz, LiveTriggerStampRing, PatternStepGeometry, StepData, StepParam, Timebase,
+        RETRIG_INFINITE, RETRIG_RATE_SEMITONE,
+    };
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
@@ -1874,7 +2037,10 @@ mod tests {
     fn plain_pattern_geometry_matches_uniform_mapping() {
         let geometry = plain_geometry();
         assert_close64(geometry.cycle_beats(), 4.0);
-        assert_close64(geometry.steps_at_beats(5.3), (5.3_f64 * 4.0).rem_euclid(16.0));
+        assert_close64(
+            geometry.steps_at_beats(5.3),
+            (5.3_f64 * 4.0).rem_euclid(16.0),
+        );
         assert_close64(geometry.beats_at_steps(6.5), 6.5 / 4.0);
         assert_close64(geometry.advanced_offset(4.0, 1.25), 9.0);
         assert_close64(geometry.advanced_offset(4.0, 3.0), 0.0);
@@ -1910,5 +2076,88 @@ mod tests {
                 beat.rem_euclid(geometry.cycle_beats()),
             );
         }
+    }
+
+    /// The `RetrigRate` slider curve is dual-maintained with
+    /// `retrig-rate-slider-position` / `-value` in
+    /// content/ui/step-grid-interactions.lisp: two log segments split at 32.
+    #[test]
+    fn retrig_rate_slider_curve_is_log_over_the_whole_range() {
+        let param = StepParam::RetrigRate;
+        assert_eq!(param.normalize(1.0), 0.0, "the bottom of the range is 0");
+        assert_eq!(param.normalize(1024.0), 1.0, "the top of the range is 1");
+        // The rhythm/pitch split (32) sits at the split position, and each
+        // segment is log: 4/beat is exactly a third of the way up the rhythm
+        // segment (log 4 / log 32 = 0.4), i.e. 0.28 of the whole throw.
+        assert!((param.normalize(32.0) - super::RETRIG_RATE_SPLIT_POSITION).abs() < 1e-5);
+        assert!((param.normalize(4.0) - 0.28).abs() < 1e-5);
+        assert!((param.normalize(181.02) - 0.85).abs() < 1e-3);
+        for rate in [1.0f32, 4.0, 6.0, 32.0, 220.0, 1024.0] {
+            let round_tripped = param.denormalize_slider(param.normalize(rate));
+            assert!(
+                (round_tripped - rate).abs() < rate * 1e-3,
+                "rate {rate} round-tripped to {round_tripped}"
+            );
+        }
+        // Out-of-range input clamps rather than producing NaN/inf.
+        assert_eq!(param.normalize(0.0), 0.0);
+        assert_eq!(param.denormalize_slider(-1.0), 1.0);
+        assert_eq!(param.denormalize_slider(2.0), 1024.0);
+    }
+
+    /// Dual-maintained with `retrig-slider-position` / `-value` in
+    /// content/ui/step-grid-interactions.lisp: cube over 0..127.
+    #[test]
+    fn retrig_count_slider_curve_is_cubic() {
+        let param = StepParam::Retrig;
+        assert_eq!(param.normalize(0.0), 0.0);
+        assert_eq!(param.normalize(127.0), 1.0);
+        assert!((param.denormalize_slider(0.5) - 15.875).abs() < 1e-4);
+        for count in [0.0f32, 1.0, 4.0, 16.0, 64.0, 127.0] {
+            let round_tripped = param.denormalize_slider(param.normalize(count));
+            assert!(
+                (round_tripped - count).abs() < 1e-3,
+                "{count} -> {round_tripped}"
+            );
+        }
+    }
+
+    #[test]
+    fn retrig_params_report_machinedrum_ranges_and_displays() {
+        assert_eq!(StepParam::Retrig.default_value(), 0.0);
+        assert_eq!(StepParam::Retrig.min(), 0.0);
+        assert_eq!(StepParam::Retrig.max(), RETRIG_INFINITE);
+        assert_eq!(StepParam::Retrig.format_value(RETRIG_INFINITE), "inf");
+        assert_eq!(StepParam::Retrig.format_value(3.0), "3");
+
+        assert_eq!(StepParam::RetrigRate.default_value(), 4.0, "16ths");
+        assert_eq!(StepParam::RetrigRate.format_value(4.0), "4/b 16th");
+        assert_eq!(StepParam::RetrigRate.format_value(6.0), "6/b 16T");
+        assert_eq!(StepParam::RetrigRate.format_value(220.0), "220/b");
+
+        // 120 BPM, rate 220 = 440 Hz (the spec's worked example).
+        assert!((retrig_rate_hz(220.0, 120.0) - 440.0).abs() < 1e-3);
+
+        // Below the pitch threshold the picker walks whole retrigs/beat;
+        // above it, one semitone at a time.
+        assert_eq!(StepParam::RetrigRate.increment_at(8.0), 1.0);
+        let semitone_step = StepParam::RetrigRate.increment_at(220.0);
+        assert!((220.0 + semitone_step - 220.0 * RETRIG_RATE_SEMITONE).abs() < 1e-2);
+    }
+
+    /// Both new params are storable and appended at the end of the row, so
+    /// existing positional storage is untouched.
+    #[test]
+    fn retrig_params_store_and_clamp_through_step_data() {
+        let data = StepData::new();
+        assert_eq!(StepParam::Retrig.index(), 10);
+        assert_eq!(StepParam::RetrigRate.index(), 11);
+        assert_eq!(data.get(0, StepParam::Retrig), 0.0);
+        assert_eq!(data.get(0, StepParam::RetrigRate), 4.0);
+
+        data.set(0, StepParam::Retrig, 500.0);
+        assert_eq!(data.get(0, StepParam::Retrig), RETRIG_INFINITE);
+        data.set(0, StepParam::RetrigRate, 0.0);
+        assert_eq!(data.get(0, StepParam::RetrigRate), 1.0);
     }
 }

@@ -3606,6 +3606,9 @@ pub fn register_math_natives(vm: &mut VM) {
     math1!("ceil", f64::ceil);
     math1!("round", f64::round);
     math1!("fract", f64::fract);
+    // Natural log / exp, spelled as in the DGenLisp DSP dialect.
+    math1!("log", f64::ln);
+    math1!("exp", f64::exp);
 
     macro_rules! math2 {
         ($name:expr, $op:expr) => {
@@ -3698,7 +3701,7 @@ pub fn register_math_natives(vm: &mut VM) {
     });
 
     vm.mark_natives_expansion_safe(&[
-        "abs", "sqrt", "sin", "cos", "floor", "ceil", "round", "fract", "pow",
+        "abs", "sqrt", "sin", "cos", "floor", "ceil", "round", "fract", "log", "exp", "pow",
         "atan2", "mod", "clamp", "mix", "smoothstep", "vec2", "length", "dot",
     ]);
 }
@@ -4954,16 +4957,28 @@ impl VM {
         // not make an export of a deleted definition look valid.
         let authored_defined_symbols = defined_symbols.clone();
         // Textual extraction yields bare names, but the compiler interns
-        // most defs qualified (`eseq.vanilla/name`) and effect reads record
-        // interned names. Track both forms so hot-reload invalidation
+        // most defs qualified (`<module>/name`, `eseq.vanilla/name` for a
+        // file without a `(module ...)` form) and effect reads record
+        // interned names. Track every form so hot-reload invalidation
         // matches regardless of which slot a def resolved to (a def
         // shadowing a flat native stays flat). Superset only means
-        // conservative over-invalidation.
-        let qualified: Vec<String> = defined_symbols
+        // conservative over-invalidation. The declared module MUST be in
+        // this set: a module file evaluated on its own (eval-buffer on a
+        // file whose owner root does not re-register every dependent
+        // effect) is invalidated only through these names, and a root that
+        // read `eseq.effects.track-panels/step-parameters-panel` never
+        // matched the implicit `eseq.vanilla/...` spelling alone, so the
+        // *step* panel kept its stale tree until a reactive rerun.
+        let mut qualified: Vec<String> = Vec::new();
+        for name in defined_symbols
             .iter()
             .filter(|name| !crate::modules::is_qualified(name))
-            .map(|name| crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name))
-            .collect();
+        {
+            qualified.push(crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name));
+            if let Some(module) = declared_module.as_deref() {
+                qualified.push(crate::modules::qualify(module, name));
+            }
+        }
         defined_symbols.extend(qualified);
         self.clear_effects_for_module(&path);
         self.source_manager

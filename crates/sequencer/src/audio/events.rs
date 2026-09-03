@@ -1,11 +1,11 @@
 /*!
 Callback-side event machinery: the consumer end of the scheduler queue.
 
-Owns the deferred-event types (gate-off, chop, countdown, block) and their
+Owns the deferred-event types (gate-off, retrig, countdown, block) and their
 queues. Scheduled events from the scheduler thread are enqueued per block,
 counted down sample-accurately, promoted to block events, prioritized (with
 mute-group arbitration), and dispatched — ultimately into `fire_resolved` /
-`dispatch_chop_event` / gate-off handling. Also computes swing delays and
+`dispatch_retrig_event` / gate-off handling. Also computes swing delays and
 cancels pending events when tracks or voices are retired.
 */
 
@@ -25,18 +25,54 @@ pub(super) struct GateOffEvent {
     pub(super) target: GateOffTarget,
 }
 
+/// One custom (dgen) voice a retrig burst re-excites. The burst re-fires the
+/// *same* logical voice rather than allocating a new one, so the running patch
+/// restarts its envelopes instead of being voice-stolen mid-roll.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct RetrigCustomVoice {
+    pub(super) logical_id: u64,
+    pub(super) pitch_hz: f32,
+    pub(super) velocity: f32,
+}
+
+/// How a retrig repeat re-fires the track.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ChopEvent {
+pub(super) enum RetrigTarget {
+    /// Sampler and modulator tracks: the repeat re-allocates from the step's
+    /// stored parameters (the path the retired `Chop` param used).
+    Step,
+    /// Custom (dgen) tracks: re-trigger the logical voices the initial hit
+    /// allocated, with the gate left held.
+    Custom {
+        voices: [RetrigCustomVoice; MAX_VOICES],
+        count: usize,
+        /// Pool the voices came from, so each repeat can re-arm its gate-off.
+        engine_id: usize,
+        free_patch: bool,
+        /// Track gate mode at the initial hit. When set, every repeat closes
+        /// its gate after `RetrigEvent::gate` samples; otherwise the patch
+        /// owns its own envelope and repeats only re-pulse the trigger.
+        gated: bool,
+    },
+}
+
+/// A single repeat of a step's retrig burst (Machinedrum RTRG/RTIM). See
+/// `docs/step-retrig-spec.md`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RetrigEvent {
     pub(super) track_idx: usize,
     pub(super) step: usize,
-    pub(super) chop_gate: f32,
+    /// Gate length for this hit, in samples: `min(interval, step duration)`,
+    /// so repeats butt together like the MD's restarted amp envelope.
+    pub(super) gate: f32,
+    pub(super) target: RetrigTarget,
 }
 
 #[derive(Debug)]
 pub(super) enum CountdownEventKind {
     Scheduled(ScheduledEvent),
     GateOff(GateOffEvent),
-    Chop(ChopEvent),
+    Retrig(RetrigEvent),
 }
 
 #[derive(Debug)]
@@ -53,7 +89,7 @@ pub(super) struct CountdownEvent {
 pub(super) enum BlockEventKind {
     Scheduled(ScheduledEvent),
     GateOff(GateOffEvent),
-    Chop(ChopEvent),
+    Retrig(RetrigEvent),
 }
 
 #[derive(Debug)]
@@ -93,7 +129,7 @@ pub(super) fn cancel_gate_off_for_lid(
     });
 }
 
-pub(super) fn cancel_chops_for_track(
+pub(super) fn cancel_retrigs_for_track(
     countdown_events: &mut Vec<CountdownEvent>,
     block_events: &mut Vec<BlockEvent>,
     track_idx: usize,
@@ -101,13 +137,13 @@ pub(super) fn cancel_chops_for_track(
     countdown_events.retain(|event| {
         !matches!(
             event.kind,
-            CountdownEventKind::Chop(ChopEvent { track_idx: event_track, .. }) if event_track == track_idx
+            CountdownEventKind::Retrig(RetrigEvent { track_idx: event_track, .. }) if event_track == track_idx
         )
     });
     block_events.retain(|event| {
         !matches!(
             event.kind,
-            BlockEventKind::Chop(ChopEvent { track_idx: event_track, .. }) if event_track == track_idx
+            BlockEventKind::Retrig(RetrigEvent { track_idx: event_track, .. }) if event_track == track_idx
         )
     });
 }
@@ -140,7 +176,10 @@ pub(super) fn schedule_gate_off_event(
     );
 }
 
-pub(super) fn schedule_chop_events(
+/// Arm a step's retrig burst. Always cancels the track's pending burst first,
+/// which is the Machinedrum "until the next trig on this track" rule.
+/// `repeats == u32::MAX` is the infinite (RTRG 127) case.
+pub(super) fn schedule_retrig_events(
     data: &mut AudioCallbackData,
     track_idx: usize,
     source_frame_offset: u32,
@@ -148,9 +187,10 @@ pub(super) fn schedule_chop_events(
     interval_samples: f64,
     repeats: u32,
     step: usize,
-    chop_gate: f32,
+    gate: f32,
+    target: RetrigTarget,
 ) {
-    cancel_chops_for_track(
+    cancel_retrigs_for_track(
         &mut data.countdown_events,
         &mut data.block_events,
         track_idx,
@@ -164,10 +204,11 @@ pub(super) fn schedule_chop_events(
         interval_samples.max(1.0),
         repeats,
         data.scheduler_snapshot.transport.pattern_epoch,
-        CountdownEventKind::Chop(ChopEvent {
+        CountdownEventKind::Retrig(RetrigEvent {
             track_idx,
             step,
-            chop_gate,
+            gate,
+            target,
         }),
     );
 }
@@ -399,7 +440,7 @@ pub(super) fn block_event_priority(kind: &BlockEventKind) -> u8 {
                 ScheduledEventKind::InstrumentParams { .. } | ScheduledEventKind::EffectParams { .. },
             ..
         }) => 1,
-        BlockEventKind::Scheduled(_) | BlockEventKind::Chop(_) => 2,
+        BlockEventKind::Scheduled(_) | BlockEventKind::Retrig(_) => 2,
     }
 }
 
@@ -454,6 +495,30 @@ pub(super) fn try_push_countdown_event(
     });
 }
 
+/// Walk a repeating burst across one block of `nframes`, calling `emit` with
+/// each in-block frame offset. Returns the leftover `(offset relative to the
+/// next block, remaining repeats)` when the burst outlives this block, or
+/// `None` when it finished inside it. `repeats == u32::MAX` is the infinite
+/// (RTRG 127) burst: it always has a leftover, so it keeps rolling until
+/// something cancels it. Allocation-free, so it is safe on the audio thread.
+pub(super) fn walk_repeating_offsets(
+    first_offset: f64,
+    period_samples: f64,
+    repeats: u32,
+    nframes: usize,
+    mut emit: impl FnMut(u32),
+) -> Option<(f64, u32)> {
+    let period = period_samples.max(1.0);
+    let mut next_offset = first_offset;
+    let mut remaining = repeats;
+    while remaining > 0 && next_offset < nframes as f64 {
+        emit(frame_offset_from_remaining(next_offset, nframes));
+        remaining -= 1;
+        next_offset += period;
+    }
+    (remaining > 0).then_some((next_offset - nframes as f64, remaining))
+}
+
 pub(super) fn schedule_countdown_or_block_event(
     data: &mut AudioCallbackData,
     event_offset: f64,
@@ -503,28 +568,29 @@ pub(super) fn schedule_countdown_or_block_event(
                 );
             }
         }
-        CountdownEventKind::Chop(event) => {
-            let mut next_offset = event_offset;
-            let mut remaining_repeats = repeats;
-            while remaining_repeats > 0 && next_offset < nframes as f64 {
-                let seq = data.event_seq;
-                data.event_seq = data.event_seq.wrapping_add(1);
-                let frame_offset = frame_offset_from_remaining(next_offset, nframes);
-                try_push_block_event(data, frame_offset, seq, BlockEventKind::Chop(event));
-                remaining_repeats -= 1;
-                next_offset += period_samples.max(1.0);
-            }
-            if remaining_repeats > 0 {
+        CountdownEventKind::Retrig(event) => {
+            let leftover = walk_repeating_offsets(
+                event_offset,
+                period_samples.max(1.0),
+                repeats,
+                nframes,
+                |frame_offset| {
+                    let seq = data.event_seq;
+                    data.event_seq = data.event_seq.wrapping_add(1);
+                    try_push_block_event(data, frame_offset, seq, BlockEventKind::Retrig(event));
+                },
+            );
+            if let Some((next_offset, remaining_repeats)) = leftover {
                 let seq = data.event_seq;
                 data.event_seq = data.event_seq.wrapping_add(1);
                 try_push_countdown_event(
                     data,
-                    next_offset - nframes as f64,
+                    next_offset,
                     period_samples.max(1.0),
                     remaining_repeats,
                     pattern_epoch,
                     seq,
-                    CountdownEventKind::Chop(event),
+                    CountdownEventKind::Retrig(event),
                 );
             }
         }
@@ -592,7 +658,7 @@ pub(super) fn collect_due_countdown_events(
     while i < data.countdown_events.len() {
         let stale = match data.countdown_events[i].kind {
             CountdownEventKind::GateOff(_) => false,
-            CountdownEventKind::Scheduled(_) | CountdownEventKind::Chop(_) => {
+            CountdownEventKind::Scheduled(_) | CountdownEventKind::Retrig(_) => {
                 data.countdown_events[i].pattern_epoch != current_pattern_epoch
             }
         };
@@ -603,23 +669,27 @@ pub(super) fn collect_due_countdown_events(
         if data.countdown_events[i].remaining_samples < block_len {
             let mut due = data.countdown_events.swap_remove(i);
             match due.kind {
-                CountdownEventKind::Chop(event) => {
-                    while due.repeats > 0 && due.remaining_samples < block_len {
-                        let frame_offset =
-                            frame_offset_from_remaining(due.remaining_samples, nframes);
-                        try_push_block_event(
-                            data,
-                            frame_offset,
-                            due.seq,
-                            BlockEventKind::Chop(event),
-                        );
-                        due.repeats -= 1;
-                        due.seq = data.event_seq;
-                        data.event_seq = data.event_seq.wrapping_add(1);
-                        due.remaining_samples += due.period_samples;
-                    }
-                    if due.repeats > 0 {
-                        due.remaining_samples -= block_len;
+                CountdownEventKind::Retrig(event) => {
+                    let seq = &mut due.seq;
+                    let leftover = walk_repeating_offsets(
+                        due.remaining_samples,
+                        due.period_samples,
+                        due.repeats,
+                        nframes,
+                        |frame_offset| {
+                            try_push_block_event(
+                                data,
+                                frame_offset,
+                                *seq,
+                                BlockEventKind::Retrig(event),
+                            );
+                            *seq = data.event_seq;
+                            data.event_seq = data.event_seq.wrapping_add(1);
+                        },
+                    );
+                    if let Some((next_offset, remaining_repeats)) = leftover {
+                        due.remaining_samples = next_offset;
+                        due.repeats = remaining_repeats;
                         data.countdown_events.push(due);
                     }
                 }
@@ -673,7 +743,7 @@ pub(super) fn mute_group_winner_for_block_events(
         .iter()
         .filter_map(|event| match &event.kind {
             BlockEventKind::Scheduled(scheduled) => scheduled_trigger_track(scheduled),
-            BlockEventKind::GateOff(_) | BlockEventKind::Chop(_) => None,
+            BlockEventKind::GateOff(_) | BlockEventKind::Retrig(_) => None,
         })
         .filter(|&candidate| track_mute_groups(candidate) == group)
         .max()
@@ -707,7 +777,7 @@ pub(super) fn dispatch_block_events(data: &mut AudioCallbackData, block_start_sa
             for event in group {
                 let Some(track) = (match &event.kind {
                     BlockEventKind::Scheduled(scheduled) => scheduled_trigger_track(scheduled),
-                    BlockEventKind::GateOff(_) | BlockEventKind::Chop(_) => None,
+                    BlockEventKind::GateOff(_) | BlockEventKind::Retrig(_) => None,
                 }) else {
                     continue;
                 };
@@ -763,8 +833,8 @@ pub(super) fn dispatch_block_events(data: &mut AudioCallbackData, block_start_sa
                 BlockEventKind::GateOff(gate_off) => {
                     dispatch_gate_off_event(data, gate_off, frame_offset, block_start_sample);
                 }
-                BlockEventKind::Chop(chop) => {
-                    dispatch_chop_event(data, chop, frame_offset);
+                BlockEventKind::Retrig(retrig) => {
+                    dispatch_retrig_event(data, retrig, frame_offset);
                 }
             }
         }

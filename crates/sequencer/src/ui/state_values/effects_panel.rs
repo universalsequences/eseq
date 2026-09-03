@@ -497,6 +497,14 @@ pub(crate) fn build_effects_value(
                             }
                         }
                     }
+                    if modulation_targets.get(&param_idx).is_none() && pdesc.is_host_modulatable() {
+                        // Plain builtin knob opted into macro mapping (no
+                        // depth slots, so no `mod-targets`).
+                        pmap.insert(
+                            "modulatable".to_string(),
+                            Rc::new(RefCell::new(Value::Bool(true))),
+                        );
+                    }
                     if let Some(targets) = modulation_targets.get(&param_idx) {
                         insert_mod_metadata(&mut pmap, targets);
                         // Modulated-value display fields (eseq-hpc), read-only
@@ -642,6 +650,12 @@ pub(crate) fn build_effects_value(
                 if let Some(source_param) = source_param {
                     section_map.insert("source-param".to_string(), source_param);
                 }
+                // The source editor's waveform marker binds this (eseq mods rework).
+                insert_string_prop(
+                    &mut section_map,
+                    "phase-field",
+                    effect_mod_slot_phase_field(node_id, slot_number),
+                );
                 section_map.insert(
                     "params".to_string(),
                     Rc::new(RefCell::new(Value::List(section_params))),
@@ -1147,6 +1161,14 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                     }
                                 }
                             }
+                            if modulation_targets.get(&param_idx).is_none()
+                                && pdesc.is_host_modulatable()
+                            {
+                                pmap.insert(
+                                    "modulatable".to_string(),
+                                    Rc::new(RefCell::new(Value::Bool(true))),
+                                );
+                            }
                             if let Some(targets) = modulation_targets.get(&param_idx) {
                                 insert_mod_metadata(&mut pmap, targets);
                                 // Effective-value field (eseq-hpc); see the
@@ -1289,6 +1311,12 @@ pub(crate) fn build_bus_effects_value_for_selection(
                         if let Some(source_param) = source_param {
                             section_map.insert("source-param".to_string(), source_param);
                         }
+                        // The source editor's waveform marker binds this (eseq mods rework).
+                        insert_string_prop(
+                            &mut section_map,
+                            "phase-field",
+                            effect_mod_slot_phase_field(node_id, slot_number),
+                        );
                         section_map.insert(
                             "params".to_string(),
                             Rc::new(RefCell::new(Value::List(section_params))),

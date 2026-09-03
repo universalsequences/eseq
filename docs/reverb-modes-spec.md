@@ -1,6 +1,24 @@
-# Multiverb — Multi-Mode Vintage Reverb Builtin (Spec, rev 1)
+# Multiverb — Multi-Mode Vintage Reverb Builtin (Spec, rev 2)
 
-> **Status:** Phases 1-5 landed. All four tanks are implemented, mode changes
+> **Status (2026-09-02): superseded.** Multiverb's Plate and Hall tanks were
+> folded into the builtin `Reverb`, which is now a three-mode effect
+> (`galaxy` = the original Galactic tank, `plate`, `hall`) with an
+> Ableton-style front end: stereo predelay, input lo/hi cut, hi/lo damping
+> shelves inside the tank feedback (replacing Multiverb's `damp`/`bass`),
+> a wet chorus stage and stereo width — see `crates/sequencer/src/effects/reverb/`.
+> Reverb's params are append-only from its original five, so every saved
+> project renders galaxy mode bit-for-bit as before (golden-hash test in
+> `effects/reverb/mod.rs`). The Reverb panel has no inline presets and no
+> host-modulator depth slots; its knobs are macro-mappable through the
+> `modulatable` descriptor tag instead.
+>
+> `Multiverb` itself is retired: listed in
+> `EffectDescriptor::RETIRED_BUILTIN_INSERT_NAMES`, hidden from the browser
+> and add-effect pickers, but still loadable so saved Multiverb slots (Quad
+> and Mod modes included) keep rendering exactly as saved. Its DSP, panel and
+> tests are frozen. Everything below is the historical rev 1 spec.
+>
+> *Rev 1 status:* Phases 1-5 landed. All four tanks are implemented, mode changes
 > use the locked 25 ms wet fade-out/clear/25 ms fade-in behavior, host
 > modulation targets are wired for decay/size/mod depth/mix, and the custom
 > panel includes the four factory settings. Hall depth uses a squared curve so
@@ -23,7 +41,8 @@ the classic boxes, all sharing one param set and one panel:
 
 The existing `Reverb` stays untouched (projects depend on it). Optionally a later phase
 folds Galactic in as a fifth "Galaxy" mode and soft-deprecates the old builtin — decide
-after Multiverb ships.
+after Multiverb ships. *(Resolved the other way round in rev 2: Plate and Hall moved
+into `Reverb`, Multiverb was retired.)*
 
 ## Research notes (what makes each box sound like itself)
 

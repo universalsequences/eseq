@@ -322,46 +322,54 @@ pub struct GeneratorTickErrorNotice {
 /// substitutes these values when it resolves step events on the armed track:
 /// the pattern write only lands BEHIND the playhead (each step is stamped as
 /// it passes, after it was already scheduled), so without this override the
-/// printed value would only be heard one loop later. `mask` bits:
-/// 1 = velocity, 2 = duration, 4 = transpose; 0 = disarmed. Values are f32
-/// bits. Written by the control thread on latch/disarm, read per scheduled
-/// step by the scheduler.
-#[derive(Default)]
+/// printed value would only be heard one loop later. `mask` carries one bit
+/// per [`StepParam`] index; 0 = disarmed. Values are f32 bits. Written by the
+/// control thread on latch/disarm, read per scheduled step by the scheduler.
 pub struct StepPrintOverride {
     track: std::sync::atomic::AtomicUsize,
     mask: AtomicU32,
-    velocity_bits: AtomicU32,
-    duration_bits: AtomicU32,
-    transpose_bits: AtomicU32,
+    values: [AtomicU32; NUM_PARAMS],
+}
+
+impl Default for StepPrintOverride {
+    fn default() -> Self {
+        Self {
+            track: std::sync::atomic::AtomicUsize::new(0),
+            mask: AtomicU32::new(0),
+            values: std::array::from_fn(|_| AtomicU32::new(0)),
+        }
+    }
+}
+
+/// A snapshot of the latched overrides for one track, taken in a single
+/// `Acquire` read so the scheduler never mixes values from two latch states.
+#[derive(Clone, Copy, Default)]
+pub struct StepPrintOverrideValues {
+    mask: u32,
+    values: [f32; NUM_PARAMS],
+}
+
+impl StepPrintOverrideValues {
+    pub fn get(&self, param: StepParam) -> Option<f32> {
+        let index = param.index();
+        (self.mask & (1 << index) != 0).then(|| self.values[index])
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mask == 0
+    }
 }
 
 impl StepPrintOverride {
-    pub const VELOCITY: u32 = 1;
-    pub const DURATION: u32 = 1 << 1;
-    pub const TRANSPOSE: u32 = 1 << 2;
-
     /// Publish the full latch state: values first, mask last (Release), so a
     /// reader that observes a set bit never sees a stale value for it.
-    pub fn set(
-        &self,
-        track: usize,
-        velocity: Option<f32>,
-        duration: Option<f32>,
-        transpose: Option<f32>,
-    ) {
+    pub fn set(&self, track: usize, values: &[(StepParam, f32)]) {
         self.track.store(track, Ordering::Relaxed);
         let mut mask = 0;
-        if let Some(value) = velocity {
-            self.velocity_bits.store(value.to_bits(), Ordering::Relaxed);
-            mask |= Self::VELOCITY;
-        }
-        if let Some(value) = duration {
-            self.duration_bits.store(value.to_bits(), Ordering::Relaxed);
-            mask |= Self::DURATION;
-        }
-        if let Some(value) = transpose {
-            self.transpose_bits.store(value.to_bits(), Ordering::Relaxed);
-            mask |= Self::TRANSPOSE;
+        for (param, value) in values {
+            let index = param.index();
+            self.values[index].store(value.to_bits(), Ordering::Relaxed);
+            mask |= 1 << index;
         }
         self.mask.store(mask, Ordering::Release);
     }
@@ -370,21 +378,20 @@ impl StepPrintOverride {
         self.mask.store(0, Ordering::Relaxed);
     }
 
-    /// The latched (velocity, duration, transpose) overrides for `track`, all
-    /// `None` when disarmed or armed for a different track.
-    pub fn values_for_track(&self, track: usize) -> (Option<f32>, Option<f32>, Option<f32>) {
+    /// The latched overrides for `track`; empty when disarmed or armed for a
+    /// different track.
+    pub fn values_for_track(&self, track: usize) -> StepPrintOverrideValues {
         let mask = self.mask.load(Ordering::Acquire);
         if mask == 0 || self.track.load(Ordering::Relaxed) != track {
-            return (None, None, None);
+            return StepPrintOverrideValues::default();
         }
-        let value = |bit: u32, bits: &AtomicU32| {
-            (mask & bit != 0).then(|| f32::from_bits(bits.load(Ordering::Relaxed)))
-        };
-        (
-            value(Self::VELOCITY, &self.velocity_bits),
-            value(Self::DURATION, &self.duration_bits),
-            value(Self::TRANSPOSE, &self.transpose_bits),
-        )
+        let mut values = [0.0f32; NUM_PARAMS];
+        for (index, slot) in values.iter_mut().enumerate() {
+            if mask & (1 << index) != 0 {
+                *slot = f32::from_bits(self.values[index].load(Ordering::Relaxed));
+            }
+        }
+        StepPrintOverrideValues { mask, values }
     }
 }
 

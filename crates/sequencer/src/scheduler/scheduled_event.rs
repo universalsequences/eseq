@@ -372,6 +372,8 @@ mod tests {
                         transpose: 0.0,
                         pan: 0.0,
                         chop: 1.0,
+                        retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                        retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     chord: ScheduledChordData {
                         count: 0,
@@ -413,6 +415,8 @@ mod tests {
                         transpose: 0.0,
                         pan: 0.0,
                         chop: 1.0,
+                        retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                        retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     chord: ScheduledChordData {
                         count: 0,
@@ -449,6 +453,8 @@ mod tests {
                         transpose: 0.0,
                         pan: 0.0,
                         chop: 1.0,
+                        retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                        retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     chord: ScheduledChordData {
                         count: 0,
@@ -491,6 +497,8 @@ mod tests {
                         transpose: 0.0,
                         pan: 0.0,
                         chop: 1.0,
+                        retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                        retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     chord: ScheduledChordData {
                         count: 0,
@@ -531,6 +539,8 @@ mod tests {
                         transpose: 0.0,
                         pan: 0.0,
                         chop: 1.0,
+                        retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                        retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     chord: ScheduledChordData {
                         count: 0,
@@ -565,6 +575,8 @@ mod tests {
                     transpose: 0.0,
                     pan: 0.0,
                     chop: 1.0,
+                    retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                    retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 chord: ScheduledChordData {
                     count: 0,

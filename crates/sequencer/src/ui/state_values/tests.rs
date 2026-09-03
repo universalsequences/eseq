@@ -951,6 +951,7 @@
             "ui/effects/builtin/str8-delay.lisp",
             "ui/effects/builtin/space-echo.lisp",
             "ui/effects/builtin/multiverb.lisp",
+            "ui/effects/builtin/reverb.lisp",
             "ui/effects/builtin/dimension.lisp",
             "ui/effects/builtin/phaser-flanger.lisp",
             "ui/effects/builtin/roar.lisp",
@@ -7631,13 +7632,47 @@
         params
     }
 
-    fn test_reverb_params() -> Vec<Value> {
+    /// A retired builtin with no bespoke panel: the pre-mode Reverb's five
+    /// params, used to exercise the param-grid fallback.
+    fn test_legacy_delay_params() -> Vec<Value> {
         vec![
             Value::Map(test_param_map("mix", 0, 0.35, 0.0, 1.0)),
             Value::Map(test_param_map("size", 1, 0.2, 0.0, 1.0)),
             Value::Map(test_param_map("brightness", 2, 0.8, 0.0, 1.0)),
             Value::Map(test_param_map("replace", 3, 0.3, 0.0, 1.0)),
             Value::Map(test_param_map("enabled", 4, 1.0, 0.0, 1.0)),
+        ]
+    }
+
+    /// Mirrors `EffectDescriptor::builtin_reverb_insert` (19 params).
+    fn test_reverb_params(mode: f64) -> Vec<Value> {
+        vec![
+            Value::Map(test_param_map("mix", 0, 0.35, 0.0, 1.0)),
+            Value::Map(test_param_map("size", 1, 0.2, 0.0, 1.0)),
+            Value::Map(test_param_map("brightness", 2, 0.8, 0.0, 1.0)),
+            Value::Map(test_param_map("replace", 3, 0.3, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 4, 1.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map(
+                "mode",
+                5,
+                mode,
+                vec!["galaxy", "plate", "hall"],
+            )),
+            Value::Map(test_param_map("predelay", 6, 0.0, 0.0, 250.0)),
+            Value::Map(test_param_map("decay", 7, 0.55, 0.0, 1.0)),
+            Value::Map(test_param_map("diffusion", 8, 0.7, 0.0, 1.0)),
+            Value::Map(test_param_map("hi shelf freq", 9, 6000.0, 1000.0, 16000.0)),
+            Value::Map(test_param_map("hi shelf gain", 10, 0.0, -18.0, 0.0)),
+            Value::Map(test_param_map("lo shelf freq", 11, 250.0, 40.0, 1000.0)),
+            Value::Map(test_param_map("lo shelf gain", 12, 0.0, -18.0, 0.0)),
+            Value::Map(test_param_map("in lo cut", 13, 20.0, 20.0, 2000.0)),
+            Value::Map(test_param_map("in hi cut", 14, 20000.0, 1000.0, 20000.0)),
+            Value::Map(test_param_map("stereo", 15, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("chorus amount", 16, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("chorus rate", 17, 0.7, 0.05, 8.0)),
+            Value::Map(test_param_map("mod depth", 18, 0.15, 0.0, 1.0)),
+            Value::Map(test_param_map("wet gain", 19, 6.0, -12.0, 18.0)),
+            Value::Map(test_enum_param_map("mix law", 20, 1.0, vec!["cube", "linear"])),
         ]
     }
 
@@ -19859,6 +19894,16 @@
         let mut durations = [1.0; 16];
         durations[2] = 2.5;
         durations[3] = 0.75;
+        let mut retrigs = [0.0; 16];
+        retrigs[2] = 3.0;
+        let mut retrig_rates = [4.0; 16];
+        retrig_rates[2] = 12.0;
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "retrigs", test_number_list(&retrigs));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "retrig-rates", test_number_list(&retrig_rates));
         editor
             .runtime_mut()
             .set_reactive("SEQ", "transposes", test_number_list(&transposes));
@@ -19916,6 +19961,9 @@
             ("/step-param-transpose", "transpose picker", -48.0, 48.0, 7.0),
             ("/step-param-velocity", "velocity picker", 0.0, 1.0, 0.75),
             ("/step-param-duration", "duration picker", 0.0, 128.0, 2.5),
+            // Machinedrum RTRG/RTIM, docs/step-retrig-spec.md.
+            ("/step-param-retrig", "retrig picker", 0.0, 127.0, 3.0),
+            ("/step-param-retrig-rate", "retrig rate picker", 1.0, 1024.0, 12.0),
         ] {
             let picker =
                 find_layout_node_by_stable_key_suffix(step_params_panel, key).unwrap_or_else(|| {
@@ -22177,10 +22225,18 @@
         let prompt = find_layout_node_by_text(&layout, "Instrument and effects appear here")
             .expect("empty fx prompt should be present");
         let prompt_center = prompt.rect.row + prompt.rect.height * 0.5;
+        let prompt_col_center = prompt.rect.col + prompt.rect.width * 0.5;
 
         assert!(
             (prompt_center - 5.0).abs() <= 1.0,
             "empty fx prompt should be vertically centered, got rect {:?}",
+            prompt.rect
+        );
+        // The *fx* root is an h-stack (p-lock menu overlay sibling); without
+        // a fill width it shrank the fallback to its label, pinning it left.
+        assert!(
+            (prompt_col_center - 60.0).abs() <= 2.0,
+            "empty fx prompt should be horizontally centered, got rect {:?}",
             prompt.rect
         );
         assert!(
@@ -22188,6 +22244,124 @@
             "empty fx fallback should fit viewport without scroll overflow; bottom={:.3}",
             layout_bottom(&layout)
         );
+    }
+
+    /// Hot-reload track-panels.lisp with a label edit while *step* sits in an
+    /// inactive tile, the way eval-buffer runs in the app. `standalone`
+    /// evaluates a copy the module graph has never seen, so the file is
+    /// evaluated on its own and *step* can only pick the edit up through
+    /// symbol invalidation (the app's boot loads main.lisp with a plain
+    /// eval_str, so the real owner root is the effects manifest, which does
+    /// not re-register the *step* buffer either).
+    fn assert_step_panel_hot_reload_rerenders(standalone: bool) {
+        fn step_tile_layout(
+            editor: &mut eseqlisp::Editor,
+        ) -> std::sync::Arc<eseqlisp::layout::LayoutNode> {
+            let frame = eseqlisp::frame::build_tiled_render_frame_borderless(editor, 180, 90);
+            frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*step*")
+                .and_then(|tile| tile.frame.widget_layout.clone())
+                .expect("step tile should render a layout")
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = step_tile_layout(&mut editor);
+        assert!(
+            find_layout_node_by_text(&layout, "·").is_some(),
+            "step tile should show the selection summary before reload"
+        );
+        // Age the panel the way a session does: reactive changes that rerun
+        // the *step* subtrees on their own (track switch, transport toggle)
+        // before the source edit lands.
+        for (track, playing) in [(1.0, true), (0.0, false), (1.0, false), (0.0, true), (0.0, false)] {
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "current-track", Value::Number(track));
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "playing", Value::Bool(playing));
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let _ = step_tile_layout(&mut editor);
+        }
+
+        let real_path = sequencer::app_paths::app_paths()
+            .ui_dir()
+            .join("effects/track-panels.lisp");
+        let source = std::fs::read_to_string(&real_path).expect("read track-panels.lisp");
+        let edited = source.replacen("(label \"·\"", "(label \"RELOADED-MARKER\"", 1);
+        // Variant: a path the module graph has never seen, so the file is
+        // evaluated standalone instead of through its owner root.
+        let path = if standalone {
+            let dir = std::env::temp_dir().join("eseq-repro-standalone/effects");
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let p = dir.join("track-panels.lisp");
+            std::fs::write(&p, &source).expect("write copy");
+            p
+        } else {
+            real_path.clone()
+        };
+        assert_ne!(source, edited, "expected the summary separator label in track-panels.lisp");
+
+        // Mirror the interactive flow: the file is open in the active tile
+        // with the edit in its buffer, and eval-buffer runs from there while
+        // *step* sits in another tile.
+        let tp_id = editor
+            .open_file_buffer(path.clone())
+            .expect("open track-panels.lisp");
+        editor.set_active_buffer(tp_id);
+        editor.active_buffer_mut().set_text(&edited);
+        editor.active_buffer_mut().dirty = true;
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor
+            .runtime_mut()
+            .eval_source_transactional(Some(path), &edited, overlays);
+        assert!(report.success, "reload failed: {:?}", report.diagnostics);
+        if standalone {
+            assert!(
+                report
+                    .rerendered_roots
+                    .iter()
+                    .any(|root| root.contains("*step*")),
+                "standalone module reload should dirty the *step* root through its \
+                 module-qualified symbols; rerendered={:?}",
+                report.rerendered_roots
+            );
+        }
+        editor.process_lisp_reload_report(report);
+        editor.refresh_runtime_side_effects();
+
+        let step_idx = editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == "*step*")
+            .expect("step buffer");
+        let tree_has_marker = editor.buffers[step_idx]
+            .widget_tree
+            .as_ref()
+            .map(|tree| format!("{tree:?}").contains("RELOADED-MARKER"))
+            .unwrap_or(false);
+
+        let layout = step_tile_layout(&mut editor);
+        assert!(
+            find_layout_node_by_text(&layout, "RELOADED-MARKER").is_some(),
+            "step tile should rerender after track-panels.lisp reload (tree_has_marker={tree_has_marker})"
+        );
+    }
+
+    #[test]
+    fn metal_seq_step_panel_hot_reload_rerenders_track_panels_edit() {
+        assert_step_panel_hot_reload_rerenders(false);
+    }
+
+    #[test]
+    fn metal_seq_step_panel_hot_reload_rerenders_standalone_module_edit() {
+        assert_step_panel_hot_reload_rerenders(true);
     }
 
     #[test]
@@ -29640,6 +29814,10 @@
         );
         for key in [
             "/expanded-param-tab-0-0",
+            // Retrig (7) and Rate (8) are always-present step params, so they
+            // must render as real lane tabs (docs/step-retrig-spec.md).
+            "/expanded-param-tab-0-7",
+            "/expanded-param-tab-0-8",
             "/expanded-timebase-0",
             "/expanded-param-number-picker-0",
             "/expanded-half-0",
@@ -29984,7 +30162,7 @@
             .eval_str(
                 r#"
                 (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 7)
+                (eseq.sequencer/set-track-param-mode 0 9)
                 "#,
             )
             .expect("expand track and select process lane");
@@ -30002,7 +30180,11 @@
             .widget_layout()
             .expect("expanded sequencer layout should build");
         assert!(
-            find_layout_node_by_stable_key_suffix(&layout, "/expanded-param-tab-0-7").is_none(),
+            find_layout_node_by_stable_key_suffix(
+                &layout,
+                &format!("/expanded-param-tab-0-{PROCESS_LANE_MODE_OFFSET}")
+            )
+            .is_none(),
             "process lanes should not consume direct step-param tab slots"
         );
         let process_selector =
@@ -30966,7 +31148,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.seqv-track-params/seqv-track-param-origin 0 7)")
+                .eval_str("(eseq.seqv-track-params/seqv-track-param-origin 0 9)")
                 .expect("evaluate asymmetric process lane origin"),
             Some(Value::Number(2.0)),
             "non-symmetric process lane ranges should originate at their minimum"
@@ -30974,7 +31156,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.seqv-track-params/seqv-track-param-origin 0 8)")
+                .eval_str("(eseq.seqv-track-params/seqv-track-param-origin 0 10)")
                 .expect("evaluate symmetric process lane origin"),
             Some(Value::Number(0.0)),
             "symmetric process lane ranges should originate at zero"
@@ -30993,7 +31175,7 @@
             .eval_str(
                 r#"
                 (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 7)
+                (eseq.sequencer/set-track-param-mode 0 9)
                 "#,
             )
             .expect("expand track and select asymmetric process lane");
@@ -31063,7 +31245,7 @@
                 .runtime_mut()
                 .eval_str(r#"(do (eseq.sequencer/select-process-lane-option 0 0 "3 pr/amount") (eseq.sequencer/track-param-mode 0))"#)
                 .expect("select third process lane through selector"),
-            Some(Value::Number(9.0)),
+            Some(Value::Number((PROCESS_LANE_MODE_OFFSET + 2) as f64)),
             "third process selector option should select the third process-lane mode"
         );
         assert_eq!(
@@ -31081,7 +31263,7 @@
             .eval_str(
                 r#"
                 (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 7)
+                (eseq.sequencer/set-track-param-mode 0 9)
                 "#,
             )
             .expect("expand track and select first process lane");
@@ -31107,7 +31289,7 @@
             selector.props.get("value"),
             Some(&Value::String("1 or/amount".to_string()))
         );
-        for mode in 7..11 {
+        for mode in PROCESS_LANE_MODE_OFFSET..PROCESS_LANE_MODE_OFFSET + 4 {
             assert!(
                 find_layout_node_by_stable_key_suffix(
                     &layout,
@@ -31156,7 +31338,7 @@
             .eval_str(
                 r#"
                 (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 7)
+                (eseq.sequencer/set-track-param-mode 0 9)
                 "#,
             )
             .expect("expand track 0 and select its process lane after selecting track 1");
@@ -31242,7 +31424,7 @@
             .eval_str(
                 r#"
                 (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 7)
+                (eseq.sequencer/set-track-param-mode 0 9)
                 "#,
             )
             .expect("expand track and select process lane");
@@ -31315,7 +31497,7 @@
             .eval_str(
                 r#"
                 (eseq.sequencer/set-track-expanded 0 true)
-                (eseq.sequencer/set-track-param-mode 0 7)
+                (eseq.sequencer/set-track-param-mode 0 9)
                 (eseq.step-grid-interactions/set-track-cursor-step 3)
                 "#,
             )
@@ -39432,8 +39614,7 @@
         );
     }
 
-    #[test]
-    fn metal_seq_fx_builtin_without_custom_ui_falls_back_to_param_grid() {
+    fn reverb_panel_editor(mode: f64) -> eseqlisp::Editor {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
@@ -39441,6 +39622,7 @@
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
+                ("bpm", Value::Number(120.0)),
                 ("available-effects", test_list(vec![])),
                 (
                     "available-builtin-effects",
@@ -39456,7 +39638,228 @@
                     test_list(vec![Value::Map(test_fx_map(
                         "Reverb",
                         0,
-                        test_reverb_params(),
+                        test_reverb_params(mode),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate eseq.seq-core-state/selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+    }
+
+    #[test]
+    fn metal_seq_fx_reverb_layout_contains_modes_curves_and_knobs() {
+        let mut editor = reverb_panel_editor(0.0);
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe Reverb ui")
+            .expect("Reverb ui probe value");
+        for text in [
+            "INPUT FILTER",
+            "MODE",
+            "galaxy",
+            "DIFFUSION NETWORK",
+            "CHORUS",
+            "dry/wet",
+        ] {
+            assert!(
+                value_contains_string(&ui_probe, text),
+                "Reverb custom UI should contain {text:?}: {ui_probe:?}"
+            );
+        }
+        assert!(
+            !value_contains_string(&ui_probe, "FACTORY"),
+            "Reverb panel must not carry inline presets"
+        );
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("Reverb fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(160, 22);
+        let layout = editor.widget_layout().expect("Reverb fx layout");
+        assert_finite_layout_tree(&layout);
+        let panel = find_layout_node_by_debug_name(&layout, "audio-fx-panel-root-0-Reverb")
+            .expect("layout should contain the built-in Reverb panel");
+        assert_finite_nonzero_rect(panel, "Reverb panel");
+        for section_name in [
+            "reverb-input-section",
+            "reverb-mode-section",
+            "reverb-network-section",
+            "reverb-chorus-section",
+        ] {
+            let section = find_layout_node_by_debug_name(&layout, section_name)
+                .unwrap_or_else(|| panic!("Reverb layout should contain {section_name}"));
+            assert_finite_nonzero_rect(section, section_name);
+            assert_layout_inside(section, panel, section_name);
+        }
+        let mode = find_layout_node_by_debug_name(&layout, "reverb-mode-dropdown")
+            .expect("Reverb layout should contain the mode dropdown");
+        assert_finite_nonzero_rect(mode, "Reverb mode dropdown");
+        assert_layout_inside(mode, panel, "Reverb mode dropdown");
+        assert_eq!(
+            count_widget_type(&layout, "response-curve-editor"),
+            2,
+            "Reverb panel should render the input-filter and diffusion-network curves"
+        );
+        // Galaxy: bright, replace, size, predelay, wet gain, stereo, dry/wet
+        // (chorus uses number pickers).
+        assert_eq!(
+            count_widget_type(&layout, "knob-number"),
+            7,
+            "galaxy mode should render its seven knobs"
+        );
+        for (key, label) in [
+            ("reverb-param-2-base", "brightness knob"),
+            ("reverb-param-3-base", "replace knob"),
+            ("reverb-param-0-base", "dry/wet knob"),
+        ] {
+            let wrapper = find_layout_node_by_stable_key(&layout, key)
+                .unwrap_or_else(|| panic!("Reverb layout should contain {label}"));
+            let knob = find_layout_node_by_widget_type(wrapper, "knob-number")
+                .unwrap_or_else(|| panic!("Reverb {label} should contain a knob-number"));
+            assert_layout_inside(knob, panel, &format!("Reverb {label}"));
+        }
+        assert!(
+            find_layout_node_by_stable_key(&layout, "reverb-param-7-base").is_none(),
+            "galaxy mode should hide the decay knob"
+        );
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "rendering Reverb should not author effect values"
+        );
+
+        // Dragging the hi-cut band writes exactly one batch update to param 14.
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(let ((fx (nth SEQ.effects 0)))
+                     (eseq.effects.builtin.reverb/reverb-input-curve-action fx
+                       (nth (get fx :params) 13) (nth (get fx :params) 14)
+                       (dict :type :change-band :id 1 :freq 3000 :gain 0 :q 0.71)))"#,
+            )
+            .expect("drive the input curve");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "one batch write expected: {commands:?}");
+        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+            panic!("expected a custom command, got {:?}", commands[0]);
+        };
+        assert_eq!(name, "set-effect-param-batch");
+        let Value::Map(payload) = payload else {
+            panic!("batch payload should be a map: {payload:?}");
+        };
+        let updates = payload.get("updates").expect("updates").borrow().clone();
+        let Value::List(updates) = updates else {
+            panic!("updates should be a list: {updates:?}");
+        };
+        assert_eq!(updates.len(), 1);
+        let update = updates[0].borrow().clone();
+        let Value::Map(update) = update else {
+            panic!("update should be a map");
+        };
+        let idx = match &*update.get("param-idx").expect("param-idx").borrow() {
+            Value::Number(v) => *v,
+            other => panic!("param-idx should be a number: {other:?}"),
+        };
+        let value = match &*update.get("value").expect("value").borrow() {
+            Value::Number(v) => *v,
+            other => panic!("value should be a number: {other:?}"),
+        };
+        assert_eq!((idx, value), (14.0, 3000.0));
+    }
+
+    #[test]
+    fn metal_seq_fx_reverb_plate_mode_swaps_the_tank_knobs() {
+        let mut editor = reverb_panel_editor(1.0);
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("Reverb fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(160, 22);
+        let layout = editor.widget_layout().expect("Reverb fx layout");
+        assert_finite_layout_tree(&layout);
+        // Plate: decay, diffuse, size, predelay, mod depth, wet gain, stereo, dry/wet.
+        assert_eq!(
+            count_widget_type(&layout, "knob-number"),
+            8,
+            "plate mode should render its eight knobs"
+        );
+        for key in ["reverb-param-7-base", "reverb-param-8-base", "reverb-param-18-base"] {
+            assert!(
+                find_layout_node_by_stable_key(&layout, key).is_some(),
+                "plate mode should show {key}"
+            );
+        }
+        for key in ["reverb-param-2-base", "reverb-param-3-base"] {
+            assert!(
+                find_layout_node_by_stable_key(&layout, key).is_none(),
+                "plate mode should hide {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_builtin_without_custom_ui_falls_back_to_param_grid() {
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Delay".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Delay",
+                        0,
+                        test_legacy_delay_params(),
                     ))]),
                 ),
                 ("midi-effects", test_list(vec![])),
@@ -39488,10 +39891,10 @@
         let reverb_ui_probe = editor
             .runtime_mut()
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
-            .expect("probe reverb ui");
+            .expect("probe delay ui");
         assert!(
             matches!(reverb_ui_probe, Some(Value::Bool(false))),
-            "Reverb should not have a bespoke built-in UI: {reverb_ui_probe:?}"
+            "retired Delay should not have a bespoke built-in UI: {reverb_ui_probe:?}"
         );
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -39507,8 +39910,8 @@
         editor.set_layout_viewport(120, 18);
         let layout = editor.widget_layout().expect("reverb fx layout");
         assert!(
-            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Reverb"),
-            "layout should contain the Reverb panel"
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Delay"),
+            "layout should contain the Delay panel"
         );
         let mut layout_summaries = Vec::new();
         collect_layout_node_summaries(&layout, &mut layout_summaries);
@@ -43722,6 +44125,214 @@
     }
 
     #[test]
+    fn metal_seq_fx_lisp_lays_out_digiwave_columns() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
+        let digiwave_ui = read_factory_source("instruments/factory/digiwave/ui.lisp")
+            .expect("read digiwave ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/factory/digiwave/ui.lisp".to_string(),
+            digiwave_ui,
+        )));
+        let mut digiwave_inst = test_instrument_map();
+        digiwave_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("bank1", 18, 0.0, 0.0, 7.0)),
+                Value::Map(test_param_map("wave1", 0, 8.0, 0.0, 63.0)),
+                Value::Map(test_param_map("crush1", 1, 0.0, 0.0, 11.0)),
+                Value::Map(test_param_map("mix", 2, 0.5, 0.0, 1.0)),
+                Value::Map(test_param_map("time", 3, 18.0, 0.0, 127.0)),
+                Value::Map(test_param_map("tune_cents", 4, 0.0, -100.0, 100.0)),
+                Value::Map(test_param_map("vel_to_amp", 5, 0.6, 0.0, 1.0)),
+                Value::Map(test_param_map("volume_db", 6, -14.0, -36.0, 6.0)),
+                Value::Map(test_param_map("eq_freq", 7, 1200.0, 40.0, 11000.0)),
+                Value::Map(test_param_map("eq_gain_db", 8, 0.0, -30.0, 30.0)),
+                Value::Map(test_param_map("filter_mode", 9, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("cutoff", 10, 7200.0, 20.0, 18000.0)),
+                Value::Map(test_param_map("resonance", 11, 0.1, 0.0, 1.0)),
+                Value::Map(test_param_map("filter_env_amt", 12, 1800.0, -8000.0, 8000.0)),
+                Value::Map(test_param_map("drive", 13, 0.05, 0.0, 1.0)),
+                Value::Map(test_param_map("srr", 14, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("am_depth", 15, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("am_rate", 16, 55.0, 0.1, 2200.0)),
+                Value::Map(test_param_map("glide_ms", 17, 0.0, 0.0, 1000.0)),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(digiwave_inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate eseq.seq-core-state/selected-bus -1)
+                (def asset-metadata (path)
+                  (dict :sets '("Bank Alpha" "Bank Omega") :waves-per-set 64))
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load digiwave custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("digiwave fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("digiwave layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        // Tabbed envelope detail (AMP / FLT) in the middle column.
+        let adsr_editor =
+            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
+        assert!(
+            adsr_editor.rect.width > 8.0
+                && adsr_editor.rect.height > 2.0
+                && adsr_editor.rect.height <= 4.0,
+            "ADSR editor should stay constrained in the medium detail panel, got {:?}",
+            adsr_editor.rect
+        );
+
+        // The doubledraw bank viewer for the visible oscillator tab.
+        let viewer = find_layout_node_by_widget_type(&layout, "wavetable-viewer")
+            .expect("wavetable viewer");
+        assert!(
+            viewer.rect.width > 10.0 && viewer.rect.height > 4.0,
+            "wavetable viewer should have a finite nonzero rect, got {:?}",
+            viewer.rect
+        );
+
+        // Bank labels come from the bank's asset metadata, like poseidon.
+        let bank1 = find_stable_key_suffix(&layout, "bank1")
+            .expect("bank1 control should be present in layout");
+        let bank1_dropdown = find_layout_node_by_widget_type(bank1, "dropdown")
+            .expect("bank1 control should contain a dropdown");
+        assert_eq!(
+            bank1_dropdown.props.get("options"),
+            Some(&test_string_list(&["Bank Alpha", "Bank Omega"])),
+            "Digiwave bank labels should come from the bank's asset metadata"
+        );
+
+        // Every functional control appears exactly once: no repeated knobs.
+        for suffix in [
+            "bank1",
+            "wave1",
+            "crush1",
+            "mix",
+            "time",
+            "tune_cents",
+            "cutoff",
+            "resonance",
+            "filter_env_amt",
+            "drive",
+            "srr",
+            "am_depth",
+            "am_rate",
+            "eq_freq",
+            "eq_gain_db",
+            "vel_to_amp",
+            "volume_db",
+            "glide_ms",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+            let mut count = 0usize;
+            fn count_stable_key_suffix(
+                node: &eseqlisp::layout::LayoutNode,
+                suffix: &str,
+                count: &mut usize,
+            ) {
+                if node
+                    .stable_key
+                    .as_deref()
+                    .is_some_and(|key| key.ends_with(suffix))
+                {
+                    *count += 1;
+                    return;
+                }
+                for child in &node.children {
+                    count_stable_key_suffix(child, suffix, count);
+                }
+            }
+            count_stable_key_suffix(&layout, suffix, &mut count);
+            assert_eq!(
+                count, 1,
+                "{suffix} should be laid out exactly once (no repeated knobs/panels), got {count}"
+            );
+        }
+    }
+
+    #[test]
     fn metal_seq_fx_lisp_lays_out_membrane_tabla_columns() {
         fn find_stable_key_suffix<'a>(
             node: &'a eseqlisp::layout::LayoutNode,
@@ -46532,6 +47143,55 @@
                 toggle_idx % 2 == 0,
                 &format!("mods toggle {} should flip state", toggle_idx + 1),
             );
+        }
+    }
+
+    #[test]
+    fn builtin_reverb_params_are_host_modulatable_without_depth_slots() {
+        fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            map.get(key).map(|value| value.borrow())
+        }
+
+        let desc = sequencer::effects::EffectDescriptor::builtin_insert("Reverb").unwrap();
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+
+        let effects = build_effects_value(&state, 0, &[vec![desc]], &selected);
+        let Value::List(slots) = effects else {
+            panic!("effects value should be a list");
+        };
+        let first_slot = slots.first().expect("reverb slot").borrow();
+        let params = map_get(&first_slot, "params").expect("effect should expose params");
+        let Value::List(params) = &*params else {
+            panic!("params should be a list: {params:?}");
+        };
+        let mut seen = std::collections::BTreeMap::new();
+        for param in params {
+            let param = param.borrow();
+            let name = match map_get(&param, "name").as_deref() {
+                Some(Value::String(name)) => name.clone(),
+                other => panic!("param name: {other:?}"),
+            };
+            let modulatable = matches!(map_get(&param, "modulatable").as_deref(), Some(Value::Bool(true)));
+            let has_targets = map_get(&param, "mod-targets").is_some();
+            seen.insert(name, (modulatable, has_targets));
+        }
+        for name in ["mix", "size", "decay", "hi shelf gain", "chorus amount", "mod depth"] {
+            assert_eq!(
+                seen.get(name),
+                Some(&(true, false)),
+                "{name} should be macro-mappable with no depth-slot targets: {seen:?}"
+            );
+        }
+        for name in ["mode", "enabled"] {
+            assert_eq!(seen.get(name), Some(&(false, false)), "{name} must not be modulatable");
         }
     }
 

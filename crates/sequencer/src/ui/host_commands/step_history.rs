@@ -77,12 +77,13 @@ pub(super) fn handle(
             let mutation = match op.as_str() {
                 "set-chain" => match field("value") {
                     Some(Value::List(values)) => {
-                        let chain = values.into_iter().map(|value| {
-                            match &*value.borrow() {
+                        let chain = values
+                            .into_iter()
+                            .map(|value| match &*value.borrow() {
                                 Value::String(name) => Ok(name.clone()),
                                 _ => Err("MIDI FX chain contains a non-string name".to_string()),
-                            }
-                        }).collect::<Result<Vec<_>, _>>();
+                            })
+                            .collect::<Result<Vec<_>, _>>();
                         match chain {
                             Ok(chain) => MidiFxHistoryMutation::Chain(chain),
                             Err(error) => {
@@ -121,9 +122,8 @@ pub(super) fn handle(
                     }
                 },
                 _ => {
-                    editor.handle_host_event(HostEvent::Error(format!(
-                        "Unknown MIDI FX edit {op}"
-                    )));
+                    editor
+                        .handle_host_event(HostEvent::Error(format!("Unknown MIDI FX edit {op}")));
                     return;
                 }
             };
@@ -142,30 +142,29 @@ pub(super) fn handle(
             if unchanged {
                 return;
             }
-            let result = app.apply_recorded_scene_structure_mutation(
-                "Edit MIDI FX routing",
-                |app| {
-                    let params = app.state.pattern.track_params.get(track)
+            let result =
+                app.apply_recorded_scene_structure_mutation("Edit MIDI FX routing", |app| {
+                    let params = app
+                        .state
+                        .pattern
+                        .track_params
+                        .get(track)
                         .ok_or_else(|| "MIDI FX track no longer exists".to_string())?;
                     match mutation {
-                        MidiFxHistoryMutation::Chain(chain) => {
-                            params.set_midi_fx_chain(chain)
-                        }
+                        MidiFxHistoryMutation::Chain(chain) => params.set_midi_fx_chain(chain),
                         MidiFxHistoryMutation::Position(position) => {
                             params.set_midi_fx_position(position)
                         }
                     }
                     Ok(())
-                },
-            );
+                });
             match result {
                 Ok(()) => {
                     state.publish_scheduler_snapshot();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
-                    "MIDI FX edit failed: {error}"
-                ))),
+                Err(error) => editor
+                    .handle_host_event(HostEvent::Error(format!("MIDI FX edit failed: {error}"))),
             }
         }
         "process-history-action" => {
@@ -190,123 +189,130 @@ pub(super) fn handle(
                 }
                 _ => None,
             });
-            let (Some(op), Some(track), Some(instance_id)) =
-                (op, track, instance_id)
-            else {
+            let (Some(op), Some(track), Some(instance_id)) = (op, track, instance_id) else {
                 editor.handle_host_event(HostEvent::Status(
                     "Process edit failed: missing operation target".to_string(),
                 ));
                 return;
             };
-            let result = app.apply_recorded_scene_structure_mutation(
-                "Edit process chain",
-                |app| {
-                    let changed = match op.as_str() {
-                        "set-lane-step" => {
-                            let inlet = field("inlet").and_then(|value| match value {
+            let result = app.apply_recorded_scene_structure_mutation("Edit process chain", |app| {
+                let changed = match op.as_str() {
+                    "set-lane-step" => {
+                        let inlet = field("inlet")
+                            .and_then(|value| match value {
                                 Value::String(value) => Some(value),
                                 _ => None,
-                            }).ok_or_else(|| "Process lane inlet is missing".to_string())?;
-                            let step = field("step").and_then(|value| match value {
+                            })
+                            .ok_or_else(|| "Process lane inlet is missing".to_string())?;
+                        let step = field("step")
+                            .and_then(|value| match value {
                                 Value::Number(value) if value >= 0.0 => Some(value as usize),
                                 _ => None,
-                            }).ok_or_else(|| "Process lane step is missing".to_string())?;
-                            let value = field("value").and_then(|value| match value {
+                            })
+                            .ok_or_else(|| "Process lane step is missing".to_string())?;
+                        let value = field("value")
+                            .and_then(|value| match value {
                                 Value::Number(value) => Some(value as f32),
                                 _ => None,
-                            }).ok_or_else(|| "Process lane value is missing".to_string())?;
-                            app.state.set_process_lane_value(
-                                track, instance_id, inlet, step, value,
-                            )
-                        }
-                        "clear-project-lane-override" => {
-                            let inlet = field("inlet").and_then(|value| match value {
+                            })
+                            .ok_or_else(|| "Process lane value is missing".to_string())?;
+                        app.state
+                            .set_process_lane_value(track, instance_id, inlet, step, value)
+                    }
+                    "clear-project-lane-override" => {
+                        let inlet = field("inlet")
+                            .and_then(|value| match value {
                                 Value::String(value) => Some(value),
                                 _ => None,
-                            }).ok_or_else(|| "Process lane inlet is missing".to_string())?;
-                            app.state.clear_project_process_lane_override(
-                                track, instance_id, &inlet,
-                            )
-                        }
-                        "set-inlet" => {
-                            let inlet = field("inlet").and_then(|value| match value {
+                            })
+                            .ok_or_else(|| "Process lane inlet is missing".to_string())?;
+                        app.state
+                            .clear_project_process_lane_override(track, instance_id, &inlet)
+                    }
+                    "set-inlet" => {
+                        let inlet = field("inlet")
+                            .and_then(|value| match value {
                                 Value::String(value) => Some(value),
                                 _ => None,
-                            }).ok_or_else(|| "Process inlet is missing".to_string())?;
-                            let literal = match field("value")
-                                .ok_or_else(|| "Process inlet value is missing".to_string())?
-                            {
-                                Value::Number(value) => sequencer::process::ProcessLiteral::Number(value),
-                                Value::Bool(value) => sequencer::process::ProcessLiteral::Bool(value),
-                                Value::String(value) => sequencer::process::ProcessLiteral::String(value),
-                                Value::Keyword(value) => sequencer::process::ProcessLiteral::Keyword(value),
-                                Value::Symbol(value) => sequencer::process::ProcessLiteral::Symbol(value),
-                                Value::Nil => sequencer::process::ProcessLiteral::Nil,
-                                _ => return Err("Unsupported process inlet literal".to_string()),
-                            };
-                            app.state.set_track_process_inlet_value(
-                                track, instance_id, &inlet, literal,
-                            )
-                        }
-                        "set-enabled" => {
-                            let enabled = field("enabled").and_then(|value| match value {
+                            })
+                            .ok_or_else(|| "Process inlet is missing".to_string())?;
+                        let literal = match field("value")
+                            .ok_or_else(|| "Process inlet value is missing".to_string())?
+                        {
+                            Value::Number(value) => {
+                                sequencer::process::ProcessLiteral::Number(value)
+                            }
+                            Value::Bool(value) => sequencer::process::ProcessLiteral::Bool(value),
+                            Value::String(value) => {
+                                sequencer::process::ProcessLiteral::String(value)
+                            }
+                            Value::Keyword(value) => {
+                                sequencer::process::ProcessLiteral::Keyword(value)
+                            }
+                            Value::Symbol(value) => {
+                                sequencer::process::ProcessLiteral::Symbol(value)
+                            }
+                            Value::Nil => sequencer::process::ProcessLiteral::Nil,
+                            _ => return Err("Unsupported process inlet literal".to_string()),
+                        };
+                        app.state
+                            .set_track_process_inlet_value(track, instance_id, &inlet, literal)
+                    }
+                    "set-enabled" => {
+                        let enabled = field("enabled")
+                            .and_then(|value| match value {
                                 Value::Bool(value) => Some(value),
                                 _ => None,
-                            }).ok_or_else(|| "Process enabled state is missing".to_string())?;
-                            app.state.set_track_process_slot_enabled(
-                                track, instance_id, enabled,
-                            )
-                        }
-                        "move-slot" => {
-                            let before = match field("before-instance-id") {
-                                Some(Value::Number(value)) if value >= 0.0 => {
-                                    Some(sequencer::process::ProcessInstanceId(value as u64))
-                                }
-                                Some(Value::Nil) | None => None,
-                                _ => return Err("Process move target is invalid".to_string()),
-                            };
-                            app.state.move_track_process_slot_before(
-                                track, instance_id, before,
-                            )
-                        }
-                        "remove-slot" => app.state.remove_track_process_slot(
-                            track, instance_id,
-                        ),
-                        "bind-port" => {
-                            let port = field("port").and_then(|value| match value {
+                            })
+                            .ok_or_else(|| "Process enabled state is missing".to_string())?;
+                        app.state
+                            .set_track_process_slot_enabled(track, instance_id, enabled)
+                    }
+                    "move-slot" => {
+                        let before = match field("before-instance-id") {
+                            Some(Value::Number(value)) if value >= 0.0 => {
+                                Some(sequencer::process::ProcessInstanceId(value as u64))
+                            }
+                            Some(Value::Nil) | None => None,
+                            _ => return Err("Process move target is invalid".to_string()),
+                        };
+                        app.state
+                            .move_track_process_slot_before(track, instance_id, before)
+                    }
+                    "remove-slot" => app.state.remove_track_process_slot(track, instance_id),
+                    "bind-port" => {
+                        let port = field("port")
+                            .and_then(|value| match value {
                                 Value::String(value) => Some(value),
                                 _ => None,
-                            }).ok_or_else(|| "Process port is missing".to_string())?;
-                            let target = field("target")
-                                .ok_or_else(|| "Process binding target is missing".to_string())?;
-                            let target = natives::param_target_from_value(
-                                &app.state, track, &target,
-                            )?;
-                            app.state.set_process_port_binding(
-                                track, instance_id, &port, target,
-                            )
-                        }
-                        "clear-port-binding" => {
-                            let port = field("port").and_then(|value| match value {
+                            })
+                            .ok_or_else(|| "Process port is missing".to_string())?;
+                        let target = field("target")
+                            .ok_or_else(|| "Process binding target is missing".to_string())?;
+                        let target = natives::param_target_from_value(&app.state, track, &target)?;
+                        app.state
+                            .set_process_port_binding(track, instance_id, &port, target)
+                    }
+                    "clear-port-binding" => {
+                        let port = field("port")
+                            .and_then(|value| match value {
                                 Value::String(value) => Some(value),
                                 _ => None,
-                            }).ok_or_else(|| "Process port is missing".to_string())?;
-                            app.state.clear_process_port_binding(
-                                track, instance_id, &port,
-                            )
-                        }
-                        _ => return Err(format!("Unknown process history operation {op}")),
-                    };
-                    changed.then_some(()).ok_or_else(|| {
-                        "Process edit target was missing or unchanged".to_string()
-                    })
-                },
-            );
+                            })
+                            .ok_or_else(|| "Process port is missing".to_string())?;
+                        app.state
+                            .clear_process_port_binding(track, instance_id, &port)
+                    }
+                    _ => return Err(format!("Unknown process history operation {op}")),
+                };
+                changed
+                    .then_some(())
+                    .ok_or_else(|| "Process edit target was missing or unchanged".to_string())
+            });
             match result {
                 Ok(()) => ui_invalidations.push(UiInvalidation::ProcessChain { track }),
-                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
-                    "Process edit failed: {error}"
-                ))),
+                Err(error) => editor
+                    .handle_host_event(HostEvent::Status(format!("Process edit failed: {error}"))),
             }
         }
         "piano-roll-gesture-update" => {
@@ -390,11 +396,7 @@ pub(super) fn handle(
                 ));
                 return;
             };
-            match apply_selected_steps_delete(
-                &mut app,
-                track,
-                &selected_steps,
-            ) {
+            match apply_selected_steps_delete(&mut app, track, &selected_steps) {
                 Ok((app::edit::EditOutcome::Applied(_), steps)) => {
                     *auto_follow_override_until.lock().unwrap() =
                         Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
@@ -416,26 +418,24 @@ pub(super) fn handle(
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
             }
         }
-        "paste-steps" => {
-            match apply_step_paste_host_command(&mut app, &step_clipboard, &payload) {
-                Ok((app::edit::EditOutcome::Applied(result), track)) => {
-                    *auto_follow_override_until.lock().unwrap() =
-                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                    ui_invalidations.push(UiInvalidation::Pattern(
-                        PatternInvalidation::WholeTrack { track },
-                    ));
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
-                    editor.show_transient_message(result.label);
-                }
-                Ok((app::edit::EditOutcome::NoOp, _)) => {}
-                Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
-                    editor.handle_host_event(HostEvent::Error(
-                        "Step paste was applied without history".to_string(),
-                    ));
-                }
-                Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+        "paste-steps" => match apply_step_paste_host_command(&mut app, &step_clipboard, &payload) {
+            Ok((app::edit::EditOutcome::Applied(result), track)) => {
+                *auto_follow_override_until.lock().unwrap() =
+                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                ui_invalidations.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
+                    track,
+                }));
+                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                editor.show_transient_message(result.label);
             }
-        }
+            Ok((app::edit::EditOutcome::NoOp, _)) => {}
+            Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                editor.handle_host_event(HostEvent::Error(
+                    "Step paste was applied without history".to_string(),
+                ));
+            }
+            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+        },
         "print-step-param" => {
             // Live step-param printing (bead eseq-jc9): while playing with
             // record on, a *step*-buffer param touch latches into print mode;
@@ -461,12 +461,7 @@ pub(super) fn handle(
                 _ => None,
             });
             let param = field("param").and_then(|value| match value {
-                Value::Keyword(name) => match name.as_str() {
-                    "velocity" | "vel" => Some(StepParam::Velocity),
-                    "duration" | "dur" => Some(StepParam::Duration),
-                    "transpose" => Some(StepParam::Transpose),
-                    _ => None,
-                },
+                Value::Keyword(name) => crate::step_print::print_step_param_from_keyword(&name),
                 _ => None,
             });
             let value = field("value").and_then(|value| match value {
@@ -497,12 +492,7 @@ pub(super) fn handle(
                 .get("param")
                 .map(|cell| cell.borrow().clone())
                 .and_then(|value| match value {
-                    Value::Keyword(name) => match name.as_str() {
-                        "velocity" | "vel" => Some(StepParam::Velocity),
-                        "duration" | "dur" => Some(StepParam::Duration),
-                        "transpose" => Some(StepParam::Transpose),
-                        _ => None,
-                    },
+                    Value::Keyword(name) => crate::step_print::print_step_param_from_keyword(&name),
                     _ => None,
                 });
             let Some(param) = param else {
@@ -542,9 +532,11 @@ pub(super) fn handle(
                             .clamp(1, MAX_STEPS);
                         let value = state.pattern.step_data[track]
                             .get(cursor.min(num_steps.saturating_sub(1)), param);
-                        editor
-                            .runtime_mut()
-                            .set_reactive("SEQ", field, Value::Number(value as f64));
+                        editor.runtime_mut().set_reactive(
+                            "SEQ",
+                            field,
+                            Value::Number(value as f64),
+                        );
                         editor.refresh_visible_layouts_for_buffer_named("*step*");
                     }
                 }
@@ -590,68 +582,68 @@ pub(super) fn handle(
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
             }
         }
-        "move-step-history" => {
-            match apply_move_step_history_host_command(&mut app, &payload) {
-                Ok((app::edit::EditOutcome::Applied(result), track, steps, affected_steps, delta, move_selection)) => {
-                    let moved_steps = steps
-                        .iter()
-                        .map(|step| (*step as isize + delta) as usize)
-                        .collect::<Vec<_>>();
-                    let mut changed_selection = Vec::new();
-                    if move_selection {
-                        let mut selected = selected_steps.lock().unwrap();
-                        let previous = selected.clone();
-                        selected.clear();
-                        selected.extend(moved_steps.iter().copied());
-                        changed_selection = previous
-                            .symmetric_difference(&selected)
-                            .copied()
-                            .collect();
-                        changed_selection.sort_unstable();
-                    }
-                    *auto_follow_override_until.lock().unwrap() =
-                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                    ui_invalidations.push(UiInvalidation::StepBatch {
+        "move-step-history" => match apply_move_step_history_host_command(&mut app, &payload) {
+            Ok((
+                app::edit::EditOutcome::Applied(result),
+                track,
+                steps,
+                affected_steps,
+                delta,
+                move_selection,
+            )) => {
+                let moved_steps = steps
+                    .iter()
+                    .map(|step| (*step as isize + delta) as usize)
+                    .collect::<Vec<_>>();
+                let mut changed_selection = Vec::new();
+                if move_selection {
+                    let mut selected = selected_steps.lock().unwrap();
+                    let previous = selected.clone();
+                    selected.clear();
+                    selected.extend(moved_steps.iter().copied());
+                    changed_selection = previous.symmetric_difference(&selected).copied().collect();
+                    changed_selection.sort_unstable();
+                }
+                *auto_follow_override_until.lock().unwrap() =
+                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                ui_invalidations.push(UiInvalidation::StepBatch {
+                    track,
+                    steps: affected_steps,
+                });
+                if move_selection {
+                    ui_invalidations.push(UiInvalidation::StepSelection {
                         track,
-                        steps: affected_steps,
+                        changed_steps: changed_selection,
                     });
-                    if move_selection {
-                        ui_invalidations.push(UiInvalidation::StepSelection {
-                            track,
-                            changed_steps: changed_selection,
-                        });
-                    }
-                    editor.show_transient_message(result.label);
                 }
-                Ok((app::edit::EditOutcome::NoOp, ..)) => {}
-                Ok((app::edit::EditOutcome::AppliedUnrecorded, ..)) => {
-                    editor.handle_host_event(HostEvent::Error(
-                        "Step move was applied without history".to_string(),
-                    ));
-                }
-                Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                editor.show_transient_message(result.label);
             }
-        }
-        "slice2-history-action" => {
-            match apply_slice2_history_host_command(&mut app, &payload) {
-                Ok((app::edit::EditOutcome::Applied(result), track)) => {
-                    *auto_follow_override_until.lock().unwrap() =
-                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                    ui_invalidations.push(UiInvalidation::Pattern(
-                        PatternInvalidation::WholeTrack { track },
-                    ));
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
-                    editor.show_transient_message(result.label);
-                }
-                Ok((app::edit::EditOutcome::NoOp, _)) => {}
-                Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
-                    editor.handle_host_event(HostEvent::Error(
-                        "Slice 2 edit was applied without history".to_string(),
-                    ));
-                }
-                Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+            Ok((app::edit::EditOutcome::NoOp, ..)) => {}
+            Ok((app::edit::EditOutcome::AppliedUnrecorded, ..)) => {
+                editor.handle_host_event(HostEvent::Error(
+                    "Step move was applied without history".to_string(),
+                ));
             }
-        }
+            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+        },
+        "slice2-history-action" => match apply_slice2_history_host_command(&mut app, &payload) {
+            Ok((app::edit::EditOutcome::Applied(result), track)) => {
+                *auto_follow_override_until.lock().unwrap() =
+                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                ui_invalidations.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
+                    track,
+                }));
+                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                editor.show_transient_message(result.label);
+            }
+            Ok((app::edit::EditOutcome::NoOp, _)) => {}
+            Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                editor.handle_host_event(HostEvent::Error(
+                    "Slice 2 edit was applied without history".to_string(),
+                ));
+            }
+            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+        },
         "resize-drum-rack-patterns" => {
             let Value::Map(map) = &payload else {
                 editor.handle_host_event(HostEvent::Error(
@@ -677,8 +669,7 @@ pub(super) fn handle(
                 .find(|group| group.bus_id == bus_id && group.rack.is_some())
             else {
                 editor.handle_host_event(HostEvent::Error(
-                    "Drum rack pattern resize failed: selected bus is not a drum rack"
-                        .to_string(),
+                    "Drum rack pattern resize failed: selected bus is not a drum rack".to_string(),
                 ));
                 return;
             };
@@ -717,47 +708,43 @@ pub(super) fn handle(
                 ))),
             }
         }
-        "slice3-history-action" => {
-            match apply_slice3_history_host_command(&mut app, &payload) {
-                Ok((app::edit::EditOutcome::Applied(result), track)) => {
-                    *auto_follow_override_until.lock().unwrap() =
-                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                    match (track, slice3_track_mixer_invalidation(&payload)) {
-                        (Some(track), Some(change)) => {
-                            ui_invalidations
-                                .push(UiInvalidation::TrackMixer { track, change });
-                        }
-                        (track, None) => {
-                            if let Some(track) = track {
-                                ui_invalidations.push(UiInvalidation::Pattern(
-                                    PatternInvalidation::WholeTrack { track },
-                                ));
-                            }
-                            ui_epoch.fetch_add(1, Ordering::Relaxed);
-                        }
-                        (None, Some(_)) => {
-                            ui_epoch.fetch_add(1, Ordering::Relaxed);
-                        }
+        "slice3-history-action" => match apply_slice3_history_host_command(&mut app, &payload) {
+            Ok((app::edit::EditOutcome::Applied(result), track)) => {
+                *auto_follow_override_until.lock().unwrap() =
+                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                match (track, slice3_track_mixer_invalidation(&payload)) {
+                    (Some(track), Some(change)) => {
+                        ui_invalidations.push(UiInvalidation::TrackMixer { track, change });
                     }
-                    editor.show_transient_message(result.label);
+                    (track, None) => {
+                        if let Some(track) = track {
+                            ui_invalidations.push(UiInvalidation::Pattern(
+                                PatternInvalidation::WholeTrack { track },
+                            ));
+                        }
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    }
+                    (None, Some(_)) => {
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
-                Ok((app::edit::EditOutcome::NoOp, _)) => {}
-                Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
-                    editor.handle_host_event(HostEvent::Error(
-                        "Slice 3 edit was applied without history".to_string(),
-                    ));
-                }
-                Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                editor.show_transient_message(result.label);
             }
-        }
+            Ok((app::edit::EditOutcome::NoOp, _)) => {}
+            Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                editor.handle_host_event(HostEvent::Error(
+                    "Slice 3 edit was applied without history".to_string(),
+                ));
+            }
+            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+        },
         "bus-mixer-history-action" => {
             match apply_bus_mixer_history_host_command(&mut app, &payload) {
                 Ok((app::edit::EditOutcome::Applied(result), bus)) => {
                     *bus_state.lock().unwrap() = app.buses.clone();
                     match bus_mixer_targeted_invalidation(&payload) {
                         Some(change) => {
-                            ui_invalidations
-                                .push(UiInvalidation::BusMixer { bus, change });
+                            ui_invalidations.push(UiInvalidation::BusMixer { bus, change });
                         }
                         None => {
                             ui_invalidations.push(UiInvalidation::BusMixer {
@@ -812,21 +799,18 @@ pub(super) fn handle(
                     Value::Number(n) => Some(*n as usize),
                     _ => None,
                 });
-                let slot_idx =
-                    map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
-                        Value::Number(n) => Some(*n as usize),
-                        _ => None,
-                    });
-                let rack_slot =
-                    map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
-                        Value::Number(n) => Some(*n as usize),
-                        _ => None,
-                    });
-                let param_idx =
-                    map.get("param-idx").and_then(|cell| match &*cell.borrow() {
-                        Value::Number(n) => Some(*n as usize),
-                        _ => None,
-                    });
+                let slot_idx = map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n as usize),
+                    _ => None,
+                });
+                let rack_slot = map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n as usize),
+                    _ => None,
+                });
+                let param_idx = map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n as usize),
+                    _ => None,
+                });
                 let value = map.get("value").and_then(|cell| match &*cell.borrow() {
                     Value::Number(n) => Some(*n as f32),
                     _ => None,
@@ -842,9 +826,7 @@ pub(super) fn handle(
                                 app::AppCommand::SetTimebasePlock {
                                     track,
                                     step,
-                                    timebase: Some(
-                                        sequencer::sequencer::Timebase::ALL[idx],
-                                    ),
+                                    timebase: Some(sequencer::sequencer::Timebase::ALL[idx]),
                                 },
                             );
                         }
@@ -859,9 +841,8 @@ pub(super) fn handle(
                             );
                         }
                         "swing-resolution" => {
-                            let idx = (value.round() as usize).min(
-                                sequencer::sequencer::SwingResolution::ALL.len() - 1,
-                            );
+                            let idx = (value.round() as usize)
+                                .min(sequencer::sequencer::SwingResolution::ALL.len() - 1);
                             app::apply_command(
                                 &mut app,
                                 app::AppCommand::SetTrackSwingResolutionPlock {
@@ -914,8 +895,7 @@ pub(super) fn handle(
                                     .and_then(|d| d.params.get(param_idx))
                                     .cloned()
                                 {
-                                    let stored =
-                                        desc.clamp(desc.user_input_to_stored(value));
+                                    let stored = desc.clamp(desc.user_input_to_stored(value));
                                     app::apply_command(
                                         &mut app,
                                         app::AppCommand::SetInstrumentPlock {
@@ -929,9 +909,7 @@ pub(super) fn handle(
                             }
                         }
                         "effect" => {
-                            if let (Some(slot_idx), Some(param_idx)) =
-                                (slot_idx, param_idx)
-                            {
+                            if let (Some(slot_idx), Some(param_idx)) = (slot_idx, param_idx) {
                                 if let Some(_slot) = state
                                     .pattern
                                     .effect_chains
@@ -962,9 +940,7 @@ pub(super) fn handle(
                         "rack-macro" => {
                             if let Some(param_idx) = param_idx {
                                 if let Some(id) =
-                                    sequencer::sequencer::RackMacroId::from_index(
-                                        param_idx,
-                                    )
+                                    sequencer::sequencer::RackMacroId::from_index(param_idx)
                                 {
                                     app::apply_command(
                                         &mut app,
@@ -979,11 +955,8 @@ pub(super) fn handle(
                             }
                         }
                         "rack-effect" => {
-                            if let (
-                                Some(rack_slot),
-                                Some(effect_slot),
-                                Some(param_idx),
-                            ) = (rack_slot, slot_idx, param_idx)
+                            if let (Some(rack_slot), Some(effect_slot), Some(param_idx)) =
+                                (rack_slot, slot_idx, param_idx)
                             {
                                 app::apply_command(
                                     &mut app,
@@ -999,25 +972,20 @@ pub(super) fn handle(
                             }
                         }
                         "midi-fx" => {
-                            if let (Some(slot_idx), Some(param_idx)) =
-                                (slot_idx, param_idx)
-                            {
+                            if let (Some(slot_idx), Some(param_idx)) = (slot_idx, param_idx) {
                                 if let Some(_slot) = state
                                     .pattern
                                     .midi_fx_slots
                                     .get(track)
                                     .and_then(|slots| slots.get(slot_idx))
                                 {
-                                    let chain = state.pattern.track_params[track]
-                                        .midi_fx_chain();
+                                    let chain = state.pattern.track_params[track].midi_fx_chain();
                                     let clamped = chain
                                         .get(slot_idx)
                                         .and_then(|name| {
                                             sequencer::lisp_host::load_midi_fx_descriptor(name)
                                         })
-                                        .and_then(|desc| {
-                                            desc.params.get(param_idx).cloned()
-                                        })
+                                        .and_then(|desc| desc.params.get(param_idx).cloned())
                                         .map(|p| value.clamp(p.min, p.max))
                                         .unwrap_or(value);
                                     app::apply_command(
@@ -1050,21 +1018,18 @@ pub(super) fn handle(
                     Value::Number(n) => Some(*n as usize),
                     _ => None,
                 });
-                let slot_idx =
-                    map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
-                        Value::Number(n) => Some(*n as usize),
-                        _ => None,
-                    });
-                let rack_slot =
-                    map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
-                        Value::Number(n) => Some(*n as usize),
-                        _ => None,
-                    });
-                let param_idx =
-                    map.get("param-idx").and_then(|cell| match &*cell.borrow() {
-                        Value::Number(n) => Some(*n as usize),
-                        _ => None,
-                    });
+                let slot_idx = map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n as usize),
+                    _ => None,
+                });
+                let rack_slot = map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n as usize),
+                    _ => None,
+                });
+                let param_idx = map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n as usize),
+                    _ => None,
+                });
                 let label = map.get("label").and_then(|cell| match &*cell.borrow() {
                     Value::String(s) => Some(s.clone()),
                     _ => None,
@@ -1082,18 +1047,15 @@ pub(super) fn handle(
                                     app::AppCommand::SetTimebasePlock {
                                         track,
                                         step,
-                                        timebase: Some(
-                                            sequencer::sequencer::Timebase::ALL[idx],
-                                        ),
+                                        timebase: Some(sequencer::sequencer::Timebase::ALL[idx]),
                                     },
                                 );
                             }
                         }
                         "swing-resolution" => {
-                            if let Some(idx) =
-                                sequencer::sequencer::SwingResolution::LABELS
-                                    .iter()
-                                    .position(|item| *item == label)
+                            if let Some(idx) = sequencer::sequencer::SwingResolution::LABELS
+                                .iter()
+                                .position(|item| *item == label)
                             {
                                 app::apply_command(
                                     &mut app,
@@ -1116,11 +1078,9 @@ pub(super) fn handle(
                                     .get(track)
                                     .and_then(|d| d.params.get(param_idx))
                                     .and_then(|p| match &p.kind {
-                                        sequencer::effects::ParamKind::Enum {
-                                            labels,
-                                        } => labels
-                                            .iter()
-                                            .position(|item| item == &label),
+                                        sequencer::effects::ParamKind::Enum { labels } => {
+                                            labels.iter().position(|item| item == &label)
+                                        }
                                         sequencer::effects::ParamKind::Boolean => {
                                             match label.as_str() {
                                                 "on" | "ON" => Some(1),
@@ -1144,9 +1104,7 @@ pub(super) fn handle(
                             }
                         }
                         "effect" => {
-                            if let (Some(slot_idx), Some(param_idx)) =
-                                (slot_idx, param_idx)
-                            {
+                            if let (Some(slot_idx), Some(param_idx)) = (slot_idx, param_idx) {
                                 if let Some(selected_idx) = app
                                     .graph
                                     .effect_descriptors
@@ -1154,11 +1112,9 @@ pub(super) fn handle(
                                     .and_then(|d| d.get(slot_idx))
                                     .and_then(|d| d.params.get(param_idx))
                                     .and_then(|p| match &p.kind {
-                                        sequencer::effects::ParamKind::Enum {
-                                            labels,
-                                        } => labels
-                                            .iter()
-                                            .position(|item| item == &label),
+                                        sequencer::effects::ParamKind::Enum { labels } => {
+                                            labels.iter().position(|item| item == &label)
+                                        }
                                         sequencer::effects::ParamKind::Boolean => {
                                             match label.as_str() {
                                                 "on" | "ON" => Some(1),
@@ -1190,11 +1146,8 @@ pub(super) fn handle(
                             }
                         }
                         "rack-effect" => {
-                            if let (
-                                Some(rack_slot),
-                                Some(effect_slot),
-                                Some(param_idx),
-                            ) = (rack_slot, slot_idx, param_idx)
+                            if let (Some(rack_slot), Some(effect_slot), Some(param_idx)) =
+                                (rack_slot, slot_idx, param_idx)
                             {
                                 match app.rack_slot_effect_option_value(
                                     track,
@@ -1216,44 +1169,33 @@ pub(super) fn handle(
                                             },
                                         );
                                     }
-                                    Err(error) => editor.handle_host_event(
-                                        HostEvent::Status(format!(
-                                            "Error editing rack-slot effect lock: {error}"
-                                        )),
-                                    ),
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error editing rack-slot effect lock: {error}"),
+                                    )),
                                 }
                             }
                         }
                         "midi-fx" => {
-                            if let (Some(slot_idx), Some(param_idx)) =
-                                (slot_idx, param_idx)
-                            {
-                                let chain =
-                                    state.pattern.track_params[track].midi_fx_chain();
+                            if let (Some(slot_idx), Some(param_idx)) = (slot_idx, param_idx) {
+                                let chain = state.pattern.track_params[track].midi_fx_chain();
                                 if let Some(selected_idx) = chain
                                     .get(slot_idx)
                                     .and_then(|name| {
-                                        sequencer::lisp_host::load_midi_fx_descriptor(
-                                            name,
-                                        )
+                                        sequencer::lisp_host::load_midi_fx_descriptor(name)
                                     })
                                     .and_then(|desc| {
-                                        desc.params.get(param_idx).and_then(|p| {
-                                            match &p.kind {
-                                                sequencer::effects::ParamKind::Enum {
-                                                    labels,
-                                                } => labels
-                                                    .iter()
-                                                    .position(|item| item == &label),
-                                                sequencer::effects::ParamKind::Boolean => {
-                                                    match label.as_str() {
-                                                        "on" | "ON" => Some(1),
-                                                        "off" | "OFF" => Some(0),
-                                                        _ => None,
-                                                    }
-                                                }
-                                                _ => None,
+                                        desc.params.get(param_idx).and_then(|p| match &p.kind {
+                                            sequencer::effects::ParamKind::Enum { labels } => {
+                                                labels.iter().position(|item| item == &label)
                                             }
+                                            sequencer::effects::ParamKind::Boolean => {
+                                                match label.as_str() {
+                                                    "on" | "ON" => Some(1),
+                                                    "off" | "OFF" => Some(0),
+                                                    _ => None,
+                                                }
+                                            }
+                                            _ => None,
                                         })
                                     })
                                 {
@@ -1294,39 +1236,36 @@ pub(super) fn handle(
                     Value::Number(n) => Some(*n as usize),
                     _ => None,
                 });
-                let slot_idx =
-                    map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                let slot_idx = map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n as usize),
+                    _ => None,
+                });
+                let rack_slot = map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n as usize),
+                    _ => None,
+                });
+                let param_idx = map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n as usize),
+                    _ => None,
+                });
+                let target_track = map
+                    .get("target-track")
+                    .and_then(|cell| match &*cell.borrow() {
                         Value::Number(n) => Some(*n as usize),
                         _ => None,
                     });
-                let rack_slot =
-                    map.get("rack-slot").and_then(|cell| match &*cell.borrow() {
+                let network_id = map
+                    .get("network-id")
+                    .and_then(|cell| match &*cell.borrow() {
+                        Value::Number(n) => Some(*n as u64),
+                        _ => None,
+                    });
+                let neuron_idx = map
+                    .get("neuron-idx")
+                    .and_then(|cell| match &*cell.borrow() {
                         Value::Number(n) => Some(*n as usize),
                         _ => None,
                     });
-                let param_idx =
-                    map.get("param-idx").and_then(|cell| match &*cell.borrow() {
-                        Value::Number(n) => Some(*n as usize),
-                        _ => None,
-                    });
-                let target_track =
-                    map.get("target-track")
-                        .and_then(|cell| match &*cell.borrow() {
-                            Value::Number(n) => Some(*n as usize),
-                            _ => None,
-                        });
-                let network_id =
-                    map.get("network-id")
-                        .and_then(|cell| match &*cell.borrow() {
-                            Value::Number(n) => Some(*n as u64),
-                            _ => None,
-                        });
-                let neuron_idx =
-                    map.get("neuron-idx")
-                        .and_then(|cell| match &*cell.borrow() {
-                            Value::Number(n) => Some(*n as usize),
-                            _ => None,
-                        });
                 if let Some(target) = target {
                     let track = current_track.load(Ordering::Relaxed);
                     let mut changed = false;
@@ -1436,9 +1375,7 @@ pub(super) fn handle(
                         "rack-macro" => {
                             if let (Some(step), Some(param_idx)) = (step, param_idx) {
                                 if let Some(id) =
-                                    sequencer::sequencer::RackMacroId::from_index(
-                                        param_idx,
-                                    )
+                                    sequencer::sequencer::RackMacroId::from_index(param_idx)
                                 {
                                     changed = app::try_apply_command(
                                         &mut app,
@@ -1529,13 +1466,8 @@ pub(super) fn handle(
                                 Some(target_track),
                                 Some(slot_idx),
                                 Some(param_idx),
-                            ) = (
-                                network_id,
-                                neuron_idx,
-                                target_track,
-                                slot_idx,
-                                param_idx,
-                            ) {
+                            ) = (network_id, neuron_idx, target_track, slot_idx, param_idx)
+                            {
                                 let history_before = state.capture_project_scenes();
                                 match sequencer::lisp_host::clear_neural_effect_plock_by_network_id(
                                     &state,
@@ -1554,11 +1486,9 @@ pub(super) fn handle(
                                             );
                                         }
                                     }
-                                    Err(error) => editor.handle_host_event(
-                                        HostEvent::Status(format!(
-                                            "Error clearing neuron effect p-lock: {error}"
-                                        )),
-                                    ),
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error clearing neuron effect p-lock: {error}"),
+                                    )),
                                 }
                             }
                         }
@@ -1724,11 +1654,10 @@ pub(super) fn handle(
                     Value::String(s) => Some(s.clone()),
                     _ => None,
                 });
-                let fallback_step =
-                    map.get("step").and_then(|cell| match &*cell.borrow() {
-                        Value::Number(n) => Some(*n as usize),
-                        _ => None,
-                    });
+                let fallback_step = map.get("step").and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n as usize),
+                    _ => None,
+                });
                 let mut steps: Vec<usize> =
                     selected_steps.lock().unwrap().iter().copied().collect();
                 steps.sort_unstable();
@@ -1741,8 +1670,8 @@ pub(super) fn handle(
                     return;
                 }
                 let track = current_track.load(Ordering::Relaxed);
-                let is_clear = name == "clear-step-variant-locks"
-                    || label.as_deref() == Some("def");
+                let is_clear =
+                    name == "clear-step-variant-locks" || label.as_deref() == Some("def");
                 let assignment = label.as_ref().and_then(|label| {
                     state
                         .plock_variant_registry_snapshot(track)
@@ -1760,16 +1689,11 @@ pub(super) fn handle(
                     },
                     |app| {
                         if is_clear {
-                            app.state.clear_variant_locks_for_steps_no_publish(
-                                track,
-                                &steps,
-                            );
+                            app.state
+                                .clear_variant_locks_for_steps_no_publish(track, &steps);
                         } else if let Some(key) = &assignment {
-                            app.state.stamp_variant_key_to_steps_no_publish(
-                                track,
-                                key,
-                                &steps,
-                            );
+                            app.state
+                                .stamp_variant_key_to_steps_no_publish(track, key, &steps);
                         }
                         Ok(())
                     },
@@ -1951,7 +1875,7 @@ mod tests {
                     cached_mod_display_values: Default::default(),
                     watched_display_modulators: std::collections::HashSet::new(),
                     mod_display_poll_fx_epoch: usize::MAX,
-                mod_display_poll_track: None,
+                    mod_display_poll_track: None,
                     cached_cpu_load_bits: 0.0f32.to_bits(),
                     last_meter_poll_at: Instant::now(),
                     last_cpu_ui_poll_at: Instant::now(),
@@ -1977,10 +1901,7 @@ mod tests {
         /// Give the track a real instrument descriptor, so instrument p-lock
         /// commands pass `validate_device_command_target` the way they do
         /// against a loaded instrument.
-        fn with_instrument_descriptor(
-            &mut self,
-            desc: &sequencer::effects::EffectDescriptor,
-        ) {
+        fn with_instrument_descriptor(&mut self, desc: &sequencer::effects::EffectDescriptor) {
             self.state.pattern.instrument_slots[TRACK].apply_descriptor(desc, 0);
             self.app.graph.instrument_descriptors = vec![desc.clone()];
         }
@@ -1995,13 +1916,7 @@ mod tests {
                 track_names: &mut self.track_names,
                 shared: &self.shared,
             };
-            dispatch_custom_host_command(
-                name,
-                payload,
-                &mut self.app,
-                &mut self.editor,
-                &mut ctx,
-            );
+            dispatch_custom_host_command(name, payload, &mut self.app, &mut self.editor, &mut ctx);
         }
 
         /// The real seam: `dispatch_custom_host_command` -> this module's
@@ -2093,11 +2008,12 @@ mod tests {
 
         fn list_number(&self, field: &str, index: usize) -> f64 {
             match self.editor.runtime().reactive_field_value("SEQ", field) {
-                Some(Value::List(items)) => match items.get(index).map(|item| item.borrow().clone())
-                {
-                    Some(Value::Number(value)) => value,
-                    other => panic!("SEQ.{field}[{index}] should be a number, got {other:?}"),
-                },
+                Some(Value::List(items)) => {
+                    match items.get(index).map(|item| item.borrow().clone()) {
+                        Some(Value::Number(value)) => value,
+                        other => panic!("SEQ.{field}[{index}] should be a number, got {other:?}"),
+                    }
+                }
                 other => panic!("SEQ.{field} should be a list, got {other:?}"),
             }
         }
@@ -2563,7 +2479,10 @@ mod tests {
         slot.set_plock(2, other_idx, 0.25);
 
         let undo_before = harness.app.history.undo_len();
-        harness.dispatch("clear-param-plocks", clear_param_plocks_payload("all", cutoff_idx));
+        harness.dispatch(
+            "clear-param-plocks",
+            clear_param_plocks_payload("all", cutoff_idx),
+        );
 
         let slot = &harness.state.pattern.instrument_slots[TRACK];
         for step in [2usize, 9, 40] {

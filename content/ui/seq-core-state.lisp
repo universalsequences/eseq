@@ -99,7 +99,9 @@
       (reactive-set "SEQ" "fx-step-parameter-step" parameter-step)
       (reactive-set "SEQ" "fx-step-value-transpose" (nth SEQ.transposes parameter-step))
       (reactive-set "SEQ" "fx-step-value-velocity" (nth SEQ.velocities parameter-step))
-      (reactive-set "SEQ" "fx-step-value-duration" (nth SEQ.durations parameter-step)))))
+      (reactive-set "SEQ" "fx-step-value-duration" (nth SEQ.durations parameter-step))
+      (reactive-set "SEQ" "fx-step-value-retrig" (nth SEQ.retrigs parameter-step))
+      (reactive-set "SEQ" "fx-step-value-retrig-rate" (nth SEQ.retrig-rates parameter-step)))))
 
 ;; The step cursor always tracks the current track's pattern length.  The old
 ;; bus-gate step sequencer (and its `SEQ.bus-num-steps` reactive list) is gone,

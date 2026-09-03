@@ -265,6 +265,14 @@ pub(super) fn apply_acc_emit_overrides(
             "chop" | "chp" => {
                 resolved.chop = acc_emit_number(value, "chop")?.max(1.0);
             }
+            "retrig" | "rtrg" => {
+                resolved.retrig = acc_emit_number(value, "retrig")?
+                    .clamp(StepParam::Retrig.min(), StepParam::Retrig.max());
+            }
+            "retrig-rate" | "rate" => {
+                resolved.retrig_rate = acc_emit_number(value, "retrig-rate")?
+                    .clamp(StepParam::RetrigRate.min(), StepParam::RetrigRate.max());
+            }
             "track" => {
                 let track = acc_emit_number(value, "track")?;
                 if track < 0.0 {

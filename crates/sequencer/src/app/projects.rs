@@ -637,6 +637,12 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         if !has_generated_mod_params {
             find_old_idx_by_node(param.node_param_idx)
                 .or_else(|| (new_idx < slot.defaults.len()).then_some(new_idx))
+        } else if param.node_param_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
+            // The shared modulator block has stable node indices, so match on
+            // those: a control the saved layout never had (`modN_lfo_phase`
+            // was appended after the slot block) takes its default instead of
+            // whatever generated depth lane the positional count lands on.
+            find_old_idx_by_node(param.node_param_idx)
         } else {
             Some(old_non_generated_idx_for_new_idx(new_idx))
                 .filter(|&old_idx| old_idx < slot.defaults.len())

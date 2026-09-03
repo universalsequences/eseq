@@ -485,6 +485,12 @@ pub(crate) fn build_sampler_panel_value(
         if let Some(source_param) = source_param {
             section_map.insert("source-param".to_string(), source_param);
         }
+        // The source editor's waveform marker binds this (eseq mods rework).
+        insert_string_prop(
+            &mut section_map,
+            "phase-field",
+            instrument_mod_slot_phase_field(track, slot_number),
+        );
         section_map.insert(
             "params".to_string(),
             Rc::new(RefCell::new(Value::List(params))),
@@ -1265,6 +1271,12 @@ pub(crate) fn build_instrument_panel_value(
         if let Some(source_param) = source_param {
             section_map.insert("source-param".to_string(), source_param);
         }
+        // The source editor's waveform marker binds this (eseq mods rework).
+        insert_string_prop(
+            &mut section_map,
+            "phase-field",
+            fx_instrument_mod_slot_phase_field(slot_number),
+        );
         section_map.insert(
             "params".to_string(),
             Rc::new(RefCell::new(Value::List(params))),

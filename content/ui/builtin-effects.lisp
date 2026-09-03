@@ -8,6 +8,7 @@
 (load "@/ui/effects/builtin/str8-delay.lisp")
 (load "@/ui/effects/builtin/space-echo.lisp")
 (load "@/ui/effects/builtin/multiverb.lisp")
+(load "@/ui/effects/builtin/reverb.lisp")
 (load "@/ui/effects/builtin/dimension.lisp")
 (load "@/ui/effects/builtin/phaser-flanger.lisp")
 (load "@/ui/effects/builtin/roar.lisp")

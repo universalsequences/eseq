@@ -463,6 +463,12 @@ pub(super) fn build_selected_rack_slot_instrument_value(
         if let Some(source_param) = source_param {
             section_map.insert("source-param".to_string(), source_param);
         }
+        // The source editor's waveform marker binds this (eseq mods rework).
+        insert_string_prop(
+            &mut section_map,
+            "phase-field",
+            rack_slot_mod_slot_phase_field(track, slot_idx, slot_number),
+        );
         section_map.insert("params".to_string(), value_cell(Value::List(params)));
         source_sections.push(value_cell(Value::Map(section_map)));
     }
@@ -908,6 +914,9 @@ pub(super) fn build_rack_slot_effect_value(
         if let Some(source_param) = source_param {
             section.insert("source-param".to_string(), source_param);
         }
+        // No `phase-field`: rack effect modulators are not sampled by the
+        // UI-tick poller, so the source editor draws the waveform without a
+        // marker here.
         section.insert(
             "params".to_string(),
             value_cell(Value::List(section_params)),

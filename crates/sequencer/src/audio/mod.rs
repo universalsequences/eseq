@@ -114,3 +114,20 @@ const SCHEDULED_BLOCK_SCRATCH_CAPACITY: usize =
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) fn resolve_snapshot_instrument_defaults_for_test(
+    snapshot: &crate::sequencer::SequencerSnapshot,
+    track_idx: usize,
+) -> Vec<(bool, u64, f32)> {
+    params::resolve_snapshot_instrument_defaults(snapshot, track_idx)
+        .iter()
+        .map(|p| {
+            (
+                p.target == crate::scheduler::scheduled_event::ScheduledInstrumentParamTarget::Modulator,
+                p.idx,
+                p.value,
+            )
+        })
+        .collect()
+}

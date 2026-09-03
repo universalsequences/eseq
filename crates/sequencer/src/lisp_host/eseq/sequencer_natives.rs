@@ -3194,6 +3194,14 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
             "speed" | "spd" => resolved.speed = acc_emit_number(value, "speed")?.max(0.0),
             "pan" => resolved.pan = acc_emit_number(value, "pan")?.clamp(-1.0, 1.0),
             "chop" | "chp" => resolved.chop = acc_emit_number(value, "chop")?.max(1.0),
+            "retrig" | "rtrg" => {
+                resolved.retrig = acc_emit_number(value, "retrig")?
+                    .clamp(StepParam::Retrig.min(), StepParam::Retrig.max())
+            }
+            "retrig-rate" | "rate" => {
+                resolved.retrig_rate = acc_emit_number(value, "retrig-rate")?
+                    .clamp(StepParam::RetrigRate.min(), StepParam::RetrigRate.max())
+            }
             "track" => {
                 let track = acc_emit_number(value, "track")?;
                 if track < 0.0 {

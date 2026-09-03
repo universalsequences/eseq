@@ -278,7 +278,7 @@ pub(super) fn collect_track_active_voice_releases(
             if track_idx >= voice_pools.len() {
                 return;
             }
-            cancel_chops_for_track(countdown_events, block_events, track_idx);
+            cancel_retrigs_for_track(countdown_events, block_events, track_idx);
             // The choke recycles this track's voice lids, so any live-key
             // entry here is stale: leaving it would make the eventual key
             // release note-off a lid the sequencer has already re-triggered.
@@ -307,7 +307,7 @@ pub(super) fn collect_track_active_voice_releases(
             if engine_id >= custom_engine_pools.len() {
                 return;
             }
-            cancel_chops_for_track(countdown_events, block_events, track_idx);
+            cancel_retrigs_for_track(countdown_events, block_events, track_idx);
             active_keyboard_notes[track_idx] = [None; MAX_VOICES];
             let free_patch =
                 track_custom_run_mode(state, track_idx) == CustomInstrumentRunMode::FreePatch;
@@ -1232,7 +1232,7 @@ pub(super) fn fire_rack_resolved(
             );
         }
     }
-    cancel_chops_for_track(
+    cancel_retrigs_for_track(
         &mut data.countdown_events,
         &mut data.block_events,
         track_idx,

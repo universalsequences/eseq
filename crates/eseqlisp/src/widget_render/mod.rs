@@ -16,6 +16,7 @@ pub mod image;
 pub mod knob;
 pub mod knob_number;
 pub mod label;
+pub mod lfo_curve;
 pub mod lane_preview;
 pub mod live_audio;
 pub mod linegraph;
@@ -1254,6 +1255,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &context_menu::MENU_ITEM_WIDGET,
     &context_menu::MENU_SEPARATOR_WIDGET,
     &modulator_curve::MODULATOR_CURVE_WIDGET,
+    &lfo_curve::LFO_CURVE_WIDGET,
     &number_label::NUMBER_LABEL_WIDGET,
     &patcher::PATCHER_WIDGET,
     &adsr_editor::ADSR_EDITOR_WIDGET,

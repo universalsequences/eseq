@@ -68,7 +68,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32> {
 
     let normal = button_surface_normal(p, size, r, shape, max(px * 1.5, 0.004));
     let view_dir = vec3<f32>(0.0, 0.0, 1.0);
-    let key_light = normalize(vec3<f32>(-0.72, -0.92, 1.30));
+    let key_light = normalize(vec3<f32>(-0.12, -0.32, 1.30));
     let bounce_light = normalize(vec3<f32>(0.82, 0.78, 1.10));
     let key_diffuse = max(0.0, dot(normal, key_light));
     let bounce_diffuse = max(0.0, dot(normal, bounce_light));

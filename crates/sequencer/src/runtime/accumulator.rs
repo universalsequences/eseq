@@ -32,6 +32,11 @@ pub struct ResolvedStep {
     pub transpose: f32,
     pub pan: f32,
     pub chop: f32,
+    /// Repeats after the initial hit; `RETRIG_INFINITE` rolls until the next
+    /// trig on the track. See `docs/step-retrig-spec.md`.
+    pub retrig: f32,
+    /// Retrigs per beat.
+    pub retrig_rate: f32,
 }
 
 impl ResolvedStep {
@@ -45,6 +50,8 @@ impl ResolvedStep {
             transpose: sd.get(step, StepParam::Transpose),
             pan: sd.get(step, StepParam::Pan),
             chop: sd.get(step, StepParam::Chop),
+            retrig: sd.get(step, StepParam::Retrig),
+            retrig_rate: sd.get(step, StepParam::RetrigRate),
         }
     }
 }

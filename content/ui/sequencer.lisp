@@ -1552,6 +1552,8 @@
             (param-tab track track-id 4 "pan")
             (param-tab track track-id 5 "sync")
             (param-tab track track-id 6 "delay")
+            (param-tab track track-id 7 "rtrg")
+            (param-tab track track-id 8 "rate")
             (process-lane-selector track track-id mode)
             (h-stack :align :center :gap 0.35
               (dropdown :value (track-timebase track)

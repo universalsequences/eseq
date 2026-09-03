@@ -163,6 +163,7 @@
       (c (plock-chip-color chip)))
     (box :key (str "track-plock-chip-" (get chip :kind) "-" (get chip :label))
       :height 1.0
+      :width 4.00
       :align :baseline
       :padding 0.014
       :background-color (if current
@@ -179,7 +180,9 @@
           :background-color (if def-chip :transparent c)
           :border-width (if def-chip 1 0)
           :border-color c)
+        (box :width 0.2)
         (label (plock-chip-label chip)
+          :align :center :flex 1
           :font-size 10.0 :color (if current :black :dim) :bg :transparent)
         (box :width 0.2 )
         ))))
@@ -290,7 +293,7 @@
         )
       
       (wrap :key "track-plock-variant-strip"
-        :width :fill :gap 0.18 :row-gap 0.14 :align :start
+        :width :fill :gap 0.18 :row-gap 0.04 :align :start
         (each SEQ.track-plock-variants |chip idx|
           (plock-chip chip)))
       (if (> (len SEQ.track-plocks) 0)
@@ -367,22 +370,42 @@
       (if (= mode 1) 128
         (eseq.seqv-track-params/seqv-param-max mode)))))
 
+;; Retrig rate (mode 8) drags on a log taper: equal drag distance is equal
+;; interval, so the top of the range sweeps pitch evenly instead of crawling
+;; through the rhythmic decade (docs/step-retrig-spec.md).
+(def step-param-taper (mode)
+  (if (= mode 8) "log"
+    ;; Retrig count (mode 7) is 0..127 with the musical action under ~16 and
+    ;; 127 = infinite: a cube taper keeps small counts dialable and still
+    ;; reaches inf at the top of the drag.
+    (if (= mode 7) "cube" "linear")))
+
+;; The retrig pickers span 0..127 / 1..1024 from a one-row strip; pin their
+;; full-travel drag distance so a flick is not the whole range.
+(def step-param-drag-rows (mode)
+  (if (or (= mode 7) (= mode 8)) 24 0))
+
 (def step-param-picker (mode key width)
-  (v-stack :align :center :gap 0.24
-    (label (eseq.seqv-track-params/seqv-param-name mode) :font-size 8 :color :dim :bg :transparent)
-    (number-picker
-      :key (str "step-param-" key)
-      :value (bind-seq (str "fx-step-value-" key))
-      :min (step-param-min mode)
-      :max (step-param-max mode)
-      :decimals (eseq.seqv-track-params/seqv-param-decimals mode)
-      :noui true
-      :font-size 10
-      :text-color :white
-      :on-change (lambda (v) (step-set-param mode v))
-      :on-release (lambda () (step-param-release mode))
-      :width width
-      :height 1.15)))
+  (box 
+    :corner-radius 16 :width 12 :padding 0.2 :background-color :mixer-strip-bg 
+    (h-stack :align :center :gap 0.24
+      (box :width 0.5)
+      (label (eseq.seqv-track-params/seqv-param-name mode) :font-size 10 :color :dim :bg :transparent :v-align :center :flex 1)
+      (number-picker
+        :key (str "step-param-" key)
+        :value (bind-seq (str "fx-step-value-" key))
+        :min (step-param-min mode)
+        :max (step-param-max mode)
+        :taper (step-param-taper mode)
+        :drag-rows (step-param-drag-rows mode)
+        :decimals (eseq.seqv-track-params/seqv-param-decimals mode)
+        :noui true
+        :font-size 10
+        :text-color :white
+        :on-change (lambda (v) (step-set-param mode v))
+        :on-release (lambda () (step-param-release mode))
+        :width width
+        :height 1.15))))
 
 ;; The mixer-v2-* names below resolve through eseq.mixer's compat aliases,
 ;; NOT an import: importing eseq.mixer would evaluate mixer.lisp, whose
@@ -390,45 +413,63 @@
 ;; ride along into every VM that loads the effects family.
 (def step-track-badge ()
   (let ((track SEQ.current-track)
-        (muted (eseq.mixer/muted? SEQ.current-track)))
+      (muted (eseq.mixer/muted? SEQ.current-track)))
     (box
       :key "step-track-badge"
-      :width 3.65 :height 1.0
+      :width 4.55 :height 1.0
       :padding 0
+      :corner-radius 8
+      :v-align :center
       :background-color (rgba
         (eseq.mixer/track-color-r track muted)
         (eseq.mixer/track-color-g track muted)
         (eseq.mixer/track-color-b track muted)
         1.0)
       (label (eseq.mixer/track-collapsed-label track)
-        :width 3.65
-        :font-size 9
+        :width 4.55
+        :font-size 10
+        :v-align :center
         :h-align :center
         :color (if muted :dim :black)
         :bg :transparent))))
 
 (def step-parameters-panel ()
-  (box :debug-name "step-parameters-panel" :padding 0.75
-    (box :padding 0.5
-      :background-color :mixer-strip-bg
+  (box :debug-name "step-parameters-panel" :padding 0.5
+    (box :padding 0.0
+      :background-color :transparent ;:mixer-strip-bg
       :corner-radius 16
-      :border-color :mixer-strip-border    (v-stack :gap 0.55
-        (h-stack :gap 0.45 :align :start
-          (step-track-badge)
-          (h-stack :key "step-selection-summary" :gap 0.15 :align :center
-            (number-label :key "step-cursor-label"
-              :value (bind-seq "fx-step-cursor-number")
-              :prefix "step " :decimals 0 :width 3.3
-              :font-size 8 :color :dim :bg :transparent)
-            (label "·" :font-size 8 :color :dim :bg :transparent)
-            (number-label :key "step-selection-count-label"
-              :value (bind-seq "fx-step-selection-count")
-              :suffix " selected" :decimals 0 :width 5.0
-              :font-size 8 :color :dim :bg :transparent)))
-        (h-stack :gap 0.55 :align :center
-          (step-param-picker 3 "transpose" 4.2)
-          (step-param-picker 0 "velocity" 4.2)
-          (step-param-picker 1 "duration" 4.2))))))
+      :border-color :transparent ;:mixer-strip-border    
+      (v-stack :gap 0.55
+        (box :padding 0.25 :background-color :mixer-strip-selected-bg :corner-radius 12 :v-align :center
+          (h-stack :gap 0.45 :align :start
+            (step-track-badge)
+            (h-stack :key "step-selection-summary" :gap 0.15 :align :center
+              (number-label :key "step-cursor-label"
+                :value (bind-seq "fx-step-cursor-number")
+                :prefix "step " :decimals 0 :width 3.3
+                :font-size 8 :color :dim :bg :transparent)
+              (label "·" :font-size 8 :color :dim :bg :transparent)
+              (number-label :key "step-selection-count-label"
+                :value (bind-seq "fx-step-selection-count")
+                :suffix " selected" :decimals 0 :width 5.0
+                :font-size 8 :color :dim :bg :transparent))))
+          (v-stack :gap 0.25 
+            (h-stack :gap 0.55 :align :center
+              (step-param-picker 3 "transpose" 4.2)
+              (step-param-picker 0 "velocity" 4.2)
+              )
+            (h-stack :gap 0.55 :align :center
+              (step-param-picker 1 "duration" 4.2)
+              (step-param-picker 4 "pan" 4.2)
+              )
+            (h-stack :gap 0.55 :align :center
+              (step-param-picker 7 "retrig" 4.2)
+              (step-param-picker 8 "retrig-rate" 4.2)
+              ))
+        
+        
+        )
+      )))
 
 (def track-accumulator-panel ()
   (h-stack :debug-name "track-accumulator-panel" :padding 0.00

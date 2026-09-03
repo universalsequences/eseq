@@ -185,7 +185,8 @@ fn button_icon_text_inset(rect: Rect) -> f32 {
     (icon_rect.col - rect.col) + icon_rect.width + 0.42
 }
 
-const BUTTON_ICON_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+const BUTTON_ICON_SHADER: super::ShaderSources = super::ShaderSources::both(
+    r#"
 float button_icon_box(float2 p, float2 b)
 {
     float2 q = abs(p) - b;
@@ -312,9 +313,12 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#, super::wgsl::BUTTON_ICON_SHADER);
+"#,
+    super::wgsl::BUTTON_ICON_SHADER,
+);
 
-pub(crate) const BUTTON_SURFACE_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+pub(crate) const BUTTON_SURFACE_SHADER: super::ShaderSources = super::ShaderSources::both(
+    r#"
 float button_surface_rounded_rect(float2 p, float2 size, float radius)
 {
     float2 q = abs(p) - (size - float2(radius));
@@ -386,7 +390,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     float3 normal = button_surface_normal(p, size, r, shape, max(px * 1.5, 0.004));
     float3 view_dir = float3(0.0, 0.0, 1.0);
-    float3 key_light = normalize(float3(-0.72, -0.92, 1.30));
+    float3 key_light = normalize(float3(-0.12, -0.32, 1.30));
     float3 bounce_light = normalize(float3(0.82, 0.78, 1.10));
     float key_diffuse = max(0.0, dot(normal, key_light));
     float bounce_diffuse = max(0.0, dot(normal, bounce_light));
@@ -411,7 +415,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#, super::wgsl::BUTTON_SURFACE_SHADER);
+"#,
+    super::wgsl::BUTTON_SURFACE_SHADER,
+);
 
 impl WidgetDefinition for ButtonWidget {
     fn names(&self) -> &'static [&'static str] {
@@ -435,11 +441,33 @@ impl WidgetDefinition for ButtonWidget {
 
     fn completion_props(&self) -> &'static [&'static str] {
         &[
-            "text", "icon", "width", "height", "font-size", "padding", "active", "disabled",
-            "variant", "shape", "color", "active-color", "background-color",
-            "active-background-color", "border-color", "highlight-color", "shadow-color",
-            "corner-radius", "h-align", "v-align", "on-click", "on-press", "on-release",
-            "plock-active", "plock-color-r", "plock-color-g", "plock-color-b",
+            "text",
+            "icon",
+            "width",
+            "height",
+            "font-size",
+            "padding",
+            "active",
+            "disabled",
+            "variant",
+            "shape",
+            "color",
+            "active-color",
+            "background-color",
+            "active-background-color",
+            "border-color",
+            "highlight-color",
+            "shadow-color",
+            "corner-radius",
+            "h-align",
+            "v-align",
+            "on-click",
+            "on-press",
+            "on-release",
+            "plock-active",
+            "plock-color-r",
+            "plock-color-g",
+            "plock-color-b",
         ]
     }
 
@@ -916,12 +944,24 @@ mod tests {
             ]
         );
         assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"active"));
-        assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"corner-radius"));
+        assert!(
+            !BUTTON_WIDGET
+                .size_affecting_props()
+                .contains(&"corner-radius")
+        );
     }
 
     #[test]
     fn source_list_icon_names_resolve_to_button_icons() {
-        for icon in ["piano", "sliders", "note-arrow", "dial", "folder", "sine", "lfo"] {
+        for icon in [
+            "piano",
+            "sliders",
+            "note-arrow",
+            "dial",
+            "folder",
+            "sine",
+            "lfo",
+        ] {
             let props = HashMap::from([("icon".to_string(), Value::Keyword(icon.to_string()))]);
             assert!(icon_value(&props).is_some(), "{icon} should resolve");
         }

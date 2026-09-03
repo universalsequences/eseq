@@ -10864,6 +10864,56 @@ mod tests {
         }
     }
 
+    /// Retrigger report (2026-09-02): a source-param edit lands in the live
+    /// slot, but every step note-on re-pushes the *scheduler snapshot's*
+    /// instrument defaults to the voice, so a flag that never reaches the
+    /// snapshot is clobbered back at exactly the moment it is needed.
+    #[test]
+    fn instrument_mod_source_edit_reaches_the_scheduler_snapshot() {
+        use crate::instruments::voice_modulator as vm;
+        let state = SequencerState::new(1, vec![]);
+        let desc = crate::effects::EffectDescriptor::builtin_sampler();
+        let retrig_idx = desc
+            .params
+            .iter()
+            .position(|p| p.name == "mod1_lfo_retrigger")
+            .expect("sampler exposes mod1_lfo_retrigger");
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 7);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.instrument_descriptors = vec![desc];
+        app.state.publish_scheduler_snapshot();
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: retrig_idx,
+                value: 1.0,
+            },
+        )
+        .expect("set retrigger");
+        finish_active_gesture(&mut app);
+        assert_eq!(app.state.pattern.instrument_slots[0].defaults.get(retrig_idx), 1.0);
+        let snapshot = app.state.latest_scheduler_snapshot();
+        let in_snapshot = snapshot.tracks[0].instrument_slot.defaults[retrig_idx];
+        let node_idx = vm::slot_param_idx(0, vm::PARAM_LFO_RETRIGGER) as u64;
+        let pushed = crate::audio::resolve_snapshot_instrument_defaults_for_test(&snapshot, 0)
+            .iter()
+            .find(|(is_mod, idx, _)| *is_mod && *idx == node_idx)
+            .map(|(_, _, value)| *value);
+        assert_eq!(
+            (in_snapshot, pushed),
+            (1.0, Some(1.0)),
+            "the retrigger edit must reach the snapshot the note-on re-pushes"
+        );
+    }
+
     #[test]
     fn instrument_default_drag_and_key_locks_round_trip_bit_exactly() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);

@@ -263,6 +263,8 @@ pub(super) fn handle(
             rt.set_reactive("SEQ", "pans", Value::List(vec![]));
             rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
             rt.set_reactive("SEQ", "delays", Value::List(vec![]));
+            rt.set_reactive("SEQ", "retrigs", Value::List(vec![]));
+            rt.set_reactive("SEQ", "retrig-rates", Value::List(vec![]));
             sync_track_mixer_empty_state(rt);
             rt.set_reactive("SEQ", "effects", Value::List(vec![]));
             rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));

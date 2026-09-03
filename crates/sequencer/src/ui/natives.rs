@@ -2783,6 +2783,22 @@ pub(crate) fn init_runtime(
                     },
                 ),
                 (
+                    "retrigs",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_param_list(&state, 0, StepParam::Retrig)
+                    },
+                ),
+                (
+                    "retrig-rates",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_param_list(&state, 0, StepParam::RetrigRate)
+                    },
+                ),
+                (
                     "process-lanes",
                     if track_count == 0 {
                         Value::List(vec![])
@@ -2816,6 +2832,14 @@ pub(crate) fn init_runtime(
                 (
                     "track-delays",
                     build_all_track_param_lists_value(&state, &app, StepParam::Delay),
+                ),
+                (
+                    "track-retrigs",
+                    build_all_track_param_lists_value(&state, &app, StepParam::Retrig),
+                ),
+                (
+                    "track-retrig-rates",
+                    build_all_track_param_lists_value(&state, &app, StepParam::RetrigRate),
                 ),
                 ("track-mixer-pans", build_track_pans(&state)),
                 ("track-outputs", build_track_outputs(&app, &state)),
@@ -3990,6 +4014,8 @@ pub(crate) fn init_runtime(
             "sync" | "syn" => StepParam::Sync,
             "delay" | "dly" => StepParam::Delay,
             "speed" => StepParam::Speed,
+            "retrig" | "rtrg" => StepParam::Retrig,
+            "retrig-rate" | "retrig_rate" | "rate" => StepParam::RetrigRate,
             other => return Err(format!("seq-set-step-param: unknown param :{other}").into()),
         };
         let track = ct.load(Ordering::Relaxed);
@@ -4033,13 +4059,8 @@ pub(crate) fn init_runtime(
         if step >= MAX_STEPS {
             return Err(format!("seq-print-step-param: step {step} out of range").into());
         }
-        let param = match param_name.as_str() {
-            "velocity" | "vel" => StepParam::Velocity,
-            "duration" | "dur" => StepParam::Duration,
-            "transpose" => StepParam::Transpose,
-            other => {
-                return Err(format!("seq-print-step-param: unknown param :{other}").into())
-            }
+        let Some(param) = crate::step_print::print_step_param_from_keyword(param_name) else {
+            return Err(format!("seq-print-step-param: unknown param :{param_name}").into());
         };
         let track = ct.load(Ordering::Relaxed);
         let val = (*val as f32).clamp(param.min(), param.max());
@@ -5480,6 +5501,8 @@ pub(crate) fn init_runtime(
             "sync" | "syn" => StepParam::Sync,
             "delay" | "dly" => StepParam::Delay,
             "speed" => StepParam::Speed,
+            "retrig" | "rtrg" => StepParam::Retrig,
+            "retrig-rate" | "retrig_rate" | "rate" => StepParam::RetrigRate,
             other => return Err(format!("unknown param :{other}").into()),
         };
         let track = ct.load(Ordering::Relaxed);

@@ -1,16 +1,21 @@
-use crate::audiograph::NodeVTable;
-use std::os::raw::{c_int, c_void};
+//! Galaxy tank — the original builtin Reverb.
+//!
+//! Attribution: based on Sapphire Galaxy for VCV Rack by Don Cross
+//! (cosinekitty), itself based on Airwindows Galactic by Chris Johnson.
+//!
+//! The per-sample arithmetic here is byte-for-byte the pre-multi-mode
+//! `effects/reverb.rs`; `mod.rs` pins a golden render hash so the mode fold
+//! cannot drift old projects. Only the state slots moved (they now sit at
+//! `GALAXY_RT` / `GALAXY_BUF_BASE` inside the shared reverb state) and the
+//! wet/dry mix moved out to the shared back end. The optional feedback
+//! shelves are gated on non-flat gains so the default render is unchanged.
 
-// Attribution:
-// This reverb algorithm is based on Sapphire Galaxy for VCV Rack by Don Cross (cosinekitty)
-// which is itself based on Airwindows Galactic by Chris Johnson.
+use super::{clamp4, ShelfCoefs, GALAXY_BUF_BASE, GALAXY_RT};
 
-// ── Constants ──
-
-const NDELAYS: usize = 13;
+pub(super) const NDELAYS: usize = 13;
 
 /// Delay buffer sizes (stereo frames) — relatively prime to minimize periodic artifacts.
-const DELAY_BUF_SIZES: [usize; NDELAYS] = [
+pub(super) const DELAY_BUF_SIZES: [usize; NDELAYS] = [
     9700, 6000, 2320, 940, // Bank 0 (indices 0-3)
     15220, 8460, 4540, 3200, // Bank 1 (indices 4-7)
     6480, 3660, 1720, 680,  // Bank 2 (indices 8-11)
@@ -22,31 +27,27 @@ const TANK_SIZES: [usize; 12] = [
     4801, 2909, 1153, 461, 7607, 4217, 2269, 1597, 3407, 1823, 859, 331,
 ];
 
-// ── State layout indices (f32 slots) ──
+// ── Runtime slots (relative to GALAXY_RT) ──
 
-const ST_REPLACE: usize = 0;
-const ST_BRIGHT: usize = 1;
-const ST_DETUNE: usize = 2;
-const ST_BIGNESS: usize = 3;
-const ST_MIX: usize = 4;
-const ST_FPD0: usize = 5;
-const ST_FPD1: usize = 6;
-const ST_QUALITY: usize = 7;
-const ST_VIBM: usize = 8;
-const ST_OLDFPD: usize = 9;
-const ST_CYCLE: usize = 10;
-const ST_SAMPLE_RATE: usize = 11;
-const ST_DELAY_META: usize = 12; // 13 delays × 2 (count, length) = 26 floats
-const ST_FEEDBACK: usize = 38; // 4 stereo frames = 8 floats
-const ST_IIR_A_L: usize = 46;
-const ST_IIR_A_R: usize = 47;
-const ST_IIR_B_L: usize = 48;
-const ST_IIR_B_R: usize = 49;
-const ST_LASTREF: usize = 50; // 5 stereo frames = 10 floats
-const ST_BUFS: usize = 60; // Delay buffer data starts here
+const ST_FPD0: usize = GALAXY_RT;
+const ST_FPD1: usize = GALAXY_RT + 1;
+const ST_QUALITY: usize = GALAXY_RT + 2;
+const ST_VIBM: usize = GALAXY_RT + 3;
+const ST_OLDFPD: usize = GALAXY_RT + 4;
+const ST_CYCLE: usize = GALAXY_RT + 5;
+const ST_DELAY_META: usize = GALAXY_RT + 6; // 13 delays × 2 (count, length) = 26 floats
+const ST_FEEDBACK: usize = GALAXY_RT + 32; // 4 stereo frames = 8 floats
+const ST_IIR_A_L: usize = GALAXY_RT + 40;
+const ST_IIR_A_R: usize = GALAXY_RT + 41;
+const ST_IIR_B_L: usize = GALAXY_RT + 42;
+const ST_IIR_B_R: usize = GALAXY_RT + 43;
+const ST_LASTREF: usize = GALAXY_RT + 44; // 5 stereo frames = 10 floats
+const ST_SHELF: usize = GALAXY_RT + 54; // 4 frames × 2 channels × (hi, lo) = 16 floats
+/// Runtime slots the galaxy tank owns starting at `GALAXY_RT`.
+pub(super) const RUNTIME_SLOTS: usize = 70;
 
 /// Total number of f32 slots for all delay buffers (stereo = 2 floats per frame).
-const fn total_buf_floats() -> usize {
+pub(super) const fn total_buf_floats() -> usize {
     let mut total = 0;
     let mut i = 0;
     while i < NDELAYS {
@@ -56,19 +57,10 @@ const fn total_buf_floats() -> usize {
     total
 }
 
-const ST_ENABLED: usize = ST_BUFS + total_buf_floats();
-pub const REVERB_STATE_SIZE: usize = ST_ENABLED + 1;
-
-// Public param indices for UI control
-pub const REVERB_PARAM_REPLACE: u64 = ST_REPLACE as u64;
-pub const REVERB_PARAM_BRIGHT: u64 = ST_BRIGHT as u64;
-pub const REVERB_PARAM_SIZE: u64 = ST_BIGNESS as u64;
-pub const REVERB_PARAM_ENABLED: u64 = ST_ENABLED as u64;
-
-/// Pre-computed buffer offsets (from index 0 of state array).
+/// Pre-computed buffer offsets (from index 0 of the shared state array).
 const fn buf_offsets() -> [usize; NDELAYS] {
     let mut offsets = [0usize; NDELAYS];
-    let mut offset = ST_BUFS;
+    let mut offset = GALAXY_BUF_BASE;
     let mut i = 0;
     while i < NDELAYS {
         offsets[i] = offset;
@@ -79,8 +71,6 @@ const fn buf_offsets() -> [usize; NDELAYS] {
 }
 
 const BUF_OFFSETS: [usize; NDELAYS] = buf_offsets();
-
-// ── Helper functions ──
 
 #[inline(always)]
 fn square(x: f32) -> f32 {
@@ -93,93 +83,58 @@ fn cube(x: f32) -> f32 {
 }
 
 #[inline(always)]
-fn clamp4(x: f32) -> f32 {
-    x.clamp(-4.0, 4.0)
-}
-
-#[inline(always)]
-fn clamp1(x: f32) -> f32 {
-    x.clamp(-1.0, 1.0)
-}
-
-#[inline(always)]
 fn fast_sin(x: f32) -> f32 {
-    // Use standard sin — the Swift version uses a lookup table but std sin
-    // is fast enough for 4x sub-sampled processing.
     x.sin()
 }
 
-// ── Init ──
+pub(super) struct GalaxyParams {
+    pub sample_rate: f32,
+    pub replace: f32,
+    pub bright: f32,
+    pub detune: f32,
+    pub bigness: f32,
+    /// Feedback shelves; `None` when both gains are flat (the default), which
+    /// keeps the loop byte-identical to the original.
+    pub shelves: Option<ShelfCoefs>,
+}
 
-unsafe extern "C" fn reverb_init(
-    state: *mut c_void,
-    sample_rate: c_int,
-    _max_block: c_int,
-    _initial_state: *const c_void,
-) {
-    let s = state as *mut f32;
-
-    // Zero entire state
-    for i in 0..REVERB_STATE_SIZE {
-        *s.add(i) = 0.0;
+/// Reset the tank's runtime slots + buffers (mode switch into galaxy).
+pub(super) unsafe fn clear(s: *mut f32) {
+    for i in 0..RUNTIME_SLOTS {
+        *s.add(GALAXY_RT + i) = 0.0;
     }
+    std::ptr::write_bytes(s.add(GALAXY_BUF_BASE), 0, total_buf_floats());
+    seed(s);
+}
 
-    // Hardcoded defaults for send-return usage
-    *s.add(ST_REPLACE) = 0.3;
-    *s.add(ST_BRIGHT) = 0.8;
-    *s.add(ST_DETUNE) = 0.1;
-    *s.add(ST_BIGNESS) = 0.2;
-    *s.add(ST_MIX) = 1.0; // Pure wet (send return)
-
-    // LFSR seeds
+/// Seed the runtime slots exactly as the original `reverb_init` did.
+pub(super) unsafe fn seed(s: *mut f32) {
     *s.add(ST_FPD0) = f32::from_bits(2756923396u32);
     *s.add(ST_FPD1) = f32::from_bits(2341963165u32);
-
-    // Low quality mode (4x sub-sampling)
     *s.add(ST_QUALITY) = 2.0;
-
     *s.add(ST_VIBM) = 3.0;
     *s.add(ST_OLDFPD) = 429496.7295;
     *s.add(ST_CYCLE) = 0.0;
-    *s.add(ST_SAMPLE_RATE) = sample_rate as f32;
-
-    // Initialize delay metadata: count=0, length=bufSize/2
     for i in 0..NDELAYS {
         let meta = ST_DELAY_META + i * 2;
-        *s.add(meta) = 0.0; // count
-        *s.add(meta + 1) = (DELAY_BUF_SIZES[i] / 2) as f32; // initial length
+        *s.add(meta) = 0.0;
+        *s.add(meta + 1) = (DELAY_BUF_SIZES[i] / 2) as f32;
     }
-    *s.add(ST_ENABLED) = 1.0;
 }
 
-// ── Process ──
-
-unsafe extern "C" fn reverb_process(
-    inp: *const *mut f32,
-    out: *const *mut f32,
-    nframes: c_int,
-    state: *mut c_void,
-    _buffers: *mut c_void,
+/// Run the tank over one block. Reads the tank input from `in_l/in_r` and
+/// writes the post-lowpass wet signal to `wet_l/wet_r` (these may alias the
+/// inputs: sample `i` is fully read before it is written).
+pub(super) unsafe fn process_block(
+    s: *mut f32,
+    in_l: *const f32,
+    in_r: *const f32,
+    wet_l_out: *mut f32,
+    wet_r_out: *mut f32,
+    nf: usize,
+    p: &GalaxyParams,
 ) {
-    let s = state as *mut f32;
-    let nf = nframes as usize;
-
-    let in_l = *inp.add(0);
-    let in_r = *inp.add(1);
-    let out0 = *out.add(0); // L output
-    let out1 = *out.add(1); // R output
-
-    if *s.add(ST_ENABLED) <= 0.5 {
-        std::ptr::copy_nonoverlapping(in_l as *const f32, out0, nf);
-        std::ptr::copy_nonoverlapping(in_r as *const f32, out1, nf);
-        return;
-    }
-
-    // Read sample rate
-    let mut sample_rate = *s.add(ST_SAMPLE_RATE);
-    if sample_rate < 8000.0 || sample_rate > 192000.0 {
-        sample_rate = 44100.0;
-    }
+    let sample_rate = p.sample_rate;
     let overallscale = sample_rate / 44100.0;
 
     // Quality mode: 2 = low (4x sub-sampling)
@@ -193,7 +148,6 @@ unsafe extern "C" fn reverb_process(
     let mut oldfpd = *s.add(ST_OLDFPD);
     let mut cycle = (*s.add(ST_CYCLE)) as i32;
     let mut fpd0 = (*s.add(ST_FPD0)).to_bits();
-    let _fpd1 = (*s.add(ST_FPD1)).to_bits();
 
     if fpd0 == 0 {
         fpd0 = 2756923396;
@@ -227,6 +181,12 @@ unsafe extern "C" fn reverb_process(
     let mut lr4_l = *s.add(ST_LASTREF + 8);
     let mut lr4_r = *s.add(ST_LASTREF + 9);
 
+    // Feedback shelf states: [frame][hi_l, lo_l, hi_r, lo_r]
+    let mut shelf = [[0.0f32; 2]; 8];
+    for k in 0..8 {
+        shelf[k] = [*s.add(ST_SHELF + 2 * k), *s.add(ST_SHELF + 2 * k + 1)];
+    }
+
     // Delay counts and lengths (13 each)
     let mut counts = [0i32; NDELAYS];
     let mut lengths = [0i32; NDELAYS];
@@ -236,11 +196,10 @@ unsafe extern "C" fn reverb_process(
     }
 
     // Read parameters
-    let replace_knob = *s.add(ST_REPLACE);
-    let bright_knob = *s.add(ST_BRIGHT);
-    let detune_knob = *s.add(ST_DETUNE);
-    let bigness_knob = *s.add(ST_BIGNESS);
-    let mix_knob = *s.add(ST_MIX);
+    let replace_knob = p.replace;
+    let bright_knob = p.bright;
+    let detune_knob = p.detune;
+    let bigness_knob = p.bigness;
 
     // Derived values
     let regen = 0.0625 + ((1.0 - replace_knob) * 0.0625);
@@ -264,8 +223,9 @@ unsafe extern "C" fn reverb_process(
     let two_pi = std::f32::consts::PI * 2.0;
     let pi_over_2 = std::f32::consts::PI * 0.5;
 
-    // Inline write_head and read_tail closures operate on the state pointer `s`
-    // They are unsafe and expect valid indices.
+    // The feedback loop runs sub-sampled, so the shelf coefficients were
+    // designed at fs / cycle_end by the caller.
+    let shelves = p.shelves;
 
     for i in 0..nf {
         let dry_l = *in_l.add(i);
@@ -342,7 +302,6 @@ unsafe extern "C" fn reverb_process(
         // Sub-sampled processing
         cycle += 1;
         if cycle >= cycle_end {
-            // Macro for write_head
             macro_rules! write_head {
                 ($di:expr, $val_l:expr, $val_r:expr) => {{
                     let ofs = BUF_OFFSETS[$di];
@@ -358,7 +317,6 @@ unsafe extern "C" fn reverb_process(
                 }};
             }
 
-            // Macro for read_tail
             macro_rules! read_tail {
                 ($di:expr) => {{
                     let ofs = BUF_OFFSETS[$di];
@@ -429,6 +387,19 @@ unsafe extern "C" fn reverb_process(
             fb3_l = clamp4(f3_l + f3_l - sum1_l);
             fb3_r = clamp4(f3_r + f3_r - sum1_r);
 
+            // Optional damping shelves on the feedback frames (multi-mode
+            // addition; skipped entirely at flat gains).
+            if let Some(sh) = &shelves {
+                fb0_l = sh.apply(fb0_l, &mut shelf[0]);
+                fb0_r = sh.apply(fb0_r, &mut shelf[1]);
+                fb1_l = sh.apply(fb1_l, &mut shelf[2]);
+                fb1_r = sh.apply(fb1_r, &mut shelf[3]);
+                fb2_l = sh.apply(fb2_l, &mut shelf[4]);
+                fb2_r = sh.apply(fb2_r, &mut shelf[5]);
+                fb3_l = sh.apply(fb3_l, &mut shelf[6]);
+                fb3_r = sh.apply(fb3_r, &mut shelf[7]);
+            }
+
             // Output from bank 1 sum
             let sum_l = sum1_l * 0.125;
             let sum_r = sum1_r * 0.125;
@@ -487,14 +458,8 @@ unsafe extern "C" fn reverb_process(
         iir_b_l = iir_b_l * one_minus_lp + wet_l * lowpass;
         iir_b_r = iir_b_r * one_minus_lp + wet_r * lowpass;
 
-        // Wet/dry mix
-        let wet = 1.0 - cube(1.0 - mix_knob);
-        let out_l = iir_b_l * wet + dry_l * (1.0 - wet);
-        let out_r = iir_b_r * wet + dry_r * (1.0 - wet);
-
-        // Soft clamp and write output
-        *out0.add(i) = clamp1(out_l);
-        *out1.add(i) = clamp1(out_r);
+        *wet_l_out.add(i) = iir_b_l;
+        *wet_r_out.add(i) = iir_b_r;
     }
 
     // Write back mutable state
@@ -528,59 +493,14 @@ unsafe extern "C" fn reverb_process(
     *s.add(ST_LASTREF + 8) = lr4_l;
     *s.add(ST_LASTREF + 9) = lr4_r;
 
+    for k in 0..8 {
+        *s.add(ST_SHELF + 2 * k) = super::flush(shelf[k][0]);
+        *s.add(ST_SHELF + 2 * k + 1) = super::flush(shelf[k][1]);
+    }
+
     // Write back delay counts and lengths
     for di in 0..NDELAYS {
         *s.add(ST_DELAY_META + di * 2) = counts[di] as f32;
         *s.add(ST_DELAY_META + di * 2 + 1) = lengths[di] as f32;
-    }
-}
-
-pub fn reverb_vtable() -> NodeVTable {
-    NodeVTable {
-        process: Some(reverb_process),
-        init: Some(reverb_init),
-        reset: None,
-        migrate: None,
-        ..NodeVTable::default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::ptr;
-
-    fn init_state() -> Vec<f32> {
-        let mut state = vec![0.0; REVERB_STATE_SIZE];
-        unsafe {
-            reverb_init(state.as_mut_ptr().cast(), 44_100, 64, ptr::null());
-        }
-        state
-    }
-
-    #[test]
-    fn disabled_reverb_passes_stereo_inputs_independently() {
-        let mut state = init_state();
-        state[ST_ENABLED] = 0.0;
-
-        let mut in_l = [0.25, -0.5, 0.75, -1.0];
-        let mut in_r = [-0.125, 0.375, -0.625, 0.875];
-        let inputs = [in_l.as_mut_ptr(), in_r.as_mut_ptr()];
-        let mut out_l = [0.0; 4];
-        let mut out_r = [0.0; 4];
-        let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
-
-        unsafe {
-            reverb_process(
-                inputs.as_ptr(),
-                outputs.as_ptr(),
-                in_l.len() as c_int,
-                state.as_mut_ptr().cast(),
-                ptr::null_mut(),
-            );
-        }
-
-        assert_eq!(out_l, in_l);
-        assert_eq!(out_r, in_r);
     }
 }

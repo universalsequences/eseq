@@ -302,6 +302,8 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
         transpose: StepParam::Transpose.default_value(),
         pan: StepParam::Pan.default_value(),
         chop: StepParam::Chop.default_value(),
+        retrig: StepParam::Retrig.default_value(),
+        retrig_rate: StepParam::RetrigRate.default_value(),
     };
     let (step, delay, step_dur_beats) = clock.roll_record_position(
         track,
@@ -317,11 +319,17 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
     // key's pitch is the pass-through invariant above; the recorded
     // transpose override is applied on the control thread instead.
     {
-        let (velocity, duration, _) = state.step_print_override.values_for_track(track);
-        if let Some(value) = velocity {
+        let overrides = state.step_print_override.values_for_track(track);
+        if let Some(value) = overrides.get(StepParam::Velocity) {
             resolved.velocity = value;
         }
-        if let Some(value) = duration {
+        if let Some(value) = overrides.get(StepParam::Retrig) {
+            resolved.retrig = value;
+        }
+        if let Some(value) = overrides.get(StepParam::RetrigRate) {
+            resolved.retrig_rate = value;
+        }
+        if let Some(value) = overrides.get(StepParam::Duration) {
             if grid_beats > 0.0 {
                 resolved.duration = value * (step_dur_beats / grid_beats) as f32;
             }

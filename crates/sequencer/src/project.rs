@@ -61,7 +61,10 @@ use crate::track_color::TrackColor;
 //       one. Older builds reject v8 files (they demand a scene event at 0).
 //   9 — pattern-scoped `defscene` slot overrides. Older files load with an
 //       empty store, so every declaration resolves to its authored default.
-const PROJECT_FILE_VERSION: u32 = 9;
+//  10 — per-step `Retrig` / `RetrigRate` params appended to every step row.
+//       Narrower rows load with those two at their defaults (see
+//       `step_values_from_vec`), so v9 files are read unchanged.
+const PROJECT_FILE_VERSION: u32 = 10;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -401,6 +404,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             track_sounds: wire.track_sounds,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
+        migrate_legacy_chop_to_retrig(&mut project);
         // A take with no chunks is structurally impossible (registration
         // rejects empty chunk lists), and the loader would skip it silently
         // — desyncing the positional `track_sounds.takes` alignment so
@@ -3009,6 +3013,54 @@ fn default_master_volume() -> f32 {
     1.0
 }
 
+/// One-time migration of the retired `Chop` step param onto `Retrig` /
+/// `RetrigRate` (docs/step-retrig-spec.md). `Chop` was a hidden, sampler-only
+/// 1..8 subdivision of the step's gate; retrig subsumes it for every
+/// instrument type, and `fire_resolved` no longer consults `Chop` at all — so
+/// a project that stored a non-default chop would silently lose its rolls.
+///
+/// `Chop = N` played N hits inside one step, i.e. `N - 1` repeats at
+/// `N / step_beats` retrigs per beat. Index 7 stays in the enum so the stored
+/// value keeps round-tripping; this only fills the two new columns, and only
+/// where they are still at their defaults (a project already carrying retrig
+/// data was written by a build that had it, so its retrig columns win).
+fn migrate_legacy_chop_to_retrig(project: &mut ProjectFile) {
+    use crate::sequencer::StepParam;
+    let chop_idx = StepParam::Chop.index();
+    let retrig_idx = StepParam::Retrig.index();
+    let rate_idx = StepParam::RetrigRate.index();
+    let default_chop = StepParam::Chop.default_value();
+    let default_retrig = StepParam::Retrig.default_value();
+    let default_rate = StepParam::RetrigRate.default_value();
+
+    for pattern in &mut project.patterns {
+        for (track, steps) in pattern.step_data.iter_mut().enumerate() {
+            let Some(params) = pattern.track_params.get(track) else {
+                continue;
+            };
+            let step_beats = Timebase::from_index(params.timebase as u32)
+                .step_beats(params.num_steps.max(1));
+            if !(step_beats > 0.0) {
+                continue;
+            }
+            for row in steps.iter_mut() {
+                let chop = row[chop_idx];
+                if chop <= default_chop
+                    || row[retrig_idx] != default_retrig
+                    || row[rate_idx] != default_rate
+                {
+                    continue;
+                }
+                let hits = chop.round().clamp(1.0, StepParam::Chop.max());
+                row[retrig_idx] =
+                    (hits - 1.0).clamp(StepParam::Retrig.min(), StepParam::Retrig.max());
+                row[rate_idx] = ((hits as f64 / step_beats) as f32)
+                    .clamp(StepParam::RetrigRate.min(), StepParam::RetrigRate.max());
+            }
+        }
+    }
+}
+
 fn default_step_values() -> [f32; NUM_PARAMS] {
     let mut params = [0.0; NUM_PARAMS];
     for (idx, param) in crate::sequencer::StepParam::ALL.into_iter().enumerate() {
@@ -3019,11 +3071,18 @@ fn default_step_values() -> [f32; NUM_PARAMS] {
 
 fn step_values_from_vec(values: Vec<f32>) -> [f32; NUM_PARAMS] {
     let mut params = default_step_values();
-    if values.len() == NUM_PARAMS - 1 {
+    // These two literals are the *historical* row widths, not `NUM_PARAMS`
+    // offsets: 9 = pre-`Delay` rows, 8 = pre-`Chop` rows (where everything from
+    // `Pan` onward shifts by one). They must stay pinned to those numbers as
+    // `NUM_PARAMS` grows, otherwise a wider current row falls into the legacy
+    // shift branch and is silently corrupted. Any other length (including the
+    // current width) takes the generic prefix copy below, which is correct
+    // because every param appended since then lives at the end of the row.
+    if values.len() == 9 {
         for (idx, value) in values.into_iter().enumerate() {
             params[idx] = value;
         }
-    } else if values.len() == NUM_PARAMS - 2 {
+    } else if values.len() == 8 {
         for (idx, value) in values.into_iter().enumerate() {
             let target_idx = if idx >= crate::sequencer::StepParam::Pan.index() {
                 idx + 1
@@ -3432,6 +3491,80 @@ pub fn chord_snapshot_from_steps_and_durations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step_values_from_vec_preserves_legacy_row_widths_across_param_growth() {
+        use crate::sequencer::StepParam;
+
+        // Rows are stored positionally, so widening `NUM_PARAMS` must not move
+        // any historical value. The 9-wide and 8-wide widths are the only two
+        // legacy shapes; everything else is a straight prefix copy.
+
+        // Current-width row: every value lands on its own index.
+        let current: Vec<f32> = (0..NUM_PARAMS).map(|i| i as f32).collect();
+        let row = step_values_from_vec(current);
+        for (idx, value) in row.iter().enumerate() {
+            assert_eq!(*value, idx as f32, "current-width row shifted at {idx}");
+        }
+
+        // 10-wide row (the width shipped before Retrig/RetrigRate): Pan, Chop,
+        // Sync and Delay must stay where they were, and the two new params take
+        // their defaults.
+        let ten = vec![
+            0.5, // Duration
+            0.6, // Velocity
+            0.7, // Speed
+            1.0, // AuxA
+            0.25, // AuxB
+            7.0, // Transpose
+            -0.5, // Pan
+            4.0, // Chop
+            2.0, // Sync
+            0.75, // Delay
+        ];
+        let row = step_values_from_vec(ten);
+        assert_eq!(row[StepParam::Duration.index()], 0.5);
+        assert_eq!(row[StepParam::Transpose.index()], 7.0);
+        assert_eq!(row[StepParam::Pan.index()], -0.5);
+        assert_eq!(row[StepParam::Chop.index()], 4.0);
+        assert_eq!(row[StepParam::Sync.index()], 2.0);
+        assert_eq!(row[StepParam::Delay.index()], 0.75);
+        assert_eq!(
+            row[StepParam::Retrig.index()],
+            StepParam::Retrig.default_value()
+        );
+        assert_eq!(
+            row[StepParam::RetrigRate.index()],
+            StepParam::RetrigRate.default_value()
+        );
+
+        // 9-wide row (pre-Delay): straight prefix, Delay defaults.
+        let nine = vec![0.5, 0.6, 0.7, 1.0, 0.25, 7.0, -0.5, 4.0, 2.0];
+        let row = step_values_from_vec(nine);
+        assert_eq!(row[StepParam::Pan.index()], -0.5);
+        assert_eq!(row[StepParam::Chop.index()], 4.0);
+        assert_eq!(row[StepParam::Sync.index()], 2.0);
+        assert_eq!(
+            row[StepParam::Delay.index()],
+            StepParam::Delay.default_value()
+        );
+        assert_eq!(
+            row[StepParam::RetrigRate.index()],
+            StepParam::RetrigRate.default_value()
+        );
+
+        // 8-wide row (pre-Pan): everything from Pan onward shifts up by one.
+        let eight = vec![0.5, 0.6, 0.7, 1.0, 0.25, 7.0, 4.0, 2.0];
+        let row = step_values_from_vec(eight);
+        assert_eq!(row[StepParam::Transpose.index()], 7.0);
+        assert_eq!(row[StepParam::Pan.index()], StepParam::Pan.default_value());
+        assert_eq!(row[StepParam::Chop.index()], 4.0);
+        assert_eq!(row[StepParam::Sync.index()], 2.0);
+        assert_eq!(
+            row[StepParam::Retrig.index()],
+            StepParam::Retrig.default_value()
+        );
+    }
 
     fn test_bus(id: u64, output: BusOutput) -> ProjectBusChannel {
         ProjectBusChannel {
@@ -5163,6 +5296,52 @@ mod tests {
         let restored: ProjectFile =
             serde_json::from_value(legacy).expect("load project without scene slots");
         assert!(restored.patterns[0].scene_slots.is_empty());
+    }
+
+    #[test]
+    fn legacy_chop_values_migrate_to_retrig_and_rate_on_load() {
+        use crate::sequencer::StepParam;
+
+        let mut project = sample_project();
+        // Track 0 is a 16th-note track: chop 4 becomes 3 repeats at
+        // 4 / 0.25 = 16 retrigs per beat.
+        project.patterns[0].step_data[0][0][StepParam::Chop.index()] = 4.0;
+        // A step that already carries retrig data must be left alone.
+        project.patterns[0].step_data[0][1][StepParam::Chop.index()] = 8.0;
+        project.patterns[0].step_data[0][1][StepParam::Retrig.index()] = 1.0;
+        // Default chop stays a non-rolling step.
+        let untouched = project.patterns[0].step_data[0][2];
+
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let steps = &restored.patterns[0].step_data[0];
+
+        assert_eq!(steps[0][StepParam::Retrig.index()], 3.0);
+        assert_eq!(steps[0][StepParam::RetrigRate.index()], 16.0);
+        assert_eq!(
+            steps[0][StepParam::Chop.index()],
+            4.0,
+            "the enum slot keeps round-tripping; only the new columns are filled"
+        );
+
+        assert_eq!(
+            steps[1][StepParam::Retrig.index()],
+            1.0,
+            "a step that already has retrig data must not be overwritten"
+        );
+        assert_eq!(
+            steps[1][StepParam::RetrigRate.index()],
+            StepParam::RetrigRate.default_value()
+        );
+
+        assert_eq!(
+            steps[2][StepParam::Retrig.index()],
+            untouched[StepParam::Retrig.index()]
+        );
+        assert_eq!(
+            steps[2][StepParam::RetrigRate.index()],
+            untouched[StepParam::RetrigRate.index()]
+        );
     }
 
     #[test]

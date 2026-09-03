@@ -184,6 +184,24 @@ pub struct ParamUiMetadata {
     pub display_name: Option<String>,
 }
 
+/// Tag that marks a builtin-insert param as a destination for the project-wide
+/// modulation system (macro arm-and-click) even though the effect carries no
+/// voice-modulator depth slots. The effects panel turns it into
+/// `:modulatable true` on the param map.
+pub const HOST_MODULATABLE_TAG: &str = "modulatable";
+
+/// `ui_metadata` for a plain builtin knob that should be macro-mappable.
+pub fn modulatable_ui_metadata() -> ParamUiMetadata {
+    ParamUiMetadata {
+        group: None,
+        env: None,
+        role: None,
+        tags: vec![HOST_MODULATABLE_TAG.to_string()],
+        asset_options: None,
+        display_name: None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParamAssetOptions {
     pub tensor: String,
@@ -376,6 +394,14 @@ pub enum PersistedParamNameResolution {
 }
 
 impl ParamDescriptor {
+    /// True when the descriptor opts this param into project-wide modulation
+    /// without a voice-modulator depth slot (see `modulatable_ui_metadata`).
+    pub fn is_host_modulatable(&self) -> bool {
+        self.ui_metadata
+            .as_ref()
+            .is_some_and(|meta| meta.tags.iter().any(|tag| tag == HOST_MODULATABLE_TAG))
+    }
+
     pub fn has_tag_or_name(&self, tag_or_name: &str) -> bool {
         let needle = tag_or_name.trim_start_matches(':').to_ascii_lowercase();
         if self.name.eq_ignore_ascii_case(&needle) {
@@ -2087,7 +2113,6 @@ mod tests {
                 "Filterbank",
                 "Glue Compressor",
                 "Limiter",
-                "Multiverb",
                 "OTT",
                 "Phaser-Flanger",
                 "Reverb",
@@ -2110,7 +2135,6 @@ mod tests {
                 "Filterbank",
                 "Glue Compressor",
                 "Limiter",
-                "Multiverb",
                 "OTT",
                 "Phaser-Flanger",
                 "Reverb",
@@ -2247,6 +2271,135 @@ mod tests {
         let desc = EffectDescriptor::builtin_insert("Reverb").unwrap();
         assert_eq!(desc.input_channels, 2);
         assert_eq!(desc.output_channels, 2);
+    }
+
+    #[test]
+    fn builtin_reverb_pins_param_order_within_state_bounds() {
+        let desc = EffectDescriptor::builtin_insert("Reverb").unwrap();
+        assert!(desc.instrument_modulators.is_empty());
+        assert!(desc.instrument_modulation_targets.is_empty());
+        // Param order is append-only (plocks persist by descriptor index).
+        // 0-4 are the pre-mode block; this list may only ever grow at the end.
+        let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "mix",
+                "size",
+                "brightness",
+                "replace",
+                "enabled",
+                "mode",
+                "predelay",
+                "decay",
+                "diffusion",
+                "hi shelf freq",
+                "hi shelf gain",
+                "lo shelf freq",
+                "lo shelf gain",
+                "in lo cut",
+                "in hi cut",
+                "stereo",
+                "chorus amount",
+                "chorus rate",
+                "mod depth",
+                "wet gain",
+                "mix law",
+            ]
+        );
+        let mode = &desc.params[5];
+        assert!(matches!(
+            &mode.kind,
+            ParamKind::Enum { labels } if labels == &["galaxy", "plate", "hall"]
+        ));
+        assert!(!mode.is_host_modulatable());
+        assert!(!desc.params[4].is_host_modulatable());
+        for param in &desc.params {
+            assert!(
+                (param.node_param_idx as usize) < crate::effects::reverb::REVERB_STATE_SIZE,
+                "{} writes outside the reverb state",
+                param.name
+            );
+            assert!(
+                param.default >= param.min && param.default <= param.max,
+                "{} default out of range",
+                param.name
+            );
+            if matches!(param.kind, ParamKind::Continuous { .. }) && param.name != "enabled" {
+                assert!(
+                    param.is_host_modulatable(),
+                    "{} should be macro-mappable",
+                    param.name
+                );
+            }
+        }
+        // The legacy fill covers exactly the appended block with exact-bypass
+        // values, each inside its param's range.
+        let legacy = crate::effects::reverb::LEGACY_BYPASS_DEFAULTS;
+        assert_eq!(legacy.len(), desc.params.len() - 5);
+        for (param, value) in desc.params.iter().skip(5).zip(legacy) {
+            assert!(value >= param.min && value <= param.max, "{}", param.name);
+        }
+        let by_name = |n: &str| desc.params.iter().position(|p| p.name == n).unwrap() - 5;
+        assert_eq!(legacy[by_name("mode")], 0.0);
+        assert_eq!(legacy[by_name("predelay")], 0.0);
+        assert_eq!(legacy[by_name("hi shelf gain")], 0.0);
+        assert_eq!(legacy[by_name("lo shelf gain")], 0.0);
+        assert_eq!(legacy[by_name("in lo cut")], desc.params[5 + by_name("in lo cut")].min);
+        assert_eq!(legacy[by_name("in hi cut")], desc.params[5 + by_name("in hi cut")].max);
+        assert_eq!(legacy[by_name("stereo")], 1.0);
+        assert_eq!(legacy[by_name("chorus amount")], 0.0);
+        assert_eq!(legacy[by_name("wet gain")], 0.0);
+        assert_eq!(legacy[by_name("mix law")], crate::effects::reverb::MIX_LAW_CUBE);
+        assert_eq!(
+            desc.legacy_append_defaults(5).as_deref(),
+            Some(&legacy[..]),
+            "a five-param slot must get the bypass fill"
+        );
+        assert!(desc.legacy_append_defaults(21).is_none());
+    }
+
+    /// A pre-mode Reverb slot (5 params, as saved by every project before the
+    /// fold — see tests/fixtures/projects/92.json) keeps its values at 0-4 and
+    /// takes the bypass defaults for the appended params.
+    #[test]
+    fn legacy_five_param_reverb_slot_syncs_onto_the_multimode_descriptor() {
+        let desc = EffectDescriptor::builtin_insert("Reverb").unwrap();
+        let mut snapshot = EffectSlotSnapshot {
+            node_id: 0,
+            modulator_node_id: 0,
+            num_params: 5,
+            defaults: vec![0.6, 0.45, 0.9, 0.1, 1.0],
+            plocks: (0..crate::sequencer::MAX_STEPS)
+                .map(|_| vec![None; 5])
+                .collect(),
+            plock_param_ids: (0..crate::sequencer::MAX_STEPS)
+                .map(|_| vec![None; 5])
+                .collect(),
+            key_locks: BTreeMap::new(),
+            key_lock_param_ids: BTreeMap::new(),
+            param_node_indices: vec![4, 3, 1, 0, 132122],
+            param_node_spans: vec![1; 5],
+            transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
+            tensor_params: Vec::new(),
+            ir: None,
+            table: None,
+            sampler_slice_edits: None,
+        };
+        snapshot.plocks[2][1] = Some(0.8);
+
+        snapshot.sync_to_descriptor(&desc, 7);
+
+        assert_eq!(snapshot.num_params as usize, desc.params.len());
+        assert_eq!(&snapshot.defaults[..5], &[0.6, 0.45, 0.9, 0.1, 1.0]);
+        assert_eq!(snapshot.plocks[2][1], Some(0.8));
+        for (i, value) in crate::effects::reverb::LEGACY_BYPASS_DEFAULTS.iter().enumerate() {
+            assert_eq!(snapshot.defaults[5 + i], *value, "{}", desc.params[5 + i].name);
+        }
+        assert_eq!(
+            snapshot.param_node_indices,
+            desc.params.iter().map(|p| p.node_param_idx).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -3006,6 +3159,21 @@ impl EffectDescriptor {
     /// bypass is a bit-exact passthrough with no delay line, so the
     /// compensation planner must drop the slot rather than keep padding
     /// parallel branches against latency that is no longer there.
+    /// Values for the params appended after `saved_param_count` when a slot
+    /// saved with an older, shorter layout is synced onto this descriptor.
+    /// `None` means "use the descriptor defaults". Reverb is the one builtin
+    /// whose new defaults are a voicing rather than bypass, so its pre-mode
+    /// five-param slots get the exact-bypass set that keeps them sounding as
+    /// saved.
+    pub fn legacy_append_defaults(&self, saved_param_count: usize) -> Option<Vec<f32>> {
+        match self.name.as_str() {
+            "Reverb" if saved_param_count == 5 && self.params.len() == 21 => {
+                Some(crate::effects::reverb::LEGACY_BYPASS_DEFAULTS.to_vec())
+            }
+            _ => None,
+        }
+    }
+
     pub fn enabled_param_idx(&self) -> Option<usize> {
         self.params
             .iter()
@@ -3045,9 +3213,12 @@ impl EffectDescriptor {
 
     /// Built-ins that are still loadable but no longer offered in any
     /// add-effect picker: superseded by newer builtins (see `eseq-wyu`).
-    /// "444 Compressor" is replaced by "Compressor"/"Glue Compressor" and
-    /// "Delay" by "Str8 Delay".
-    pub const RETIRED_BUILTIN_INSERT_NAMES: &'static [&'static str] = &["444 Compressor", "Delay"];
+    /// "444 Compressor" is replaced by "Compressor"/"Glue Compressor",
+    /// "Delay" by "Str8 Delay", and "Multiverb" by the multi-mode "Reverb"
+    /// (its plate and hall tanks moved there; quad and mod stay loadable only
+    /// through saved Multiverb slots).
+    pub const RETIRED_BUILTIN_INSERT_NAMES: &'static [&'static str] =
+        &["444 Compressor", "Delay", "Multiverb"];
 
     /// Every built-in insert that can be instantiated, including retired ones.
     /// User-facing pickers want [`Self::listable_builtin_insert_names`].
@@ -6350,7 +6521,43 @@ impl EffectDescriptor {
     }
 
     /// Built-in reverb as a stereo insert effect.
+    /// Multi-mode reverb (Galaxy / Plate / Hall) as a stereo insert. Params
+    /// 0-4 predate the modes and are frozen; everything after is appended
+    /// (plocks persist by descriptor index). Defaults are the factory voicing
+    /// for a new instance; a slot saved with only the original five params is
+    /// filled with `reverb::LEGACY_BYPASS_DEFAULTS` instead (see
+    /// `legacy_append_defaults`) so galaxy mode renders old projects
+    /// unchanged — `effects::reverb` pins that with a golden hash.
     pub fn builtin_reverb_insert() -> Self {
+        use crate::effects::reverb as rv;
+
+        fn knob(
+            name: &str,
+            min: f32,
+            max: f32,
+            default: f32,
+            unit: Option<&str>,
+            scaling: ParamScaling,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min,
+                max,
+                default,
+                kind: ParamKind::Continuous {
+                    unit: unit.map(str::to_string),
+                },
+                scaling,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: Some(modulatable_ui_metadata()),
+            }
+        }
+        let lin = ParamScaling::Linear;
+        let exp = ParamScaling::Exponential;
+
         Self {
             name: "Reverb".to_string(),
             input_channels: 2,
@@ -6359,57 +6566,125 @@ impl EffectDescriptor {
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
+                // ── frozen pre-mode block (0-4) ──
+                knob("mix", 0.0, 1.0, 0.67, Some("%"), lin, rv::REVERB_PARAM_MIX),
+                knob("size", 0.0, 1.0, 0.51, None, lin, rv::REVERB_PARAM_SIZE),
+                knob("brightness", 0.0, 1.0, 0.88, None, lin, rv::REVERB_PARAM_BRIGHT),
+                knob("replace", 0.0, 1.0, 0.23, None, lin, rv::REVERB_PARAM_REPLACE),
+                Self::enabled_param(rv::REVERB_PARAM_ENABLED as u32, 1.0),
+                // ── appended (5-18) ──
                 ParamDescriptor {
-                    name: "mix".to_string(),
+                    name: "mode".to_string(),
                     min: 0.0,
-                    max: 1.0,
-                    default: 0.35,
-                    kind: ParamKind::Continuous {
-                        unit: Some("%".to_string()),
+                    max: 2.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "galaxy".to_string(),
+                            "plate".to_string(),
+                            "hall".to_string(),
+                        ],
                     },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: 4,
+                    node_param_idx: rv::REVERB_PARAM_MODE as u32,
                     node_param_span: 1,
                     host_control: None,
                     ui_metadata: None,
                 },
+                knob("predelay", 0.0, 250.0, 0.0, Some("ms"), lin, rv::REVERB_PARAM_PREDELAY_MS),
+                knob("decay", 0.0, 1.0, 0.55, None, lin, rv::REVERB_PARAM_DECAY),
+                knob("diffusion", 0.0, 1.0, 0.7, None, lin, rv::REVERB_PARAM_DIFFUSION),
+                knob(
+                    "hi shelf freq",
+                    rv::HI_SHELF_FREQ_MIN,
+                    rv::HI_SHELF_FREQ_MAX,
+                    1_128.0,
+                    Some("Hz"),
+                    exp,
+                    rv::REVERB_PARAM_HI_SHELF_FREQ,
+                ),
+                knob(
+                    "hi shelf gain",
+                    rv::SHELF_GAIN_MIN_DB,
+                    0.0,
+                    -11.5,
+                    Some("dB"),
+                    lin,
+                    rv::REVERB_PARAM_HI_SHELF_GAIN,
+                ),
+                knob(
+                    "lo shelf freq",
+                    rv::LO_SHELF_FREQ_MIN,
+                    rv::LO_SHELF_FREQ_MAX,
+                    130.0,
+                    Some("Hz"),
+                    exp,
+                    rv::REVERB_PARAM_LO_SHELF_FREQ,
+                ),
+                knob(
+                    "lo shelf gain",
+                    rv::SHELF_GAIN_MIN_DB,
+                    0.0,
+                    -9.7,
+                    Some("dB"),
+                    lin,
+                    rv::REVERB_PARAM_LO_SHELF_GAIN,
+                ),
+                knob(
+                    "in lo cut",
+                    rv::IN_LOCUT_OFF,
+                    rv::IN_LOCUT_MAX,
+                    103.0,
+                    Some("Hz"),
+                    exp,
+                    rv::REVERB_PARAM_IN_LOCUT,
+                ),
+                knob(
+                    "in hi cut",
+                    rv::IN_HICUT_MIN,
+                    rv::IN_HICUT_OFF,
+                    1_892.0,
+                    Some("Hz"),
+                    exp,
+                    rv::REVERB_PARAM_IN_HICUT,
+                ),
+                knob("stereo", 0.0, 1.0, 1.0, None, lin, rv::REVERB_PARAM_WIDTH),
+                knob("chorus amount", 0.0, 1.0, 0.26, None, lin, rv::REVERB_PARAM_CHORUS_AMT),
+                knob(
+                    "chorus rate",
+                    rv::CHORUS_RATE_MIN,
+                    rv::CHORUS_RATE_MAX,
+                    0.7,
+                    Some("Hz"),
+                    exp,
+                    rv::REVERB_PARAM_CHORUS_RATE,
+                ),
+                knob("mod depth", 0.0, 1.0, 0.15, None, lin, rv::REVERB_PARAM_MOD_DEPTH),
+                knob(
+                    "wet gain",
+                    rv::WET_GAIN_MIN_DB,
+                    rv::WET_GAIN_MAX_DB,
+                    6.0,
+                    Some("dB"),
+                    lin,
+                    rv::REVERB_PARAM_WET_GAIN_DB,
+                ),
+                // Compatibility switch: old slots load with the Galactic cube
+                // dry/wet law; new instances use a linear crossfade.
                 ParamDescriptor {
-                    name: "size".to_string(),
+                    name: "mix law".to_string(),
                     min: 0.0,
                     max: 1.0,
-                    default: 0.2,
-                    kind: ParamKind::Continuous { unit: None },
+                    default: rv::MIX_LAW_LINEAR,
+                    kind: ParamKind::Enum {
+                        labels: vec!["cube".to_string(), "linear".to_string()],
+                    },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: crate::effects::reverb::REVERB_PARAM_SIZE as u32,
+                    node_param_idx: rv::REVERB_PARAM_MIX_LAW as u32,
                     node_param_span: 1,
                     host_control: None,
                     ui_metadata: None,
                 },
-                ParamDescriptor {
-                    name: "brightness".to_string(),
-                    min: 0.0,
-                    max: 1.0,
-                    default: 0.8,
-                    kind: ParamKind::Continuous { unit: None },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::effects::reverb::REVERB_PARAM_BRIGHT as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                ParamDescriptor {
-                    name: "replace".to_string(),
-                    min: 0.0,
-                    max: 1.0,
-                    default: 0.3,
-                    kind: ParamKind::Continuous { unit: None },
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: crate::effects::reverb::REVERB_PARAM_REPLACE as u32,
-                    node_param_span: 1,
-                    host_control: None,
-                    ui_metadata: None,
-                },
-                Self::enabled_param(crate::effects::reverb::REVERB_PARAM_ENABLED as u32, 1.0),
             ],
         }
     }
@@ -7680,7 +7955,17 @@ impl EffectDescriptor {
                 ui_metadata: None,
             },
         ];
-        params.extend(crate::instruments::voice_modulator::ui_param_descriptors());
+        // The modulator's own descriptor order puts `modN_lfo_phase` after its
+        // slot block, but in THIS list that is mid-descriptor: every sampler
+        // param after it (smooth, warp, and the host-resolved slice tail with
+        // its hardcoded `SLOT_PARAM_SLICE_*` indices) would shift, which
+        // silently made `resolve_slice` read "smooth" as the slice mode and
+        // veto every trigger. Hold them back and append them after the tail.
+        let (deferred_mod_params, mod_params): (Vec<_>, Vec<_>) =
+            crate::instruments::voice_modulator::ui_param_descriptors()
+                .into_iter()
+                .partition(|param| param.name.ends_with("_lfo_phase"));
+        params.extend(mod_params);
         let mod_source_labels: Vec<String> = std::iter::once("off".to_string())
             .chain(
                 (1..=crate::instruments::voice_modulator::SLOT_COUNT)
@@ -7862,6 +8147,8 @@ impl EffectDescriptor {
                 ui_metadata: None,
             },
         ]);
+        // Strict extension: newer modulator params land after the slice tail.
+        params.extend(deferred_mod_params);
         Self {
             name: "Sampler".to_string(),
             input_channels: 0,
@@ -10652,6 +10939,13 @@ impl EffectSlotSnapshot {
         for i in 0..preserve {
             self.defaults[i] = old_defaults[i];
         }
+        if let Some(legacy) = desc.legacy_append_defaults(old_defaults.len()) {
+            for (i, value) in legacy.into_iter().enumerate() {
+                if let Some(slot) = self.defaults.get_mut(preserve + i) {
+                    *slot = value;
+                }
+            }
+        }
         for step in 0..MAX_STEPS {
             if let Some(saved_step) = old_plocks.get(step) {
                 for param_idx in 0..preserve.min(saved_step.len()) {
@@ -10796,10 +11090,14 @@ pub enum SyncDivision {
     QuarterDotted = 8,
     Half = 9,
     Whole = 10,
+    // Appended (indices are saved in projects): slow LFO cycles.
+    TwoBars = 11,
+    FourBars = 12,
+    EightBars = 13,
 }
 
 impl SyncDivision {
-    pub const ALL: [SyncDivision; 11] = [
+    pub const ALL: [SyncDivision; 14] = [
         SyncDivision::ThirtySecond,
         SyncDivision::Sixteenth,
         SyncDivision::SixteenthTriplet,
@@ -10811,6 +11109,9 @@ impl SyncDivision {
         SyncDivision::QuarterDotted,
         SyncDivision::Half,
         SyncDivision::Whole,
+        SyncDivision::TwoBars,
+        SyncDivision::FourBars,
+        SyncDivision::EightBars,
     ];
 
     /// Duration in beats (quarter notes).
@@ -10827,6 +11128,9 @@ impl SyncDivision {
             SyncDivision::QuarterDotted => 1.5,
             SyncDivision::Half => 2.0,
             SyncDivision::Whole => 4.0,
+            SyncDivision::TwoBars => 8.0,
+            SyncDivision::FourBars => 16.0,
+            SyncDivision::EightBars => 32.0,
         }
     }
 
@@ -10843,6 +11147,9 @@ impl SyncDivision {
             SyncDivision::QuarterDotted => "1/4.",
             SyncDivision::Half => "1/2",
             SyncDivision::Whole => "1",
+            SyncDivision::TwoBars => "2 bars",
+            SyncDivision::FourBars => "4 bars",
+            SyncDivision::EightBars => "8 bars",
         }
     }
 

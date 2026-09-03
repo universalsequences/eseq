@@ -162,6 +162,8 @@ pub(super) fn step_param_from_name(name: &str) -> Option<StepParam> {
         "delay" | "dly" => Some(StepParam::Delay),
         "speed" => Some(StepParam::Speed),
         "chop" => Some(StepParam::Chop),
+        "retrig" | "rtrg" => Some(StepParam::Retrig),
+        "retrig-rate" | "retrig_rate" | "rate" => Some(StepParam::RetrigRate),
         _ => None,
     }
 }

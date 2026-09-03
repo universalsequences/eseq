@@ -234,6 +234,7 @@ fn is_widget_name(name: &str) -> bool {
             | "knob"
             | "meter"
             | "modulator-curve"
+            | "lfo-curve"
             | "text-input"
             | "select"
             | "v-stack"

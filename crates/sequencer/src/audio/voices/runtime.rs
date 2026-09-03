@@ -749,7 +749,7 @@ fn reconcile_audio_runtime_after_track_delete(
             CountdownEventKind::GateOff(gate_off) => {
                 remap_track_index_after_delete(&mut gate_off.track_idx, deleted_track)
             }
-            CountdownEventKind::Chop(chop) => {
+            CountdownEventKind::Retrig(chop) => {
                 remap_track_index_after_delete(&mut chop.track_idx, deleted_track)
             }
         };
@@ -1179,7 +1179,7 @@ pub(in crate::audio) fn release_track_active_voices(
     if track_idx >= MAX_TRACKS || track_idx >= data.state.active_track_count() {
         return;
     }
-    cancel_chops_for_track(
+    cancel_retrigs_for_track(
         &mut data.countdown_events,
         &mut data.block_events,
         track_idx,

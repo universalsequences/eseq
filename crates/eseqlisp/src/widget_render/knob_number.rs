@@ -153,6 +153,20 @@ mod tests {
     }
 
     #[test]
+    fn cube_taper_gives_the_low_eighth_half_the_travel_and_still_reaches_max() {
+        let taper = KnobTaper::Cube;
+        assert_eq!(taper_normalize(taper, 0.0, 127.0, 0.0), 0.0);
+        assert_eq!(taper_normalize(taper, 0.0, 127.0, 127.0), 1.0);
+        assert!((taper_denormalize(taper, 0.0, 127.0, 0.5) - 15.875).abs() < 1e-4);
+        for t in [0.0f32, 0.1, 0.5, 0.9, 1.0] {
+            let value = taper_denormalize(taper, 0.0, 127.0, t);
+            assert!((taper_normalize(taper, 0.0, 127.0, value) - t).abs() < 1e-5);
+        }
+        // Degenerate domain falls back to linear rather than dividing by zero.
+        assert_eq!(taper_normalize(taper, 1.0, 1.0, 1.0), 0.0);
+    }
+
+    #[test]
     fn log_taper_falls_back_to_linear_for_nonpositive_domains() {
         let taper = KnobTaper::Log;
         assert_eq!(taper_normalize(taper, -1.0, 1.0, 0.5), 0.75);
@@ -1013,29 +1027,37 @@ fn quantized_value(props: &HashMap<String, Value>, value: f32) -> f32 {
 /// Knob travel taper: how value-space maps to normalized arc position.
 /// `:taper "log"` distributes travel logarithmically (equal arc per octave) —
 /// for frequency-like params whose musical action lives in the low decades.
-/// Only positional mapping (arc, drag, mod-range rings) tapers; the numeric
-/// text and typed entry stay in real value units.
+/// `:taper "cube"` is the zero-minimum cousin: value grows with the cube of
+/// the travel, so half the arc covers the bottom eighth of a count-like range
+/// (0..127 -> 0..16) while the top still reaches the extreme. Only positional
+/// mapping (arc, drag, mod-range rings) tapers; the numeric text and typed
+/// entry stay in real value units.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum KnobTaper {
+pub(crate) enum KnobTaper {
     Linear,
     Log,
+    Cube,
 }
 
-fn knob_taper(props: &HashMap<String, Value>) -> KnobTaper {
+pub(crate) fn knob_taper(props: &HashMap<String, Value>) -> KnobTaper {
     match props.get("taper") {
         Some(Value::String(taper)) if taper == "log" => KnobTaper::Log,
+        Some(Value::String(taper)) if taper == "cube" => KnobTaper::Cube,
         _ => KnobTaper::Linear,
     }
 }
 
 /// Value → normalized [0,1] position under the taper. Log requires a strictly
 /// positive domain; degenerate domains fall back to the linear mapping.
-fn taper_normalize(taper: KnobTaper, min: f32, max: f32, value: f32) -> f32 {
+pub(crate) fn taper_normalize(taper: KnobTaper, min: f32, max: f32, value: f32) -> f32 {
     match taper {
         KnobTaper::Log if min > 0.0 && max > min => {
             let ratio = max / min;
             ((value.clamp(min, max) / min).ln() / ratio.ln()).clamp(0.0, 1.0)
         }
+        KnobTaper::Cube if max > min => ((value.clamp(min, max) - min) / (max - min))
+            .cbrt()
+            .clamp(0.0, 1.0),
         _ => {
             let range = max - min;
             if range == 0.0 {
@@ -1049,10 +1071,11 @@ fn taper_normalize(taper: KnobTaper, min: f32, max: f32, value: f32) -> f32 {
 
 /// Normalized [0,1] position → value under the taper (inverse of
 /// `taper_normalize`).
-fn taper_denormalize(taper: KnobTaper, min: f32, max: f32, t: f32) -> f32 {
+pub(crate) fn taper_denormalize(taper: KnobTaper, min: f32, max: f32, t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     match taper {
         KnobTaper::Log if min > 0.0 && max > min => min * (max / min).powf(t),
+        KnobTaper::Cube if max > min => min + (max - min) * t * t * t,
         _ => min + (max - min) * t,
     }
 }
@@ -1810,7 +1833,7 @@ impl WidgetDefinition for KnobNumberWidget {
 
         match key.code {
             KeyCode::Char(c)
-                if (c.is_ascii_digit() || c == '.' || c == '-')
+                if (c.is_ascii_digit() || c == '-' || (state.editing && c == '.'))
                     && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
             {
                 if !state.editing {

@@ -314,6 +314,8 @@
             transpose: 0.0,
             pan: 0.0,
             chop: 1.0,
+            retrig: crate::sequencer::StepParam::Retrig.default_value(),
+            retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
         }
     }
 
@@ -1153,6 +1155,8 @@
             transpose: 0.0,
             pan: 0.0,
             chop: 1.0,
+            retrig: crate::sequencer::StepParam::Retrig.default_value(),
+            retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
         };
         let mut chord = ScheduledChordData {
             count: 2,
@@ -1627,6 +1631,8 @@
                 transpose,
                 pan: 0.0,
                 chop: 1.0,
+                retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
             },
             chord: vec![transpose],
             chord_durations: vec![1.0],
@@ -1756,6 +1762,90 @@
     /// the scheduler substitutes the latched values when it resolves a step
     /// event on the armed track — that is what makes a print audible on the
     /// SAME pass (the pattern write lands behind the playhead), instead of
+    /// Retrig / Rate join the pre-echo: dragging the roll knobs while
+    /// play+record must be heard on the step the playhead is about to hit,
+    /// not one loop later (docs/step-retrig-spec.md).
+    #[test]
+    fn scheduler_lookahead_substitutes_armed_retrig_print_values() {
+        run_with_scheduler_stack(scheduler_lookahead_substitutes_armed_retrig_print_values_body);
+    }
+
+    fn scheduler_lookahead_substitutes_armed_retrig_print_values_body() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.patterns[0].set_step_active(0, true);
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state
+            .step_print_override
+            .set(0, &[(StepParam::Retrig, 5.0), (StepParam::RetrigRate, 12.0)]);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<16>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = None;
+
+        schedule_playing_lookahead(
+            &mut scheduler,
+            &state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            6_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+
+        let scheduled = queue.pop().expect("step 0 trigger");
+        let ScheduledEventKind::ResolvedTrigger { resolved, .. } = scheduled.kind else {
+            panic!("expected resolved trigger");
+        };
+        assert_eq!(resolved.retrig, 5.0, "latched retrig count rolls now");
+        assert_eq!(resolved.retrig_rate, 12.0, "latched retrig rate rolls now");
+
+        state.step_print_override.clear();
+        let queue = ScheduledEventQueue::<16>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        schedule_playing_lookahead(
+            &mut scheduler,
+            &state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            6_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+        let scheduled = queue.pop().expect("step 0 trigger after disarm");
+        let ScheduledEventKind::ResolvedTrigger { resolved, .. } = scheduled.kind else {
+            panic!("expected resolved trigger");
+        };
+        assert_eq!(
+            resolved.retrig,
+            StepParam::Retrig.default_value(),
+            "a disarmed latch leaves the stored step alone"
+        );
+        assert_eq!(
+            resolved.retrig_rate,
+            StepParam::RetrigRate.default_value(),
+            "a disarmed latch leaves the stored step alone"
+        );
+    }
+
     /// one loop later. Untouched params and other tracks stay untouched.
     #[test]
     fn scheduler_lookahead_substitutes_armed_step_print_values() {
@@ -1770,7 +1860,7 @@
         state.transport.playing.store(true, Ordering::Relaxed);
         state
             .step_print_override
-            .set(0, Some(0.25), Some(3.0), None);
+            .set(0, &[(StepParam::Velocity, 0.25), (StepParam::Duration, 3.0)]);
 
         let snapshot = state.publish_scheduler_snapshot();
         let queue = ScheduledEventQueue::<16>::new();
@@ -1852,7 +1942,7 @@
         state.transport.playing.store(true, Ordering::Relaxed);
         // Latch duration 3.0: delta over the stored base (2.0) is +1.0, so
         // the chord's explicit per-note durations move to 3.0 and 2.0.
-        state.step_print_override.set(0, None, Some(3.0), None);
+        state.step_print_override.set(0, &[(StepParam::Duration, 3.0)]);
 
         let snapshot = state.publish_scheduler_snapshot();
         let queue = ScheduledEventQueue::<16>::new();
@@ -6216,6 +6306,8 @@
                 transpose: 0.0,
                 pan: 0.0,
                 chop: 1.0,
+                retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
@@ -6278,6 +6370,8 @@
                 transpose: 0.0,
                 pan: 0.0,
                 chop: 1.0,
+                retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
@@ -6338,6 +6432,8 @@
                 transpose: 0.0,
                 pan: 0.0,
                 chop: 1.0,
+                retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
@@ -6394,6 +6490,8 @@
                 transpose: 0.0,
                 pan: 0.0,
                 chop: 1.0,
+                retrig: crate::sequencer::StepParam::Retrig.default_value(),
+                retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),

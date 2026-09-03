@@ -17,9 +17,21 @@ pub(super) fn sync_after_instrument_track_apply(
     lg_raw: *mut sequencer::audiograph::LiveGraph,
 ) {
     sync_after_instrument_track_apply_with_selection(
-        app, editor, state, track_index, current_track, track_names, track_pan_ids,
-        record_armed, selected_steps, accumulator_names, cached_track_peak_levels,
-        cached_bus_peak_levels, ui_epoch, lg_raw, false,
+        app,
+        editor,
+        state,
+        track_index,
+        current_track,
+        track_names,
+        track_pan_ids,
+        record_armed,
+        selected_steps,
+        accumulator_names,
+        cached_track_peak_levels,
+        cached_bus_peak_levels,
+        ui_epoch,
+        lg_raw,
+        false,
     );
 }
 
@@ -99,13 +111,7 @@ pub(super) fn sync_after_instrument_track_apply_with_selection(
     );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
     sync_track_params(rt, app, state, selected_track, selected_steps);
-    sync_selected_track_bus_send_binding_fields(
-        rt,
-        app,
-        state,
-        selected_track,
-        selected_steps,
-    );
+    sync_selected_track_bus_send_binding_fields(rt, app, state, selected_track, selected_steps);
     sync_fx_param_binding_fields(rt, app, state, selected_track, selected_steps);
     rt.set_reactive(
         "SEQ",
@@ -382,12 +388,18 @@ pub(super) fn step_param_fields(param: StepParam) -> Option<(&'static str, &'sta
         StepParam::Pan => Some(("pans", "track-pans", 4)),
         StepParam::Sync => Some(("syncs", "track-syncs", 5)),
         StepParam::Delay => Some(("delays", "track-delays", 6)),
+        StepParam::Retrig => Some(("retrigs", "track-retrigs", 7)),
+        StepParam::RetrigRate => Some(("retrig-rates", "track-retrig-rates", 8)),
         _ => None,
     }
 }
 
 pub(super) fn step_param_slider_value(param: StepParam, value: f32) -> f64 {
-    if param == StepParam::Duration {
+    // Duration, Retrig and RetrigRate ride bespoke slider curves.
+    if matches!(
+        param,
+        StepParam::Duration | StepParam::Retrig | StepParam::RetrigRate
+    ) {
         param.normalize(value) as f64
     } else {
         value as f64
@@ -409,6 +421,8 @@ pub(super) fn sync_track_step_param_list_bindings(
         StepParam::Pan,
         StepParam::Sync,
         StepParam::Delay,
+        StepParam::Retrig,
+        StepParam::RetrigRate,
     ] {
         let Some((current_field, track_field, _)) = step_param_fields(param) else {
             continue;
@@ -503,8 +517,8 @@ pub(super) fn sync_single_step_param_binding(
         dirty |= rt
             .set_reactive_list_index("SEQ", current_field, step, Value::Number(value as f64))
             .effects_dirty;
-        let parameter_step = selected_plock_step(selected_steps)
-            .unwrap_or_else(|| fx_step_cursor_from_runtime(rt));
+        let parameter_step =
+            selected_plock_step(selected_steps).unwrap_or_else(|| fx_step_cursor_from_runtime(rt));
         if parameter_step == step {
             if let Some(field) = fx_step_param_value_field(param) {
                 dirty |= rt
@@ -800,12 +814,7 @@ pub(super) fn sync_step_batch_structural_bindings(
                 &track_step_plocked_field(track, step),
                 Value::Bool(
                     visible
-                        && track_step_has_plock(
-                            state,
-                            track,
-                            &app.graph.effect_descriptors,
-                            step,
-                        ),
+                        && track_step_has_plock(state, track, &app.graph.effect_descriptors, step),
                 ),
             )
             .effects_dirty;
@@ -987,7 +996,11 @@ pub(super) fn sync_step_selection_bindings(
     dirty
 }
 
-pub(super) fn neural_neuron_selected_field(pattern_idx: usize, network_id: u64, neuron_idx: usize) -> String {
+pub(super) fn neural_neuron_selected_field(
+    pattern_idx: usize,
+    network_id: u64,
+    neuron_idx: usize,
+) -> String {
     format!("neural-neuron-selected-{pattern_idx}-{network_id}-{neuron_idx}")
 }
 
@@ -1231,8 +1244,7 @@ pub(super) fn record_selected_neural_instrument_plock(
     Option<sequencer::sequencer::ProjectScenes>,
 ) {
     let neural_selection = selected_neural_neurons.lock().unwrap().clone();
-    let history_before = (!neural_selection.is_empty())
-        .then(|| state.capture_project_scenes());
+    let history_before = (!neural_selection.is_empty()).then(|| state.capture_project_scenes());
     let wrote_neural_plock = write_selected_neural_instrument_plock(
         editor,
         state,
@@ -1285,8 +1297,7 @@ pub(super) fn record_selected_neural_effect_plock(
     Option<sequencer::sequencer::ProjectScenes>,
 ) {
     let neural_selection = selected_neural_neurons.lock().unwrap().clone();
-    let history_before = (!neural_selection.is_empty())
-        .then(|| state.capture_project_scenes());
+    let history_before = (!neural_selection.is_empty()).then(|| state.capture_project_scenes());
     let wrote_neural_plock = write_selected_neural_effect_plock(
         editor,
         state,
@@ -1447,7 +1458,10 @@ pub(super) struct EffectParamDisplaySync<'a> {
     pub(super) sync_plock_list: bool,
 }
 
-pub(super) fn sync_effect_param_authoring_display(editor: &mut Editor, sync: EffectParamDisplaySync<'_>) {
+pub(super) fn sync_effect_param_authoring_display(
+    editor: &mut Editor,
+    sync: EffectParamDisplaySync<'_>,
+) {
     let mut ui_dirty = false;
     if sync.sync_plock_list {
         ui_dirty |= sync_track_plocks_for_neural_selection(
@@ -1518,13 +1532,12 @@ pub(super) fn sync_instrument_param_batch_display(
             )
         };
     }
-    if param_indices.iter().any(|param_idx| *param_idx == 2 || *param_idx == 3) {
-        ui_dirty |= sync_sampler_selection_time_fields(
-            editor.runtime_mut(),
-            app,
-            track,
-            display_step,
-        );
+    if param_indices
+        .iter()
+        .any(|param_idx| *param_idx == 2 || *param_idx == 3)
+    {
+        ui_dirty |=
+            sync_sampler_selection_time_fields(editor.runtime_mut(), app, track, display_step);
     }
     flush_reactive_display_edit(editor, ui_dirty);
 }
@@ -2014,20 +2027,16 @@ pub(super) fn apply_ui_invalidations(
                         selected_steps,
                     );
                     if fx_visible {
-                        let next_display = displayed_plock_step(
-                            state,
-                            track,
-                            selected_plock_step(selected_steps),
-                        );
+                        let next_display =
+                            displayed_plock_step(state, track, selected_plock_step(selected_steps));
                         // Read the single field directly: `global_value("SEQ")`
                         // clones the entire SEQ namespace map (thousands of
                         // per-track/per-step fields) just to look at one entry.
-                        let previous_display = match rt
-                            .reactive_field_value("SEQ", "fx-step-display-step")
-                        {
-                            Some(Value::Number(step)) if *step >= 0.0 => Some(*step as usize),
-                            _ => None,
-                        };
+                        let previous_display =
+                            match rt.reactive_field_value("SEQ", "fx-step-display-step") {
+                                Some(Value::Number(step)) if *step >= 0.0 => Some(*step as usize),
+                                _ => None,
+                            };
                         needs_reactive_cycle |= sync_track_plocks_for_neural_selection(
                             rt,
                             app,
@@ -2294,7 +2303,11 @@ pub(super) fn apply_ui_invalidations(
                     InstrumentInvalidation::Param { param } => {
                         needs_reactive_cycle |= if track == current_track_idx {
                             sync_fx_instrument_param_value_field(
-                                rt, app, track, param, display_step,
+                                rt,
+                                app,
+                                track,
+                                param,
+                                display_step,
                             )
                         } else {
                             sync_instrument_param_value_field(rt, app, track, param, display_step)
@@ -2303,7 +2316,11 @@ pub(super) fn apply_ui_invalidations(
                     InstrumentInvalidation::Plock { param } => {
                         needs_reactive_cycle |= if track == current_track_idx {
                             sync_fx_instrument_param_value_field(
-                                rt, app, track, param, display_step,
+                                rt,
+                                app,
+                                track,
+                                param,
+                                display_step,
                             )
                         } else {
                             sync_instrument_param_value_field(rt, app, track, param, display_step)
@@ -2374,8 +2391,7 @@ pub(super) fn apply_ui_invalidations(
                                 build_step_has_plocks(state, track, &app.graph.effect_descriptors),
                             )
                             .effects_dirty;
-                        needs_reactive_cycle |=
-                            sync_track_plock_any_field(rt, app, state, track);
+                        needs_reactive_cycle |= sync_track_plock_any_field(rt, app, state, track);
                     }
                 }
                 TrackFxInvalidation::Topology | TrackFxInvalidation::PanelTree => {
@@ -2403,8 +2419,7 @@ pub(super) fn apply_ui_invalidations(
                     if track == current_track_idx {
                         // A MIDI-FX p-lock write arrives on this same arm, so
                         // the automation dot has to be re-derived here too.
-                        needs_reactive_cycle |=
-                            sync_track_plock_any_field(rt, app, state, track);
+                        needs_reactive_cycle |= sync_track_plock_any_field(rt, app, state, track);
                     }
                 }
                 MidiFxInvalidation::Topology => {
@@ -2546,7 +2561,10 @@ pub(super) fn apply_ui_invalidations(
 }
 
 pub(super) fn reset_sampler_waveform_view(editor: &mut Editor) {
-    if let Err(error) = editor.runtime_mut().eval_str("(eseq.effects.sampler-panel/sampler-reset-view)") {
+    if let Err(error) = editor
+        .runtime_mut()
+        .eval_str("(eseq.effects.sampler-panel/sampler-reset-view)")
+    {
         eprintln!("waveform: failed to reset sampler viewport: {error:?}");
     }
 }
@@ -2606,14 +2624,15 @@ pub(super) fn load_or_convert_sampler_track(
     };
 
     let history_path = resolved_path.clone();
-    let reset_summary = app.apply_recorded_instrument_binding_mutation(
-        track,
-        "Replace instrument",
-        |app| {
+    let reset_summary =
+        app.apply_recorded_instrument_binding_mutation(track, "Replace instrument", |app| {
             let reset_summary = match instrument_type {
                 InstrumentType::Sampler => {
-                    app.graph_controller()
-                        .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
+                    app.graph_controller().send_sample_to_all_voices(
+                        track,
+                        new_buffer_id,
+                        sample_rate,
+                    );
                     app.graph.track_buffer_ids[track] = new_buffer_id;
                     app.graph.track_sample_rates[track] = sample_rate;
                     app.tracks[track] = new_name.clone();
@@ -2623,14 +2642,14 @@ pub(super) fn load_or_convert_sampler_track(
                     );
                     None
                 }
-                InstrumentType::Custom => Some(
-                    app.graph_controller().convert_custom_track_to_sampler(
+                InstrumentType::Custom => {
+                    Some(app.graph_controller().convert_custom_track_to_sampler(
                         track,
                         new_buffer_id,
                         sample_rate,
                         &new_name,
-                    )?,
-                ),
+                    )?)
+                }
                 InstrumentType::Rack => {
                     let summary = app.graph_controller().replace_rack_track_with_sampler(
                         track,
@@ -2656,8 +2675,7 @@ pub(super) fn load_or_convert_sampler_track(
             app.reset_sampler_bpm_for_analysis(track);
             app.publish_sampler_analysis_runtime(track);
             Ok(reset_summary)
-        },
-    )?;
+        })?;
     reset_sampler_waveform_view(editor);
     if let Some(track_name) = track_names.get_mut(track) {
         *track_name = new_name.clone();

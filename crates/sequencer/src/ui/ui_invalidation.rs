@@ -144,6 +144,8 @@ pub(crate) enum StepParamKey {
     Chop,
     Sync,
     Delay,
+    Retrig,
+    RetrigRate,
 }
 
 impl From<StepParam> for StepParamKey {
@@ -159,6 +161,8 @@ impl From<StepParam> for StepParamKey {
             StepParam::Chop => Self::Chop,
             StepParam::Sync => Self::Sync,
             StepParam::Delay => Self::Delay,
+            StepParam::Retrig => Self::Retrig,
+            StepParam::RetrigRate => Self::RetrigRate,
         }
     }
 }
@@ -176,6 +180,8 @@ impl StepParamKey {
             Self::Chop => StepParam::Chop,
             Self::Sync => StepParam::Sync,
             Self::Delay => StepParam::Delay,
+            Self::Retrig => StepParam::Retrig,
+            Self::RetrigRate => StepParam::RetrigRate,
         }
     }
 }

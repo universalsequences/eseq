@@ -657,15 +657,15 @@
       :variant :ghost
       :background-color (if selected 
         :accent
-        :bg)
-      :color (if selected (rgba 0.1 0.1 0.2 1) :dim)
-      :border-color 
-      :transparent
+        :mixer-control-bg
+        )
+      :color (if selected (rgba 0.1 0.2 0.6 0.2) :dim)
+      :border-color (rgba 0.1 0.2 0.8 1)
       
       :height 0.9
       :padding 0.5532
-      :font-size 11.0
-      :corner-radius 24
+      :font-size 12.0
+      :corner-radius 17
       :on-click |x y r| (do 
         (set! search-filter "") 
         (toggle-tag name)
@@ -678,12 +678,12 @@
       (if (= name "factory") "Factory"
         (if (string-starts-with? name "pkg:") (substring name 4 (len name)) name)))
       :variant :ghost
-      :background-color (if selected :accent :bg)
+      :background-color (if selected :accent :mixer-control-bg)
       :color (if selected (rgba 0.1 0.1 0.2 1) :dim)
-      :border-color :transparent
+      :border-color (rgba 0.1 0.2 0.8 1)
       :height 0.9
       :padding 0.5532
-      :font-size 11.0
+      :font-size 12.0
       :corner-radius 24
       :on-click |x y r| (toggle-origin name))))
 

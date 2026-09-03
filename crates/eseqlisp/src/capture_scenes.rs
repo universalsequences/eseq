@@ -43,6 +43,7 @@ pub const SCENES: &[&str] = &[
     "widget-knob",
     "widget-matrix",
     "widget-modulator-curve",
+    "widget-lfo-curve",
     "widget-multiband-meter",
     "widget-response-curve-editor",
     "widget-scroll",
@@ -539,6 +540,14 @@ pub fn widget_instances_for_scene(scene: &str) -> Vec<WidgetInstance> {
                 // response curve crosses the frame instead of pinning to an
                 // edge at the 20 Hz clamp the generic uniforms produce.
                 widget.uniform_a = [1200.0, 0.65, 0.0, 0.0];
+            }
+        }
+        // shape, pulse width, phase offset (cycles), marker phase: one
+        // instance per shape, with the marker off the exact cycle boundary so
+        // the capture shows the dot riding the curve.
+        "widget-lfo-curve" => {
+            for (index, widget) in widgets.iter_mut().enumerate() {
+                widget.uniform_a = [[0.0, 1.0, 2.0, 3.0][index], 0.35, 0.25, 0.62];
             }
         }
         "widget-knob-number-mod-range" => {

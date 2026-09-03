@@ -140,12 +140,18 @@ pub(super) fn expanded_step_param_for_mode(mode: usize) -> Option<StepParam> {
         4 => Some(StepParam::Pan),
         5 => Some(StepParam::Sync),
         6 => Some(StepParam::Delay),
+        7 => Some(StepParam::Retrig),
+        8 => Some(StepParam::RetrigRate),
         _ => None,
     }
 }
 
 pub(super) fn expanded_step_param_slider_value(param: StepParam, value: f32) -> f32 {
-    if param == StepParam::Duration {
+    // Duration, Retrig and RetrigRate ride bespoke slider curves.
+    if matches!(
+        param,
+        StepParam::Duration | StepParam::Retrig | StepParam::RetrigRate
+    ) {
         param.normalize(value)
     } else {
         value
@@ -164,12 +170,8 @@ fn expanded_step_param_value(
         return 0.0;
     }
     expanded_step_param_for_mode(mode)
-        .map(|param| {
-            state.pattern.step_data[viewport.track].get(viewport.cursor_step, param)
-        })
-        .or_else(|| {
-            process_lane_value_for_mode(state, viewport.track, mode, viewport.cursor_step)
-        })
+        .map(|param| state.pattern.step_data[viewport.track].get(viewport.cursor_step, param))
+        .or_else(|| process_lane_value_for_mode(state, viewport.track, mode, viewport.cursor_step))
         .unwrap_or(0.0)
 }
 

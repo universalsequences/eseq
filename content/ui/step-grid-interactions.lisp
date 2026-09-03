@@ -70,6 +70,10 @@
         delete-selected-steps
         duration-slider-position
         duration-slider-value
+        retrig-rate-slider-position
+        retrig-rate-slider-value
+        retrig-slider-position
+        retrig-slider-value
         step-param-value
         step-slider-param-value
         param-decimals)
@@ -430,6 +434,50 @@
       (* p 4)
       (+ 2 (* 30 (pow (* 2 (- p 0.5)) 4))))))
 
+;; Retrig rate (retrigs per beat) rides a two-segment log curve over 1..1024.
+;; The rhythmic range 1..32 takes the bottom 70% of the throw so rolls are
+;; easy to dial in; the pitched range 32..1024 takes the top 30%. Mirrors
+;; `StepParam::RetrigRate`'s normalize/denormalize in
+;; crates/sequencer/src/sequencer/data.rs — keep the two in step.
+(def retrig-rate-slider-max 1024)
+(def retrig-rate-slider-split 32)
+(def retrig-rate-slider-split-position 0.7)
+
+;; Retrig count rides a cube curve over 0..127: half the lane covers 0..16
+;; repeats, the top still reaches 127 (= infinite). Mirrors
+;; `StepParam::Retrig`'s normalize/denormalize in
+;; crates/sequencer/src/sequencer/data.rs — keep the two in step.
+(def retrig-slider-max 127)
+
+(def retrig-slider-position (count)
+  (let ((c (max 0 (min count retrig-slider-max))))
+    (pow (/ c retrig-slider-max) (/ 1 3))))
+
+(def retrig-slider-value (position)
+  (let ((p (max 0 (min position 1))))
+    (max 0 (min retrig-slider-max (* retrig-slider-max p p p)))))
+
+(def retrig-rate-slider-position (rate)
+  (let ((r (max 1 (min rate retrig-rate-slider-max))))
+    (if (<= r retrig-rate-slider-split)
+      (* retrig-rate-slider-split-position
+         (/ (log r) (log retrig-rate-slider-split)))
+      (+ retrig-rate-slider-split-position
+         (* (- 1 retrig-rate-slider-split-position)
+            (/ (log (/ r retrig-rate-slider-split))
+               (log (/ retrig-rate-slider-max retrig-rate-slider-split))))))))
+
+(def retrig-rate-slider-value (position)
+  (let ((p (max 0 (min position 1))))
+    (if (<= p retrig-rate-slider-split-position)
+      (max 1 (pow retrig-rate-slider-split
+                  (/ p retrig-rate-slider-split-position)))
+      (min retrig-rate-slider-max
+           (* retrig-rate-slider-split
+              (pow (/ retrig-rate-slider-max retrig-rate-slider-split)
+                   (/ (- p retrig-rate-slider-split-position)
+                      (- 1 retrig-rate-slider-split-position))))))))
+
 ;; `param-mode` is a `defstate` owned by eseq.seq-core-state: bare is the
 ;; documented path (state_bindings, not the global ladder).
 (def step-param-value (v)
@@ -440,7 +488,11 @@
 (def step-slider-param-value (v)
   (if (= eseq.seq-core-state/param-mode 1)
     (duration-slider-value v)
-    (step-param-value v)))
+    (if (= eseq.seq-core-state/param-mode 8)
+      (retrig-rate-slider-value v)
+      (if (= eseq.seq-core-state/param-mode 7)
+        (round (retrig-slider-value v))
+        (step-param-value v)))))
 
 (def param-decimals ()
   (eseq.seqv-track-params/seqv-param-decimals eseq.seq-core-state/param-mode))

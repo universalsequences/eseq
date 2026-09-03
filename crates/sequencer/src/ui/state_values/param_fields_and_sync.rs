@@ -1368,6 +1368,16 @@ pub(super) fn sync_all_track_sequencer_state_inner(
     }
     rt.set_reactive(
         "SEQ",
+        "track-retrigs",
+        build_all_track_param_lists_value(state, app, StepParam::Retrig),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-retrig-rates",
+        build_all_track_param_lists_value(state, app, StepParam::RetrigRate),
+    );
+    rt.set_reactive(
+        "SEQ",
         "track-process-lanes",
         build_all_track_process_lanes_value(state, app.tracks.len()),
     );
@@ -1415,11 +1425,25 @@ pub(crate) fn build_param_list(
     Value::List(items)
 }
 
+/// The step params the *step* inspector strip shows as number pickers, in
+/// panel order. Every entry must have an [`fx_step_param_value_field`], and
+/// this is the single list the readout sync, the print-latch restore and the
+/// empty-project reset all walk.
+pub(crate) const STEP_INSPECTOR_PARAMS: [StepParam; 5] = [
+    StepParam::Transpose,
+    StepParam::Velocity,
+    StepParam::Duration,
+    StepParam::Retrig,
+    StepParam::RetrigRate,
+];
+
 pub(crate) fn fx_step_param_value_field(param: StepParam) -> Option<&'static str> {
     match param {
         StepParam::Velocity => Some("fx-step-value-velocity"),
         StepParam::Duration => Some("fx-step-value-duration"),
         StepParam::Transpose => Some("fx-step-value-transpose"),
+        StepParam::Retrig => Some("fx-step-value-retrig"),
+        StepParam::RetrigRate => Some("fx-step-value-retrig-rate"),
         _ => None,
     }
 }
@@ -1474,7 +1498,7 @@ pub(crate) fn sync_fx_step_cursor_binding_fields(
             Value::Number(parameter_step as f64),
         )
         .effects_dirty;
-    for param in [StepParam::Velocity, StepParam::Duration, StepParam::Transpose] {
+    for param in STEP_INSPECTOR_PARAMS {
         let field = fx_step_param_value_field(param)
             .expect("step parameter strip field should exist");
         dirty |= rt
@@ -1526,6 +1550,16 @@ pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState
     );
     rt.set_reactive(
         "SEQ",
+        "retrigs",
+        build_param_list(state, track, StepParam::Retrig),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "retrig-rates",
+        build_param_list(state, track, StepParam::RetrigRate),
+    );
+    rt.set_reactive(
+        "SEQ",
         "track-velocities",
         build_all_active_track_param_lists_value(state, StepParam::Velocity),
     );
@@ -1558,6 +1592,16 @@ pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState
         "SEQ",
         "track-delays",
         build_all_active_track_param_lists_value(state, StepParam::Delay),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-retrigs",
+        build_all_active_track_param_lists_value(state, StepParam::Retrig),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-retrig-rates",
+        build_all_active_track_param_lists_value(state, StepParam::RetrigRate),
     );
     sync_process_chain_state(rt, state, state.active_track_count(), track);
 }

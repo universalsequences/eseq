@@ -630,6 +630,10 @@ pub(in crate::lisp_host) fn parse_acc_emit_offset(
     }
 }
 
+fn clamp_step_param(param: StepParam, value: f32) -> f32 {
+    value.clamp(param.min(), param.max())
+}
+
 pub(in crate::lisp_host) fn apply_step_param_set(resolved: &mut ResolvedStep, param: StepParam, value: f32) {
     match param {
         StepParam::Duration => resolved.duration = value.max(0.0),
@@ -639,6 +643,8 @@ pub(in crate::lisp_host) fn apply_step_param_set(resolved: &mut ResolvedStep, pa
         StepParam::Transpose => resolved.transpose = value,
         StepParam::Pan => resolved.pan = value.clamp(-1.0, 1.0),
         StepParam::Chop => resolved.chop = value.max(1.0),
+        StepParam::Retrig => resolved.retrig = clamp_step_param(param, value),
+        StepParam::RetrigRate => resolved.retrig_rate = clamp_step_param(param, value),
     }
 }
 
@@ -651,6 +657,10 @@ pub(in crate::lisp_host) fn apply_step_param_add(resolved: &mut ResolvedStep, pa
         StepParam::Transpose => resolved.transpose += delta,
         StepParam::Pan => resolved.pan = (resolved.pan + delta).clamp(-1.0, 1.0),
         StepParam::Chop => resolved.chop = (resolved.chop + delta).max(1.0),
+        StepParam::Retrig => resolved.retrig = clamp_step_param(param, resolved.retrig + delta),
+        StepParam::RetrigRate => {
+            resolved.retrig_rate = clamp_step_param(param, resolved.retrig_rate + delta)
+        }
     }
 }
 
@@ -663,6 +673,10 @@ pub(in crate::lisp_host) fn apply_step_param_scale(resolved: &mut ResolvedStep, 
         StepParam::Transpose => resolved.transpose *= factor,
         StepParam::Pan => resolved.pan = (resolved.pan * factor).clamp(-1.0, 1.0),
         StepParam::Chop => resolved.chop = (resolved.chop * factor).max(1.0),
+        StepParam::Retrig => resolved.retrig = clamp_step_param(param, resolved.retrig * factor),
+        StepParam::RetrigRate => {
+            resolved.retrig_rate = clamp_step_param(param, resolved.retrig_rate * factor)
+        }
     }
 }
 
@@ -1019,6 +1033,8 @@ pub(in crate::lisp_host) fn parse_step_param_arg(args: &[EValue], idx: usize) ->
                 "chop" | "chp" => Ok(StepParam::Chop),
                 "sync" | "syn" => Ok(StepParam::Sync),
                 "delay" | "dly" => Ok(StepParam::Delay),
+                "retrig" | "rtrg" => Ok(StepParam::Retrig),
+                "retrig-rate" | "retrig_rate" | "rate" => Ok(StepParam::RetrigRate),
                 _ => Err("unknown step param".to_string()),
             }
         }

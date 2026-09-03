@@ -105,28 +105,53 @@
       :width 4.4 :height 2.05
       :on-change (lambda (v) (source-set-param-value fx p v)))))
 
+(def lfo-shape-curve (fx section shape pulse-width phase width height)
+  (lfo-curve
+    :width width :height height
+    :shape (source-param-value fx shape 0)
+    :pw (source-param-value fx pulse-width 0.5)
+    :phase-offset (source-param-value fx phase 0)
+    :phase (if (get section :phase-field) (bind-seq (get section :phase-field)) -1)
+    :background-color :instrument-control-bg
+    :grid-color :dim
+    :curve-color (lego/ui-accent-orange)
+    :fill-color (rgba 1.0 0.48 0.18 0.16)))
+
+;; Same conditional layout as the instrument editor: the host filters the
+;; section's params (rate vs division by sync, pulse width by shape), so a
+;; control is drawn only when its param is.
 (def lfo-source-editor (fx section)
   (let ((rate (source-param section "rate"))
         (sync (source-param section "sync"))
         (division (source-param section "division"))
         (shape (source-param section "shape"))
-        (pulse-width (source-param section "pulse width"))
-        (retrigger (source-param section "retrigger")))
-    (lego/ui-readout-panel-medium-s 0
+        (phase (source-param section "phase"))
+        (pulse-width (source-param section "pulse width")))
+    (lego/ui-lego-panel-s 7.0 0 :instrument-control-bg
       (h-stack :debug-name "effect-lfo-source-editor"
                :width :fill :height :fill :gap 0.38 :align :start
-        (v-stack :width 13.8 :height :fill :gap 0.12 :align :start
+        (v-stack :width 11.8 :height :fill :gap 0.12 :align :start
           (h-stack :gap 0.25 :align :start
-            (source-number fx rate "rate" 2 false 6.4)
+            (if division
+              (source-dropdown fx division "division" 6.4)
+              (source-number fx rate "rate" 2 "Hz" 6.4))
             (source-button fx sync "sync" 5.0))
           (h-stack :gap 0.25 :align :start
-            (source-dropdown fx division "division" 6.4)
-            (source-dropdown fx shape "shape" 5.0)))
-        (v-stack :width 5.0 :height :fill :gap 0.18 :align :center
-          (source-compact-knob fx pulse-width "pw" 2)
-          (box :debug-name "effect-lfo-retrigger-button"
-               :width 4.4 :height 1.55 :padding 0
-            (source-button fx retrigger "retrig" 4.4)))))))
+            (source-dropdown fx shape "shape" 6.4)
+            (source-number fx phase "phase" 0 "°" 5.0))
+          ;; No retrig here: an effect-chain modulator has no gate or trigger
+          ;; input (only the Ext inputs are wired), so there is no note to
+          ;; retrigger from. The param still exists on the node but is inert.
+          (h-stack :gap 0.25 :align :start
+            (if pulse-width
+              (source-compact-knob fx pulse-width
+                (if (= (reactive-value (source-param-value fx shape 0)) 0) "peak" "pw") 2)
+              (box :width 4.4 :height 1.72))))
+        (box :debug-name "effect-lfo-curve-wrapper"
+             :width 12.2 :height 5.7 :padding 0.22
+             :background-color :black
+             :corner-radius 8
+          (lfo-shape-curve fx section shape pulse-width phase 11.7 5.25))))))
 
 (def selected-mod-source-editor (fx)
   (box :debug-name "effect-selected-mod-source-editor"

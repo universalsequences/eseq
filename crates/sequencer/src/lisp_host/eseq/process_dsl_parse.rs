@@ -240,6 +240,11 @@ pub(in crate::lisp_host) fn process_ratchet_event_value(event: crate::process::P
     );
     map.insert("pan".to_string(), number(event.resolved.pan as f64));
     map.insert("chop".to_string(), number(event.resolved.chop as f64));
+    map.insert("retrig".to_string(), number(event.resolved.retrig as f64));
+    map.insert(
+        "retrig-rate".to_string(),
+        number(event.resolved.retrig_rate as f64),
+    );
     EValue::Map(map)
 }
 
@@ -274,6 +279,8 @@ pub(in crate::lisp_host) fn process_ratchet_event_from_value(
             transpose: process_ratchet_event_number(map, "transpose")?,
             pan: process_ratchet_event_number(map, "pan")?,
             chop: process_ratchet_event_number(map, "chop")?,
+            retrig: process_ratchet_event_number(map, "retrig")?,
+            retrig_rate: process_ratchet_event_number(map, "retrig-rate")?,
         },
     })
 }
@@ -286,6 +293,8 @@ pub(in crate::lisp_host) fn process_ratchet_event_param_key(native: &str) -> Opt
         "speed" => Some("speed"),
         "pan" => Some("pan"),
         "chop" => Some("chop"),
+        "retrig" => Some("retrig"),
+        "retrig-rate" => Some("retrig-rate"),
         _ => None,
     }
 }
@@ -319,7 +328,7 @@ pub(in crate::lisp_host) fn process_ratchet_event_write(args: &[EValue], native:
 }
 
 pub(in crate::lisp_host) fn register_process_ratchet_event_natives(runtime: &mut Runtime) {
-    for native in ["vel", "note", "dur", "speed", "pan", "chop"] {
+    for native in ["vel", "note", "dur", "speed", "pan", "chop", "retrig", "retrig-rate"] {
         runtime.register_native_with_docs(
             native,
             native,
@@ -1873,6 +1882,10 @@ pub(in crate::lisp_host) fn build_process_emit_event(args: &[EValue]) -> Result<
             ("speed", EValue::Number(value)) => resolved.speed = *value as f32,
             ("pan", EValue::Number(value)) => resolved.pan = *value as f32,
             ("chop", EValue::Number(value)) => resolved.chop = *value as f32,
+            ("retrig" | "rtrg", EValue::Number(value)) => resolved.retrig = *value as f32,
+            ("retrig-rate" | "rate", EValue::Number(value)) => {
+                resolved.retrig_rate = *value as f32
+            }
             _ => {}
         }
         idx += 1;

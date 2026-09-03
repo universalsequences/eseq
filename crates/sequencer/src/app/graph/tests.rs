@@ -292,6 +292,102 @@
         }
     }
 
+    /// User report 2026-09-02: "retrig ON does nothing". Drive the real path —
+    /// a note-on block event into a gatepitch node feeding a voice modulator —
+    /// and check the LFO phase restarts at the note.
+    #[test]
+    fn voice_modulator_retriggers_from_gatepitch_note_on_block_events() {
+        use crate::instruments::voice_modulator as vm;
+        let graph = TestLiveGraph::new("lfo-retrigger-test");
+        let gp_name = CString::new("retrig_gatepitch").unwrap();
+        let gp_id = unsafe {
+            crate::audiograph::add_node(
+                graph.ptr.0,
+                crate::effects::gatepitch::gatepitch_vtable(),
+                crate::effects::gatepitch::GATEPITCH_STATE_SIZE * std::mem::size_of::<f32>(),
+                gp_name.as_ptr(),
+                0,
+                6,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert!(gp_id >= 0);
+        let mod_name = CString::new("retrig_modulator").unwrap();
+        let mod_id = unsafe {
+            crate::audiograph::add_node(
+                graph.ptr.0,
+                vm::voice_modulator_vtable(),
+                vm::STATE_SIZE * std::mem::size_of::<f32>(),
+                mod_name.as_ptr(),
+                vm::INPUT_COUNT as i32,
+                vm::NUM_OUTPUTS as i32,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert!(mod_id >= 0);
+        for port in 0..4 {
+            unsafe { crate::audiograph::graph_connect(graph.ptr.0, gp_id, port, mod_id, port) };
+        }
+        unsafe {
+            crate::audiograph::params_push_wrapper(
+                graph.ptr.0,
+                crate::audiograph::ParamMsg {
+                    idx: vm::slot_param_idx(0, vm::PARAM_LFO_RETRIGGER) as u64,
+                    logical_id: mod_id as u64,
+                    fvalue: 1.0,
+                },
+            );
+        }
+        graph.process_block();
+        assert!(
+            unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, mod_id) },
+            "modulator should join the watchlist"
+        );
+        let lfo_phase = |graph: &TestLiveGraph| {
+            let state = graph
+                .read_node_state::<{ vm::STATE_SIZE }>(mod_id)
+                .expect("modulator state");
+            state[0] // slot 0, IDX_LFO_PHASE
+        };
+        for _ in 0..40 {
+            graph.process_block();
+        }
+        let before = lfo_phase(&graph);
+        assert!(before > 0.2, "LFO should have advanced freely, got {before}");
+        let ok = unsafe {
+            crate::audiograph::push_block_event(
+                graph.ptr.0,
+                crate::audiograph::GraphBlockEvent {
+                    logical_id: gp_id as u64,
+                    frame_offset: 8,
+                    sequence: 0,
+                    kind: crate::audiograph::GBE_NOTE_ON,
+                    aux_count: 2,
+                    aux: {
+                        let mut aux = [0.0; crate::audiograph::GBE_AUX_CAP];
+                        aux[0] = 440.0;
+                        aux[1] = 1.0;
+                        aux
+                    },
+                },
+            )
+        };
+        assert!(ok, "note-on block event should queue");
+        // Watchlist snapshots are throttled, so run a few blocks past the note
+        // before reading: 5 Hz at 44.1 kHz advances ~0.0073 per block, so a
+        // restarted phase is well under 0.1 while a free-running one is ~0.35.
+        for _ in 0..8 {
+            graph.process_block();
+        }
+        let after = lfo_phase(&graph);
+        assert!(
+            after < 0.1,
+            "phase should restart at the note-on, got {after} (was {before})"
+        );
+    }
+
     #[test]
     fn watchlist_throttle_starts_each_live_graph_with_a_snapshot() {
         let first = TestLiveGraph::new("first-watchlist-throttle-test");

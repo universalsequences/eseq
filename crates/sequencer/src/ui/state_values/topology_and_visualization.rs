@@ -46,6 +46,8 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
         rt.set_reactive("SEQ", "delays", Value::List(vec![]));
+        rt.set_reactive("SEQ", "retrigs", Value::List(vec![]));
+        rt.set_reactive("SEQ", "retrig-rates", Value::List(vec![]));
         sync_track_mixer_state(rt, app, state);
         sync_bus_mixer_state(rt, app);
         rt.set_reactive("SEQ", "effects", Value::List(vec![]));
@@ -73,6 +75,8 @@ pub(crate) fn sync_track_topology_state(
             rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-syncs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-delays", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-retrigs", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-retrig-rates", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-process-lanes", Value::List(vec![]));
         rt.set_reactive("SEQ", "process-lanes", Value::List(vec![]));
         rt.set_reactive("SEQ", "process-slots", Value::List(vec![]));
@@ -83,7 +87,7 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-plock-any", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plock-printing", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plock-variants", Value::List(vec![]));
-        for param in [StepParam::Velocity, StepParam::Duration, StepParam::Transpose] {
+        for param in STEP_INSPECTOR_PARAMS {
             rt.set_reactive(
                 "SEQ",
                 fx_step_param_value_field(param)

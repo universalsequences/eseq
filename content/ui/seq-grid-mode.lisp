@@ -147,6 +147,10 @@
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "s" "set-sync-mode")
 (def set-delay-mode () (set! eseq.seq-core-state/param-mode 6))
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "l" "set-delay-mode")
+(def set-retrig-mode () (set! eseq.seq-core-state/param-mode 7))
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "r" "set-retrig-mode")
+(def set-retrig-rate-mode () (set! eseq.seq-core-state/param-mode 8))
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "e" "set-retrig-rate-mode")
 (def set-process-lane-mode ()
   (if (> (len SEQ.process-lanes) 0)
     (set! eseq.seq-core-state/param-mode eseq.seqv-track-params/seqv-process-lane-mode-offset)
@@ -163,16 +167,21 @@
 (def param-max ()
   (eseq.seqv-track-params/seqv-param-max eseq.seq-core-state/param-mode))
 
+;; Modes 1 (duration), 7 (retrig) and 8 (retrig rate) ride bespoke slider curves.
 (def param-slider-min ()
-  (if (= eseq.seq-core-state/param-mode 1) 0 (param-min)))
+  (if (or (= eseq.seq-core-state/param-mode 1) (= eseq.seq-core-state/param-mode 7) (= eseq.seq-core-state/param-mode 8)) 0 (param-min)))
 
 (def param-slider-max ()
-  (if (= eseq.seq-core-state/param-mode 1) 1 (param-max)))
+  (if (or (= eseq.seq-core-state/param-mode 1) (= eseq.seq-core-state/param-mode 7) (= eseq.seq-core-state/param-mode 8)) 1 (param-max)))
 
 (def param-slider-value (step)
   (if (= eseq.seq-core-state/param-mode 1)
     (eseq.step-grid-interactions/duration-slider-position (nth (param-values) step))
-    (nth (param-values) step)))
+    (if (= eseq.seq-core-state/param-mode 8)
+      (eseq.step-grid-interactions/retrig-rate-slider-position (nth (param-values) step))
+      (if (= eseq.seq-core-state/param-mode 7)
+        (eseq.step-grid-interactions/retrig-slider-position (nth (param-values) step))
+        (nth (param-values) step)))))
 
 (def param-haptic-pivot-position ()
   (if (= eseq.seq-core-state/param-mode 1) 0.5 1))

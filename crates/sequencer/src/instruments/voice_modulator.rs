@@ -33,7 +33,7 @@ pub const LEGACY_FIXED_MOD_PARAM_BASE: u32 = 1_000_000;
 /// value so raising MOD_PARAM_BASE doesn't widen the legacy-detection range.
 pub const LEGACY_FIXED_MOD_PARAM_BASE_END: u32 = 1_100_000;
 
-const SLOT_STATE_STRIDE: usize = 8;
+const SLOT_STATE_STRIDE: usize = 11;
 const IDX_SLOT_STATE_BASE: usize = 0;
 const IDX_LFO_PHASE: usize = 0;
 const IDX_ENV: usize = 1;
@@ -43,6 +43,14 @@ const IDX_RNG: usize = 4;
 const IDX_RAND_HOLD: usize = 5;
 const IDX_RAND_SMOOTH: usize = 6;
 const IDX_ENV_STAGE: usize = 7;
+/// Drift: 0..1 progress from the `from` value (`IDX_DRIFT`) to the next random
+/// target (`IDX_DRIFT_TARGET`); a wrap picks a new target.
+const IDX_DRIFT_PHASE: usize = 8;
+const IDX_DRIFT_TARGET: usize = 9;
+/// Synced LFO + retrigger: the bar-derived phase captured at the last note-on,
+/// subtracted so the cycle restarts at the note instead of staying locked to
+/// the bar. Ignored while retrigger is off, so toggling it off re-locks.
+const IDX_LFO_SYNC_ANCHOR: usize = 10;
 
 const IDX_PREV_GATE: usize = IDX_SLOT_STATE_BASE + SLOT_STATE_STRIDE * SLOT_COUNT;
 const IDX_LAST_RESET_COUNTER: usize = IDX_PREV_GATE + 1;
@@ -79,6 +87,14 @@ pub const PARAM_BPM: usize = PARAM_SLOT_BASE + PARAM_SLOT_STRIDE * SLOT_COUNT;
 pub const PARAM_TRANSPORT_BAR_PHASE: usize = PARAM_BPM + 1;
 pub const PARAM_TRANSPORT_BAR_PHASE_INC: usize = PARAM_TRANSPORT_BAR_PHASE + 1;
 pub const PARAM_RESET_COUNTER: usize = PARAM_TRANSPORT_BAR_PHASE_INC + 1;
+/// Per-slot LFO phase offset in degrees, one param per slot at
+/// `PARAM_LFO_PHASE_BASE + slot`. It lives *after* the slot block rather than
+/// inside it on purpose: the slot stride and every existing node param index
+/// are part of the saved-project contract (`ProjectEffectSlot` remaps by node
+/// index, and `EffectSlotSnapshot::sync_to_descriptor` preserves values
+/// positionally), so a param inserted mid-slot would silently shift every
+/// later slot's saved values onto the wrong control.
+pub const PARAM_LFO_PHASE_BASE: usize = PARAM_RESET_COUNTER + 1;
 
 /// Display tail (eseq-dtx.13). `voice_modulator_process` stores the block's
 /// last output value per slot here so a UI-thread poller can read the live
@@ -87,9 +103,20 @@ pub const PARAM_RESET_COUNTER: usize = PARAM_TRANSPORT_BAR_PHASE_INC + 1;
 /// the audio thread — no allocation, no locking, no atomics needed because
 /// the watchlist snapshot is taken between blocks, and a torn read would at
 /// worst show one stale display value.
-pub const STATE_DISPLAY_SLOT_VALUE: usize = PARAM_RESET_COUNTER + 1;
+pub const STATE_DISPLAY_SLOT_VALUE: usize = PARAM_LFO_PHASE_BASE + SLOT_COUNT;
 
-pub const STATE_SIZE: usize = STATE_DISPLAY_SLOT_VALUE + SLOT_COUNT;
+/// Display tail, second row: the slot's cycle position for the source editor's
+/// waveform marker. LFO slots publish their effective phase (after the phase
+/// offset param), rand and drift slots the 0..1 progress towards their next
+/// random value, and every other source `-1.0` (no marker). Same contract as
+/// `STATE_DISPLAY_SLOT_VALUE`: plain per-block stores, read back off the
+/// watchlist between blocks.
+pub const STATE_DISPLAY_SLOT_PHASE: usize = STATE_DISPLAY_SLOT_VALUE + SLOT_COUNT;
+
+pub const STATE_SIZE: usize = STATE_DISPLAY_SLOT_PHASE + SLOT_COUNT;
+
+/// No marker: the slot's source has no cycle to place one on.
+pub const DISPLAY_PHASE_NONE: f32 = -1.0;
 
 /// The `@mod-mode additive` contract that `(mod name)` compiles to inside the
 /// DGen engine (and that the hand-written Rust built-ins implement inline):
@@ -320,6 +347,15 @@ const SHAPE_SINE: usize = 1;
 const SHAPE_PULSE: usize = 2;
 const SHAPE_SAW: usize = 3;
 
+/// Drift picks a new random target every `1 / rate` seconds and glides to it
+/// with a raised-cosine, so the output covers the full range at every rate
+/// (the old one-pole design scaled its target by 0.08 and barely moved).
+/// Envelope stage ceiling. Was 2 s attack / 4 s decay+release, which the
+/// user hit constantly; exponential scaling keeps the low end fine-grained.
+const ENV_TIME_MAX_MS: f32 = 20_000.0;
+const DRIFT_RATE_MIN_HZ: f32 = 0.02;
+const DRIFT_RATE_MAX_HZ: f32 = 8.0;
+
 const SOURCE_OFF: usize = 0;
 const SOURCE_LFO: usize = 1;
 const SOURCE_ENV: usize = 2;
@@ -346,6 +382,10 @@ pub fn slot_param_idx(slot: usize, offset: usize) -> usize {
 
 pub fn slot_source_param_idx(slot: usize) -> usize {
     slot_param_idx(slot, PARAM_SLOT_SOURCE)
+}
+
+pub fn slot_lfo_phase_param_idx(slot: usize) -> usize {
+    PARAM_LFO_PHASE_BASE + slot
 }
 
 pub fn slot_source_node_param_idx(slot: usize) -> u32 {
@@ -401,9 +441,8 @@ pub fn source_type_name_from_param_name(name: &str) -> Option<&'static str> {
     let parts = parse_slot_param_name(name)?;
     match parts.1 {
         "source" => Some("source"),
-        "lfo_rate" | "lfo_sync" | "lfo_div" | "lfo_shape" | "lfo_pw" | "lfo_retrigger" => {
-            Some("lfo")
-        }
+        "lfo_rate" | "lfo_sync" | "lfo_div" | "lfo_shape" | "lfo_pw" | "lfo_retrigger"
+        | "lfo_phase" => Some("lfo"),
         "env_attack" | "env_decay" | "env_sustain" | "env_release" => Some("env"),
         "rand_rate" | "rand_sync" | "rand_div" | "rand_slew" => Some("rand"),
         "drift_rate" | "drift_sync" | "drift_div" => Some("drift"),
@@ -423,6 +462,7 @@ pub fn source_param_display_name(name: &str) -> String {
         "lfo_shape" => "shape",
         "lfo_pw" => "pulse width",
         "lfo_retrigger" => "retrigger",
+        "lfo_phase" => "phase",
         "env_attack" => "attack",
         "env_decay" => "decay",
         "env_sustain" => "sustain",
@@ -481,6 +521,8 @@ where
             .map(|idx| value_for_param(idx, &params[idx]) > 0.5)
             .unwrap_or(false);
 
+        // Pulse width doubles as the triangle's peak position, so the control
+        // is shown for both shapes.
         let pulse = source_indices
             .iter()
             .copied()
@@ -488,7 +530,10 @@ where
                 slot_from_param_name(&params[idx].name) == Some(slot + 1)
                     && params[idx].name.ends_with("_shape")
             })
-            .map(|idx| value_for_param(idx, &params[idx]).round() as i32 == SHAPE_PULSE as i32)
+            .map(|idx| {
+                let shape = value_for_param(idx, &params[idx]).round() as i32;
+                shape == SHAPE_PULSE as i32 || shape == SHAPE_TRIANGLE as i32
+            })
             .unwrap_or(false);
 
         for &idx in &source_indices {
@@ -532,8 +577,17 @@ fn next_rand(state: &mut u32) -> f32 {
     v * 2.0 - 1.0
 }
 
-fn triangle(phase: f32) -> f32 {
-    1.0 - 4.0 * (phase - 0.5).abs()
+/// Triangle whose peak sits at `peak` (0..1) of the cycle: 0.5 is symmetric,
+/// lower values ramp up fast and fall slowly, higher values the reverse. The
+/// same `lfo_pw` param drives it, so the pulse's width and the triangle's
+/// skew share one control ("pw" / "peak" in the editor).
+fn triangle(phase: f32, peak: f32) -> f32 {
+    let peak = peak.clamp(0.05, 0.95);
+    if phase < peak {
+        -1.0 + 2.0 * phase / peak
+    } else {
+        1.0 - 2.0 * (phase - peak) / (1.0 - peak)
+    }
 }
 
 fn shape_value(shape: usize, phase: f32, pulse_width: f32) -> f32 {
@@ -547,8 +601,20 @@ fn shape_value(shape: usize, phase: f32, pulse_width: f32) -> f32 {
             }
         }
         SHAPE_SAW => phase * 2.0 - 1.0,
-        _ => triangle(phase),
+        _ => triangle(phase, pulse_width),
     }
+}
+
+/// Phase offset param (degrees) applied on top of the running LFO phase.
+fn lfo_effective_phase(phase: f32, offset_degrees: f32) -> f32 {
+    normalize_phase(phase + offset_degrees.clamp(0.0, 360.0) / 360.0)
+}
+
+/// Raised-cosine glide from `from` to `target` over `phase` in 0..1: smooth at
+/// both ends, so consecutive targets join without a kink.
+fn drift_value(from: f32, target: f32, phase: f32) -> f32 {
+    let t = (1.0 - (std::f32::consts::PI * phase.clamp(0.0, 1.0)).cos()) * 0.5;
+    (from + (target - from) * t).clamp(-1.0, 1.0)
 }
 
 fn bipolar_to_unipolar(value: f32) -> f32 {
@@ -780,7 +846,7 @@ where
                 "env_attack",
                 PARAM_ENV_ATTACK_MS,
                 1.0,
-                2000.0,
+                ENV_TIME_MAX_MS,
                 6.0,
                 Some("ms"),
                 ParamScaling::Exponential,
@@ -789,7 +855,7 @@ where
                 "env_decay",
                 PARAM_ENV_DECAY_MS,
                 5.0,
-                4000.0,
+                ENV_TIME_MAX_MS,
                 180.0,
                 Some("ms"),
                 ParamScaling::Exponential,
@@ -807,7 +873,7 @@ where
                 "env_release",
                 PARAM_ENV_RELEASE_MS,
                 5.0,
-                4000.0,
+                ENV_TIME_MAX_MS,
                 240.0,
                 Some("ms"),
                 ParamScaling::Exponential,
@@ -875,9 +941,9 @@ where
         push_param(
             &mut out,
             &format!("{prefix}_drift_rate"),
-            0.00001,
-            0.01,
-            0.00035,
+            DRIFT_RATE_MIN_HZ,
+            DRIFT_RATE_MAX_HZ,
+            0.5,
             ParamKind::Continuous {
                 unit: Some("Hz".to_string()),
             },
@@ -905,6 +971,22 @@ where
             },
             ParamScaling::Linear,
             slot_param_idx(slot, PARAM_DRIFT_DIV),
+        );
+    }
+
+    // Appended after the slot block; see `PARAM_LFO_PHASE_BASE`.
+    for slot in 0..SLOT_COUNT {
+        push_param(
+            &mut out,
+            &format!("mod{}_lfo_phase", slot + 1),
+            0.0,
+            360.0,
+            0.0,
+            ParamKind::Continuous {
+                unit: Some("°".to_string()),
+            },
+            ParamScaling::Linear,
+            slot_lfo_phase_param_idx(slot),
         );
     }
 
@@ -1032,6 +1114,21 @@ unsafe fn publish_slot_display_values(s: *mut f32, out: *const *mut f32, nf: usi
             *out_slot.add(nf - 1)
         };
         *s.add(STATE_DISPLAY_SLOT_VALUE + slot) = value;
+        *s.add(STATE_DISPLAY_SLOT_PHASE + slot) = slot_display_phase(s, slot);
+    }
+}
+
+/// Cycle position for the source editor's waveform marker; see
+/// `STATE_DISPLAY_SLOT_PHASE`.
+unsafe fn slot_display_phase(s: *const f32, slot: usize) -> f32 {
+    match slot_source(s, slot) {
+        SOURCE_LFO => lfo_effective_phase(
+            *s.add(slot_state_idx(slot, IDX_LFO_PHASE)),
+            *s.add(slot_lfo_phase_param_idx(slot)),
+        ),
+        SOURCE_RAND => (*s.add(slot_state_idx(slot, IDX_RAND_PHASE))).clamp(0.0, 1.0),
+        SOURCE_DRIFT => (*s.add(slot_state_idx(slot, IDX_DRIFT_PHASE))).clamp(0.0, 1.0),
+        _ => DISPLAY_PHASE_NONE,
     }
 }
 
@@ -1183,7 +1280,6 @@ unsafe fn render_slot(
     source: usize,
     frame: usize,
     gate: f32,
-    velocity: f32,
     note_on: bool,
     sample_rate: f32,
     bpm: f32,
@@ -1213,10 +1309,18 @@ unsafe fn render_slot(
             let mut phase = *s.add(slot_state_idx(slot, IDX_LFO_PHASE));
             let sync = *s.add(slot_param_idx(slot, PARAM_LFO_SYNC)) > 0.5;
             if sync && transport_clock_advancing {
-                phase = synced_phase_from_bar_phase(
+                let bar_derived = synced_phase_from_bar_phase(
                     (*s.add(slot_param_idx(slot, PARAM_LFO_DIV))).round() as usize,
                     transport_bar_phase,
                 );
+                phase = if *s.add(slot_param_idx(slot, PARAM_LFO_RETRIGGER)) > 0.5 {
+                    if note_on {
+                        *s.add(slot_state_idx(slot, IDX_LFO_SYNC_ANCHOR)) = bar_derived;
+                    }
+                    normalize_phase(bar_derived - *s.add(slot_state_idx(slot, IDX_LFO_SYNC_ANCHOR)))
+                } else {
+                    bar_derived
+                };
             } else {
                 if note_on && *s.add(slot_param_idx(slot, PARAM_LFO_RETRIGGER)) > 0.5 {
                     phase = 0.0;
@@ -1234,7 +1338,8 @@ unsafe fn render_slot(
             *s.add(slot_state_idx(slot, IDX_LFO_PHASE)) = phase;
             let shape = (*s.add(slot_param_idx(slot, PARAM_LFO_SHAPE))).round() as usize;
             let pw = (*s.add(slot_param_idx(slot, PARAM_LFO_PW))).clamp(0.05, 0.95);
-            bipolar_to_unipolar(shape_value(shape, phase, pw))
+            let effective = lfo_effective_phase(phase, *s.add(slot_lfo_phase_param_idx(slot)));
+            bipolar_to_unipolar(shape_value(shape, effective, pw))
         }
         SOURCE_ENV => {
             let mut env = *s.add(slot_state_idx(slot, IDX_ENV));
@@ -1247,16 +1352,16 @@ unsafe fn render_slot(
                 stage = ENV_STAGE_RELEASE;
             }
             let attack = 1.0
-                / ((*s.add(slot_param_idx(slot, PARAM_ENV_ATTACK_MS))).clamp(1.0, 2000.0)
+                / ((*s.add(slot_param_idx(slot, PARAM_ENV_ATTACK_MS))).clamp(1.0, ENV_TIME_MAX_MS)
                     * 0.001
                     * sample_rate);
             let decay = 1.0
-                / ((*s.add(slot_param_idx(slot, PARAM_ENV_DECAY_MS))).clamp(5.0, 4000.0)
+                / ((*s.add(slot_param_idx(slot, PARAM_ENV_DECAY_MS))).clamp(5.0, ENV_TIME_MAX_MS)
                     * 0.001
                     * sample_rate);
             let sustain = (*s.add(slot_param_idx(slot, PARAM_ENV_SUSTAIN))).clamp(0.0, 1.0);
             let release = 1.0
-                / ((*s.add(slot_param_idx(slot, PARAM_ENV_RELEASE_MS))).clamp(5.0, 4000.0)
+                / ((*s.add(slot_param_idx(slot, PARAM_ENV_RELEASE_MS))).clamp(5.0, ENV_TIME_MAX_MS)
                     * 0.001
                     * sample_rate);
 
@@ -1321,20 +1426,29 @@ unsafe fn render_slot(
             bipolar_to_unipolar(smooth)
         }
         SOURCE_DRIFT => {
-            let mut drift = *s.add(slot_state_idx(slot, IDX_DRIFT));
+            let mut from = *s.add(slot_state_idx(slot, IDX_DRIFT));
+            let mut target = *s.add(slot_state_idx(slot, IDX_DRIFT_TARGET));
+            let mut phase = *s.add(slot_state_idx(slot, IDX_DRIFT_PHASE));
             let rate = if *s.add(slot_param_idx(slot, PARAM_DRIFT_SYNC)) > 0.5 {
                 synced_rate_hz(
                     (*s.add(slot_param_idx(slot, PARAM_DRIFT_DIV))).round() as usize,
                     bpm,
-                ) * 0.2
+                )
             } else {
-                (*s.add(slot_param_idx(slot, PARAM_DRIFT_RATE))).clamp(0.00001, 0.01) * sample_rate
+                (*s.add(slot_param_idx(slot, PARAM_DRIFT_RATE)))
+                    .clamp(DRIFT_RATE_MIN_HZ, DRIFT_RATE_MAX_HZ)
             };
-            drift +=
-                (next_rand(&mut rng_state) * 0.08 - drift) * (rate / sample_rate).clamp(0.0, 1.0);
-            drift = drift.clamp(-1.0, 1.0);
-            *s.add(slot_state_idx(slot, IDX_DRIFT)) = drift;
-            bipolar_to_unipolar((drift * (0.4 + velocity * 0.6)).clamp(-1.0, 1.0))
+            phase += rate / sample_rate;
+            if phase >= 1.0 {
+                phase = normalize_phase(phase);
+                from = target;
+                target = next_rand(&mut rng_state);
+            }
+            let value = drift_value(from, target, phase);
+            *s.add(slot_state_idx(slot, IDX_DRIFT)) = from;
+            *s.add(slot_state_idx(slot, IDX_DRIFT_TARGET)) = target;
+            *s.add(slot_state_idx(slot, IDX_DRIFT_PHASE)) = phase;
+            bipolar_to_unipolar(value)
         }
         _ => 0.0,
     };
@@ -1366,7 +1480,6 @@ unsafe extern "C" fn voice_modulator_process(
     let sampler_identity = sampler_identity(s);
 
     let gate_in = *inp.add(INPUT_GATE);
-    let velocity_in = *inp.add(INPUT_VELOCITY);
     let trigger_in = *inp.add(INPUT_TRIGGER);
     let transport_bar_phase_in = *inp.add(INPUT_TRANSPORT_BAR_PHASE);
     let transport_bar_phase_inc_in = *inp.add(INPUT_TRANSPORT_BAR_PHASE_INC);
@@ -1403,6 +1516,9 @@ unsafe extern "C" fn voice_modulator_process(
             *s.add(slot_state_idx(slot, IDX_ENV)) = 0.0;
             *s.add(slot_state_idx(slot, IDX_RAND_PHASE)) = 0.0;
             *s.add(slot_state_idx(slot, IDX_DRIFT)) = 0.0;
+            *s.add(slot_state_idx(slot, IDX_DRIFT_TARGET)) = 0.0;
+            *s.add(slot_state_idx(slot, IDX_DRIFT_PHASE)) = 0.0;
+            *s.add(slot_state_idx(slot, IDX_LFO_SYNC_ANCHOR)) = 0.0;
             *s.add(slot_state_idx(slot, IDX_RAND_HOLD)) = 0.0;
             *s.add(slot_state_idx(slot, IDX_RAND_SMOOTH)) = 0.0;
             *s.add(slot_state_idx(slot, IDX_ENV_STAGE)) = ENV_STAGE_IDLE;
@@ -1441,7 +1557,6 @@ unsafe extern "C" fn voice_modulator_process(
     let mut sampler_voice_started = sampler_identity.is_none() || prev_gate > 0.5;
     for i in 0..nf {
         let gate = (*gate_in.add(i)).clamp(0.0, 1.0);
-        let velocity = (*velocity_in.add(i)).clamp(0.0, 1.0);
         let trigger = (*trigger_in.add(i)).max(0.0);
         if !sampler_voice_started && gate <= 0.5 && trigger <= 0.5 {
             clear_output_frame(out, i);
@@ -1481,7 +1596,6 @@ unsafe extern "C" fn voice_modulator_process(
                 source,
                 i,
                 gate,
-                velocity,
                 note_on,
                 sample_rate,
                 bpm,
@@ -1928,7 +2042,10 @@ mod tests {
         assert!(names.contains(&"mod1_source"));
         assert!(names.contains(&"mod1_lfo_rate"));
         assert!(!names.contains(&"mod1_lfo_div"));
-        assert!(!names.contains(&"mod1_lfo_pw"));
+        // Triangle (the default) uses pw as its peak position, so it shows.
+        assert!(names.contains(&"mod1_lfo_pw"));
+        values[idx("mod1_lfo_shape")] = SHAPE_SINE as f32;
+        assert!(!selected_names(&values).contains(&"mod1_lfo_pw"));
         assert!(names.contains(&"mod2_env_attack"));
         assert!(names.contains(&"mod3_rand_rate"));
         assert!(names.contains(&"mod4_drift_rate"));
@@ -2201,5 +2318,243 @@ mod tests {
         assert!(outputs[0][0] > 0.0);
         assert!(outputs[0][2] > 0.0);
         assert_eq!(state[IDX_PREV_GATE], 0.0);
+    }
+
+    /// The rewritten drift picks full-range random targets and glides between
+    /// them, so its output covers the unipolar range at every rate — the old
+    /// one-pole design scaled its target by 0.08 and looked broken at max rate.
+    #[test]
+    fn drift_covers_the_full_range_at_max_rate() {
+        let mut state = init_state();
+        state[slot_source_param_idx(3)] = SOURCE_DRIFT as f32;
+        state[slot_param_idx(3, PARAM_DRIFT_RATE)] = DRIFT_RATE_MAX_HZ;
+        let mut min = f32::MAX;
+        let mut max = f32::MIN;
+        // Two seconds at 48 kHz: sixteen targets at 8 Hz.
+        for _ in 0..1500 {
+            let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+            for value in outputs[3] {
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+        assert!(min < 0.25, "drift min {min}");
+        assert!(max > 0.75, "drift max {max}");
+    }
+
+    #[test]
+    fn drift_glides_without_jumps() {
+        let mut state = init_state();
+        state[slot_source_param_idx(3)] = SOURCE_DRIFT as f32;
+        state[slot_param_idx(3, PARAM_DRIFT_RATE)] = DRIFT_RATE_MAX_HZ;
+        let mut previous = None;
+        for _ in 0..400 {
+            let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+            for value in outputs[3] {
+                if let Some(previous) = previous {
+                    // 8 Hz over a ±1 swing is at most ~0.0005 per sample.
+                    assert!((value - previous as f32).abs() < 0.002, "drift jumped {previous} -> {value}");
+                }
+                previous = Some(value);
+            }
+        }
+    }
+
+    #[test]
+    fn drift_value_is_a_raised_cosine_between_targets() {
+        assert_eq!(drift_value(-1.0, 1.0, 0.0), -1.0);
+        assert!((drift_value(-1.0, 1.0, 0.5)).abs() < 1e-6);
+        assert_eq!(drift_value(-1.0, 1.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn lfo_phase_param_offsets_the_shape() {
+        let mut base = init_state();
+        base[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SINE as f32;
+        base[slot_param_idx(0, PARAM_LFO_RATE_HZ)] = 0.01;
+        let mut shifted = base;
+        shifted[slot_lfo_phase_param_idx(0)] = 90.0;
+        let base_out = render_voice_modulator(&mut base, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+        let shifted_out = render_voice_modulator(&mut shifted, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+        // sin(0) = 0 -> 0.5 unipolar; sin(90°) = 1 -> 1.0.
+        assert!((base_out[0][0] - 0.5).abs() < 0.01, "{}", base_out[0][0]);
+        assert!((shifted_out[0][0] - 1.0).abs() < 0.01, "{}", shifted_out[0][0]);
+        assert!((lfo_effective_phase(0.9, 90.0) - 0.15).abs() < 1e-5);
+    }
+
+    #[test]
+    fn lfo_phase_params_are_appended_after_the_slot_block() {
+        let params = param_descriptors();
+        let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+        let phase_start = names
+            .iter()
+            .position(|name| *name == "mod1_lfo_phase")
+            .expect("mod1_lfo_phase");
+        assert_eq!(
+            &names[phase_start..],
+            &["mod1_lfo_phase", "mod2_lfo_phase", "mod3_lfo_phase", "mod4_lfo_phase"],
+        );
+        assert_eq!(
+            params[phase_start].node_param_idx,
+            MOD_PARAM_BASE + PARAM_LFO_PHASE_BASE as u32
+        );
+        assert_eq!(source_type_name_from_param_name("mod2_lfo_phase"), Some("lfo"));
+        assert_eq!(source_param_display_name("mod2_lfo_phase"), "phase");
+        let values = params.iter().map(|param| param.default).collect::<Vec<_>>();
+        let selected = selected_source_param_indices(&params, |idx, _| values[idx])
+            .into_iter()
+            .map(|idx| params[idx].name.as_str())
+            .collect::<Vec<_>>();
+        assert!(selected.contains(&"mod1_lfo_phase"));
+        assert!(!selected.contains(&"mod2_lfo_phase"), "slot 2 defaults to env");
+    }
+
+    #[test]
+    fn display_tail_publishes_each_slot_cycle_position() {
+        let mut state = init_state();
+        state[slot_lfo_phase_param_idx(0)] = 180.0;
+        let _ = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+        let lfo = state[STATE_DISPLAY_SLOT_PHASE];
+        assert!(
+            (lfo - lfo_effective_phase(state[slot_state_idx(0, IDX_LFO_PHASE)], 180.0)).abs()
+                < 1e-6,
+            "lfo display phase {lfo}"
+        );
+        assert!(lfo > 0.5 && lfo < 0.51, "offset by half a cycle, got {lfo}");
+        assert_eq!(state[STATE_DISPLAY_SLOT_PHASE + 1], DISPLAY_PHASE_NONE, "env has no cycle");
+        let rand = state[STATE_DISPLAY_SLOT_PHASE + 2];
+        assert!((0.0..1.0).contains(&rand), "rand progress {rand}");
+        let drift = state[STATE_DISPLAY_SLOT_PHASE + 3];
+        assert!((0.0..1.0).contains(&drift), "drift progress {drift}");
+
+        state[slot_source_param_idx(0)] = SOURCE_OFF as f32;
+        let _ = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+        assert_eq!(state[STATE_DISPLAY_SLOT_PHASE], DISPLAY_PHASE_NONE);
+    }
+}
+#[cfg(test)]
+mod retrigger_tests {
+    use super::*;
+
+    #[test]
+    fn retrigger_resets_the_running_phase_on_gate_rise_and_on_trigger_pulse() {
+        let mut state = [0.0f32; STATE_SIZE];
+        unsafe {
+            voice_modulator_init(state.as_mut_ptr().cast(), 48_000, 64, std::ptr::null());
+        }
+        state[slot_param_idx(0, PARAM_LFO_RETRIGGER)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_RATE_HZ)] = 20.0;
+        let pitch = [440.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let zeros = [0.0f32; 64];
+        let run = |state: &mut [f32; STATE_SIZE], gate: [f32; 64], trigger: [f32; 64]| {
+            let mut outs = [[0.0f32; 64]; NUM_OUTPUTS];
+            let inputs = [
+                gate.as_ptr() as *mut f32,
+                pitch.as_ptr() as *mut f32,
+                velocity.as_ptr() as *mut f32,
+                trigger.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+            ];
+            let mut out_ptrs = [std::ptr::null_mut::<f32>(); NUM_OUTPUTS];
+            for (slot, out) in outs.iter_mut().enumerate() {
+                out_ptrs[slot] = out.as_mut_ptr();
+            }
+            unsafe {
+                voice_modulator_process(
+                    inputs.as_ptr(),
+                    out_ptrs.as_ptr(),
+                    64,
+                    state.as_mut_ptr().cast(),
+                    std::ptr::null_mut(),
+                );
+            }
+            outs
+        };
+        let gate_on = [1.0f32; 64];
+        run(&mut state, gate_on, zeros);
+        run(&mut state, gate_on, zeros);
+        let advanced = state[slot_state_idx(0, IDX_LFO_PHASE)];
+        assert!(advanced > 0.04, "phase should have advanced, got {advanced}");
+        // Trigger pulse mid-block while the gate stays high (voice steal).
+        let mut trigger = [0.0f32; 64];
+        trigger[10] = 1.0;
+        run(&mut state, gate_on, trigger);
+        let after = state[slot_state_idx(0, IDX_LFO_PHASE)];
+        let expected = 54.0 * 20.0 / 48_000.0;
+        assert!((after - expected).abs() < 1e-4, "after trigger {after} vs {expected}");
+        // Gate drop + rise.
+        run(&mut state, zeros, zeros);
+        run(&mut state, gate_on, zeros);
+        let after_rise = state[slot_state_idx(0, IDX_LFO_PHASE)];
+        assert!(after_rise < 0.03, "gate rise should reset, got {after_rise}");
+    }
+
+    /// Sync mode used to ignore retrigger (phase came straight from the bar),
+    /// so "retrig ON" audibly did nothing while the transport ran. With
+    /// retrigger on, the synced cycle restarts at the note.
+    #[test]
+    fn synced_lfo_retrigger_anchors_the_cycle_to_the_note() {
+        let mut state = [0.0f32; STATE_SIZE];
+        unsafe {
+            voice_modulator_init(state.as_mut_ptr().cast(), 48_000, 64, std::ptr::null());
+        }
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(SyncDivision::Whole);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[IDX_TRANSPORT_CLOCK_SOURCE] = TRANSPORT_CLOCK_SOURCE_INPUT;
+        let pitch = [440.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let zeros = [0.0f32; 64];
+        let gate_on = [1.0f32; 64];
+        // Transport parked at 0.6 of the bar and advancing.
+        let bar = [0.6f32; 64];
+        let inc = [1.0e-6f32; 64];
+        let run = |state: &mut [f32; STATE_SIZE], gate: [f32; 64]| {
+            let mut outs = [[0.0f32; 64]; NUM_OUTPUTS];
+            let inputs = [
+                gate.as_ptr() as *mut f32,
+                pitch.as_ptr() as *mut f32,
+                velocity.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                bar.as_ptr() as *mut f32,
+                inc.as_ptr() as *mut f32,
+            ];
+            let mut out_ptrs = [std::ptr::null_mut::<f32>(); NUM_OUTPUTS];
+            for (slot, out) in outs.iter_mut().enumerate() {
+                out_ptrs[slot] = out.as_mut_ptr();
+            }
+            unsafe {
+                voice_modulator_process(
+                    inputs.as_ptr(),
+                    out_ptrs.as_ptr(),
+                    64,
+                    state.as_mut_ptr().cast(),
+                    std::ptr::null_mut(),
+                );
+            }
+            outs
+        };
+        // Retrigger off: bar-locked, phase 0.6 -> saw 0.2 -> unipolar 0.6.
+        let locked = run(&mut state, gate_on);
+        assert!((locked[0][0] - 0.6).abs() < 1e-3, "bar-locked, got {}", locked[0][0]);
+        // Retrigger on, new note at the same transport position: cycle restarts.
+        state[slot_param_idx(0, PARAM_LFO_RETRIGGER)] = 1.0;
+        run(&mut state, zeros);
+        let anchored = run(&mut state, gate_on);
+        assert!(anchored[0][0] < 0.01, "should restart at the note, got {}", anchored[0][0]);
+        // Turning retrigger back off re-locks to the bar.
+        state[slot_param_idx(0, PARAM_LFO_RETRIGGER)] = 0.0;
+        let relocked = run(&mut state, gate_on);
+        assert!((relocked[0][0] - 0.6).abs() < 1e-3, "re-locked, got {}", relocked[0][0]);
     }
 }

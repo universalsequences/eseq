@@ -722,6 +722,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 transpose: step_snapshot.params[StepParam::Transpose.index()],
                 pan: step_snapshot.params[StepParam::Pan.index()],
                 chop: step_snapshot.params[StepParam::Chop.index()],
+                retrig: step_snapshot.params[StepParam::Retrig.index()],
+                retrig_rate: step_snapshot.params[StepParam::RetrigRate.index()],
             };
             // Live step-param printing (bead eseq-jc9): while the *step*
             // panel's print latch is armed for this track, the latched values
@@ -739,18 +741,27 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             // delta per chord note (`resolved_chord_transpose`).
             let mut print_chord_duration_delta: Option<f32> = None;
             {
-                let (velocity, duration, transpose) = state
+                let overrides = state
                     .step_print_override
                     .values_for_track(trigger.track);
-                if let Some(value) = velocity {
+                if let Some(value) = overrides.get(StepParam::Velocity) {
                     resolved.velocity = value;
                 }
-                if let Some(value) = duration {
+                if let Some(value) = overrides.get(StepParam::Duration) {
                     print_chord_duration_delta = Some(value - resolved.duration);
                     resolved.duration = value;
                 }
-                if let Some(value) = transpose {
+                if let Some(value) = overrides.get(StepParam::Transpose) {
                     resolved.transpose = value;
+                }
+                // Retrig/Rate are the roll knobs: without the pre-echo a drag
+                // is inaudible until the loop wraps, which defeats the whole
+                // performance gesture (docs/step-retrig-spec.md).
+                if let Some(value) = overrides.get(StepParam::Retrig) {
+                    resolved.retrig = value;
+                }
+                if let Some(value) = overrides.get(StepParam::RetrigRate) {
+                    resolved.retrig_rate = value;
                 }
             }
             let mut process_overlay = ProcessTargetOverlay::default();

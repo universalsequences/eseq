@@ -24,18 +24,38 @@ use sequencer::sequencer::{DeviceParamPrintTarget, RollHitRecorded};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrintTarget {
     Step(StepParam),
-    Instrument { param_idx: usize },
-    Effect { slot_idx: usize, param_idx: usize },
-    BusEffect { bus_idx: usize, slot_idx: usize, param_idx: usize },
-    MidiFx { slot_idx: usize, param_idx: usize },
-    RackSlotParam { slot_idx: usize, param: RackSlotParam },
-    RackSlotInstrument { slot_idx: usize, param_idx: usize },
+    Instrument {
+        param_idx: usize,
+    },
+    Effect {
+        slot_idx: usize,
+        param_idx: usize,
+    },
+    BusEffect {
+        bus_idx: usize,
+        slot_idx: usize,
+        param_idx: usize,
+    },
+    MidiFx {
+        slot_idx: usize,
+        param_idx: usize,
+    },
+    RackSlotParam {
+        slot_idx: usize,
+        param: RackSlotParam,
+    },
+    RackSlotInstrument {
+        slot_idx: usize,
+        param_idx: usize,
+    },
     RackSlotEffect {
         rack_slot_idx: usize,
         effect_slot_idx: usize,
         param_idx: usize,
     },
-    RackMacro { macro_idx: usize },
+    RackMacro {
+        macro_idx: usize,
+    },
 }
 
 impl From<StepParam> for PrintTarget {
@@ -79,6 +99,22 @@ pub(crate) struct PrintedSteps {
     pub(crate) targets: Vec<(PrintTarget, f32)>,
 }
 
+/// The step params the *step* panel pickers can print, by their Lisp keyword.
+/// Single source of truth for `seq-print-step-param` (natives.rs) and the
+/// `print-step-param` / `print-step-param-release` host commands: a param
+/// accepted by one and not the other silently froze the picker while
+/// recording (the retrig pickers shipped that way).
+pub(crate) fn print_step_param_from_keyword(name: &str) -> Option<StepParam> {
+    match name {
+        "velocity" | "vel" => Some(StepParam::Velocity),
+        "duration" | "dur" => Some(StepParam::Duration),
+        "transpose" => Some(StepParam::Transpose),
+        "retrig" | "rtrg" => Some(StepParam::Retrig),
+        "retrig-rate" | "rate" => Some(StepParam::RetrigRate),
+        _ => None,
+    }
+}
+
 impl StepPrintState {
     pub(crate) fn armed(&self) -> bool {
         !self.values.is_empty()
@@ -86,18 +122,17 @@ impl StepPrintState {
 
     /// Arm-on-touch: latch a param value for printing. A touch on a
     /// different track than the current latch restarts the latch there.
-    pub(crate) fn latch(
-        &mut self,
-        track: usize,
-        target: impl Into<PrintTarget>,
-        value: f32,
-    ) {
+    pub(crate) fn latch(&mut self, track: usize, target: impl Into<PrintTarget>, value: f32) {
         let target = target.into();
         if self.armed() && self.track != track {
             self.disarm();
         }
         self.track = track;
-        match self.values.iter_mut().find(|(existing, _)| *existing == target) {
+        match self
+            .values
+            .iter_mut()
+            .find(|(existing, _)| *existing == target)
+        {
             Some(entry) => entry.1 = value,
             None => self.values.push((target, value)),
         }
@@ -151,21 +186,18 @@ impl StepPrintState {
             state.device_print_override.clear();
             return;
         }
-        let value = |param: StepParam| {
-            self.values
-                .iter()
-                .find(|(target, _)| *target == PrintTarget::Step(param))
-                .map(|(_, value)| *value)
-        };
-        let velocity = value(StepParam::Velocity);
-        let duration = value(StepParam::Duration);
-        let transpose = value(StepParam::Transpose);
-        if velocity.is_none() && duration.is_none() && transpose.is_none() {
+        let step_entries = self
+            .values
+            .iter()
+            .filter_map(|(target, value)| match target {
+                PrintTarget::Step(param) => Some((*param, *value)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if step_entries.is_empty() {
             state.step_print_override.clear();
         } else {
-            state
-                .step_print_override
-                .set(self.track, velocity, duration, transpose);
+            state.step_print_override.set(self.track, &step_entries);
         }
         // Device-param analog: latched instrument/effect values substitute at
         // the scheduler's trigger resolution. An empty entry list disarms.
@@ -174,10 +206,15 @@ impl StepPrintState {
             .iter()
             .filter_map(|(target, value)| match target {
                 PrintTarget::Instrument { param_idx } => Some((
-                    DeviceParamPrintTarget::Instrument { param_idx: *param_idx },
+                    DeviceParamPrintTarget::Instrument {
+                        param_idx: *param_idx,
+                    },
                     *value,
                 )),
-                PrintTarget::Effect { slot_idx, param_idx } => Some((
+                PrintTarget::Effect {
+                    slot_idx,
+                    param_idx,
+                } => Some((
                     DeviceParamPrintTarget::Effect {
                         slot_idx: *slot_idx,
                         param_idx: *param_idx,
@@ -262,7 +299,11 @@ pub(crate) fn print_latch_rows(targets: &[(PrintTarget, f32)]) -> Value {
 /// latched param's overlay, including the targets a cross-track re-latch
 /// dropped in `StepPrintState::latch`.
 pub(crate) fn sync_print_latch_rows(rt: &mut Runtime, print: &StepPrintState) -> bool {
-    let result = rt.set_reactive("SEQ", "track-plock-printing", print_latch_rows(&print.values));
+    let result = rt.set_reactive(
+        "SEQ",
+        "track-plock-printing",
+        print_latch_rows(&print.values),
+    );
     result.effects_dirty || result.widgets_dirty
 }
 
@@ -305,7 +346,10 @@ fn print_latch_display_updates(
                     ));
                 }
             }
-            PrintTarget::Effect { slot_idx, param_idx } => {
+            PrintTarget::Effect {
+                slot_idx,
+                param_idx,
+            } => {
                 if let Some(pdesc) = app
                     .graph
                     .effect_descriptors
@@ -314,14 +358,16 @@ fn print_latch_display_updates(
                     .and_then(|desc| desc.params.get(*param_idx))
                 {
                     updates.push((
-                        track_effect_param_value_field(
-                            track, *slot_idx, *param_idx, &pdesc.name,
-                        ),
+                        track_effect_param_value_field(track, *slot_idx, *param_idx, &pdesc.name),
                         Value::Number(value as f64),
                     ));
                 }
             }
-            PrintTarget::BusEffect { bus_idx, slot_idx, param_idx } => {
+            PrintTarget::BusEffect {
+                bus_idx,
+                slot_idx,
+                param_idx,
+            } => {
                 if let Some(pdesc) = app
                     .buses
                     .get(*bus_idx)
@@ -329,14 +375,15 @@ fn print_latch_display_updates(
                     .and_then(|desc| desc.params.get(*param_idx))
                 {
                     updates.push((
-                        bus_effect_param_value_field(
-                            *bus_idx, *slot_idx, *param_idx, &pdesc.name,
-                        ),
+                        bus_effect_param_value_field(*bus_idx, *slot_idx, *param_idx, &pdesc.name),
                         Value::Number(value as f64),
                     ));
                 }
             }
-            PrintTarget::MidiFx { slot_idx, param_idx } => {
+            PrintTarget::MidiFx {
+                slot_idx,
+                param_idx,
+            } => {
                 let Some(track_params) = app.state.pattern.track_params.get(track) else {
                     continue;
                 };
@@ -361,17 +408,17 @@ fn print_latch_display_updates(
             PrintTarget::RackSlotParam { slot_idx, param } => {
                 updates.push((
                     rack_slot_value_field(track, *slot_idx, *param),
-                    if matches!(
-                        param,
-                        RackSlotParam::Mute | RackSlotParam::Solo
-                    ) {
+                    if matches!(param, RackSlotParam::Mute | RackSlotParam::Solo) {
                         Value::Bool(value > 0.5)
                     } else {
                         Value::Number(value as f64)
                     },
                 ));
             }
-            PrintTarget::RackSlotInstrument { slot_idx, param_idx } => {
+            PrintTarget::RackSlotInstrument {
+                slot_idx,
+                param_idx,
+            } => {
                 let racks = app.state.pattern.rack_tracks.lock().unwrap();
                 let Some(slot) = racks
                     .get(track)
@@ -386,7 +433,10 @@ fn print_latch_display_updates(
                 {
                     updates.push((
                         rack_slot_instrument_param_value_field(
-                            track, *slot_idx, *param_idx, &pdesc.name,
+                            track,
+                            *slot_idx,
+                            *param_idx,
+                            &pdesc.name,
                         ),
                         Value::Number(pdesc.stored_to_user(value) as f64),
                     ));
@@ -585,8 +635,7 @@ pub(crate) fn print_pass(
         return PrintedSteps::default();
     }
     if wrote_step_params {
-        print.dirty_unpublished_tracks |=
-            1u64 << track.min(sequencer::sequencer::MAX_TRACKS - 1);
+        print.dirty_unpublished_tracks |= 1u64 << track.min(sequencer::sequencer::MAX_TRACKS - 1);
     }
     PrintedSteps {
         track,
@@ -643,7 +692,7 @@ pub(crate) fn restore_cursor_display_fields(
         .unwrap_or_else(|| fx_step_cursor_from_runtime(rt))
         .min(num_steps.saturating_sub(1));
     let mut dirty = false;
-    for param in [StepParam::Velocity, StepParam::Duration, StepParam::Transpose] {
+    for param in STEP_INSPECTOR_PARAMS {
         if let Some(field) = fx_step_param_value_field(param) {
             let value = state.pattern.step_data[track].get(parameter_step, param);
             dirty |= rt
@@ -685,11 +734,7 @@ pub(crate) fn tick_step_print(
     // record off, focus move) as well as a cross-track re-latch: the overlay
     // has to leave every control the latch no longer holds.
     display_dirty |= sync_print_latch_rows(rt, &print);
-    let roll_publish_pending = shared
-        .roll_record
-        .lock()
-        .unwrap()
-        .has_unpublished_writes();
+    let roll_publish_pending = shared.roll_record.lock().unwrap().has_unpublished_writes();
     let publish_tracks = if roll_publish_pending {
         0
     } else {
@@ -735,41 +780,37 @@ pub(crate) fn tick_step_print(
                     }
                 }
                 PrintTarget::Instrument { param_idx } => {
-                    let target_wrote = app.print_instrument_plock(
-                        printed.track,
-                        *step,
-                        *param_idx,
-                        *value,
-                    );
+                    let target_wrote =
+                        app.print_instrument_plock(printed.track, *step, *param_idx, *value);
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
                     track_snapshot_dirty |= target_wrote;
                 }
-                PrintTarget::Effect { slot_idx, param_idx } => {
-                    let target_wrote = app.print_effect_plock(
-                        printed.track,
-                        *step,
-                        *slot_idx,
-                        *param_idx,
-                        *value,
-                    );
+                PrintTarget::Effect {
+                    slot_idx,
+                    param_idx,
+                } => {
+                    let target_wrote =
+                        app.print_effect_plock(printed.track, *step, *slot_idx, *param_idx, *value);
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
                     track_snapshot_dirty |= target_wrote;
                 }
-                PrintTarget::BusEffect { bus_idx, slot_idx, param_idx } => {
-                    let target_wrote = app.print_bus_effect_plock(
-                        *bus_idx,
-                        *step,
-                        *slot_idx,
-                        *param_idx,
-                        *value,
-                    );
+                PrintTarget::BusEffect {
+                    bus_idx,
+                    slot_idx,
+                    param_idx,
+                } => {
+                    let target_wrote =
+                        app.print_bus_effect_plock(*bus_idx, *step, *slot_idx, *param_idx, *value);
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
                     bus_runtime_dirty |= target_wrote;
                 }
-                PrintTarget::MidiFx { slot_idx, param_idx } => {
+                PrintTarget::MidiFx {
+                    slot_idx,
+                    param_idx,
+                } => {
                     let target_wrote = app.print_midi_fx_plock(
                         printed.track,
                         *step,
@@ -793,7 +834,10 @@ pub(crate) fn tick_step_print(
                     wrote_plock |= target_wrote;
                     track_snapshot_dirty |= target_wrote;
                 }
-                PrintTarget::RackSlotInstrument { slot_idx, param_idx } => {
+                PrintTarget::RackSlotInstrument {
+                    slot_idx,
+                    param_idx,
+                } => {
                     let target_wrote = app.print_rack_slot_instrument_plock(
                         printed.track,
                         *step,
@@ -823,12 +867,8 @@ pub(crate) fn tick_step_print(
                     track_snapshot_dirty |= target_wrote;
                 }
                 PrintTarget::RackMacro { macro_idx } => {
-                    let target_wrote = app.print_rack_macro_plock(
-                        printed.track,
-                        *step,
-                        *macro_idx,
-                        *value,
-                    );
+                    let target_wrote =
+                        app.print_rack_macro_plock(printed.track, *step, *macro_idx, *value);
                     wrote |= target_wrote;
                     wrote_plock |= target_wrote;
                     track_snapshot_dirty |= target_wrote;
@@ -915,7 +955,10 @@ mod step_print_tests {
         let mut print = StepPrintState::default();
         let printed = print_pass(&state, &mut print, 0, true);
         assert!(printed.steps.is_empty());
-        assert_eq!(state.pattern.step_data[0].get(0, StepParam::Velocity), before);
+        assert_eq!(
+            state.pattern.step_data[0].get(0, StepParam::Velocity),
+            before
+        );
     }
 
     #[test]
@@ -1012,7 +1055,9 @@ mod step_print_tests {
 
     #[test]
     fn pause_record_off_and_focus_change_each_disarm_without_stray_writes() {
-        for (playing, recording, focused_track) in [(false, true, 0), (true, false, 0), (true, true, 1)] {
+        for (playing, recording, focused_track) in
+            [(false, true, 0), (true, false, 0), (true, true, 1)]
+        {
             let state = playing_state();
             state.transport.playing.store(playing, Ordering::Relaxed);
             state.pattern.patterns[0].toggle_step(0);
@@ -1022,8 +1067,14 @@ mod step_print_tests {
             print.latch(0, StepParam::Velocity, 0.1);
             let printed = print_pass(&state, &mut print, focused_track, recording);
             assert!(printed.steps.is_empty());
-            assert!(!print.armed(), "gate ({playing}, {recording}, track {focused_track}) must disarm");
-            assert_eq!(state.pattern.step_data[0].get(0, StepParam::Velocity), before);
+            assert!(
+                !print.armed(),
+                "gate ({playing}, {recording}, track {focused_track}) must disarm"
+            );
+            assert_eq!(
+                state.pattern.step_data[0].get(0, StepParam::Velocity),
+                before
+            );
             // Disarmed: the next pass with the gate restored stays silent
             // until the next touch (re-arm on touch, not on transport).
             state.transport.playing.store(true, Ordering::Relaxed);
@@ -1072,9 +1123,8 @@ mod step_print_tests {
         assert_eq!(printed.targets, vec![(target, 0.8)]);
         assert_eq!(state.pattern.instrument_slots[0].defaults.get(2), 0.2);
         assert_eq!(state.pattern.instrument_slots[0].plocks.get(3, 2), None);
-        assert_eq!(
-            state.step_print_override.values_for_track(0),
-            (None, None, None),
+        assert!(
+            state.step_print_override.values_for_track(0).is_empty(),
             "instrument printing must not use the step engine override"
         );
 
@@ -1120,7 +1170,10 @@ mod step_print_tests {
 
         print.release_device_param_gesture(&state);
 
-        assert!(print.armed(), "the independent step-param hold remains armed");
+        assert!(
+            print.armed(),
+            "the independent step-param hold remains armed"
+        );
         assert_eq!(
             print.values,
             vec![(PrintTarget::Step(StepParam::Velocity), 0.5)]
@@ -1128,6 +1181,58 @@ mod step_print_tests {
         assert!(
             state.device_print_override.values_for_track(0).is_none(),
             "release must disarm the scheduler-side device override",
+        );
+    }
+
+    /// Retrig / Rate are the roll knobs: a drag while play+record must both
+    /// stamp the passing steps AND reach the engine override, or the roll is
+    /// inaudible until the loop wraps (docs/step-retrig-spec.md).
+    #[test]
+    fn retrig_and_rate_print_onto_passing_steps_and_pre_echo_through_the_engine() {
+        let state = playing_state();
+        state.pattern.patterns[0].toggle_step(0);
+        state.pattern.patterns[0].toggle_step(1);
+        set_playhead(&state, 0);
+        let mut print = StepPrintState::default();
+        print.latch(0, StepParam::Retrig, 3.0);
+        print.latch(0, StepParam::RetrigRate, 12.0);
+        print.publish_engine_override(&state);
+
+        let overrides = state.step_print_override.values_for_track(0);
+        assert_eq!(
+            (
+                overrides.get(StepParam::Retrig),
+                overrides.get(StepParam::RetrigRate),
+            ),
+            (Some(3.0), Some(12.0)),
+            "the held roll knobs must pre-echo through the scheduler override"
+        );
+
+        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![0]);
+        assert_eq!(state.pattern.step_data[0].get(0, StepParam::Retrig), 3.0);
+        assert_eq!(
+            state.pattern.step_data[0].get(0, StepParam::RetrigRate),
+            12.0
+        );
+
+        // Rate's mouse-up leaves the retrig count printing on its own.
+        assert!(
+            !print.unlatch(StepParam::RetrigRate),
+            "retrig is still held"
+        );
+        print.publish_engine_override(&state);
+        let overrides = state.step_print_override.values_for_track(0);
+        assert_eq!(overrides.get(StepParam::Retrig), Some(3.0));
+        assert_eq!(overrides.get(StepParam::RetrigRate), None);
+
+        let rate_before = state.pattern.step_data[0].get(1, StepParam::RetrigRate);
+        set_playhead(&state, 1);
+        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![1]);
+        assert_eq!(state.pattern.step_data[0].get(1, StepParam::Retrig), 3.0);
+        assert_eq!(
+            state.pattern.step_data[0].get(1, StepParam::RetrigRate),
+            rate_before,
+            "a released param must stop printing immediately"
         );
     }
 
@@ -1141,8 +1246,13 @@ mod step_print_tests {
         print.latch(0, StepParam::Velocity, 0.25);
         print.latch(0, StepParam::Duration, 3.0);
         print.publish_engine_override(&state);
+        let overrides = state.step_print_override.values_for_track(0);
         assert_eq!(
-            state.step_print_override.values_for_track(0),
+            (
+                overrides.get(StepParam::Velocity),
+                overrides.get(StepParam::Duration),
+                overrides.get(StepParam::Transpose),
+            ),
             (Some(0.25), Some(3.0), None),
             "both held params reach the engine override"
         );
@@ -1150,11 +1260,18 @@ mod step_print_tests {
 
         // Velocity's mouse-up: only duration keeps printing (and only
         // duration stays in the engine override).
-        assert!(!print.unlatch(StepParam::Velocity), "duration is still held");
+        assert!(
+            !print.unlatch(StepParam::Velocity),
+            "duration is still held"
+        );
         print.publish_engine_override(&state);
+        let overrides = state.step_print_override.values_for_track(0);
         assert_eq!(
-            state.step_print_override.values_for_track(0),
-            (None, Some(3.0), None)
+            (
+                overrides.get(StepParam::Velocity),
+                overrides.get(StepParam::Duration),
+            ),
+            (None, Some(3.0))
         );
         let velocity_before = state.pattern.step_data[0].get(1, StepParam::Velocity);
         set_playhead(&state, 1);
@@ -1170,7 +1287,7 @@ mod step_print_tests {
         assert!(print.unlatch(StepParam::Duration));
         assert!(!print.armed());
         print.publish_engine_override(&state);
-        assert_eq!(state.step_print_override.values_for_track(0), (None, None, None));
+        assert!(state.step_print_override.values_for_track(0).is_empty());
     }
 
     #[test]
@@ -1258,7 +1375,14 @@ mod step_print_tests {
 
         // A touch on another track restarts the latch, which must retire the
         // first track's rows rather than leaving them lit.
-        print.latch(1, PrintTarget::MidiFx { slot_idx: 0, param_idx: 4 }, 0.1);
+        print.latch(
+            1,
+            PrintTarget::MidiFx {
+                slot_idx: 0,
+                param_idx: 4,
+            },
+            0.1,
+        );
         sync_print_latch_rows(&mut rt, &print);
         assert_eq!(
             print_latch_row_keys(&rt),
@@ -1322,5 +1446,29 @@ mod step_print_tests {
         assert_eq!(hit.duration_steps, 2.0);
         // The old track's velocity latch did not carry over.
         assert_eq!(hit.velocity, 1.0);
+    }
+
+    /// Every picker in the *step* panel must be printable through both the
+    /// native and the host command, so the keyword table has to cover
+    /// `STEP_INSPECTOR_PARAMS` exactly (see `seqv-param-keyword`).
+    #[test]
+    fn every_step_inspector_param_has_a_print_keyword() {
+        use crate::state_values::STEP_INSPECTOR_PARAMS;
+        for param in STEP_INSPECTOR_PARAMS {
+            let keyword = match param {
+                StepParam::Velocity => "velocity",
+                StepParam::Duration => "duration",
+                StepParam::Transpose => "transpose",
+                StepParam::Retrig => "retrig",
+                StepParam::RetrigRate => "retrig-rate",
+                other => panic!("{other:?} is in STEP_INSPECTOR_PARAMS but has no keyword"),
+            };
+            assert_eq!(
+                super::print_step_param_from_keyword(keyword),
+                Some(param),
+                "{keyword} must resolve for printing"
+            );
+        }
+        assert_eq!(super::print_step_param_from_keyword("pan"), None);
     }
 }
