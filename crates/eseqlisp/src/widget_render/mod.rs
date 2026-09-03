@@ -54,6 +54,7 @@ pub mod waveform;
 pub mod wavetable_viewer;
 pub(crate) mod wgsl;
 pub mod wrap;
+pub mod xy_pad;
 
 pub use focus_decoration::{FocusCornerStyle, FocusDecoration};
 
@@ -1298,6 +1299,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &text_input::TEXTBOX_WIDGET,
     &tree::TREE_WIDGET,
     &tree::TREE_ROW_BG_WIDGET,
+    &xy_pad::XY_PAD_WIDGET,
 ];
 
 pub fn widget_definition(widget_type: &str) -> Option<&'static dyn WidgetDefinition> {

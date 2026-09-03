@@ -19,6 +19,7 @@
         custom-ui-set-adsr-in-scope
         custom-ui-param-change-callback
         custom-ui-param-change-callback-s
+        custom-ui-xy-change-callback-s
         custom-ui-current-param
         custom-ui-current-tensor-param
         custom-ui-current-base-note-param
@@ -178,6 +179,14 @@
       (do
         (sec/custom-ui-select-section-in-scope scope section)
         (custom-ui-set-param-in-scope scope p v)))))
+
+(def custom-ui-xy-change-callback-s (section x-p y-p)
+  (let ((scope (custom-ui-current-scope)))
+    (lambda (x y)
+      (do
+        (sec/custom-ui-select-section-in-scope scope section)
+        (custom-ui-set-param-in-scope scope x-p x)
+        (custom-ui-set-param-in-scope scope y-p y)))))
 
 (def custom-ui-current-param (name)
   (if (= eseq.vanilla/custom-ui-current-kind "audio-fx")

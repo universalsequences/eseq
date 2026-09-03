@@ -26,6 +26,10 @@ wgpu = { version = "24", optional = true }
 pollster = { version = "0.4", optional = true }
 
 [dev-dependencies]
+# Integration tests drive `WidgetDefinition::mouse_event`, whose signature is
+# `crossterm::event::MouseEventKind`. Same version as the normal dependency, so
+# Cargo unifies it rather than compiling a second copy.
+crossterm = "0.28"
 naga = { version = "24", features = ["wgsl-in"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

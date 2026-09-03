@@ -248,6 +248,7 @@ fn is_widget_name(name: &str) -> bool {
             | "eq8-editor"
             | "scroll"
             | "tree"
+            | "xy-pad"
     )
 }
 

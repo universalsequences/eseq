@@ -85,6 +85,7 @@
         ui-lego-micro-num-s
         ui-lego-micro-num-step-s
         ui-lego-matrix-s
+        ui-lego-xy-pad-s
         ui-lego-option
         ui-lego-option-s
         ui-lego-micro-option-s
@@ -609,6 +610,24 @@
             :width width :height (- height 0.60)
             :on-cell-change (eseq.effects.custom-ui-runtime/custom-ui-tensor-cell-change-callback-s section p))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+;; Absolute-position 2D control over two 0..1 scalar params. `x-name` is the
+;; horizontal param, `y-name` the vertical one, and y grows DOWNWARD so the pair
+;; reads like (row, col) on a tensor grid. Same shape as `ui-lego-matrix-s`,
+;; which it replaces for strike-position controls.
+(def ui-lego-xy-pad-s (section x-name y-name title width height accent)
+  (let ((xp (eseq.effects.custom-ui-runtime/custom-ui-current-param x-name))
+        (yp (eseq.effects.custom-ui-runtime/custom-ui-current-param y-name)))
+    (if (and xp yp)
+      (subtree :key (str "custom-ui-lego-xy-pad-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" x-name "-" y-name)
+        (v-stack :width width :height height :gap 0.10 :align :start
+          (label title :font-size 8.2 :width width :height 0.50 :color accent :bg :transparent)
+          (xy-pad :x (eseq.effects.custom-ui-runtime/custom-ui-param-binding xp)
+                  :y (eseq.effects.custom-ui-runtime/custom-ui-param-binding yp)
+                  :accent accent
+                  :width width :height (- height 0.60)
+                  :on-change (eseq.effects.custom-ui-runtime/custom-ui-xy-change-callback-s section xp yp))))
+      (label (str "missing: " x-name "/" y-name) :font-size 8 :color :red :bg :transparent))))
 
 (def ui-lego-option (name title width options accent)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
