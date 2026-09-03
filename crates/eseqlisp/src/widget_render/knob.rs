@@ -222,6 +222,10 @@ impl WidgetDefinition for KnobWidget {
         true
     }
 
+    fn hidden_drag(&self) -> bool {
+        true
+    }
+
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
         let value = match event {
             WidgetEvent::SetNormalized(t) => {

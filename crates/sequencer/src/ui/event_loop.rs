@@ -148,6 +148,9 @@ pub(crate) fn run_event_loop(
     let mut last_render_at = Instant::now() - idle_frame_interval;
     let mut stub_animation_cache = StubAnimationRenderCache::new();
     let mut pending_drag: Option<PendingPointerDrag> = None;
+    // Edge-tracked so the un-hide fires even when the gesture is dropped for a
+    // reason other than mouse-up (editor reload, tile close, focus loss).
+    let mut hidden_drag_started = false;
     let mut sample_import_session: Option<SampleImportSession> = None;
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
@@ -1258,6 +1261,18 @@ pub(crate) fn run_event_loop(
         }) {
             backend.set_widget_cursor(editor.widget_cursor());
         }
+        // Hidden-cursor infinite drag: hide/lock the pointer while a gesture
+        // on an opted-in widget is live, restore it the moment it is not.
+        let hidden_drag_wanted = editor.hidden_drag_gesture_active();
+        if hidden_drag_wanted != hidden_drag_started {
+            if hidden_drag_wanted {
+                backend.begin_hidden_drag();
+            } else {
+                backend.end_hidden_drag();
+            }
+            hidden_drag_started = hidden_drag_wanted;
+        }
+
         ui_loop_stats.note_gestures(gestures_started.elapsed());
 
         if !app.has_pending_project_load() {

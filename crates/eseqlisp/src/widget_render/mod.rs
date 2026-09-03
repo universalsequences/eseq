@@ -1179,6 +1179,13 @@ pub trait WidgetDefinition: Sync {
     fn unclamped_drag(&self) -> bool {
         false
     }
+    /// When true, a press on this widget starts an Ableton-style hidden-cursor
+    /// drag: the app loop asks the backend to hide and lock the pointer so
+    /// relative motion keeps arriving after the cursor would have hit a screen
+    /// edge, then warps the cursor back to the press point on release.
+    fn hidden_drag(&self) -> bool {
+        false
+    }
     /// When true, the default container focus highlight is suppressed — the
     /// widget renders its own focus styling (e.g. focus ring).
     fn renders_own_focus(&self) -> bool {
@@ -3116,6 +3123,28 @@ pub fn widget_unclamped_drag(widget_type: &str) -> bool {
     widget_definition(widget_type)
         .map(WidgetDefinition::unclamped_drag)
         .unwrap_or(false)
+}
+
+pub fn widget_hidden_drag(widget_type: &str) -> bool {
+    widget_definition(widget_type)
+        .map(WidgetDefinition::hidden_drag)
+        .unwrap_or(false)
+}
+
+thread_local! {
+    /// True while dispatching a mouse event that belongs to a hidden-cursor
+    /// drag gesture. Widgets whose value math depends on the pointer's
+    /// distance to a screen edge (number-picker) read this and switch to a
+    /// fixed travel distance, because a virtual pointer has no edge.
+    static HIDDEN_DRAG_EVENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn set_hidden_drag_event(active: bool) {
+    HIDDEN_DRAG_EVENT.with(|flag| flag.set(active));
+}
+
+pub fn hidden_drag_event_active() -> bool {
+    HIDDEN_DRAG_EVENT.with(|flag| flag.get())
 }
 
 pub fn begin_widget_gesture(

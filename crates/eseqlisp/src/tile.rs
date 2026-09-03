@@ -153,6 +153,10 @@ pub struct WidgetGesture {
     pub start_precise_col: f32,
     pub start_precise_row: f32,
     pub drag_active: bool,
+    /// True when the gesture's widget opted into hidden-cursor infinite drag
+    /// (`WidgetDefinition::hidden_drag`). The app loop reads this to ask the
+    /// backend to hide and lock the pointer for the life of the gesture.
+    pub hidden_drag: bool,
     pub gesture_data: Option<Value>,
     /// Modifier mode captured at pointer-down. Gesture routing must not change
     /// merely because the user releases a modifier before the mouse button.

@@ -15520,3 +15520,202 @@ fn meta_period_opens_qualified_definition_in_module_file() {
     assert_eq!(editor.active_buffer().path.as_ref(), Some(&module_path));
     assert_eq!(editor.active_buffer().cursor, (1, 5));
 }
+
+// ── Hidden-cursor infinite drag (eseq-c3xk.1) ────────────────────────────────
+
+/// The four value widgets opt into the hidden-cursor drag; ordinary sliders do
+/// not (they are absolute-position widgets, so hiding the pointer would strand
+/// the user's reference point).
+#[test]
+fn hidden_drag_opt_in_covers_knobs_and_number_pickers_only() {
+    for widget_type in [
+        "knob",
+        "inline-knob",
+        "knob-number",
+        "knob-number-mod-range",
+        "knob-number-mod-dot",
+        "number-picker",
+        "number-picker-tri",
+        "number-picker-slider",
+    ] {
+        assert!(
+            crate::widget_render::widget_hidden_drag(widget_type),
+            "{widget_type} should opt into hidden-cursor drag"
+        );
+    }
+    for widget_type in ["hslider", "slider", "button", "label"] {
+        assert!(
+            !crate::widget_render::widget_hidden_drag(widget_type),
+            "{widget_type} must not opt into hidden-cursor drag"
+        );
+    }
+}
+
+/// A press on a hidden-drag widget arms the flag the app loop uses to hide and
+/// lock the pointer, and the release disarms it.
+#[test]
+fn hidden_drag_gesture_flag_tracks_the_pointer_gesture() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def level (state 0))
+                (effect
+                  (knob-number
+                    :min -1000 :max 1000
+                    :drag-cells 100
+                    :value level
+                    :on-change |v| (set! level v)))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+    editor.update_tile_rects(40, 10);
+
+    assert!(!editor.hidden_drag_gesture_active());
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1),
+        1.5,
+        1.5,
+        0,
+    );
+    assert!(
+        editor.hidden_drag_gesture_active(),
+        "pressing a knob-number should arm the hidden-cursor drag"
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 1),
+        1.5,
+        1.5,
+        0,
+    );
+    assert!(
+        !editor.hidden_drag_gesture_active(),
+        "releasing must disarm it so the pointer is restored"
+    );
+}
+
+/// The virtual pointer of a hidden drag walks far past the window; the editor
+/// must keep dispatching those out-of-bounds drags to the gesture's widget.
+#[test]
+fn knob_number_drag_keeps_changing_past_window_bounds() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def level (state 0))
+                (effect
+                  (knob-number
+                    :min -1000 :max 1000
+                    :drag-cells 100
+                    :value level
+                    :on-change |v| (set! level v)))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+    editor.update_tile_rects(40, 10);
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1),
+        1.5,
+        1.5,
+        0,
+    );
+    // Inside the window.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 5),
+        1.5,
+        5.5,
+        0,
+    );
+    let near = numeric_state(&mut editor, "level");
+    assert!(near < 0.0, "dragging down should lower the value: {near}");
+
+    // Far below the 10-row viewport: only the hidden-drag virtual pointer can
+    // reach here, and the editor must still route it to the gesture's widget.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 60),
+        1.5,
+        61.5,
+        0,
+    );
+    let far = numeric_state(&mut editor, "level");
+    assert!(
+        far < near,
+        "out-of-bounds drag must keep moving the knob: {far} vs {near}"
+    );
+}
+
+/// A number picker's default travel is "distance to the content-area top",
+/// which a virtual pointer has no notion of. Under a hidden drag it uses the
+/// fixed `HIDDEN_DRAG_ROWS` travel instead, and keeps responding past the
+/// window edge.
+#[test]
+fn number_picker_hidden_drag_uses_fixed_travel_past_window_bounds() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def level (state 100))
+                (effect
+                  (number-picker
+                    :min 0 :max 100 :decimals 0
+                    :width 8 :height 1.4
+                    :value level
+                    :on-change |v| (set! level v)))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+    editor.update_tile_rects(40, 10);
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
+        1.5,
+        0.5,
+        0,
+    );
+    assert!(editor.hidden_drag_gesture_active());
+
+    // Four rows down. The picker sits at the top of the content area, so the
+    // legacy `start_row.max(5.0)` travel would give 20; the fixed 8-row
+    // hidden-drag travel gives 50.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 4),
+        1.5,
+        4.5,
+        0,
+    );
+    let mid = numeric_state(&mut editor, "level");
+    assert!(
+        (mid - 50.0).abs() < 0.01,
+        "hidden drag should use the fixed 8-row travel, got {mid}"
+    );
+
+    // Far past the bottom of the 10-row viewport.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 40),
+        1.5,
+        40.5,
+        0,
+    );
+    let far = numeric_state(&mut editor, "level");
+    assert!(
+        far < mid,
+        "out-of-bounds drag must keep moving the picker: {far} vs {mid}"
+    );
+}
+
+fn numeric_state(editor: &mut Editor, name: &str) -> f64 {
+    match editor.runtime.eval_str(name).unwrap().unwrap() {
+        Value::Number(n) => n,
+        other => panic!("expected numeric state for {name}, got {other:?}"),
+    }
+}

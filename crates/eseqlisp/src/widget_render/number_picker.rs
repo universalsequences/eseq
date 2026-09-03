@@ -27,6 +27,9 @@ use crate::backend::Color;
 const TEXT_PADDING_H: f32 = 0.5;
 const RING_WIDTH: f32 = 0.15;
 const TRIANGLE_WIDTH: f32 = 1.4;
+/// Full-travel drag distance (in layout rows) used when a hidden-cursor drag
+/// is active and the widget does not pin its own `:drag-rows`.
+const HIDDEN_DRAG_ROWS: f32 = 8.0;
 
 // ── Internal state ──────────────────────────────────────────────────────────
 
@@ -738,6 +741,10 @@ impl WidgetDefinition for NumberPickerWidget {
         true
     }
 
+    fn hidden_drag(&self) -> bool {
+        true
+    }
+
     fn begin_gesture(
         &self,
         node: &LayoutNode,
@@ -807,8 +814,12 @@ impl WidgetDefinition for NumberPickerWidget {
                 // in a short strip but span a wide range (the *step* panel's
                 // retrig pickers): there the content-area rule made five rows
                 // of motion cover the whole range.
+                // Under a hidden-cursor drag the pointer is virtual and can
+                // walk far past the window, so "distance to the content-area
+                // top" is meaningless; use a fixed travel distance instead.
                 let room = match get_f32_prop(&node.props, "drag-rows", 0.0) {
                     rows if rows > 0.0 => rows,
+                    _ if super::hidden_drag_event_active() => HIDDEN_DRAG_ROWS,
                     _ => start_row.max(5.0),
                 };
 

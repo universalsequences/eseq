@@ -24,9 +24,10 @@ use crossterm::event::{
 };
 use wgpu::util::DeviceExt;
 use winit::{
-    dpi::LogicalSize,
+    dpi::{LogicalSize, PhysicalPosition},
     event::{
-        ElementState, Event as WEvent, MouseButton as WMouseButton, TouchPhase, WindowEvent,
+        DeviceEvent, ElementState, Event as WEvent, MouseButton as WMouseButton, TouchPhase,
+        WindowEvent,
     },
     event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, KeyCode as WinitKeyCode, NamedKey, PhysicalKey},
@@ -51,6 +52,7 @@ use crate::ui::gpu_geometry::{
     LiveSpectrogramInstance, ScissorRect, Vertex, WaveformInstance, WavetableInstance,
 };
 use crate::ui::platform;
+use crate::ui::pointer_input::HiddenDrag;
 use crate::ui::wgpu_pipelines as pipelines;
 use crate::ui::wgpu_frame_stats::{FrameSample, WgpuFrameStats};
 use crate::ui::wgpu_backend;
@@ -492,6 +494,13 @@ pub struct WgpuAppBackend {
     pressed_mouse_button: Option<MouseButton>,
     cursor_cell: (u16, u16),
     cursor_pos: (f32, f32),
+    /// Last known pointer position in physical pixels. Tracked separately from
+    /// `cursor_pos` (cells) because the hidden-drag warp-back needs the exact
+    /// press pixel.
+    cursor_physical: PhysicalPosition<f64>,
+    /// Physical-pixel position captured at the most recent button press.
+    press_physical: Option<PhysicalPosition<f64>>,
+    hidden_drag: Option<HiddenDrag>,
     last_precise_mouse: Option<(f32, f32)>,
     // GPU
     gpu: Option<GpuState>,
@@ -576,6 +585,9 @@ impl WgpuAppBackend {
             pressed_mouse_button: None,
             cursor_cell: (0, 0),
             cursor_pos: (0.0, 0.0),
+            cursor_physical: PhysicalPosition::new(0.0, 0.0),
+            press_physical: None,
+            hidden_drag: None,
             last_precise_mouse: None,
             gpu: None,
             atlas: None,
@@ -668,6 +680,43 @@ impl WgpuAppBackend {
             widget_render::WidgetCursor::DragNotAllowed => CursorIcon::NotAllowed,
         };
         window.set_cursor_icon(icon);
+    }
+
+    /// Start an Ableton-style hidden-cursor drag: remember the press pixel,
+    /// hide the pointer and grab it so raw motion keeps arriving after the
+    /// pointer would have hit a screen edge. Idempotent.
+    pub fn begin_hidden_drag(&mut self) {
+        if self.hidden_drag.is_some() {
+            return;
+        }
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let anchor = self.press_physical.unwrap_or(self.cursor_physical);
+        let grabbed = crate::ui::pointer_input::grab_pointer_for_hidden_drag(window);
+        self.hidden_drag = Some(HiddenDrag::new(anchor, grabbed));
+    }
+
+    /// End a hidden-cursor drag: ungrab, warp the pointer back to the press
+    /// pixel and show it again. Idempotent — a stuck invisible cursor is the
+    /// worst failure mode, so every teardown path may call this
+    /// unconditionally.
+    pub fn end_hidden_drag(&mut self) {
+        let drag = self.hidden_drag.take();
+        if drag.is_none() {
+            return;
+        }
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        crate::ui::pointer_input::release_pointer_after_hidden_drag(window, drag);
+        if let Some(drag) = drag {
+            self.cursor_physical = drag.anchor;
+        }
+    }
+
+    pub fn hidden_drag_active(&self) -> bool {
+        self.hidden_drag.is_some()
     }
 
     /// Create a TextMeasurer for the proportional font. Called once after
@@ -2935,6 +2984,9 @@ impl Backend for WgpuAppBackend {
         let pressed_mouse_button = &mut self.pressed_mouse_button;
         let cursor_cell = &mut self.cursor_cell;
         let cursor_pos = &mut self.cursor_pos;
+        let cursor_physical = &mut self.cursor_physical;
+        let press_physical = &mut self.press_physical;
+        let hidden_drag = &mut self.hidden_drag;
         let window_ref = self.window.as_deref();
         let cell_size = self
             .atlas
@@ -2943,18 +2995,71 @@ impl Backend for WgpuAppBackend {
             .unwrap_or((8.0, 16.0));
         let wake_at = Instant::now() + timeout;
         let mut dropped_paths = Vec::new();
+        let pointer_scale = window_ref.map(|w| w.scale_factor()).unwrap_or(1.0);
         event_loop.pump_events(Some(timeout), |event, elwt| {
             elwt.set_control_flow(if timeout.is_zero() {
                 ControlFlow::Poll
             } else {
                 ControlFlow::WaitUntil(wake_at)
             });
+            // Raw motion is the only pointer stream that survives a cursor
+            // grab: while locked, the compositor pins CursorMoved.
+            if let WEvent::DeviceEvent {
+                event: DeviceEvent::MouseMotion { delta },
+                ..
+            } = event
+            {
+                if let Some(drag) = hidden_drag.as_mut() {
+                    // winit reports raw deltas in logical points; the virtual
+                    // pointer lives in physical pixels like CursorMoved.
+                    let delta = (delta.0 * pointer_scale, delta.1 * pointer_scale);
+                    let (vx, vy) = drag.accumulate(delta);
+                    let exact_col = (vx / cell_size.0) as f32;
+                    let exact_row = (vy / cell_size.1) as f32;
+                    *cursor_pos = (exact_col, exact_row);
+                    *cursor_cell = (
+                        exact_col.max(0.0).floor() as u16,
+                        exact_row.max(0.0).floor() as u16,
+                    );
+                    if let Some(button) = pressed_mouse_button {
+                        *pending_drag = Some(Event::Mouse(MouseEvent {
+                            kind: MouseEventKind::Drag(*button),
+                            column: cursor_cell.0,
+                            row: cursor_cell.1,
+                            modifiers: *modifiers,
+                        }));
+                    }
+                }
+                return;
+            }
             let WEvent::WindowEvent { event, .. } = event else {
                 return;
             };
             match event {
                 WindowEvent::CloseRequested => {
                     *close_requested = true;
+                }
+                WindowEvent::Focused(false) => {
+                    // Never leave the pointer hidden and grabbed behind an
+                    // unfocused window: end the drag and synthesize the
+                    // release so the editor tears the gesture down too.
+                    if let Some(drag) = hidden_drag.take() {
+                        if let Some(w) = window_ref {
+                            crate::ui::pointer_input::release_pointer_after_hidden_drag(
+                                w,
+                                Some(drag),
+                            );
+                        }
+                        *cursor_physical = drag.anchor;
+                        if let Some(button) = pressed_mouse_button.take() {
+                            pending.push_back(Event::Mouse(MouseEvent {
+                                kind: MouseEventKind::Up(button),
+                                column: cursor_cell.0,
+                                row: cursor_cell.1,
+                                modifiers: *modifiers,
+                            }));
+                        }
+                    }
                 }
                 WindowEvent::Resized(new_size) => {
                     // The surface reconfigures lazily at render time from the
@@ -2997,12 +3102,20 @@ impl Backend for WgpuAppBackend {
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
+                    // While the pointer is locked the OS keeps sending
+                    // CursorMoved with a frozen position (macOS does this for
+                    // every drag event); letting it through would overwrite
+                    // the virtual pointer with the anchor on every step.
+                    if hidden_drag.is_some() {
+                        return;
+                    }
                     let exact_col = (position.x / cell_size.0).max(0.0) as f32;
                     let exact_row = (position.y / cell_size.1).max(0.0) as f32;
                     let col = exact_col.floor() as u16;
                     let row = exact_row.floor() as u16;
                     *cursor_pos = (exact_col, exact_row);
                     *cursor_cell = (col, row);
+                    *cursor_physical = position;
                     if let Some(button) = pressed_mouse_button {
                         *pending_drag = Some(Event::Mouse(MouseEvent {
                             kind: MouseEventKind::Drag(*button),
@@ -3028,6 +3141,7 @@ impl Backend for WgpuAppBackend {
                     match state {
                         ElementState::Pressed => {
                             *pressed_mouse_button = Some(button);
+                            *press_physical = Some(*cursor_physical);
                             pending.push_back(Event::Mouse(MouseEvent {
                                 kind: MouseEventKind::Down(button),
                                 column: cursor_cell.0,

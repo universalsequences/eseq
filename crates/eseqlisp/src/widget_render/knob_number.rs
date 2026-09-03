@@ -1743,6 +1743,10 @@ impl WidgetDefinition for KnobNumberWidget {
         true
     }
 
+    fn hidden_drag(&self) -> bool {
+        true
+    }
+
     fn begin_gesture(
         &self,
         node: &LayoutNode,

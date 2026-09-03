@@ -1381,12 +1381,14 @@ impl Editor {
         });
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         if let Some((node, gesture_data)) = gesture_node {
+            let hidden_drag = widget_render::widget_hidden_drag(&node.widget_type);
             self.active_leaf_mut().active_widget_gesture = Some(WidgetGesture {
                 widget_id: node.widget_id,
                 node,
                 start_precise_col: precise_col,
                 start_precise_row: precise_row,
                 drag_active: false,
+                hidden_drag,
                 gesture_data,
                 modifiers,
             });
@@ -1870,17 +1872,21 @@ impl Editor {
             )
         });
         let leaf = self.active_leaf();
-        let gesture = leaf
+        let active_gesture = leaf
             .active_widget_gesture
             .as_ref()
-            .and_then(|gesture| (gesture.widget_id == node.widget_id).then_some(gesture))
+            .and_then(|gesture| (gesture.widget_id == node.widget_id).then_some(gesture));
+        let hidden_drag = active_gesture.is_some_and(|gesture| gesture.hidden_drag);
+        let gesture = active_gesture
             .and_then(|gesture| gesture.gesture_data.as_ref())
             .or(explicit_gesture);
         crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
+        crate::widget_render::set_hidden_drag_event(hidden_drag);
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let outcome = map_mouse_event(
             node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers, cell_w, cell_h,
         );
+        crate::widget_render::set_hidden_drag_event(false);
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         match outcome {
             MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
@@ -1994,6 +2000,18 @@ impl Editor {
             callback,
             args: vec![event],
         })
+    }
+
+    /// True while a pointer gesture on a hidden-cursor-drag widget (knob,
+    /// knob-number, inline-knob, number-picker) is live. The app loop drives
+    /// the backend's cursor hide/lock from edge transitions of this flag, so
+    /// the un-hide path also fires when the gesture is dropped for a reason
+    /// other than mouse-up (editor reload, tile close, focus loss).
+    pub fn hidden_drag_gesture_active(&self) -> bool {
+        self.active_leaf()
+            .active_widget_gesture
+            .as_ref()
+            .is_some_and(|gesture| gesture.hidden_drag)
     }
 
     pub(super) fn active_widget_drag_gesture(&self) -> Option<WidgetGesture> {

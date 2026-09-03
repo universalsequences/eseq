@@ -141,3 +141,86 @@ mod tests {
         );
     }
 }
+
+// ── Hidden-cursor infinite drag ──────────────────────────────────────────────
+
+/// Live state for an Ableton-style hidden-cursor drag.
+///
+/// While active the OS pointer is hidden and grabbed, so `CursorMoved` stops
+/// arriving (macOS) or reports a pinned position (Wayland). Raw
+/// `DeviceEvent::MouseMotion` deltas are accumulated into `virtual_pos`, a
+/// pointer position in physical pixels that is free to walk arbitrarily far
+/// past the window bounds — that is the whole point: a knob at the bottom edge
+/// of the screen keeps receiving downward travel.
+#[derive(Debug, Clone, Copy)]
+pub struct HiddenDrag {
+    /// Physical-pixel position of the press. The cursor is warped back here
+    /// when the drag ends.
+    pub anchor: winit::dpi::PhysicalPosition<f64>,
+    /// Unbounded virtual pointer position in physical pixels.
+    pub virtual_pos: (f64, f64),
+    /// True when the pointer was actually grabbed; a failed grab still runs
+    /// the drag (with a visible cursor) rather than panicking.
+    pub grabbed: bool,
+}
+
+impl HiddenDrag {
+    pub fn new(anchor: winit::dpi::PhysicalPosition<f64>, grabbed: bool) -> Self {
+        Self {
+            anchor,
+            virtual_pos: (anchor.x, anchor.y),
+            grabbed,
+        }
+    }
+
+    /// Accumulate one raw motion delta and return the new virtual position.
+    pub fn accumulate(&mut self, delta: (f64, f64)) -> (f64, f64) {
+        self.virtual_pos.0 += delta.0;
+        self.virtual_pos.1 += delta.1;
+        self.virtual_pos
+    }
+}
+
+/// Hide and grab the pointer for a hidden-cursor drag. Returns whether the
+/// grab succeeded; a failure is logged and the drag proceeds ungrabbed rather
+/// than aborting or panicking.
+pub fn grab_pointer_for_hidden_drag(window: &winit::window::Window) -> bool {
+    use winit::window::CursorGrabMode;
+    let grabbed = match window.set_cursor_grab(CursorGrabMode::Locked) {
+        Ok(()) => true,
+        Err(locked_err) => match window.set_cursor_grab(CursorGrabMode::Confined) {
+            Ok(()) => {
+                eprintln!(
+                    "hidden drag: locked cursor grab unavailable ({locked_err}); using confined grab"
+                );
+                true
+            }
+            Err(confined_err) => {
+                eprintln!(
+                    "hidden drag: cursor grab unavailable (locked: {locked_err}; confined: {confined_err}); dragging without a grab"
+                );
+                false
+            }
+        },
+    };
+    window.set_cursor_visible(false);
+    grabbed
+}
+
+/// Release the pointer grab, warp the cursor back to the press point and make
+/// it visible again. Safe to call when no drag is active.
+pub fn release_pointer_after_hidden_drag(window: &winit::window::Window, drag: Option<HiddenDrag>) {
+    use winit::window::CursorGrabMode;
+    if let Some(drag) = drag.as_ref()
+        && drag.grabbed
+        && let Err(err) = window.set_cursor_grab(CursorGrabMode::None)
+    {
+        eprintln!("hidden drag: releasing cursor grab failed: {err}");
+    }
+    if let Some(drag) = drag.as_ref()
+        && let Err(err) = window.set_cursor_position(drag.anchor)
+    {
+        eprintln!("hidden drag: warping cursor back to the press point failed: {err}");
+    }
+    window.set_cursor_visible(true);
+}
