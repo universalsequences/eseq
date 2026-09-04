@@ -99,6 +99,7 @@ pub(crate) fn build_kit_presets_value() -> Value {
         };
         Some(map_value([
             ("kind", Value::String("kit".to_string())),
+            ("icon", Value::Keyword("sampler".to_string())),
             ("label", Value::String(label.clone())),
             ("name", Value::String(label)),
             ("path", Value::String(path.to_string_lossy().to_string())),
@@ -123,6 +124,7 @@ pub(crate) fn build_sound_presets_value() -> Value {
         };
         Some(map_value([
             ("kind", Value::String("sound".to_string())),
+            ("icon", Value::Keyword("piano".to_string())),
             ("label", Value::String(label.clone())),
             ("name", Value::String(label)),
             ("path", Value::String(path.to_string_lossy().to_string())),

@@ -24,6 +24,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::effects::COMMANDS.contains(&n) => super::effects::handle(name, payload, app, editor, ctx),
         n if super::routing::COMMANDS.contains(&n) => super::routing::handle(name, payload, app, editor, ctx),
         n if super::samples::COMMANDS.contains(&n) => super::samples::handle(name, payload, app, editor, ctx),
+        n if super::sample_import::COMMANDS.contains(&n) => super::sample_import::handle(name, payload, app, editor, ctx),
         n if super::sampler_slices::COMMANDS.contains(&n) => super::sampler_slices::handle(name, payload, app, editor, ctx),
         n if super::scripts::COMMANDS.contains(&n) => super::scripts::handle(name, payload, app, editor, ctx),
         n if super::packages::COMMANDS.contains(&n) => super::packages::handle(name, payload, app, editor, ctx),

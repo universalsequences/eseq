@@ -70,6 +70,18 @@
       ;; Tile borders
       :border-active   '(0.42 0.42 0.44)     ; Lighter gray for active tile
       :border-inactive '(0.10 0.10 .105)    ; Match buffer background
+      
+      ;; Browser tree icons (solid colored silhouettes; the rail keeps white strokes)
+      :list-icon-detail     '(0.12 0.13 0.14)   ; cutouts match the row bg
+      :list-icon-folder     '(0.45 0.75 0.98)   ; Finder's light sky-blue folder
+      :list-icon-instrument '(0.96 0.57 0.10)
+      :list-icon-sample     '(0.11 0.86 0.31)
+      :list-icon-kit        '(0.96 0.14 0.10)
+      :list-icon-audio-fx   '(0.17 0.71 0.96)
+      :list-icon-midi-fx    '(0.67 0.17 0.91)
+      :list-icon-preset     '(0.96 0.79 0.10)
+      :list-icon-lfo        '(0.89 0.15 0.53)
+      :list-icon-misc       '(0.56 0.56 0.58)
       :tree-row-alt-bg '(0.14 0.15 0.16)   ; Subtle tree zebra stripe
       
       ;; Sequencer panels
@@ -122,9 +134,9 @@
       :widget-knob-filled   '(0.00 0.48 0.95)   ;
       :widget-knob-track    '(0.04 0.04 0.04)   ;
       :widget-knob-mod-dot  '(1.00 0.80 0.35)
-      :sequencer-step-border          '(0.22 0.22 0.23)
+      :sequencer-step-border          '(0.07 0.08 0.1)
       :sequencer-step-selected-border '(0.90 0.92 0.96)
-      :sequencer-step-off-fill        '(0.055 0.058 0.065)
+      :sequencer-step-off-fill        '(0.095 0.098 0.095)
       :sequencer-step-off-fill-alt    '(0.25 0.255 0.26)
       ;:patcher-bg           '(0.08 0.08 0.08)
       :patcher-bg '(0.12 0.13 0.14)  ; Main rounded buffer surface

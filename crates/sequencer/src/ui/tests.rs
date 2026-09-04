@@ -1001,6 +1001,10 @@
             .pattern
             .step_data[0]
             .set(2, sequencer::sequencer::StepParam::Transpose, -4.0);
+        state
+            .pattern
+            .step_data[0]
+            .set(2, sequencer::sequencer::StepParam::Pan, -0.35);
         let selected_steps = std::sync::Arc::new(std::sync::Mutex::new(
             [2_usize, 3, 4]
                 .into_iter()
@@ -1054,6 +1058,7 @@
             ("fx-step-value-velocity", 0.72),
             ("fx-step-value-duration", 1.5),
             ("fx-step-value-transpose", -4.0),
+            ("fx-step-value-pan", -0.35),
         ] {
             let value = runtime
                 .eval_str(&format!("SEQ.{field}"))
@@ -2506,6 +2511,20 @@
     }
 
     #[test]
+    #[ignore = "eseq-lf72: release-mode perf probe: p-lock knob drag on an Instrument Rack slot (track 0 grouped into a one-slot rack, one step selected) through the real mouse -> lisp -> set-rack-slot-instrument-plock dispatch under the production multi-pane layout; asserts no ui/fx epoch resync mid-gesture"]
+    fn project_92_full_layout_rack_slot_plock_knob_drag_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-full-layout-rack-plock-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| {
+                project_92_ui_performance_probe_impl(Project92UiProbe::RackSlotPlockKnobDrag)
+            })
+            .expect("spawn project 92 rack-slot p-lock knob probe")
+            .join()
+            .expect("project 92 rack-slot p-lock knob probe should pass");
+    }
+
+    #[test]
     #[ignore = "eseq-eeng: release-mode perf probe: real core/triton adsr-editor handle drag (production instrument load, real set-instrument-param-batch dispatch seam), cold press + first drag versus warm drags, under the real production multi-pane layout"]
     fn project_92_full_layout_triton_adsr_drag_end_to_end_perf() {
         std::thread::Builder::new()
@@ -2624,6 +2643,18 @@
         /// fixture is seeded to the reported sluggish state: ~56 entries in
         /// the focused track's p-lock variant registry.
         PrintPlockKnobDrag,
+        /// The Instrument Rack p-lock knob drag (eseq-lf72): track 0 is
+        /// grouped into a one-slot sampler rack through the production
+        /// primitive, one step is selected, and the on-screen slot knob in
+        /// the *fx* rack panel is dragged by real mouse events, so every
+        /// update reaches `set-rack-slot-instrument-plock` through the REAL
+        /// `dispatch_custom_host_command` seam. The lock is seeded by one
+        /// discovery gesture before measurement, so the rounds measure the
+        /// steady state the user complained about (tweaking an existing
+        /// lock); the shared cold/warm assertions then require zero ui/fx
+        /// epoch resyncs mid-gesture — the pre-fix tree bumped `fx_epoch`
+        /// (whole *fx* rack panel rebuild) and `ui_epoch` on every event.
+        RackSlotPlockKnobDrag,
         /// The checked-in core/triton custom instrument UI's real
         /// `adsr-editor`, added as a new track through the production
         /// compile/load path and dragged by a real handle (eseq-eeng). Each
@@ -2686,6 +2717,7 @@
                 | Project92UiProbe::GroupTrackSelectionSmoke
                 | Project92UiProbe::InstrumentKnobColdFocusDrag
                 | Project92UiProbe::PrintPlockKnobDrag
+                | Project92UiProbe::RackSlotPlockKnobDrag
                 | Project92UiProbe::TritonAdsrDrag
                 | Project92UiProbe::DriftTrackSwitch
                 | Project92UiProbe::DriftTrackSwitchSmoke
@@ -2753,6 +2785,7 @@
             probe,
             Project92UiProbe::InstrumentKnobColdFocusDrag
                 | Project92UiProbe::PrintPlockKnobDrag
+                | Project92UiProbe::RackSlotPlockKnobDrag
                 | Project92UiProbe::TritonAdsrDrag
                 | Project92UiProbe::ExpandedStepSliderDrag
         ) {
@@ -5080,16 +5113,21 @@
             Project92UiProbe::InstrumentKnobColdFocusDrag
                 | Project92UiProbe::TritonAdsrDrag
                 | Project92UiProbe::PrintPlockKnobDrag
+                | Project92UiProbe::RackSlotPlockKnobDrag
         ) {
             const STEP_COUNT: usize = 64;
             const ROUNDS: usize = 6;
             const WARM_PER_ROUND: usize = 12;
+            const RACK_PLOCK_STEP: usize = 8;
             let triton_probe = probe == Project92UiProbe::TritonAdsrDrag;
             let print_probe = probe == Project92UiProbe::PrintPlockKnobDrag;
+            let rack_probe = probe == Project92UiProbe::RackSlotPlockKnobDrag;
             let probe_prefix = if triton_probe {
                 "project-92-fullayout-triton-adsr"
             } else if print_probe {
                 "project-92-fullayout-print-plock"
+            } else if rack_probe {
+                "project-92-fullayout-rack-plock-knob"
             } else {
                 "project-92-fullayout-cold-knob"
             };
@@ -5133,10 +5171,34 @@
                 0
             };
             state.pattern.track_params[track].set_num_steps(STEP_COUNT);
-            assert!(
-                selected_steps.lock().unwrap().is_empty(),
-                "the cold-drag probes measure the no-selection batch path"
-            );
+            if rack_probe {
+                // The reported scenario: a sampler track grouped into an
+                // Instrument Rack (the production primitive behind
+                // "group-track-to-instrument-rack"), then a step selected so
+                // the slot knob authors p-locks.
+                app.group_track_to_instrument_rack_recorded(track)
+                    .expect("group project 92's track 0 into a one-slot instrument rack");
+                app.sync_track_sound_bindings();
+                assert!(
+                    state
+                        .pattern
+                        .rack_tracks
+                        .lock()
+                        .unwrap()
+                        .get(track)
+                        .is_some_and(Option::is_some),
+                    "track {track} must be a rack track after grouping"
+                );
+                if !state.pattern.patterns[track].is_active(RACK_PLOCK_STEP) {
+                    state.pattern.patterns[track].toggle_step(RACK_PLOCK_STEP);
+                }
+                selected_steps.lock().unwrap().insert(RACK_PLOCK_STEP);
+            } else {
+                assert!(
+                    selected_steps.lock().unwrap().is_empty(),
+                    "the cold-drag probes measure the no-selection batch path"
+                );
+            }
 
             let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
@@ -5676,6 +5738,27 @@
             // Per-round target discovery: the fx layout is rebuilt between
             // rounds, so the target is re-found each time. Returns the
             // screen-space press point and the target's widget id.
+            // The rack probe must land on a CONTINUOUS slot knob: an enum
+            // param (the rack panel renders the sampler's `loop` mode as a
+            // knob, see the bead filed from this probe) legitimately runs the
+            // structural fx rebuild on every write, which is not the
+            // regression under test.
+            let rack_knob_keys: Vec<String> = sequencer::effects::EffectDescriptor::builtin_sampler()
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(_, param)| {
+                    matches!(param.kind, sequencer::effects::ParamKind::Continuous { .. })
+                        && param.name != "sens"
+                })
+                .map(|(idx, _)| format!("sampler-param-{idx}"))
+                .collect();
+            let rack_knob_key_matches = |key: &str| {
+                rack_knob_keys.iter().any(|candidate| {
+                    key.strip_prefix(candidate.as_str())
+                        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit()))
+                })
+            };
             let locate_target = |editor: &mut Editor| -> (f32, f32, u64) {
                 let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
                     editor,
@@ -5709,10 +5792,13 @@
                         layout,
                         &mut |node| {
                             node.widget_type == "knob-number"
-                                && node
-                                    .stable_key
-                                    .as_deref()
-                                    .is_some_and(|key| key.starts_with("sampler-param-"))
+                                && node.stable_key.as_deref().is_some_and(|key| {
+                                    if rack_probe {
+                                        rack_knob_key_matches(key)
+                                    } else {
+                                        key.starts_with("sampler-param-")
+                                    }
+                                })
                         },
                         &mut nodes,
                     );
@@ -6756,6 +6842,74 @@
             let mut mid_gesture_layout_refreshes = 0usize;
             let mut cold_down_samples: Vec<f64> = Vec::new();
             let mut cold_first_drag_samples: Vec<f64> = Vec::new();
+            if rack_probe {
+                // Seed the lock through the real gesture so the rounds
+                // measure the steady state (tweaking an EXISTING lock). The
+                // first write of a lock legitimately runs the epoch-driven
+                // resync once (new *step* row + step-grid tick); it must not
+                // recur on later events, which the round assertions check.
+                let (down_col, down_row, _) = locate_target(&mut editor);
+                editor.handle_tiled_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Down(MouseButton::Left),
+                        down_col.floor() as u16,
+                        down_row.floor() as u16,
+                    ),
+                    down_col,
+                    down_row,
+                    0,
+                );
+                let _ = editor.drain_host_commands();
+                editor.handle_tiled_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        down_col.floor() as u16,
+                        (down_row + 1.2).floor() as u16,
+                    ),
+                    down_col,
+                    down_row + 1.2,
+                    0,
+                );
+                let commands = editor.drain_host_commands();
+                let names: Vec<String> = commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        HostCommand::Custom { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    names.iter().any(|name| name == "set-rack-slot-instrument-plock"),
+                    "the rack slot knob with a step selected must emit \
+                     set-rack-slot-instrument-plock, got {names:?}"
+                );
+                apply_host_commands(&mut editor, &mut app, commands);
+                editor.handle_tiled_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Up(MouseButton::Left),
+                        down_col.floor() as u16,
+                        (down_row + 1.2).floor() as u16,
+                    ),
+                    down_col,
+                    down_row + 1.2,
+                    0,
+                );
+                let commands = editor.drain_host_commands();
+                apply_host_commands(&mut editor, &mut app, commands);
+                app::edit::finish_active_gesture(&mut app);
+                let _ = finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                let locked = state
+                    .pattern
+                    .rack_tracks
+                    .lock()
+                    .unwrap()
+                    .get(track)
+                    .and_then(Option::as_ref)
+                    .and_then(|rack| rack.slots.first())
+                    .and_then(|slot| slot.instrument_slot.plocks.get(RACK_PLOCK_STEP).cloned())
+                    .is_some_and(|row| row.iter().any(Option::is_some));
+                assert!(locked, "the seeding gesture must have written a rack slot p-lock");
+            }
 
             for round in 0..ROUNDS {
                 // De-warm: the user was working in the sequencer tile.
@@ -6926,8 +7080,39 @@
                              batched instrument command"
                         );
                     }
+                    if rack_probe {
+                        assert!(
+                            commands.iter().any(|command| matches!(
+                                command,
+                                HostCommand::Custom { name, .. }
+                                    if name == "set-rack-slot-instrument-plock"
+                            )),
+                            "round {round}: warm drag {iteration} must author the rack slot p-lock"
+                        );
+                    }
+                    let rack_names: Vec<String> = commands
+                        .iter()
+                        .filter_map(|command| match command {
+                            HostCommand::Custom { name, payload } => {
+                                Some(format!("{name} {payload:?}"))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let epochs_before =
+                        (ui_epoch.load(Ordering::Relaxed), fx_epoch.load(Ordering::Relaxed));
                     apply_host_commands(&mut editor, &mut app, commands);
                     let host_done = Instant::now();
+                    if rack_probe && round == 0 && iteration < 2 {
+                        let epochs_after =
+                            (ui_epoch.load(Ordering::Relaxed), fx_epoch.load(Ordering::Relaxed));
+                        eprintln!(
+                            "[{probe_prefix}-warm-diag] iteration={iteration} commands={rack_names:?} \
+                             ui_epoch_delta={} fx_epoch_delta={}",
+                            epochs_after.0 - epochs_before.0,
+                            epochs_after.1 - epochs_before.1
+                        );
+                    }
                     let update =
                         finish_visible_update(&mut editor, &mut app, &mut tile_retained);
                     samples.warm_total.push(duration_ms(started.elapsed()));
@@ -13177,7 +13362,6 @@
                         &state,
                         &selected_steps,
                         &ui_epoch,
-                        &fx_epoch,
                     ));
                     let host_done = Instant::now();
                     editor.runtime_mut().run_reactive_cycle();
@@ -13452,7 +13636,8 @@
                         param_idx,
                     },
                     &selected_steps,
-                    false,
+                    RackPlockRowsSync::Unchanged,
+                    &Arc::new(ExpandedStepProjectionRegistry::new()),
                     &ui_epoch,
                 );
                 let host_done = Instant::now();

@@ -1087,7 +1087,7 @@ pub(crate) fn build_track_plocks_value(
                     else {
                         continue;
                     };
-                    items.push(rack_effect_plock_entry(
+                    let entry = rack_effect_plock_entry(
                         step,
                         rack_slot_idx,
                         effect_slot_idx,
@@ -1103,7 +1103,27 @@ pub(crate) fn build_track_plocks_value(
                         param.max,
                         param_idx,
                         plock_param_options(&param.kind),
-                    ));
+                    );
+                    if matches!(param.kind, ParamKind::Continuous { .. }) {
+                        // Same as the instrument rows above: bind the LOCK
+                        // readout to the per-param SEQV field the rack
+                        // authoring syncs maintain, so a later drag event of
+                        // this lock repaints the row without republishing
+                        // SEQ.track-plocks (eseq-lf72).
+                        if let Value::Map(map) = &mut *entry.borrow_mut() {
+                            map.insert(
+                                "value-field".to_string(),
+                                value_cell(Value::String(rack_slot_effect_param_value_field(
+                                    track,
+                                    rack_slot_idx,
+                                    effect_slot_idx,
+                                    param_idx,
+                                    &param.name,
+                                ))),
+                            );
+                        }
+                    }
+                    items.push(entry);
                 }
             }
         }

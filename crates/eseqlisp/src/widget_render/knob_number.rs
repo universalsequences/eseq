@@ -153,6 +153,18 @@ mod tests {
     }
 
     #[test]
+    fn square_taper_gives_low_values_moderate_precision_and_still_reaches_max() {
+        let taper = KnobTaper::Square;
+        assert_eq!(taper_normalize(taper, 0.0, 127.0, 0.0), 0.0);
+        assert_eq!(taper_normalize(taper, 0.0, 127.0, 127.0), 1.0);
+        assert!((taper_denormalize(taper, 0.0, 127.0, 0.5) - 31.75).abs() < 1e-4);
+        for t in [0.0f32, 0.1, 0.5, 0.9, 1.0] {
+            let value = taper_denormalize(taper, 0.0, 127.0, t);
+            assert!((taper_normalize(taper, 0.0, 127.0, value) - t).abs() < 1e-5);
+        }
+    }
+
+    #[test]
     fn cube_taper_gives_the_low_eighth_half_the_travel_and_still_reaches_max() {
         let taper = KnobTaper::Cube;
         assert_eq!(taper_normalize(taper, 0.0, 127.0, 0.0), 0.0);
@@ -1027,21 +1039,23 @@ fn quantized_value(props: &HashMap<String, Value>, value: f32) -> f32 {
 /// Knob travel taper: how value-space maps to normalized arc position.
 /// `:taper "log"` distributes travel logarithmically (equal arc per octave) —
 /// for frequency-like params whose musical action lives in the low decades.
-/// `:taper "cube"` is the zero-minimum cousin: value grows with the cube of
-/// the travel, so half the arc covers the bottom eighth of a count-like range
-/// (0..127 -> 0..16) while the top still reaches the extreme. Only positional
-/// mapping (arc, drag, mod-range rings) tapers; the numeric text and typed
-/// entry stay in real value units.
+/// `:taper "square"` and `:taper "cube"` are zero-minimum power curves:
+/// value grows with the square or cube of travel. Square gives moderate
+/// low-value precision; cube reserves half the arc for the bottom eighth of a
+/// count-like range (0..127 -> 0..16). Only positional mapping (arc, drag,
+/// mod-range rings) tapers; numeric text and typed entry stay in real units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum KnobTaper {
     Linear,
     Log,
+    Square,
     Cube,
 }
 
 pub(crate) fn knob_taper(props: &HashMap<String, Value>) -> KnobTaper {
     match props.get("taper") {
         Some(Value::String(taper)) if taper == "log" => KnobTaper::Log,
+        Some(Value::String(taper)) if taper == "square" => KnobTaper::Square,
         Some(Value::String(taper)) if taper == "cube" => KnobTaper::Cube,
         _ => KnobTaper::Linear,
     }
@@ -1055,6 +1069,9 @@ pub(crate) fn taper_normalize(taper: KnobTaper, min: f32, max: f32, value: f32) 
             let ratio = max / min;
             ((value.clamp(min, max) / min).ln() / ratio.ln()).clamp(0.0, 1.0)
         }
+        KnobTaper::Square if max > min => ((value.clamp(min, max) - min) / (max - min))
+            .sqrt()
+            .clamp(0.0, 1.0),
         KnobTaper::Cube if max > min => ((value.clamp(min, max) - min) / (max - min))
             .cbrt()
             .clamp(0.0, 1.0),
@@ -1075,6 +1092,7 @@ pub(crate) fn taper_denormalize(taper: KnobTaper, min: f32, max: f32, t: f32) ->
     let t = t.clamp(0.0, 1.0);
     match taper {
         KnobTaper::Log if min > 0.0 && max > min => min * (max / min).powf(t),
+        KnobTaper::Square if max > min => min + (max - min) * t * t,
         KnobTaper::Cube if max > min => min + (max - min) * t * t * t,
         _ => min + (max - min) * t,
     }

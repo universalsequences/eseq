@@ -43,10 +43,10 @@
 ;; NOTE: `seq-has-selection?` and `host-command` are Rust natives.
 
 (def freq-value (fx freq-p)
-  (eseq.effects.param-controls/fx-param-value freq-p))
+  (eseq.effects.param-controls/fx-param-value-for fx freq-p))
 
 (def q-value (fx q-p)
-  (eseq.effects.param-controls/fx-param-value q-p))
+  (eseq.effects.param-controls/fx-param-value-for fx q-p))
 
 (def band (fx freq-p q-p)
   (dict
@@ -142,7 +142,7 @@
       (if (eseq.effects.param-controls/fx-param-on-for? fx sync-p)
         (v-stack :gap 0.12 :align :center
           (div-grid fx div-p)
-          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "ofs" offset-p))
+          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "offset" offset-p))
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "ms" time-p)))))
 
 (def parameter-knob (fx label-text p decimals)

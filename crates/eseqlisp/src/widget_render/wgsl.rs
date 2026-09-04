@@ -190,9 +190,23 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var aspect: f32 = input.aspect;
     var p: vec2<f32> = vec2<f32>((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
     var col: vec4<f32> = input.color_a;
+    // Glyphs are authored inside roughly +-0.62; stretch them to fill the
+    // shorter side of the box so they read at Ableton-like size.
+    p = p / (max(min(aspect, 1.0), 0.05) / 0.78);
+    // uniform_a.x > 0.5 selects the filled "list" style: the folder becomes a
+    // Finder-style filled silhouette in color_b, every other glyph sits in
+    // white (color_a) on a rounded color_b tile. 0 keeps the stroke style.
+    var style: f32 = input.uniform_a.x;
+    var filled: bool = style > 0.5;
+    // In the filled style `detail_d` carves darker cutouts (key gaps, the
+    // folder fold, a dial's face) out of the solid silhouette in `d`.
+    var detail_d: f32 = 1.0;
+    // `shade_d` darkens (rather than cuts out) part of a filled silhouette:
+    // the folder's back panel behind its lighter front panel.
+    var shade_d: f32 = 1.0;
 
     var d: f32 = 1.0;
-    var stroke: f32 = 0.070;
+    var stroke: f32 = 0.072;
     if (input.value_t < 0.5) {
         // plus
         var bar_v: vec2<f32> = abs(p) - vec2<f32>(0.09, 0.38);
@@ -210,6 +224,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         var screen_base: f32 = length(max(screen_q, vec2<f32>(0.0))) + min(max(screen_q.x, screen_q.y), 0.0) - 0.03;
         var screen: f32 = abs(screen_base) - 0.052;
         var pad: f32 = 1.0;
+        var pad_fill: f32 = 1.0;
         for (var ix: i32 = 0; ix < 2; ix = ix + 1) {
             for (var iy: i32 = 0; iy < 2; iy = iy + 1) {
                 var center: vec2<f32> = vec2<f32>(0.08 + f32(ix) * 0.20, -0.05 + f32(iy) * 0.18);
@@ -217,10 +232,16 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
                 var pd_base: f32 = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - 0.03;
                 var pd: f32 = abs(pd_base) - 0.045;
                 pad = min(pad, pd);
+                pad_fill = min(pad_fill, pd_base);
             }
         }
         var knob: f32 = abs(length(p - vec2<f32>(-0.32, 0.16)) - 0.055) - 0.045;
-        d = min(min(body, screen), min(pad, knob));
+        if (filled) {
+            d = body_base;
+            detail_d = min(screen_base, min(pad_fill, length(p - vec2<f32>(-0.32, 0.16)) - 0.10));
+        } else {
+            d = min(min(body, screen), min(pad, knob));
+        }
     } else if (input.value_t < 2.5) {
         // waveform: vertical sample bars, clearer than a tiny sine curve.
         var b0: f32 = button_icon_segment(p, vec2<f32>(-0.45, -0.16), vec2<f32>(-0.45, 0.16)) - stroke;
@@ -231,11 +252,20 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         var b5: f32 = button_icon_segment(p, vec2<f32>(0.52, -0.14), vec2<f32>(0.52, 0.14)) - stroke;
         d = min(min(min(b0, b1), min(b2, b3)), min(b4, b5));
     } else if (input.value_t < 3.5) {
-        // piano keys: simple outline plus two dividers; avoids clutter at source-list size.
-        var body: f32 = abs(button_icon_round_rect(p, vec2<f32>(0.50, 0.34), 0.055)) - stroke;
-        var div_a: f32 = button_icon_segment(p, vec2<f32>(-0.16, -0.31), vec2<f32>(-0.16, 0.34)) - 0.048;
-        var div_b: f32 = button_icon_segment(p, vec2<f32>(0.18, -0.31), vec2<f32>(0.18, 0.34)) - 0.048;
-        d = min(body, min(div_a, div_b));
+        // piano keys: outlined body, four white keys, solid black keys on the dividers.
+        var body: f32 = abs(button_icon_round_rect(p, vec2<f32>(0.56, 0.36), 0.055)) - stroke;
+        var div_a: f32 = button_icon_segment(p, vec2<f32>(-0.28, 0.00), vec2<f32>(-0.28, 0.36)) - 0.045;
+        var div_b: f32 = button_icon_segment(p, vec2<f32>(0.00, 0.00), vec2<f32>(0.00, 0.36)) - 0.045;
+        var div_c: f32 = button_icon_segment(p, vec2<f32>(0.28, 0.00), vec2<f32>(0.28, 0.36)) - 0.045;
+        var black_a: f32 = button_icon_box(p - vec2<f32>(-0.28, -0.20), vec2<f32>(0.085, 0.17));
+        var black_b: f32 = button_icon_box(p - vec2<f32>(0.00, -0.20), vec2<f32>(0.085, 0.17));
+        var black_c: f32 = button_icon_box(p - vec2<f32>(0.28, -0.20), vec2<f32>(0.085, 0.17));
+        if (filled) {
+            d = button_icon_round_rect(p, vec2<f32>(0.56, 0.36), 0.055);
+            detail_d = min(min(div_a, min(div_b, div_c)), min(black_a, min(black_b, black_c)));
+        } else {
+            d = min(min(body, min(div_a, min(div_b, div_c))), min(black_a, min(black_b, black_c)));
+        }
     } else if (input.value_t < 4.5) {
         // sliders
         var a: f32 = button_icon_segment(p, vec2<f32>(-0.52, -0.30), vec2<f32>(0.52, -0.30)) - stroke;
@@ -262,33 +292,146 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         var top: f32 = button_icon_segment(p, vec2<f32>(-0.34, -0.46), vec2<f32>(0.34, -0.46)) - stroke;
         var fold_a: f32 = button_icon_segment(p, vec2<f32>(-0.34, 0.46), vec2<f32>(0.00, 0.20)) - stroke;
         var fold_b: f32 = button_icon_segment(p, vec2<f32>(0.34, 0.46), vec2<f32>(0.00, 0.20)) - stroke;
-        d = min(min(left, right), min(top, min(fold_a, fold_b)));
+        if (filled) {
+            // Logic-style dial: solid rounded square, dark face, pointer notch.
+            d = button_icon_round_rect(p, vec2<f32>(0.50, 0.46), 0.11);
+            var face: f32 = length(p) - 0.30;
+            var pointer: f32 = button_icon_segment(p, vec2<f32>(0.0, 0.0), vec2<f32>(0.0, -0.27)) - 0.05;
+            detail_d = max(face, -pointer);
+        } else {
+            d = min(min(left, right), min(top, min(fold_a, fold_b)));
+        }
     } else if (input.value_t < 7.5) {
-        // folder
-        var left: f32 = button_icon_segment(p, vec2<f32>(-0.44, -0.16), vec2<f32>(-0.44, 0.40)) - stroke;
-        var right: f32 = button_icon_segment(p, vec2<f32>(0.50, -0.04), vec2<f32>(0.50, 0.40)) - stroke;
-        var bottom: f32 = button_icon_segment(p, vec2<f32>(-0.44, 0.40), vec2<f32>(0.50, 0.40)) - stroke;
-        var tab_top: f32 = button_icon_segment(p, vec2<f32>(-0.44, -0.32), vec2<f32>(-0.12, -0.32)) - stroke;
-        var tab_side: f32 = button_icon_segment(p, vec2<f32>(-0.12, -0.32), vec2<f32>(0.02, -0.16)) - stroke;
-        var lip: f32 = button_icon_segment(p, vec2<f32>(-0.44, -0.16), vec2<f32>(0.46, -0.16)) - stroke;
-        d = min(min(left, right), min(bottom, min(tab_top, min(tab_side, lip))));
+        // folder: macOS Finder sidebar glyph, an outlined body-plus-tab
+        // silhouette with the fold line across the full width.
+        var f_body: f32 = button_icon_round_rect(p - vec2<f32>(0.00, 0.06), vec2<f32>(0.54, 0.36), 0.09);
+        var f_tab: f32 = button_icon_round_rect(p - vec2<f32>(-0.32, -0.30), vec2<f32>(0.22, 0.12), 0.07);
+        var silhouette: f32 = min(f_body, f_tab);
+        var fold: f32 = button_icon_segment(p, vec2<f32>(-0.54, -0.18), vec2<f32>(0.54, -0.18)) - stroke;
+        if (filled) {
+            // Finder-style: darker back panel (with the tab) behind a lighter
+            // front panel that covers the lower two thirds. No gaps.
+            d = silhouette;
+            var front: f32 = button_icon_round_rect(p - vec2<f32>(0.00, 0.13), vec2<f32>(0.54, 0.29), 0.08);
+            shade_d = -front;
+        } else {
+            d = min(abs(silhouette) - stroke, fold);
+        }
+    } else if (input.value_t < 8.5) {
+        // sine: one cycle sampled from a real sine at 20 short segments so
+        // the peaks stay rounded at badge size.
+        var s0: f32 = button_icon_segment(p, vec2<f32>(-0.540, 0.000), vec2<f32>(-0.486, 0.117)) - stroke;
+        var s1: f32 = button_icon_segment(p, vec2<f32>(-0.486, 0.117), vec2<f32>(-0.432, 0.223)) - stroke;
+        var s2: f32 = button_icon_segment(p, vec2<f32>(-0.432, 0.223), vec2<f32>(-0.378, 0.307)) - stroke;
+        var s3: f32 = button_icon_segment(p, vec2<f32>(-0.378, 0.307), vec2<f32>(-0.324, 0.361)) - stroke;
+        var s4: f32 = button_icon_segment(p, vec2<f32>(-0.324, 0.361), vec2<f32>(-0.270, 0.380)) - stroke;
+        var s5: f32 = button_icon_segment(p, vec2<f32>(-0.270, 0.380), vec2<f32>(-0.216, 0.361)) - stroke;
+        var s6: f32 = button_icon_segment(p, vec2<f32>(-0.216, 0.361), vec2<f32>(-0.162, 0.307)) - stroke;
+        var s7: f32 = button_icon_segment(p, vec2<f32>(-0.162, 0.307), vec2<f32>(-0.108, 0.223)) - stroke;
+        var s8: f32 = button_icon_segment(p, vec2<f32>(-0.108, 0.223), vec2<f32>(-0.054, 0.117)) - stroke;
+        var s9: f32 = button_icon_segment(p, vec2<f32>(-0.054, 0.117), vec2<f32>(0.000, 0.000)) - stroke;
+        var s10: f32 = button_icon_segment(p, vec2<f32>(0.000, 0.000), vec2<f32>(0.054, -0.117)) - stroke;
+        var s11: f32 = button_icon_segment(p, vec2<f32>(0.054, -0.117), vec2<f32>(0.108, -0.223)) - stroke;
+        var s12: f32 = button_icon_segment(p, vec2<f32>(0.108, -0.223), vec2<f32>(0.162, -0.307)) - stroke;
+        var s13: f32 = button_icon_segment(p, vec2<f32>(0.162, -0.307), vec2<f32>(0.216, -0.361)) - stroke;
+        var s14: f32 = button_icon_segment(p, vec2<f32>(0.216, -0.361), vec2<f32>(0.270, -0.380)) - stroke;
+        var s15: f32 = button_icon_segment(p, vec2<f32>(0.270, -0.380), vec2<f32>(0.324, -0.361)) - stroke;
+        var s16: f32 = button_icon_segment(p, vec2<f32>(0.324, -0.361), vec2<f32>(0.378, -0.307)) - stroke;
+        var s17: f32 = button_icon_segment(p, vec2<f32>(0.378, -0.307), vec2<f32>(0.432, -0.223)) - stroke;
+        var s18: f32 = button_icon_segment(p, vec2<f32>(0.432, -0.223), vec2<f32>(0.486, -0.117)) - stroke;
+        var s19: f32 = button_icon_segment(p, vec2<f32>(0.486, -0.117), vec2<f32>(0.540, -0.000)) - stroke;
+        d = s0;
+        d = min(d, s1);
+        d = min(d, s2);
+        d = min(d, s3);
+        d = min(d, s4);
+        d = min(d, s5);
+        d = min(d, s6);
+        d = min(d, s7);
+        d = min(d, s8);
+        d = min(d, s9);
+        d = min(d, s10);
+        d = min(d, s11);
+        d = min(d, s12);
+        d = min(d, s13);
+        d = min(d, s14);
+        d = min(d, s15);
+        d = min(d, s16);
+        d = min(d, s17);
+        d = min(d, s18);
+        d = min(d, s19);
+    } else if (input.value_t < 9.5) {
+        // drop: a single water droplet. Pointed apex at the top, round
+        // belly below; the cone between the apex and its tangent points on
+        // the belly circle joins the two exactly (30 degree half-angle for
+        // r = 0.34 at 0.68 from the apex). A short glint on the lower left.
+        var dq: vec2<f32> = vec2<f32>(abs(p.x), p.y);
+        let apex: vec2<f32> = vec2<f32>(0.0, -0.52);
+        let belly: vec2<f32> = vec2<f32>(0.0, 0.16);
+        let belly_r: f32 = 0.34;
+        let cone_len: f32 = 0.589;
+        let cone_dir: vec2<f32> = vec2<f32>(0.5, 0.866);
+        let cone_n: vec2<f32> = vec2<f32>(0.866, -0.5);
+        var da: vec2<f32> = dq - apex;
+        var t: f32 = dot(da, cone_dir);
+        var drop: f32 = length(dq - belly) - belly_r;
+        if (t < 0.0) {
+            drop = length(da);
+        } else if (t < cone_len) {
+            drop = dot(da, cone_n);
+        }
+        var glint: f32 = button_icon_segment(p, vec2<f32>(-0.17, 0.08), vec2<f32>(-0.09, 0.28)) - 0.045;
+        if (filled) {
+            d = drop;
+            detail_d = glint;
+        } else {
+            d = min(abs(drop) - stroke, glint);
+        }
     } else {
-        // sine: one cycle traced as short segments so it stays crisp at badge size.
-        var s0: f32 = button_icon_segment(p, vec2<f32>(-0.54, 0.00), vec2<f32>(-0.405, 0.24)) - stroke;
-        var s1: f32 = button_icon_segment(p, vec2<f32>(-0.405, 0.24), vec2<f32>(-0.27, 0.38)) - stroke;
-        var s2: f32 = button_icon_segment(p, vec2<f32>(-0.27, 0.38), vec2<f32>(-0.135, 0.24)) - stroke;
-        var s3: f32 = button_icon_segment(p, vec2<f32>(-0.135, 0.24), vec2<f32>(0.00, 0.00)) - stroke;
-        var s4: f32 = button_icon_segment(p, vec2<f32>(0.00, 0.00), vec2<f32>(0.135, -0.24)) - stroke;
-        var s5: f32 = button_icon_segment(p, vec2<f32>(0.135, -0.24), vec2<f32>(0.27, -0.38)) - stroke;
-        var s6: f32 = button_icon_segment(p, vec2<f32>(0.27, -0.38), vec2<f32>(0.405, -0.24)) - stroke;
-        var s7: f32 = button_icon_segment(p, vec2<f32>(0.405, -0.24), vec2<f32>(0.54, 0.00)) - stroke;
-        d = min(min(min(s0, s1), min(s2, s3)), min(min(s4, s5), min(s6, s7)));
+        // document: Finder-style page. Portrait sheet with a folded top-right
+        // corner; the fold is a real triangle sitting inside the cut. Stroke
+        // style matches Finder's sidebar "Documents" glyph (no text lines);
+        // filled style adds two faint lines like Finder's file-list icon.
+        var q: vec2<f32> = p - vec2<f32>(0.0, 0.0);
+        let dw: f32 = 0.34;
+        let dh: f32 = 0.46;
+        let dk: f32 = 0.26;
+        let dc: f32 = dw - dk;
+        var page: f32 = button_icon_round_rect(q, vec2<f32>(dw, dh), 0.05);
+        var corner_cut: f32 = (q.x - q.y - (dw + dh - dk)) / 1.41421;
+        var sheet: f32 = max(page, corner_cut);
+        var fold_a: f32 = button_icon_segment(q, vec2<f32>(dc, -dh), vec2<f32>(dc, -dh + dk)) - stroke;
+        var fold_b: f32 = button_icon_segment(q, vec2<f32>(dc, -dh + dk), vec2<f32>(dw, -dh + dk)) - stroke;
+        var line_a: f32 = button_icon_segment(q, vec2<f32>(-0.17, 0.04), vec2<f32>(0.17, 0.04)) - 0.03;
+        var line_b: f32 = button_icon_segment(q, vec2<f32>(-0.17, 0.20), vec2<f32>(0.17, 0.20)) - 0.03;
+        if (filled) {
+            d = sheet;
+            var fold_tri: f32 = max(max(dc - q.x, q.y - (-dh + dk)), q.x - q.y - (dw + dh - dk));
+            shade_d = fold_tri;
+            detail_d = min(line_a, line_b);
+        } else {
+            var outline: f32 = abs(sheet) - stroke;
+            d = min(outline, min(fold_a, fold_b));
+        }
     }
 
     var edge: f32 = max(fwidth(d), 0.001) * 1.2;
     var mask: f32 = smoothstep(edge, -edge, d);
+    if (!filled) {
+        if (mask < 0.002) { discard; }
+        return vec4<f32>(col.rgb, col.a * mask);
+    }
+    // Filled style: solid silhouette in color_b with details cut out toward
+    // color_a (the theme's detail tone, normally near the row background).
+    var fill: vec4<f32> = input.color_b;
     if (mask < 0.002) { discard; }
-    return vec4<f32>(col.rgb, col.a * mask);
+    var detail_edge: f32 = max(fwidth(detail_d), 0.001) * 1.2;
+    var detail_mask: f32 = smoothstep(detail_edge, -detail_edge, detail_d);
+    var shade_edge: f32 = max(fwidth(shade_d), 0.001) * 1.2;
+    var shade_mask: f32 = smoothstep(shade_edge, -shade_edge, shade_d);
+    var rgb: vec3<f32> = mix(fill.rgb, fill.rgb * 0.68, shade_mask);
+    rgb = mix(rgb, col.rgb, detail_mask * col.a);
+    return vec4<f32>(rgb, fill.a * mask);
 }"#;
 
 pub const BUTTON_SURFACE_SHADER: &str = r#"
@@ -1615,6 +1758,8 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     // Aspect-corrected coordinates: x input [-a, a], y input [-1, 1]
     var a: f32 = input.aspect;
     var p: vec2<f32> = vec2<f32>((uv.x - 0.5) * 2.0 * a, (uv.y - 0.5) * 2.0);
+    // Finder-sized disclosure: about half the box, thin stroke.
+    p = p * 1.85;
 
     // Right chevron ">" — endpoints input aspect-corrected space
     var r_pt: vec2<f32> = vec2<f32>(0.25 * a, 0.0);
@@ -1646,7 +1791,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var d: f32 = min(seg1, seg2);
 
     // Stroke width + anti-aliasing
-    var stroke: f32 = 0.18;
+    var stroke: f32 = 0.19;
     var edge: f32 = fwidth(d) * 1.2;
     var mask: f32 = smoothstep(stroke + edge, stroke - edge, d);
 

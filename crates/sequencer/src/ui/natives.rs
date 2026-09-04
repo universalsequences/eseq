@@ -6437,6 +6437,7 @@ pub(crate) fn init_runtime(
         .expect("metal_seq requires the AppPaths sample database for sample browsing"),
     );
     eprintln!("metal_seq: sample db opened");
+    register_sample_import_natives(&mut runtime);
 
     let sample_db_for_search = sample_db.clone();
     runtime.register_native("seq-search-samples", move |args, _ctx| {
@@ -6569,7 +6570,11 @@ pub(crate) fn init_runtime(
             _ => "",
         };
         let project_engines = value_string_list(args.get(1));
-        Ok(build_instrument_tree_value(query, &project_engines))
+        let origin_filter = match args.get(2) {
+            Some(Value::String(s)) => s.as_str(),
+            _ => "",
+        };
+        Ok(build_instrument_tree_value(query, &project_engines, origin_filter))
     });
     runtime.register_native("seq-audio-effect-tree", move |args, _ctx| {
         let query = match args.first() {
@@ -7630,8 +7635,8 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
         ),
         (
             "seq-saved-instrument-tree",
-            "(seq-saved-instrument-tree query)",
-            "Return the saved instrument browser tree filtered by query.",
+            "(seq-saved-instrument-tree query [project-engines] [origin])",
+            "Return the saved instrument browser tree filtered by query. `origin` is \"factory\", \"user\", or \"\" for both tiers.",
         ),
         (
             "seq-audio-effect-tree",

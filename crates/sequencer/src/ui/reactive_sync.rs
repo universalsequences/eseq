@@ -173,14 +173,15 @@ pub(super) fn refresh_rack_macro_value_reactive(
     track: usize,
     id: sequencer::sequencer::RackMacroId,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    ui_epoch: &AtomicUsize,
 ) {
     let display_step = displayed_plock_step(&app.state, track, selected_plock_step(selected_steps));
     let rt = editor.runtime_mut();
     let mut dirty = sync_rack_macro_value_field(rt, app, track, id, display_step);
     dirty |= sync_rack_macro_target_value_fields(rt, app, track, id, display_step);
+    // The macro knob and every mapped target readout are bound to the value
+    // fields written above; a per-event `ui_epoch` bump here resynced the
+    // whole UI per mouse move (eseq-lf72).
     flush_reactive_display_edit(editor, dirty);
-    ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(super) fn refresh_rack_macro_plock_reactive(
@@ -224,6 +225,37 @@ pub(super) enum RackDirectDisplayTarget {
     },
 }
 
+/// What a rack direct-param edit owes the *step* p-lock surfaces.
+///
+/// Mirrors the `set-instrument-plock` policy (instrument_params.rs): a
+/// continuous knob drag is fully covered by the bound per-param value field,
+/// so only the FIRST write of a lock in a gesture — the one event that can
+/// change the *step* row set and light the step-grid presence tick — pays for
+/// the row-list republish, the presence sync, and one `ui_epoch` resync.
+/// Bumping the epochs on every drag event rebuilt the whole *fx* rack panel
+/// (every slot) per mouse move, which is what made rack knobs feel like
+/// molasses once a step was selected (eseq-lf72).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RackPlockRowsSync {
+    /// Base value edit, or a later drag event of a lock that already existed:
+    /// the bound value field alone repaints the knob and the LOCK readout.
+    Unchanged,
+    /// This write can add a *step* row / presence tick: republish once.
+    RowSetChanged,
+}
+
+impl RackPlockRowsSync {
+    /// `existed` = the displayed step already carried this lock before the
+    /// write. A later drag event of the same gesture is therefore `Unchanged`.
+    pub(super) fn for_plock_write(existed: bool) -> Self {
+        if existed {
+            Self::Unchanged
+        } else {
+            Self::RowSetChanged
+        }
+    }
+}
+
 pub(super) fn refresh_rack_direct_param_reactive(
     editor: &mut Editor,
     app: &app::App,
@@ -231,7 +263,8 @@ pub(super) fn refresh_rack_direct_param_reactive(
     track: usize,
     target: RackDirectDisplayTarget,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    sync_plock_rows: bool,
+    plock_rows: RackPlockRowsSync,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     ui_epoch: &AtomicUsize,
 ) {
     let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
@@ -265,16 +298,29 @@ pub(super) fn refresh_rack_direct_param_reactive(
             display_step,
         ),
     };
-    if sync_plock_rows {
+    if plock_rows == RackPlockRowsSync::RowSetChanged {
         let result = rt.set_reactive(
             "SEQ",
             "track-plocks",
             build_track_plocks_value(app, state, track, selected_steps),
         );
         dirty |= result.effects_dirty || result.widgets_dirty;
+        // Step-grid tick, expanded-lane tick, variant tint: the surfaces the
+        // per-event `ui_epoch` bump used to refresh for free.
+        dirty |= sync_instrument_plock_presence_display_fields(
+            rt,
+            state,
+            app,
+            expanded_step_projection,
+            track,
+            selected_steps,
+        );
     }
     flush_reactive_display_edit(editor, dirty);
-    ui_epoch.fetch_add(1, Ordering::Relaxed);
+    if plock_rows == RackPlockRowsSync::RowSetChanged {
+        // Once per gesture (the first lock write), never per drag event.
+        ui_epoch.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub(super) fn apply_rack_macro_host_command(
@@ -285,7 +331,6 @@ pub(super) fn apply_rack_macro_host_command(
     state: &Arc<SequencerState>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     ui_epoch: &AtomicUsize,
-    fx_epoch: &AtomicUsize,
 ) -> bool {
     let (Some(track), Some(id), Some(value)) = (
         map_usize(map, "track"),
@@ -299,7 +344,7 @@ pub(super) fn apply_rack_macro_host_command(
             if !app.set_rack_macro_value(track, id, value) {
                 return false;
             }
-            refresh_rack_macro_value_reactive(editor, app, track, id, selected_steps, ui_epoch);
+            refresh_rack_macro_value_reactive(editor, app, track, id, selected_steps);
         }
         "set-rack-macro-plock" => {
             let steps = selected_steps
@@ -342,8 +387,15 @@ pub(super) fn apply_rack_macro_host_command(
                 selected_steps,
                 !plock_row_exists,
             );
-            fx_epoch.fetch_add(1, Ordering::Relaxed);
-            ui_epoch.fetch_add(1, Ordering::Relaxed);
+            // Same policy as `refresh_rack_direct_param_reactive`: the macro
+            // knob and its mapped targets repaint through bound value fields,
+            // so only the first write of the lock (new *step* row, new
+            // step-grid presence tick) runs the epoch-driven resync. A macro
+            // is always continuous, so the *fx* tree never needs a
+            // structural (`fx_epoch`) rebuild for it.
+            if !plock_row_exists {
+                ui_epoch.fetch_add(1, Ordering::Relaxed);
+            }
         }
         _ => return false,
     }

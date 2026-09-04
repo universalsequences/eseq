@@ -54,7 +54,7 @@
 (def parameter-knob (fx label-text p)
   (param-wrapper fx p "knob"
     (knob-number :label label-text
-    :value (eseq.effects.param-controls/fx-param-value p)
+    :value (eseq.effects.param-controls/fx-param-value-for fx p)
     :min (get p :min) :max (get p :max) :decimals 2 :unit "dB"
     :mod-offset (eseq.effects.param-controls/param-mod-offset p)
     :mod-scale (eseq.effects.param-controls/param-mod-scale p)
@@ -72,7 +72,7 @@
 (def percent-knob (fx label-text p)
   (param-wrapper fx p "percent-knob"
     (knob-number :label label-text
-    :value (eseq.effects.param-controls/fx-param-value p)
+    :value (eseq.effects.param-controls/fx-param-value-for fx p)
     :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0 :unit "%"
     :font-size 9.0 :label-font-size 8.0
     :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
@@ -87,7 +87,7 @@
 
 (def field (fx p decimals unit-text color width)
   (param-wrapper fx p "field"
-    (number-picker :value (eseq.effects.param-controls/fx-param-value p)
+    (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
     :min (get p :min) :max (get p :max) :decimals decimals :unit unit-text
     :noui true :font-size 9.0 :text-color color
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)

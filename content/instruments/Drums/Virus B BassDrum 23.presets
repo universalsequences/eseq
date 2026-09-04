@@ -1,0 +1,125 @@
+{
+ "version": 1,
+ "engine_name": "Drums/Virus B BassDrum 23/",
+ "source_file": "instruments/Drums/Virus B BassDrum 23/dsp.lisp",
+ "presets": [
+  {
+   "id": "Virus B BassDrum 23",
+   "name": "Virus B BassDrum 23",
+   "base_note_offset": 0.0,
+   "params": {}
+  },
+  {
+   "id": "Dry",
+   "name": "Dry",
+   "base_note_offset": 0.0,
+   "params": {
+    "hiss": 0.0,
+    "noise": 0.0
+   }
+  },
+  {
+   "id": "Short",
+   "name": "Short",
+   "base_note_offset": 0.0,
+   "params": {
+    "attack": 46.12,
+    "decay": 198.2,
+    "hiss": 1.5
+   }
+  },
+  {
+   "id": "Sub Drop",
+   "name": "Sub Drop",
+   "base_note_offset": -7.0,
+   "params": {
+    "tune": -7.0,
+    "sweep": 1.7,
+    "decay": 713.7,
+    "harm": 0.4
+   }
+  },
+  {
+   "id": "Hard Virus",
+   "name": "Hard Virus",
+   "base_note_offset": 0.0,
+   "params": {
+    "attack": 54.51,
+    "harm": 2.2,
+    "bright": 1.2,
+    "drive": 2.2,
+    "hiss": 2.5
+   }
+  },
+  {
+   "id": "Pure Sine",
+   "name": "Pure Sine",
+   "base_note_offset": 0.0,
+   "params": {
+    "harm": 0.0,
+    "noise": 0.0,
+    "hiss": 0.0
+   }
+  },
+  {
+   "id": "Soft Boom",
+   "name": "Soft Boom",
+   "base_note_offset": -3.0,
+   "params": {
+    "tune": -3.0,
+    "attack": 150.94,
+    "decay": 555.1,
+    "harm": 0.6,
+    "bright": 0.8,
+    "drive": 0.7
+   }
+  },
+  {
+   "id": "Sherman FB2",
+   "name": "Sherman FB2",
+   "base_note_offset": 0.0,
+   "params": {
+    "bank": 1.0,
+    "level": 1.5
+   }
+  },
+  {
+   "id": "FB2 Scream",
+   "name": "FB2 Scream",
+   "base_note_offset": 0.0,
+   "params": {
+    "bank": 1.0,
+    "bank_res": 0.95,
+    "bank_freq": 0.12,
+    "bank_env": 0.45,
+    "bank_crunch": 0.3,
+    "level": 1.4
+   }
+  },
+  {
+   "id": "FB2 Crunch",
+   "name": "FB2 Crunch",
+   "base_note_offset": 0.0,
+   "params": {
+    "bank": 1.0,
+    "bank_crunch": 0.65,
+    "bank_harm": 3.0,
+    "bank_recon": 0.35,
+    "bank_drive": 0.95,
+    "level": 1.5
+   }
+  },
+  {
+   "id": "Gated Bass",
+   "name": "Gated Bass",
+   "base_note_offset": 0.0,
+   "params": {
+    "decay": 1200.0,
+    "sustain": 0.75,
+    "release": 2400.0,
+    "harm": 1.6,
+    "level": 0.44
+   }
+  }
+ ]
+}

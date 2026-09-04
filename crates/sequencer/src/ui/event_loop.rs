@@ -151,7 +151,6 @@ pub(crate) fn run_event_loop(
     // Edge-tracked so the un-hide fires even when the gesture is dropped for a
     // reason other than mouse-up (editor reload, tile close, focus loss).
     let mut hidden_drag_started = false;
-    let mut sample_import_session: Option<SampleImportSession> = None;
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
     let mut soft_step_param_edit = SoftStepParamEdit::default();
@@ -680,21 +679,22 @@ pub(crate) fn run_event_loop(
                             editor.show_transient_message(format!("Asset import failed: {error}"));
                         }
                         Ok(None) => {
-                            match SampleImportSession::from_drop(
+                            match SampleImportDraft::from_drop(
                                 paths,
                                 &sequencer::app_paths::app_paths().sample_db_path(),
                             ) {
-                                Ok(session) => {
-                                    if session.is_empty() {
+                                Ok(draft) => {
+                                    if draft.is_empty() {
                                         editor.show_transient_message(
                                             "No supported audio files found in dropped items",
                                         );
                                     } else {
-                                        sample_import_session = Some(session);
-                                        if let Some(session) = sample_import_session.as_ref() {
-                                            session.render_into_editor(&mut editor);
-                                        }
-                                        editor.show_transient_message("Sample import staged");
+                                        let count = draft.len();
+                                        install_draft(draft);
+                                        open_sample_import_modal(&mut editor);
+                                        editor.show_transient_message(format!(
+                                            "Staged {count} sample(s) for import"
+                                        ));
                                     }
                                 }
                                 Err(error) => {
@@ -735,51 +735,6 @@ pub(crate) fn run_event_loop(
                         editor.handle_key(key);
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
-                    }
-                    if editor.active_buffer().name == "*sample-import*" {
-                        let key = normalize_command_shortcuts(raw_key);
-                        if let Some(session) = sample_import_session.as_mut() {
-                            match session.handle_key(key) {
-                                ImportKeyOutcome::Handled => {
-                                    session.render_into_editor(&mut editor);
-                                    ui_loop_stats.note_event(event_started.elapsed());
-                                    continue;
-                                }
-                                ImportKeyOutcome::Cancel => {
-                                    sample_import_session = None;
-                                    switch_to_sequencer(&mut editor);
-                                    editor.show_transient_message("Sample import canceled");
-                                    ui_loop_stats.note_event(event_started.elapsed());
-                                    continue;
-                                }
-                                ImportKeyOutcome::Commit => {
-                                    let summary = session
-                                        .commit(
-                                            &sequencer::app_paths::app_paths().sample_db_path(),
-                                            &sequencer::app_paths::app_paths().samples_dir(),
-                                        );
-                                    sample_import_session = None;
-                                    switch_to_sequencer(&mut editor);
-                                    match summary {
-                                        Ok(summary) => {
-                                            editor.show_transient_message(format!(
-                                                "Imported {} sample(s), skipped {} duplicate(s), {} failed",
-                                                summary.imported, summary.duplicates, summary.failed
-                                            ));
-                                            let _ = refresh_sample_browser_buffer(&mut editor);
-                                        }
-                                        Err(error) => {
-                                            editor.show_transient_message(format!(
-                                                "Sample import failed: {error}"
-                                            ));
-                                        }
-                                    }
-                                    ui_loop_stats.note_event(event_started.elapsed());
-                                    continue;
-                                }
-                                ImportKeyOutcome::Ignored => {}
-                            }
-                        }
                     }
                     if raw_key.kind == crossterm::event::KeyEventKind::Press {
                         if raw_key.code == crossterm::event::KeyCode::Esc

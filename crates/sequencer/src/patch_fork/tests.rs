@@ -2,8 +2,9 @@ use super::*;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// The pre-curation factory tree kept as fixtures; these tests need core/triton.
 fn instruments_root() -> PathBuf {
-    crate::app_paths::app_paths().instruments_dir()
+    crate::app_paths::app_paths().dev_instrument_fixtures_dir().expect("dev layout has the instrument fixture tree")
 }
 
 fn effects_root() -> PathBuf {

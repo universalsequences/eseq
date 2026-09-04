@@ -61,6 +61,18 @@
 
       :border-active   '(0.60 0.60 0.56)
       :border-inactive '(0.105 0.105 0.100)
+
+      ;; Browser tree icons (solid colored silhouettes; the rail keeps white strokes)
+      :list-icon-detail     '(0.17 0.17 0.16)   ; cutouts match the row bg
+      :list-icon-folder     '(0.24 0.54 0.83)   ; category hues at the accent's saturation/brightness
+      :list-icon-instrument '(0.93 0.54 0.26)
+      :list-icon-sample     '(0.32 0.81 0.42)
+      :list-icon-kit        '(0.93 0.28 0.25)
+      :list-icon-audio-fx   '(0.31 0.79 0.86)
+      :list-icon-midi-fx    '(0.55 0.37 0.88)
+      :list-icon-preset     '(0.94 0.70 0.27)
+      :list-icon-lfo        '(0.90 0.29 0.61)
+      :list-icon-misc       '(0.53 0.53 0.51)
       :tree-row-alt-bg '(0.195 0.195 0.186)
 
       :fx-panel-bg       '(0.215 0.215 0.205)

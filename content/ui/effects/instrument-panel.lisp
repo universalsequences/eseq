@@ -550,8 +550,9 @@
         (h-stack :debug-name "rack-header-row" :gap 0.6 :align :center :width :fill
           (pf/fx-panel-header-leading-spacer)
           (if st/rack-panel-slot-list-open
-            (h-stack :debug-name "rack-expanded-header-content" :gap 0.6 :align :center :flex 1
+            (h-stack :debug-name "rack-expanded-header-content" :gap 0.6 :align :start :flex 1
               (label (substring (get inst :display-name) 0 16)
+                :v-align :center
                 :font-size 11 :color :white :bg :transparent)
               (box :flex 1 :height 0.15))
             (box :debug-name "rack-compact-header-content"

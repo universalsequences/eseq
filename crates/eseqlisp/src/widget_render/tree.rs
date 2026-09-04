@@ -131,6 +131,26 @@ fn item_bool_field(item: &Value, key: &str, default: bool) -> bool {
     }
 }
 
+/// Fill color for a list-style icon, keyed by the shader glyph id from
+/// `button::icon_name_value`. Every color is a theme slot so themes can
+/// restyle the browser trees; folders default to Finder's sidebar blue.
+fn list_icon_fill(icon: f32) -> [f32; 4] {
+    let color = match icon.round() as i32 {
+        0 => theme::LIST_ICON_MISC(),
+        1 => theme::LIST_ICON_KIT(),
+        2 => theme::LIST_ICON_SAMPLE(),
+        3 => theme::LIST_ICON_INSTRUMENT(),
+        4 => theme::LIST_ICON_AUDIO_FX(),
+        5 => theme::LIST_ICON_MIDI_FX(),
+        6 => theme::LIST_ICON_PRESET(),
+        7 => theme::LIST_ICON_FOLDER(),
+        8 => theme::LIST_ICON_LFO(),
+        9 => theme::LIST_ICON_AUDIO_FX(),
+        _ => theme::LIST_ICON_MISC(),
+    };
+    color.to_rgba()
+}
+
 fn item_icon_value(item: &Value) -> Option<f32> {
     super::button::icon_name_value(&item_string_field(item, "icon")?)
 }
@@ -1241,13 +1261,9 @@ impl WidgetDefinition for TreeWidget {
         let selected_bg = resolve_named_color(&node.props, "selected-bg", theme::WIDGET_FOCUS_BG());
         let folder_fg = resolve_named_color(&node.props, "folder-color", theme::FG());
         let fg = theme::FG();
-        let default_file = Color {
-            r: fg.r * 0.72,
-            g: fg.g * 0.72,
-            b: fg.b * 0.72,
-            a: 1.0,
-        };
-        let file_fg = resolve_named_color(&node.props, "file-color", default_file);
+        // Leaves read at full foreground like folders (Finder does not dim
+        // files); `:file-color` still overrides per tree.
+        let file_fg = resolve_named_color(&node.props, "file-color", fg);
         let chevron_fg = theme::FG_MUTED();
         let default_chevron = Color {
             r: (chevron_fg.r + fg.r) * 0.5,
@@ -1351,7 +1367,7 @@ impl WidgetDefinition for TreeWidget {
             // Label text (transparent bg — row Rect already handles background)
             // Offset down slightly to vertically center text in the row
             let text_y = y + (rh - 1.0) * 0.5;
-            let icon_height = rh.min(1.0);
+            let icon_height = (rh * 0.92).min(1.15);
             let cell_aspect = if _viewport.cell_w > 0.0 {
                 _viewport.cell_h / _viewport.cell_w
             } else {
@@ -1397,12 +1413,21 @@ impl WidgetDefinition for TreeWidget {
                         value_t: icon,
                         orientation: 0.0,
                         itime: _viewport.time_seconds,
-                        uniform_a: [0.0; 4],
+                        // Filled list style: solid colored silhouettes with
+                        // details cut out in the theme's detail tone.
+                        uniform_a: [1.0, 0.0, 0.0, 0.0],
                         uniform_b: [0.0; 4],
                         uniform_c: [0.0; 4],
                         uniform_d: [0.0; 4],
-                        color_a: [file_fg.r, file_fg.g, file_fg.b, file_fg.a],
-                        color_b: [0.0; 4],
+                        color_a: theme::LIST_ICON_DETAIL().to_rgba(),
+                        // Lift the fill on the selected row so a blue folder
+                        // does not sink into the blue selection accent.
+                        color_b: if is_selected {
+                            let [r, g, b, a] = list_icon_fill(icon);
+                            [r + (1.0 - r) * 0.30, g + (1.0 - g) * 0.30, b + (1.0 - b) * 0.30, a]
+                        } else {
+                            list_icon_fill(icon)
+                        },
                         color_c: [0.0; 4],
                         color_d: [0.0; 4],
                         corner_radius: 0.0,
@@ -1536,6 +1561,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     // Aspect-corrected coordinates: x in [-a, a], y in [-1, 1]
     float a = in.aspect;
     float2 p = float2((uv.x - 0.5) * 2.0 * a, (uv.y - 0.5) * 2.0);
+    // Finder-sized disclosure: about half the box, thin stroke.
+    p *= 1.85;
 
     // Right chevron ">" — endpoints in aspect-corrected space
     float2 r_pt = float2(0.25 * a, 0.0);
@@ -1567,7 +1594,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float d = min(seg1, seg2);
 
     // Stroke width + anti-aliasing
-    float stroke = 0.18;
+    float stroke = 0.19;
     float edge = fwidth(d) * 1.2;
     float mask = smoothstep(stroke + edge, stroke - edge, d);
 

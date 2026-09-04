@@ -24,6 +24,9 @@
 
 (import eseq.seq-panels)
 
+;; Drag-and-drop sample import modal (zero footprint while closed).
+(import eseq.sample-import)
+
 (export track-selected-binding
         expanded-track-ids
         select-track-for-edit
@@ -500,76 +503,65 @@
 
 (defwidget seqv-track-volume-meter
   :width 8.2 :height 1.05
-  :paint-margin 0.16
-  :state (level volume track-r track-g track-b)
-  :bindable (level volume track-r track-g track-b)
+  :paint-margin 0.28
+  :state (level volume)
+  :bindable (level volume)
   :shader
   (let ((lvl (min 1.0 (max 0.0 level)))
         (vol (min 1.0 (max 0.0 volume)))
-        (track (sdf/rounded-rect width height 0.18))
         (green-end (min lvl 0.70))
         (yellow-end (min lvl 0.88))
         (red-end lvl)
-        (marker-start (max 0.0 (- vol 0.012)))
-        (marker-end (min 1.0 (+ vol 0.012))))
+        (handle-x (* aspect (- (* 2.0 vol) 1.0)))
+        (lane-track
+          (min
+            (sdf/translate 0.0 -0.23 (sdf/rounded-rect width 0.17 0.0))
+            (sdf/translate 0.0 0.23 (sdf/rounded-rect width 0.17 0.0)))))
     (sdf/layer
-      (sdf/fill track
+      (sdf/fill lane-track
         (material
           :lighting (lighting :edge-min -0.45 :edge-max 0.35
             :light (vec3 0.0 -1.4 2.2) :shininess 24.0)
-          :color (rgba 0.035 0.040 0.050 0.2)))
+          :color (rgba 0.025 0.030 0.038 0.72)))
       (if (> green-end 0.005)
         (sdf/fill
           (let ((__start 0.0)
                 (__end green-end)
-                (__half_w (* 0.5 aspect (- __end __start)))
-                (__half_h 0.30)
-                (__radius (min 0.15 (min __half_h (max __half_w 0.001)))))
-            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
-                  (y (* 0.5 y)))
-              (sdf/rounded-rect __half_w __half_h __radius)))
-          (material :color (rgba 0.10 0.85 0.30 1.0)))
+                (__half_w (* 0.5 aspect (- __end __start))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end))))))
+              (min
+                (sdf/translate 0.0 -0.23 (sdf/rounded-rect __half_w 0.17 0.0))
+                (sdf/translate 0.0 0.23 (sdf/rounded-rect __half_w 0.17 0.0)))))
+          (material :color (rgba 0.12 0.86 0.34 1.0)))
         (rgba 0 0 0 0))
       (if (> (- yellow-end 0.70) 0.005)
         (sdf/fill
           (let ((__start 0.70)
                 (__end yellow-end)
-                (__half_w (* 0.5 aspect (- __end __start)))
-                (__half_h 0.30)
-                (__radius (min 0.15 (min __half_h (max __half_w 0.001)))))
-            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
-                  (y (* 0.5 y)))
-              (sdf/rounded-rect __half_w __half_h __radius)))
+                (__half_w (* 0.5 aspect (- __end __start))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end))))))
+              (min
+                (sdf/translate 0.0 -0.23 (sdf/rounded-rect __half_w 0.17 0.0))
+                (sdf/translate 0.0 0.23 (sdf/rounded-rect __half_w 0.17 0.0)))))
           (material :color (rgba 0.96 0.82 0.18 1.0)))
         (rgba 0 0 0 0))
       (if (> (- red-end 0.88) 0.005)
         (sdf/fill
           (let ((__start 0.88)
                 (__end red-end)
-                (__half_w (* 0.5 aspect (- __end __start)))
-                (__half_h 0.30)
-                (__radius (min 0.15 (min __half_h (max __half_w 0.001)))))
-            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
-                  (y (* 0.5 y)))
-              (sdf/rounded-rect __half_w __half_h __radius)))
+                (__half_w (* 0.5 aspect (- __end __start))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end))))))
+              (min
+                (sdf/translate 0.0 -0.23 (sdf/rounded-rect __half_w 0.17 0.0))
+                (sdf/translate 0.0 0.23 (sdf/rounded-rect __half_w 0.17 0.0)))))
           (material :color (rgba 0.95 0.18 0.16 1.0)))
         (rgba 0 0 0 0))
       (sdf/fill
-        (let ((__start marker-start)
-              (__end marker-end)
-              (__half_w (* 0.5 aspect (- __end __start)))
-              (__half_h 0.44)
-              (__radius 0.045))
-          (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
-                (y (* 0.5 y)))
-            (sdf/rounded-rect __half_w __half_h __radius)))
+        (sdf/translate handle-x 0.0 (sdf/circle 0.72))
         (material
-          :lighting (lighting :edge-min -0.30 :edge-max 0.45
-            :light (vec3 0.0 -1.0 2.6) :shininess 64.0)
-          :color
-            (eseq.materials/color
-              (rgba (+ (* track-r 0.38) 0.45) (+ (* track-g 0.38) 0.45) (+ (* track-b 0.38) 0.45) 1.0)
-              (rgba 0.95 0.96 0.98 1.0)))))))
+          :lighting (lighting :edge-min -0.24 :edge-max 0.62
+            :light (vec3 -0.35 -1.0 2.8) :shininess 54.0)
+          :color (rgba 0.90 0.91 0.93 0.64))))))
 
 (defwidget seqv-ellipsis-button
   :width 2.2 :height 1.2
@@ -746,8 +738,8 @@
         ;; toggled fill
         (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
           (material
-            :lighting (lighting :edge-min -0.25 :edge-max 0.95
-              :light (vec3 0.1 -1.4 0.3) :shininess 32.0)
+            :lighting (lighting :edge-min -0.15 :edge-max 1.15
+              :light (vec3 0.01 -0.4 1.8) :shininess 32.0)
             :color (if (= active 1)
               (if (= muted 1)
                 (* 0.7 (eseq.materials/color offcol border))
@@ -855,9 +847,6 @@
       :background "seqv-track-volume-meter"
       :level (track-peak i)
       :volume (track-volume-binding i)
-      :track-r (track-color-r-binding i)
-      :track-g (track-color-g-binding i)
-      :track-b (track-color-b-binding i)
       :on-click (lambda (event) (set-track-volume-from-event i event))
       :on-drag (lambda (event) (set-track-volume-from-event i event))))
   )
@@ -907,6 +896,10 @@
           (badge (track-name-display name)
             :key (str "track-name-label-" i)
             :icon (eseq.track-collapse/type-icon i)
+            ;; Bound track color fills the device glyph (Logic-style).
+            :track-r (track-color-r-binding i)
+            :track-g (track-color-g-binding i)
+            :track-b (track-color-b-binding i)
             :font-size 11 :width 8.6 :height 1 :padding 0
             :h-align :left
             :background-color :transparent
@@ -917,6 +910,7 @@
               (rgba 0.4 0.4 0.4 0.6)
               :dim)
             :bg :transparent))
+        (box :width 0.5)
         (track-volume-control i)
         ;; Take-lane indicator (takes spec 10 UX): green = a take governs
         ;; the lane (steps dim, grid read-only); grey = the performer
@@ -1540,9 +1534,9 @@
 
 (def expanded-track-editor (track track-id)
   (let ((mode (track-param-mode track-id)))
-    (box :padding 0.25
+    (box :padding 0.85
       (box 
-        :background-color (rgba 0.1 0.1 0.1 0.2) :corner-radius 8
+        :background-color :buffer-bg :corner-radius 8
         (v-stack :width :fill :padding 0.35 :gap 0.1
           (h-stack :gap 0.5
             (box :width 1)
@@ -1772,21 +1766,17 @@
 ;; Volume/meter for a group's backing bus. Group bus lists are rebuilt per
 ;; frame, so an unresolved index degrades to a spacer instead of an error.
 (def group-volume-control (gidx bus-idx)
-  (let ((c (eseq.drum-rack-v2/color gidx)))
-    (v-stack (box :height 0.13)
-      (if (>= bus-idx 0)
-        (box
-          :key (group-element-key gidx "volume-control")
-          :width 8.2 :height 1.25
-          :background "seqv-track-volume-meter"
-          :level (bind-seq (str "bus-peak-" bus-idx))
-          :volume (bind-seq-nth "bus-volumes" bus-idx)
-          :track-r (nth c 0)
-          :track-g (nth c 1)
-          :track-b (nth c 2)
-          :on-click (lambda (event) (group-bus-volume-from-event bus-idx event))
-          :on-drag (lambda (event) (group-bus-volume-from-event bus-idx event)))
-        (box :width 8.2 :height 1.25 :bg :transparent)))))
+  (v-stack (box :height 0.13)
+    (if (>= bus-idx 0)
+      (box
+        :key (group-element-key gidx "volume-control")
+        :width 8.2 :height 1.25
+        :background "seqv-track-volume-meter"
+        :level (bind-seq (str "bus-peak-" bus-idx))
+        :volume (bind-seq-nth "bus-volumes" bus-idx)
+        :on-click (lambda (event) (group-bus-volume-from-event bus-idx event))
+        :on-drag (lambda (event) (group-bus-volume-from-event bus-idx event)))
+      (box :width 8.2 :height 1.25 :bg :transparent))))
 
 ;; Selecting a group selects its backing bus, exactly as the mixer header does,
 ;; so the fx panel follows the group chain.
@@ -2249,6 +2239,7 @@
             :shadow-color :transparent
             :color (if muted (rgba 0.4 0.4 0.4 0.6) :dim)
             :bg :transparent))
+        (box :width 0.3)
         ;; No PADS/KIT buttons here: selecting the rack puts both the pad grid
         ;; and SAVE KIT in the *fx* buffer's rack panel (ui/effects/buffers.lisp,
         ;; docs/drum-rack-v2-spec.md, "UI"), so the header keeps the same
@@ -2298,6 +2289,10 @@
 
 (effect-buffer "*sequencer*"
   (v-stack :width :fill :fill-content-style true :padding 0.00 :gap 0.0
+    ;; Sample import modal: opened by Rust after a file drop; renders as a
+    ;; centered overlay (modal spec) with zero footprint here while closed.
+    (subtree :key "seq-sample-import"
+      (eseq.sample-import/panel))
     (each (eseq.drum-rack-v2/grid-render-items) |item|
       (grid-render-item item))
 

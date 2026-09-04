@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "engine_name": "Drums/Digi Clap/",
+  "source_file": "instruments/Drums/Digi Clap/dsp.lisp",
+  "presets": [
+    {
+      "id": "808 Classic",
+      "name": "808 Classic",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 1,
+        "dec": 260,
+        "tone": 1050,
+        "reso": 0.7,
+        "bursts": 4,
+        "sprd": 10,
+        "bdec": 9,
+        "snap": 0.8,
+        "body": 0.62,
+        "clip": 0.15
+      }
+    },
+    {
+      "id": "808 Dub",
+      "name": "808 Dub",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 1,
+        "dec": 520,
+        "tone": 880,
+        "reso": 1.2,
+        "bursts": 4,
+        "sprd": 11,
+        "bdec": 12,
+        "snap": 0.65,
+        "body": 0.7,
+        "clip": 0.28,
+        "srr": 0.12,
+        "dist": 0.18,
+        "eqf": 1400,
+        "eqg": 3
+      }
+    },
+    {
+      "id": "808 Tight",
+      "name": "808 Tight",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 1,
+        "dec": 120,
+        "tone": 1300,
+        "reso": 0.9,
+        "bursts": 3,
+        "sprd": 8,
+        "bdec": 6,
+        "snap": 0.9,
+        "body": 0.4,
+        "clip": 0.1
+      }
+    },
+    {
+      "id": "909 Clap",
+      "name": "909 Clap",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 2,
+        "dec": 300,
+        "tone": 1250,
+        "reso": 0.6,
+        "bursts": 4,
+        "sprd": 9,
+        "bdec": 7,
+        "snap": 0.85,
+        "body": 0.7,
+        "tlpf": 6500,
+        "clip": 0.3
+      }
+    },
+    {
+      "id": "909 Big Room",
+      "name": "909 Big Room",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 2,
+        "dec": 900,
+        "tone": 1100,
+        "reso": 0.5,
+        "bursts": 5,
+        "sprd": 11,
+        "bdec": 8,
+        "snap": 0.8,
+        "body": 0.95,
+        "tlpf": 4200,
+        "clip": 0.35,
+        "dist": 0.2
+      }
+    },
+    {
+      "id": "Linn Clap",
+      "name": "Linn Clap",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 3,
+        "dec": 280,
+        "tone": 1150,
+        "reso": 0.8,
+        "bursts": 3,
+        "sprd": 7,
+        "bdec": 8,
+        "snap": 0.8,
+        "body": 0.55,
+        "air": 0.35,
+        "crowd": 0.55,
+        "bits": 8,
+        "clip": 0.15
+      }
+    },
+    {
+      "id": "Linn Crushed",
+      "name": "Linn Crushed",
+      "base_note_offset": -3.0,
+      "params": {
+        "engine": 3,
+        "dec": 360,
+        "tone": 900,
+        "reso": 1.0,
+        "bursts": 4,
+        "sprd": 6,
+        "bdec": 10,
+        "snap": 0.9,
+        "body": 0.7,
+        "air": 0.6,
+        "crowd": 0.8,
+        "bits": 6,
+        "clip": 0.3,
+        "srr": 0.3
+      }
+    }
+  ]
+}

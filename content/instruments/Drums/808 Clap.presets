@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "engine_name": "Drums/808 Clap/",
+  "source_file": "instruments/Drums/808 Clap/dsp.lisp",
+  "presets": [
+    {"id": "R-8 808Clap", "name": "R-8 808Clap", "base_note_offset": 0.0, "params": {}},
+    {"id": "Tight", "name": "Tight", "base_note_offset": 0.0, "params": {"flam": 0.7, "decay": 0.6, "body": 0.8}},
+    {"id": "Dub Room", "name": "Dub Room", "base_note_offset": 0.0, "params": {"decay": 2.2, "body": 1.4, "bright": 0.6, "drive": 1.6}},
+    {"id": "Wide Flam", "name": "Wide Flam", "base_note_offset": 0.0, "params": {"flam": 1.6, "snap": 1.3}},
+    {"id": "Dark", "name": "Dark", "base_note_offset": -4.0, "params": {"tune": -4, "bright": 0.2, "decay": 1.4}}
+  ]
+}

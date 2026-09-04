@@ -1,0 +1,66 @@
+{
+ "version": 1,
+ "engine_name": "Drums/R8 Kick 03/",
+ "source_file": "instruments/Drums/R8 Kick 03/dsp.lisp",
+ "presets": [
+  {
+   "id": "R8 Kick 03",
+   "name": "R8 Kick 03",
+   "base_note_offset": 0.0,
+   "params": {}
+  },
+  {
+   "id": "Dry",
+   "name": "Dry",
+   "base_note_offset": 0.0,
+   "params": {
+    "hiss": 0.0,
+    "noise": 0.0
+   }
+  },
+  {
+   "id": "Tight",
+   "name": "Tight",
+   "base_note_offset": 0.0,
+   "params": {
+    "decay": 0.5,
+    "ring": 0.6,
+    "glide": 1.4
+   }
+  },
+  {
+   "id": "Boomy",
+   "name": "Boomy",
+   "base_note_offset": -3.0,
+   "params": {
+    "tune": -3.0,
+    "decay": 2.2,
+    "knock": 0.5,
+    "glide": 0.6
+   }
+  },
+  {
+   "id": "Woody",
+   "name": "Woody",
+   "base_note_offset": 0.0,
+   "params": {
+    "knock": 2.5,
+    "ring": 1.8,
+    "noise": 1.5,
+    "drive": 1.6
+   }
+  },
+  {
+   "id": "Sub",
+   "name": "Sub",
+   "base_note_offset": -7.0,
+   "params": {
+    "tune": -7.0,
+    "knock": 0.0,
+    "noise": 0.3,
+    "hiss": 0.0,
+    "decay": 1.8
+   }
+  }
+ ]
+}

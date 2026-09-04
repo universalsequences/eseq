@@ -23,6 +23,7 @@
 ;; ui/main.lisp used to encode by listing those files above us.
 (import eseq.track-collapse)
 (import eseq.sound-palette)
+(import eseq.sample-import)
 
 (export view-start
         view-duration
@@ -1747,6 +1748,10 @@
     ;; frame (modal spec §4) with zero footprint here while closed.
     (subtree :key "arr-sound-palette"
       (eseq.sound-palette/panel))
+    ;; Sample import modal: same mount as *sequencer* (the two buffers never
+    ;; share a tile); Rust activates whichever tile shows it before opening.
+    (subtree :key "arr-sample-import"
+      (eseq.sample-import/panel))
     (subtree :key "arr-scene-row"
       (box :width :fill
         (h-stack :width :fill :align :start

@@ -18288,7 +18288,7 @@ fn layout_keeps_lexilush_history_nodes_near_feedback_writers() {
 #[test]
 fn fixture_videogame_arp_projects_without_parse_failure() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../content/instruments/arcade/videogame-arp/dsp.lisp");
+        .join("../sequencer/tests/fixtures/instruments/arcade/videogame-arp/dsp.lisp");
     let source = std::fs::read_to_string(path).unwrap();
     let patch = parse_patch_source(&source, PatcherIntent::Instrument).unwrap();
     assert!(!patch.nodes.is_empty());
@@ -18301,7 +18301,7 @@ fn fixture_autogen_filters_param_ids_still_match_its_layout_sidecar() {
     // the legacy `(param fm.attack … @group fm)` spelling must stay `fm.attack`
     // rather than becoming `fm.fm.attack`.
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../content/instruments/arcade/autogen-filters");
+        .join("../sequencer/tests/fixtures/instruments/arcade/autogen-filters");
     let source = std::fs::read_to_string(dir.join("dsp.lisp")).unwrap();
     let patch = parse_patch_source(&source, PatcherIntent::Instrument).unwrap();
     let layout: serde_json::Value =

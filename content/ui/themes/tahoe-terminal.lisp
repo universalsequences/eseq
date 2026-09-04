@@ -62,6 +62,18 @@
 
       :border-active   '(0.31 0.55 0.73)
       :border-inactive '(0.155 0.245 0.330)
+
+      ;; Browser tree icons (solid colored silhouettes; the rail keeps white strokes)
+      :list-icon-detail     '(0.06 0.12 0.18)   ; cutouts match the row bg
+      :list-icon-folder     '(0.31 0.55 0.73)   ; category hues at the accent's saturation/brightness
+      :list-icon-instrument '(0.83 0.52 0.34)
+      :list-icon-sample     '(0.32 0.71 0.47)
+      :list-icon-kit        '(0.83 0.33 0.35)
+      :list-icon-audio-fx   '(0.36 0.66 0.81)
+      :list-icon-midi-fx    '(0.52 0.40 0.81)
+      :list-icon-preset     '(0.82 0.65 0.35)
+      :list-icon-lfo        '(0.74 0.37 0.62)
+      :list-icon-misc       '(0.48 0.53 0.66)
       :tree-row-alt-bg '(0.072 0.125 0.200)
 
       :fx-panel-bg       '(0.082 0.140 0.222)
@@ -112,9 +124,9 @@
       :widget-knob-filled   '(0.54 0.56 0.87)
       :widget-knob-track    '(0.022 0.045 0.082)
       :widget-knob-mod-dot  '(1.00 0.78 0.32)
-      :sequencer-step-border          '(0.155 0.245 0.330)
+      :sequencer-step-border          '(0.055 0.045 0.120)
       :sequencer-step-selected-border '(0.80 0.86 0.95)
-      :sequencer-step-off-fill        '(0.034 0.062 0.105)
+      :sequencer-step-off-fill        '(0.034 0.062 0.125)
       :sequencer-step-off-fill-alt    '(0.095 0.155 0.238)
       :patcher-bg           '(0.052 0.096 0.158)
       :patcher-grid-minor   '(0.11 0.17 0.26 0.36)

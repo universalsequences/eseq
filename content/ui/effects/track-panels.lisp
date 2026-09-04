@@ -375,10 +375,10 @@
 ;; through the rhythmic decade (docs/step-retrig-spec.md).
 (def step-param-taper (mode)
   (if (= mode 8) "log"
-    ;; Retrig count (mode 7) is 0..127 with the musical action under ~16 and
-    ;; 127 = infinite: a cube taper keeps small counts dialable and still
-    ;; reaches inf at the top of the drag.
-    (if (= mode 7) "cube" "linear")))
+    ;; Retrig count (mode 7) is 0..127 with most musical action at low counts.
+    ;; Square keeps that range precise without making the first repeat require
+    ;; the excessive travel of the old cube curve; 127/inf remains reachable.
+    (if (= mode 7) "square" "linear")))
 
 ;; The retrig pickers span 0..127 / 1..1024 from a one-row strip; pin their
 ;; full-travel drag distance so a flick is not the whole range.

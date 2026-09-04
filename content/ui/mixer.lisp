@@ -608,9 +608,9 @@
               :selected (track-pattern-cell-selected-binding track pattern-id)
               ;; Dimmed so the sound glyph on top carries the cell's identity;
               ;; the launch/selection states still read through the shader.
-              :track-r (* 0.95 (track-color-r track false))
-              :track-g (* 0.95 (track-color-g track false))
-              :track-b (* 0.95 (track-color-b track false))
+              :track-r (* 0.65 (track-color-r track false))
+              :track-g (* 0.65 (track-color-g track false))
+              :track-b (* 0.65 (track-color-b track false))
               :on-click (lambda (event) (launch-track-pattern track cell))
               ;; The pattern's bound sound, as its palette glyph (host feed:
               ;; sync_pattern_cell_glyph_frames). The tuned shader styling is
@@ -635,9 +635,9 @@
                 :play-glyph-padding 0.14
                 :play-glyph-opacity 0.4
                 :play-color :white
-                :tint-r (* 0.4 (track-color-r track false))
-                :tint-g (* 0.4 (track-color-g track false))
-                :tint-b (* 0.4 (track-color-b track false))
+                :tint-r (* 0.1 (track-color-r track false))
+                :tint-g (* 0.1 (track-color-g track false))
+                :tint-b (* 0.1 (track-color-b track false))
                 ))))))))
 
 (def mod-output-style
@@ -1086,7 +1086,7 @@
       :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
       (if (= track-renaming i)
         (track-rename-input i "track-rename-input-" 9.8 10)
-        (badge (substring (nth SEQ.track-names i) 0 15)
+        (badge (substring (nth SEQ.track-names i) 0 12)
           :key (str "track-label-content-" i)
           :icon (eseq.track-collapse/type-icon i)
           :width 9.8

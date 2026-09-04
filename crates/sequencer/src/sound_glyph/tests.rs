@@ -5,7 +5,8 @@ use crate::effects::EffectDescriptor;
 use super::*;
 
 fn instrument_source(rel: &str) -> String {
-    let path = crate::app_paths::app_paths().instruments_dir().join(rel);
+    // Old factory instruments live on as dev fixtures after the 2026-09 curation.
+    let path = crate::app_paths::app_paths().dev_instrument_fixtures_dir().expect("dev layout has the instrument fixture tree").join(rel);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 

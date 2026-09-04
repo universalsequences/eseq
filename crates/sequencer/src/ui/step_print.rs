@@ -109,6 +109,7 @@ pub(crate) fn print_step_param_from_keyword(name: &str) -> Option<StepParam> {
         "velocity" | "vel" => Some(StepParam::Velocity),
         "duration" | "dur" => Some(StepParam::Duration),
         "transpose" => Some(StepParam::Transpose),
+        "pan" => Some(StepParam::Pan),
         "retrig" | "rtrg" => Some(StepParam::Retrig),
         "retrig-rate" | "rate" => Some(StepParam::RetrigRate),
         _ => None,
@@ -1459,6 +1460,7 @@ mod step_print_tests {
                 StepParam::Velocity => "velocity",
                 StepParam::Duration => "duration",
                 StepParam::Transpose => "transpose",
+                StepParam::Pan => "pan",
                 StepParam::Retrig => "retrig",
                 StepParam::RetrigRate => "retrig-rate",
                 other => panic!("{other:?} is in STEP_INSPECTOR_PARAMS but has no keyword"),
@@ -1469,6 +1471,5 @@ mod step_print_tests {
                 "{keyword} must resolve for printing"
             );
         }
-        assert_eq!(super::print_step_param_from_keyword("pan"), None);
     }
 }

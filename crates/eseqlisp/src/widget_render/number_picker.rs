@@ -205,6 +205,20 @@ mod tests {
     }
 
     #[test]
+    fn square_taper_reaches_one_without_sacrificing_full_range() {
+        let mut props = HashMap::new();
+        props.insert("min".to_string(), Value::Number(0.0));
+        props.insert("max".to_string(), Value::Number(127.0));
+        props.insert("decimals".to_string(), Value::Number(0.0));
+        props.insert("taper".to_string(), Value::String("square".to_string()));
+        props.insert("drag-rows".to_string(), Value::Number(24.0));
+
+        // Two rows reaches the first repeat (the old cube curve needed five).
+        assert_eq!(drag_to(props.clone(), 0.0, 1.0, -1.0), 1.0);
+        assert_eq!(drag_to(props, 0.0, 1.0, -23.0), 127.0);
+    }
+
+    #[test]
     fn explicit_step_snaps_decimal_values() {
         let props = HashMap::from([
             ("decimals".to_string(), Value::Number(2.0)),

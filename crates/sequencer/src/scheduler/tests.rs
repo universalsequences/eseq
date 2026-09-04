@@ -5258,6 +5258,28 @@
     }
 
     #[test]
+    fn sampler_slice_mode_survives_an_attack_plock() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[track].apply_descriptor_with_modulator(&desc, 12, 13);
+        let slot = &state.pattern.instrument_slots[track];
+        slot.defaults
+            .set(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 1.0);
+        slot.set_plock(step, 0, 25.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut params = resolve_sampler_params(&snapshot, track, step);
+        let inst = super::resolve_instrument_params(&snapshot, track, step, None);
+        super::apply_sampler_instrument_param_overrides(&snapshot, track, &mut params, &inst);
+        assert_eq!(params.attack_ms, 25.0);
+        assert_eq!(params.slice_mode, 1.0);
+        assert!(!params.start_point_locked);
+        assert!(!params.end_point_locked);
+    }
+
+    #[test]
     fn resolve_sampler_params_carries_beats_warp_controls_by_node_param() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;

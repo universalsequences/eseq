@@ -41,7 +41,7 @@
 
 (def parameter-knob (fx label-text p decimals)
   (knob-number :label label-text
-    :value (eseq.effects.param-controls/fx-param-value p)
+    :value (eseq.effects.param-controls/fx-param-value-for fx p)
     :min (get p :min) :max (get p :max) :decimals decimals
     :mod-offset (eseq.effects.param-controls/param-mod-offset p)
     :mod-scale (eseq.effects.param-controls/param-mod-scale p)
@@ -59,7 +59,7 @@
 
 (def percent-knob (fx label-text p)
   (knob-number :label label-text
-    :value (eseq.effects.param-controls/fx-param-value p)
+    :value (eseq.effects.param-controls/fx-param-value-for fx p)
     :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
     :font-size 9.5 :label-font-size 9.5
     :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim

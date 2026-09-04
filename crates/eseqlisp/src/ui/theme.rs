@@ -195,6 +195,18 @@ pub struct Theme {
     pub patcher_agentic_spinner: Color,
     pub border_active: Color,
     pub border_inactive: Color,
+    /// Filled list-style browser icons (tree rows). The rail keeps the
+    /// stroke style; these only color the tiles and folder silhouettes.
+    pub list_icon_detail: Color,
+    pub list_icon_folder: Color,
+    pub list_icon_instrument: Color,
+    pub list_icon_sample: Color,
+    pub list_icon_kit: Color,
+    pub list_icon_audio_fx: Color,
+    pub list_icon_midi_fx: Color,
+    pub list_icon_preset: Color,
+    pub list_icon_lfo: Color,
+    pub list_icon_misc: Color,
 }
 
 macro_rules! theme_slots {
@@ -1012,6 +1024,16 @@ theme_slots!(
         BORDER_INACTIVE,
         Color::from_hex(0x3a, 0x3a, 0x3a)
     ),
+    (list_icon_detail, LIST_ICON_DETAIL, Color::from_hex(0x14, 0x15, 0x18)),
+    (list_icon_folder, LIST_ICON_FOLDER, Color::from_hex(0x6b, 0xae, 0xf0)),
+    (list_icon_instrument, LIST_ICON_INSTRUMENT, Color::from_hex(0xeb, 0x94, 0x3d)),
+    (list_icon_sample, LIST_ICON_SAMPLE, Color::from_hex(0x57, 0xb8, 0x75)),
+    (list_icon_kit, LIST_ICON_KIT, Color::from_hex(0xdb, 0x5c, 0x57)),
+    (list_icon_audio_fx, LIST_ICON_AUDIO_FX, Color::from_hex(0x3d, 0xa3, 0xbd)),
+    (list_icon_midi_fx, LIST_ICON_MIDI_FX, Color::from_hex(0x9e, 0x75, 0xdb)),
+    (list_icon_preset, LIST_ICON_PRESET, Color::from_hex(0xe6, 0xb8, 0x47)),
+    (list_icon_lfo, LIST_ICON_LFO, Color::from_hex(0xe0, 0x70, 0xa8)),
+    (list_icon_misc, LIST_ICON_MISC, Color::from_hex(0x8c, 0x91, 0x9e)),
 );
 
 static ACTIVE_THEME: OnceLock<RwLock<Theme>> = OnceLock::new();

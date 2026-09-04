@@ -1,0 +1,91 @@
+{
+ "version": 1,
+ "engine_name": "Drums/Orbit Tom 66/",
+ "source_file": "instruments/Drums/Orbit Tom 66/dsp.lisp",
+ "presets": [
+  {
+   "id": "Orbit Tom 66",
+   "name": "Orbit Tom 66",
+   "base_note_offset": 0.0,
+   "params": {}
+  },
+  {
+   "id": "Dry",
+   "name": "Dry",
+   "base_note_offset": 0.0,
+   "params": {
+    "noise": 0.0
+   }
+  },
+  {
+   "id": "Pure Sweep",
+   "name": "Pure Sweep",
+   "base_note_offset": 0.0,
+   "params": {
+    "harm": 0.0,
+    "noise": 0.0
+   }
+  },
+  {
+   "id": "Low Tom",
+   "name": "Low Tom",
+   "base_note_offset": -5.0,
+   "params": {
+    "tune": -5.0,
+    "decay": 1.4
+   }
+  },
+  {
+   "id": "High Tom",
+   "name": "High Tom",
+   "base_note_offset": 5.0,
+   "params": {
+    "tune": 5.0,
+    "decay": 0.8,
+    "harm": 1.2
+   }
+  },
+  {
+   "id": "Metal Tom",
+   "name": "Metal Tom",
+   "base_note_offset": 0.0,
+   "params": {
+    "ratio": 1.41,
+    "harm": 1.8,
+    "bright": 1.2
+   }
+  },
+  {
+   "id": "Sub Tom",
+   "name": "Sub Tom",
+   "base_note_offset": -12.0,
+   "params": {
+    "tune": -12.0,
+    "sweep": 1.6,
+    "decay": 1.8,
+    "harm": 0.5
+   }
+  },
+  {
+   "id": "Hard Orbit",
+   "name": "Hard Orbit",
+   "base_note_offset": 0.0,
+   "params": {
+    "drive": 2.5,
+    "harm": 1.6,
+    "bright": 1.15,
+    "sweep": 0.7
+   }
+  },
+  {
+   "id": "Snappy",
+   "name": "Snappy",
+   "base_note_offset": 0.0,
+   "params": {
+    "sweep": 0.5,
+    "decay": 0.5,
+    "harm": 1.3
+   }
+  }
+ ]
+}

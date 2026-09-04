@@ -599,6 +599,36 @@ impl AppPaths {
         distinct_paths([self.instruments_dir(), self.user_instruments_dir()])
     }
 
+    /// The pre-curation factory instrument tree, kept as checked-in test
+    /// fixtures when the shipped factory set was narrowed (2026-09). Dev-only:
+    /// tests and dev projects still resolve these by name, but behind both the
+    /// factory and user tiers, and the browser never lists them. Release
+    /// layouts have no such root.
+    pub fn dev_instrument_fixtures_dir(&self) -> Option<PathBuf> {
+        match self {
+            AppPaths::Dev { sequencer_dir, .. } => {
+                Some(sequencer_dir.join("tests/fixtures/instruments"))
+            }
+            AppPaths::Release { .. } => None,
+        }
+    }
+
+    /// Content roots that host-UI asset reads (`asset-metadata`, viewer
+    /// `:file` props) try, in order, for content-root-relative spellings such
+    /// as `instruments/<name>/waves/bank.json`: the factory content root, then
+    /// the user data root (an instrument copied into the user tier keeps its
+    /// spelling), then the dev fixture root's parent.
+    pub fn ui_asset_fallback_bases(&self) -> Vec<PathBuf> {
+        let mut bases = vec![self.factory_root(), self.user_data_root()];
+        if let Some(parent) = self
+            .dev_instrument_fixtures_dir()
+            .and_then(|dir| dir.parent().map(Path::to_path_buf))
+        {
+            bases.push(parent);
+        }
+        distinct_vec_paths(bases)
+    }
+
     /// Base for resolving relative `@file` asset references when a compile
     /// supplies no explicit asset base.
     pub fn dgen_asset_fallback_base(&self) -> PathBuf {
@@ -905,7 +935,7 @@ pub fn init_dev() -> io::Result<()> {
 fn configure_eseqlisp_roots(paths: &AppPaths) {
     eseqlisp::defmacro_library::set_default_library_root(paths.defmacros_dir());
     eseqlisp::widget_render::patcher::set_asset_roots(
-        paths.factory_root(),
+        paths.ui_asset_fallback_bases(),
         paths.user_assets_dir(),
         paths.factory_assets_dir(),
     );

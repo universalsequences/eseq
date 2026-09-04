@@ -208,6 +208,18 @@
       ;; Active content gets system-blue focus; inactive content gets a hairline.
       :border-active   '(0.00 0.478 1.00)
       :border-inactive '(0.776 0.776 0.792)
+
+      ;; Browser tree icons (solid colored silhouettes; the rail keeps dark strokes)
+      :list-icon-detail     '(0.99 0.99 1.00)   ; cutouts match the row bg
+      :list-icon-folder     '(0.10 0.51 0.96)   ; category hues at the accent's saturation/brightness
+      :list-icon-instrument '(0.96 0.57 0.10)
+      :list-icon-sample     '(0.12 0.89 0.31)
+      :list-icon-kit        '(0.96 0.14 0.10)
+      :list-icon-audio-fx   '(0.17 0.71 0.96)
+      :list-icon-midi-fx    '(0.20 0.18 0.92)
+      :list-icon-preset     '(0.96 0.79 0.10)
+      :list-icon-lfo        '(0.68 0.17 0.94)
+      :list-icon-misc       '(0.35 0.35 0.37)
       )))
 
 (mac-osx-light-theme)

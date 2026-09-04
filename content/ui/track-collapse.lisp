@@ -57,13 +57,13 @@
         (if (= track-type "custom")
           :piano
           (if (= track-type "rack")
-            :sliders
+            :sampler
             (if (= track-type "modulator") :sine nil)))))
     nil))
 
 (def group-type-icon (group)
-  ;; The browser's Kits tab uses :sampler. A drum rack is the corresponding
-  ;; track-group identity, distinct from the slot-based rack's :sliders icon.
+  ;; The browser lists Drum Rack and Instrument Rack under the same :sampler
+  ;; rack glyph, so both the drum-rack group and the slot-based rack use it.
   (if (get group :rack) :sampler nil))
 
 (def toggle-collapsed-ui (track)
