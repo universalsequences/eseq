@@ -1536,7 +1536,7 @@
   (let ((mode (track-param-mode track-id)))
     (box :padding 0.85
       (box 
-        :background-color :buffer-bg :corner-radius 8
+        :background-color :buffer-bg :corner-radius 16
         (v-stack :width :fill :padding 0.35 :gap 0.1
           (h-stack :gap 0.5
             (box :width 1)

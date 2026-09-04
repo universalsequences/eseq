@@ -659,7 +659,7 @@
         :mixer-strip-selected-bg
         :mixer-control-bg
         )
-      :color (if selected :fg :gray)
+      :color (if selected :fg :dimmer)
       :border-color (if selected :dim  :none)
       :height 1.0
       :padding 0.8532
@@ -681,7 +681,7 @@
         :mixer-strip-selected-bg
         :mixer-control-bg
         )
-      :color (if selected :fg :gray)
+      :color (if selected :fg :dimmer)
       :border-color (if selected :buffer-bg  :none)
       :height 1.0
       :padding 0.8532

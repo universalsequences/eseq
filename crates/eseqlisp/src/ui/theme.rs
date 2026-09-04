@@ -12,6 +12,7 @@ pub struct Theme {
     pub fg: Color,
     pub fg_muted: Color,
     pub dim: Color,
+    pub dimmer: Color,
     pub black: Color,
     pub red: Color,
     pub green: Color,
@@ -257,6 +258,7 @@ macro_rules! theme_slots {
                 "secondary" => Some(theme.red),
                 "gray" | "grey" => Some(theme.bright_black),
                 "dim" => Some(theme.dim),
+                "dimmer" => Some(theme.dimmer),
                 "transparent" | "none" => Some(Color::rgba(0.0, 0.0, 0.0, 0.0)),
                 $(
                     stringify!($field) => Some(theme.$field),
@@ -280,6 +282,7 @@ theme_slots!(
     (fg, FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
     (fg_muted, FG_MUTED, Color::from_hex(0x50, 0x50, 0x50)),
     (dim, DIM, Color::from_hex(0x6c, 0x6c, 0x70)),
+    (dimmer, DIMMER, Color::from_hex(0x53, 0x53, 0x55)),
     (black, BLACK, Color::from_hex(0x05, 0x05, 0x05)),
     (red, RED, Color::from_hex(0xff, 0x3b, 0x3b)),
     (green, GREEN, Color::from_hex(0xc8, 0xff, 0x00)),
@@ -1277,6 +1280,27 @@ mod tests {
             named_color("sequencer_step_off_fill_alt"),
             Some(SEQUENCER_STEP_OFF_FILL_ALT())
         );
+    }
+
+    #[test]
+    fn dimmer_is_a_named_theme_color() {
+        let restore = current();
+        let override_value = Value::Map(std::collections::HashMap::from([(
+            "dimmer".to_string(),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::List(vec![
+                std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.25))),
+                std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.5))),
+                std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.75))),
+            ]))),
+        )]));
+
+        sync_from_value(&override_value);
+        assert_eq!(
+            named_color("dimmer"),
+            Some(Color::rgba(0.25, 0.5, 0.75, 1.0))
+        );
+        assert_eq!(named_color("dimmer"), Some(DIMMER()));
+        set_current(restore);
     }
 
     #[test]

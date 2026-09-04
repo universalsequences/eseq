@@ -14,6 +14,7 @@
       :fg             '(0.114 0.114 0.122)     ; #1d1d1f — primary label
       :fg-muted       '(0.353 0.353 0.373)     ; Strong secondary label
       :dim            '(0.365 0.365 0.384)     ; Survives disabled-state opacity
+      :dimmer         '(0.524 0.524 0.541)     ; Between :gray and :dim
       :black          '(0.114 0.114 0.122)
       :red            '(1.00 0.231 0.188)      ; #ff3b30
       :green          '(0.204 0.780 0.349)     ; #34c759

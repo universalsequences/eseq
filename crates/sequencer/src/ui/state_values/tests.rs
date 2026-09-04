@@ -1146,6 +1146,35 @@
     }
 
     #[test]
+    fn every_sequencer_theme_defines_dimmer_once() {
+        for path in [
+            "ui/themes/mac-osx-dark.lisp",
+            "ui/themes/mac-osx-light-theme.lisp",
+            "ui/themes/ableton-mid.lisp",
+            "ui/themes/mac-osx-graphite.lisp",
+            "ui/themes/mac-osx-haze.lisp",
+            "ui/themes/mac-osx-midnight.lisp",
+            "ui/themes/mac-osx-midnight-50.lisp",
+            "ui/themes/black-ir-theme.lisp",
+            "ui/themes/mac-osx-ember.lisp",
+            "ui/themes/mac-osx-violet.lisp",
+            "ui/themes/tahoe-terminal.lisp",
+        ] {
+            let src = read_factory_source(path)
+                .unwrap_or_else(|error| panic!("read {path}: {error}"));
+            assert_eq!(
+                src.lines()
+                    .filter(|line| {
+                        line.trim_start().split_ascii_whitespace().next() == Some(":dimmer")
+                    })
+                    .count(),
+                1,
+                "{path} must define :dimmer exactly once"
+            );
+        }
+    }
+
+    #[test]
     fn every_sequencer_theme_defines_the_step_surface_palette_once() {
         let step_surface_slots = [
             "sequencer-step-border",

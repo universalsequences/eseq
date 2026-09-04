@@ -4,6 +4,7 @@
 (def light-theme ()
   (apply-theme (dict
     :bg "#fafafa" :fg "#1a1a2e" :fg_muted "#8b8fa0"
+    :dim "#6c6c70" :dimmer "#85868f"
     :black "#f0f0f3" :red "#d1345b" :green "#2e8555"
     :yellow "#9a6700" :blue "#0969da" :magenta "#8250df"
     :cyan "#0c7d9d" :white "#1a1a2e"
@@ -39,6 +40,7 @@
 (def tokyonight-storm-theme ()
   (apply-theme (dict
     :bg "#24283b" :fg "#c0caf5" :fg_muted "#565f89"
+    :dim "#6c6c70" :dimmer "#606473"
     :black "#1f2335" :red "#f7768e" :green "#9ece6a"
     :yellow "#e0af68" :blue "#7aa2f7" :magenta "#bb9af7"
     :cyan "#7dcfff" :white "#c0caf5"
@@ -74,6 +76,7 @@
 (def aura-theme ()
   (apply-theme (dict
     :bg "#15141b" :fg "#edecee" :fg_muted "#6d6d6d"
+    :dim "#6c6c70" :dimmer "#6d6d6f"
     :black "#110f18" :red "#ff6767" :green "#61ffca"
     :yellow "#ffca85" :blue "#82e2ff" :magenta "#f694ff"
     :cyan "#61ffca" :white "#edecee"
@@ -109,6 +112,7 @@
 (def aqua-dark-theme ()
   (apply-theme (dict
     :bg "#0a0612" :fg "#c8d8f0" :fg_muted "#5a6e8a"
+    :dim "#6c6c70" :dimmer "#535d6d"
     :black "#061020" :red "#ff6b8a" :green "#5ec4b0"
     :yellow "#f0c060" :blue "#4a9ef5" :magenta "#a88bfa"
     :cyan "#5ccfe6" :white "#ffffff"
@@ -147,6 +151,7 @@
       :fg             '(0.88 0.88 0.89)
       :fg-muted       '(0.56 0.56 0.58)
       :dim            '(0.66 0.66 0.68)
+      :dimmer         '(0.555 0.555 0.565)
       :black          '(0.07 0.07 0.07)
       :white          '(0.92 0.92 0.94)
       :bright-black   '(0.45 0.45 0.45)
