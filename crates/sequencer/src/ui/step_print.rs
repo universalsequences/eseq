@@ -185,6 +185,7 @@ impl StepPrintState {
         if !self.armed() {
             state.step_print_override.clear();
             state.device_print_override.clear();
+            state.rack_macro_print_override.clear();
             return;
         }
         let step_entries = self
@@ -226,6 +227,23 @@ impl StepPrintState {
             })
             .collect::<Vec<_>>();
         state.device_print_override.set(self.track, device_entries);
+        // Rack-macro analog: the audio thread substitutes latched macro
+        // positions when it applies rack macros at a trigger.
+        let rack_macro_entries = self
+            .values
+            .iter()
+            .filter_map(|(target, value)| match target {
+                PrintTarget::RackMacro { macro_idx } => Some((*macro_idx, *value)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if rack_macro_entries.is_empty() {
+            state.rack_macro_print_override.clear();
+        } else {
+            state
+                .rack_macro_print_override
+                .set(self.track, &rack_macro_entries);
+        }
     }
 
     /// Rolled hits recorded while print mode is armed take the latched
@@ -581,6 +599,7 @@ pub(crate) fn print_pass(
         print.disarm();
         state.step_print_override.clear();
         state.device_print_override.clear();
+        state.rack_macro_print_override.clear();
         return PrintedSteps::default();
     }
     let track = print.track;

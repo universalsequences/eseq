@@ -461,6 +461,25 @@ const LANE_PATTERN_EVENT_CAP: usize = 1024;
 
 /// Collect the distinct pool patterns each track's lane clips resolve to and
 /// flatten their step/chord snapshots into preview events.
+pub(crate) fn arrangement_pattern_preview(
+    scenes: &ProjectScenes,
+    track: usize,
+    id: PatternId,
+) -> Option<LanePatternEvents> {
+    let data = scenes.track_pools.get(track)?.get(id)?;
+    let num_steps = data.track_params.num_steps.max(1);
+    let mut events = Vec::new();
+    flatten_pattern_events(&data, 0.0, num_steps, &mut events);
+    events.truncate(LANE_PATTERN_EVENT_CAP);
+    Some(LanePatternEvents {
+        pattern_id: id.0,
+        take_id: None,
+        num_steps,
+        length_beats: data.track_params.timebase.step_beats(num_steps) * num_steps as f64,
+        events,
+    })
+}
+
 pub(crate) fn collect_lane_pattern_events(
     lanes: &[Vec<ArrClip>],
     scenes: &ProjectScenes,
@@ -475,20 +494,7 @@ pub(crate) fn collect_lane_pattern_events(
             let mut entries: Vec<LanePatternEvents> = ids
                 .into_iter()
                 .filter_map(|id| {
-                    let data = scenes.track_pools.get(track)?.get(PatternId(id))?;
-                    let num_steps = data.track_params.num_steps.max(1);
-                    let length_beats =
-                        data.track_params.timebase.step_beats(num_steps) * num_steps as f64;
-                    let mut events = Vec::new();
-                    flatten_pattern_events(&data, 0.0, num_steps, &mut events);
-                    events.truncate(LANE_PATTERN_EVENT_CAP);
-                    Some(LanePatternEvents {
-                        pattern_id: id,
-                        take_id: None,
-                        num_steps,
-                        length_beats,
-                        events,
-                    })
+                    arrangement_pattern_preview(scenes, track, PatternId(id))
                 })
                 .collect();
             // Take entries (takes spec 11.3): one aggregated entry per take
@@ -552,60 +558,21 @@ pub(crate) fn collect_lane_pattern_events(
 
 /// `song-lane-events` value: per track, a list of
 /// `{pattern-id, num-steps, events: ((time transpose velocity)...)}` maps.
+pub(crate) fn build_pattern_preview_value(pattern: &LanePatternEvents) -> Value {
+    map_value([
+        ("pattern-id", if pattern.take_id.is_some() { Value::Nil }
+            else { Value::Number(pattern.pattern_id as f64) }),
+        ("take-id", pattern.take_id.map(|id| Value::Number(id as f64)).unwrap_or(Value::Nil)),
+        ("num-steps", Value::Number(pattern.num_steps as f64)),
+        ("length-beats", Value::Number(pattern.length_beats)),
+        ("events", list_value(pattern.events.iter().map(|(time, pitch, velocity, duration)|
+            list_value([*time, *pitch, *velocity, *duration].into_iter().map(Value::Number))))),
+    ])
+}
+
 pub(crate) fn build_song_lane_events_value(events: &[Vec<LanePatternEvents>]) -> Value {
-    let tracks = events
-        .iter()
-        .map(|patterns| {
-            let patterns = patterns
-                .iter()
-                .map(|pattern| {
-                    let events = pattern
-                        .events
-                        .iter()
-                        .map(|(time, transpose, velocity, duration)| {
-                            Rc::new(RefCell::new(Value::List(vec![
-                                Rc::new(RefCell::new(Value::Number(*time))),
-                                Rc::new(RefCell::new(Value::Number(*transpose))),
-                                Rc::new(RefCell::new(Value::Number(*velocity))),
-                                Rc::new(RefCell::new(Value::Number(*duration))),
-                            ])))
-                        })
-                        .collect();
-                    let mut map = HashMap::new();
-                    map.insert(
-                        "pattern-id".to_string(),
-                        Rc::new(RefCell::new(match pattern.take_id {
-                            // Take entries carry no pattern identity.
-                            Some(_) => Value::Nil,
-                            None => Value::Number(pattern.pattern_id as f64),
-                        })),
-                    );
-                    map.insert(
-                        "take-id".to_string(),
-                        Rc::new(RefCell::new(match pattern.take_id {
-                            Some(id) => Value::Number(id as f64),
-                            None => Value::Nil,
-                        })),
-                    );
-                    map.insert(
-                        "num-steps".to_string(),
-                        Rc::new(RefCell::new(Value::Number(pattern.num_steps as f64))),
-                    );
-                    map.insert(
-                        "length-beats".to_string(),
-                        Rc::new(RefCell::new(Value::Number(pattern.length_beats))),
-                    );
-                    map.insert(
-                        "events".to_string(),
-                        Rc::new(RefCell::new(Value::List(events))),
-                    );
-                    Rc::new(RefCell::new(Value::Map(map)))
-                })
-                .collect();
-            Rc::new(RefCell::new(Value::List(patterns)))
-        })
-        .collect();
-    Value::List(tracks)
+    list_value(events.iter().map(|patterns|
+        list_value(patterns.iter().map(build_pattern_preview_value))))
 }
 
 /// The row governing `beats` for display purposes: `state_at_beat` semantics

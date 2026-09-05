@@ -208,6 +208,17 @@ pub(crate) fn reactive_tick_and_render(
         &ctx.shared.ui_epoch,
     );
 
+    // Theme changes do not mutate the project or bump its UI epoch. Refresh
+    // both literal and bound track colors when the display tint changes.
+    let track_tint = eseqlisp::theme::TRACK_TINT();
+    if Some(track_tint) != ctx.frame.prev_track_tint {
+        ctx.frame.prev_track_tint = Some(track_tint);
+        sync_track_color_state(editor.runtime_mut(), app, &ctx.shared.state);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+    }
+
     // Inline runtime values are polled while building a render frame. The UI
     // is otherwise event-driven, so scheduler-owned channel changes must ask
     // for a frame or a process-driven slider remains still until unrelated

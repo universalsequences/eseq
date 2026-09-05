@@ -415,6 +415,7 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
 
     // Text-entry and composite value widgets are always focusable.
     if widget_type == "button"
+        || widget_type == "menu-item"
         || widget_type == "text-input"
         || widget_type == "textbox"
         || widget_type == "number-picker"

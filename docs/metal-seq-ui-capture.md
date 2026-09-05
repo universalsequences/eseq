@@ -36,6 +36,12 @@ Supported track forms are:
 (track :layer-rack :samples ("path/to/layer.wav"))
 ```
 
+`capture-project` also accepts `(mod-route SOURCE TRACK INPUT)` entries.
+All three indices are zero-based; input must be 0–3. The capture installs the
+route through the production graph controller after building the tracks, so
+mixer cable captures use real routing state. Self-routes and missing endpoints
+are rejected.
+
 Every track accepts an optional display `:name`, initial `:solo` boolean,
 `:midi-fx` list, and built-in `:audio-fx` list. `:num-steps` sets the initial
 pattern length from 1 through the sequencer's maximum pattern length. A saved

@@ -406,6 +406,72 @@ impl SequencerState {
         Ok(epoch)
     }
 
+    /// Apply a scene-wide pitch edit under one repository lock and publish
+    /// once. Return only changed overrides for a compact undo entry.
+    pub(crate) fn write_scene_transpose_in_bank(
+        &self,
+        bank: Option<SceneBankId>,
+        value: f64,
+    ) -> Result<Vec<(SceneId, Option<crate::process::ProcessLiteral>)>, String> {
+        let value = crate::process::ProcessLiteral::Number(value);
+        SceneSlotStore::validate_literal(SCENE_TRANSPOSE_SLOT, &value)?;
+        let changes = {
+            let mut scenes = self.pattern.scenes.lock()
+                .map_err(|_| "failed to lock scene repository".to_string())?;
+            if let Some(bank) = bank {
+                if !scenes.scene_banks().iter().any(|item| item.id == bank) {
+                    return Err("scene bank no longer exists".to_string());
+                }
+            }
+            let mut changes = Vec::new();
+            for index in 0..scenes.scenes.len() {
+                if bank.is_some() && scenes.scene_bank_containing(index) != bank {
+                    continue;
+                }
+                let scene = &mut scenes.scenes[index];
+                let before = scene.scene_slots.get(SCENE_TRANSPOSE_SLOT).cloned();
+                if before.as_ref() == Some(&value) {
+                    continue;
+                }
+                scene.scene_slots.write_literal(SCENE_TRANSPOSE_SLOT, value.clone())?;
+                changes.push((scene.id, before));
+            }
+            changes
+        };
+        if !changes.is_empty() {
+            self.publish_scheduler_snapshot();
+        }
+        Ok(changes)
+    }
+
+    /// Validate the complete batch before writing any slot. Undo/redo must
+    /// never expose a partially restored set of scene values to the scheduler.
+    pub(crate) fn set_scene_slot_overrides(
+        &self,
+        writes: &[(SceneId, String, Option<crate::process::ProcessLiteral>)],
+    ) -> Result<(), String> {
+        {
+            let mut scenes = self.pattern.scenes.lock()
+                .map_err(|_| "failed to lock scene repository".to_string())?;
+            let mut indices = Vec::with_capacity(writes.len());
+            for (scene, name, value) in writes {
+                let index = scenes.scene_index(*scene)
+                    .ok_or_else(|| "scene-slot scene no longer exists".to_string())?;
+                if let Some(value) = value {
+                    SceneSlotStore::validate_literal(name, value)?;
+                }
+                indices.push(index);
+            }
+            for (index, (_, name, value)) in indices.into_iter().zip(writes) {
+                scenes.scenes[index].scene_slots.set_override(name.clone(), value.clone())?;
+            }
+        }
+        if !writes.is_empty() {
+            self.publish_scheduler_snapshot();
+        }
+        Ok(())
+    }
+
     pub fn current_mod_connections(&self) -> Vec<ModConnection> {
         self.current_scene_metadata().0
     }

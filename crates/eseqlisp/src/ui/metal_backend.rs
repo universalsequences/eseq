@@ -6055,6 +6055,16 @@ fragment float4 live_spectrogram_frag(
     }
 
     impl MetalBackend {
+        /// Handle another thread can use to interrupt a blocked poll. A
+        /// user event posted through it ends the AppKit wait inside
+        /// `pump_events`, so a MIDI note queued off-thread reaches the host
+        /// loop within a frame instead of at the idle timeout.
+        pub fn event_loop_waker(&self) -> Option<crate::ui::backend::EventLoopWaker> {
+            self.event_loop.as_ref().map(|event_loop| {
+                crate::ui::backend::EventLoopWaker::new(event_loop.create_proxy())
+            })
+        }
+
         /// Like `poll_backend_event`, but invokes `redraw` to render a frame
         /// whenever the window is resized while the pump is blocked. During a
         /// macOS live resize AppKit runs a modal tracking loop inside
@@ -8445,13 +8455,14 @@ fragment float4 live_spectrogram_frag(
         }
 
         let mut cables = Vec::new();
-        let base_color = Color::rgba(0.10, 0.58, 1.0, 0.92);
-        let highlight_color = Color::rgba(0.78, 0.94, 1.0, 0.38);
+        let base_color = crate::theme::MOD_CABLE();
+        let highlight_color = crate::theme::MOD_CABLE_HIGHLIGHT();
         let shadow_color = Color::rgba(0.0, 0.0, 0.0, 0.34);
-        let selected_color = Color::rgba(1.0, 0.16, 0.10, 0.96);
-        let selected_highlight_color = Color::rgba(1.0, 0.66, 0.58, 0.42);
-        let preview_color = Color::rgba(0.42, 0.84, 1.0, 0.84);
-        let preview_highlight_color = Color::rgba(0.88, 0.98, 1.0, 0.36);
+        let selected_color = crate::theme::MOD_CABLE_SELECTED();
+        let selected_highlight_color = crate::theme::MOD_CABLE_SELECTED_HIGHLIGHT();
+        let preview_color = crate::theme::MOD_CABLE_PREVIEW();
+        let preview_highlight_color = crate::theme::MOD_CABLE_PREVIEW_HIGHLIGHT();
+        let lane_color = crate::theme::MOD_CABLE_LANE_TINT();
         let tension = 0.30;
         for port in ports {
             if port.direction != ModPatchPortDirection::In {
@@ -8482,9 +8493,9 @@ fragment float4 live_spectrogram_frag(
                     selected_color
                 } else {
                     Color {
-                        r: (base_color.r + lane_tint).min(1.0),
-                        g: (base_color.g + lane_tint * 0.35).min(1.0),
-                        b: base_color.b,
+                        r: (base_color.r + lane_tint * lane_color.r).min(1.0),
+                        g: (base_color.g + lane_tint * lane_color.g).min(1.0),
+                        b: (base_color.b + lane_tint * lane_color.b).min(1.0),
                         a: base_color.a,
                     }
                 };

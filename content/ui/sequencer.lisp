@@ -561,7 +561,7 @@
         (material
           :lighting (lighting :edge-min -0.24 :edge-max 0.62
             :light (vec3 -0.35 -1.0 2.8) :shininess 54.0)
-          :color (rgba 0.90 0.91 0.93 0.64))))))
+          :color :sequencer-volume-handle)))))
 
 (defwidget seqv-ellipsis-button
   :width 2.2 :height 1.2
@@ -822,14 +822,10 @@
                  (rgba track-r track-g track-b 1.0)))))))))
 
 (def mute-bg (active)
-  (if active
-    (rgba 0.08 0.09 0.10 1.0)
-         (rgba 0.95 0.48 0.18 1.0)))
+  (if active :sequencer-toggle-off-bg :control-on-bg))
 
 (def solo-bg (active)
-  (if active
-    (rgba 0.72 0.10 0.10 1.0)
-    (rgba 0.08 0.09 0.10 1.0)))
+  (if active :sequencer-solo-on-bg :sequencer-toggle-off-bg))
 
 ;; Compact mixer track row — the common track actions plus an inline
 ;; meter/fader so the sequencer remains usable when the mixer is hidden.
@@ -877,14 +873,14 @@
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :border-color :transparent
           :background-color (mute-bg (nth SEQ.track-mutes i))
-          :color (if (nth SEQ.track-mutes i) :gray :black)
+          :color (if (nth SEQ.track-mutes i) :gray :control-on-fg)
           :on-click |x y r| (do (activate-track-for-edit i) (seq-toggle-track-mute i)))
         (button "S"
           :key (str "solo-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :background-color (solo-bg (nth SEQ.track-solos i))
           :border-color :transparent
-          :color (if (nth SEQ.track-solos i) :white :gray)
+          :color (if (nth SEQ.track-solos i) :sequencer-solo-on-fg :gray)
           :on-click |x y r| (do (activate-track-for-edit i) (seq-toggle-track-solo i)))
         (box :width 8.6 :height 1
           :key (str "select-" i)

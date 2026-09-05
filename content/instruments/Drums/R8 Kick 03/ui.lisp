@@ -1,175 +1,82 @@
-;; Roland R-8 Kick03.
-;;
-;; Four columns, each within the 10.8-row instrument panel. PLAY / SHAPE on
-;; the left are the departure knobs, all no-ops at their defaults so the
-;; instrument boots AS the sample. Next the five inharmonic MEMBRANE modes, one
-;; row each (FREQ / LEVEL / DECAY / GLIDE). Then the shared tension GLIDE and
-;; the CLICK / AIR layers. On the right the RING bank (eight fixed-pitch shell /
-;; beater modes) over the identified saturator.
-;;
-;; Naming follows id808 / idvb23: the badge on the left of a row carries the
-;; noun, the fields carry the plain role. Field widths are set from the widest
-;; string the parameter's range can print (~0.6 cells per glyph at font-size
-;; 9.5) so no number runs into its neighbour.
+;; R8 Kick 03 — musical surface for the acoustic reconstruction.
+;; Identification coefficients live in the DSP, not a wall of lab readouts.
+;; Each exposed parameter appears exactly once and uses the standard
+;; reactive / p-lock / modulation-aware custom instrument control contract.
 
-(def idr8k-c () (eseq.effects.custom-ui-lego/ui-accent-orange))
-(def idr8k-id-c () (eseq.effects.custom-ui-lego/ui-accent-blue))
+(def r8a-body-c () (eseq.effects.custom-ui-lego/ui-accent-orange))
+(def r8a-motion-c () (eseq.effects.custom-ui-lego/ui-accent-green))
+(def r8a-contact-c () (eseq.effects.custom-ui-lego/ui-accent-cyan))
+(def r8a-color-c () (eseq.effects.custom-ui-lego/ui-accent-violet))
 
-;; Panel heights: a row of number fields measures 1.64, and a panel's first
-;; row starts 1.0 below its top edge.
-(def idr8k-h1 () 3.08)
-(def idr8k-h2 () 4.90)
-(def idr8k-h3 () 6.72)
-(def idr8k-h4 () 8.54)
-(def idr8k-knob-h () 3.40)
+(def r8a-knob (name title color decimals)
+  (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s
+    0 name title 6.8 3.25 3.25 color decimals))
+(def r8a-row (a b c)
+  (h-stack :gap 0.32 :align :start a b c))
+(def r8a-note (text)
+  (label text :width 21 :height 0.82 :font-size 9 :color :dim :bg :transparent))
+(def r8a-panel (title color top bottom footer)
+  (eseq.effects.custom-ui-lego/ui-lego-panel-width-s 23 10.6 0 :instrument-group-bg
+    (v-stack :width :fill :gap 0.22 :align :start
+      (h-stack :width :fill :height 1.10 :align :center
+        (eseq.effects.custom-ui-lego/ui-lego-badge-s 0 title 12 color))
+      top
+      bottom
+      footer)))
 
-(def idr8k-n (name title width decimals unit)
-  (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 name title width decimals unit (idr8k-id-c)))
-(def idr8k-badge (title)
-  (eseq.effects.custom-ui-lego/ui-lego-badge-s 0 title 4.0 :fg))
-(def idr8k-gap (width)
-  (box :width width :height 1.64))
-(def idr8k-knob (name title)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 name title 4.6
-    (idr8k-knob-h) (idr8k-knob-h) (idr8k-c) 2))
+(def r8a-body ()
+  (r8a-panel "01 / MEMBRANE" (r8a-body-c)
+    (r8a-row
+      (r8a-knob "tune" "TUNE" (r8a-body-c) 1)
+      (r8a-knob "weight" "WEIGHT" (r8a-body-c) 2)
+      (r8a-knob "head" "HEAD" (r8a-body-c) 2))
+    (r8a-row
+      (r8a-knob "decay" "DECAY" (r8a-body-c) 2)
+      (r8a-knob "damp" "DAMP" (r8a-body-c) 2)
+      (r8a-knob "stretch" "STRETCH" (r8a-body-c) 2))
+    (h-stack :width :fill :gap 0.35 :align :center
+      (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s 0 4.6 (r8a-body-c))
+      (label "low weight / head tension" :width 15 :height 0.82 :font-size 9 :color :dim :bg :transparent))))
 
-(def idr8k-panel (width height body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-width-s width height 0 :instrument-group-bg
-    (box :width :fill :height :fill :v-align :start body)))
+(def r8a-motion ()
+  (r8a-panel "02 / IMPACT" (r8a-motion-c)
+    (r8a-row
+      (r8a-knob "bend" "BEND" (r8a-motion-c) 2)
+      (r8a-knob "bend_time" "BEND TIME" (r8a-motion-c) 2)
+      (r8a-knob "attack" "RISE" (r8a-motion-c) 2))
+    (r8a-row
+      (r8a-knob "length" "LENGTH" (r8a-motion-c) 0)
+      (r8a-knob "punch" "PUNCH" (r8a-motion-c) 2)
+      (r8a-knob "dynamics" "TOUCH" (r8a-motion-c) 2))
+    (r8a-note "pitch drop / cut / velocity response")))
 
-;; ---- column 1: the departure knobs ------------------------------------------
+(def r8a-contact ()
+  (r8a-panel "03 / CONTACT" (r8a-contact-c)
+    (r8a-row
+      (r8a-knob "knock" "KNOCK" (r8a-contact-c) 2)
+      (r8a-knob "shell_tune" "SHELL TUNE" (r8a-contact-c) 1)
+      (r8a-knob "ring" "RING" (r8a-contact-c) 2))
+    (r8a-row
+      (r8a-knob "beater" "BEATER" (r8a-contact-c) 2)
+      (r8a-knob "hardness" "HARDNESS" (r8a-contact-c) 2)
+      (r8a-knob "contact" "CONTACT" (r8a-contact-c) 2))
+    (r8a-note "shell / felt-to-wood / contact time")))
 
-(def idr8k-play-panel ()
-  (idr8k-panel 34 5.70
-    (h-stack :width :fill :gap 0.15 :align :center
-      (v-stack :width 4.6 :gap 0.18 :align :start
-        (idr8k-badge "PLAY")
-        (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s 0 4.6 (idr8k-c)))
-      (idr8k-knob "tune" "TUNE")
-      (idr8k-knob "glide" "GLIDE")
-      (idr8k-knob "attack" "ATTACK")
-      (idr8k-knob "decay" "DECAY")
-      (idr8k-knob "drive" "DRIVE")
-      (idr8k-knob "level" "LEVEL"))))
-
-(def idr8k-shape-panel ()
-  (idr8k-panel 34 4.90
-    (h-stack :width :fill :gap 0.15 :align :center
-      (v-stack :width 4.6 :gap 0.18 :align :start
-        (idr8k-badge "SHAPE")
-        (idr8k-gap 4.6))
-      (idr8k-knob "knock" "KNOCK")
-      (idr8k-knob "ring" "RING")
-      (idr8k-knob "rattle" "RATTLE")
-      (idr8k-knob "noise" "CLICK")
-      (idr8k-knob "hiss" "AIR"))))
-
-;; ---- column 2: the membrane --------------------------------------------------
-
-;; The five inharmonic membrane modes, one row each: base FREQ (where the mode
-;; lands once the glide has settled), LEVEL, DECAY (1/s) and how much of the
-;; shared GLIDE the mode follows (1 = the full tension curve), and its initial
-;; PHASE in cycles (audible through the saturator as the shape of the humps).
-(def idr8k-mode-row (badge f-name a-name d-name g-name p-name)
-  (h-stack :gap 0.18 :align :start
-    (idr8k-badge badge)
-    (idr8k-n f-name "FREQ" 4.6 2 "Hz")
-    (idr8k-n a-name "LEVEL" 4.6 4 false)
-    (idr8k-n d-name "DECAY" 4.6 1 false)
-    (idr8k-n g-name "GLIDE" 4.6 3 false)
-    (idr8k-n p-name "PHASE" 4.6 3 false)))
-
-(def idr8k-membrane-panel ()
-  (idr8k-panel 29 10.20
-    (v-stack :width :fill :gap 0.18 :align :start
-      (idr8k-mode-row "MODE 1" "lf1" "la1" "ld1" "lg1" "lp1")
-      (idr8k-mode-row "MODE 2" "lf2" "la2" "ld2" "lg2" "lp2")
-      (idr8k-mode-row "MODE 3" "lf3" "la3" "ld3" "lg3" "lp3")
-      (idr8k-mode-row "MODE 4" "lf4" "la4" "ld4" "lg4" "lp4")
-      (idr8k-mode-row "MODE 5" "lf5" "la5" "ld5" "lg5" "lp5"))))
-
-;; ---- column 3: the glide and the layers --------------------------------------
-
-;; One tension glide shared by every membrane mode: a fast SNAP over the first
-;; milliseconds and a slower DROP under it, each with its RATE in 1/s. RISE is
-;; the attack of both banks.
-(def idr8k-glide-panel ()
-  (idr8k-panel 24 (idr8k-h2)
-    (v-stack :width :fill :gap 0.18 :align :start
-      (h-stack :gap 0.18 :align :start
-        (idr8k-badge "GLIDE")
-        (idr8k-n "glide_a1" "SNAP" 4.8 3 false)
-        (idr8k-n "glide_r1" "RATE" 4.8 1 false)
-        (idr8k-n "attack_time" "RISE" 5.4 5 "s"))
-      (h-stack :gap 0.18 :align :start
-        (idr8k-gap 4.0)
-        (idr8k-n "glide_a2" "DROP" 4.8 3 false)
-        (idr8k-n "glide_r2" "RATE" 4.8 1 false)))))
-
-;; CLICK is the lowpassed beater burst; AIR the recording hiss.
-(def idr8k-layer-row (badge a-name b-name c-name)
-  (h-stack :gap 0.18 :align :start
-    (idr8k-badge badge)
-    (idr8k-n a-name "CUT" 4.8 0 "Hz")
-    (idr8k-n b-name "LEVEL" 4.8 4 false)
-    (idr8k-n c-name "DECAY" 5.4 1 false)))
-
-(def idr8k-layers-panel ()
-  (idr8k-panel 24 (idr8k-h2)
-    (v-stack :width :fill :gap 0.18 :align :start
-      (idr8k-layer-row "CLICK" "noise_cutoff" "noise_amp" "noise_decay")
-      (idr8k-layer-row "AIR" "hiss_cutoff" "hiss_amp" "hiss_decay"))))
-
-;; ---- column 4: the ring bank and the output ----------------------------------
-
-;; Eight fixed-pitch shell / beater modes: the woody knock of a real drum.
-(def idr8k-mf (name title) (idr8k-n name title 4.6 1 "Hz"))
-(def idr8k-ma (name title) (idr8k-n name title 4.6 4 false))
-(def idr8k-md (name title) (idr8k-n name title 4.6 1 false))
-
-(def idr8k-ring-panel ()
-  (idr8k-panel 44 (idr8k-h3)
-    (v-stack :width :fill :gap 0.18 :align :start
-      (h-stack :gap 0.18 :align :start
-        (idr8k-badge "FREQ")
-        (idr8k-mf "mf1" "1") (idr8k-mf "mf2" "2") (idr8k-mf "mf3" "3") (idr8k-mf "mf4" "4")
-        (idr8k-mf "mf5" "5") (idr8k-mf "mf6" "6") (idr8k-mf "mf7" "7") (idr8k-mf "mf8" "8"))
-      (h-stack :gap 0.18 :align :start
-        (idr8k-badge "LEVEL")
-        (idr8k-ma "ma1" "1") (idr8k-ma "ma2" "2") (idr8k-ma "ma3" "3") (idr8k-ma "ma4" "4")
-        (idr8k-ma "ma5" "5") (idr8k-ma "ma6" "6") (idr8k-ma "ma7" "7") (idr8k-ma "ma8" "8"))
-      (h-stack :gap 0.18 :align :start
-        (idr8k-badge "DECAY")
-        (idr8k-md "md1" "1") (idr8k-md "md2" "2") (idr8k-md "md3" "3") (idr8k-md "md4" "4")
-        (idr8k-md "md5" "5") (idr8k-md "md6" "6") (idr8k-md "md7" "7") (idr8k-md "md8" "8")))))
-
-;; RATTLE is noise gated by the membrane's negative half-cycles (the buzz on
-;; every trough of the real hit); OUT the identified saturator — SAT sets the
-;; shape only, GAIN the level — and TRACK, how much the ring bank follows the
-;; played note (1 = with the membrane; 0 = fixed shell resonance).
-(def idr8k-out-panel ()
-  (idr8k-panel 44 (idr8k-h1)
-    (h-stack :gap 0.60 :align :start
-      (h-stack :gap 0.18 :align :start
-        (idr8k-badge "RATTLE")
-        (idr8k-n "rattle_hp" "HP" 4.8 0 "Hz")
-        (idr8k-n "rattle_amp" "LEVEL" 4.8 4 false)
-        (idr8k-n "rattle_decay" "DECAY" 4.8 1 false))
-      (h-stack :gap 0.18 :align :start
-        (idr8k-badge "OUT")
-        (idr8k-n "out_drive" "SAT" 4.8 3 false)
-        (idr8k-n "out_gain" "GAIN" 4.8 3 false)
-        (idr8k-n "ring_track" "TRACK" 4.8 2 false)))))
+(def r8a-color ()
+  (r8a-panel "04 / PRINT" (r8a-color-c)
+    (r8a-row
+      (r8a-knob "air" "AIR" (r8a-color-c) 2)
+      (r8a-knob "track" "KEYTRACK" (r8a-color-c) 2)
+      (r8a-knob "drive" "DRIVE" (r8a-color-c) 2))
+    (r8a-row
+      (r8a-knob "tone" "TONE" (r8a-color-c) 2)
+      (r8a-knob "crush" "CRUSH" (r8a-color-c) 2)
+      (r8a-knob "level" "LEVEL" (r8a-color-c) 2))
+    (r8a-note "texture / dark-to-bright / grit")))
 
 (defsynth-ui
-  (h-stack :width :fill :gap 0.35 :align :start
-    (v-stack :gap 0.10 :align :start
-      (idr8k-play-panel)
-      (idr8k-shape-panel))
-    (idr8k-membrane-panel)
-    (v-stack :gap 0.10 :align :start
-      (idr8k-glide-panel)
-      (idr8k-layers-panel))
-    (v-stack :gap 0.10 :align :start
-      (idr8k-ring-panel)
-      (idr8k-out-panel))))
+  (h-stack :gap 0.35 :align :start
+    (r8a-body)
+    (r8a-motion)
+    (r8a-contact)
+    (r8a-color)))

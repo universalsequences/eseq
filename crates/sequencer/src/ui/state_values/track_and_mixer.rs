@@ -18,15 +18,52 @@ pub(crate) fn build_track_names(names: &[String]) -> Value {
     Value::List(items)
 }
 
+/// Resolve display color without touching the authored/persisted track palette.
+fn track_display_color(app: &app::App, track: usize) -> sequencer::track_color::TrackColor {
+    let color = app
+        .track_colors
+        .get(track)
+        .copied()
+        .unwrap_or_else(|| sequencer::track_color::TrackColor::palette_color(track))
+        .clamped();
+    let [r, g, b] = themed_track_rgb([color.r, color.g, color.b]);
+    sequencer::track_color::TrackColor::new(r, g, b).clamped()
+}
+
+/// Track groups share the track display tint, not a separate authored palette.
+pub(super) fn themed_track_rgb(color: [f32; 3]) -> [f32; 3] {
+    let tint = eseqlisp::theme::TRACK_TINT();
+    let weight = tint.a.clamp(0.0, 1.0);
+    std::array::from_fn(|i| color[i] * (1.0 - weight) + [tint.r, tint.g, tint.b][i] * weight)
+}
+
+/// Republish all color projections together on a theme switch. Mute and take
+/// dimming are applied after the tint, just as they are for authored colors.
+pub(crate) fn sync_track_color_state(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+) {
+    rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
+    rt.set_reactive("SEQ", "groups", build_groups_value(&app.groups));
+    for channel in 0..3 {
+        rt.set_reactive(
+            "SEQ",
+            track_color_channel_effective_field(channel),
+            build_track_color_channel_effective(app, state, channel),
+        );
+        rt.set_reactive(
+            "SEQ",
+            step_color_channel_effective_field(channel),
+            build_step_color_channel_effective(app, state, channel),
+        );
+    }
+}
+
 pub(crate) fn build_track_colors(app: &app::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
         .map(|track| {
-            let color = app
-                .track_colors
-                .get(track)
-                .copied()
-                .unwrap_or_else(|| sequencer::track_color::TrackColor::palette_color(track))
-                .clamped();
+            let color = track_display_color(app, track);
             Rc::new(RefCell::new(Value::List(vec![
                 Rc::new(RefCell::new(Value::Number(color.r as f64))),
                 Rc::new(RefCell::new(Value::Number(color.g as f64))),
@@ -514,12 +551,7 @@ pub(super) fn track_color_channel_effective_value(
     channel: usize,
     dimmed: bool,
 ) -> f64 {
-    let color = app
-        .track_colors
-        .get(track)
-        .copied()
-        .unwrap_or_else(|| sequencer::track_color::TrackColor::palette_color(track))
-        .clamped();
+    let color = track_display_color(app, track);
     let (raw, dim_base) = match channel {
         0 => (color.r as f64, 0.10),
         1 => (color.g as f64, 0.10),

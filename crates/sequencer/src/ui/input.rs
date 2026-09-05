@@ -10,11 +10,63 @@ use eseqlisp::widget_render::number_picker::{
     number_picker_edit_state, NumberPickerEditOutcome,
 };
 
+/// What is holding a live note down. Dedup and release lookups key on this,
+/// so a hardware C4 and the `a` key never collide (bead eseq-egs6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiveNoteSource {
+    /// Computer-keyboard musical typing, by lowercase character.
+    Key(char),
+    /// Hardware MIDI input, by note number.
+    Midi(u8),
+    /// The momentary sequence-roll hold marker (no note of its own).
+    SequenceRoll,
+}
+
+/// Pitch a live press asks for, before per-track resolution. Musical typing
+/// carries one relative transpose for every target; a MIDI note is absolute
+/// and lands on each armed track through that track's base-note offset, the
+/// same formula the on-screen piano widget uses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum LiveNotePitch {
+    Transpose(f32),
+    MidiNote(u8),
+}
+
+impl LiveNotePitch {
+    /// Transpose this pitch sounds at on an armed `track`.
+    fn transpose_for_track(self, state: &SequencerState, track: usize) -> f32 {
+        match self {
+            Self::Transpose(transpose) => transpose,
+            Self::MidiNote(note) => {
+                let base_note_offset = state
+                    .pattern
+                    .instrument_base_note_offsets
+                    .get(track)
+                    .map(|offset| f32::from_bits(offset.load(Ordering::Relaxed)))
+                    .unwrap_or(0.0);
+                f32::from(note) - 60.0 - base_note_offset
+            }
+        }
+    }
+
+    /// Note used to pick an armed rack's pad (`pad_note` is a transpose with
+    /// 0 = C4, docs/drum-rack-v2-spec.md).
+    fn pad_note(self) -> f32 {
+        match self {
+            Self::Transpose(transpose) => transpose,
+            Self::MidiNote(note) => f32::from(note) - 60.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct HeldKeyboardNote {
-    key: char,
+    source: LiveNoteSource,
     sequence_roll_code: Option<crossterm::event::KeyCode>,
     transpose: f32,
+    /// Note-on velocity, 0..=1; recorded into the step. Musical typing has no
+    /// velocity and always presses at 1.0.
+    velocity: f32,
     press_time: Instant,
     /// Everything this key press sounds on, with the record position each
     /// target was pressed at. One entry per armed track, plus the rack pad
@@ -563,7 +615,7 @@ pub(crate) fn held_note_for_key(
     };
     held_notes.lock().unwrap().iter().any(|note| {
         note.sequence_roll_code == Some(normalized_code)
-            || matches!(normalized_code, crossterm::event::KeyCode::Char(c) if note.key == c)
+            || matches!(normalized_code, crossterm::event::KeyCode::Char(c) if note.source == LiveNoteSource::Key(c))
     })
 }
 
@@ -1981,9 +2033,10 @@ pub(crate) fn handle_recording_key(
                     .any(|note| note.sequence_roll_code == Some(normalized_code))
                 {
                     held.push(HeldKeyboardNote {
-                        key: '\0',
+                        source: LiveNoteSource::SequenceRoll,
                         sequence_roll_code: Some(normalized_code),
                         transpose: 0.0,
+                        velocity: 0.0,
                         press_time: Instant::now(),
                         targets: Vec::new(),
                     });
@@ -2076,332 +2129,449 @@ pub(crate) fn handle_recording_key(
         None => return RecordingKeyOutcome::Ignored,
     };
 
+    let source = LiveNoteSource::Key(c);
     match key.kind {
         KeyEventKind::Press => {
-            // Suppress key repeat — only trigger on first press
-            let mut held = held_notes.lock().unwrap();
-            if held.iter().any(|note| note.key == c) {
-                return RecordingKeyOutcome::Consumed;
-            }
-
             let octave = keyboard_octave.load(Ordering::Relaxed);
-            let transpose = (note + octave) as f32;
-            let press_time = Instant::now();
-            let mut targets: Vec<LiveNoteTarget> = Vec::new();
-            {
-                let armed = record_armed.lock().unwrap();
-                for (track, a) in armed.iter().enumerate() {
-                    if *a {
-                        targets.push(LiveNoteTarget {
-                            track,
-                            transpose,
-                            position: press_record_position(state, track, press_time),
-                            stamped: false,
-                        });
-                    }
-                }
-            }
-            // Rack arm = pad-play mode: the key's note picks a pad, and the
-            // pad's member track is triggered at base pitch. A note with no
-            // pad is ignored; a member that is somehow armed as a track too
-            // keeps its chromatic entry rather than sounding twice.
-            if let Some(track) =
-                armed_rack_pad_track(&app.groups, *armed_rack.lock().unwrap(), transpose)
-            {
-                if !targets.iter().any(|t| t.track == track) {
-                    targets.push(LiveNoteTarget {
-                        track,
-                        transpose: 0.0,
-                        position: press_record_position(state, track, press_time),
-                        stamped: false,
-                    });
-                }
-            }
-
-            // With roll mode on the sequencer owns triggering outright:
-            // presses never take the immediate live path — playing OR
-            // stopped — they only arm the scheduler. A press while parked is
-            // silent until Play, at which point it rolls from the first grid
-            // line; this is also what makes press-then-Play (either order,
-            // however racy) clean, with no out-of-time live hit leaking in
-            // ahead of the quantized roll. (Amends rolling-core-spec 4.3's
-            // "stopped behaves as normal live keys".)
-            // Send note-on to audio thread for every target.
-            for target in &targets {
-                if roll_mode {
-                    // No hit on keydown (F1): the scheduler fires the
-                    // first hit at the next roll-grid boundary.
-                    state.push_roll_command(sequencer::sequencer::RollCommand::NoteOn {
-                        track: target.track,
-                        transpose: target.transpose,
-                    });
-                } else {
-                    let _ = keyboard_tx.send(KeyboardTrigger {
-                        track: target.track,
-                        transpose: target.transpose,
-                        velocity: 1.0,
-                        note_off: false,
-                    });
-                }
-            }
-
-            let triggered = !targets.is_empty();
-            held.push(HeldKeyboardNote {
-                key: c,
-                sequence_roll_code: None,
-                transpose,
-                press_time,
-                targets,
-            });
-            if triggered {
-                RecordingKeyOutcome::Triggered
-            } else {
-                RecordingKeyOutcome::Consumed
-            }
+            live_note_on(
+                source,
+                LiveNotePitch::Transpose((note + octave) as f32),
+                1.0,
+                app,
+                state,
+                record_armed,
+                armed_rack,
+                keyboard_tx,
+                held_notes,
+            )
         }
-        KeyEventKind::Release => {
-            // Catch any note-on stamp that landed since the last frame drain
-            // before the write below reads the target positions.
-            apply_live_trigger_stamps(state, held_notes);
-            // Find and remove the held note
-            let held_entry = {
-                let mut held = held_notes.lock().unwrap();
-                let pos = held.iter().position(|note| note.key == c);
-                pos.map(|idx| held.remove(idx))
-            };
-
-            // Record into pattern if recording + playing
-            if let Some(mut note) = held_entry {
-                // A tap so short its audio-thread stamp has not landed yet:
-                // the trigger is still in flight and will sound at the render
-                // frontier, so restamp there instead of keeping the
-                // latency-subtracted press estimate. Older unstamped targets
-                // (MIDI-FX-routed tracks) sounded near their press — the
-                // frontier at release would be wrong for them, so they keep
-                // the press estimate.
-                if note.press_time.elapsed() < FRONTIER_FALLBACK_WINDOW
-                    && note.targets.iter().any(|target| !target.stamped)
-                {
-                    if let Some(frontier) =
-                        state.record_frontier_beats_at_instant(Instant::now())
-                    {
-                        for target in &mut note.targets {
-                            if target.stamped {
-                                continue;
-                            }
-                            if let Some(position) =
-                                state.record_position_at_beat(target.track, frontier)
-                            {
-                                if record_stamp_debug() {
-                                    eprintln!(
-                                        "[record-stamp] frontier fallback track={} beat={:.4} -> step={} phase={:.3} (press estimate was step={} phase={:.3})",
-                                        target.track,
-                                        frontier,
-                                        position.step,
-                                        position.phase,
-                                        target.position.step,
-                                        target.position.phase,
-                                    );
-                                }
-                                target.position = position;
-                            }
-                        }
-                    }
-                }
-                let note = note;
-                for target in &note.targets {
-                    if roll_mode {
-                        // Cancels every roll hit not yet inside the lookahead
-                        // horizon (F3).
-                        state.push_roll_command(sequencer::sequencer::RollCommand::NoteOff {
-                            track: target.track,
-                            transpose: target.transpose,
-                        });
-                    }
-                    // The audio note-off always goes out so a sounding voice
-                    // (rolled or normal) releases its envelope.
-                    let _ = keyboard_tx.send(KeyboardTrigger {
-                        track: target.track,
-                        transpose: target.transpose,
-                        velocity: 0.0,
-                        note_off: true,
-                    });
-                }
-                if roll_mode {
-                    // Rolled hits were already written into live pattern
-                    // state as they sounded (rolling-core-spec 6); the
-                    // release schedules the deferred snapshot publish that
-                    // makes them audible. The press-position write below
-                    // would stamp a note where no hit sounded (F1).
-                    if recording.load(Ordering::Relaxed) && state.is_playing() {
-                        roll_record.lock().unwrap().note_released();
-                    }
-                    return RecordingKeyOutcome::Consumed;
-                }
-
-                if recording.load(Ordering::Relaxed) && state.is_playing() {
-                    let bpm = state.transport.bpm.load(Ordering::Relaxed) as f64;
-                    let secs_per_step = 60.0 / bpm / 4.0;
-                    let hold_secs = note.press_time.elapsed().as_secs_f64();
-                    let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
-                    let mut recorded_steps: Vec<(usize, usize)> = Vec::new();
-
-                    let mut recorded_take = false;
-                    let quantize = sequencer::record_quantize::RecordQuantize::from_atomic(
-                        state.transport.record_quantize.load(Ordering::Relaxed) as u8,
-                    );
-                    // Recording engaged mid-playback: stamp the recording
-                    // kind from the active view (unified-transport spec 5) —
-                    // arrangement view promotes into arrangement capture so
-                    // this performance records as a take; the session view
-                    // stamps loop overdub into the looping live pattern.
-                    if !note.targets.is_empty() {
-                        app.stamp_recording_kind_for_note();
-                    }
-                    let song_authority = app.song_playback_authority_active();
-                    let overdub = app.recording_kind
-                        == Some(sequencer::app::song_transport::RecordingKind::Overdub);
-                    for &LiveNoteTarget {
-                        track,
-                        transpose,
-                        position,
-                        stamped,
-                    } in &note.targets
-                    {
-                        // Song-mode take recording (takes spec 8.4): while
-                        // arrangement capture is active, an armed track's
-                        // notes retarget into its pending take at
-                        // clip-relative positions stamped on the
-                        // latency-compensated record clock — the live
-                        // pattern is NOT written.
-                        if !overdub
-                            && app.take_record_note(
-                                track,
-                                note.press_time,
-                                transpose,
-                                duration_steps,
-                            )
-                        {
-                            recorded_take = true;
-                            continue;
-                        }
-                        if song_authority {
-                            if !overdub {
-                                // The song owns playback for this lane: a
-                                // note that could not be staged as a take
-                                // (no record clock anchor yet) is dropped
-                                // rather than folded — modulo the clip
-                                // length — into the scene's looping pattern.
-                                continue;
-                            }
-                            // Loop overdub claims the armed lane (spec 5.1):
-                            // latch it so the target pattern is stable
-                            // across row boundaries and the layered notes
-                            // are audible. A lane currently playing a take
-                            // refuses overdub — its note is dropped.
-                            if !app.claim_overdub_lane(track) {
-                                continue;
-                            }
-                        }
-                        // Each target quantizes against its OWN track's
-                        // timebase and length, which is what lets one rack
-                        // performance land a 1/64 hat pad and a 1/16 kick pad
-                        // on their own grids.
-                        let num_steps = state.pattern.track_params[track].get_num_steps();
-                        let (local_step, delay) = quantized_record_position(
-                            position.step,
-                            position.phase,
-                            num_steps,
-                            state.pattern.track_params[track].get_timebase(),
-                            quantize,
-                        );
-                        if record_stamp_debug() {
-                            eprintln!(
-                                "[record-stamp] write track={} stamped={} step={} delay={:.3} (from step={} phase={:.3}, quantize={:?})",
-                                track, stamped, local_step, delay, position.step, position.phase, quantize,
-                            );
-                        }
-                        if !state.pattern.patterns[track].is_active(local_step) {
-                            state.pattern.patterns[track].toggle_step(local_step);
-                        }
-                        state.pattern.chord_data[track].add_note_with_timing(
-                            local_step,
-                            transpose,
-                            duration_steps,
-                            delay,
-                        );
-                        let first_note = state.pattern.chord_data[track].get(local_step, 0);
-                        state.pattern.step_data[track].set(
-                            local_step,
-                            StepParam::Transpose,
-                            first_note,
-                        );
-                        state.pattern.step_data[track].set(local_step, StepParam::Velocity, 1.0);
-                        state.pattern.step_data[track].set(
-                            local_step,
-                            StepParam::Duration,
-                            duration_steps,
-                        );
-                        if !recorded_steps.contains(&(track, local_step)) {
-                            recorded_steps.push((track, local_step));
-                        }
-                    }
-                    if !recorded_steps.is_empty() {
-                        // Targeted invalidations instead of a ui_epoch bump
-                        // (the live step-print contract): the epoch resync
-                        // rebuilds every surface and refreshes the sequencer
-                        // layout, which starved queued key events behind each
-                        // recorded release — fast chord stabs sounded their
-                        // second chord late on slow machines. These pushes
-                        // update exactly the recorded trig's bindings on this
-                        // frame's tick.
-                        let mut published_tracks: Vec<usize> = Vec::new();
-                        for &(track, step) in &recorded_steps {
-                            ui_invalidations.push(UiInvalidation::StepBatch {
-                                track,
-                                steps: vec![step],
-                            });
-                            for param in [
-                                StepParam::Transpose,
-                                StepParam::Velocity,
-                                StepParam::Duration,
-                            ] {
-                                ui_invalidations.push(UiInvalidation::Step {
-                                    track,
-                                    step,
-                                    change: StepInvalidation::Param(param.into()),
-                                });
-                            }
-                            ui_invalidations.push(UiInvalidation::Step {
-                                track,
-                                step,
-                                change: StepInvalidation::DurationSpan,
-                            });
-                            if !published_tracks.contains(&track) {
-                                published_tracks.push(track);
-                            }
-                        }
-                        // Copy-on-write per-track publishes: a recorded note
-                        // touches only its target tracks, so the scheduler
-                        // hears it without a full-capture snapshot.
-                        for track in published_tracks {
-                            state.publish_scheduler_track(track);
-                            ui_invalidations.push(UiInvalidation::PianoRoll {
-                                track,
-                                change: PianoRollInvalidation::Items,
-                            });
-                        }
-                        return RecordingKeyOutcome::Recorded;
-                    }
-                    if recorded_take {
-                        return RecordingKeyOutcome::RecordedTake;
-                    }
-                }
-            }
-            RecordingKeyOutcome::Consumed
-        }
+        KeyEventKind::Release => live_note_off(
+            source,
+            app,
+            state,
+            recording,
+            keyboard_tx,
+            held_notes,
+            roll_record,
+            ui_invalidations,
+        ),
         _ => RecordingKeyOutcome::Consumed, // consume Repeat events too
     }
+}
+
+/// Feed one hardware MIDI note into the live-note path (bead eseq-egs6).
+/// Same seam as a musical-typing key: armed tracks and the armed rack's pad
+/// sound it, and its release records exactly like a key release. The editor
+/// focus gate does not apply — a hardware key is never a text keystroke — so
+/// the caller only checks that something is armed (or that this note is
+/// already held, so its release always lands).
+pub(crate) fn handle_midi_note(
+    event: sequencer::midi_input::MidiNoteEvent,
+    app: &mut sequencer::app::App,
+    state: &Arc<SequencerState>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    armed_rack: &Arc<Mutex<Option<u64>>>,
+    recording: &Arc<AtomicBool>,
+    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    roll_record: &Arc<Mutex<RollRecordBuffer>>,
+    ui_invalidations: &UiInvalidationQueue,
+) -> RecordingKeyOutcome {
+    let source = LiveNoteSource::Midi(event.note);
+    if event.on {
+        live_note_on(
+            source,
+            LiveNotePitch::MidiNote(event.note),
+            event.velocity,
+            app,
+            state,
+            record_armed,
+            armed_rack,
+            keyboard_tx,
+            held_notes,
+        )
+    } else {
+        live_note_off(
+            source,
+            app,
+            state,
+            recording,
+            keyboard_tx,
+            held_notes,
+            roll_record,
+            ui_invalidations,
+        )
+    }
+}
+
+/// True when `source` is currently held, so its release must reach the
+/// live-note path even if nothing is armed any more.
+pub(crate) fn held_note_for_source(
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    source: LiveNoteSource,
+) -> bool {
+    held_notes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|note| note.source == source)
+}
+
+/// Source-agnostic live note-on: sounds `pitch` at `velocity` on every armed
+/// track and the armed rack's matching pad, and remembers the press under
+/// `source` for its release. Musical typing and hardware MIDI both enter
+/// here.
+fn live_note_on(
+    source: LiveNoteSource,
+    pitch: LiveNotePitch,
+    velocity: f32,
+    app: &mut sequencer::app::App,
+    state: &Arc<SequencerState>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    armed_rack: &Arc<Mutex<Option<u64>>>,
+    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+) -> RecordingKeyOutcome {
+    let roll_mode = state.transport.roll_mode.load(Ordering::Relaxed);
+    // Suppress key repeat — only trigger on first press
+    let mut held = held_notes.lock().unwrap();
+    if held.iter().any(|note| note.source == source) {
+        return RecordingKeyOutcome::Consumed;
+    }
+
+    let pad_note = pitch.pad_note();
+    let press_time = Instant::now();
+    let mut targets: Vec<LiveNoteTarget> = Vec::new();
+    {
+        let armed = record_armed.lock().unwrap();
+        for (track, a) in armed.iter().enumerate() {
+            if *a {
+                targets.push(LiveNoteTarget {
+                    track,
+                    transpose: pitch.transpose_for_track(state, track),
+                    position: press_record_position(state, track, press_time),
+                    stamped: false,
+                });
+            }
+        }
+    }
+    // Rack arm = pad-play mode: the key's note picks a pad, and the
+    // pad's member track is triggered at base pitch. A note with no
+    // pad is ignored; a member that is somehow armed as a track too
+    // keeps its chromatic entry rather than sounding twice.
+    if let Some(track) =
+        armed_rack_pad_track(&app.groups, *armed_rack.lock().unwrap(), pad_note)
+    {
+        if !targets.iter().any(|t| t.track == track) {
+            targets.push(LiveNoteTarget {
+                track,
+                transpose: 0.0,
+                position: press_record_position(state, track, press_time),
+                stamped: false,
+            });
+        }
+    }
+
+    // With roll mode on the sequencer owns triggering outright:
+    // presses never take the immediate live path — playing OR
+    // stopped — they only arm the scheduler. A press while parked is
+    // silent until Play, at which point it rolls from the first grid
+    // line; this is also what makes press-then-Play (either order,
+    // however racy) clean, with no out-of-time live hit leaking in
+    // ahead of the quantized roll. (Amends rolling-core-spec 4.3's
+    // "stopped behaves as normal live keys".)
+    // Send note-on to audio thread for every target.
+    for target in &targets {
+        if roll_mode {
+            // No hit on keydown (F1): the scheduler fires the
+            // first hit at the next roll-grid boundary.
+            state.push_roll_command(sequencer::sequencer::RollCommand::NoteOn {
+                track: target.track,
+                transpose: target.transpose,
+            });
+        } else {
+            let _ = keyboard_tx.send(KeyboardTrigger {
+                track: target.track,
+                transpose: target.transpose,
+                velocity,
+                note_off: false,
+            });
+        }
+    }
+
+    let triggered = !targets.is_empty();
+    held.push(HeldKeyboardNote {
+        source,
+        sequence_roll_code: None,
+        transpose: pad_note,
+        velocity,
+        press_time,
+        targets,
+    });
+    if triggered {
+        RecordingKeyOutcome::Triggered
+    } else {
+        RecordingKeyOutcome::Consumed
+    }
+}
+
+/// Source-agnostic live note-off: releases every target of the note held
+/// under `source` and, while recording + playing, writes it into the pending
+/// take or the live pattern.
+fn live_note_off(
+    source: LiveNoteSource,
+    app: &mut sequencer::app::App,
+    state: &Arc<SequencerState>,
+    recording: &Arc<AtomicBool>,
+    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    roll_record: &Arc<Mutex<RollRecordBuffer>>,
+    ui_invalidations: &UiInvalidationQueue,
+) -> RecordingKeyOutcome {
+    let roll_mode = state.transport.roll_mode.load(Ordering::Relaxed);
+    // Catch any note-on stamp that landed since the last frame drain
+    // before the write below reads the target positions.
+    apply_live_trigger_stamps(state, held_notes);
+    // Find and remove the held note
+    let held_entry = {
+        let mut held = held_notes.lock().unwrap();
+        let pos = held.iter().position(|note| note.source == source);
+        pos.map(|idx| held.remove(idx))
+    };
+
+    // Record into pattern if recording + playing
+    if let Some(mut note) = held_entry {
+        // A tap so short its audio-thread stamp has not landed yet:
+        // the trigger is still in flight and will sound at the render
+        // frontier, so restamp there instead of keeping the
+        // latency-subtracted press estimate. Older unstamped targets
+        // (MIDI-FX-routed tracks) sounded near their press — the
+        // frontier at release would be wrong for them, so they keep
+        // the press estimate.
+        if note.press_time.elapsed() < FRONTIER_FALLBACK_WINDOW
+            && note.targets.iter().any(|target| !target.stamped)
+        {
+            if let Some(frontier) =
+                state.record_frontier_beats_at_instant(Instant::now())
+            {
+                for target in &mut note.targets {
+                    if target.stamped {
+                        continue;
+                    }
+                    if let Some(position) =
+                        state.record_position_at_beat(target.track, frontier)
+                    {
+                        if record_stamp_debug() {
+                            eprintln!(
+                                "[record-stamp] frontier fallback track={} beat={:.4} -> step={} phase={:.3} (press estimate was step={} phase={:.3})",
+                                target.track,
+                                frontier,
+                                position.step,
+                                position.phase,
+                                target.position.step,
+                                target.position.phase,
+                            );
+                        }
+                        target.position = position;
+                    }
+                }
+            }
+        }
+        let note = note;
+        for target in &note.targets {
+            if roll_mode {
+                // Cancels every roll hit not yet inside the lookahead
+                // horizon (F3).
+                state.push_roll_command(sequencer::sequencer::RollCommand::NoteOff {
+                    track: target.track,
+                    transpose: target.transpose,
+                });
+            }
+            // The audio note-off always goes out so a sounding voice
+            // (rolled or normal) releases its envelope.
+            let _ = keyboard_tx.send(KeyboardTrigger {
+                track: target.track,
+                transpose: target.transpose,
+                velocity: 0.0,
+                note_off: true,
+            });
+        }
+        if roll_mode {
+            // Rolled hits were already written into live pattern
+            // state as they sounded (rolling-core-spec 6); the
+            // release schedules the deferred snapshot publish that
+            // makes them audible. The press-position write below
+            // would stamp a note where no hit sounded (F1).
+            if recording.load(Ordering::Relaxed) && state.is_playing() {
+                roll_record.lock().unwrap().note_released();
+            }
+            return RecordingKeyOutcome::Consumed;
+        }
+
+        if recording.load(Ordering::Relaxed) && state.is_playing() {
+            let bpm = state.transport.bpm.load(Ordering::Relaxed) as f64;
+            let secs_per_step = 60.0 / bpm / 4.0;
+            let hold_secs = note.press_time.elapsed().as_secs_f64();
+            let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
+            let mut recorded_steps: Vec<(usize, usize)> = Vec::new();
+
+            let mut recorded_take = false;
+            let quantize = sequencer::record_quantize::RecordQuantize::from_atomic(
+                state.transport.record_quantize.load(Ordering::Relaxed) as u8,
+            );
+            // Recording engaged mid-playback: stamp the recording
+            // kind from the active view (unified-transport spec 5) —
+            // arrangement view promotes into arrangement capture so
+            // this performance records as a take; the session view
+            // stamps loop overdub into the looping live pattern.
+            if !note.targets.is_empty() {
+                app.stamp_recording_kind_for_note();
+            }
+            let song_authority = app.song_playback_authority_active();
+            let overdub = app.recording_kind
+                == Some(sequencer::app::song_transport::RecordingKind::Overdub);
+            for &LiveNoteTarget {
+                track,
+                transpose,
+                position,
+                stamped,
+            } in &note.targets
+            {
+                // Song-mode take recording (takes spec 8.4): while
+                // arrangement capture is active, an armed track's
+                // notes retarget into its pending take at
+                // clip-relative positions stamped on the
+                // latency-compensated record clock — the live
+                // pattern is NOT written.
+                if !overdub
+                    && app.take_record_note(
+                        track,
+                        note.press_time,
+                        transpose,
+                        duration_steps,
+                    )
+                {
+                    recorded_take = true;
+                    continue;
+                }
+                if song_authority {
+                    if !overdub {
+                        // The song owns playback for this lane: a
+                        // note that could not be staged as a take
+                        // (no record clock anchor yet) is dropped
+                        // rather than folded — modulo the clip
+                        // length — into the scene's looping pattern.
+                        continue;
+                    }
+                    // Loop overdub claims the armed lane (spec 5.1):
+                    // latch it so the target pattern is stable
+                    // across row boundaries and the layered notes
+                    // are audible. A lane currently playing a take
+                    // refuses overdub — its note is dropped.
+                    if !app.claim_overdub_lane(track) {
+                        continue;
+                    }
+                }
+                // Each target quantizes against its OWN track's
+                // timebase and length, which is what lets one rack
+                // performance land a 1/64 hat pad and a 1/16 kick pad
+                // on their own grids.
+                let num_steps = state.pattern.track_params[track].get_num_steps();
+                let (local_step, delay) = quantized_record_position(
+                    position.step,
+                    position.phase,
+                    num_steps,
+                    state.pattern.track_params[track].get_timebase(),
+                    quantize,
+                );
+                if record_stamp_debug() {
+                    eprintln!(
+                        "[record-stamp] write track={} stamped={} step={} delay={:.3} (from step={} phase={:.3}, quantize={:?})",
+                        track, stamped, local_step, delay, position.step, position.phase, quantize,
+                    );
+                }
+                if !state.pattern.patterns[track].is_active(local_step) {
+                    state.pattern.patterns[track].toggle_step(local_step);
+                }
+                state.pattern.chord_data[track].add_note_with_timing(
+                    local_step,
+                    transpose,
+                    duration_steps,
+                    delay,
+                );
+                let first_note = state.pattern.chord_data[track].get(local_step, 0);
+                state.pattern.step_data[track].set(
+                    local_step,
+                    StepParam::Transpose,
+                    first_note,
+                );
+                state.pattern.step_data[track].set(
+                    local_step,
+                    StepParam::Velocity,
+                    note.velocity,
+                );
+                state.pattern.step_data[track].set(
+                    local_step,
+                    StepParam::Duration,
+                    duration_steps,
+                );
+                if !recorded_steps.contains(&(track, local_step)) {
+                    recorded_steps.push((track, local_step));
+                }
+            }
+            if !recorded_steps.is_empty() {
+                // Targeted invalidations instead of a ui_epoch bump
+                // (the live step-print contract): the epoch resync
+                // rebuilds every surface and refreshes the sequencer
+                // layout, which starved queued key events behind each
+                // recorded release — fast chord stabs sounded their
+                // second chord late on slow machines. These pushes
+                // update exactly the recorded trig's bindings on this
+                // frame's tick.
+                let mut published_tracks: Vec<usize> = Vec::new();
+                for &(track, step) in &recorded_steps {
+                    ui_invalidations.push(UiInvalidation::StepBatch {
+                        track,
+                        steps: vec![step],
+                    });
+                    for param in [
+                        StepParam::Transpose,
+                        StepParam::Velocity,
+                        StepParam::Duration,
+                    ] {
+                        ui_invalidations.push(UiInvalidation::Step {
+                            track,
+                            step,
+                            change: StepInvalidation::Param(param.into()),
+                        });
+                    }
+                    ui_invalidations.push(UiInvalidation::Step {
+                        track,
+                        step,
+                        change: StepInvalidation::DurationSpan,
+                    });
+                    if !published_tracks.contains(&track) {
+                        published_tracks.push(track);
+                    }
+                }
+                // Copy-on-write per-track publishes: a recorded note
+                // touches only its target tracks, so the scheduler
+                // hears it without a full-capture snapshot.
+                for track in published_tracks {
+                    state.publish_scheduler_track(track);
+                    ui_invalidations.push(UiInvalidation::PianoRoll {
+                        track,
+                        change: PianoRollInvalidation::Items,
+                    });
+                }
+                return RecordingKeyOutcome::Recorded;
+            }
+            if recorded_take {
+                return RecordingKeyOutcome::RecordedTake;
+            }
+        }
+    }
+    RecordingKeyOutcome::Consumed
 }
 
 #[cfg(test)]
@@ -2411,7 +2581,8 @@ mod live_keyboard_tests {
         armed_rack_pad_track, build_selection_value, current_step_param_number_picker_id,
         handle_metal_command_shortcut, handle_metal_soft_step_param_key,
         handle_number_picker_edit_key_for_widget,
-        handle_recording_key, held_note_for_key,
+        handle_midi_note, handle_recording_key, held_note_for_key, held_note_for_source,
+        LiveNoteSource,
         is_active_roll_rate_key, is_duplicate_shortcut_for, is_new_instrument_shortcut_for,
         normalize_command_shortcuts, normalize_command_shortcuts_for, note_from_key,
         number_picker_edit_state, quantized_record_position, sample_browser_search_shortcut_for,
@@ -2519,9 +2690,10 @@ mod live_keyboard_tests {
     #[test]
     fn held_note_lookup_is_case_insensitive_for_release_matching() {
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
-            key: 'a',
+            source: LiveNoteSource::Key('a'),
             sequence_roll_code: None,
             transpose: 0.0,
+            velocity: 1.0,
             press_time: Instant::now(),
             targets: vec![LiveNoteTarget {
                 track: 0,
@@ -2542,9 +2714,10 @@ mod live_keyboard_tests {
     fn live_trigger_stamps_reposition_only_the_matching_unstamped_target() {
         let state = Arc::new(SequencerState::new(2, vec![]));
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
-            key: 'a',
+            source: LiveNoteSource::Key('a'),
             sequence_roll_code: None,
             transpose: 5.0,
+            velocity: 1.0,
             press_time: Instant::now(),
             targets: vec![
                 LiveNoteTarget {
@@ -2711,9 +2884,10 @@ mod live_keyboard_tests {
     fn held_note_release_bypasses_live_key_mode_gate() {
         let editor = Editor::new(Runtime::new(), EditorConfig::default());
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
-            key: 'a',
+            source: LiveNoteSource::Key('a'),
             sequence_roll_code: None,
             transpose: 0.0,
+            velocity: 1.0,
             press_time: Instant::now(),
             targets: Vec::new(),
         }]));
@@ -2871,6 +3045,89 @@ mod live_keyboard_tests {
             &ui_invalidations,
             false,
         )
+    }
+
+    /// Bead eseq-egs6: a hardware note enters the same seam as musical
+    /// typing. Note-on sounds every armed track at the absolute pitch
+    /// (MIDI 60 = transpose 0, through the track's base-note offset) with
+    /// the real velocity; note-off releases it; the armed rack's pad answers
+    /// the note number.
+    #[test]
+    fn midi_note_sounds_armed_tracks_and_rack_pads_like_a_key() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        state.pattern.instrument_base_note_offsets[0].store(12.0f32.to_bits(), Ordering::Relaxed);
+        let mut app = rack_test_app(Arc::clone(&state), 3);
+        let record_armed = Arc::new(Mutex::new(vec![true, false, false]));
+        let armed_rack = Arc::new(Mutex::new(Some(7)));
+        let recording = Arc::new(AtomicBool::new(false));
+        let (keyboard_tx, keyboard_rx) = std::sync::mpsc::channel();
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let roll_record = Arc::new(Mutex::new(RollRecordBuffer::default()));
+        let ui_invalidations = UiInvalidationQueue::new();
+        let drive = |event: sequencer::midi_input::MidiNoteEvent, app: &mut sequencer::app::App| {
+            handle_midi_note(
+                event,
+                app,
+                &state,
+                &record_armed,
+                &armed_rack,
+                &recording,
+                &keyboard_tx,
+                &held,
+                &roll_record,
+                &ui_invalidations,
+            )
+        };
+        // MIDI 96 = transpose 36 for the rack: pad 36 -> member track 1.
+        let on = sequencer::midi_input::MidiNoteEvent {
+            note: 96,
+            velocity: 0.5,
+            on: true,
+        };
+        assert!(drive(on, &mut app).triggered_note());
+        assert!(held_note_for_source(&held, LiveNoteSource::Midi(96)));
+        assert!(
+            !drive(on, &mut app).triggered_note(),
+            "a repeated note-on for a held note is a no-op"
+        );
+
+        let mut triggers: Vec<_> = keyboard_rx.try_iter().collect();
+        triggers.sort_by_key(|trigger| trigger.track);
+        assert_eq!(triggers.len(), 2, "armed track + rack pad: {triggers:?}");
+        assert_eq!(
+            (triggers[0].track, triggers[0].transpose, triggers[0].velocity, triggers[0].note_off),
+            (0, 96.0 - 60.0 - 12.0, 0.5, false),
+            "armed track sounds the absolute pitch through its base-note offset"
+        );
+        assert_eq!(
+            (triggers[1].track, triggers[1].transpose, triggers[1].note_off),
+            (1, 0.0, false),
+            "rack pad member plays at base pitch"
+        );
+
+        let off = sequencer::midi_input::MidiNoteEvent {
+            note: 96,
+            velocity: 0.0,
+            on: false,
+        };
+        assert!(drive(off, &mut app).consumed());
+        assert!(!held_note_for_source(&held, LiveNoteSource::Midi(96)));
+        let mut offs: Vec<_> = keyboard_rx.try_iter().collect();
+        offs.sort_by_key(|trigger| trigger.track);
+        assert_eq!(offs.len(), 2);
+        assert!(offs.iter().all(|trigger| trigger.note_off));
+        assert_eq!((offs[0].track, offs[1].track), (0, 1));
+
+        // A key and a MIDI note at the same pitch are distinct holds.
+        held.lock().unwrap().push(HeldKeyboardNote {
+            source: LiveNoteSource::Key('a'),
+            sequence_roll_code: None,
+            transpose: 0.0,
+            velocity: 1.0,
+            press_time: Instant::now(),
+            targets: Vec::new(),
+        });
+        assert!(!held_note_for_source(&held, LiveNoteSource::Midi(60)));
     }
 
     #[test]

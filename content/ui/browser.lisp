@@ -442,7 +442,7 @@
     (sdf/layer
       (sdf/fill __shape
         (material
-          :color (rgba 0.45 0.47 0.50 1.0))))))
+          :color :search-icon)))))
 
 ;; Headphone toggle for the preview strip (Ableton-style auto-preview): a
 ;; circular badge with the headphone glyph inside — headband arc (ring clipped
@@ -1700,7 +1700,7 @@
                 :font-size 9
                 :on-click |x y r|
                 (host-command "set-draft-instrument-run-mode" (dict :run-mode "instrument"))
-                :color :white)
+                :color (if (= SEQ.editor-instrument-run-mode "instrument") :browser-primary-fg :white))
               (button "Free Patch"
                 :variant (if (= SEQ.editor-instrument-run-mode "free_patch") :primary :secondary)
                 :width 8.5
@@ -1708,7 +1708,7 @@
                 :font-size 9
                 :on-click |x y r|
                 (host-command "set-draft-instrument-run-mode" (dict :run-mode "free_patch"))
-                :color :white))
+                :color (if (= SEQ.editor-instrument-run-mode "free_patch") :browser-primary-fg :white)))
             (label "Save as"
               :font-size 9
               :color :gray
@@ -1818,7 +1818,7 @@
                   (if (= SEQ.editor-mode "new-effect")
                     (host-command "save-new-effect" (dict :name sbrowser-editor-name))
                     (host-command "update-effect" (dict))))))
-            :color :white)
+            :color :browser-primary-fg)
           ;; Fork sits next to the clobbering path on purpose: in edit modes the
           ;; primary button overwrites an instrument every project shares, and
           ;; the safe alternative should not require leaving the buffer.

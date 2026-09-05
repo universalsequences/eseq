@@ -1,14 +1,31 @@
 use crate::*;
 
-pub(super) const COMMANDS: &[&str] = &["scene-slot-history-write"];
+pub(super) const COMMANDS: &[&str] = &["scene-slot-history-write", "apply-scene-transpose"];
 
 pub(super) fn handle(
-    _name: &str,
+    name: &str,
     payload: Value,
     app: &mut app::App,
     editor: &mut Editor,
     _ctx: &mut LoopCtx<'_>,
 ) {
+    if name == "apply-scene-transpose" {
+        match apply_scene_transpose_host_command(app, &payload) {
+            Ok(_) => {
+                let slot = sequencer::sequencer::SCENE_TRANSPOSE_SLOT;
+                let epoch = app.state.current_scene_slots().epoch(slot);
+                let result = editor.runtime_mut().invalidate_reactive_source(
+                    sequencer::lisp_host::SCENE_SLOT_REACTIVE_NAMESPACE,
+                    slot, Value::String(epoch.to_string()));
+                if let Err(error) = result {
+                    editor.handle_host_event(HostEvent::Error(format!("Scene transpose repaint failed: {error:?}")));
+                }
+                editor.refresh_runtime_side_effects();
+            }
+            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+        }
+        return;
+    }
     match apply_scene_slot_history_host_command(app, &payload) {
         Ok(app::edit::EditOutcome::Applied(_)) | Ok(app::edit::EditOutcome::NoOp) => {}
         Ok(app::edit::EditOutcome::AppliedUnrecorded) => {
@@ -57,4 +74,32 @@ pub(crate) fn apply_scene_slot_history_host_command(
     )?;
     app.record_applied_scene_slot_write(scene, name, before, after)
         .map_err(|error| format!("{error:?}"))
+}
+
+fn apply_scene_transpose_host_command(
+    app: &mut app::App,
+    payload: &Value,
+) -> Result<app::edit::EditOutcome, String> {
+    let Value::Map(map) = payload else {
+        return Err("invalid scene transpose payload".into());
+    };
+    let field = |name: &str| map.get(name).map(|cell| cell.borrow().clone());
+    let value = match field("value") {
+        Some(Value::Number(value)) => value,
+        _ => return Err("scene transpose value is missing".into()),
+    };
+    let bank = match field("scope") {
+        Some(Value::String(scope)) if scope == "all-banks" => None,
+        Some(Value::String(scope)) if scope == "bank" => {
+            match field("bank-id") {
+                Some(Value::Number(id)) if id.is_finite() && id > 0.0
+                    && id.fract() == 0.0 && id < u64::MAX as f64 => {
+                    Some(sequencer::sequencer::SceneBankId(id as u64))
+                }
+                _ => return Err("scene bank identity is missing or invalid".into()),
+            }
+        }
+        _ => return Err("scene transpose scope is missing or invalid".into()),
+    };
+    app.apply_scene_transpose_to_bank(bank, value)
 }

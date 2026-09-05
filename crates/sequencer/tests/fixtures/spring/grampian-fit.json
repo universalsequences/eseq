@@ -1,0 +1,97 @@
+{
+  "paths": [
+    {
+      "dispersion": [
+        {
+          "sections": 40,
+          "pole_hz": 4566.205,
+          "bandwidth_hz": 2990.4854
+        },
+        {
+          "sections": 40,
+          "pole_hz": 5629.909,
+          "bandwidth_hz": 1373.7612
+        },
+        {
+          "sections": 40,
+          "pole_hz": 6089.8003,
+          "bandwidth_hz": 617.3548
+        }
+      ],
+      "forward_s": 0.013806314,
+      "return_s": 0.011261084,
+      "scatter_s": 0.0305,
+      "scatter": 0.30647343,
+      "t60_s": 6.61088,
+      "damping_hz": 14114.904,
+      "shelf_hz": 1262.8733,
+      "shelf_gain": 0.9012612,
+      "highpass_hz": 219.48396,
+      "highpass_q": 0.70710677,
+      "lowpass_hz": 4514.2866,
+      "gain": 1.0
+    },
+    {
+      "dispersion": [
+        {
+          "sections": 40,
+          "pole_hz": 4490.864,
+          "bandwidth_hz": 2546.683
+        },
+        {
+          "sections": 40,
+          "pole_hz": 5526.009,
+          "bandwidth_hz": 1239.3225
+        },
+        {
+          "sections": 40,
+          "pole_hz": 6000.0,
+          "bandwidth_hz": 503.97784
+        }
+      ],
+      "forward_s": 0.022027025,
+      "return_s": 0.011061424,
+      "scatter_s": 0.038,
+      "scatter": 0.32576406,
+      "t60_s": 3.4313042,
+      "damping_hz": 5603.1045,
+      "shelf_hz": 415.47064,
+      "shelf_gain": 0.89951384,
+      "highpass_hz": 357.82718,
+      "highpass_q": 0.70710677,
+      "lowpass_hz": 5128.477,
+      "gain": 0.80322754
+    },
+    {
+      "dispersion": [
+        {
+          "sections": 6,
+          "pole_hz": 7300.0,
+          "bandwidth_hz": 2200.0
+        },
+        {
+          "sections": 0,
+          "pole_hz": 7300.0,
+          "bandwidth_hz": 2200.0
+        },
+        {
+          "sections": 0,
+          "pole_hz": 7300.0,
+          "bandwidth_hz": 2200.0
+        }
+      ],
+      "forward_s": 0.001,
+      "return_s": 0.008160958,
+      "scatter_s": 0.0,
+      "scatter": 0.0,
+      "t60_s": 1.0672294,
+      "damping_hz": 17233.254,
+      "shelf_hz": 400.0,
+      "shelf_gain": 1.0,
+      "highpass_hz": 6198.56,
+      "highpass_q": 3.5078776,
+      "lowpass_hz": 11675.518,
+      "gain": 0.030298281
+    }
+  ]
+}

@@ -202,9 +202,11 @@
 ;; same at any lane height; tune by eye against the Ableton reference.
 (def clip-title-bar-height 0.9)
 (def clip-label-font-size 9)
-(def clip-label-color '(rgba 0.2 0.2 0.2 1))
+(def clip-label-color :clip-label-fg)
+
+(def scene-color () THEME.scene_clip_bg)
 (def timeline-background-color :buffer-bg)
-(def cursor-color '(rgba 0.32 0.78 0.94 1))
+(def cursor-color :arrangement-cursor)
 ;; Clip corner radius in CELLS (GarageBand-style rounded clips), so it scales
 ;; with the UI zoom like the lane heights above. 0 gives the square clips
 ;; every other timeline host draws.
@@ -365,8 +367,8 @@
             ;; The scene identity is the performer's while scene-latched:
             ;; dim the lane like any overridden track (rev 4).
             :color (if SEQ.song-scene-latched
-                     (override-dim (list 0.52 0.56 0.62))
-                     (list 0.52 0.56 0.62))))))
+                     (override-dim (scene-color))
+                     (scene-color))))))
     (range 0 (len SEQ.scene-spans))))
 
 (def scene-items ()
@@ -835,7 +837,7 @@
           :end end
           :kind :scene
           :label (scene-name (get event :scene))
-          :color (list 0.52 0.56 0.62))))))
+          :color (scene-color))))))
 
 (def pending-scene-items ()
   (let ((events (pending-scene-events)))
@@ -1351,10 +1353,76 @@
     (seq-song-deselect-clip)
     (set-cursor (get event :time) i)))
 
+;; Pattern placement is a one-shot gesture. Source identity is captured on
+;; activation for each track; moving the pointer only repaints the hovered lane.
+(defstate placement nil)
+(defstate placement-choice nil)
+(defstate placement-choice-track -1)
+(defstate placement-menu nil)
+
+(def cancel-placement ()
+  (let ((was-active (not (= placement nil))))
+    (do (set! placement nil) was-active)))
+
+(def placement-cells (track)
+  (if (and (>= track 0) (< track (len SEQ.track-pattern-cells)))
+    (nth SEQ.track-pattern-cells track)
+    '()))
+
+(def placement-source (track)
+  (do
+    ;; These reads invalidate the selector when the scene or track changes.
+    SEQ.current-pattern
+    (let ((cells (placement-cells track)))
+      (if (= (len cells) 0)
+        nil
+        (do
+          (map |cell| (reactive-get "SEQ"
+            (str "track-pattern-cell-active-" track "-" (get cell :id))) cells)
+          (let ((source (seq-arrangement-pattern track
+                    (if (and (= (nth SEQ.track-ids track) placement-choice-track)
+                          (> (len (filter |cell| (= (get cell :id) placement-choice) cells)) 0))
+                      placement-choice nil))))
+            (if (= source nil) nil
+              (merge source :track-id (nth SEQ.track-ids track)))))))))
+
+(def placement-label (track id) (str id))
+
+(def begin-placement ()
+  (if (= placement nil)
+    (let ((sources (map |i| (placement-source i) (range 0 (len SEQ.track-ids)))))
+      (if (= (len (filter |source| (not (= source nil)) sources)) 0) nil
+        (set! placement (dict :track-ids SEQ.track-ids :sources sources))))
+    (cancel-placement)))
+
+(def placement-target-source (track)
+  (if (or (= placement nil) (< track 0) (>= track (len (get placement :sources)))) nil
+    (let ((source (nth (get placement :sources) track)))
+      (if (and (not (= source nil)) (< track (len SEQ.track-ids))
+            (= (get source :track-id) (nth SEQ.track-ids track)))
+        source nil))))
+
+(def sync-placement-target ()
+  (if (and (not (= placement nil)) (not (= SEQ.track-ids (get placement :track-ids))))
+    (cancel-placement) nil))
+
+(def place-pattern (track source time)
+  (if (= source nil) nil
+    (do
+      (cancel-placement)
+      (set! placement-menu nil)
+      (host-command "arrangement-pattern-place"
+        (dict :track track :pattern-id (get source :pattern-id) :track-id (get source :track-id) :start-beat time)))))
+
+
 (def track-action (i event)
   (if (view-action? event)
     (view-action event)
     (match event.type
+      :place-item
+      (place-pattern i (placement-target-source i) (get event :time))
+      :cancel-placement
+      (cancel-placement)
       :select
       (track-select i event)
       ;; Title-bar double-click (clip-edit-target spec 4): bind exactly like a
@@ -1444,10 +1512,12 @@
 ;; beat, snapped to the bar grid. The drop event's :sx is the normalized
 ;; (-1..1) position within the lane, which maps straight onto the shared view
 ;; span because lanes have no sidebar.
-(def drop-time (event)
+(def pointer-time (event)
   (let ((ratio (max 0 (min 1 (/ (+ (event-num event :sx -1) 1) 2)))))
-    (let ((time (+ view-start (* ratio view-duration))))
-      (max 0 (* snap (floor (/ time snap)))))))
+    (+ view-start (* ratio view-duration))))
+
+(def drop-time (event)
+  (max 0 (* snap (floor (/ (pointer-time event) snap)))))
 
 (def drop-scene (event)
   (let ((scene (get (get event :payload) :scene)))
@@ -1461,6 +1531,101 @@
             ;; the drop point (the translator only uses :end in that case).
             :end (+ start (* beats-per-bar 4))
             :scene scene))))))
+
+(def placement-toolbar ()
+  (let ((track SEQ.current-track))
+    (let ((source (placement-source track))
+          (cells (placement-cells track)))
+      (h-stack :key "arr-placement-toolbar" :gap 0.4 :padding 0.6 :align :center
+        (button "Place" :key "arr-place-pattern" :width 4.2 :height 1.15 :font-size 9
+          :corner-radius 8
+          :background-color :mixer-strip-bg :color :fg
+          :border-color :mixer-strip-selected-bg
+          :highlight-color :transparent :shadow-color :transparent
+          :active-background-color (rgba 0.88 0.69 0.28 1)
+          :active-color (rgba 0.16 0.14 0.10 1)
+          :disabled (= source nil)
+          :active (if (= placement nil) 0 1)
+          :on-click (lambda (event) (begin-placement)))
+        (dropdown :key "arr-placement-pattern" :width 3.5 :height 1.15 :font-size 9
+          :bg-color :mixer-strip-bg
+          :border-color :mixer-strip-selected-bg
+          :badge-color :transparent
+          :value (if (= source nil) "—" (placement-label track (get source :pattern-id)))
+          :options (map |cell| (placement-label track (get cell :id)) cells)
+          :on-change (lambda (label)
+            (let ((matches (filter |cell| (= (placement-label track (get cell :id)) label) cells)))
+              (if (= (len matches) 0) nil
+                (do
+                  (cancel-placement)
+                  (set! placement-choice-track (nth SEQ.track-ids track))
+                  (set! placement-choice (get (nth matches 0) :id)))))))))))
+
+(def placement-item (i)
+  (let ((source (placement-target-source i)))
+    (if (= source nil) nil
+      (dict :id -1 :lane 0 :start 0 :end (get source :length-beats)
+        :label (str "Pattern " (placement-label i (get source :pattern-id)))
+        :color (clip-color i)
+        :content (dict :dots (windowed-dots source 0 (get source :num-steps))
+                   :cycle 1 :phase 0 :wrap true)))))
+
+(def open-placement-menu (i event)
+  (do
+    (cancel-placement)
+    (set! placement-menu
+      (let ((clips (filter |clip| (and (or (get clip :pattern-id) (get clip :take-id))
+                                    (<= (get clip :start-beat) (pointer-time event))
+                                    (> (get clip :end-beat) (pointer-time event))) (track-clips i))))
+        (dict :track i :source (placement-source i) :time (drop-time event)
+          :clip (if (= (len clips) 0) nil (nth clips 0))
+          :col (get event :col) :row (get event :row))))))
+
+(def change-clip-pattern (clip pattern-id)
+  (do
+    (set! placement-menu nil)
+    (if (= (get clip :pattern-id) pattern-id) nil
+      (host-command "arrangement-clip-set-source"
+        (dict :clip-id (get clip :clip-id) :pattern-id pattern-id)))))
+
+(def placement-context-menu ()
+  (context-menu :is-open (not (= placement-menu nil))
+    :anchor-col (or (get placement-menu :col) 0)
+    :anchor-row (or (get placement-menu :row) 0)
+    :on-close (lambda () (set! placement-menu nil))
+    (if (not (= (get placement-menu :clip) nil))
+      (menu-item "Change Pattern" :key "arr-change-pattern"
+        (each (placement-cells (get placement-menu :track)) |cell|
+          (let ((clip (get placement-menu :clip)) (id (get cell :id)))
+            (menu-item (str "Pattern " id) :key (str "arr-change-pattern-" id)
+              :checked (= (get clip :pattern-id) id)
+              :on-select (lambda (event) (change-clip-pattern clip id))))))
+      (list
+        (menu-item "Create empty take here" :key "arr-create-empty-take"
+          :on-select (lambda (event)
+            (let ((target placement-menu))
+              (do
+                (set! placement-menu nil)
+                (track-action (get target :track)
+                  (dict :type :finish-create-item :start (get target :time)
+                    :end (+ (get target :time) beats-per-bar)))))))
+        (menu-item
+          (let ((source (get placement-menu :source)))
+            (if (= source nil) "Insert current pattern here"
+              (str "Insert Pattern "
+                (placement-label (get placement-menu :track) (get source :pattern-id)) " here")))
+          :key "arr-insert-pattern" :disabled (= (get placement-menu :source) nil)
+          :on-select (lambda (event)
+            (place-pattern (get placement-menu :track)
+              (get placement-menu :source) (get placement-menu :time))))))))
+
+(def drop-track-pattern (i event)
+  (let ((payload (get event :payload)))
+    (if (= (get payload :track) i)
+      (let ((source (seq-arrangement-pattern i (get payload :pattern-id))))
+        (if (= source nil) nil
+          (place-pattern i (merge source :track-id (get payload :track-id)) (drop-time event))))
+      nil)))
 
 ;; ── Lane instances (spec 4.1/4.2) ──────────────────────────────────────────
 
@@ -1483,10 +1648,10 @@
     :background-color timeline-background-color
     :title-bar-height clip-title-bar-height
     :item-label-font-size clip-label-font-size
-    :item-label-color clip-label-color
+    :item-label-color :scene-clip-fg
     :item-corner-radius clip-corner-radius
-    :item-color (list 0.52 0.56 0.62)
-    :loop-color (list 0.92 0.72 0.25)
+    :item-color :scene-clip-bg
+    :loop-color :arrangement-loop
     :playhead-time (bind-seq "song-position-beats")
     ;; The ruler always owns the transport-start triangle, while the
     ;; track-specific cursor line remains in the lane the user clicked.
@@ -1538,10 +1703,10 @@
     :background-color timeline-background-color
     :title-bar-height clip-title-bar-height
     :item-label-font-size clip-label-font-size
-    :item-label-color clip-label-color
+    :item-label-color :scene-clip-fg
     :item-corner-radius clip-corner-radius
-    :item-color (list 0.52 0.56 0.62)
-    :loop-color (list 0.92 0.72 0.25)
+    :item-color :scene-clip-bg
+    :loop-color :arrangement-loop
     :playhead-time (bind-seq "song-position-beats")
     ;; The ruler always owns the transport-start triangle, while the
     ;; track-specific cursor line remains in the lane the user clicked.
@@ -1618,8 +1783,13 @@
     :cursor-marker-visible false
     :cursor-line-visible true
     :cursor-color cursor-color
-    :drop-types (list "transport-scene")
-    :on-drop (lambda (event) (drop-scene event))
+    :placement-active (if (= (placement-target-source i) nil) 0 1)
+    :placement-item (placement-item i)
+    :on-right-click (lambda (event) (open-placement-menu i event))
+    :drop-types (list "transport-scene" (str "track-pattern-" (nth SEQ.track-ids i)))
+    :on-drop (lambda (event)
+      (if (= (get (get event :payload) :pattern-id) nil)
+        (drop-scene event) (drop-track-pattern i event)))
     :items (track-items i)
     :selected-id (bind "SEQV" (channel "selected-clip" i))
     :bound-id (bind "SEQV" (channel "bound-clip" i))
@@ -1679,8 +1849,7 @@
 ;; the pointer is always over a lane, keeping scroll/zoom gestures captured
 ;; by the timelines instead of leaking to the buffer viewport.
 ;;
-;; No mode toolbar (Ableton-style): pointer gestures + scene drag-and-drop
-;; and double-click cover editing; Backspace deletes the selection. The scene
+;; The compact placement toolbar shares the pinned scene header. The scene
 ;; lane (the arrangement's one ruler) sits OUTSIDE the track scroll container
 ;; so it stays pinned while track rows scroll vertically inside it.
 ;; The step tile hides the global status line, so song-primitive rejections
@@ -1705,6 +1874,7 @@
 ;; active buffer's layout.
 (def publish-bridge ()
   (do
+    (sync-placement-target)
     (let ((bound SEQ.song-bound-clip))
       (map
         (lambda (i)
@@ -1741,6 +1911,8 @@
         (box :width 0 :height 0 :bg :transparent)))
     ;; The "No song yet" banner is gone (empty-arrangement spec 8): the
     ;; arrangement always exists, so there is no mode to explain.
+    (subtree :key "arr-placement-context-menu"
+      (placement-context-menu))
     (subtree :key "arr-error-banner"
       (error-banner))
     ;; Sound palette overlay (takes spec 17.6): opened from a clip via the
@@ -1757,7 +1929,12 @@
         (h-stack :width :fill :align :start
           (box :key "scene-header-spacer"
             :width header-width :height scene-lane-height
-            )
+            (v-stack :width :fill :align :start :gap 0
+              (placement-toolbar)
+              (if (= placement nil) (box :width 0 :height 0)
+                (h-stack :gap 0
+                  (box :width 0.6)
+                  (label "Click to place · Esc cancels" :font-size 8 :color :dim)))))
           (scene-lane))))
     (box :width :fill :height 0.1 :background-color :bg)
     (scroll :key "track-scroll" :width :fill :flex 1

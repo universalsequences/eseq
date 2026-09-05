@@ -504,8 +504,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             .as_deref()
             .or(session_launch_snapshot.as_deref())
             .unwrap_or(base_snapshot);
+        let chunk_slots = scene_slots_for_chunk(base_snapshot, snapshot);
+        process_runtime.set_scene_transpose(&chunk_slots);
         if let Some(scratch) = scratch_runtime.as_ref() {
-            let chunk_slots = scene_slots_for_chunk(base_snapshot, snapshot);
             // ESEQ_DEBUG_SCENE_SLOTS: one line per change at the seam where a
             // chunk selects the scene its shipped ticks read.
             if scene_slot_debug_enabled() {
@@ -660,6 +661,23 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         print_overrides.as_ref(),
                     ),
                 );
+                // Instrument Rack tracks keep their p-locks inside the rack
+                // (macros, slot params, slot devices), which the two
+                // track-level resolvers above never see. One event per
+                // locked (or currently printing) off step lets the audio
+                // side apply them to the rack's sounding voices.
+                if rack_off_step_has_params(state, snapshot, trigger.track, trigger.step) {
+                    chunk_enqueued &= queue
+                        .push(ScheduledEvent {
+                            pattern_epoch,
+                            sample_time,
+                            kind: ScheduledEventKind::RackParams {
+                                track: trigger.track,
+                                step: trigger.step,
+                            },
+                        })
+                        .is_ok();
+                }
                 if !chunk_enqueued {
                     break;
                 }
@@ -2064,4 +2082,29 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     SchedulerLookaheadResult {
         scheduled_until_sample,
     }
+}
+
+/// Whether an inactive step on `track` needs a `RackParams` event: the track
+/// is an Instrument Rack and either something in the rack is p-locked at
+/// `step` or a rack-macro print latch is held for the track (so a printing
+/// knob is heard on sparse patterns, like the device-print latch is).
+pub(super) fn rack_off_step_has_params(
+    state: &SequencerState,
+    snapshot: &SequencerSnapshot,
+    track: usize,
+    step: usize,
+) -> bool {
+    let Some(rack) = snapshot
+        .tracks
+        .get(track)
+        .and_then(|track| track.rack_track.as_ref())
+    else {
+        return false;
+    };
+    rack.step_has_plocks(step)
+        || state
+            .rack_macro_print_override
+            .values_for_track(track)
+            .iter()
+            .any(Option::is_some)
 }

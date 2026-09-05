@@ -31,8 +31,7 @@
 
 (export builtin-fx-compressor-ui)
 
-(def orange () (rgba 1.00 0.62 0.25 1.0))
-(def cyan   () (rgba 0.45 0.78 0.95 1.0))
+(def mode-on-color () :effect-mode-on-bg)
 
 (def effect-source (fx)
   (if (get fx :bus-fx)
@@ -54,7 +53,7 @@
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :width 6.4 :height 2.6 :knob-size 2.0
-    :track-color '(rgba 0.4, 0.4, 0.4, 1)
+    :track-color :dynamics-knob-track
     :on-change (lambda (v) (eseq.effects.param-controls/fx-set-effect-value fx p v))))
 
 (def percent-knob (fx label-text p)
@@ -69,7 +68,7 @@
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :width 6.4 :height 3.2 :knob-size 2.0
-    :track-color '(rgba 0.4, 0.4, 0.4, 1)
+    :track-color :dynamics-knob-track
     :on-change (lambda (v) (eseq.effects.param-controls/fx-set-effect-value fx p v))))
 
 (def mini-number (fx label-text p decimals w)
@@ -88,7 +87,7 @@
 (def parameter-toggle (fx p label-text w)
   (button label-text
     :width w :height 1.05 :padding 0 :font-size 8.5
-    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (orange) :mixer-control-bg)
+    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (mode-on-color) :mixer-control-bg)
     :border-color :transparent
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -102,7 +101,7 @@
   (let ((active (= (get p :text-value) (nth (get p :options) idx))))
     (button label-text
       :width w :height 1.05 :padding 0 :font-size 8.5
-      :background-color (if active (orange) :mixer-control-bg)
+      :background-color (if active (mode-on-color) :mixer-control-bg)
       :border-color :transparent
       :color (if active :black :dim)
       :on-click |x y r| (eseq.effects.param-controls/fx-set-effect-value fx p idx))))
@@ -157,7 +156,7 @@
     (v-stack :gap 0.16 :align :start
       (h-stack :gap 0.6 :align :baseline
         (mini-number fx "Thresh" thr-p 1 4.4)
-        (label "GR" :font-size 8.5 :width 1.6 :color (orange) :bg :transparent)
+        (label "GR" :font-size 8.5 :width 1.6 :color :compressor-gr :bg :transparent)
         (label "Output" :font-size 8.5 :width 3.2 :color :dim :bg :transparent)
         (mini-number fx "Out" out-p 1 4.4))
       (compressor-display

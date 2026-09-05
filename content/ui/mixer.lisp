@@ -139,9 +139,7 @@
     :mixer-strip-border))
 
 (def button-bg (active)
-  (if active
-    (rgba 0.95 0.48 0.18 1.0)
-    :mixer-control-bg))
+  (if active :control-on-bg :mixer-control-bg))
 
 (def arm-bg (active)
   (if active
@@ -477,14 +475,14 @@
   :shader
   (let ((outer (if active
           (if selected
-            (rgba 1.0 0.18 0.12 1.0)
+            :mod-port-selected
             (if output
-              (if pending (rgba 0.48 0.86 1.0 1.0) (rgba 0.10 0.58 1.0 1.0))
-              (rgba 1.0 0.52 0.16 1.0)))
-          (rgba 0.10 0.11 0.13 1.0)))
+              (if pending :mod-port-pending :mod-port-output)
+              :mod-port-input))
+          :mod-port-inactive))
       (inner (if active
-          (if output (rgba 0.015 0.035 0.055 1.0) (rgba 0.035 0.018 0.006 1.0))
-          (rgba 0.02 0.025 0.03 1.0))))
+          (if output :mod-port-output-inner :mod-port-input-inner)
+          :mod-port-inactive-inner)))
     (sdf/layer
       (sdf/fill (sdf/circle 0.82)
         (material :color outer))
@@ -596,6 +594,9 @@
           (let ((pattern-id (get cell :id)))
             (box
               :key (str "track-pattern-cell-" track "-" pattern-id)
+              :drag-type (str "track-pattern-" (nth SEQ.track-ids track))
+              :drag-modifier :none
+              :drag-payload (dict :track track :track-id (nth SEQ.track-ids track) :pattern-id pattern-id)
               :width 1.90 :height 0.95
               :padding 0.35
               :bg :transparent
@@ -738,7 +739,7 @@
                   (d2 (- (* (- p3x p2x) (- ty p2y)) (* (- p3y p2y) (- tx p2x))))
                   (d3 (- (* (- p1x p3x) (- ty p3y)) (* (- p1y p3y) (- tx p3x)))))
               (max (max d1 d2) d3))))
-        (material :color (rgba 0.78 0.80 0.83 1.0))))))
+        (material :color :mixer-volume-handle)))))
 
 (def level-color (level)
   (if (> level 0.88)
@@ -925,14 +926,14 @@
       (button (str (+ i 1))
         :width 2.1 :height 1.0 :padding 0 :font-size 10
         :border-color :transparent
-        :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
-        :color (if muted :dim :black)
+        :background-color (if muted :mixer-control-bg :control-on-bg)
+        :color (if muted :dim :control-on-fg)
         :on-click (lambda (event) (do (activate-track-control i) (seq-toggle-track-mute i))))
       (button "S"
         :width 2.1 :height 1.0 :padding 0 :font-size 10
         :border-color :transparent
         :background-color (button-bg (nth SEQ.track-solos i))
-        :color (if (nth SEQ.track-solos i) :black :dim)
+        :color (if (nth SEQ.track-solos i) :control-on-fg :dim)
         :on-click (lambda (event) (do (activate-track-control i) (seq-toggle-track-solo i))))
       (button "R"
         :width 2.1 :height 1.0 :padding 0 :font-size 10
@@ -1133,7 +1134,7 @@
           :key (str "track-collapsed-mute-" i)
           :width 3.65 :height 1.0 :padding 0 :font-size 10
           :background-color (button-bg (nth SEQ.track-mutes i))
-          :color (if (nth SEQ.track-mutes i) :black :dim)
+          :color (if (nth SEQ.track-mutes i) :control-on-fg :dim)
           :on-click (lambda (event) (do (activate-track-control i) (seq-toggle-track-mute i))))
         (box
           :key (str "track-collapsed-label-" i)
@@ -1275,15 +1276,15 @@
         (h-stack :gap 0.35
           (button (bus-mute-label i)
             :width 2.1 :height 1.0 :padding 0 :font-size 10
-            :background-color (if (nth SEQ.bus-mutes i) :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
+            :background-color (if (nth SEQ.bus-mutes i) :mixer-control-bg :control-on-bg)
             :border-color :transparent
-            :color (if (nth SEQ.bus-mutes i) :dim :black)
+            :color (if (nth SEQ.bus-mutes i) :dim :control-on-fg)
             :on-click (lambda (event) (do (select-bus i) (seq-toggle-bus-mute i))))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (button-bg (nth SEQ.bus-solos i))
             :border-color :transparent
-            :color (if (nth SEQ.bus-solos i) :black :dim)
+            :color (if (nth SEQ.bus-solos i) :control-on-fg :dim)
             :on-click (lambda (event) (do (select-bus i) (seq-toggle-bus-solo i))))
           (box :width 2.1 :height 1.0))
         (if (not (= (nth SEQ.bus-names i) "Mix"))
@@ -1448,8 +1449,8 @@
         :key (str "group-mute-" gid)
         :width 2.1 :height 1.0 :padding 0 :font-size 10
         :border-color :transparent
-        :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
-        :color (if muted :dim :black)
+        :background-color (if muted :mixer-control-bg :control-on-bg)
+        :color (if muted :dim :control-on-fg)
         :on-click (lambda (event)
           (do (select-group gidx) (seq-toggle-bus-mute bus-idx))))
       (button "S"
@@ -1457,7 +1458,7 @@
         :width 2.1 :height 1.0 :padding 0 :font-size 10
         :border-color :transparent
         :background-color (button-bg soloed)
-        :color (if soloed :black :dim)
+        :color (if soloed :control-on-fg :dim)
         :on-click (lambda (event)
           (do (select-group gidx) (seq-toggle-bus-solo bus-idx))))
       (if rack
@@ -1666,10 +1667,10 @@
             (v-stack :align :center :gap 0.34
               (label "poly" :font-size 8 :color :dim :bg :transparent)
               (button (if SEQ.tp-poly "ON" "OFF") :width 3.2 :height 1.3
-                :background-color (if SEQ.tp-poly (rgba 0.95 0.48 0.18 1.0) '(rgba 0.1 0.1 0.1 1))
+                :background-color (if SEQ.tp-poly :control-on-bg :poly-off-bg)
                 :border-color :none
                 :font-size 11
-                :color (if SEQ.tp-poly :black :white)
+                :color (if SEQ.tp-poly :control-on-fg :poly-off-fg)
                 ;; Rack tracks: playback polyphony is per-slot
                 ;; (RackSlotSnapshot::max_polyphony), never the track-level
                 ;; param — route there or this silently edits a dead value.

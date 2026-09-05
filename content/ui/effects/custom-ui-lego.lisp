@@ -538,7 +538,7 @@
               :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p) :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :mode (if slider :slider :plain)
-              :fill-color (rgba 0.1 0.2 0.6 1)
+              :fill-color :number-slider-fill
               :noui (if slider false true)
               :corner-radius 0
               :border-color :black
@@ -580,7 +580,7 @@
               :unit unit
               :mode :slider
               :corner-radius 0
-              :fill-color (rgba 0.1 0.2 0.6 1)
+              :fill-color :number-slider-fill
               :border-color :black
               :background-color :mixer-strip-bg
               :noui false 

@@ -458,6 +458,68 @@ impl DeviceParamPrintOverride {
     }
 }
 
+/// Engine-side live override for rack-macro printing, the rack analog of
+/// [`DeviceParamPrintOverride`]: while a print latch holds a rack macro, the
+/// audio thread substitutes the latched value when applying macros at a
+/// trigger. Without it the gesture is inaudible while it is being made — the
+/// printed macro p-locks land behind the already-scheduled playhead and are
+/// only heard one loop later. Values are 0..1 normalized macro positions.
+///
+/// Written by the control thread on latch changes/disarm, read per rack
+/// trigger on the AUDIO thread, so it is atomics only (like
+/// [`StepPrintOverride`]): values first, mask last with `Release`, so a
+/// reader that observes a set bit never sees a stale value for it.
+pub struct RackMacroPrintOverride {
+    track: std::sync::atomic::AtomicUsize,
+    mask: AtomicU32,
+    values: [AtomicU32; RACK_MACRO_COUNT],
+}
+
+impl Default for RackMacroPrintOverride {
+    fn default() -> Self {
+        Self {
+            track: std::sync::atomic::AtomicUsize::new(0),
+            mask: AtomicU32::new(0),
+            values: std::array::from_fn(|_| AtomicU32::new(0)),
+        }
+    }
+}
+
+impl RackMacroPrintOverride {
+    pub fn set(&self, track: usize, values: &[(usize, f32)]) {
+        self.track.store(track, Ordering::Relaxed);
+        let mut mask = 0;
+        for (macro_idx, value) in values {
+            if *macro_idx >= RACK_MACRO_COUNT {
+                continue;
+            }
+            self.values[*macro_idx].store(value.to_bits(), Ordering::Relaxed);
+            mask |= 1 << macro_idx;
+        }
+        self.mask.store(mask, Ordering::Release);
+    }
+
+    pub fn clear(&self) {
+        self.mask.store(0, Ordering::Relaxed);
+    }
+
+    /// The latched macro values for `track`, `None` per macro when disarmed,
+    /// armed for a different track, or not latched.
+    pub fn values_for_track(&self, track: usize) -> [Option<f32>; RACK_MACRO_COUNT] {
+        let mut values = [None; RACK_MACRO_COUNT];
+        let mask = self.mask.load(Ordering::Acquire);
+        if mask == 0 || self.track.load(Ordering::Relaxed) != track {
+            return values;
+        }
+        for (index, slot) in values.iter_mut().enumerate() {
+            if mask & (1 << index) != 0 {
+                *slot = Some(f32::from_bits(self.values[index].load(Ordering::Relaxed)));
+            }
+        }
+        values
+    }
+}
+
 pub struct SequencerState {
     pub pattern: PatternState,
     pub transport: TransportState,
@@ -467,6 +529,9 @@ pub struct SequencerState {
     /// Device-param analog of `step_print_override` (bead eseq-prm): latched
     /// instrument/effect print values the scheduler substitutes per trigger.
     pub device_print_override: DeviceParamPrintOverride,
+    /// Rack-macro analog of `device_print_override`: latched macro values the
+    /// audio thread substitutes when applying rack macros at a trigger.
+    pub rack_macro_print_override: RackMacroPrintOverride,
     pub runtime: RuntimeBindingState,
     pub(super) scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     pub(super) scheduler_snapshot_version: AtomicU64,

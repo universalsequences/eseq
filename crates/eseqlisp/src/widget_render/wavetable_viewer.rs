@@ -123,11 +123,15 @@ fn load_bank(path: &str) -> Option<Arc<WavetableBank>> {
 }
 
 fn read_bank_file(path: &str) -> Option<WavetableBank> {
-    // `:file` names a factory asset by its content-relative path. That used to
-    // resolve against the process cwd (`crates/sequencer`); since the factory
-    // `content/` split it only resolves against the host's installed content
-    // roots, so go through the same fallback `(load …)` uses.
-    let resolved = crate::hot_reload::resolve_content_relative_asset(path);
+    // Use the same factory/user asset roots as metadata and the compiler.
+    // Lisp load roots deliberately exclude user asset libraries, so using
+    // them here made saved user instruments show names but no wave display.
+    let raw = std::path::Path::new(path);
+    let resolved = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        super::patcher::resolve_asset_reference(path, Some(std::path::Path::new(".")))?
+    };
     let text = std::fs::read_to_string(&resolved).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     let (shape, data, waves_per_set) = match &json {
@@ -383,6 +387,31 @@ mod tests {
             scroll_left: 0.0,
             inherited_hover: false,
         }
+    }
+
+    #[test]
+    fn file_viewer_uses_the_same_user_asset_fallback_as_metadata() {
+        let root = std::env::temp_dir().join(format!("eseqlisp-viewer-user-roots-{}", std::process::id()));
+        let factory = root.join("content");
+        let user = root.join("user");
+        let reference = "instruments/retained/waves/bank.json";
+        std::fs::create_dir_all(&factory).unwrap();
+        std::fs::create_dir_all(user.join("instruments/retained/waves")).unwrap();
+        std::fs::write(user.join(reference),
+            r#"{"shape":[4,2],"waves_per_set":2,"data":[0,1,1,0,0,-1,-1,0]}"#,
+        ).unwrap();
+        super::super::patcher::set_asset_roots(
+            vec![factory.clone(), user.clone()], root.join("user-assets"), root.join("factory-assets"),
+        );
+        assert!(matches!(crate::editor::asset_metadata_lisp_value(reference, None), Value::Map(_)));
+        let bank = read_bank_file(reference).expect("viewer resolves the same retained user bank");
+        assert_eq!(bank.frame_len, 4);
+        assert_eq!(bank.waves_per_set, Some(2));
+        // Explicit paths retain the same result, independent of content roots.
+        let absolute = read_bank_file(user.join(reference).to_str().unwrap()).unwrap();
+        assert_eq!(absolute.frame_len, bank.frame_len);
+        assert_eq!(absolute.waves_per_set, bank.waves_per_set);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

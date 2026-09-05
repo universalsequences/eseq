@@ -180,10 +180,10 @@
           :gain-min -24 :gain-max 24
           :q-min 0.25 :q-max 16
           :width 35.9 :height 1.85
-          :background-color (rgba 0.030 0.040 0.055 1.0)
-          :grid-color (rgba 0.30 0.32 0.36 0.5)
+          :background-color :filter-table-editor-bg
+          :grid-color :filter-table-editor-grid
           :stroke-color :blue
-          :point-color (rgba 1.0 0.62 0.25 1.0)
+          :point-color :filter-table-wave
           :on-action |event| (ed-band-action ed event))
         ;; Node + op toolbars. (The magnitude viewer above doubles as the
         ;; table overview: while the editor is open its highlight tracks
@@ -243,7 +243,7 @@
                     :value (if table-name table-name "Drop a sample / pick a preset")
                     :bg-color :mixer-strip-bg
                     :border-color :buffer-bg
-                    :badge-color :yellow
+                    :badge-color :filter-table-badge-bg
                     :chevron-color :black
                     :key (str "filter-table-preset-dd-" (get fx :slot-idx))
                     :options (get fx :table-options)
@@ -281,7 +281,7 @@
                     :options '("Spectral" "Min Phase")
                     :bg-color :mixer-strip-bg
                     :border-color :buffer-bg
-                    :badge-color :yellow
+                    :badge-color :filter-table-badge-bg
                     :chevron-color :black
                     :on-change (lambda (v)
                       (set-engine fx (if (= v "Min Phase") "causal" "spectral")))
@@ -308,9 +308,9 @@
                   (get (get fx :editor) :selected-frame-normalized)
                   (pc/param-effective-value frame-p))
                 :wave-normalized true
-                :wave-color (rgba 1.0 0.62 0.25 1.0)                  
-                :inactive-color (rgba 0.20 0.43 0.72 0.14)
-                :background-color (rgba 0.035 0.045 0.060 1.0)
+                :wave-color :filter-table-wave
+                :inactive-color :filter-table-wave-inactive
+                :background-color :filter-table-wave-bg
                 :width 35.9 :height (if (get fx :editor) 1.9 2.75))
               (box :width :fill :height (if (get fx :editor) 1.9 2.75)))
             (if (and table-key (not (get fx :editor)))
@@ -327,9 +327,9 @@
                 :response-cutoff (pc/param-effective-value cutoff-p)
                 :response-resonance (pc/param-effective-value res-p)
                 :background-color :mixer-control-bg
-                :curve-color (rgba 0.78 0.84 0.92 0.96)
-                :spectrum-color (rgba 0.18 0.38 0.64 0.30)
-                :spectrum-peak-color (rgba 0.36 0.62 0.92 0.58))
+                :curve-color :filter-table-response
+                :spectrum-color :filter-table-spectrum
+                :spectrum-peak-color :filter-table-spectrum-peak)
               (box :width :fill :height 0))))
         (if (get fx :editor)
           (editor-section fx (get fx :editor) table-key)

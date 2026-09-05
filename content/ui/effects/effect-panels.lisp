@@ -49,7 +49,7 @@
   :bindable (active)
   :shader
   (sdf/fill (sdf/circle 0.86)
-    (material :color (if (> active 0.5) (rgba 1.0 0.8 0.12 1.0) (rgba 0 0 0 1)))))
+    (material :color (if (> active 0.5) :device-enabled :device-disabled))))
 
 (def enabled-toggle (p fx subtree-key)
   (subtree :key subtree-key
@@ -70,10 +70,8 @@
   :paint-margin 0.2
   :state (active)
   :shader
-  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
-        (bg-col (if (= active 1)
-          (rgba 0.00 0.35 0.82 1.0)
-          (rgba 0.08 0.08 0.01 1.0))))
+  (let ((fg-col :save-icon-fg)
+        (bg-col (if (= active 1) :preset-save-active-bg :preset-save-bg)))
     (sdf/layer
       (sdf/fill
         (sdf/rounded-rect width height 0.5)

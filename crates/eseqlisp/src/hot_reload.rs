@@ -43,7 +43,7 @@ pub fn resolve_content_relative_asset(path: &str) -> PathBuf {
 /// `defmacro_library::default_library_root`), so tests and helper tools
 /// resolve factory content without explicit setup. Missing dirs → no
 /// fallback.
-fn load_fallback_roots() -> &'static [PathBuf] {
+pub(crate) fn load_fallback_roots() -> &'static [PathBuf] {
     LOAD_FALLBACK_ROOTS
         .get_or_init(|| {
             let workspace = Path::new(env!("ESEQ_DEV_MANIFEST_DIR")).join("../..");

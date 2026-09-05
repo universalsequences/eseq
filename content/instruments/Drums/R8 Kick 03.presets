@@ -4,63 +4,40 @@
  "source_file": "instruments/Drums/R8 Kick 03/dsp.lisp",
  "presets": [
   {
-   "id": "R8 Kick 03",
-   "name": "R8 Kick 03",
-   "base_note_offset": 0.0,
+   "id": "R8 Kick 03", "name": "R8 Kick 03", "base_note_offset": 0.0,
    "params": {}
   },
   {
-   "id": "Dry",
-   "name": "Dry",
-   "base_note_offset": 0.0,
-   "params": {
-    "hiss": 0.0,
-    "noise": 0.0
-   }
+   "id": "Dry", "name": "Dry", "base_note_offset": 0.0,
+   "params": {"beater": 0.0, "air": 0.0, "knock": 0.0}
   },
   {
-   "id": "Tight",
-   "name": "Tight",
-   "base_note_offset": 0.0,
-   "params": {
-    "decay": 0.5,
-    "ring": 0.6,
-    "glide": 1.4
-   }
+   "id": "Pillow Cut", "name": "Pillow Cut", "base_note_offset": 0.0,
+   "params": {"decay": 0.45, "damp": 0.6, "beater": 0.5, "hardness": -0.8, "length": 180.0, "ring": 0.3, "air": 0.5, "knock": 0.025, "punch": 0.15, "tone": -0.4, "level": 0.9}
   },
   {
-   "id": "Boomy",
-   "name": "Boomy",
-   "base_note_offset": -3.0,
-   "params": {
-    "tune": -3.0,
-    "decay": 2.2,
-    "knock": 0.5,
-    "glide": 0.6
-   }
+   "id": "Dusty Crate", "name": "Dusty Crate", "base_note_offset": 0.0,
+   "params": {"tune": -3.0, "weight": 1.2, "head": 0.85, "decay": 1.1, "damp": 0.12, "length": 230.0, "ring": 0.6, "hardness": -0.35, "knock": 0.12, "beater": 0.9, "air": 0.7, "drive": 0.18, "tone": -0.25, "crush": 0.55, "level": 0.68}
   },
   {
-   "id": "Woody",
-   "name": "Woody",
-   "base_note_offset": 0.0,
-   "params": {
-    "knock": 2.5,
-    "ring": 1.8,
-    "noise": 1.5,
-    "drive": 1.6
-   }
+   "id": "Chest Hit", "name": "Chest Hit", "base_note_offset": 0.0,
+   "params": {"weight": 1.3, "head": 0.7, "decay": 0.9, "length": 190.0, "punch": 0.65, "bend": 0.8, "beater": 0.8, "knock": 0.45, "hardness": 0.05, "contact": 0.7, "ring": 0.45, "air": 0.5, "level": 0.5}
   },
   {
-   "id": "Sub",
-   "name": "Sub",
-   "base_note_offset": -7.0,
-   "params": {
-    "tune": -7.0,
-    "knock": 0.0,
-    "noise": 0.3,
-    "hiss": 0.0,
-    "decay": 1.8
-   }
+   "id": "Hard Knocker", "name": "Hard Knocker", "base_note_offset": 0.0,
+   "params": {"weight": 1.25, "head": 0.9, "decay": 0.45, "damp": 0.12, "length": 190.0, "punch": 0.75, "knock": 1.1, "beater": 1.3, "hardness": 0.8, "contact": 0.45, "ring": 0.22, "air": 0.4, "drive": 0.1, "tone": 0.1, "level": 0.4}
+  },
+  {
+   "id": "Long Low", "name": "Long Low", "base_note_offset": 0.0,
+   "params": {"tune": -5.0, "decay": 2.5, "length": 250.0, "weight": 1.15, "head": 0.5, "bend": 0.35, "knock": 0.04, "beater": 0.3, "air": 0.25, "ring": 0.4, "contact": 0.7, "level": 0.7}
+  },
+  {
+   "id": "Basement 12", "name": "Basement 12", "base_note_offset": 0.0,
+   "params": {"tune": -4.0, "length": 200.0, "decay": 1.25, "ring": 0.5, "punch": 0.3, "knock": 0.28, "hardness": -0.2, "beater": 0.8, "damp": 0.08, "air": 0.5, "drive": 0.4, "crush": 0.8, "tone": -0.4, "level": 0.6}
+  },
+  {
+   "id": "Paper Tight", "name": "Paper Tight", "base_note_offset": 0.0,
+   "params": {"stretch": 0.16, "weight": 0.8, "head": 1.1, "bend": 1.2, "decay": 0.35, "length": 120.0, "beater": 0.9, "knock": 0.25, "contact": 0.35, "damp": 0.25, "ring": 0.3, "hardness": 0.35, "punch": 0.2, "level": 0.6}
   }
  ]
 }

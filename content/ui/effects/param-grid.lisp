@@ -295,8 +295,8 @@
                :color :dim :bg :transparent)
         (button (if (pc/fx-param-on? p) "ON" "OFF")
           :width 4.2 :height 1.05 :padding 0 :font-size 10.0
-          :background-color (if (pc/fx-param-on? p) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-          :color (if (pc/fx-param-on? p) :black :dim)
+          :background-color (if (pc/fx-param-on? p) :control-on-bg :mixer-control-bg)
+          :color (if (pc/fx-param-on? p) :control-on-fg :dim)
           :plock-active (if (pc/param-plock-active? fx p) 1 0)
           :plock-color-r (pc/param-plock-color-r)
           :plock-color-g (pc/param-plock-color-g)

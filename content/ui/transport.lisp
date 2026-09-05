@@ -220,12 +220,12 @@
             :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
           :color
           (if (> active 0)
-            (let ((base (rgba 0.00 0.01 0.42 1.0))
+            (let ((base :scene-active-base)
                   (lit (+ 0.06 (* 0.03 diffuse)))
                   (shine (* 0.25 specular)))
               (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
             (if hit/hover
-              (let ((base (rgba 0.10 0.10 0.12 0.72))
+              (let ((base :scene-hover-base)
                     (lit (+ 0.06 (* 0.03 diffuse)))
                     (shine (* 0.25 specular)))
                 (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
@@ -239,11 +239,8 @@
             (let ((amount (clamp push-amount 0.0 1.0))
                   (lit (* amount (+ 0.04 (* 0.05 diffuse))))
                   (shine (* amount 0.24 specular)))
-              (rgba
-                (+ 0.04 lit shine)
-                (+ 0.24 lit shine)
-                (+ 0.88 lit shine)
-                (* 0.88 amount)))))
+              (* (+ :scene-push-base (rgba (+ lit shine) (+ lit shine) (+ lit shine) 0))
+                (rgba 1 1 1 (* 0.88 amount))))))
         (rgba 0 0 0 0)))))
 
 (defwidget queued-scene-pill-bg
@@ -254,11 +251,7 @@
   :shader
   (let ((pulse (+ 0.5 (* 0.5 (cos (* itime 5.4)))))
         (push-amount (if (= scene push-target) push 0.0))
-        (base (rgba
-          (+ 0.01 (* 0.04 pulse))
-          (+ 0.03 (* 0.10 pulse))
-          (+ 0.38 (* 0.30 pulse))
-          1.0)))
+        (base (+ :scene-queued-base (* :scene-queued-pulse pulse))))
     (sdf/layer
       (sdf/fill (sdf/rounded-rect width height 0.54)
         (material
@@ -279,11 +272,8 @@
             (let ((amount (clamp push-amount 0.0 1.0))
                   (lit (* amount (+ 0.04 (* 0.05 diffuse))))
                   (shine (* amount 0.20 specular)))
-              (rgba
-                (+ 0.04 lit shine)
-                (+ 0.24 lit shine)
-                (+ 0.88 lit shine)
-                (* 0.72 amount)))))
+              (* (+ :scene-push-base (rgba (+ lit shine) (+ lit shine) (+ lit shine) 0))
+                (rgba 1 1 1 (* 0.72 amount))))))
         (rgba 0 0 0 0)))))
 
 
@@ -294,7 +284,7 @@
   :shader
   (let ((pulse (+ 0.58 (* 0.42 (cos (* itime 4.8))))))
     (sdf/fill (sdf/circle (* 0.34 (+ 0.82 (* 0.18 pulse))))
-      (material :color (rgba 0.20 0.52 1.0 pulse)))))
+      (material :color (* :scene-bank-indicator (rgba 1 1 1 pulse))))))
 
 (defwidget pattern-pill-btn-bg
  :width 1 :height 1
@@ -308,12 +298,12 @@
           :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
         :color
         (if (> active 0)
-          (let ((base (rgba 0.00 0.01 0.02 1.0))
+          (let ((base :scene-action-base)
                 (lit (+ 0.06 (* 0.03 diffuse)))
                 (shine (* 0.25 specular)))
             (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
           (if hit/hover
-            (let ((base (rgba 0.10 0.10 0.12 0.72))
+            (let ((base :scene-hover-base)
                   (lit (+ 0.06 (* 0.03 diffuse)))
                   (shine (* 0.25 specular)))
               (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
@@ -324,7 +314,7 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col (if (= active 1) (rgba 1 1 1 1.0) (rgba 0.75 0.75 0.78 1.0))))
+  (let ((fg-col (if (= active 1) :icon-active-fg :icon-fg)))
     (sdf/layer
         (rgba 0 0 0 0)
       (sdf/fill (sdf/rounded-rect 0.12 0.72 0.05)
@@ -337,7 +327,7 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+  (let ((fg-col :save-icon-fg)
       (bg-col (if (= active 1)
           :mixer-strip-selected-bg
           :mixer-strip-bg
@@ -366,7 +356,7 @@
   :state (active)
   :shader
   (let ((fg-col :fg)
-      (muted-col :mixer-strip-bg)
+      (muted-col :gray)
       (bg-col (if (= active 1)
           :transparent
           :transparent
@@ -396,7 +386,7 @@
   :state (active)
   :shader
   (let ((fg-col :fg)
-      (muted-col :mixer-strip-bg)
+      (muted-col :gray)
       (bg-col (if (= active 1)
           :mixer-strip-selected-bg
           :transparent
@@ -426,7 +416,7 @@
   :state (active)
   :shader
   (let ((fg-col :fg)
-      (muted-col :mixer-strip-bg)
+      (muted-col :gray)
       (bg-col (if (= active 1)
           :mixer-strip-selected-bg
           :transparent
@@ -456,7 +446,7 @@
   :state (active)
   :shader
   (let ((fg-col :fg)
-      (muted-col :mixer-strip-bg)
+      (muted-col :gray)
       (bg-col :transparent)
       (line-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
@@ -482,7 +472,7 @@
   :state (active)
   :shader
   (let ((fg-col :fg)
-      (muted-col :mixer-strip-bg)
+      (muted-col :gray)
       (bg-col :transparent)
       (line-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
@@ -523,7 +513,7 @@
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect 0.44 0.44 0.05)
-      (material :color (rgba 0.75 0.75 0.78 1.0)))))
+      (material :color :icon-fg))))
 
 ;; Stop returns the arrangement insertion/start marker to the beginning even
 ;; when playback is already stopped. The cursor mirror makes the next Play
@@ -538,7 +528,7 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col (if (= active 1) (rgba 1 1 1 1.0) (rgba 0.75 0.75 0.78 1.0))))
+  (let ((fg-col (if (= active 1) :icon-active-fg :icon-fg)))
     (sdf/layer
       (if (= active 1)
         (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.4)
@@ -546,7 +536,7 @@
             :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
               :light (vec3 -0.31 -0.851 1.3) :shininess 51.0)
             :color
-            (let ((base (rgba 0.05 0.28 0.03 1.0))
+            (let ((base :play-active-base)
                   (lit (+ 0.025 (* 0.05 diffuse)))
                   (shine (* 0.18 specular)))
               (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))))
@@ -559,7 +549,7 @@
             (max (max d1 d2) d3)))
         (material :color fg-col)))))
 
-;; Back to Arrangement (Ableton-style): an orange tile with a play triangle
+;; Back to Arrangement: a theme-accent tile with a play triangle
 ;; and three arrangement lanes beside it. Lights the moment a manual launch
 ;; overrides the arrangement; fully transparent while nothing is latched.
 (defwidget back-to-arrangement-icon
@@ -576,7 +566,7 @@
           :color
           (let ((lit (+ 0.04 (* 0.10 diffuse)))
                 (shine (* 0.20 specular)))
-            (+ (rgba 0.80 0.38 0.16 1.0)
+            (+ :arrangement-return-base
                (rgba lit (* 0.6 lit) (* 0.3 lit) 1)
                (rgba shine shine shine 0)))))
       (sdf/fill
@@ -585,13 +575,13 @@
                 (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
                 (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
             (max (max d1 d2) d3)))
-        (material :color (rgba 0.10 0.045 0.02 1.0)))
+        (material :color :arrangement-return-fg))
       (sdf/fill (sdf/translate 0.38 -0.28 (sdf/rounded-rect 0.28 0.055 0.03))
-        (material :color (rgba 0.10 0.045 0.02 1.0)))
+        (material :color :arrangement-return-fg))
       (sdf/fill (sdf/translate 0.38 0.0 (sdf/rounded-rect 0.28 0.055 0.03))
-        (material :color (rgba 0.10 0.045 0.02 1.0)))
+        (material :color :arrangement-return-fg))
       (sdf/fill (sdf/translate 0.38 0.28 (sdf/rounded-rect 0.28 0.055 0.03))
-        (material :color (rgba 0.10 0.045 0.02 1.0))))
+        (material :color :arrangement-return-fg)))
     (rgba 0 0 0 0)))
 
 (defwidget rec-icon
@@ -599,7 +589,7 @@
   :paint-margin 0.5
   :state (active)
   :shader
-  (let ((fg-col (if (= active 1) (rgba 1 1 1 1.0) (rgba 0.65 0.18 0.18 1.0))))
+  (let ((fg-col (if (= active 1) :icon-active-fg :record-idle-fg)))
     (sdf/layer
       (if (= active 1)
         (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.4)
@@ -607,7 +597,7 @@
             :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
               :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
             :color
-            (let ((base (rgba 0.12 0.001 0.001 1.0))
+            (let ((base :record-active-base)
                   (lit (+ 0.06 (* 0.40 diffuse)))
                   (shine (* 0.25 specular)))
               (+ base (rgba lit 0 0 1) (rgba shine shine shine 0)))))
@@ -885,6 +875,40 @@
       :brightness 1.12
       :transition (dict :brightness 0.12 :ease :smoothstep))))
 
+;; Saved per scene; defscene supplies persistence, targeted repaint, and undo.
+(defscene scene-transpose 0)
+
+(defstate transpose-menu-open false)
+(defstate transpose-menu-col 0)
+(defstate transpose-menu-row 0)
+(defstate transpose-menu-value 0)
+(defstate transpose-menu-bank 0)
+
+(def open-transpose-menu (event)
+  (do
+    (set! transpose-menu-value scene-transpose)
+    (set! transpose-menu-bank (get (scene-viewed-bank) :id))
+    (set! transpose-menu-col (get event :col))
+    (set! transpose-menu-row (get event :row))
+    (set! transpose-menu-open true)))
+
+(def apply-transpose-menu (scope)
+  (do
+    (set! transpose-menu-open false)
+    (host-command "apply-scene-transpose"
+      (dict :scope scope :bank-id transpose-menu-bank :value transpose-menu-value))))
+
+(def transpose-context-menu ()
+  (context-menu :is-open transpose-menu-open
+    :anchor-col transpose-menu-col :anchor-row transpose-menu-row
+    :on-close (lambda () (set! transpose-menu-open false))
+    (menu-item "Apply to all scenes in this bank"
+      :key "transpose-apply-bank"
+      :on-select (lambda (event) (apply-transpose-menu "bank")))
+    (menu-item "Apply to all scenes in all banks"
+      :key "transpose-apply-all-banks"
+      :on-select (lambda (event) (apply-transpose-menu "all-banks")))))
+
 ;; ── Transport layout ──
 
 (effect-buffer "*transport*"
@@ -957,7 +981,7 @@
               :active (if SEQ.song-manual-latch 1 0))))))
     
     ;; Single continuous LED panel
-    (box :background-color :mixer-strip-bg :corner-radius 64 :height 1.4 :width 69
+    (box :background-color :mixer-strip-bg :corner-radius 64 :height 1.4 :width 77
       (h-stack
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
@@ -972,16 +996,25 @@
                 (bind-seq "song-position-beats"))
               :use-song-position true
               :font-size 15 :width 10 :height 1.2
-              :color '(rgba 0.85 0.85 0.85 1)
+              :color :clock-fg
               :bg :transparent)
             (label "" :width 1 :bg :transparent)
             (number-picker :value SEQ.bpm :min 20 :max 300 :decimals 1
               :key "transport-bpm"
               :noui true
               :font-size 15
-              :text-color (rgba 0.85 0.85 0.85 1)
+              :text-color :clock-fg
               :on-change (lambda (v) (seq-set-bpm v))
               :width 7 :height 1.2)
+            (subtree :key "transport-scene-transpose"
+              (number-picker :value scene-transpose
+                :key "transport-scene-transpose-picker"
+                :debug-name "transport-scene-transpose"
+                :on-right-click open-transpose-menu
+                :min -48 :max 48 :step 1 :decimals 0 :unit "st"
+                :noui true :font-size 15 :text-color :clock-fg
+                :on-change (lambda (v) (set! scene-transpose (round v)))
+                :width 5.5 :height 1.2))
             (subtree :key "transport-scene-launch-quantize"
               (dropdown
                 :bg-color :mixer-strip-bg
@@ -1133,7 +1166,7 @@
                       (label (fmt " {} " (+ i 1))
                         :font-size 11
                         :color (if (or (= scene SEQ.current-pattern) (= scene SEQ.queued-scene))
-                          :white
+                          :scene-active-fg
                           :gray)
                         :hover-color :white
                         :bg :transparent)))))
@@ -1176,6 +1209,9 @@
               (scene-bank-context-menu)
               (scene-bank-ops-context-menu))))))
     
+    (subtree :key "transport-transpose-context-menu"
+      (transpose-context-menu))
+
     ;; Session and arrangement are app views, not tabs in the main buffer.
     ;; This spacer keeps the view pair against the transport's right edge.
     (box :width 0 :flex 1)

@@ -1877,8 +1877,8 @@ impl Runtime {
             ),
             (
                 "menu-item",
-                "(menu-item \"label\" :shortcut text :disabled bool :on-select callback)",
-                "One row of a context-menu: label, optional right-aligned shortcut hint, optional disabled state.",
+                "(menu-item \"label\" :shortcut text :disabled bool :checked bool :on-select callback child ...)",
+                "One context-menu row with optional checkmark and shortcut. Child menu rows form a submenu opened by hover or Right; leaf selection closes the whole menu.",
             ),
             (
                 "menu-separator",

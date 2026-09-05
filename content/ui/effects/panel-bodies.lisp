@@ -120,7 +120,10 @@
   (if (get inst :key-lock-variants) (get inst :key-lock-variants) '()))
 
 (def instrument-key-lock-chip-color (chip alpha)
-  (rgba (get chip :color-r) (get chip :color-g) (get chip :color-b) alpha))
+  (let ((c (if (= (get chip :kind) "def")
+        THEME.plock_base
+        (list (get chip :color-r) (get chip :color-g) (get chip :color-b)))))
+    (rgba (nth c 0) (nth c 1) (nth c 2) alpha)))
 
 (def instrument-key-lock-chip-label (chip)
   (if (get chip :display)
@@ -306,13 +309,15 @@
           body))))))
 
 (def midi-fx-panel-body (fx)
-  (let ((custom (eseq.vanilla/custom-midi-fx-ui fx)))
-    (if custom
-      (box
-        (v-stack :gap 0.25 custom)
-        :debug-name "custom-midi-fx-wrapper" :padding 0 :h-align :start :v-align :start)
-      (box (pg/fx-param-grid (get fx :params) fx)
-        :debug-name "fallback-midi-fx-wrapper"))))
+  (do
+    (set! eseq.vanilla/custom-ui-current-kind "midi-fx")
+    (let ((custom (eseq.vanilla/custom-midi-fx-ui fx)))
+      (if custom
+        (box
+          (v-stack :gap 0.25 custom)
+          :debug-name "custom-midi-fx-wrapper" :padding 0 :h-align :start :v-align :start)
+        (box (pg/fx-param-grid (get fx :params) fx)
+          :debug-name "fallback-midi-fx-wrapper")))))
 
 (def audio-fx-panel-body (fx params)
   (let ((builtin-ui (afx/builtin-audio-fx-ui fx)))

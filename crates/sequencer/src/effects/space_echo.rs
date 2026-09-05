@@ -14,16 +14,16 @@
 //! Wow/flutter (flutter deepens with loop energy — motor strain), a periodic
 //! tape-splice gain dip + thump, hiss and head crosstalk scale with "age".
 //!
-//! A two-tank dispersive spring reverb (see `crate::effects::spring`: stretched
-//! allpasses inside parallel feedback delays, tuned offline against a real
-//! spring IR) hangs off the echo bus per the RE-201 mode selector. The tanks
-//! dominate the node's CPU cost, so they run at half the host rate behind
-//! anti-alias/anti-image filters (their own band-limit sits far below host
-//! Nyquist) and are skipped entirely while the echo bus is silent.
+//! The RE-201 spring voice retains its fitted stretched-allpass tanks, with
+//! rate reduction when their bandwidth permits it. The independent Grampian
+//! voice uses two dispersive propagation paths and boundary scattering at
+//! host rate (see `spring::grampian`). Both hang off the preamp + echo bus;
+//! the Grampian's stereo width mixes its pickups rather than duplicating and
+//! detuning the tank. Its silence detector accounts for queued wave packets.
 
 use crate::audiograph::NodeVTable;
 use crate::effects::spring::{
-    spring_tank_process, SpringCoeffs, SpringParams, SPRING_TANK_STATE_LEN,
+    grampian, spring_tank_process, SpringCoeffs, SpringParams, SPRING_TANK_STATE_LEN,
 };
 use std::os::raw::{c_int, c_void};
 
@@ -44,8 +44,7 @@ const SPLICE_DIP_S: f32 = 0.004;
 // The spring tanks run at half the host rate when the tank's fitted
 // bandwidth allows it: the reduced Nyquist must clear the input lowpass by
 // enough margin that the resampling filters never touch the spring band.
-// The dark RE-201 tank (f_lp ≈ 2.2 kHz) qualifies; the bright King Tubby
-// tank (f_lp ≈ 5 kHz, audible energy to ~10 kHz) runs at full rate.
+// This helper is only for the RE-201; Grampian always runs at host rate.
 fn spring_decim(base: &SpringParams, sr: f32) -> usize {
     if sr * 0.5 >= 4.8 * base.f_lp {
         2
@@ -122,10 +121,10 @@ const STATE_LOOP_DC_Y1: usize = 65;
 const STATE_TENSION: usize = 66;
 const STATE_SMOOTH_TENSION: usize = 67;
 
-// Spring type selector: 0 = RE-201, 1 = King Tubby (Grampian). Each selects
-// a differently-tuned SpringParams fit.
+// Spring type selector: 0 = the RE-201 fit, 1 = the independent Grampian
+// waveguide. Their coefficients and runtime state are deliberately separate.
 const STATE_SPRING_TYPE: usize = 68;
-// Stereo width of the panned playback heads (0 = mono, like the hardware).
+// Stereo width of playback heads and Grampian pickups (0 = mono).
 const STATE_STEREO_WIDTH: usize = 69;
 const STATE_SMOOTH_WIDTH: usize = 70;
 // Side-channel copy of the playback EQ chain (the width pan runs the head
@@ -168,7 +167,9 @@ const STATE_GATE_OUT_ENV: usize = 95; // spring output envelope
 const STATE_SPRING_A: usize = 96;
 const STATE_SPRING_B: usize = STATE_SPRING_A + SPRING_TANK_STATE_LEN;
 
-const STATE_TAPE_OFFSET: usize = STATE_SPRING_B + SPRING_TANK_STATE_LEN;
+const STATE_SPRING_TYPE_MIX: usize = STATE_SPRING_B + SPRING_TANK_STATE_LEN;
+const STATE_GRAMPIAN: usize = STATE_SPRING_TYPE_MIX + 1;
+const STATE_TAPE_OFFSET: usize = STATE_GRAMPIAN + grampian::STATE_LEN;
 const STATE_END: usize = STATE_TAPE_OFFSET + TAPE_BUF_LEN;
 
 pub const SPACE_ECHO_STATE_SIZE: usize = STATE_END;
@@ -379,16 +380,10 @@ const SPRING_B_DETUNE: f32 = 1.035;
 // Output calibration so the new tanks sit at the same loudness as the old
 // spring did at REVERB_VOL = 0.5 (impulse-response RMS match over 3 s).
 const SPRING_OUT_GAIN: f32 = 0.788;
-const KING_TUBBY_OUT_GAIN: f32 = 0.579;
-
-// Per-type base params + output gain (each gain RMS-matched to the RE-201
-// tank over 3 s so flipping the type doesn't jump the reverb level).
-fn spring_type_params(spring_type: usize) -> (SpringParams, f32) {
-    match spring_type {
-        1 => (SpringParams::king_tubby(), KING_TUBBY_OUT_GAIN),
-        _ => (SpringParams::re201(), SPRING_OUT_GAIN),
-    }
-}
+// Isolated 0.25-amplitude impulse RMS over 3 s at 48 kHz, matched to the
+// historical King Tubby tank at its 0.579 return gain. This is level
+// calibration, not part of the shape-fitting objective.
+const GRAMPIAN_OUT_GAIN: f32 = 0.43490696;
 
 fn spring_tank_b_params(base: &SpringParams) -> SpringParams {
     let mut p = base.clone();
@@ -560,11 +555,35 @@ unsafe extern "C" fn space_echo_process(
     // tension knob is smoothed across blocks so coefficient steps stay small.
     let tension_knob = (*s.add(STATE_TENSION)).clamp(0.0, 1.0);
     let mut smooth_tension = *s.add(STATE_SMOOTH_TENSION);
-    smooth_tension += 0.1 * (tension_knob - smooth_tension);
+    let tension_slew = 1.0 - (-(nf as f32) / (0.1 * sr)).exp();
+    smooth_tension += tension_slew * (tension_knob - smooth_tension);
     *s.add(STATE_SMOOTH_TENSION) = smooth_tension;
     let spring_type = (*s.add(STATE_SPRING_TYPE)).round().clamp(0.0, 1.0) as usize;
-    let (spring_base, spring_out_gain) = spring_type_params(spring_type);
+    let mut spring_type_mix = *s.add(STATE_SPRING_TYPE_MIX);
+    let type_fade_step = 1.0 / (0.020 * sr);
+    if reverb_on && spring_type == 1 && spring_type_mix == 0.0 {
+        // Reactivating a dormant voice starts from rest, never a frozen tail.
+        std::ptr::write_bytes(s.add(STATE_GRAMPIAN), 0, grampian::STATE_LEN);
+    } else if reverb_on && spring_type == 0 && spring_type_mix == 1.0 {
+        std::ptr::write_bytes(s.add(STATE_SPRING_A), 0, 2 * SPRING_TANK_STATE_LEN);
+        std::ptr::write_bytes(s.add(STATE_SPRING_PHASE), 0, STATE_GATE_IN_ENV - STATE_SPRING_PHASE);
+    }
+    let spring_base = SpringParams::re201();
+    let spring_out_gain = SPRING_OUT_GAIN;
     let decim = spring_decim(&spring_base, sr);
+    let grampian_coeffs = if spring_type == 1 || spring_type_mix > 0.0 {
+        match grampian::Coeffs::new(&grampian::Params::default(), sr, smooth_tension) {
+            Ok(coeffs) => Some(coeffs),
+            Err(_) => {
+                // Same corrupted/unsupported-state contract as the sample-rate
+                // guard above: never unwind through the audio C ABI or silently
+                // substitute a different spring model.
+                std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
+                std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
+                return;
+            }
+        }
+    } else { None };
     let spring_params = spring_base.with_tension(smooth_tension);
     let sr_spring = sr / decim as f32;
     let spring_coef_a = SpringCoeffs::new(&spring_params, sr_spring);
@@ -639,6 +658,8 @@ unsafe extern "C" fn space_echo_process(
         std::slice::from_raw_parts_mut(s.add(STATE_SPRING_A), SPRING_TANK_STATE_LEN);
     let spring_b_state =
         std::slice::from_raw_parts_mut(s.add(STATE_SPRING_B), SPRING_TANK_STATE_LEN);
+    let grampian_state =
+        std::slice::from_raw_parts_mut(s.add(STATE_GRAMPIAN), grampian::STATE_LEN);
 
     let target_intensity = intensity_gain(intensity_knob);
     let fb_norm = 1.0 / (head_mask.count_ones().max(1)) as f32;
@@ -833,15 +854,19 @@ unsafe extern "C" fn space_echo_process(
         let side = side_bass + smooth_treble * (side_bass - side_treble_lp);
 
         // ── Spring reverb (fed from preamp + echo, per the RE-201 bus) ──
-        // The tanks tick at sr / SPRING_DECIM behind an anti-alias lowpass,
-        // with zero-stuffed upsampling through matching anti-image filters.
-        // When both the feed and the tank output have been below the gate
-        // threshold for the release time, the whole spring path is skipped.
+        // RE-201 uses rate reduction and its envelope gate; Grampian runs at
+        // host rate with delay-aware activity detection. Both real engines
+        // run during type crossfades, before the shared return tone controls.
         let (tank_a, tank_b) = if reverb_on {
             let spring_in = (pre + echo) * 0.7;
+            spring_type_mix = if spring_type == 1 {
+                (spring_type_mix + type_fade_step).min(1.0)
+            } else { (spring_type_mix - type_fade_step).max(0.0) };
             gate_in_env = spring_in.abs().max(gate_in_env * gate_decay);
-            if gate_in_env > SPRING_GATE_THRESH || gate_out_env > SPRING_GATE_THRESH {
-                let (raw_a, raw_b) = if decim == 1 {
+            if grampian_coeffs.is_some() || gate_in_env > SPRING_GATE_THRESH || gate_out_env > SPRING_GATE_THRESH {
+                let (re_a, re_b) = if spring_type_mix == 1.0 {
+                    (0.0, 0.0)
+                } else if decim == 1 {
                     (
                         spring_out_gain
                             * spring_tank_process(spring_in, &spring_coef_a, spring_a_state),
@@ -871,6 +896,16 @@ unsafe extern "C" fn space_echo_process(
                     let b = biquad_sample(b, resamp_lp, &mut spring_up_b_z3, &mut spring_up_b_z4);
                     (a, b)
                 };
+                let (gram_a, gram_b) = if spring_type_mix > 0.0 {
+                    // Both real engines run during a 20 ms type crossfade;
+                    // there is no frozen-sample substitute for the old tail.
+                    let (mid, side) = grampian::process(spring_in,
+                        grampian_coeffs.as_ref().expect("active Grampian coefficients"), grampian_state);
+                    (GRAMPIAN_OUT_GAIN * (mid + smooth_width * side),
+                     GRAMPIAN_OUT_GAIN * (mid - smooth_width * side))
+                } else { (0.0, 0.0) };
+                let raw_a = (1.0 - spring_type_mix) * re_a + spring_type_mix * gram_a;
+                let raw_b = (1.0 - spring_type_mix) * re_b + spring_type_mix * gram_b;
                 gate_out_env = (raw_a.abs() + raw_b.abs()).max(gate_out_env * gate_decay);
                 // Bass/treble shelves on the tank outputs, so the tone knobs
                 // shape the reverb too (matters most in reverb-only mode, where
@@ -961,6 +996,79 @@ unsafe extern "C" fn space_echo_process(
     *s.add(STATE_SPRING_UP_B_Z4) = spring_up_b_z4;
     *s.add(STATE_GATE_IN_ENV) = gate_in_env;
     *s.add(STATE_GATE_OUT_ENV) = gate_out_env;
+    *s.add(STATE_SPRING_TYPE_MIX) = spring_type_mix;
+}
+
+/// Deterministic offline access to the production node, for spring fitting and
+/// musical auditions without opening an audio device. Character noise and wow
+/// are disabled; all signal routing, preamp, tape, tone and spring DSP are real.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SpaceEchoRenderSettings {
+    pub sample_rate: u32,
+    /// Zero-based hardware mode: 11 is reverb-only.
+    pub mode: usize,
+    pub grampian: bool,
+    pub tension: f32,
+    pub width: f32,
+    pub input_db: f32,
+    pub intensity: f32,
+    pub echo: f32,
+    pub reverb: f32,
+    pub dry: f32,
+    pub block_size: usize,
+}
+
+impl Default for SpaceEchoRenderSettings {
+    fn default() -> Self {
+        Self { sample_rate: 48000, mode: 11, grampian: true, tension: 0.5,
+            width: 0.0, input_db: 0.0, intensity: 0.45, echo: 0.8,
+            reverb: 1.0, dry: 0.0, block_size: 128 }
+    }
+}
+
+pub fn render_space_echo(input: &[[f32; 2]], settings: &SpaceEchoRenderSettings)
+    -> Result<Vec<[f32; 2]>, String>
+{
+    let p = settings;
+    if !(8000..=192000).contains(&p.sample_rate) || p.mode >= MODES.len()
+        || !(1..=8192).contains(&p.block_size)
+        || [p.tension, p.width, p.intensity, p.echo, p.reverb, p.dry].iter()
+            .any(|x| !x.is_finite() || !(0.0..=1.0).contains(x))
+        || !p.input_db.is_finite() || !(-12.0..=24.0).contains(&p.input_db)
+        || input.iter().flatten().any(|x| !x.is_finite()) {
+        return Err("invalid Space Echo offline render settings or input".into());
+    }
+    let mut state = vec![0.0f32; SPACE_ECHO_STATE_SIZE];
+    unsafe { space_echo_init(state.as_mut_ptr().cast(), p.sample_rate as c_int,
+        p.block_size as c_int, std::ptr::null()); }
+    for (slot, value) in [
+        (STATE_MODE, p.mode as f32), (STATE_SPRING_TYPE, if p.grampian { 1.0 } else { 0.0 }),
+        (STATE_TENSION, p.tension), (STATE_SMOOTH_TENSION, p.tension),
+        (STATE_SPRING_TYPE_MIX, if p.grampian { 1.0 } else { 0.0 }),
+        (STATE_STEREO_WIDTH, p.width), (STATE_SMOOTH_WIDTH, p.width),
+        (STATE_INPUT_DB, p.input_db), (STATE_INTENSITY, p.intensity),
+        (STATE_SMOOTH_INTENSITY, intensity_gain(p.intensity)),
+        (STATE_ECHO_VOL, p.echo), (STATE_SMOOTH_ECHO, p.echo),
+        (STATE_REVERB_VOL, p.reverb), (STATE_SMOOTH_REVERB, p.reverb),
+        (STATE_DRY, p.dry), (STATE_SMOOTH_DRY, p.dry),
+        (STATE_AGE, 0.0), (STATE_WOW_FLUTTER, 0.0),
+    ] { state[slot] = value; }
+    let mut channels = vec![vec![0.0f32; p.block_size]; 6];
+    let mut left = vec![0.0f32; p.block_size];
+    let mut right = left.clone();
+    let mut result = Vec::with_capacity(input.len());
+    for block in input.chunks(p.block_size) {
+        for (i, frame) in block.iter().enumerate() {
+            channels[0][i] = frame[0]; channels[1][i] = frame[1];
+        }
+        let inputs: Vec<*mut f32> = channels.iter_mut().map(|c| c.as_mut_ptr()).collect();
+        let outputs = [left.as_mut_ptr(), right.as_mut_ptr()];
+        unsafe { space_echo_process(inputs.as_ptr(), outputs.as_ptr(), block.len() as c_int,
+            state.as_mut_ptr().cast(), std::ptr::null_mut()); }
+        result.extend((0..block.len()).map(|i| [left[i], right[i]]));
+    }
+    Ok(result)
 }
 
 pub fn space_echo_vtable() -> NodeVTable {
@@ -1173,6 +1281,74 @@ mod tests {
         let frames = SR as usize / 2;
         let (out_l, out_r) = render(&mut state, &impulse(frames), &impulse(frames));
         assert_eq!(out_l, out_r);
+    }
+
+    #[test]
+    fn grampian_production_width_preserves_mono_and_block_partition() {
+        let mut input = vec![[0.0; 2]; 24000];
+        input[0] = [0.5; 2];
+        input[701] = [-0.25, 0.1];
+        let settings = SpaceEchoRenderSettings::default();
+        let mono = render_space_echo(&input, &settings).unwrap();
+        assert!(mono.iter().all(|v| v[0] == v[1] && v[0].is_finite()));
+        let mut wide_settings = settings.clone();
+        wide_settings.width = 1.0;
+        let wide = render_space_echo(&input, &wide_settings).unwrap();
+        assert!(wide.iter().any(|v| (v[0] - v[1]).abs() > 1e-3));
+        for (a, b) in mono.iter().zip(&wide) {
+            assert!((a[0] - (b[0] + b[1]) * 0.5).abs() < 2e-6);
+        }
+        let mut other_blocks = settings.clone();
+        other_blocks.block_size = 31;
+        assert_eq!(mono, render_space_echo(&input, &other_blocks).unwrap());
+        // Exercise tape -> spring routing as well as the reverb-only mode.
+        other_blocks.mode = 7;
+        other_blocks.block_size = 128;
+        let echoes = render_space_echo(&input, &other_blocks).unwrap();
+        assert!(echoes.iter().zip(&mono).any(|(a,b)| (a[0]-b[0]).abs() > 1e-3));
+    }
+
+    #[test]
+    fn grampian_type_crossfade_does_not_resurrect_a_dormant_tail() {
+        let mut state = clean_state();
+        state[STATE_MODE] = 11.0;
+        state[STATE_DRY] = 0.0;
+        state[STATE_SMOOTH_DRY] = 0.0;
+        state[STATE_SPRING_TYPE] = 1.0;
+        state[STATE_SPRING_TYPE_MIX] = 1.0;
+        let (excited, _) = render(&mut state, &impulse(4800), &impulse(4800));
+        assert!(rms(&excited) > 1e-4);
+        state[STATE_SPRING_TYPE] = 0.0;
+        let silence = vec![0.0; 48000];
+        let (left, right) = render(&mut state, &silence, &silence);
+        assert!(left.iter().chain(&right).all(|x| x.is_finite() && x.abs() < 1.0));
+        assert_eq!(state[STATE_SPRING_TYPE_MIX], 0.0);
+        state[STATE_SPRING_TYPE] = 1.0;
+        // Keep the outgoing RE-201 and preamp state identical. They can have
+        // a legitimate tail from the DC-blocker's post-impulse residual; only
+        // the dormant Grampian's stored energy must be forgotten.
+        let mut cleared = state.clone();
+        cleared[STATE_GRAMPIAN..STATE_GRAMPIAN + grampian::STATE_LEN].fill(0.0);
+        let actual = render(&mut state, &silence, &silence);
+        let expected = render(&mut cleared, &silence, &silence);
+        assert_eq!(actual, expected, "old Grampian tail returned");
+        assert_eq!(state[STATE_SPRING_TYPE_MIX], 1.0);
+    }
+
+    #[test]
+    fn grampian_production_automation_remains_bounded() {
+        let mut state = clean_state();
+        state[STATE_MODE] = 11.0;
+        state[STATE_SPRING_TYPE] = 1.0;
+        state[STATE_DRY] = 0.0;
+        state[STATE_SMOOTH_DRY] = 0.0;
+        for block in 0..400 {
+            state[STATE_TENSION] = if block % 50 < 25 { 0.0 } else { 1.0 };
+            state[STATE_STEREO_WIDTH] = (block % 100) as f32 / 99.0;
+            let input = if block % 31 == 0 { impulse(128) } else { vec![0.0; 128] };
+            let (left, right) = render(&mut state, &input, &input);
+            assert!(left.iter().chain(&right).all(|x| x.is_finite() && x.abs() < 4.0));
+        }
     }
 
     #[test]
@@ -1493,8 +1669,10 @@ mod tests {
         state[STATE_SMOOTH_DRY] = 0.0;
         state[STATE_REVERB_VOL] = 1.0;
         state[STATE_SMOOTH_REVERB] = 1.0;
-        state[STATE_SPRING_TYPE] = 1.0; // king tubby: short tail, gates in-run
-        let frames = SR as usize * 5;
+        state[STATE_SPRING_TYPE] = 1.0;
+        // The new tank preserves low modes and gates at -100 rather than
+        // -80 dBFS. Its measured tail falls below that floor after ~6 s.
+        let frames = SR as usize * 8;
         let (out_l, _) = render(&mut state, &impulse(frames), &impulse(frames));
         let tail = &out_l[frames - SR as usize / 2..];
         assert!(

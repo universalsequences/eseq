@@ -2148,6 +2148,32 @@ impl App {
         Ok(EditOutcome::Applied(history_move))
     }
 
+    pub fn apply_scene_transpose_to_bank(
+        &mut self,
+        bank: Option<crate::sequencer::SceneBankId>,
+        value: f64,
+    ) -> Result<EditOutcome, String> {
+        finish_active_gesture(self);
+        let changes = self.state.write_scene_transpose_in_bank(bank, value)?;
+        if changes.is_empty() {
+            return Ok(EditOutcome::NoOp);
+        }
+        let patches = changes.into_iter().map(|(scene, before)| SceneSlotPatch {
+            scene,
+            name: crate::sequencer::SCENE_TRANSPOSE_SLOT.to_string(),
+            before,
+            after: Some(crate::process::ProcessLiteral::Number(value)),
+        }).collect();
+        let patch = EditPatch::SceneSlots(patches);
+        let retained_bytes = edit_patch_retained_bytes(&patch);
+        let label = if bank.is_some() {
+            "Apply transpose to scene bank"
+        } else {
+            "Apply transpose to all scene banks"
+        };
+        Ok(EditOutcome::Applied(self.history.commit(label, None, patch, retained_bytes)))
+    }
+
     pub fn apply_recorded_scene_structure_mutation<T>(
         &mut self,
         label: &'static str,
@@ -9629,6 +9655,18 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
                 .map(|_| ())
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::SceneSlots(patches) => {
+            let writes = patches.iter().map(|patch| {
+                let target = match mode {
+                    ApplyMode::Undo => patch.before.clone(),
+                    ApplyMode::Redo => patch.after.clone(),
+                    _ => return Err(EditError::ReplayFailed(
+                        "scene-slot replay requires undo or redo mode".to_string())),
+                };
+                Ok((patch.scene, patch.name.clone(), target))
+            }).collect::<Result<Vec<_>, _>>()?;
+            app.state.set_scene_slot_overrides(&writes).map_err(EditError::ReplayFailed)
+        }
         EditPatch::SceneStructure(patch) => {
             let target = match mode {
                 ApplyMode::Undo => &patch.before,
@@ -9746,7 +9784,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackCreation(_) => true,
         EditPatch::TrackDeletion(_) => true,
         EditPatch::TrackPresentation(_) => false,
-        EditPatch::SceneSlot(_) => true,
+        EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) => true,
         EditPatch::SceneStructure(_) => true,
         // The arrangement's compiled song has no scheduler runtime.
         EditPatch::Arrangement(_) => false,
@@ -9843,6 +9881,8 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::TrackDeletion(patch) => patch.retained_bytes(),
         EditPatch::TrackPresentation(patch) => patch.retained_bytes(),
         EditPatch::SceneSlot(patch) => patch.retained_bytes(),
+        EditPatch::SceneSlots(patches) => std::mem::size_of::<Vec<SceneSlotPatch>>()
+            + patches.iter().map(SceneSlotPatch::retained_bytes).sum::<usize>(),
         EditPatch::SceneStructure(patch) => patch.retained_bytes(),
         EditPatch::Arrangement(patch) => patch.retained_bytes(),
         EditPatch::BusGroupStructure(patch) => patch.retained_bytes(),
@@ -9981,7 +10021,7 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::TrackPresentation(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
-        EditPatch::SceneSlot(_) => {
+        EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::SceneStructure(_) => {
@@ -10088,6 +10128,62 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app
+    }
+
+    #[test]
+    fn scene_transpose_bank_batch_is_scoped_and_undoable() {
+        use crate::sequencer::{SceneBank, SceneBankId, SCENE_TRANSPOSE_SLOT};
+        use crate::process::ProcessLiteral;
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let mut patterns = vec![PatternSnapshot::new_default(1, &[]); 3];
+        patterns[1].scene_slots.write_literal(SCENE_TRANSPOSE_SLOT, ProcessLiteral::Number(5.0)).unwrap();
+        patterns[2].scene_slots.write_literal(SCENE_TRANSPOSE_SLOT, ProcessLiteral::Number(12.0)).unwrap();
+        state.replace_pattern_repository(patterns, 0);
+        state.with_scenes_mut(|scenes| scenes.install_scene_banks(vec![
+            SceneBank { id: SceneBankId(10), name: None, len: 2 },
+            SceneBank { id: SceneBankId(20), name: None, len: 1 },
+        ]));
+        let mut app = test_app(state);
+        let values = |app: &App| app.state.with_scenes_mut(|scenes| scenes.scenes.iter()
+            .map(|scene| scene.scene_slots.get(SCENE_TRANSPOSE_SLOT).cloned()).collect::<Vec<_>>());
+        let number = |value| Some(ProcessLiteral::Number(value));
+        let original = values(&app);
+        app.apply_scene_transpose_to_bank(Some(SceneBankId(10)), -9.0).unwrap();
+        assert_eq!(values(&app), vec![number(-9.0), number(-9.0), number(12.0)]);
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(values(&app), original);
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        let bank_values = values(&app);
+        assert!(matches!(app.apply_scene_transpose_to_bank(Some(SceneBankId(10)), -9.0), Ok(EditOutcome::NoOp)));
+        assert_eq!(app.history.undo_len(), 1);
+        app.apply_scene_transpose_to_bank(None, 3.0).unwrap();
+        assert_eq!(values(&app), vec![number(3.0); 3]);
+        assert_eq!(app.history.undo_len(), 2);
+        // Later scene-slot writes outside the batch's field survive replay.
+        app.state.write_current_scene_slot("unrelated", ProcessLiteral::Number(8.0)).unwrap();
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(values(&app), bank_values);
+        assert_eq!(app.state.current_scene_slots().get("unrelated"), Some(&ProcessLiteral::Number(8.0)));
+        assert!(app.apply_scene_transpose_to_bank(Some(SceneBankId(999)), 4.0).is_err());
+        assert!(app.apply_scene_transpose_to_bank(None, 100.0).is_err());
+        assert_eq!(values(&app), bank_values);
+        assert_eq!(app.history.undo_len(), 1);
+    }
+
+    #[test]
+    fn scene_slot_batch_replay_validates_every_target_before_writing() {
+        use crate::sequencer::{SceneId, SCENE_TRANSPOSE_SLOT};
+        use crate::process::ProcessLiteral;
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let scene = state.current_scene_id().unwrap();
+        let write = (scene, SCENE_TRANSPOSE_SLOT.to_string(), Some(ProcessLiteral::Number(-9.0)));
+        let missing = (SceneId(u64::MAX), SCENE_TRANSPOSE_SLOT.to_string(), Some(ProcessLiteral::Number(5.0)));
+        assert!(state.set_scene_slot_overrides(&[write.clone(), missing]).is_err());
+        assert_eq!(state.current_scene_slots().get(SCENE_TRANSPOSE_SLOT), None);
+        let invalid = (scene, SCENE_TRANSPOSE_SLOT.to_string(), Some(ProcessLiteral::Number(0.5)));
+        assert!(state.set_scene_slot_overrides(&[write, invalid]).is_err());
+        assert_eq!(state.current_scene_slots().get(SCENE_TRANSPOSE_SLOT), None);
     }
 
     #[test]

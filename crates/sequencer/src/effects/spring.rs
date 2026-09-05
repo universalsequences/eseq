@@ -21,6 +21,9 @@
 //! floats so the same code runs inside the space-echo node's flat state array
 //! and inside the offline tuner bin (`src/bin/spring_tune.rs`).
 
+pub mod grampian;
+pub use super::space_echo::{render_space_echo, SpaceEchoRenderSettings};
+
 /// Parallel dispersive loops per tank.
 pub const SPRING_LOOPS: usize = 3;
 /// Maximum allpasses per loop the state layout supports; the active count is
@@ -159,17 +162,11 @@ impl SpringParams {
         }
     }
 
-    /// Fitted to `content/impulses/prepared/king-tubby.wav` (Grampian spring, the
-    /// King Tubby dub tank) with `scripts/spring_tune.py` staged Nelder-Mead
-    /// from the `re201()` start, then a hand "boing" pass: the optimizer's
-    /// centroid-based ridge metric under-rewards distinct chirp arcs, so
-    /// `t_dc`/`ap_per_loop` were pushed up (chirp sweep ~7 ms → ~35 ms) and
-    /// the diffusers backed off (c_df, d_df1) until the spectrogram shows the
-    /// reference's repeating rising arcs — the audible spring boing.
-    /// Brighter and much shorter than the RE-201 tank (flat to ~5 kHz,
-    /// −20 dB by 1.0 s). Residuals: EDC 1.29 dB RMS, 1/6-oct spectrum
-    /// 2.6 dB, echo density 0.14.
-    pub fn king_tubby() -> Self {
+    /// Historical v1 fit, retained only as an offline A/B baseline. Its hand
+    /// adjustment crossed into positive allpass coefficients and reversed the
+    /// intended dispersion. The centroid-based optimizer did not detect this.
+    /// Production Grampian playback uses the independent `grampian` module.
+    pub fn king_tubby_v1() -> Self {
         SpringParams {
             ap_per_loop: 128,
             d_loop: [0.049_275_733, 0.072_572_678, 0.099_002_319],
@@ -536,8 +533,8 @@ mod tests {
     }
 
     #[test]
-    fn all_spring_type_presets_render_finite_and_distinct() {
-        let presets = [SpringParams::re201(), SpringParams::king_tubby()];
+    fn legacy_reference_fits_render_finite_and_distinct() {
+        let presets = [SpringParams::re201(), SpringParams::king_tubby_v1()];
         let irs: Vec<Vec<f32>> = presets
             .iter()
             .map(|p| render_impulse(p, 44_100.0, 2.0, 0.25))

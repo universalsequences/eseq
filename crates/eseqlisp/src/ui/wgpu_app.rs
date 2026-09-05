@@ -2702,6 +2702,13 @@ fn create_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
 }
 
 impl WgpuAppBackend {
+    /// Handle another thread can use to interrupt a blocked poll.
+    pub fn event_loop_waker(&self) -> Option<crate::ui::backend::EventLoopWaker> {
+        self.event_loop
+            .as_ref()
+            .map(|event_loop| crate::ui::backend::EventLoopWaker::new(event_loop.create_proxy()))
+    }
+
     /// Signature parity with `MetalBackend::poll_backend_event_with_redraw`.
     /// The live-resize modal-loop stall is macOS-specific; here the callback
     /// is unused and this is a plain poll.

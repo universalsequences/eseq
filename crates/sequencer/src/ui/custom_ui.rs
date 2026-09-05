@@ -595,7 +595,7 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
             functions.push_str(&format!("\n{helper}\n"));
         }
         functions.push_str(&format!(
-            "\n(def {fn_name} (fx) (do (set! midi-fx-ui-current-fx fx) (set! midi-fx-ui-current-name {}) {body}))\n",
+            "\n(def {fn_name} (fx) (do (set! midi-fx-ui-current-fx fx) (set! midi-fx-ui-current-name {}) (set! custom-ui-current-kind \"midi-fx\") (set! custom-ui-selected-section (eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope)) {body}))\n",
             lisp_string_literal(&fx_name)
         ));
         dispatch = format!(

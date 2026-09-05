@@ -148,7 +148,7 @@
         (h-stack :gap 0.18
           (button (str (+ band 1))
             :width 1.05 :height 0.55 :padding 0 :font-size 6.8
-            :background-color (if selected (rgba 1.0 0.74 0.22 1.0) :mixer-control-bg)
+            :background-color (if selected :eq8-band-selected :mixer-control-bg)
             :border-color :transparent
             :corner-radius 0
             :color (if selected :black (if (get band-map :enabled) :fg :dim))
@@ -158,7 +158,7 @@
             :corner-radius 6
             :width 2.15 :height 0.85 :padding 0 :font-size 8.0
             :background-color :transparent
-            :active-color :yellow
+            :active-color :eq8-active-text
             :color :dim
             :active (get band-map :enabled)
             :plock-active (if (eseq.effects.param-controls/param-plock-active? fx enabled-p) 1 0)
@@ -218,7 +218,7 @@
             :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx type-p v))
             :bg-color :mixer-strip-bg
             :border-color :buffer-bg
-            :badge-color :yellow
+            :badge-color :eq8-badge-bg
             :chevron-color :black
             :plock-active (if (eseq.effects.param-controls/param-plock-active? fx type-p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -250,10 +250,10 @@
               :max-db 0
               :smoothing 0.65
               :background-color :mixer-control-bg
-              :curve-color (rgba 1.0 0.54 0.14 1.0)
-              :selected-color (rgba 1.0 0.78 0.18 1.0)
-              :spectrum-color (rgba 0.08 0.52 0.54 0.30)
-              :spectrum-peak-color (rgba 0.40 0.92 0.86 0.74)
+              :curve-color :eq8-curve
+              :selected-color :eq8-selected
+              :spectrum-color :eq8-spectrum
+              :spectrum-peak-color :eq8-spectrum-peak
               :on-action |event| (handle-action fx params event))))
         (box :background-color :mixer-control-bg
           :corner-radius 12

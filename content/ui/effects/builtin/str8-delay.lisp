@@ -87,8 +87,8 @@
     (button "Sync"
       :corner-radius 1
       :width 4.95 :height 0.88 :padding 0 :font-size 8.5
-      :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
-      :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
+      :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :effect-mode-on-bg :mixer-control-bg)
+      :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :control-on-fg :dim)
       :border-color :transparent
       :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -102,9 +102,9 @@
 (def div-button (fx p current label-text)
   (button label-text
     :width 2.72 :height 1.12 :padding 0 :font-size 8.0
-    :background-color (if (= current label-text) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
-        :border-color :transparent
-    :color (if (= current label-text) :black :dim)
+    :background-color (if (= current label-text) :effect-mode-on-bg :mixer-control-bg)
+    :border-color :transparent
+    :color (if (= current label-text) :control-on-fg :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)

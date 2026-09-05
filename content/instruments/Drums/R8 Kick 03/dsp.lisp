@@ -1,20 +1,12 @@
-; Roland R-8 'Kick03', identified from the sample-library hit by SynthID-style
-; scalar optimisation (dgen Examples/SynthID/scripts/fit_r8_kick.py). At the
-; defaults every hit reproduces the learned render; every knob is a departure
-; from the identified sound. No sample, target-derived table, FIR, or residual
-; is embedded.
-;
-; Source provenance: Kick03.wav, tags drums / kick / Roland / Roland R8,
-; sha256 26eb639f7d6587382cdc95d297626bef8fac396f5b5ff5fc8892fb805042278e
-; (44.1 kHz, 182 ms, no capture band-limit above the natural roll-off).
-;
-; Voice: the hit is a real drum, not a swept sine. Five inharmonic membrane
-; modes (each with its own level, decay, glide depth and initial phase) sit under one shared
-; two-exponential tension glide; eight fixed-pitch ring modes (shell / beater
-; 'knock', ~300 Hz .. 3.5 kHz) carry the woody attack; a lowpassed noise burst
-; is the beater click; noise gated by the membrane's negative half-cycles is
-; the rattle heard on every trough; a slowly decaying high-passed hiss is the
-; recording texture; gain-normalised tanh output (linear regime).
+; R8 Kick 03 — acoustic modal reconstruction, not sample playback.
+; Source: Roland R8 / Kick03.wav, 44.1 kHz, 8032 frames.
+; SHA256: 26eb639f7d6587382cdc95d297626bef8fac396f5b5ff5fc8892fb805042278e
+; Identification: dgen Examples/SynthID/scripts/fit_r8_contact.py.
+; Seven low membrane modes, a finite pressure-force pulse, and six broad
+; contact/shell noise bands. NO stationary shell sine bank or comb feedback.
+; Identified coefficients below are ordinary scalars (Hz, amplitude, 1/s,
+; phase in cycles, dimensionless tension depths), not waveform/residual data.
+; Musical controls are neutral at default, at C4 / velocity 1.
 
 (def gate (in 1 @name gate))
 (def pitch (in 2 @name pitch))
@@ -26,169 +18,203 @@
 (def mod3 (in 8 @name mod3 @modulator 3))
 (def mod4 (in 9 @name mod4 @modulator 4))
 
-; ---- departures from the identified sound (all no-ops at their defaults) ----
+; BODY: squared level ranges expose strong weight/head balance changes.
+; DAMP damps the whole drum, including shell and contact, not just its bass.
 (param tune @default 0 @min -24 @max 24 @unit st @mod true @mod-mode additive)
-(param glide @default 1 @min 0 @max 4 @mod true @mod-mode additive)
-(param attack @default 1 @min 0.1 @max 8 @mod true @mod-mode additive)
-(param decay @default 1 @min 0.1 @max 4 @mod true @mod-mode additive)
-(param knock @default 1 @min 0 @max 4 @mod true @mod-mode additive)
-(param ring @default 1 @min 0.1 @max 4 @mod true @mod-mode additive)
-; How much the ring bank follows the played note: 1 = with the membrane (the
-; timbre transposes as one instrument), 0 = the shell modes stay where the
-; sample has them (a fixed resonance across notes). Exact no-op at C4 either way.
-(param ring_track @default 1 @min 0 @max 1 @mod true @mod-mode additive)
-(param noise @default 1 @min 0 @max 4 @mod true @mod-mode additive)
-(param rattle @default 1 @min 0 @max 4 @mod true @mod-mode additive)
-(param hiss @default 1 @min 0 @max 4 @mod true @mod-mode additive)
-(param drive @default 1 @min 0.25 @max 4 @mod true @mod-mode additive)
+(param weight @default 1 @min 0 @max 2 @mod true @mod-mode additive)
+(param head @default 1 @min 0 @max 2 @mod true @mod-mode additive)
+(param decay @default 1 @min 0.2 @max 4 @mod true @mod-mode additive)
+(param damp @default 0 @min 0 @max 1 @mod true @mod-mode additive)
+(param stretch @default 0 @min -0.3 @max 0.3 @mod true @mod-mode additive)
+
+; MOTION: LENGTH is the base cut; DECAY/RING/CONTACT stretch their own
+; layer's damping AND cut. A fixed global ROM cut must not mask their ranges.
+; PUNCH speeds head energy transfer as well as increasing early impact.
+(param bend @default 1 @min 0 @max 2 @mod true @mod-mode additive)
+(param bend_time @default 1 @min 0.25 @max 3 @mod true @mod-mode additive)
+(param attack @default 1 @min 0.25 @max 20 @mod true @mod-mode additive)
+(param length @default 180.514 @min 40 @max 1200 @unit ms @mod true @mod-mode additive)
+(param punch @default 0 @min 0 @max 1 @mod true @mod-mode additive)
+(param dynamics @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+
+; CONTACT: KNOCK is the finite pressure pulse, BEATER is struck abrasion.
+; HARDNESS changes contact duration, exciter bandwidth and modal weighting.
+; RING extends diffuse shell decay, never a bank of clean fixed oscillators.
+(param knock @default 0.0466918 @min 0 @max 3 @mod true @mod-mode additive)
+(param shell_tune @default 0 @min -12 @max 12 @unit st @mod true @mod-mode additive)
+(param ring @default 1 @min 0.2 @max 4 @mod true @mod-mode additive)
+(param beater @default 1 @min 0 @max 3 @mod true @mod-mode additive)
+(param hardness @default 0 @min -1 @max 1 @mod true @mod-mode additive)
+(param contact @default 1 @min 0.2 @max 4 @mod true @mod-mode additive)
+
+; COLOR: track lets the shell/texture follow played notes or remain fixed.
+; Drive/crush/tone are dry at zero; none disguises fit errors at default.
+(param air @default 1 @min 0 @max 3 @mod true @mod-mode additive)
+(param track @default 1 @min 0 @max 1 @mod true @mod-mode additive)
+(param drive @default 0 @min 0 @max 1 @mod true @mod-mode additive)
+(param tone @default 0 @min -1 @max 1 @mod true @mod-mode additive)
+(param crush @default 0 @min 0 @max 1 @mod true @mod-mode additive)
 (param level @default 1 @min 0 @max 1.5 @mod true @mod-mode additive)
 
-; ---- the identified scalars (recovered_params.json), editable ----
-(param glide_a1 @default 0.250029 @min 0.05 @max 3)
-(param glide_r1 @default -480.911 @min -1200 @max -60)
-(param glide_a2 @default 0.263726 @min 0.02 @max 1.5)
-(param glide_r2 @default -34.9268 @min -80 @max -8)
-(param attack_time @default 0.0001 @min 0.0001 @max 0.006 @unit s)
-(param lf1 @default 45.6676 @min 20 @max 400 @unit Hz)
-(param lf2 @default 89.6389 @min 20 @max 400 @unit Hz)
-(param lf3 @default 127.696 @min 20 @max 400 @unit Hz)
-(param lf4 @default 167.715 @min 20 @max 400 @unit Hz)
-(param lf5 @default 244.085 @min 20 @max 400 @unit Hz)
-(param la1 @default 0.856324 @min 0.001 @max 1)
-(param la2 @default 0.989175 @min 0.001 @max 1)
-(param la3 @default 0.63755 @min 0.001 @max 1)
-(param la4 @default 0.520093 @min 0.001 @max 1)
-(param la5 @default 0.11475 @min 0.001 @max 1)
-(param ld1 @default -11.463 @min -400 @max -3)
-(param ld2 @default -24.241 @min -400 @max -3)
-(param ld3 @default -12.504 @min -400 @max -3)
-(param ld4 @default -30.7075 @min -400 @max -3)
-(param ld5 @default -24.3515 @min -400 @max -3)
-(param lg1 @default 2.97554 @min 0 @max 3)
-(param lg2 @default 2.51896 @min 0 @max 3)
-(param lg3 @default 1.7639 @min 0 @max 3)
-(param lg4 @default 2.34637 @min 0 @max 3)
-(param lg5 @default 1.9717 @min 0 @max 3)
-(param lp1 @default 0.203198 @min 0 @max 1)
-(param lp2 @default 0.44 @min 0 @max 1)
-(param lp3 @default 0.48266 @min 0 @max 1)
-(param lp4 @default 0.444286 @min 0 @max 1)
-(param lp5 @default 0.38743 @min 0 @max 1)
-(param mf1 @default 348.101 @min 200 @max 6000 @unit Hz)
-(param mf2 @default 456.473 @min 200 @max 6000 @unit Hz)
-(param mf3 @default 840.253 @min 200 @max 6000 @unit Hz)
-(param mf4 @default 1356.64 @min 200 @max 6000 @unit Hz)
-(param mf5 @default 2067.64 @min 200 @max 6000 @unit Hz)
-(param mf6 @default 2826.18 @min 200 @max 6000 @unit Hz)
-(param mf7 @default 3379.52 @min 200 @max 6000 @unit Hz)
-(param mf8 @default 4111.14 @min 200 @max 6000 @unit Hz)
-(param ma1 @default 0.0765368 @min 0.0001 @max 0.3)
-(param ma2 @default 0.0378978 @min 0.0001 @max 0.3)
-(param ma3 @default 0.0317308 @min 0.0001 @max 0.3)
-(param ma4 @default 0.0261733 @min 0.0001 @max 0.3)
-(param ma5 @default 0.0906526 @min 0.0001 @max 0.3)
-(param ma6 @default 0.163107 @min 0.0001 @max 0.3)
-(param ma7 @default 0.26807 @min 0.0001 @max 0.3)
-(param ma8 @default 0.211719 @min 0.0001 @max 0.3)
-(param md1 @default -26.3748 @min -800 @max -5)
-(param md2 @default -18.883 @min -800 @max -5)
-(param md3 @default -21.0564 @min -800 @max -5)
-(param md4 @default -25.6401 @min -800 @max -5)
-(param md5 @default -50.743 @min -800 @max -5)
-(param md6 @default -80.6973 @min -800 @max -5)
-(param md7 @default -111.99 @min -800 @max -5)
-(param md8 @default -129.162 @min -800 @max -5)
-(param noise_cutoff @default 2851.74 @min 500 @max 14000 @unit Hz)
-(param noise_amp @default 0.8 @min 0 @max 0.8)
-(param noise_decay @default -64.4698 @min -4000 @max -40)
-(param rattle_amp @default 0 @min 0 @max 1)
-(param rattle_hp @default 630.463 @min 300 @max 4000 @unit Hz)
-(param rattle_decay @default -53.5398 @min -300 @max -5)
-(param hiss_cutoff @default 2000 @min 2000 @max 12000 @unit Hz)
-(param hiss_amp @default 0.00148168 @min 0 @max 0.02)
-(param hiss_decay @default -2.8568 @min -80 @max -2)
-(param out_drive @default 0.102266 @min 0.02 @max 0.15)
-(param out_gain @default 0.467551 @min 0.05 @max 5)
+(defmacro wrap (p) (- p (floor p)))
+(defmacro semi (st) (pow 2.0 (/ st 12.0)))
+(defmacro bq-hz (hz) (* (clip hz 20.0 (* samplerate 0.45)) (/ 44100.0 samplerate)))
+; Control smoothing has an initialized state, so the first hit is exact.
+(defmacro smooth (x)
+  (make-history h)
+  (make-history init-h)
+  (def k (exp (/ -1.0 (* 0.003 samplerate))))
+  (def y (gswitch (read-history init-h) (+ x (* k (- (read-history h) x))) x))
+  (write-history h y)
+  (write-history init-h 1.0)
+  y)
+(def dt (/ 1.0 samplerate))
+(def hit (gt trigger 0.5))
+(make-history count-h)
+(def count (gswitch hit 0.0 (read-history count-h)))
+; Count is exact up to the longest voice; stop advancing once all envelopes
+; have ended. This avoids float32 integer overflow during long idle periods.
+(write-history count-h (min (+ count 1.0) (* samplerate 8.0)))
+(def t (* count dt))
+(make-history active-h)
+(def active (gswitch hit 1.0 (read-history active-h)))
+(write-history active-h active)
+(make-history velocity-h)
+(def vel (gswitch hit (clip velocity 0 1) (read-history velocity-h)))
+(write-history velocity-h vel)
 
-(defmacro semi (st) (pow 2 (/ st 12)))
-(defmacro bq-hz (hz) (* hz (/ 44100.0 samplerate)))
+(def tuning (smooth (clip (mod tune) -24 24)))
+(def pitch-ratio (* (/ (max pitch 1.0) 261.63) (semi tuning)))
+(def weight-v (pow (smooth (clip (mod weight) 0 2)) 2.0))
+(def head-v (pow (smooth (clip (mod head) 0 2)) 2.0))
+(def decay-v (smooth (clip (mod decay) 0.2 4)))
+(def damp-v (smooth (clip (mod damp) 0 1)))
+(def stretch-v (smooth (clip (mod stretch) -0.3 0.3)))
+(def bend-v (pow (smooth (clip (mod bend) 0 2)) 2.0))
+(def bend-time-v (smooth (clip (mod bend_time) 0.25 3)))
+(def attack-v (smooth (clip (mod attack) 0.25 20)))
+(def length-v (* 0.001 (smooth (clip (mod length) 40 1200))))
+(def punch-v (smooth (clip (mod punch) 0 1)))
+(def dynamics-v (smooth (clip (mod dynamics) 0 1)))
+(def knock-v (smooth (clip (mod knock) 0 3)))
+(def shell-ratio (* (pow pitch-ratio (smooth (clip (mod track) 0 1)))
+                   (semi (smooth (clip (mod shell_tune) -12 12)))))
+(def ring-v (smooth (clip (mod ring) 0.2 4)))
+(def beater-v (pow (smooth (clip (mod beater) 0 3)) 1.5))
+(def hard-v (smooth (clip (mod hardness) -1 1)))
+(def contact-v (smooth (clip (mod contact) 0.2 4)))
+(def air-v (pow (smooth (clip (mod air) 0 3)) 2.0))
+(def drive-v (smooth (clip (mod drive) 0 1)))
+(def tone-v (smooth (clip (mod tone) -1 1)))
+(def crush-v (smooth (clip (mod crush) 0 1)))
+(def level-v (smooth (clip (mod level) 0 1.5)))
+(def touch (- hard-v (* dynamics-v (- 1.0 vel))))
+(def brightness (pow 2.0 touch))
+(def fast-time (* 0.00236874 bend-time-v))
+(def slow-time (* 0.0387451 bend-time-v))
 
-; Exact seconds-since-trigger clock: t=0 on the trigger sample, then n/sr.
-(make-history time-h)
-(def previous-time (read-history time-h))
-(def t (gswitch (gt trigger 0.5) 0.0 previous-time))
-(write-history time-h (+ t (/ 1.0 samplerate)))
+; Stable 1-exp(-x). Direct subtraction loses precision at slow rates/high
+; sample rates; the small-x series has error below float32 rounding here.
+(defmacro one-minus-exp (x)
+  (gswitch (lt x 0.02)
+    (* x (+ 1.0 (* x (+ -0.5 (* x (+ 0.1666666667 (* x -0.0416666667)))))))
+    (- 1.0 (exp (- x)))))
+; Exact integral over this sample interval. Wrapped phase history allows
+; live pitch/bend changes without multiplying an entire elapsed phase.
+(def fast-step (* fast-time (one-minus-exp (/ dt fast-time)) (exp (/ (- t) fast-time))))
+(def slow-step (* slow-time (one-minus-exp (/ dt slow-time)) (exp (/ (- t) slow-time))))
+; Per-layer cubic cuts retain the reference at neutral controls but permit
+; an actual longer body/shell/contact when its decay control is increased.
+(defmacro layer-cut (scale)
+  (def end (* length-v scale))
+  (def start (* end (/ 0.17 0.180514)))
+  (def u (clip (/ (- t start) (max 0.0001 (- end start))) 0 1))
+  (- 1.0 (* u u (- 3.0 (* 2.0 u)))))
+(def body-cut (layer-cut decay-v))
+(def shell-cut (layer-cut ring-v))
+(def contact-cut (layer-cut contact-v))
+; Tone-filter memory may ring briefly after the last layer ends. Give that
+; causal response its own 20 ms smooth exit, without applying the ROM fade
+; twice to the source or abruptly chopping a live filter state.
+(def last-end (* length-v (max decay-v (max ring-v contact-v))))
+(def exit-u (clip (/ (- t last-end) 0.020) 0 1))
+(def final-cut (- 1.0 (* exit-u exit-u (- 3.0 (* 2.0 exit-u)))))
+(defmacro oscillator (frequency phase0 delta)
+  (make-history phase-h)
+  (def phase (gswitch hit (wrap phase0) (read-history phase-h)))
+  (write-history phase-h (wrap (+ phase delta)))
+  ; Smoothly suppress partials approaching Nyquist at extreme notes.
+  (* (sin (* 2.0 pi phase))
+     (clip (/ (- (* samplerate 0.49) frequency) (* samplerate 0.04)) 0 1)))
+; Independent modal rise times model the transfer into the low head modes;
+; the beater does not excite every resonance with one identical envelope.
+(defmacro membrane (f a d p g s rise fundamental)
+  (def spacing (pow (/ f 42.3414) stretch-v))
+  (def freq (* f pitch-ratio spacing))
+  (def phase-step (* freq (+ dt (* bend-v (+ (* g fast-step) (* s slow-step))))))
+  (def inst-freq (* freq (+ 1.0 (* bend-v (+ (* g (exp (/ (- t) fast-time))) (* s (exp (/ (- t) slow-time))))))))
+  (def damping (+ (/ d decay-v) (* damp-v 140.0 (pow (/ f 42.3414) 0.7))))
+  (def impact-rise (/ (* rise attack-v) (+ 1.0 (* punch-v 15.0))))
+  (* a (+ (* fundamental weight-v) (* (- 1.0 fundamental) head-v))
+     (pow (/ f 42.3414) (* touch 0.65)) (exp (* (- damping) t))
+     (one-minus-exp (/ t impact-rise))
+     (oscillator inst-freq p phase-step)))
+(def low
+  (+ (membrane 42.3414 0.625835 16.2328 0.00435194 1.8 0.928374 0.0247114 1)
+     (membrane 83.4973 0.686091 29.5333 0.0669222 1.79988 0.733356 0.00103155 0)
+     (membrane 95.4932 0.0648089 11.498 0.331164 0.839052 1.15431 0.000524464 0)
+     (membrane 117.55 0.201218 11.796 -0.288051 0.762298 0.781782 0.000334438 0)
+     (membrane 164.316 0.0519495 11.1795 -0.439262 0.726686 0.641322 0.000478625 0)
+     (membrane 199.634 0.0988798 25.502 0.753856 0.876163 0.0711835 0.000332483 0)
+     (membrane 232.748 0.0225236 10.5791 -1.36716 0.15261 0.888127 0.000507208 0)))
+; A single finite half-sine contact force, not a decaying oscillator.
+; The filters have Q=.707: their short impulse response is a knock, not a
+; sustaining pitched shell. Hardness changes the actual contact duration.
+(def contact-speed (pow 2.0 (* -2.5 touch)))
+(def force-width (max (* 4.0 dt) (* 0.000956169 contact-v attack-v contact-speed)))
+(def force-phase (clip (/ t force-width) 0.0 1.0))
+(def force (* (sin (* pi force-phase)) (lt t force-width)
+              (sqrt (/ 0.0012 force-width))))
+(def force-hp (biquad force (bq-hz (* 180.0 shell-ratio)) 0.707 1.0 1))
+(def force-lp (biquad force-hp (bq-hz (* 3500.0 shell-ratio brightness)) 0.707 1.0 0))
+(def knock-voice (* knock-v force-lp contact-cut))
 
-; The fit was rendered with the host pitch at C4 (261.63 Hz); this ratio
-; keeps that render exact while making the membrane modes playable.
-(def pitch-ratio (* (/ pitch 261.63) (semi (mod tune))))
+; Finite-bandwidth noise with constant per-Hz density across host rates.
+(def white (* (- (* (noise) 2.0) 1.0) (sqrt (/ samplerate 48000.0))))
+; Felt removes high-frequency excitation; it does not retune the shell.
+; Keeping the band centers independent of hardness also avoids pushing the
+; hardest strike's energy above the useful audible range.
+(def exciter-cutoff (* 14000.0 (pow 2.0 (* 3.0 (min touch 0.0)))))
+(def exciter (biquad white (bq-hz exciter-cutoff) 0.707 1.0 0))
+(defmacro contact-band (fc q mode a d rise tail tail-d tilt)
+  (def filtered (biquad exciter (bq-hz (* fc (pow shell-ratio 0.5))) q 1.0 mode))
+  (def onset (one-minus-exp (/ t (* rise attack-v contact-v contact-speed))))
+  (def damping (* damp-v 180.0 (sqrt (/ fc 350.0))))
+  (def fast (* contact-cut beater-v a
+     (exp (* (- (+ (/ d (* contact-v contact-speed)) damping)) t))))
+  (def slow (* shell-cut air-v tail
+     (exp (* (- (+ (/ tail-d ring-v) damping)) t))))
+  (* filtered onset (+ fast slow) (pow brightness tilt)))
+(def texture
+  (+ (contact-band 350.0 0.65 2 0.461722 1617.31 0.000055712759 0.0634067 11.5259 -0.5)
+     (contact-band 700.0 0.75 2 0.850015 82.2232 0.000756282 0.0051501 82.4303 0.0)
+     (contact-band 1400.0 0.85 2 6 620.033 0.00552818 0.0104924 350 0.5)
+     (contact-band 2600.0 1.0 2 4.9293 409.095 0.00772751 0.0141674 350 1.0)
+     (contact-band 4200.0 0.8 2 0.00191863 2500 0.008 0.000298233 350 1.5)
+     (contact-band 6500.0 0.707 1 0.0343957 67.0148 0.000053185583 0.00152785 5 2.0)))
 
-; Shared tension glide, integrated in closed form: G(t) = int (g(t)-1) dt.
-(def glide-depth (clip (mod glide) 0 4))
-(def glide-int
-  (* glide-depth
-     (+ (* (/ glide_a1 (- glide_r1)) (- 1.0 (exp (* glide_r1 t))))
-        (* (/ glide_a2 (- glide_r2)) (- 1.0 (exp (* glide_r2 t)))))))
-
-(def attack-seconds (* attack_time (clip (mod attack) 0.1 8)))
-(def attack-env (- 1.0 (exp (/ (- t) attack-seconds))))
-(def decay-scale (/ 1.0 (clip (mod decay) 0.1 4)))
-
-; Low membrane bank: each mode has its own level, decay and glide depth.
-(defmacro wrap (ph) (- ph (floor ph)))
-(defmacro low-phase (freq gscale ph0)
-  (+ (* freq pitch-ratio (+ t (* gscale glide-int))) ph0))
-(defmacro low-mode (freq level rate gscale ph0)
-  (* level (exp (* rate decay-scale t))
-     (sin (* 2.0 pi (wrap (low-phase freq gscale ph0))))))
-(def low-bank
-  (+ (low-mode lf1 la1 ld1 lg1 lp1)
-     (low-mode lf2 la2 ld2 lg2 lp2)
-     (low-mode lf3 la3 ld3 lg3 lp3)
-     (low-mode lf4 la4 ld4 lg4 lp4)
-     (low-mode lf5 la5 ld5 lg5 lp5)))
-
-; Ring bank: fixed-pitch shell / beater modes. knock scales the level, ring
-; scales the decay time; both exact no-ops at 1.
-(def ring-scale (/ 1.0 (clip (mod ring) 0.1 4)))
-(def ring-pitch (pow pitch-ratio (clip (mod ring_track) 0 1)))
-(defmacro ring-mode (freq level rate)
-  (* level (exp (* rate ring-scale t))
-     (sin (* 2.0 pi (wrap (* freq ring-pitch t))))))
-(def ring-bank
-  (* (clip (mod knock) 0 4)
-     (+ (ring-mode mf1 ma1 md1)
-        (ring-mode mf2 ma2 md2)
-        (ring-mode mf3 ma3 md3)
-        (ring-mode mf4 ma4 md4)
-        (ring-mode mf5 ma5 md5)
-        (ring-mode mf6 ma6 md6)
-        (ring-mode mf7 ma7 md7)
-        (ring-mode mf8 ma8 md8))))
-(def bipolar-noise (- (* (noise) 2.0) 1.0))
-
-; Rattle: noise gated by the negative half of the membrane signal, the buzz
-; that rides every trough of the real hit.
-(def rattle-noise (biquad bipolar-noise (bq-hz rattle_hp) 0.707 1.0 1))
-(def rattle-voice
-  (* rattle-noise (max (- 0.0 (+ low-bank ring-bank)) 0.0)
-     (exp (* rattle_decay t)) rattle_amp (clip (mod rattle) 0 4)))
-(def body (* (+ low-bank ring-bank rattle-voice) attack-env))
-
-(def filtered-noise
-  (biquad bipolar-noise (bq-hz noise_cutoff) 0.707 1.0 0))
-(def noise-voice
-  (* filtered-noise (exp (* noise_decay t)) noise_amp
-     (clip (mod noise) 0 4)))
-
-; Recording hiss: high-passed noise with its own slow decay.
-(def hiss-hp (biquad bipolar-noise (bq-hz hiss_cutoff) 0.707 1.0 1))
-(def hiss-voice
-  (* hiss-hp (exp (* hiss_decay t)) hiss_amp (clip (mod hiss) 0 4)))
-
-(def mixed (+ body noise-voice hiss-voice))
-; Gain-normalised saturator: out_drive / drive set the shape only.
-(def drive-amount (* out_drive (clip (mod drive) 0.25 4)))
-(def shaped
-  (* (/ (tanh (* mixed drive-amount)) drive-amount) out_gain))
-(out (* shaped (clip velocity 0 1) (clip (mod level) 0 1.5)) 1 @name audio)
+(def mixed (+ (* low body-cut (+ 1.0 (* punch-v 0.75 (exp (* -65.0 t))))) knock-voice texture))
+; A genuine bass/attack tilt around 420 Hz. Gain normalization is analytic,
+; not a target-derived EQ or a level follower; neutral tone is exactly dry.
+(def dark (biquad mixed (bq-hz 420.0) 0.707 1.0 0))
+(def bass-gain (pow 2.0 (* -2.0 tone-v)))
+(def treble-gain (pow 2.0 (* 2.0 tone-v)))
+(def tilt-norm (sqrt (* 0.5 (+ (* bass-gain bass-gain) (* treble-gain treble-gain)))))
+(def toned (/ (+ (* dark bass-gain) (* (- mixed dark) treble-gain)) tilt-norm))
+(def gain (+ 1.0 (* drive-v 24.0)))
+(def saturated (/ (tanh (* gain toned)) (tanh gain)))
+(def driven (+ toned (* drive-v (- saturated toned))))
+(def steps (pow 2.0 (- 16.0 (* crush-v 12.0))))
+(def quantized (/ (floor (+ (* driven steps) 0.5)) steps))
+(def colored (+ driven (* crush-v (- quantized driven))))
+(out (* colored final-cut active vel level-v 0.864444) 1 @name audio)

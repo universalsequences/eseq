@@ -5526,6 +5526,22 @@ pub(crate) fn init_runtime(
 
     register_transport_toggle_play_native(&mut runtime, state.clone());
 
+    let placement_state = state.clone();
+    runtime.register_native("seq-arrangement-pattern", move |args, _ctx| {
+        let track = song_track_arg("seq-arrangement-pattern: track", args.first())?;
+        let requested = match args.get(1) {
+            None | Some(Value::Nil) => None,
+            Some(Value::Number(id)) if id.is_finite() && *id > 0.0 && id.fract() == 0.0 =>
+                Some(sequencer::sequencer::PatternId(*id as u64)),
+            _ => return Err("seq-arrangement-pattern: invalid pattern id".into()),
+        };
+        let preview = placement_state.with_project_scenes(|scenes| {
+            let id = requested.or_else(|| scenes.effective_pattern_id(track))?;
+            arrangement_pattern_preview(scenes, track, id)
+        });
+        Ok(preview.as_ref().map(build_pattern_preview_value).unwrap_or(Value::Nil))
+    });
+
     runtime.register_native("seq-set-bpm", move |args, ctx| {
         let Some(Value::Number(bpm)) = args.first() else {
             return Err("seq-set-bpm: expected bpm number".into());
@@ -6366,6 +6382,53 @@ pub(crate) fn init_runtime(
             }
             None => Ok(Value::Bool(false)),
         }
+    });
+
+    // seq-armed-tracks — indices of every record-armed track, ascending.
+    // Read by the MIDI mapping layer (content/ui/midi.lisp) to find the
+    // performance target at event time.
+    let ra = record_armed.clone();
+    runtime.register_native("seq-armed-tracks", move |_args, _ctx| {
+        let armed = ra.lock().unwrap();
+        Ok(Value::List(
+            armed
+                .iter()
+                .enumerate()
+                .filter(|(_, armed)| **armed)
+                .map(|(track, _)| Rc::new(RefCell::new(Value::Number(track as f64))))
+                .collect(),
+        ))
+    });
+
+    // seq-track-is-rack? — true when the track's instrument is an Instrument
+    // Rack (and so carries the 8 rack macros).
+    let st = state.clone();
+    runtime.register_native("seq-track-is-rack?", move |args, _ctx| {
+        let Some(Value::Number(track)) = args.first() else {
+            return Err("seq-track-is-rack?: expected track index".into());
+        };
+        Ok(Value::Bool(
+            *track >= 0.0 && st.live_rack_track_snapshot(*track as usize).is_some(),
+        ))
+    });
+
+    // seq-rack-macro-value — the current (default, un-p-locked) value of a
+    // rack macro, 0..1; nil when the track is not a rack.
+    let st = state.clone();
+    runtime.register_native("seq-rack-macro-value", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(macro_idx))) =
+            (args.first(), args.get(1))
+        else {
+            return Err("seq-rack-macro-value: expected track and macro index".into());
+        };
+        if *track < 0.0 || *macro_idx < 0.0 {
+            return Ok(Value::Nil);
+        }
+        Ok(st
+            .live_rack_track_snapshot(*track as usize)
+            .and_then(|rack| rack.macros.get(*macro_idx as usize).map(|m| m.value))
+            .map(|value| Value::Number(f64::from(value)))
+            .unwrap_or(Value::Nil))
     });
 
     // seq-arm-track-exclusive — arm one track and disarm every other track
@@ -7587,6 +7650,21 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-record-arm",
             "(seq-toggle-record-arm track)",
             "Toggle record-arm state for a track.",
+        ),
+        (
+            "seq-armed-tracks",
+            "(seq-armed-tracks)",
+            "List the indices of every record-armed track.",
+        ),
+        (
+            "seq-track-is-rack?",
+            "(seq-track-is-rack? track)",
+            "True when the track's instrument is an Instrument Rack.",
+        ),
+        (
+            "seq-rack-macro-value",
+            "(seq-rack-macro-value track macro)",
+            "Current value (0..1) of a rack macro, or nil if the track is not a rack.",
         ),
         (
             "seq-search-samples",

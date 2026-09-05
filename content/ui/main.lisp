@@ -16,6 +16,8 @@
 (seq-theme-mac-osx-dark)
 (import eseq.materials)
 (import eseq.seq-core-state)
+;; Hardware MIDI mapping table + dispatch entry point (pure data, no UI).
+(import eseq.midi)
 
 (import eseq.browser)
 (import eseq.mixer)

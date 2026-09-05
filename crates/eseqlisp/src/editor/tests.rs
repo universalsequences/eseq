@@ -15719,3 +15719,130 @@ fn numeric_state(editor: &mut Editor, name: &str) -> f64 {
         other => panic!("expected numeric state for {name}, got {other:?}"),
     }
 }
+
+#[test]
+fn timeline_placement_click_reaches_callback_once() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.runtime.eval_str(r#"
+        (defstate placing true)
+        (def placed '())
+        (effect (timeline :width 64 :height 3 :header-height 0 :sidebar-width 0
+          :view-duration 64 :snap 4 :snap-mode :floor
+          :placement-active (if placing 1 0)
+          :on-action (lambda (event)
+            (if (= (get event :type) :place-item)
+              (do (set! placed (cons (get event :time) placed)) (set! placing false)) nil))))
+    "#).unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.set_layout_viewport(80, 20);
+    editor.widget_layout().unwrap();
+    for kind in [MouseEventKind::Moved, MouseEventKind::Down(MouseButton::Left),
+                 MouseEventKind::Up(MouseButton::Left)] {
+        editor.handle_mouse_precise(mouse_event(kind, 10, 1), 0, 0, 80, 20, 10.0, 1.0);
+    }
+    assert_eq!(editor.runtime.eval_str("(len placed)").unwrap(), Some(Value::Number(1.0)));
+    assert_eq!(editor.runtime.eval_str("(nth placed 0)").unwrap(), Some(Value::Number(8.0)));
+    assert_eq!(editor.runtime.eval_str("placing").unwrap(), Some(Value::Bool(false)));
+}
+
+
+#[test]
+fn context_menu_nested_hover_keyboard_and_leaf_selection() {
+    let _overlay_guard = OverlayClearGuard;
+    let program = CONTEXT_MENU_PROGRAM.replace(
+        "(menu-item \"Delete\"\n            :on-select (lambda (event) (set! selected \"delete\")))",
+        r#"(menu-item "Branch" :key "branch"
+            (menu-item "Disabled" :disabled true (menu-item "Hidden"))
+            (menu-item "Current" :checked true :on-select (lambda (event) (set! selected "current")))
+            (menu-item "Deep" :key "deep"
+              (menu-item "Leaf" :on-select (lambda (event) (set! selected "leaf")))))"#,
+    );
+    assert!(program.contains("Branch"));
+    let mut editor = context_menu_two_tile_editor_for(&program);
+    right_click_at(&mut editor, 50.0, 2.5);
+    let layout = editor.runtime.current_layout.clone().unwrap();
+    assert!(find_menu_item(&layout, "Leaf").is_none());
+    let parent = find_menu_item(&layout, "Branch").unwrap().clone();
+    let col = parent.rect.col + parent.rect.width * 0.5;
+    let row = parent.rect.row + parent.rect.height * 0.5;
+    editor.handle_tiled_mouse_precise(mouse_event(MouseEventKind::Moved, col as u16, row as u16), col, row, 0);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    register_active_layout_overlays(&mut editor);
+    let layout = editor.runtime.current_layout.clone().unwrap();
+    let current = find_menu_item(&layout, "Current").expect("hover opens child panel").clone();
+    assert!(current.rect.width.is_finite() && current.rect.width > 0.0);
+    assert!(current.rect.height.is_finite() && current.rect.height > 0.0);
+    assert!(current.rect.col >= 0.0 && current.rect.col + current.rect.width <= 60.01);
+    assert!(current.rect.row >= 0.0 && current.rect.row + current.rect.height <= 20.01);
+    assert!(find_menu_item(&layout, "Hidden").is_none());
+    // Right enters the first enabled child; Down selects the deeper branch.
+    editor.set_focused_widget(find_menu_item(&layout, "Branch").unwrap().clone());
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    let layout = editor.runtime.current_layout.clone().unwrap();
+    assert!(find_menu_item(&layout, "Leaf").is_some());
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(eval_bool(&mut editor, "menu-open"));
+    assert!(find_menu_item(&editor.runtime.current_layout.clone().unwrap(), "Leaf").is_none());
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    register_active_layout_overlays(&mut editor);
+    let layout = editor.runtime.current_layout.clone().unwrap();
+    let leaf = find_menu_item(&layout, "Leaf").unwrap();
+    let col = leaf.rect.col + leaf.rect.width * 0.5;
+    let row = leaf.rect.row + leaf.rect.height * 0.5;
+    editor.handle_tiled_mouse_precise(mouse_event(MouseEventKind::Down(MouseButton::Left), col as u16, row as u16), col, row, 0);
+    assert_eq!(eval_string(&mut editor, "selected"), "leaf");
+    assert!(!eval_bool(&mut editor, "menu-open"));
+    assert!(!eval_bool(&mut editor, "underlay-clicked"));
+    right_click_at(&mut editor, 4.0, 2.0);
+    assert!(find_menu_item(&editor.runtime.current_layout.clone().unwrap(), "Current").is_none(), "reopen starts collapsed");
+}
+
+#[test]
+fn context_menu_long_submenu_scrolls_and_keyboard_reaches_last_choice() {
+    let _overlay_guard = OverlayClearGuard;
+    let program = CONTEXT_MENU_PROGRAM.replace(
+        "(menu-item \"Delete\"\n            :on-select (lambda (event) (set! selected \"delete\")))",
+        r#"(menu-item "Branch" :key "long-branch"
+            (each (range 0 40) |i|
+              (menu-item (str i) :key (str "choice-" i)
+                :on-select (lambda (event) (set! selected (str i))))))"#,
+    );
+    let mut editor = context_menu_two_tile_editor_for(&program);
+    right_click_at(&mut editor, 50.0, 2.5);
+    let layout = editor.runtime.current_layout.clone().unwrap();
+    let parent = find_menu_item(&layout, "Branch").unwrap();
+    let col = parent.rect.col + parent.rect.width * 0.5;
+    let row = parent.rect.row + parent.rect.height * 0.5;
+    // Opening is valid before a renderer has registered the first overlay.
+    crate::widget_render::clear_overlay();
+    for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+        editor.handle_mouse_precise(mouse_event(kind, col as u16, row as u16), 0, 0, 60, 10, col, row);
+    }
+    register_active_layout_overlays(&mut editor);
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    let layout = editor.runtime.current_layout.clone().unwrap();
+    assert!(find_menu_item(&layout, "39").is_none());
+    let bottom = find_menu_item(&layout, "Branch").unwrap().children.last().unwrap();
+    let col = bottom.rect.col + bottom.rect.width * 0.5;
+    let row = bottom.rect.row + bottom.rect.height * 0.5;
+    editor.handle_tiled_mouse_precise(mouse_event(MouseEventKind::ScrollDown, col as u16, row as u16), col, row, 0);
+    assert!(find_menu_item(&editor.runtime.current_layout.clone().unwrap(), "0").is_none());
+    editor.handle_tiled_mouse_precise(mouse_event(MouseEventKind::ScrollUp, col as u16, row as u16), col, row, 0);
+    assert!(find_menu_item(&editor.runtime.current_layout.clone().unwrap(), "0").is_some());
+    for _ in 0..39 { editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)); }
+    let layout = editor.runtime.current_layout.clone().unwrap();
+    let last = find_menu_item(&layout, "39").expect("keyboard scrolls to last choice");
+    assert!(last.rect.row + last.rect.height <= 20.01);
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(eval_string(&mut editor, "selected"), "39");
+    assert!(!eval_bool(&mut editor, "menu-open"));
+    register_active_layout_overlays(&mut editor);
+    right_click_at(&mut editor, 4.0, 2.0);
+    let layout = editor.runtime.current_layout.clone().unwrap();
+    editor.set_focused_widget(find_menu_item(&layout, "Branch").unwrap().clone());
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert!(find_menu_item(&editor.runtime.current_layout.clone().unwrap(), "0").is_some(), "reopen resets scrolling");
+}

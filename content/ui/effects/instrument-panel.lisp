@@ -57,11 +57,11 @@
   :shader
   (let (
       (disc-border (if (= active 1)
-          (rgba 1.0 0.58 0.25 1.0)
+          :rack-view-on
           :white
           ))
-      (disc-color (if (= active 1) (rgba 1.0 0.58 0.25 1.0) (rgba 0.24 0.25 0.26 1.0)))
-      (glyph-color (if (= active 1) (rgba 0.10 0.10 0.11 1.0) (rgba 0.72 0.73 0.74 1.0))))
+      (disc-color (if (= active 1) :rack-view-on :rack-view-off))
+      (glyph-color (if (= active 1) :rack-view-on-fg :rack-macro-off-fg)))
     (sdf/layer
       (sdf/fill (sdf/circle 0.72) (material :color disc-border))
       (sdf/fill (sdf/circle 0.68) (material :color disc-color))
@@ -76,16 +76,16 @@
   :state (active)
   :shader
   (let ((disc-color (if (= active 1)
-          (rgba 1.0 0.58 0.25 1.0)
-          (rgba 0.24 0.25 0.26 1.0)
+          :rack-view-on
+          :rack-view-off
           ))
       (disc-border (if (= active 1)
-          (rgba 1.0 0.58 0.25 1.0)
+          :rack-view-on
           :white
           ))
       (glyph-color (if (= active 1)
-          (rgba 0.10 0.10 0.11 1.0)
-          (rgba 0.58 0.59 0.60 1.0))))
+          :rack-view-on-fg
+          :rack-view-off-fg)))
     (sdf/layer
       (sdf/fill (sdf/circle 0.72)
         (material :color disc-border))
@@ -101,15 +101,15 @@
   :shader
   (let (
       (disc-border (if (= active 1)
-          (rgba 1.0 0.58 0.25 1.0)
+          :rack-view-on
           :white
           ))
       (disc-color (if (= active 1)
-          (rgba 1.0 0.58 0.25 1.0)
-          (rgba 0.24 0.25 0.26 1.0)))
+          :rack-view-on
+          :rack-view-off))
       (glyph-color (if (= active 1)
-          (rgba 0.10 0.10 0.11 1.0)
-          (rgba 0.58 0.59 0.60 1.0))))
+          :rack-view-on-fg
+          :rack-view-off-fg)))
     (sdf/layer
       (sdf/fill (sdf/circle 0.72)
         (material :color disc-border))
@@ -196,7 +196,7 @@
     (box :key (str "rack-macro-" (get macro :id)) :width 5.7 :height 4.35 :padding 0.18
       :corner-radius 9
       :background-color :mixer-strip-bg :border-color
-      (if (= ms/rack-mapping-selected (get macro :id)) (rgba 0.18 0.85 0.42 0.9) :mixer-strip-border)
+      (if (= ms/rack-mapping-selected (get macro :id)) :rack-mapping-border :mixer-strip-border)
       (v-stack :gap 0.08 :align :center
         (text-input :key (str "rack-macro-name-" (get macro :id))
           :width 5.2 :height 0.9 :font-size 8.5 :value (get macro :name)
@@ -214,7 +214,7 @@
         (button (str "map " (get macro :mapping-count)) :width 4.6 :height 0.7 :font-size 7.5
           :active (if (= ms/rack-mapping-selected (get macro :id)) 1 0)
           :background-color :mixer-control-bg
-          :active-background-color (rgba 0.18 0.85 0.42 1.0)
+          :active-background-color :rack-mapping-bg
           :border-color :transparent
           :color :dim :active-color :black
           :on-click (lambda (event) (rack-macro-arm macro)))))))
@@ -390,8 +390,8 @@
       :selected-background-color :fx-panel-header-selected-bg
       :border-width 1
       :border-color (if selected
-        '(rgba 0.48 0.50 0.52 1.0)
-        '(rgba 0.16 0.17 0.19 1.0))
+        :rack-row-selected-border
+        :rack-row-border)
       :selected-border-color :mixer-strip-selected-border
       :corner-radius 10
       :drop-types (list "audio-effect")
@@ -461,14 +461,14 @@
         (button "M"
           :width 2.0 :height 1.02 :padding 0 :font-size 9
           :border-color :transparent
-          :background-color (if (rack-slot-display-scalar slot :mute :mute-field) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-          :color (if (rack-slot-display-scalar slot :mute :mute-field) :black :dim)
+          :background-color (if (rack-slot-display-scalar slot :mute :mute-field) :control-on-bg :mixer-control-bg)
+          :color (if (rack-slot-display-scalar slot :mute :mute-field) :control-on-fg :dim)
           :on-click |x y r| (rack-slot-set-mute slot (not (rack-slot-display-scalar slot :mute :mute-field))))
         (button "S"
           :width 2.0 :height 1.02 :padding 0 :font-size 9
           :border-color :transparent
-          :background-color (if (rack-slot-display-scalar slot :solo :solo-field) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-          :color (if (rack-slot-display-scalar slot :solo :solo-field) :black :dim)
+          :background-color (if (rack-slot-display-scalar slot :solo :solo-field) :control-on-bg :mixer-control-bg)
+          :color (if (rack-slot-display-scalar slot :solo :solo-field) :control-on-fg :dim)
           :on-click |x y r| (rack-slot-set-solo slot (not (rack-slot-display-scalar slot :solo :solo-field))))))))
 
 (def rack-empty-selected-panel (inst)

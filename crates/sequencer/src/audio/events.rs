@@ -382,6 +382,9 @@ pub(super) fn dispatch_scheduled_event(
         } => unsafe {
             dispatch_effect_chain_for_track(data.lg.0, &mut effect_params);
         },
+        ScheduledEventKind::RackParams { track, step } => {
+            apply_rack_params_off_step(data, track, step);
+        }
         ScheduledEventKind::NetworkTrigger {
             track,
             samples_per_step,
@@ -419,9 +422,9 @@ pub(super) fn scheduled_trigger_track(event: &ScheduledEvent) -> Option<usize> {
     match &event.kind {
         ScheduledEventKind::ResolvedTrigger { track, .. }
         | ScheduledEventKind::NetworkTrigger { track, .. } => Some(*track),
-        ScheduledEventKind::InstrumentParams { .. } | ScheduledEventKind::EffectParams { .. } => {
-            None
-        }
+        ScheduledEventKind::InstrumentParams { .. }
+        | ScheduledEventKind::EffectParams { .. }
+        | ScheduledEventKind::RackParams { .. } => None,
     }
 }
 
@@ -437,7 +440,9 @@ pub(super) fn block_event_priority(kind: &BlockEventKind) -> u8 {
         BlockEventKind::GateOff(_) => 0,
         BlockEventKind::Scheduled(ScheduledEvent {
             kind:
-                ScheduledEventKind::InstrumentParams { .. } | ScheduledEventKind::EffectParams { .. },
+                ScheduledEventKind::InstrumentParams { .. }
+                | ScheduledEventKind::EffectParams { .. }
+                | ScheduledEventKind::RackParams { .. },
             ..
         }) => 1,
         BlockEventKind::Scheduled(_) | BlockEventKind::Retrig(_) => 2,

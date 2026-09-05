@@ -138,8 +138,11 @@
               (min idx (- next-count 1)))))))
     nil))
 
-(def plock-chip-color (chip)
-  (rgba (get chip :color-r) (get chip :color-g) (get chip :color-b) 1.0))
+(def plock-chip-color (chip alpha)
+  (let ((c (if (= (get chip :kind) "def")
+        THEME.plock_base
+        (list (get chip :color-r) (get chip :color-g) (get chip :color-b)))))
+    (rgba (nth c 0) (nth c 1) (nth c 2) alpha)))
 
 (def plock-chip-label (chip)
   (if (get chip :display)
@@ -160,14 +163,14 @@
 (def plock-chip (chip)
   (let ((current (get chip :current))
       (def-chip (= (get chip :kind) "def"))
-      (c (plock-chip-color chip)))
+      (c (plock-chip-color chip 1.0)))
     (box :key (str "track-plock-chip-" (get chip :kind) "-" (get chip :label))
       :height 1.0
       :width 4.00
       :align :baseline
       :padding 0.014
       :background-color (if current
-        (rgba (get chip :color-r) (get chip :color-g) (get chip :color-b) 0.11)
+        (plock-chip-color chip 0.11)
         :mixer-strip-bg
         )
       :border-width (if current 0.75 0.35)
@@ -520,10 +523,10 @@
           (v-stack :align :center :gap 0.34
             (label "poly" :font-size 8 :color :dim :bg :transparent)
             (button  (if SEQ.tp-poly "ON" "OFF") :width 3.2 :height 1.3
-              :background-color (if SEQ.tp-poly  (rgba 0.95 0.48 0.18 1.0) '(rgba 0.1 0.1 0.1 1))
+              :background-color (if SEQ.tp-poly :control-on-bg :poly-off-bg)
               :border-color :none
               :font-size 11
-              :color (if SEQ.tp-poly :black :white)
+              :color (if SEQ.tp-poly :control-on-fg :poly-off-fg)
               ;; Rack tracks: playback polyphony is per-slot (RackSlotSnapshot::max_polyphony),
               ;; never the track-level param below — route there instead, or this control
               ;; silently edits a value playback ignores.

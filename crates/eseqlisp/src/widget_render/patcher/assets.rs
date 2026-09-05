@@ -78,7 +78,8 @@ pub(crate) fn resolve_asset_reference(reference: &str, draft_root: Option<&Path>
     resolve_asset_reference_with_fallback_bases(
         reference,
         draft_root,
-        roots.map(|roots| roots.fallback_bases.as_slice()).unwrap_or(&[]),
+        roots.map(|roots| roots.fallback_bases.as_slice())
+            .unwrap_or_else(crate::hot_reload::load_fallback_roots),
         roots.map(|roots| roots.libraries[0].as_path()),
         roots.map(|roots| roots.libraries[1].as_path()),
     )

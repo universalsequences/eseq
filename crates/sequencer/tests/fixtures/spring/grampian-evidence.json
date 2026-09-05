@@ -1,0 +1,106 @@
+{
+  "status": "Development candidate; listening approval pending (eseq-4ew3).",
+  "fit_sha256": "629c4595a3963bf93a17ce82dfaf93c96b862957bd2faec8103fbcec0d494e08",
+  "model_source_sha256": "84394a7299dc1233757045c517171a0526d03ca76de7a2679682a9a5d25f9a4e",
+  "platform": "Darwin arm64",
+  "primary": {
+    "reference": {
+      "id": "grampian-sweep",
+      "path": "king-tubby/Grampian Filter Sweep Spring Reverb 002.wav",
+      "sha256": "9d70879d1965af16960420381e93f7b5f98ab5b24b13aee5e36939a6826ea23a",
+      "role": "primary Grampian geometry and voicing target",
+      "capture_family": "grampian",
+      "provenance": "Local filename identifies Grampian; exact hardware, drive level, capture procedure and redistribution license not independently established.",
+      "preparation": "Decode to float mono at analysis rate; preserve capture start and fast HF precursor. No peak trim, click excision, or peak normalization. Normalize analysis energy only.",
+      "timing": "First LF packets near 16 and 24 ms; repeat packets near 77 and 100 ms. Capture/interface latency has not been independently measured.",
+      "noise": "Estimate stationary per-band power from final 300 ms of the analysis window, subtract before integration, score decay only above -30 dB and before 2 s. Inspect curves; this is not a calibrated noise measurement."
+    },
+    "metrics": {
+      "v1": {
+        "packets": 0.10236168638940166,
+        "spectrum_db": 2.050138189916092,
+        "decay_db": 18.7799105243328
+      },
+      "grampian": {
+        "packets": 0.036389782344929955,
+        "spectrum_db": 2.6142074640306414,
+        "decay_db": 2.4271174760799177
+      }
+    }
+  },
+  "filtered_cross_check": {
+    "reference": {
+      "id": "grampian-filter-500",
+      "path": "king-tubby/Grampian Filter 500.wav",
+      "sha256": "515cbf85297811b263fa321a79c7e14a9bacecd43e10655ab9f1ff2017c7e333",
+      "role": "separate filtered tonal cross-check; not optimized or averaged",
+      "capture_family": "grampian",
+      "provenance": "Local filename only; likely related capture, not an independent tank. Aligned first-2-second waveform correlation approximately 0.922 with primary.",
+      "preparation": "Same float decode as primary. Keep its original timing; roughly 2.4 ms later than primary. Both files are effectively mono."
+    },
+    "metrics": {
+      "v1": {
+        "packets": 0.10482361172612054,
+        "spectrum_db": 2.540931877745489,
+        "decay_db": 18.644887030935614
+      },
+      "grampian": {
+        "packets": 0.0437913990584585,
+        "spectrum_db": 3.5380084718426676,
+        "decay_db": 2.542112612939963
+      }
+    }
+  },
+  "ablations": {
+    "full": {
+      "packets": 0.03638482893468146,
+      "spectrum_db": 2.6142091856727663,
+      "decay_db": 2.427201893123172
+    },
+    "no-scattering": {
+      "packets": 0.04987268607821968,
+      "spectrum_db": 3.2039077414089747,
+      "decay_db": 4.083691467540049
+    },
+    "no-precursor": {
+      "packets": 0.06195428695709026,
+      "spectrum_db": 18.08976031424269,
+      "decay_db": 3.3584672781551874
+    },
+    "no-dispersion": {
+      "packets": 0.06732725965288071,
+      "spectrum_db": 2.6101202069126033,
+      "decay_db": 3.314884355388572
+    }
+  },
+  "analytical_vs_rust": [
+    {
+      "sr": 44100,
+      "relative_l2": 5.845020052164154e-05
+    },
+    {
+      "sr": 48000,
+      "relative_l2": 0.00013970231517044902
+    },
+    {
+      "sr": 96000,
+      "relative_l2": 0.0001771585429579824
+    }
+  ],
+  "validation": {
+    "targeted_rust_tests": 15,
+    "python_tests": 4,
+    "cpu_probe_tests": 1,
+    "note": "13 Rust checks passed together; corrected the type-switch test to isolate dormant Grampian state from legitimate outgoing RE-201/preamp tails, then reran that exact test successfully. No full package/workspace suite. Final guard hardening additionally verified late returns across 400ms gaps, re-arming on output activity, input-filter settling, sleep/reopen, and the production gate in three exact selected tests."
+  },
+  "cpu_probe": {
+    "command": "cargo nextest run --release -p sequencer --lib --run-ignored ignored-only --no-capture -E test(=effects::space_echo::cpu_bench::bench_modes)",
+    "sample_rate": 48000,
+    "block_frames": 128,
+    "blocks": 4000,
+    "grampian_percent_realtime": 7.64,
+    "re201_percent_realtime": 1.65,
+    "note": "Single observed diagnostic run, nice -n 10, not a portable performance ceiling. Both are full echo+spring modes."
+  },
+  "production_source_sha256": "c0978f42c8e2b6310d7fce739d43a1699d706ca319dfef3510b48b60034950e2"
+}

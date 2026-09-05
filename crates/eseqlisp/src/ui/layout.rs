@@ -830,6 +830,10 @@ impl<'a> LayoutEngine<'a> {
         let children =
             self.layout_children_with_font(node, rect, &children_values, font_size, layout_ctx);
         let mut props = collect_props(node);
+        if widget_type == "menu-item" && !children_values.is_empty() {
+            props.insert("__has-submenu".to_string(), Value::Bool(true));
+        }
+
 
         // Inject inherited font-size into props so the rendering path can use it.
         if !props.contains_key("font-size")
