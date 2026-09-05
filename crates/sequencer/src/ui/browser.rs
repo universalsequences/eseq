@@ -646,11 +646,16 @@ fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
                         "icon".to_string(),
                         Rc::new(RefCell::new(Value::Keyword("piano".to_string()))),
                     );
-                } else if let Some(folder) = &item.folder {
-                    map.insert(
-                        "folder".to_string(),
-                        Rc::new(RefCell::new(Value::String(folder.clone()))),
-                    );
+                } else if item.folder.is_some() || !item.children.is_empty() {
+                    // Factory folders have no movable folder id (see
+                    // `clear_instrument_folder_ids`) but are still folders:
+                    // they keep the kind and icon, only the drop id is absent.
+                    if let Some(folder) = &item.folder {
+                        map.insert(
+                            "folder".to_string(),
+                            Rc::new(RefCell::new(Value::String(folder.clone()))),
+                        );
+                    }
                     map.insert(
                         "kind".to_string(),
                         Rc::new(RefCell::new(Value::String("folder".to_string()))),
@@ -1403,6 +1408,38 @@ mod tests {
         for labels in [&both, &factory_only, &library_only] {
             assert_eq!(labels[0], "Built-in");
         }
+    }
+
+    #[test]
+    fn instrument_tree_factory_folders_keep_icon_without_folder_id() {
+        let mut nodes = vec![InstrumentTreeNode {
+            label: "Drums".to_string(),
+            name: None,
+            folder: Some("Drums".to_string()),
+            children: vec![InstrumentTreeNode {
+                label: "Kick".to_string(),
+                name: Some("Drums/Kick/".to_string()),
+                folder: None,
+                children: Vec::new(),
+            }],
+        }];
+        clear_instrument_folder_ids(&mut nodes);
+        let Value::List(items) = instrument_tree_nodes_to_value(&nodes) else {
+            panic!("instrument tree should be a list");
+        };
+        let folder = items[0].borrow();
+        let Value::Map(folder) = &*folder else {
+            panic!("folder should be a map");
+        };
+        assert!(folder.get("folder").is_none());
+        assert_eq!(
+            folder.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::String("folder".to_string()))
+        );
+        assert_eq!(
+            folder.get("icon").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("folder".to_string()))
+        );
     }
 
     #[test]
