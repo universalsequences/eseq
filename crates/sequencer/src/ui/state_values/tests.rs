@@ -1,3 +1,6 @@
+#[path = "drift_waveform_tests.rs"]
+mod drift_waveform_tests;
+
     use super::*;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
     use sequencer::sequencer::default_empty_effect_chain;

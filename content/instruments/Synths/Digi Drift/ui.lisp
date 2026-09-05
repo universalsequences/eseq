@@ -155,9 +155,39 @@
       (drift-row-knob "osc2_gain_db" "gain" (drift-ice) 1))
     (drift-route-chip "osc2_route" 1.5 (drift-ice))))
 
+;; Bindings go straight to Rust: oscillator samples depend on these values,
+;; never on ui_epoch. This phase-aligned source diagram includes host mod
+;; offsets, not the synth's internal per-voice matrix or filter/output stages.
+(def drift-preview-binding (name)
+  (eseq.effects.custom-ui-runtime/custom-ui-param-binding
+    (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+(def drift-preview-mod (name)
+  (eseq.effects.custom-ui-runtime/custom-ui-param-mod-offset
+    (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+
+(def drift-source-preview ()
+  (drift-waveform :width 15.5 :height 2.6
+    :background-color (drift-surf-dark) :wave-color (drift-knob)
+    :osc1-wave (drift-preview-binding "osc1_wave")
+    :osc1-shape (drift-preview-binding "osc1_shape")
+    :osc1-shape-mod (drift-preview-mod "osc1_shape")
+    :osc1-octave (drift-preview-binding "osc1_octave")
+    :osc1-on (drift-preview-binding "osc1_on")
+    :osc1-gain-db (drift-preview-binding "osc1_gain_db")
+    :osc1-gain-db-mod (drift-preview-mod "osc1_gain_db")
+    :osc2-wave (drift-preview-binding "osc2_wave")
+    :osc2-octave (drift-preview-binding "osc2_octave")
+    :osc2-detune (drift-preview-binding "osc2_detune")
+    :osc2-detune-mod (drift-preview-mod "osc2_detune")
+    :osc2-on (drift-preview-binding "osc2_on")
+    :osc2-gain-db (drift-preview-binding "osc2_gain_db")
+    :osc2-gain-db-mod (drift-preview-mod "osc2_gain_db")
+    :noise-gain-db (drift-preview-binding "noise_gain_db")
+    :noise-gain-db-mod (drift-preview-mod "noise_gain_db")))
+
 (def drift-source-block ()
   (h-stack :width :fill :height :fill :gap 0.30 :align :center
-    (box :width 15.5)
+    (drift-source-preview)
     (box :width 2.3 :height 1.5 :v-align :end
       (eseq.effects.custom-ui-lego/ui-lego-tab-s 0 "N" 2.3 1.5 (drift-pink) :black))
     (h-stack :gap 0.10 :align :start

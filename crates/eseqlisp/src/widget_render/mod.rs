@@ -50,6 +50,7 @@ pub mod tree;
 pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
+pub mod drift_waveform;
 pub mod waveform;
 pub mod wavetable_viewer;
 pub(crate) mod wgsl;
@@ -1271,6 +1272,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &timeline::TIMELINE_WIDGET,
     &timeline::TIMELINE_CURSOR_MARKER_WIDGET,
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
+    &drift_waveform::DRIFT_WAVEFORM_WIDGET,
     &waveform::WAVEFORM_WIDGET,
     &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
     &sound_glyph::SOUND_GLYPH_WIDGET,
