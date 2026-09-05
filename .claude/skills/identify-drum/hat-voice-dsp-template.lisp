@@ -1,7 +1,9 @@
 ; Factory 909 Open Hat — the identified TR-909 open hi-hat (HHOD0, decay 0),
 ; recovered by SynthID-style optimisation (dgen Examples/SynthID/scripts/
-; fit_hat.py) rather than sampled: at the defaults below every hit reproduces
-; the learned render; every knob is a departure from the identified sound.
+; fit_hat.py) rather than sampled. Factory voicing keeps the fitted body but
+; disables the synthetic swish by ear: it added paper-like flutter absent from
+; the reference. Swish remains an optional departure. Noise continues
+; across retriggers, so successive hits are not identical waveforms.
 ;
 ; Voice: one noise stream -> a broad wash (two bandpasses + a highpass; the high
 ; part undulates slowly, the 909's swish) and a
@@ -20,13 +22,13 @@
 (def mod3 (in 8 @name mod3 @modulator 3))
 (def mod4 (in 9 @name mod4 @modulator 4))
 
-; ---- departures from the identified sound (all no-ops at their defaults) ----
+; ---- performance controls (swish is deliberately off in the factory voice) ----
 (param tune @default 0 @min -24 @max 24 @unit st @mod true @mod-mode additive)
 (param decay @default 1 @min 0.1 @max 6 @mod true @mod-mode additive)
 (param metal @default 1 @min 0 @max 4 @mod true @mod-mode additive)
 (param wash @default 1 @min 0 @max 4 @mod true @mod-mode additive)
 (param bright @default 1 @min 0 @max 4 @mod true @mod-mode additive)
-(param swish @default 1 @min 0 @max 4 @mod true @mod-mode additive)
+(param swish @default 0 @min 0 @max 4 @mod true @mod-mode additive)
 (param drive @default 1 @min 0.2 @max 6 @mod true @mod-mode additive)
 (param level @default 1 @min 0 @max 1.5 @mod true @mod-mode additive)
 
@@ -51,7 +53,8 @@
 (param click_decay @default __CLICKDECAY__ @min -3000 @max -400)
 (param click_fc @default __CLICKFC__ @min 150 @max 1500 @unit Hz)
 (param out_hp @default __OUTHP__ @min 20 @max 2000 @unit Hz)
-(param out_drive @default __DRIVE__ @min 0.5 @max 4)
+; Permit a nearly linear output: spectral-only fitting over-clipped the attack.
+(param out_drive @default __DRIVE__ @min 0.02 @max 4)
 (param out_gain @default __OUTGAIN__ @min 0.05 @max 2)
 (param m1f @default __M1F__ @min 644.1 @max 650.5 @unit Hz)
 (param m1d @default __M1D__ @min -80 @max -1)
@@ -71,7 +74,8 @@
 (param m6f @default __M6F__ @min 4251.0 @max 4293.7 @unit Hz)
 (param m6d @default __M6D__ @min -80 @max -1)
 (param m6g @default __M6G__ @min 0.001 @max 3)
-(param m7f @default __M7F__ @min 4998.1 @max 5048.2 @unit Hz)
+; Round the measured fit bound (5023.1 * 1.005 = 5048.2155) outward.
+(param m7f @default __M7F__ @min 4998.1 @max 5048.3 @unit Hz)
 (param m7d @default __M7D__ @min -80 @max -1)
 (param m7g @default __M7G__ @min 0.001 @max 3)
 (param m8f @default __M8F__ @min 5199.1 @max 5251.2 @unit Hz)
@@ -93,7 +97,8 @@
 (defmacro semi (s) (pow 2 (/ s 12)))
 ; DGen's biquad hardcodes a 44.1 kHz frame in its coefficient math; scale the
 ; requested Hz so the filter lands on the physical frequency at any host rate.
-(defmacro bq-hz (hz) (* hz (/ 44100.0 samplerate)))
+; Keep tuning/brightness departures inside the stable, sub-Nyquist range.
+(defmacro bq-hz (hz) (* (clip hz 20 (* 0.45 samplerate)) (/ 44100.0 samplerate)))
 ; a struck-once metal mode: decaying sine, phase wrapped before the sine
 (defmacro mode-sine (f d g) (* g (exp (* d t)) (sin (* 2.0 pi (- (* t f tn) (floor (* t f tn)))))))
 
@@ -124,7 +129,11 @@
 (def sw2 (+ (read-history sw2-h) (* sw_k (- sw1 (read-history sw2-h)))))
 (write-history sw2-h sw2)
 (def sw_mod (exp (* sw_amp (clip (mod swish) 0 4) sw2)))
-(def wash_src (+ (* sw_mod (+ (biquad n (bq-hz (* fc1 tn)) q1 1.0 2)
+; BRIGHT moves the main wash's colour as well as the extra highpassed noise.
+; It must remain effective when the identified sound needs no extra hiss (g_hp=0).
+; One octave down at 0, unity at 1; upper departures are Nyquist-clamped by bq-hz.
+(def wash_colour (pow 2 (- br 1)))
+(def wash_src (+ (* sw_mod (+ (biquad n (bq-hz (* fc1 tn wash_colour)) q1 1.0 2)
                               (* g_hp br (biquad n (bq-hz (* hp_fc tn)) 0.707 1.0 1))))
                  (* g2 (biquad n (bq-hz (* fc2 tn)) q2 1.0 2))))
 (def modes (+ (mode-sine m1f m1d m1g) (mode-sine m2f m2d m2g) (mode-sine m3f m3d m3g) (mode-sine m4f m4d m4g) (mode-sine m5f m5d m5g) (mode-sine m6f m6d m6g) (mode-sine m7f m7d m7g) (mode-sine m8f m8d m8g) (mode-sine m9f m9d m9g) (mode-sine m10f m10d m10g) (mode-sine m11f m11d m11g) (mode-sine m12f m12d m12g)))

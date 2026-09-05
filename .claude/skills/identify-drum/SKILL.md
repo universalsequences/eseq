@@ -74,6 +74,11 @@ What to read off (both scripts print it):
     sound's character ("finger on a guitar cable, high-passed" was the user's words).
     It sits ~-90 dB *per bin*, under the gate's floor — it must be measured here.
   - the first 60 samples: does the hit open with an impulse or grow in?
+- **noise-attack dynamics**: compare RMS, crest factor and kurtosis in 0–5,
+  5–10, 10–20, 20–40 and 40–80 ms windows. A spectral match can conceal a
+  nearly square-wave noise attack (909 hat v8b: kurtosis 1.23 versus the
+  target's 2.66 over 0–20 ms). Check several noise realisations too; do not
+  mistake a random peak for a repeatable transient.
 
 Decide the family:
 
@@ -159,6 +164,16 @@ Reading a round — `deficit_table.py` (any voice) and `clap_residual.py` (noise
   full-band noise wash (the 909 hat) the floor is ~2.4 against a 2.9 baseline
   and every round scores under it: the gate is blind, read the pooled loss and
   the deficit table instead (`fit_hat.py` prints `floor` and `excess`).
+- **clipped noise attacks**: `fit_hat.py --dynamics-weight` adds local RMS and
+  log-kurtosis (`DynamicsStats`). Permit a nearly linear output stage; do not
+  force saturation with the drive bound. Keep the mode-track and swish terms
+  active and report each separately: restoring dynamics can worsen metallic
+  texture even when the combined loss improves. Compare against the unchanged
+  old baseline too if parameter bounds change. Also run `--balance-weight`:
+  `BandBalanceStats` compares integrated band-energy shares through the hit.
+  A high output highpass can improve kurtosis by removing low-mid body rather
+  than fixing the source's dynamics (909 v13 did this). Do not accept the
+  dynamics number without the body-to-hiss balance and the deficit table.
 - **metal modes**: measure the narrow tail peaks and fit them as deterministic
   decaying sines with frequency bounded ±5 % of the measurement, never as
   noise-excited high-Q resonators (the fitter chases the noise realisation and
