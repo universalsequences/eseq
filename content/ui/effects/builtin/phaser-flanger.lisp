@@ -46,8 +46,8 @@
 ;; Migration alias (module spec §10): src/ui/state_values/tests.rs evals the
 ;; analyzer-source builder by its flat name (read-only, alias-covered).
 
-(def orange () (rgba 1.00 0.62 0.25 1.0))
-(def cyan   () (rgba 0.45 0.78 0.95 1.0))
+(def mode-on-color () :effect-mode-on-bg)
+(def wave-on-color () :phaser-wave-on-bg)
 
 (def analyzer-source (fx)
   (if (get fx :rack-fx)
@@ -117,7 +117,7 @@
   (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value p)) index)))
     (button label-text
       :width 4.85 :height 1.15 :padding 0 :font-size 8.5
-      :background-color (if selected (orange) :mixer-control-bg)
+      :background-color (if selected (mode-on-color) :mixer-control-bg)
       :color (if selected :black :dim)
     :border-color :transparent
       :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -215,7 +215,7 @@
 (def sync-button (fx p)
   (button "Sync"
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
-    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (orange) :mixer-control-bg)
+    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (mode-on-color) :mixer-control-bg)
     :border-color :transparent
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -227,7 +227,7 @@
 (def div-button (fx p current label-text)
   (button label-text
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
-    :background-color (if (= current label-text) (orange) :mixer-control-bg)
+    :background-color (if (= current label-text) (mode-on-color) :mixer-control-bg)
     :border-color :transparent
     :color (if (= current label-text) :black :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -262,7 +262,7 @@
 (def shape-button (fx p current label-text)
   (button label-text
     :width 3.85 :height 0.92 :padding 0 :font-size 8.0
-    :background-color (if (= current label-text) (cyan) :mixer-control-bg)
+    :background-color (if (= current label-text) (wave-on-color) :mixer-control-bg)
     :color (if (= current label-text) :black :dim)
     :border-color :transparent
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -299,7 +299,7 @@
 (def invert-button (fx p)
   (button "Ø"
     :width 1.45 :height 1.05 :padding 0 :font-size 9.5
-    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (orange) :mixer-control-bg)
+    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (mode-on-color) :mixer-control-bg)
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)

@@ -145,3 +145,9 @@ right: the curve. `division` is drawn only when the param exists (sync on),
   four number pickers underneath; the inert "env" badge is gone. Envelope
   stage ceiling `ENV_TIME_MAX_MS` = 20 s for attack, decay and release (was
   2 s / 4 s / 4 s), applied in both the descriptors and the render clamps.
+- **Multi-bar sync no longer restarts per bar.** The transport only supplies
+  a within-bar phase, so the modulator now counts bar wraps
+  (`IDX_PREV_BAR_PHASE` / `IDX_BAR_COUNT`, reset with the mod reset counter)
+  and `synced_phase_from_bar_phase` folds `bar_count mod cycle_bars` in for
+  divisions longer than a bar. The cycle is anchored to the last reset
+  (transport start / bar resync), not to absolute song bars.

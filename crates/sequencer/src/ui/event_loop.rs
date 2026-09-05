@@ -9,6 +9,9 @@ pub(super) fn scene_slot_replay_targets(
 ) -> Vec<(sequencer::sequencer::SceneId, String)> {
     match patch {
         app::history::EditPatch::SceneSlot(patch) => vec![(patch.scene, patch.name.clone())],
+        app::history::EditPatch::SceneSlots(patches) => {
+            patches.iter().map(|patch| (patch.scene, patch.name.clone())).collect()
+        }
         app::history::EditPatch::Composite(patches) => {
             patches.iter().flat_map(scene_slot_replay_targets).collect()
         }
@@ -21,7 +24,7 @@ pub(super) fn scene_slot_replay_targets(
 /// topology/`ui_epoch` refresh can be skipped.
 pub(super) fn patch_is_only_scene_slots(patch: &app::history::EditPatch) -> bool {
     match patch {
-        app::history::EditPatch::SceneSlot(_) => true,
+        app::history::EditPatch::SceneSlot(_) | app::history::EditPatch::SceneSlots(_) => true,
         app::history::EditPatch::Composite(patches) => {
             !patches.is_empty() && patches.iter().all(patch_is_only_scene_slots)
         }
@@ -134,6 +137,40 @@ fn apply_touchpad_scroll_delta(
 /// The metal_seq event loop: input polling, gestures, async polling, and
 /// host-command dispatch, ending each iteration in the reactive tick.
 #[allow(clippy::too_many_lines)]
+/// React to a live note press/release outcome the same way for every source
+/// (musical typing, hardware MIDI). `blur_focus_on_trigger` says whether a
+/// triggered note may drop widget focus: musical typing always may, because
+/// it only reaches the live keyboard once no text widget has focus; hardware
+/// MIDI skips that gate, so it must leave an in-progress text edit alone.
+fn apply_live_note_outcome(
+    outcome: RecordingKeyOutcome,
+    blur_focus_on_trigger: bool,
+    app: &mut app::App,
+    editor: &mut Editor,
+) {
+    if outcome.triggered_note() && blur_focus_on_trigger {
+        // A live key fired an armed track: the user is playing now, so drop
+        // any widget focus left by an earlier click (e.g. a number picker),
+        // the same way the transport flip does in the reactive tick.
+        editor.blur_all_widget_focus();
+    }
+    if outcome.recorded_take() {
+        // Take-retargeted notes touch neither the live pattern nor the step
+        // grid; the timeline preview updates at commit.
+        editor.mark_needs_redraw();
+    }
+    if outcome.recorded() {
+        // The recorded write bumped ui_epoch, and this same iteration ends in
+        // the reactive tick, whose epoch-driven resync republishes the step
+        // grid and refreshes the sequencer layout. Repeating that sync +
+        // relayout inline here doubled the cost of every recorded release and
+        // made fast chord stabs starve the next notes' key events on slow
+        // machines.
+        app.mark_recording_take_changed();
+        editor.mark_needs_redraw();
+    }
+}
+
 pub(crate) fn run_event_loop(
     mut app: app::App,
     mut editor: Editor,
@@ -151,7 +188,6 @@ pub(crate) fn run_event_loop(
     // Edge-tracked so the un-hide fires even when the gesture is dropped for a
     // reason other than mouse-up (editor reload, tile close, focus loss).
     let mut hidden_drag_started = false;
-    let mut sample_import_session: Option<SampleImportSession> = None;
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
     let mut soft_step_param_edit = SoftStepParamEdit::default();
@@ -162,6 +198,20 @@ pub(crate) fn run_event_loop(
     };
     let mut lisp_hot_reload_source_revision = editor.runtime().lisp_source_revision();
     let mut last_lisp_hot_reload_path_scan = Instant::now();
+
+    // Hardware MIDI keyboards (bead eseq-egs6): every input port is opened
+    // once and drained below, right after the backend poll, so a note lands
+    // on the live-note path within one frame. The waker ends a blocked idle
+    // poll the moment a note is queued.
+    let midi_input = {
+        let waker = backend.event_loop_waker();
+        let wake: Option<sequencer::midi_input::WakeFn> = waker.map(|waker| {
+            std::sync::Arc::new(move || {
+                waker.wake();
+            }) as sequencer::midi_input::WakeFn
+        });
+        sequencer::midi_input::MidiInputPorts::open_all(wake)
+    };
 
     let mut gesture = GestureState {
         // Pointer-rate rack edits update the live graph immediately. Their large
@@ -229,6 +279,7 @@ pub(crate) fn run_event_loop(
         prev_track_button_states: track_button_state_snapshot(&shared.state),
         prev_current_track_playhead_visible: false,
         prev_process_channel_values_version: shared.state.process_channel_values_version(),
+        prev_track_tint: None,
         prev_ui_epoch: 0,
         prev_fx_epoch: 0,
         prev_fx_value_epoch: 0,
@@ -286,6 +337,10 @@ pub(crate) fn run_event_loop(
     eprintln!("metal_seq: entering event loop");
     let mut ui_loop_stats = UiLoopStats::new();
     let mut pointer_is_down = false;
+    // Hardware MIDI note-ons a Lisp mapping consumed, so their note-offs route
+    // the same way even if the mapping's answer has changed meanwhile.
+    let mut lisp_consumed_midi_notes: std::collections::HashSet<LiveNoteSource> =
+        std::collections::HashSet::new();
 
     loop {
         let mut pointer_released_this_loop = false;
@@ -680,21 +735,22 @@ pub(crate) fn run_event_loop(
                             editor.show_transient_message(format!("Asset import failed: {error}"));
                         }
                         Ok(None) => {
-                            match SampleImportSession::from_drop(
+                            match SampleImportDraft::from_drop(
                                 paths,
                                 &sequencer::app_paths::app_paths().sample_db_path(),
                             ) {
-                                Ok(session) => {
-                                    if session.is_empty() {
+                                Ok(draft) => {
+                                    if draft.is_empty() {
                                         editor.show_transient_message(
                                             "No supported audio files found in dropped items",
                                         );
                                     } else {
-                                        sample_import_session = Some(session);
-                                        if let Some(session) = sample_import_session.as_ref() {
-                                            session.render_into_editor(&mut editor);
-                                        }
-                                        editor.show_transient_message("Sample import staged");
+                                        let count = draft.len();
+                                        install_draft(draft);
+                                        open_sample_import_modal(&mut editor);
+                                        editor.show_transient_message(format!(
+                                            "Staged {count} sample(s) for import"
+                                        ));
                                     }
                                 }
                                 Err(error) => {
@@ -735,51 +791,6 @@ pub(crate) fn run_event_loop(
                         editor.handle_key(key);
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
-                    }
-                    if editor.active_buffer().name == "*sample-import*" {
-                        let key = normalize_command_shortcuts(raw_key);
-                        if let Some(session) = sample_import_session.as_mut() {
-                            match session.handle_key(key) {
-                                ImportKeyOutcome::Handled => {
-                                    session.render_into_editor(&mut editor);
-                                    ui_loop_stats.note_event(event_started.elapsed());
-                                    continue;
-                                }
-                                ImportKeyOutcome::Cancel => {
-                                    sample_import_session = None;
-                                    switch_to_sequencer(&mut editor);
-                                    editor.show_transient_message("Sample import canceled");
-                                    ui_loop_stats.note_event(event_started.elapsed());
-                                    continue;
-                                }
-                                ImportKeyOutcome::Commit => {
-                                    let summary = session
-                                        .commit(
-                                            &sequencer::app_paths::app_paths().sample_db_path(),
-                                            &sequencer::app_paths::app_paths().samples_dir(),
-                                        );
-                                    sample_import_session = None;
-                                    switch_to_sequencer(&mut editor);
-                                    match summary {
-                                        Ok(summary) => {
-                                            editor.show_transient_message(format!(
-                                                "Imported {} sample(s), skipped {} duplicate(s), {} failed",
-                                                summary.imported, summary.duplicates, summary.failed
-                                            ));
-                                            let _ = refresh_sample_browser_buffer(&mut editor);
-                                        }
-                                        Err(error) => {
-                                            editor.show_transient_message(format!(
-                                                "Sample import failed: {error}"
-                                            ));
-                                        }
-                                    }
-                                    ui_loop_stats.note_event(event_started.elapsed());
-                                    continue;
-                                }
-                                ImportKeyOutcome::Ignored => {}
-                            }
-                        }
                     }
                     if raw_key.kind == crossterm::event::KeyEventKind::Press {
                         if raw_key.code == crossterm::event::KeyCode::Esc
@@ -1027,6 +1038,15 @@ pub(crate) fn run_event_loop(
                     if key.kind == crossterm::event::KeyEventKind::Press
                         && key.code == crossterm::event::KeyCode::Esc
                     {
+                        // Placement can be armed while the toolbar owns focus.
+                        // Escape must cancel it before ordinary selection handling.
+                        if matches!(editor.runtime_mut().eval_str(
+                            "(eseq.arrangement/cancel-placement)"
+                        ), Ok(Some(Value::Bool(true)))) {
+                            editor.refresh_runtime_side_effects();
+                            editor.mark_needs_redraw();
+                            continue;
+                        }
                         let cleared_neural_selection = {
                             let mut selection = shared.selected_neural_neurons.lock().unwrap();
                             let had_selection = !selection.is_empty();
@@ -1123,31 +1143,8 @@ pub(crate) fn run_event_loop(
                     } else {
                         RecordingKeyOutcome::Ignored
                     };
-                    if recording_key_outcome.triggered_note() {
-                        // A live key fired an armed track: the user is playing
-                        // now, so drop any widget focus left by an earlier
-                        // click (e.g. a number picker), the same way the
-                        // transport flip does in the reactive tick.
-                        editor.blur_all_widget_focus();
-                    }
+                    apply_live_note_outcome(recording_key_outcome, true, &mut app, &mut editor);
                     let intercepted = recording_key_outcome.consumed();
-                    if recording_key_outcome.recorded_take() {
-                        // Take-retargeted notes touch neither the live
-                        // pattern nor the step grid; the timeline preview
-                        // updates at commit.
-                        editor.mark_needs_redraw();
-                    }
-                    if recording_key_outcome.recorded() {
-                        // The recorded write bumped ui_epoch, and this same
-                        // iteration ends in the reactive tick, whose
-                        // epoch-driven resync republishes the step grid and
-                        // refreshes the sequencer layout. Repeating that sync
-                        // + relayout inline here doubled the cost of every
-                        // recorded release and made fast chord stabs starve
-                        // the next notes' key events on slow machines.
-                        app.mark_recording_take_changed();
-                        editor.mark_needs_redraw();
-                    }
                     // Only pass Press events to the editor (Release is only for note-off)
                     if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
                         let should_reload_custom_ui = should_reload_custom_ui_after_key(&key);
@@ -1207,6 +1204,87 @@ pub(crate) fn run_event_loop(
                 _ => {}
             }
             ui_loop_stats.note_event(event_started.elapsed());
+        }
+        // Hardware MIDI notes queued since the last iteration (bead
+        // eseq-egs6). Note-ons need an arm target; a note-off always goes
+        // through so a release never strands a sounding voice.
+        if let Some(midi_input) = &midi_input {
+            let mut dispatched_to_lisp = false;
+            for event in midi_input.drain() {
+                let port = event.port;
+                let note_source = match event.message {
+                    sequencer::midi_input::MidiMessage::Note { channel, note } => Some((
+                        LiveNoteSource::Midi {
+                            port,
+                            channel,
+                            note: note.note,
+                        },
+                        channel,
+                        note,
+                    )),
+                    _ => None,
+                };
+                let held = note_source
+                    .is_some_and(|(source, _, _)| held_note_for_source(&shared.held_notes, source));
+                // Lisp mappings (content/ui/midi.lisp) see every message
+                // first; a consumed message never reaches the live keyboard.
+                // Whether a mapping consumes a note is decided at event time
+                // against mutable state (an armed rack, a reloaded init.lisp),
+                // so a note-off is routed like its note-on rather than asked
+                // again: a note the live keyboard holds always gets its
+                // release, and a note-on Lisp consumed keeps its note-off.
+                let consumed = dispatch_midi_to_lisp(&mut editor, &event);
+                dispatched_to_lisp = true;
+                let route_to_live_keyboard = match note_source {
+                    Some((source, _, note)) if note.on => {
+                        if consumed {
+                            lisp_consumed_midi_notes.insert(source);
+                        }
+                        !consumed
+                    }
+                    Some((source, _, _)) => {
+                        let consumed_on = lisp_consumed_midi_notes.remove(&source);
+                        held || !(consumed || consumed_on)
+                    }
+                    None => false,
+                };
+                if !route_to_live_keyboard {
+                    continue;
+                }
+                let Some((_, channel, event)) = note_source else {
+                    continue;
+                };
+                let any_armed = shared.record_armed.lock().unwrap().iter().any(|a| *a)
+                    || shared.armed_rack.lock().unwrap().is_some();
+                if !(any_armed || held) {
+                    continue;
+                }
+                let outcome = handle_midi_note(
+                    port,
+                    channel,
+                    event,
+                    &mut app,
+                    &shared.state,
+                    &shared.record_armed,
+                    &shared.armed_rack,
+                    &shared.recording,
+                    &shared.keyboard_tx,
+                    &shared.held_notes,
+                    &shared.roll_record,
+                    &shared.ui_invalidations,
+                );
+                // A hardware note is never a text keystroke, so unlike musical
+                // typing it can arrive while a text widget is focused; that
+                // edit must survive the note (only stale non-text focus, e.g.
+                // a number picker, is dropped).
+                let blur_focus = !focused_widget_captures_text_input(&editor);
+                apply_live_note_outcome(outcome, blur_focus, &mut app, &mut editor);
+            }
+            // One runtime refresh per drained batch, not per message: a CC
+            // sweep can queue dozens of messages between iterations.
+            if dispatched_to_lisp {
+                editor.refresh_runtime_side_effects();
+            }
         }
 
         // Touchpad gestures

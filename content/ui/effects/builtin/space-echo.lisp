@@ -3,7 +3,7 @@
 ;; Layout mirrors the hardware: REPEAT RATE on the left (sync grid or free
 ;; knob), the 12-position MODE SELECTOR in the middle, then the echo section
 ;; (intensity / echo volume / bass / treble) and the tape+reverb section.
-;; Palette: dark chassis, RE-green selector, signal-orange repeat controls.
+;; Palette: theme-owned panel surfaces and selected-control colors.
 (module eseq.effects.builtin.space-echo)
 
 (import eseq.effects.param-controls :refer
@@ -38,9 +38,7 @@
 
 (export panel-ui)
 
-(def orange () (rgba 1.00 0.62 0.25 1.0))
-(def green  () (rgba 0.36 0.80 0.50 1.0))
-(def cream  () (rgba 0.93 0.88 0.78 1.0))
+
 
 ;; Mod-wrapped knob (same pattern as the Str8 Delay knobs, so intensity /
 ;; rate / volumes pick up modulation rings and plock handling).
@@ -101,8 +99,8 @@
 (def sync-button (fx p)
   (button "Sync"
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
-    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (orange) :mixer-control-bg)
-    :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
+    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :effect-mode-on-bg :mixer-control-bg)
+    :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :control-on-fg :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -112,8 +110,8 @@
 (def div-button (fx p current label-text)
   (button label-text
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
-    :background-color (if (= current label-text) (orange) :mixer-control-bg)
-    :color (if (= current label-text) :black :dim)
+    :background-color (if (= current label-text) :effect-mode-on-bg :mixer-control-bg)
+    :color (if (= current label-text) :control-on-fg :dim)
     :border-color :transparent
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -163,13 +161,11 @@
 
 (def mode-button (fx p index short-label)
   (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value p)) index))
-      (reverb-mode (> index 5)))
+        (reverb-mode (> index 5)))
     (button short-label
       :width 3.0 :height 1.30 :padding 0 :font-size 8.5
-      :background-color (if selected
-        (if reverb-mode (green) (orange))
-        :mixer-control-bg)
-      :color (if selected :black :dim)
+      :background-color (if selected (if reverb-mode :delay-reverb-mode-on-bg :effect-mode-on-bg) :mixer-control-bg)
+      :color (if selected :control-on-fg :dim)
       :border-color :transparent
       :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -204,7 +200,7 @@
       (box :height 0.25)
       (mode-grid fx mode-p)
       (label (get mode-p :text-value)
-        :font-size 8.5 :width 8.2 :color (cream) :bg :transparent))))
+        :font-size 8.5 :width 8.2 :color :delay-mode-readout-fg :bg :transparent))))
 
 ;; ── Echo section ──
 
@@ -232,9 +228,9 @@
   (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value p)) index)))
     (button short-label
       :width 4.35 :height 0.92 :padding 0 :font-size 8.0
-      :background-color (if selected (green) :mixer-control-bg)
+      :background-color (if selected :delay-reverb-mode-on-bg :mixer-control-bg)
       :border-color :transparent
-      :color (if selected :black :dim)
+      :color (if selected :control-on-fg :dim)
       :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
       :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
       :plock-color-g (eseq.effects.param-controls/param-plock-color-g)

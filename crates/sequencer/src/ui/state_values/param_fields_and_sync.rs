@@ -1429,10 +1429,11 @@ pub(crate) fn build_param_list(
 /// panel order. Every entry must have an [`fx_step_param_value_field`], and
 /// this is the single list the readout sync, the print-latch restore and the
 /// empty-project reset all walk.
-pub(crate) const STEP_INSPECTOR_PARAMS: [StepParam; 5] = [
+pub(crate) const STEP_INSPECTOR_PARAMS: [StepParam; 6] = [
     StepParam::Transpose,
     StepParam::Velocity,
     StepParam::Duration,
+    StepParam::Pan,
     StepParam::Retrig,
     StepParam::RetrigRate,
 ];
@@ -1442,6 +1443,7 @@ pub(crate) fn fx_step_param_value_field(param: StepParam) -> Option<&'static str
         StepParam::Velocity => Some("fx-step-value-velocity"),
         StepParam::Duration => Some("fx-step-value-duration"),
         StepParam::Transpose => Some("fx-step-value-transpose"),
+        StepParam::Pan => Some("fx-step-value-pan"),
         StepParam::Retrig => Some("fx-step-value-retrig"),
         StepParam::RetrigRate => Some("fx-step-value-retrig-rate"),
         _ => None,

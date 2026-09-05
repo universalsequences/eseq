@@ -78,6 +78,53 @@ impl InstrumentTier {
     }
 }
 
+/// One directory instrument sources resolve from.
+struct InstrumentRoot {
+    /// The id prefix sources under this root qualify as.
+    tier: InstrumentTier,
+    path: PathBuf,
+    /// Fallback roots resolve only after every primary root has missed, so a
+    /// checkout's own factory and user tiers always win over them.
+    fallback: bool,
+}
+
+/// Instrument roots in resolution order: the factory tier, the user tier, and
+/// (dev only) the pre-curation factory tree kept as test fixtures. The fixture
+/// root qualifies as `factory` — it is the tree those ids were minted for —
+/// but resolves last.
+fn instrument_roots(paths: &crate::app_paths::AppPaths) -> Vec<InstrumentRoot> {
+    let mut roots = vec![
+        InstrumentRoot {
+            tier: InstrumentTier::Factory,
+            path: InstrumentTier::Factory.root(paths),
+            fallback: false,
+        },
+        InstrumentRoot {
+            tier: InstrumentTier::User,
+            path: InstrumentTier::User.root(paths),
+            fallback: false,
+        },
+    ];
+    if let Some(fixtures) = paths.dev_instrument_fixtures_dir() {
+        roots.push(InstrumentRoot {
+            tier: InstrumentTier::Factory,
+            path: fixtures,
+            fallback: true,
+        });
+    }
+    roots
+}
+
+/// Every directory that may hold an instrument source, for path-to-name
+/// stripping and `ui.lisp` lookup. The browser lists only
+/// `AppPaths::instrument_dirs`; this adds the dev fixture root.
+pub(in crate::lisp_host) fn instrument_source_roots() -> Vec<PathBuf> {
+    instrument_roots(crate::app_paths::app_paths())
+        .into_iter()
+        .map(|root| root.path)
+        .collect()
+}
+
 fn parse_instrument_id(name: &str) -> io::Result<Option<(InstrumentTier, &str)>> {
     let trimmed = name.trim_end_matches('/');
     let qualified = if let Some(path) = trimmed.strip_prefix("factory:") {
@@ -185,11 +232,31 @@ fn resolve_instrument_storage_path_with_paths(
     let logical_name = qualified
         .map(|(_, logical_name)| logical_name)
         .unwrap_or_else(|| name.trim_end_matches('/'));
-    let tiers: &[InstrumentTier] = match qualified {
-        Some((InstrumentTier::Factory, _)) => &[InstrumentTier::Factory],
-        Some((InstrumentTier::User, _)) => &[InstrumentTier::User],
-        None => &[InstrumentTier::Factory, InstrumentTier::User],
-    };
+    // A qualified id names an exact logical path. `factory:` ids search the
+    // factory tier, then the user tier, then fallback roots: they keep working
+    // after an instrument leaves the shipped factory set and lives on as a
+    // user-tier copy under the same path (the 2026-09 curation); saving
+    // re-qualifies them through `qualify_instrument_id`. `user:` ids never
+    // fall through — a user id whose copy is missing must still resolve into
+    // the user tier, otherwise a save would write over shipped factory content
+    // and requalify the project's instrument as read-only. Bare names keep the
+    // legacy leaf-name walk within each root.
+    let all_roots = instrument_roots(paths);
+    let mut ordered: Vec<&InstrumentRoot> = Vec::with_capacity(all_roots.len());
+    match qualified {
+        Some((InstrumentTier::User, _)) => {
+            ordered.extend(all_roots.iter().filter(|r| !r.fallback && r.tier == InstrumentTier::User));
+        }
+        Some((InstrumentTier::Factory, _)) => {
+            ordered.extend(all_roots.iter().filter(|r| !r.fallback && r.tier == InstrumentTier::Factory));
+            ordered.extend(all_roots.iter().filter(|r| !r.fallback && r.tier != InstrumentTier::Factory));
+            ordered.extend(all_roots.iter().filter(|r| r.fallback));
+        }
+        None => {
+            ordered.extend(all_roots.iter().filter(|r| !r.fallback));
+            ordered.extend(all_roots.iter().filter(|r| r.fallback));
+        }
+    }
 
     let cache_key = (name.to_string(), extension.to_string());
     if let Some(cached) = resolved_walk_cache().lock().unwrap().get(&cache_key).cloned() {
@@ -199,23 +266,43 @@ fn resolve_instrument_storage_path_with_paths(
         resolved_walk_cache().lock().unwrap().remove(&cache_key);
     }
 
-    for tier in tiers {
-        if let Some(resolved) = resolve_in_root(
-            &tier.root(paths),
-            logical_name,
-            extension,
-            qualified.is_none(),
-        )? {
-            resolved_walk_cache()
-                .lock()
-                .unwrap()
-                .insert(cache_key, resolved.clone());
-            return Ok(resolved);
+    let mut remember = |resolved: PathBuf| {
+        resolved_walk_cache()
+            .lock()
+            .unwrap()
+            .insert(cache_key.clone(), resolved.clone());
+        resolved
+    };
+
+    if qualified.is_some() {
+        // The instrument lives wherever its source is; every other file of it
+        // (bank, metadata) is looked up beside that source only, so a factory
+        // instrument with no shipped bank still keeps its bank slot in the
+        // factory tier rather than borrowing a user-tier file of the same name.
+        let home = ordered
+            .iter()
+            .find(|root| {
+                matches!(
+                    resolve_in_root(&root.path, logical_name, "lisp", false),
+                    Ok(Some(_))
+                )
+            })
+            .copied()
+            .unwrap_or(ordered[0]);
+        if let Some(resolved) = resolve_in_root(&home.path, logical_name, extension, false)? {
+            return Ok(remember(resolved));
+        }
+        return Ok(home.path.join(format!("{logical_name}.{extension}")));
+    }
+
+    for root in &ordered {
+        if let Some(resolved) = resolve_in_root(&root.path, logical_name, extension, true)? {
+            return Ok(remember(resolved));
         }
     }
 
-    Ok(tiers[0]
-        .root(paths)
+    Ok(ordered[0]
+        .path
         .join(format!("{logical_name}.{extension}")))
 }
 
@@ -241,8 +328,7 @@ fn qualify_instrument_id_with_paths(
             format!("instrument '{name}' does not exist"),
         ));
     }
-    for tier in [InstrumentTier::Factory, InstrumentTier::User] {
-        let root = tier.root(paths);
+    for InstrumentRoot { tier, path: root, .. } in instrument_roots(paths) {
         if let Ok(relative) = source.strip_prefix(&root) {
             let logical = if relative.file_name().and_then(|part| part.to_str()) == Some("dsp.lisp") {
                 relative.parent().unwrap_or(relative).to_path_buf()
@@ -387,11 +473,8 @@ fn strip_source_root(parent: &Path, roots: &[PathBuf], relative_dir: &str) -> Op
 pub(in crate::lisp_host) fn instrument_name_from_source_path(path: &Path) -> Option<String> {
     if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
         if let Some(parent) = path.parent() {
-            if let Some(rel) = strip_source_root(
-                parent,
-                &crate::app_paths::app_paths().instrument_dirs(),
-                "instruments",
-            ) {
+            if let Some(rel) = strip_source_root(parent, &instrument_source_roots(), "instruments")
+            {
                 let rel = rel.to_string_lossy().replace('\\', "/");
                 if !rel.is_empty() {
                     return Some(format!("{rel}/"));
@@ -696,8 +779,11 @@ fn user_preset_overlay_for_factory_source_with_paths(
     paths: &crate::app_paths::AppPaths,
     source_dsp: &Path,
 ) -> Option<PathBuf> {
-    let factory_root = InstrumentTier::Factory.root(paths);
-    let rel = source_dsp.strip_prefix(&factory_root).ok()?;
+    let rel = instrument_roots(paths)
+        .into_iter()
+        .filter(|root| root.tier == InstrumentTier::Factory)
+        .find_map(|root| source_dsp.strip_prefix(&root.path).ok().map(Path::to_path_buf))?;
+    let rel = rel.as_path();
     let logical = if rel.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
         rel.parent()?.to_path_buf()
     } else {
@@ -1042,7 +1128,10 @@ fn writable_instrument_source_path_with_paths(
         }
         Some((InstrumentTier::User, logical_name)) => {
             let existing = resolve_instrument_storage_path_with_paths(paths, name, "lisp")?;
-            if existing.is_file() {
+            // Only an existing file inside the user tier is a write target; a
+            // resolution that landed anywhere else (factory tree, dev fixture
+            // root) must never be handed to `fs::write`.
+            if existing.is_file() && existing.starts_with(paths.user_instruments_dir()) {
                 return Ok(existing);
             }
             logical_name
@@ -1093,8 +1182,7 @@ pub fn save_instrument_ui(name: &str, source: &str) -> io::Result<()> {
 
 pub fn instrument_ui_path(name: &str) -> io::Result<PathBuf> {
     if name.ends_with('/') {
-        let direct = crate::app_paths::app_paths()
-            .instrument_dirs()
+        let direct = instrument_source_roots()
             .into_iter()
             .map(|root| root.join(name.trim_end_matches('/')).join("ui.lisp"))
             .find(|path| path.exists());
@@ -1102,8 +1190,7 @@ pub fn instrument_ui_path(name: &str) -> io::Result<PathBuf> {
             return Ok(direct);
         }
     } else {
-        if let Some(direct) = crate::app_paths::app_paths()
-            .instrument_dirs()
+        if let Some(direct) = instrument_source_roots()
             .into_iter()
             .map(|root| root.join(name).join("ui.lisp"))
             .find(|path| path.exists())
@@ -1768,6 +1855,123 @@ mod tier_id_tests {
         let error = qualify_instrument_id_with_paths(&paths, "pkg:someone/mine")
             .expect_err("package ids are not part of the T3 tier resolver");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A project saved against a factory instrument keeps loading after that
+    /// instrument leaves the shipped set and lives on as a user-tier copy under
+    /// the same logical path; the next save re-qualifies it as `user:`.
+    #[test]
+    fn factory_ids_fall_through_to_a_user_tier_copy_and_requalify() {
+        let (paths, root) = test_paths("factory-fallthrough");
+        write_folder_instrument(&paths.user_instruments_dir(), "core/drift", "user copy");
+
+        assert_eq!(
+            std::fs::read_to_string(
+                resolve_instrument_storage_path_with_paths(&paths, "factory:core/drift", "lisp")
+                    .unwrap(),
+            )
+            .unwrap(),
+            "user copy"
+        );
+        assert_eq!(
+            qualify_instrument_id_with_paths(&paths, "factory:core/drift").unwrap(),
+            "user:core/drift"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The fall-through is one-directional: a `user:` id with no user-tier copy
+    /// never resolves into the factory tree (or the dev fixture root), so a
+    /// save creates a user copy instead of overwriting shipped content, and
+    /// the id never requalifies as read-only `factory:`.
+    #[test]
+    fn user_ids_never_fall_through_to_factory_content() {
+        let (paths, root) = test_paths("user-no-fallthrough");
+        write_folder_instrument(&InstrumentTier::Factory.root(&paths), "core/drift", "factory");
+        let fixtures = paths.dev_instrument_fixtures_dir().expect("dev layout has a fixture root");
+        write_folder_instrument(&fixtures, "core/fixture-only", "fixture");
+        let user_root = paths.user_instruments_dir();
+
+        let resolved =
+            resolve_instrument_storage_path_with_paths(&paths, "user:core/drift", "lisp").unwrap();
+        assert!(
+            resolved.starts_with(&user_root),
+            "user: id resolved outside the user tier: {}",
+            resolved.display()
+        );
+        assert!(!resolved.is_file());
+        assert!(qualify_instrument_id_with_paths(&paths, "user:core/drift").is_err());
+
+        for name in ["user:core/drift/", "user:core/fixture-only/"] {
+            let writable = writable_instrument_source_path_with_paths(&paths, name).unwrap();
+            assert!(
+                writable.starts_with(&user_root),
+                "{name} would write outside the user tier: {}",
+                writable.display()
+            );
+            let preset = instrument_preset_save_path_with_paths(&paths, name).unwrap();
+            assert!(
+                preset.starts_with(&user_root),
+                "{name} presets would land outside the user tier: {}",
+                preset.display()
+            );
+        }
+        save_instrument_with_paths(&paths, "user:core/drift/", "user copy").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(InstrumentTier::Factory.root(&paths).join("core/drift/dsp.lisp"))
+                .unwrap(),
+            "factory",
+            "saving a user: id must not touch the factory source"
+        );
+        assert_eq!(
+            std::fs::read_to_string(user_root.join("core/drift/dsp.lisp")).unwrap(),
+            "user copy"
+        );
+        assert_eq!(
+            qualify_instrument_id_with_paths(&paths, "user:core/drift").unwrap(),
+            "user:core/drift"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The dev fixture tree qualifies as `factory` but resolves behind both
+    /// primary tiers, so a checkout's user copy always wins over it.
+    #[test]
+    fn dev_fixture_root_resolves_last_and_qualifies_as_factory() {
+        let (paths, root) = test_paths("fixture-root");
+        let fixtures = paths.dev_instrument_fixtures_dir().expect("dev layout has a fixture root");
+        write_folder_instrument(&fixtures, "core/drift", "fixture");
+        write_folder_instrument(&fixtures, "core/only-here", "fixture only");
+
+        assert_eq!(
+            qualify_instrument_id_with_paths(&paths, "factory:core/only-here").unwrap(),
+            "factory:core/only-here"
+        );
+        assert_eq!(
+            qualify_instrument_id_with_paths(&paths, "core/only-here/").unwrap(),
+            "factory:core/only-here"
+        );
+
+        write_folder_instrument(&paths.user_instruments_dir(), "core/drift", "user copy");
+        assert_eq!(
+            std::fs::read_to_string(
+                resolve_instrument_storage_path_with_paths(&paths, "factory:core/drift", "lisp")
+                    .unwrap(),
+            )
+            .unwrap(),
+            "user copy"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                resolve_instrument_storage_path_with_paths(&paths, "core/drift/", "lisp").unwrap(),
+            )
+            .unwrap(),
+            "user copy"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -13,8 +13,15 @@ resolves rack-slot param sets.
 #[allow(unused_imports)]
 use super::*;
 
+/// Hz handed to a custom (DGenLisp) instrument's `pitch` input.
+///
+/// Transpose 0 is MIDI 60 (C4 = 261.63 Hz) everywhere else in the app: the
+/// piano-roll labels, the MIDI-keyboard seam (`note - 60`), the sampler root,
+/// and the audition/probe path. This must agree with them; the original
+/// `440 * 2^(t/12)` form played A4 at transpose 0 and left every dgen synth
+/// nine semitones sharp against its note name.
 pub(super) fn custom_pitch_hz(transpose: f32, base_note_offset: f32) -> f32 {
-    440.0 * 2f32.powf((transpose + base_note_offset) / 12.0)
+    440.0 * 2f32.powf((transpose + base_note_offset - 9.0) / 12.0)
 }
 
 pub(super) fn custom_pitch_midi_note(transpose: f32, base_note_offset: f32) -> u8 {
@@ -286,7 +293,11 @@ fn resolved_sampler_host_param_value(
         .unwrap_or_else(|| slot.defaults.get(param_idx).copied().unwrap_or(default))
 }
 
-fn slot_has_explicit_plock(slot: &EffectSlotSnapshot, step_idx: usize, param_idx: usize) -> bool {
+pub(super) fn slot_has_explicit_plock(
+    slot: &EffectSlotSnapshot,
+    step_idx: usize,
+    param_idx: usize,
+) -> bool {
     let Some(raw_idx) = slot.node_param_idx(param_idx) else {
         return false;
     };
@@ -925,4 +936,26 @@ pub(super) fn rack_slot_sound_fingerprint(
         param.value.to_bits().hash(&mut hasher);
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod pitch_tests {
+    use super::{custom_pitch_hz, custom_pitch_midi_note};
+
+    #[test]
+    fn transpose_zero_is_middle_c_for_custom_instruments() {
+        assert!((custom_pitch_hz(0.0, 0.0) - 261.6256).abs() < 0.01);
+        assert!((custom_pitch_hz(9.0, 0.0) - 440.0).abs() < 0.01);
+        assert!((custom_pitch_hz(0.0, 9.0) - 440.0).abs() < 0.01);
+        assert!((custom_pitch_hz(-12.0, 0.0) - 130.8128).abs() < 0.01);
+    }
+
+    #[test]
+    fn custom_hz_and_midi_note_agree_on_the_same_transpose() {
+        for transpose in [-24.0f32, -9.0, 0.0, 7.0, 12.0, 31.0] {
+            let note = custom_pitch_midi_note(transpose, 0.0) as f32;
+            let expected = 440.0 * 2f32.powf((note - 69.0) / 12.0);
+            assert!((custom_pitch_hz(transpose, 0.0) - expected).abs() < 0.01);
+        }
+    }
 }

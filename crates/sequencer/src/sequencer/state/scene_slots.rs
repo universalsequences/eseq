@@ -3,6 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::process::ProcessLiteral;
 
+/// Built-in scene pitch offset, also declared by the transport's `defscene`.
+pub const SCENE_TRANSPOSE_SLOT: &str = "eseq.transport/scene-transpose";
+
 // Epochs cross the UI/scheduler VM boundary in snapshots, so they must not be
 // counters local to one pattern: two scenes can each have a first write with
 // different values. A process-wide monotonic source makes the token sufficient
@@ -57,6 +60,14 @@ impl SceneSlotStore {
             .map(|name| (name, next_scene_slot_epoch()))
             .collect();
         Ok(Self { values, epochs })
+    }
+
+    /// Validated at every write/load boundary; absent in older scenes means zero.
+    pub fn transpose_semitones(&self) -> f32 {
+        match self.get(SCENE_TRANSPOSE_SLOT) {
+            Some(ProcessLiteral::Number(value)) => *value as f32,
+            _ => 0.0,
+        }
     }
 
     pub fn values(&self) -> &BTreeMap<String, ProcessLiteral> {
@@ -221,6 +232,12 @@ fn validate_scene_slot_literal(name: &str, value: &ProcessLiteral) -> Result<(),
         }
     }
 
+    if name == SCENE_TRANSPOSE_SLOT
+        && !matches!(value, ProcessLiteral::Number(value)
+            if value.is_finite() && value.fract() == 0.0 && (-48.0..=48.0).contains(value))
+    {
+        return Err("scene transpose must be a whole number from -48 to 48 semitones".into());
+    }
     if validate(value) {
         Ok(())
     } else {
@@ -235,6 +252,26 @@ fn validate_scene_slot_literal(name: &str, value: &ProcessLiteral) -> Result<(),
 mod tests {
     use super::*;
     use eseqlisp::vm::Value;
+
+    #[test]
+    fn scene_transpose_validates_writes_and_loaded_values() {
+        let mut slots = SceneSlotStore::default();
+        assert_eq!(slots.transpose_semitones(), 0.0);
+        for value in [-48.0, -9.0, 0.0, 48.0] {
+            slots.write_literal(SCENE_TRANSPOSE_SLOT, ProcessLiteral::Number(value)).unwrap();
+            let loaded = SceneSlotStore::from_values(slots.values().clone()).unwrap();
+            assert_eq!(loaded.transpose_semitones(), value as f32);
+        }
+        for value in [ProcessLiteral::Number(49.0), ProcessLiteral::Number(-49.0),
+            ProcessLiteral::Number(0.5), ProcessLiteral::Number(f64::NAN), ProcessLiteral::Nil]
+        {
+            assert!(slots.write_literal(SCENE_TRANSPOSE_SLOT, value.clone()).is_err());
+            assert!(SceneSlotStore::from_values(BTreeMap::from([
+                (SCENE_TRANSPOSE_SLOT.to_string(), value),
+            ])).is_err());
+            assert_eq!(slots.transpose_semitones(), 48.0);
+        }
+    }
 
     #[test]
     fn resolution_prefers_override_and_every_write_bumps_its_epoch() {

@@ -53,6 +53,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "timeline",
     "transport-clock",
     "waveform",
+    "drift-waveform",
     "wavetable-viewer",
     "sound-glyph",
     "spectrogram",
@@ -65,6 +66,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "gate-led",
     "scroll",
     "tree",
+    "xy-pad",
 ];
 
 pub fn is_builtin_widget_name(name: &str) -> bool {
@@ -413,6 +415,7 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
 
     // Text-entry and composite value widgets are always focusable.
     if widget_type == "button"
+        || widget_type == "menu-item"
         || widget_type == "text-input"
         || widget_type == "textbox"
         || widget_type == "number-picker"

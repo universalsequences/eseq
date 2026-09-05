@@ -15283,7 +15283,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn patcher_writeback_for_real_instrument_compiles() {
-        let path = crate::app_paths::app_paths().instruments_dir().join("bass/bad-subbass1/dsp.lisp");
+        let path = crate::app_paths::app_paths().dev_instrument_fixtures_dir().expect("dev layout has the instrument fixture tree").join("bass/bad-subbass1/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
         let emitted = eseqlisp::widget_render::patcher::emit_patch_writeback_source(
             &source,
@@ -15298,7 +15298,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn patcher_insert_unity_gain_before_real_instrument_output_compiles() {
-        let path = crate::app_paths::app_paths().instruments_dir().join("bass/bad-subbass1/dsp.lisp");
+        let path = crate::app_paths::app_paths().dev_instrument_fixtures_dir().expect("dev layout has the instrument fixture tree").join("bass/bad-subbass1/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
         let emitted =
             eseqlisp::widget_render::patcher::emit_patch_writeback_with_inserted_node_before_first_output(
@@ -15319,7 +15319,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn patcher_edit_gemini_piano_svf_literal_compiles() {
-        let path = crate::app_paths::app_paths().instruments_dir().join("wips/gemini-piano/dsp.lisp");
+        let path = crate::app_paths::app_paths().dev_instrument_fixtures_dir().expect("dev layout has the instrument fixture tree").join("wips/gemini-piano/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read gemini-piano dsp source");
         let emitted =
             eseqlisp::widget_render::patcher::emit_patch_writeback_with_first_node_text_edit(
@@ -15339,7 +15339,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn patcher_insert_created_phasor_multiply_before_real_instrument_output_compiles() {
-        let path = crate::app_paths::app_paths().instruments_dir().join("bass/bad-subbass1/dsp.lisp");
+        let path = crate::app_paths::app_paths().dev_instrument_fixtures_dir().expect("dev layout has the instrument fixture tree").join("bass/bad-subbass1/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
         let emitted =
             eseqlisp::widget_render::patcher::emit_patch_writeback_with_created_phasor_multiply_before_first_output(

@@ -87,66 +87,7 @@ fn state_color_prop<'a>(
     }
 }
 
-fn box_mouse_info(
-    phase: &str,
-    modifiers: KeyModifiers,
-    node: &LayoutNode,
-    local_col: f32,
-    local_row: f32,
-) -> Value {
-    let mut info = super::pointer_modifier_info(modifiers);
-    info.insert(
-        "phase".to_string(),
-        Rc::new(RefCell::new(Value::String(phase.to_string()))),
-    );
-    let wc = local_col - node.rect.col;
-    let wr = local_row - node.rect.row;
-    let sx = if node.rect.width > 0.0 {
-        wc / node.rect.width * 2.0 - 1.0
-    } else {
-        0.0
-    };
-    let sy = if node.rect.height > 0.0 {
-        wr / node.rect.height * 2.0 - 1.0
-    } else {
-        0.0
-    };
-    info.insert(
-        "x".to_string(),
-        Rc::new(RefCell::new(Value::Number(wc as f64))),
-    );
-    info.insert(
-        "y".to_string(),
-        Rc::new(RefCell::new(Value::Number(wr as f64))),
-    );
-    // Absolute pointer position in tile-local layout CONTENT cells: the
-    // tile's own scroll offsets are already folded in, so this matches the
-    // space layout rects live in (the backend draws the layout, and the
-    // overlay channel, translated by -scroll). It is therefore the space
-    // `context-menu` :anchor-col/:anchor-row are expressed in — a
-    // frame-anchored widget reconciles the two via `current_frame_viewport`,
-    // which reports the frame in this same content space.
-    //
-    // Not folded in: the offset of an enclosing `scroll` WIDGET, which
-    // children read separately via `scroll::current_event_scroll_offset`.
-    info.insert(
-        "col".to_string(),
-        Rc::new(RefCell::new(Value::Number(local_col as f64))),
-    );
-    info.insert(
-        "row".to_string(),
-        Rc::new(RefCell::new(Value::Number(local_row as f64))),
-    );
-    info.insert(
-        "sx".to_string(),
-        Rc::new(RefCell::new(Value::Number(sx as f64))),
-    );
-    info.insert(
-        "sy".to_string(),
-        Rc::new(RefCell::new(Value::Number(sy as f64))),
-    );
-    Value::Map(info)
-}
+
 
 pub(crate) fn box_drop_info(
     node: &LayoutNode,
@@ -155,7 +96,7 @@ pub(crate) fn box_drop_info(
     local_col: f32,
     local_row: f32,
 ) -> Value {
-    let mut info = match box_mouse_info("drop", KeyModifiers::empty(), node, local_col, local_row) {
+    let mut info = match super::pointer_event_info("drop", KeyModifiers::empty(), node, local_col, local_row) {
         Value::Map(map) => map,
         _ => std::collections::HashMap::new(),
     };
@@ -503,7 +444,7 @@ impl WidgetDefinition for BoxWidget {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Right) => {
                 if node.props.contains_key("on-right-click") {
-                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(super::pointer_event_info(
                         "right-click",
                         modifiers,
                         node,
@@ -519,7 +460,7 @@ impl WidgetDefinition for BoxWidget {
                 if modifiers.contains(KeyModifiers::CONTROL)
                     && node.props.contains_key("on-right-click")
                 {
-                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(super::pointer_event_info(
                         "right-click",
                         modifiers,
                         node,
@@ -528,23 +469,23 @@ impl WidgetDefinition for BoxWidget {
                     )));
                 }
                 if node.props.contains_key("on-mouse-down") {
-                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(super::pointer_event_info(
                         "down", modifiers, node, local_col, local_row,
                     )));
                 }
                 if node.props.contains_key("on-click") {
-                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(super::pointer_event_info(
                         "click", modifiers, node, local_col, local_row,
                     )));
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if node.props.contains_key("on-drag") => {
-                return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                return MouseEventOutcome::Dispatch(WidgetEvent::Custom(super::pointer_event_info(
                     "drag", modifiers, node, local_col, local_row,
                 )));
             }
             MouseEventKind::Up(MouseButton::Left) if node.props.contains_key("on-mouse-up") => {
-                return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                return MouseEventOutcome::Dispatch(WidgetEvent::Custom(super::pointer_event_info(
                     "up", modifiers, node, local_col, local_row,
                 )));
             }
@@ -560,7 +501,7 @@ impl WidgetDefinition for BoxWidget {
         local_row: f32,
     ) -> Option<WidgetEvent> {
         if node.props.contains_key("on-double-click") {
-            Some(WidgetEvent::Custom(box_mouse_info(
+            Some(WidgetEvent::Custom(super::pointer_event_info(
                 "double-click",
                 KeyModifiers::empty(),
                 node,
@@ -576,7 +517,7 @@ impl WidgetDefinition for BoxWidget {
         let (callback_name, arg) = match event {
             WidgetEvent::Activate(modifiers) => (
                 "on-click",
-                box_mouse_info("click", modifiers, node, node.rect.col, node.rect.row),
+                super::pointer_event_info("click", modifiers, node, node.rect.col, node.rect.row),
             ),
             WidgetEvent::Custom(value) => {
                 let phase = match &value {

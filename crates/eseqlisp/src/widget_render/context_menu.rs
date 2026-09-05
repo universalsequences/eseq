@@ -11,6 +11,9 @@
 //! (context-menu :is-open (menu-open?) :anchor-col c :anchor-row r
 //!               :on-close (fn () (close-menu!))
 //!   (menu-item "Rename" :shortcut "⌘R" :on-select (fn (info) ...))
+//!   (menu-item "Change Pattern"
+//!     (menu-item "Pattern 1" :checked true :on-select (fn (info) ...))
+//!     (menu-item "Pattern 2" :on-select (fn (info) ...)))
 //!   (menu-separator)
 //!   (menu-item "Delete" :disabled true :on-select (fn (info) ...)))
 //! ```
@@ -31,7 +34,7 @@ use crate::vm::Value;
 
 use super::{EventOutput, MouseEventOutcome, WidgetEvent};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// Menu rows span the panel width; text and hover insets come from the shared
@@ -59,6 +62,173 @@ pub struct MenuSeparatorWidget;
 pub static CONTEXT_MENU_WIDGET: ContextMenuWidget = ContextMenuWidget;
 pub static MENU_ITEM_WIDGET: MenuItemWidget = MenuItemWidget;
 pub static MENU_SEPARATOR_WIDGET: MenuSeparatorWidget = MenuSeparatorWidget;
+
+// One open branch per menu, keyed by source-stable widget identities. Closed
+// branches have no layout children, so they cannot paint or receive input.
+#[derive(Default)]
+struct MenuWindow {
+    offset: usize,
+    max_offset: usize,
+    owner: u64,
+}
+
+thread_local! {
+    static MENU_LAYOUT_OWNER: Cell<Option<u64>> = const { Cell::new(None) };
+    static MENU_WINDOWS: RefCell<HashMap<u64, MenuWindow>> = RefCell::new(HashMap::new());
+    static OPEN_BRANCHES: RefCell<HashMap<u64, Vec<u64>>> = RefCell::new(HashMap::new());
+}
+
+fn identity(node: &LayoutNode) -> u64 {
+    node.stable_widget_id.unwrap_or(node.widget_id)
+}
+
+pub(crate) fn close_branches(node: &LayoutNode) {
+    clear_menu_state(identity(node));
+}
+
+fn clear_menu_state(owner: u64) {
+    OPEN_BRANCHES.with(|branches| { branches.borrow_mut().remove(&owner); });
+    MENU_WINDOWS.with(|windows| windows.borrow_mut().retain(|_, window| window.owner != owner));
+}
+
+pub(crate) fn set_branch(node: &LayoutNode, path: Vec<u64>) -> bool {
+    OPEN_BRANCHES.with(|branches| {
+        let mut branches = branches.borrow_mut();
+        let previous = branches.entry(identity(node)).or_default();
+        if *previous == path { return false; }
+        *previous = path;
+        super::bump_widget_state_generation();
+        true
+    })
+}
+
+pub(crate) fn branch(node: &LayoutNode) -> Vec<u64> {
+    OPEN_BRANCHES.with(|branches| branches.borrow().get(&identity(node)).cloned().unwrap_or_default())
+}
+
+pub(crate) fn submenu_open(node: &LayoutNode) -> bool {
+    OPEN_BRANCHES.with(|branches| branches.borrow().values().any(|path| path.contains(&identity(node))))
+}
+
+pub(crate) fn has_submenu(node: &LayoutNode) -> bool {
+    matches!(node.props.get("__has-submenu"), Some(Value::Bool(true)))
+}
+
+pub(crate) fn path_to_item(root: &LayoutNode, target: u64) -> Option<Vec<u64>> {
+    for child in &root.children {
+        if child.widget_id == target {
+            return Some(if has_submenu(child) && !item_disabled(&child.props) {
+                vec![identity(child)]
+            } else { vec![] });
+        }
+        if let Some(mut path) = path_to_item(child, target) {
+            if has_submenu(child) { path.insert(0, identity(child)); }
+            return Some(path);
+        }
+    }
+    None
+}
+
+pub(crate) fn scroll_window(node: &LayoutNode) -> (usize, usize) {
+    MENU_WINDOWS.with(|windows| windows.borrow().get(&identity(node)).map(|window| (window.offset, window.max_offset)).unwrap_or_default())
+}
+
+pub(crate) fn scroll_panel(node: &LayoutNode, amount: isize, wrap: bool) -> bool {
+    MENU_WINDOWS.with(|windows| {
+        let mut windows = windows.borrow_mut();
+        let Some(window) = windows.get_mut(&identity(node)) else { return false; };
+        let MenuWindow { offset, max_offset: max, .. } = window;
+        let next = if wrap && amount > 0 && *offset == *max { 0 }
+            else if wrap && amount < 0 && *offset == 0 { *max }
+            else { offset.saturating_add_signed(amount).min(*max) };
+        if next == *offset { return false; }
+        *offset = next;
+        super::bump_widget_state_generation();
+        true
+    })
+}
+
+pub(crate) fn scroll_at(node: &LayoutNode, row: f32, col: f32, amount: isize) -> bool {
+    for child in node.children.iter().rev() {
+        if contains_panel(child, row, col) { return scroll_at(child, row, col, amount); }
+    }
+    scroll_panel(node, amount, false)
+}
+
+fn layout_rows(
+    node: &Value, panel: Rect, children: &[Value], sizes: Vec<Size>,
+    build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
+) -> Vec<LayoutNode> {
+    let available = (panel.height - PANEL_PADDING_ROWS * 2.0).max(ITEM_ROW_HEIGHT);
+    let mut tail_height = 0.0;
+    let mut max_offset = children.len();
+    for size in sizes.iter().rev() {
+        if tail_height + size.height > available { break; }
+        tail_height += size.height;
+        max_offset -= 1;
+    }
+    let offset = crate::ui::layout::get_stable_widget_id(node).map(|id| MENU_WINDOWS.with(|windows| {
+        let mut windows = windows.borrow_mut();
+        let window = windows.entry(id).or_default();
+        window.offset = window.offset.min(max_offset);
+        window.max_offset = max_offset;
+        window.owner = MENU_LAYOUT_OWNER.get().unwrap_or(id);
+        window.offset
+    })).unwrap_or(0);
+    let start = panel.row + PANEL_PADDING_ROWS;
+    let bottom = start + available;
+    children.iter().zip(sizes).skip(offset).scan(start, |next, (child, size)| {
+        if *next + size.height > bottom + 0.001 { return None; }
+        let row = *next;
+        *next += size.height;
+        Some(build_child(child, Rect { row, col: panel.col + PANEL_PADDING_COLS,
+            width: panel.width - PANEL_PADDING_COLS * 2.0, height: size.height }, LayoutCtx::default()))
+    }).collect()
+}
+
+pub(crate) fn panel_bounds(node: &LayoutNode) -> Option<Rect> {
+    let mut panel = panel_rect_from_children(&node.children)?;
+    for child in &node.children {
+        if let Some(other) = panel_bounds(child) {
+            let right = (panel.col + panel.width).max(other.col + other.width);
+            let bottom = (panel.row + panel.height).max(other.row + other.height);
+            panel.col = panel.col.min(other.col);
+            panel.row = panel.row.min(other.row);
+            panel.width = right - panel.col;
+            panel.height = bottom - panel.row;
+        }
+    }
+    Some(panel)
+}
+
+pub(crate) fn contains_panel(node: &LayoutNode, row: f32, col: f32) -> bool {
+    panel_rect_from_children(&node.children).is_some_and(|rect|
+        row >= rect.row && row < rect.row + rect.height && col >= rect.col && col < rect.col + rect.width)
+        || node.children.iter().any(|child| contains_panel(child, row, col))
+}
+
+// Each panel is a separate overlay clip segment. This preserves stacking even
+// on backends that batch text and background primitives separately.
+pub(crate) fn emit_panels(node: &LayoutNode, viewport: WidgetViewport, scroll_top: f32, max_rows: u16) {
+    let Some(panel) = panel_rect_from_children(&node.children) else { return; };
+    let screen_panel = Rect { col: panel.col - viewport.scroll_left,
+        row: panel.row - viewport.scroll_top, ..panel };
+    emit_menu_chrome(&node.props, screen_panel, viewport);
+    super::push_overlay_primitive(GpuPrimitive::PushClipRect(screen_panel));
+    for child in &node.children {
+        let mut row = child.clone();
+        row.children.clear();
+        let mut primitives = Vec::new();
+        super::collect_gpu_primitives_recursive(&row, viewport, scroll_top, max_rows, &mut primitives);
+        for mut primitive in primitives {
+            super::offset_primitive_x_mut(&mut primitive, -viewport.scroll_left, viewport);
+            super::offset_primitive_y_mut(&mut primitive, -viewport.scroll_top, viewport);
+            super::push_overlay_primitive(primitive);
+        }
+    }
+    super::push_overlay_primitive(GpuPrimitive::PopClipRect);
+    for child in &node.children { emit_panels(child, viewport, scroll_top, max_rows); }
+}
 
 fn value_is_open(node: &Value) -> bool {
     let Value::Map(map) = node else {
@@ -168,7 +338,7 @@ fn measured_text_width(text: &str, font_size: f32, ctx: &MeasureCtx<'_>) -> f32 
     }
 }
 
-fn menu_item_select_info(node: &LayoutNode) -> Value {
+pub(crate) fn menu_item_select_info(node: &LayoutNode) -> Value {
     let mut info = HashMap::new();
     let mut insert = |key: &str, value: Value| {
         info.insert(key.to_string(), Rc::new(RefCell::new(value)));
@@ -245,6 +415,9 @@ impl WidgetDefinition for ContextMenuWidget {
         build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         if !value_is_open(node) {
+            if let Some(id) = crate::ui::layout::get_stable_widget_id(node) {
+                clear_menu_state(id);
+            }
             return vec![];
         }
         let frame = current_frame_viewport().unwrap_or(area);
@@ -288,21 +461,10 @@ impl WidgetDefinition for ContextMenuWidget {
             frame,
         );
 
-        let mut cursor = panel.row + PANEL_PADDING_ROWS;
-        children
-            .iter()
-            .zip(sizes)
-            .map(|(child, size)| {
-                let rect = Rect {
-                    row: cursor,
-                    col: panel.col + PANEL_PADDING_COLS,
-                    width: content_width,
-                    height: size.height,
-                };
-                cursor += size.height;
-                build_child(child, rect, LayoutCtx::default())
-            })
-            .collect()
+        let previous_owner = MENU_LAYOUT_OWNER.replace(crate::ui::layout::get_stable_widget_id(node));
+        let rows = layout_rows(node, panel, children, sizes, build_child);
+        MENU_LAYOUT_OWNER.set(previous_owner);
+        rows
     }
 }
 
@@ -311,14 +473,41 @@ impl WidgetDefinition for MenuItemWidget {
         &["menu-item"]
     }
 
+    fn is_container(&self) -> bool { true }
+
+    fn layout_children(
+        &self, node: &Value, area: Rect, children: &[Value], aspect: f32,
+        _measure_ctx: &MeasureCtx<'_>, _layout_ctx: LayoutCtx,
+        measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
+        build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
+    ) -> Vec<LayoutNode> {
+        let open = crate::ui::layout::get_stable_widget_id(node).is_some_and(|id|
+            OPEN_BRANCHES.with(|branches| branches.borrow().values().any(|path| path.contains(&id))));
+        if !open || children.is_empty() { return vec![]; }
+        let frame = current_frame_viewport().unwrap_or(area);
+        let sizes: Vec<_> = children.iter().map(|child| measure_child(child, Constraints {
+            min_width: 0.0, max_width: frame.width, min_height: 0.0,
+            max_height: f32::INFINITY, aspect,
+        }).unwrap_or(Size { width: MIN_CONTENT_WIDTH, height: ITEM_ROW_HEIGHT })).collect();
+        let width = sizes.iter().map(|size| size.width).fold(MIN_CONTENT_WIDTH, f32::max).min(frame.width);
+        let height = sizes.iter().map(|size| size.height).sum::<f32>() + PANEL_PADDING_ROWS * 2.0;
+        // Prefer the row's right edge; flip to its LEFT edge, not its right
+        // anchor, so the child panel never covers the parent row.
+        let col = if area.col + area.width + width <= frame.col + frame.width {
+            area.col + area.width
+        } else { (area.col - width).max(frame.col) };
+        let top = (area.row - PANEL_PADDING_ROWS).min(frame.row + frame.height - height.min(frame.height)).max(frame.row);
+        layout_rows(node, Rect { row: top, col, width, height: height.min(frame.height) }, children, sizes, build_child)
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["text", "shortcut", "font-size"]
+        &["text", "shortcut", "font-size", "checked"]
     }
 
     fn measure(
         &self,
         node: &Value,
-        _children: &[Value],
+        children: &[Value],
         _constraints: Constraints,
         ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -331,6 +520,8 @@ impl WidgetDefinition for MenuItemWidget {
         {
             width += SHORTCUT_GAP_COLS + measured_text_width(&shortcut, font_size, ctx);
         }
+        if !children.is_empty() { width += SHORTCUT_GAP_COLS; }
+        if matches!(node, Value::Map(map) if map.contains_key("checked")) { width += 1.5; }
         Some(Size {
             width,
             height: ITEM_ROW_HEIGHT,
@@ -351,7 +542,7 @@ impl WidgetDefinition for MenuItemWidget {
     ) -> MouseEventOutcome {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if item_disabled(&node.props) {
+                if item_disabled(&node.props) || has_submenu(node) {
                     return MouseEventOutcome::Consume;
                 }
                 if node.props.contains_key("on-select") {
@@ -392,7 +583,7 @@ impl WidgetDefinition for MenuItemWidget {
                 color
             }
         };
-        if !disabled && super::pointer_hovered(node.widget_id) {
+        if !disabled && (super::pointer_hovered(node.widget_id) || _viewport.focused_widget_id == Some(node.widget_id) || submenu_open(node)) {
             prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: super::menu_style::row_highlight_rect(node.rect),
                 color: resolve_named_color(
@@ -408,7 +599,7 @@ impl WidgetDefinition for MenuItemWidget {
             prims.push(GpuPrimitive::ProportionalText(
                 GpuProportionalTextPrimitive {
                     row: text_row,
-                    col: node.rect.col + ITEM_PADDING_COLS,
+                    col: node.rect.col + ITEM_PADDING_COLS + if node.props.contains_key("checked") { 1.5 } else { 0.0 },
                     align_width: 0.0,
                     h_align: 0.0,
                     text: text.clone(),
@@ -422,6 +613,19 @@ impl WidgetDefinition for MenuItemWidget {
                     bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
                 },
             ));
+        }
+        let checked = matches!(node.props.get("checked"), Some(Value::Bool(true)))
+            || matches!(node.props.get("checked"), Some(Value::Number(n)) if *n > 0.5);
+        if has_submenu(node) || checked {
+            prims.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+                row: text_row,
+                col: node.rect.col + ITEM_PADDING_COLS,
+                align_width: (node.rect.width - ITEM_PADDING_COLS * 2.0).max(0.0),
+                h_align: if has_submenu(node) { 1.0 } else { 0.0 },
+                text: if has_submenu(node) { "›" } else { "✓" }.to_string(),
+                font_size, scale: 1.0,
+                fg: dim(crate::theme::DROPDOWN_FG()), bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
+            }));
         }
         if let Some(Value::String(shortcut)) = node.props.get("shortcut")
             && !shortcut.is_empty()

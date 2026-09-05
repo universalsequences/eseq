@@ -729,17 +729,17 @@ impl WidgetDefinition for Eq8EditorWidget {
         let background = resolve_named_color(
             &node.props,
             "background-color",
-            Color::rgba(0.045, 0.048, 0.052, 1.0),
+            crate::theme::EQ8_DEFAULT_BG(),
         );
         let spectrum_fill = resolve_named_color(
             &node.props,
             "spectrum-color",
-            Color::rgba(0.12, 0.58, 0.62, 0.30),
+            crate::theme::EQ8_DEFAULT_SPECTRUM(),
         );
         let spectrum_peak = resolve_named_color(
             &node.props,
             "spectrum-peak-color",
-            Color::rgba(0.42, 0.95, 0.88, 0.74),
+            crate::theme::EQ8_DEFAULT_SPECTRUM_PEAK(),
         );
         let spectrum = super::spectrogram::request_from_props(&node.props);
         let (min_hz, max_hz) =
@@ -756,7 +756,7 @@ impl WidgetDefinition for Eq8EditorWidget {
                 freq_scale: 0,
                 min_hz,
                 max_hz,
-                min_color: Color::rgba(0.03, 0.035, 0.04, 1.0),
+                min_color: crate::theme::EQ8_SPECTRUM_MIN(),
                 mid_color: spectrum_fill,
                 max_color: spectrum_peak,
                 eq_line_color: spectrum_peak,
@@ -768,18 +768,18 @@ impl WidgetDefinition for Eq8EditorWidget {
         let curve_color = resolve_named_color(
             &node.props,
             "curve-color",
-            Color::rgba(1.0, 0.58, 0.18, 1.0),
+            crate::theme::EQ8_DEFAULT_CURVE(),
         );
         let inactive_color = resolve_named_color(
             &node.props,
             "inactive-band-color",
-            Color::rgba(0.50, 0.52, 0.54, 0.72),
+            crate::theme::EQ8_INACTIVE(),
         );
         let selected_color = resolve_named_color(&node.props, "selected-color", theme::YELLOW());
         let grid_color = resolve_named_color(
             &node.props,
             "grid-color",
-            Color::rgba(0.42, 0.43, 0.45, 0.34),
+            crate::theme::EQ8_GRID(),
         );
         let sample_rate = super::get_f32_prop(&node.props, "sample-rate", DEFAULT_SAMPLE_RATE);
         let min_db = super::get_f32_prop(&node.props, "response-min-db", DEFAULT_GAIN_MIN);

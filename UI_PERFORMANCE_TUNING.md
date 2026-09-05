@@ -317,6 +317,59 @@ The important ownership boundaries discovered by this probe are:
 - item-list accumulation in Lisp must be linear (cons + reverse), never
   `append`-per-element, which is quadratic in list length.
 
+## Instrument Rack slot p-lock knob drag probe
+
+`project_92_full_layout_rack_slot_plock_knob_drag_end_to_end_perf` (eseq-lf72)
+measures a knob drag inside an Instrument Rack slot while a step is selected —
+the p-lock authoring path the sampler/instrument knob rounds above never
+covered. It runs on the cold-focus branch: project 92's track 0 is grouped
+into a one-slot sampler rack through the production
+`group_track_to_instrument_rack_recorded` primitive, step 8 is selected, and a
+continuous on-screen slot knob in the *fx* rack panel is pressed and dragged by
+real mouse events, so every update reaches `set-rack-slot-instrument-plock`
+through the real `dispatch_custom_host_command` seam. One seeding gesture
+writes the lock before measurement so the rounds time the steady state
+(tweaking an existing lock); the shared assertions then require zero ui/fx
+epoch resyncs mid-gesture. Enum params (the rack panel renders the sampler's
+`loop` mode as a knob) are excluded from target discovery because a structural
+param rebuilds the *fx* tree by policy.
+
+```sh
+cargo nextest run -p sequencer --release \
+  --run-ignored only --no-capture \
+  -E 'test(=tests::project_92_full_layout_rack_slot_plock_knob_drag_end_to_end_perf)'
+```
+
+### Rack p-lock reference timings
+
+Recorded 2026-09-03 on the developer's Apple-silicon Mac (release, 6 rounds x
+12 warm drags). The pre-fix row is the same tree with the per-event epoch
+bumps restored under `ESEQ_PROBE_BASELINE=1`.
+
+| Measure | Pre-fix | Fixed |
+| --- | ---: | ---: |
+| warm drag median | 50.1 ms | 7.7 ms |
+| cold press + first drag median | 61.7 ms | 14.4 ms |
+| mid-gesture epoch resyncs (of 78 updates) | 78 | 0 |
+
+The root cause was the rack host-command arms in `ui/host_commands/rack.rs`
+never receiving the `set-instrument-plock` policy: each p-lock arm bumped
+`fx_epoch` unconditionally per drag event (a structural *fx* root re-eval that
+rebuilds every rack slot panel), republished `SEQ.track-plocks` per event, and
+the shared `refresh_rack_direct_param_reactive` helper bumped `ui_epoch` on
+every call — so even no-selection rack knob drags paid the full epoch sync.
+The fix is `RackPlockRowsSync` in `ui/reactive_sync.rs`: only the first write
+of a lock on the displayed step (the one event that can add a *step* row or
+light the step-grid tick) republishes the row list, runs the presence sync and
+bumps `ui_epoch` once; later events repaint through the bound per-param value
+field, and `fx_epoch` moves only for structural (bool/enum, `sens`, mute/solo)
+params. Rack effect rows in `build_track_plocks_value` now carry a
+`value-field` like instrument rows so the *step* LOCK readout stays live
+without the republish. Real-handler regression tests live in
+`host_commands::rack::tests` (`RackHarness`). Still open: the
+`set-rack-slot-instrument-*-batch` arms (rack sampler start/end drags) go
+through `refresh_instrument_panel_reactive`, which bumps `ui_epoch` per event.
+
 ## Group/track selection owner-switch probe
 
 `project_92_full_layout_group_track_selection_end_to_end_perf` (eseq-4jv)

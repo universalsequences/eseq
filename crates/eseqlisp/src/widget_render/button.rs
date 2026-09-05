@@ -139,10 +139,41 @@ pub(super) fn icon_name_value(value: &str) -> Option<f32> {
         "sliders" | "controls" => Some(4.0),
         "note-arrow" | "midi-fx" => Some(5.0),
         "dial" | "preset" | "bookmark" => Some(6.0),
-        "folder" | "project" => Some(7.0),
+        "folder" => Some(7.0),
         "sine" | "lfo" => Some(8.0),
+        "drop" | "droplet" | "bubbles" | "audio-fx" => Some(9.0),
+        "document" | "project" => Some(10.0),
         _ => None,
     }
+}
+
+/// Fill for the filled (Logic-style) icon variant. `:icon-color` wins; else
+/// bound `:track-r/g/b` channels (the sequencer's per-track color) apply, so
+/// a track header's device glyph takes the track color. `None` keeps the
+/// stroke style in the button's foreground.
+fn icon_fill(props: &HashMap<String, Value>) -> Option<Color> {
+    if let Some(value) = props.get("icon-color")
+        && let Some(color) = theme::parse_color_value(value)
+    {
+        return Some(color);
+    }
+    // Track channels arrive either as literal numbers or, from
+    // `bind-seq-nth`, as reactive refs; `get_f32_prop` reads both.
+    let bound = |key: &str| {
+        matches!(
+            props.get(key),
+            Some(Value::Number(_)) | Some(Value::ReactiveRef { .. })
+        )
+    };
+    if !(bound("track-r") && bound("track-g") && bound("track-b")) {
+        return None;
+    }
+    Some(Color::rgba(
+        super::get_f32_prop(props, "track-r", 0.0),
+        super::get_f32_prop(props, "track-g", 0.0),
+        super::get_f32_prop(props, "track-b", 0.0),
+        1.0,
+    ))
 }
 
 fn icon_value(props: &HashMap<String, Value>) -> Option<f32> {
@@ -170,18 +201,26 @@ fn normalized_corner_radius(rect: Rect, viewport: super::WidgetViewport, radius_
     ((radius_px * 2.0) / px_h).clamp(0.001, 1.0)
 }
 
-fn button_icon_rect(rect: Rect) -> Rect {
-    let icon_size = rect.height.min(1.08);
+/// Square-in-pixels icon box. Cells are taller than they are wide, so a box
+/// that is `n` rows by `n` cols renders roughly half as wide as it is tall and
+/// the glyph's sides get clipped; the width is corrected by the cell aspect.
+fn button_icon_rect(rect: Rect, viewport: super::WidgetViewport) -> Rect {
+    let icon_size = rect.height.min(1.12);
+    let cell_aspect = if viewport.cell_w > 0.0 {
+        viewport.cell_h / viewport.cell_w
+    } else {
+        1.0
+    };
     Rect {
         row: rect.row + (rect.height - icon_size).max(0.0) * 0.5,
         col: rect.col + 0.56,
-        width: icon_size,
+        width: icon_size * cell_aspect.max(1.0),
         height: icon_size,
     }
 }
 
-fn button_icon_text_inset(rect: Rect) -> f32 {
-    let icon_rect = button_icon_rect(rect);
+fn button_icon_text_inset(rect: Rect, viewport: super::WidgetViewport) -> f32 {
+    let icon_rect = button_icon_rect(rect, viewport);
     (icon_rect.col - rect.col) + icon_rect.width + 0.42
 }
 
@@ -213,9 +252,23 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float aspect = in.aspect;
     float2 p = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
     float4 col = in.color_a;
+    // Glyphs are authored inside roughly +-0.62; stretch them to fill the
+    // shorter side of the box so they read at Ableton-like size.
+    p /= max(min(aspect, 1.0), 0.05) / 0.78;
+    // uniform_a.x > 0.5 selects the filled "list" style: the folder becomes a
+    // Finder-style filled silhouette in color_b, every other glyph sits in
+    // white (color_a) on a rounded color_b tile. 0 keeps the stroke style.
+    float style = in.uniform_a.x;
+    bool filled = style > 0.5;
+    // In the filled style `detail_d` carves darker cutouts (key gaps, the
+    // folder fold, a dial's face) out of the solid silhouette in `d`.
+    float detail_d = 1.0;
+    // `shade_d` darkens (rather than cuts out) part of a filled silhouette:
+    // the folder's back panel behind its lighter front panel.
+    float shade_d = 1.0;
 
     float d = 1.0;
-    float stroke = 0.070;
+    float stroke = 0.072;
     if (in.value_t < 0.5) {
         // plus
         float2 bar_v = abs(p) - float2(0.09, 0.38);
@@ -233,6 +286,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         float screen_base = length(max(screen_q, 0.0)) + min(max(screen_q.x, screen_q.y), 0.0) - 0.03;
         float screen = abs(screen_base) - 0.052;
         float pad = 1.0;
+        float pad_fill = 1.0;
         for (int ix = 0; ix < 2; ix++) {
             for (int iy = 0; iy < 2; iy++) {
                 float2 center = float2(0.08 + float(ix) * 0.20, -0.05 + float(iy) * 0.18);
@@ -240,10 +294,16 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 float pd_base = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - 0.03;
                 float pd = abs(pd_base) - 0.045;
                 pad = min(pad, pd);
+                pad_fill = min(pad_fill, pd_base);
             }
         }
         float knob = abs(length(p - float2(-0.32, 0.16)) - 0.055) - 0.045;
-        d = min(min(body, screen), min(pad, knob));
+        if (filled) {
+            d = body_base;
+            detail_d = min(screen_base, min(pad_fill, length(p - float2(-0.32, 0.16)) - 0.10));
+        } else {
+            d = min(min(body, screen), min(pad, knob));
+        }
     } else if (in.value_t < 2.5) {
         // waveform: vertical sample bars, clearer than a tiny sine curve.
         float b0 = button_icon_segment(p, float2(-0.45, -0.16), float2(-0.45, 0.16)) - stroke;
@@ -254,11 +314,20 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         float b5 = button_icon_segment(p, float2(0.52, -0.14), float2(0.52, 0.14)) - stroke;
         d = min(min(min(b0, b1), min(b2, b3)), min(b4, b5));
     } else if (in.value_t < 3.5) {
-        // piano keys: simple outline plus two dividers; avoids clutter at source-list size.
-        float body = abs(button_icon_round_rect(p, float2(0.50, 0.34), 0.055)) - stroke;
-        float div_a = button_icon_segment(p, float2(-0.16, -0.31), float2(-0.16, 0.34)) - 0.048;
-        float div_b = button_icon_segment(p, float2(0.18, -0.31), float2(0.18, 0.34)) - 0.048;
-        d = min(body, min(div_a, div_b));
+        // piano keys: outlined body, four white keys, solid black keys on the dividers.
+        float body = abs(button_icon_round_rect(p, float2(0.56, 0.36), 0.055)) - stroke;
+        float div_a = button_icon_segment(p, float2(-0.28, 0.00), float2(-0.28, 0.36)) - 0.045;
+        float div_b = button_icon_segment(p, float2(0.00, 0.00), float2(0.00, 0.36)) - 0.045;
+        float div_c = button_icon_segment(p, float2(0.28, 0.00), float2(0.28, 0.36)) - 0.045;
+        float black_a = button_icon_box(p - float2(-0.28, -0.20), float2(0.085, 0.17));
+        float black_b = button_icon_box(p - float2(0.00, -0.20), float2(0.085, 0.17));
+        float black_c = button_icon_box(p - float2(0.28, -0.20), float2(0.085, 0.17));
+        if (filled) {
+            d = button_icon_round_rect(p, float2(0.56, 0.36), 0.055);
+            detail_d = min(min(div_a, min(div_b, div_c)), min(black_a, min(black_b, black_c)));
+        } else {
+            d = min(min(body, min(div_a, min(div_b, div_c))), min(black_a, min(black_b, black_c)));
+        }
     } else if (in.value_t < 4.5) {
         // sliders
         float a = button_icon_segment(p, float2(-0.52, -0.30), float2(0.52, -0.30)) - stroke;
@@ -285,33 +354,146 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         float top = button_icon_segment(p, float2(-0.34, -0.46), float2(0.34, -0.46)) - stroke;
         float fold_a = button_icon_segment(p, float2(-0.34, 0.46), float2(0.00, 0.20)) - stroke;
         float fold_b = button_icon_segment(p, float2(0.34, 0.46), float2(0.00, 0.20)) - stroke;
-        d = min(min(left, right), min(top, min(fold_a, fold_b)));
+        if (filled) {
+            // Logic-style dial: solid rounded square, dark face, pointer notch.
+            d = button_icon_round_rect(p, float2(0.50, 0.46), 0.11);
+            float face = length(p) - 0.30;
+            float pointer = button_icon_segment(p, float2(0.0, 0.0), float2(0.0, -0.27)) - 0.05;
+            detail_d = max(face, -pointer);
+        } else {
+            d = min(min(left, right), min(top, min(fold_a, fold_b)));
+        }
     } else if (in.value_t < 7.5) {
-        // folder
-        float left = button_icon_segment(p, float2(-0.44, -0.16), float2(-0.44, 0.40)) - stroke;
-        float right = button_icon_segment(p, float2(0.50, -0.04), float2(0.50, 0.40)) - stroke;
-        float bottom = button_icon_segment(p, float2(-0.44, 0.40), float2(0.50, 0.40)) - stroke;
-        float tab_top = button_icon_segment(p, float2(-0.44, -0.32), float2(-0.12, -0.32)) - stroke;
-        float tab_side = button_icon_segment(p, float2(-0.12, -0.32), float2(0.02, -0.16)) - stroke;
-        float lip = button_icon_segment(p, float2(-0.44, -0.16), float2(0.46, -0.16)) - stroke;
-        d = min(min(left, right), min(bottom, min(tab_top, min(tab_side, lip))));
+        // folder: macOS Finder sidebar glyph, an outlined body-plus-tab
+        // silhouette with the fold line across the full width.
+        float f_body = button_icon_round_rect(p - float2(0.00, 0.06), float2(0.54, 0.36), 0.09);
+        float f_tab = button_icon_round_rect(p - float2(-0.32, -0.30), float2(0.22, 0.12), 0.07);
+        float silhouette = min(f_body, f_tab);
+        float fold = button_icon_segment(p, float2(-0.54, -0.18), float2(0.54, -0.18)) - stroke;
+        if (filled) {
+            // Finder-style: darker back panel (with the tab) behind a lighter
+            // front panel that covers the lower two thirds. No gaps.
+            d = silhouette;
+            float front = button_icon_round_rect(p - float2(0.00, 0.13), float2(0.54, 0.29), 0.08);
+            shade_d = -front;
+        } else {
+            d = min(abs(silhouette) - stroke, fold);
+        }
+    } else if (in.value_t < 8.5) {
+        // sine: one cycle sampled from a real sine at 20 short segments so
+        // the peaks stay rounded at badge size.
+        float s0 = button_icon_segment(p, float2(-0.540, 0.000), float2(-0.486, 0.117)) - stroke;
+        float s1 = button_icon_segment(p, float2(-0.486, 0.117), float2(-0.432, 0.223)) - stroke;
+        float s2 = button_icon_segment(p, float2(-0.432, 0.223), float2(-0.378, 0.307)) - stroke;
+        float s3 = button_icon_segment(p, float2(-0.378, 0.307), float2(-0.324, 0.361)) - stroke;
+        float s4 = button_icon_segment(p, float2(-0.324, 0.361), float2(-0.270, 0.380)) - stroke;
+        float s5 = button_icon_segment(p, float2(-0.270, 0.380), float2(-0.216, 0.361)) - stroke;
+        float s6 = button_icon_segment(p, float2(-0.216, 0.361), float2(-0.162, 0.307)) - stroke;
+        float s7 = button_icon_segment(p, float2(-0.162, 0.307), float2(-0.108, 0.223)) - stroke;
+        float s8 = button_icon_segment(p, float2(-0.108, 0.223), float2(-0.054, 0.117)) - stroke;
+        float s9 = button_icon_segment(p, float2(-0.054, 0.117), float2(0.000, 0.000)) - stroke;
+        float s10 = button_icon_segment(p, float2(0.000, 0.000), float2(0.054, -0.117)) - stroke;
+        float s11 = button_icon_segment(p, float2(0.054, -0.117), float2(0.108, -0.223)) - stroke;
+        float s12 = button_icon_segment(p, float2(0.108, -0.223), float2(0.162, -0.307)) - stroke;
+        float s13 = button_icon_segment(p, float2(0.162, -0.307), float2(0.216, -0.361)) - stroke;
+        float s14 = button_icon_segment(p, float2(0.216, -0.361), float2(0.270, -0.380)) - stroke;
+        float s15 = button_icon_segment(p, float2(0.270, -0.380), float2(0.324, -0.361)) - stroke;
+        float s16 = button_icon_segment(p, float2(0.324, -0.361), float2(0.378, -0.307)) - stroke;
+        float s17 = button_icon_segment(p, float2(0.378, -0.307), float2(0.432, -0.223)) - stroke;
+        float s18 = button_icon_segment(p, float2(0.432, -0.223), float2(0.486, -0.117)) - stroke;
+        float s19 = button_icon_segment(p, float2(0.486, -0.117), float2(0.540, -0.000)) - stroke;
+        d = s0;
+        d = min(d, s1);
+        d = min(d, s2);
+        d = min(d, s3);
+        d = min(d, s4);
+        d = min(d, s5);
+        d = min(d, s6);
+        d = min(d, s7);
+        d = min(d, s8);
+        d = min(d, s9);
+        d = min(d, s10);
+        d = min(d, s11);
+        d = min(d, s12);
+        d = min(d, s13);
+        d = min(d, s14);
+        d = min(d, s15);
+        d = min(d, s16);
+        d = min(d, s17);
+        d = min(d, s18);
+        d = min(d, s19);
+    } else if (in.value_t < 9.5) {
+        // drop: a single water droplet. Pointed apex at the top, round
+        // belly below; the cone between the apex and its tangent points on
+        // the belly circle joins the two exactly (30 degree half-angle for
+        // r = 0.34 at 0.68 from the apex). A short glint on the lower left.
+        float2 dq = float2(abs(p.x), p.y);
+        float2 apex = float2(0.0, -0.52);
+        float2 belly = float2(0.0, 0.16);
+        float belly_r = 0.34;
+        float cone_len = 0.589;
+        float2 cone_dir = float2(0.5, 0.866);
+        float2 cone_n = float2(0.866, -0.5);
+        float2 da = dq - apex;
+        float t = dot(da, cone_dir);
+        float drop = length(dq - belly) - belly_r;
+        if (t < 0.0) {
+            drop = length(da);
+        } else if (t < cone_len) {
+            drop = dot(da, cone_n);
+        }
+        float glint = button_icon_segment(p, float2(-0.17, 0.08), float2(-0.09, 0.28)) - 0.045;
+        if (filled) {
+            d = drop;
+            detail_d = glint;
+        } else {
+            d = min(abs(drop) - stroke, glint);
+        }
     } else {
-        // sine: one cycle traced as short segments so it stays crisp at badge size.
-        float s0 = button_icon_segment(p, float2(-0.54, 0.00), float2(-0.405, 0.24)) - stroke;
-        float s1 = button_icon_segment(p, float2(-0.405, 0.24), float2(-0.27, 0.38)) - stroke;
-        float s2 = button_icon_segment(p, float2(-0.27, 0.38), float2(-0.135, 0.24)) - stroke;
-        float s3 = button_icon_segment(p, float2(-0.135, 0.24), float2(0.00, 0.00)) - stroke;
-        float s4 = button_icon_segment(p, float2(0.00, 0.00), float2(0.135, -0.24)) - stroke;
-        float s5 = button_icon_segment(p, float2(0.135, -0.24), float2(0.27, -0.38)) - stroke;
-        float s6 = button_icon_segment(p, float2(0.27, -0.38), float2(0.405, -0.24)) - stroke;
-        float s7 = button_icon_segment(p, float2(0.405, -0.24), float2(0.54, 0.00)) - stroke;
-        d = min(min(min(s0, s1), min(s2, s3)), min(min(s4, s5), min(s6, s7)));
+        // document: Finder-style page. Portrait sheet with a folded top-right
+        // corner; the fold is a real triangle sitting inside the cut. Stroke
+        // style matches Finder's sidebar "Documents" glyph (no text lines);
+        // filled style adds two faint lines like Finder's file-list icon.
+        float2 q = p - float2(0.0, 0.0);
+        float dw = 0.34;
+        float dh = 0.46;
+        float dk = 0.26;
+        float dc = dw - dk;
+        float page = button_icon_round_rect(q, float2(dw, dh), 0.05);
+        float corner_cut = (q.x - q.y - (dw + dh - dk)) / 1.41421;
+        float sheet = max(page, corner_cut);
+        float fold_a = button_icon_segment(q, float2(dc, -dh), float2(dc, -dh + dk)) - stroke;
+        float fold_b = button_icon_segment(q, float2(dc, -dh + dk), float2(dw, -dh + dk)) - stroke;
+        float line_a = button_icon_segment(q, float2(-0.17, 0.04), float2(0.17, 0.04)) - 0.03;
+        float line_b = button_icon_segment(q, float2(-0.17, 0.20), float2(0.17, 0.20)) - 0.03;
+        if (filled) {
+            d = sheet;
+            float fold_tri = max(max(dc - q.x, q.y - (-dh + dk)), q.x - q.y - (dw + dh - dk));
+            shade_d = fold_tri;
+            detail_d = min(line_a, line_b);
+        } else {
+            float outline = abs(sheet) - stroke;
+            d = min(outline, min(fold_a, fold_b));
+        }
     }
 
     float edge = max(fwidth(d), 0.001) * 1.2;
     float mask = smoothstep(edge, -edge, d);
+    if (!filled) {
+        if (mask < 0.002) { discard_fragment(); }
+        return float4(col.rgb, col.a * mask);
+    }
+    // Filled style: solid silhouette in color_b with details cut out toward
+    // color_a (the theme's detail tone, normally near the row background).
+    float4 fill = in.color_b;
     if (mask < 0.002) { discard_fragment(); }
-    return float4(col.rgb, col.a * mask);
+    float detail_edge = max(fwidth(detail_d), 0.001) * 1.2;
+    float detail_mask = smoothstep(detail_edge, -detail_edge, detail_d);
+    float shade_edge = max(fwidth(shade_d), 0.001) * 1.2;
+    float shade_mask = smoothstep(shade_edge, -shade_edge, shade_d);
+    float3 rgb = mix(fill.rgb, fill.rgb * 0.68, shade_mask);
+    rgb = mix(rgb, col.rgb, detail_mask * col.a);
+    return float4(rgb, fill.a * mask);
 }
 "#,
     super::wgsl::BUTTON_ICON_SHADER,
@@ -436,6 +618,9 @@ impl WidgetDefinition for ButtonWidget {
             "plock-color-r",
             "plock-color-g",
             "plock-color-b",
+            "track-r",
+            "track-g",
+            "track-b",
         ]
     }
 
@@ -443,6 +628,10 @@ impl WidgetDefinition for ButtonWidget {
         &[
             "text",
             "icon",
+            "icon-color",
+            "track-r",
+            "track-g",
+            "track-b",
             "width",
             "height",
             "font-size",
@@ -668,7 +857,7 @@ impl WidgetDefinition for ButtonWidget {
         }
 
         if let Some(icon) = icon_value(&node.props) {
-            let icon_rect = button_icon_rect(node.rect);
+            let icon_rect = button_icon_rect(node.rect, viewport);
             let (ndc_min, ndc_max) = ndc_bounds(icon_rect, viewport);
             let px_w = icon_rect.width * viewport.cell_w;
             let px_h = icon_rect.height * viewport.cell_h;
@@ -680,12 +869,21 @@ impl WidgetDefinition for ButtonWidget {
                     value_t: icon,
                     orientation: 0.0,
                     itime: viewport.time_seconds,
-                    uniform_a: [0.0; 4],
+                    uniform_a: [if icon_fill(&node.props).is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                     uniform_b: [0.0; 4],
                     uniform_c: [0.0; 4],
                     uniform_d: [0.0; 4],
-                    color_a: variant_fg(&node.props).to_rgba(),
-                    color_b: [0.0; 4],
+                    color_a: if icon_fill(&node.props).is_some() {
+                        theme::LIST_ICON_DETAIL().to_rgba()
+                    } else {
+                        variant_fg(&node.props).to_rgba()
+                    },
+                    color_b: match icon_fill(&node.props) {
+                        // Follow the label's alpha so a muted track's glyph
+                        // dims with its name.
+                        Some(fill) => [fill.r, fill.g, fill.b, fill.a * variant_fg(&node.props).a],
+                        None => [0.0; 4],
+                    },
                     color_c: [0.0; 4],
                     color_d: [0.0; 4],
                     corner_radius: 0.0,
@@ -700,7 +898,7 @@ impl WidgetDefinition for ButtonWidget {
             let font_size = super::get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
             let has_icon = icon_value(&node.props).is_some();
             let text_inset = if has_icon {
-                button_icon_text_inset(node.rect)
+                button_icon_text_inset(node.rect, viewport)
             } else {
                 0.0
             };
@@ -941,6 +1139,9 @@ mod tests {
                 "plock-color-r",
                 "plock-color-g",
                 "plock-color-b",
+                "track-r",
+                "track-g",
+                "track-b",
             ]
         );
         assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"active"));
@@ -957,6 +1158,9 @@ mod tests {
             "piano",
             "sliders",
             "note-arrow",
+            "drop",
+            "bubbles",
+            "project",
             "dial",
             "folder",
             "sine",
@@ -1040,12 +1244,72 @@ mod tests {
             .expect("button should emit text");
 
         assert_eq!(text.h_align, 0.0);
-        let icon_rect = button_icon_rect(node.rect);
+        let icon_rect = button_icon_rect(node.rect, test_viewport());
         assert!(
             text.col >= icon_rect.col + icon_rect.width + 0.35,
             "icon text should start after the icon plus a visible gap: icon={icon_rect:?}, text_col={}",
             text.col
         );
+    }
+
+    #[test]
+    fn bound_track_color_fills_the_button_icon() {
+        let node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Kick".to_string())),
+            ("icon".to_string(), Value::Keyword("piano".to_string())),
+            ("track-r".to_string(), Value::Number(0.9)),
+            ("track-g".to_string(), Value::Number(0.5)),
+            ("track-b".to_string(), Value::Number(0.1)),
+        ]));
+        let prims = ButtonWidget.build_primitives("badge", &node, test_viewport());
+        let icon = prims
+            .iter()
+            .find_map(|prim| match prim {
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "button-icon" =>
+                {
+                    Some(instance)
+                }
+                _ => None,
+            })
+            .expect("badge should emit an icon");
+        assert_eq!(icon.uniform_a[0], 1.0, "track color selects the filled style");
+        assert!((icon.color_b[0] - 0.9).abs() < 1e-6 && (icon.color_b[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reactive_track_color_fills_the_badge_icon() {
+        // The sequencer header binds `:track-r/g/b` with `bind-seq-nth`, so
+        // the props hold reactive refs, not literal numbers.
+        use std::sync::{Arc, atomic::AtomicU64};
+        let channel = |field: &str, value: f64| Value::ReactiveRef {
+            namespace: "SEQ".to_string(),
+            field: field.to_string(),
+            index: Some(0),
+            kind: crate::vm::BindingKind::Float,
+            slot: Arc::new(AtomicU64::new(value.to_bits())),
+        };
+        let node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("md-snare".to_string())),
+            ("icon".to_string(), Value::Keyword("piano".to_string())),
+            ("track-r".to_string(), channel("track-color-r-effective", 0.96)),
+            ("track-g".to_string(), channel("track-color-g-effective", 0.4)),
+            ("track-b".to_string(), channel("track-color-b-effective", 0.5)),
+        ]));
+        let prims = ButtonWidget.build_primitives("badge", &node, test_viewport());
+        let icon = prims
+            .iter()
+            .find_map(|prim| match prim {
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "button-icon" =>
+                {
+                    Some(instance)
+                }
+                _ => None,
+            })
+            .expect("badge should emit an icon");
+        assert_eq!(icon.uniform_a[0], 1.0, "bound track color selects the filled style");
+        assert!((icon.color_b[0] - 0.96).abs() < 1e-6 && (icon.color_b[1] - 0.4).abs() < 1e-6);
     }
 
     #[test]

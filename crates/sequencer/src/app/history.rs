@@ -55,6 +55,9 @@ pub enum EditPatch {
     TrackDeletion(TrackDeletionPatch),
     TrackPresentation(TrackPresentationPatch),
     SceneSlot(SceneSlotPatch),
+    /// Replay under one repository lock and publish once; a Composite would
+    /// publish intermediate per-scene states while applying its children.
+    SceneSlots(Vec<SceneSlotPatch>),
     SceneStructure(SceneStructurePatch),
     Arrangement(ArrangementStructurePatch),
     BusGroupStructure(BusGroupStructurePatch),

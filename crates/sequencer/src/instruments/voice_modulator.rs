@@ -61,6 +61,15 @@ const IDX_SAMPLER_TRACK_IDX: usize = IDX_CUSTOM_VOICE_IDX + 1;
 const IDX_SAMPLER_VOICE_IDX: usize = IDX_SAMPLER_TRACK_IDX + 1;
 const IDX_TRANSPORT_CLOCK_SOURCE: usize = IDX_SAMPLER_VOICE_IDX + 1;
 const IDX_EVENT_SLICE_START: usize = IDX_TRANSPORT_CLOCK_SOURCE + 1;
+/// The transport only reports a phase *within* the bar, so multi-bar sync
+/// divisions need the bar wraps counted here: `IDX_BAR_COUNT` advances every
+/// time the bar phase wraps while the clock is advancing, and resets with the
+/// mod reset counter (transport start / bar resync). Every process call
+/// advances it, including the idle early returns, so a voice that sat silent
+/// for a few bars counts the same wraps as one that kept sounding.
+const IDX_PREV_BAR_PHASE: usize = IDX_EVENT_SLICE_START + 1;
+const IDX_BAR_COUNT: usize = IDX_PREV_BAR_PHASE + 1;
+const _: () = assert!(IDX_BAR_COUNT < PARAM_SLOT_BASE);
 
 pub const PARAM_SLOT_BASE: usize = 64;
 pub const PARAM_SLOT_STRIDE: usize = 18;
@@ -638,9 +647,96 @@ fn transport_bar_phase_for_frame(base_phase: f32, phase_inc: f32, frame: usize) 
     normalize_phase(base_phase + phase_inc * frame as f32)
 }
 
-fn synced_phase_from_bar_phase(div_idx: usize, bar_phase: f32) -> f32 {
+/// Where one block reads its transport clock from: the per-frame input buses
+/// when the node is input-clocked, else the block-start params extrapolated
+/// by the event-slice offset.
+struct BlockTransportClock {
+    phase_in: *const f32,
+    phase_inc_in: *const f32,
+    param_phase: f32,
+    param_phase_inc: f32,
+    event_slice_start: usize,
+}
+
+impl BlockTransportClock {
+    /// `(bar phase, clock advancing)` for frame `i` of the block.
+    unsafe fn frame(&self, i: usize) -> (f32, bool) {
+        let phase = if !self.phase_in.is_null() {
+            normalize_phase(*self.phase_in.add(i))
+        } else {
+            transport_bar_phase_for_frame(
+                self.param_phase,
+                self.param_phase_inc,
+                self.event_slice_start + i,
+            )
+        };
+        let advancing = if !self.phase_inc_in.is_null() {
+            *self.phase_inc_in.add(i) > 0.0
+        } else {
+            self.param_phase_inc > 0.0
+        };
+        (phase, advancing)
+    }
+}
+
+/// Running bar counter behind `IDX_PREV_BAR_PHASE` / `IDX_BAR_COUNT`.
+#[derive(Clone, Copy)]
+struct BarTracker {
+    prev_bar_phase: f32,
+    bar_count: f32,
+}
+
+impl BarTracker {
+    unsafe fn load(s: *const f32) -> Self {
+        Self {
+            prev_bar_phase: *s.add(IDX_PREV_BAR_PHASE),
+            bar_count: *s.add(IDX_BAR_COUNT),
+        }
+    }
+
+    unsafe fn store(&self, s: *mut f32) {
+        *s.add(IDX_PREV_BAR_PHASE) = self.prev_bar_phase;
+        *s.add(IDX_BAR_COUNT) = self.bar_count;
+    }
+
+    /// A mod resync lands at a bar line, but the host clock's wrap and the
+    /// scheduler's bar change are not sample-aligned: the reset frame may sit
+    /// just before the wrap (phase near 1) or just after it (phase near 0).
+    /// Latching the reset frame's phase stops the stale pre-reset phase from
+    /// reading as a wrap, and a reset that arrives ahead of the wrap starts
+    /// at -1 so the imminent wrap lands on bar 0 instead of bar 1.
+    fn reset(&mut self, bar_phase: f32) {
+        self.prev_bar_phase = bar_phase;
+        self.bar_count = if bar_phase > 0.5 { -1.0 } else { 0.0 };
+    }
+
+    fn note_frame(&mut self, bar_phase: f32, clock_advancing: bool) {
+        if clock_advancing && bar_phase < self.prev_bar_phase - 0.5 {
+            self.bar_count += 1.0;
+        }
+        self.prev_bar_phase = bar_phase;
+    }
+
+    /// Count the wraps of a block this node does not render.
+    unsafe fn skip_block(&mut self, clock: &BlockTransportClock, nf: usize) {
+        for i in 0..nf {
+            let (phase, advancing) = clock.frame(i);
+            self.note_frame(phase, advancing);
+        }
+    }
+}
+
+/// Cycle phase for a synced division. Divisions up to one bar derive it from
+/// the bar phase alone; longer ones fold the running bar count in, so a
+/// 4-bar LFO no longer restarts at every bar line.
+fn synced_phase_from_bar_phase(div_idx: usize, bar_phase: f32, bar_count: f32) -> f32 {
     let beats = SyncDivision::from_index(div_idx).to_beats() as f32;
-    normalize_phase(normalize_phase(bar_phase) * 4.0 / beats.max(0.0001))
+    let cycle_bars = beats / 4.0;
+    if cycle_bars <= 1.0 {
+        return normalize_phase(normalize_phase(bar_phase) * 4.0 / beats.max(0.0001));
+    }
+    let bar_in_cycle = bar_count.max(0.0).rem_euclid(cycle_bars);
+    normalize_phase((bar_in_cycle + normalize_phase(bar_phase)) / cycle_bars)
 }
 
 fn sync_division_index(division: SyncDivision) -> f32 {
@@ -1004,6 +1100,8 @@ unsafe fn init_identity(s: *mut f32, initial_state: *const c_void) {
     *s.add(IDX_SAMPLER_VOICE_IDX) = UNBOUND_CUSTOM_ENGINE;
     *s.add(IDX_TRANSPORT_CLOCK_SOURCE) = TRANSPORT_CLOCK_SOURCE_PARAMS;
     *s.add(IDX_EVENT_SLICE_START) = 0.0;
+    *s.add(IDX_PREV_BAR_PHASE) = 0.0;
+    *s.add(IDX_BAR_COUNT) = 0.0;
 
     if initial_state.is_null() {
         return;
@@ -1285,6 +1383,7 @@ unsafe fn render_slot(
     bpm: f32,
     transport_bar_phase: f32,
     transport_clock_advancing: bool,
+    bar_count: f32,
 ) -> f32 {
     if source == SOURCE_OFF {
         return 0.0;
@@ -1312,6 +1411,7 @@ unsafe fn render_slot(
                 let bar_derived = synced_phase_from_bar_phase(
                     (*s.add(slot_param_idx(slot, PARAM_LFO_DIV))).round() as usize,
                     transport_bar_phase,
+                    bar_count,
                 );
                 phase = if *s.add(slot_param_idx(slot, PARAM_LFO_RETRIGGER)) > 0.5 {
                     if note_on {
@@ -1468,15 +1568,6 @@ unsafe extern "C" fn voice_modulator_process(
     let s = state as *mut f32;
 
     let custom_identity = custom_engine_identity(s);
-    if let Some((engine_id, voice_idx)) = custom_identity {
-        let enabled = crate::lisp_host::get_dgen_engine_enabled_voices(engine_id);
-        if voice_idx >= enabled {
-            record_disabled_custom_skip(engine_id, nf);
-            clear_outputs(out, nf);
-            publish_slot_display_values(s, out, nf);
-            return;
-        }
-    }
     let sampler_identity = sampler_identity(s);
 
     let gate_in = *inp.add(INPUT_GATE);
@@ -1491,25 +1582,30 @@ unsafe extern "C" fn voice_modulator_process(
     ];
 
     let mut prev_gate = *s.add(IDX_PREV_GATE);
-    if let Some((track_idx, voice_idx)) = sampler_identity {
-        let sampler_active = sampler_voice_is_active(track_idx, voice_idx);
-        if !sampler_active && !gate_timeline_has_activity(gate_in, trigger_in, nf, prev_gate) {
-            record_disabled_sampler_skip(track_idx, nf);
-            clear_outputs(out, nf);
-            publish_slot_display_values(s, out, nf);
-            return;
-        }
-    }
-
     let mut last_reset_counter = *s.add(IDX_LAST_RESET_COUNTER);
     let sample_rate = (*s.add(IDX_SAMPLE_RATE)).max(1.0);
     let bpm = (*s.add(PARAM_BPM)).clamp(20.0, 400.0);
     let reset_counter = *s.add(PARAM_RESET_COUNTER);
     let transport_clock_source = *s.add(IDX_TRANSPORT_CLOCK_SOURCE);
-    let param_transport_bar_phase = *s.add(PARAM_TRANSPORT_BAR_PHASE);
-    let param_transport_bar_phase_inc = *s.add(PARAM_TRANSPORT_BAR_PHASE_INC);
-    let event_slice_start = (*s.add(IDX_EVENT_SLICE_START)).max(0.0) as usize;
+    let clock = BlockTransportClock {
+        phase_in: if transport_clock_source > 0.5 {
+            transport_bar_phase_in
+        } else {
+            std::ptr::null()
+        },
+        phase_inc_in: if transport_clock_source > 0.5 {
+            transport_bar_phase_inc_in
+        } else {
+            std::ptr::null()
+        },
+        param_phase: *s.add(PARAM_TRANSPORT_BAR_PHASE),
+        param_phase_inc: *s.add(PARAM_TRANSPORT_BAR_PHASE_INC),
+        event_slice_start: (*s.add(IDX_EVENT_SLICE_START)).max(0.0) as usize,
+    };
+    let mut bars = BarTracker::load(s);
 
+    // The reset and the bar counter run before every early return so idle
+    // blocks still count the bar wraps that pass through them.
     if reset_counter != last_reset_counter {
         for slot in 0..SLOT_COUNT {
             *s.add(slot_state_idx(slot, IDX_LFO_PHASE)) = 0.0;
@@ -1523,7 +1619,38 @@ unsafe extern "C" fn voice_modulator_process(
             *s.add(slot_state_idx(slot, IDX_RAND_SMOOTH)) = 0.0;
             *s.add(slot_state_idx(slot, IDX_ENV_STAGE)) = ENV_STAGE_IDLE;
         }
+        if nf > 0 {
+            bars.reset(clock.frame(0).0);
+        } else {
+            bars.reset(0.0);
+        }
         last_reset_counter = reset_counter;
+    }
+
+    if let Some((engine_id, voice_idx)) = custom_identity {
+        let enabled = crate::lisp_host::get_dgen_engine_enabled_voices(engine_id);
+        if voice_idx >= enabled {
+            record_disabled_custom_skip(engine_id, nf);
+            clear_outputs(out, nf);
+            publish_slot_display_values(s, out, nf);
+            bars.skip_block(&clock, nf);
+            bars.store(s);
+            *s.add(IDX_LAST_RESET_COUNTER) = last_reset_counter;
+            return;
+        }
+    }
+
+    if let Some((track_idx, voice_idx)) = sampler_identity {
+        let sampler_active = sampler_voice_is_active(track_idx, voice_idx);
+        if !sampler_active && !gate_timeline_has_activity(gate_in, trigger_in, nf, prev_gate) {
+            record_disabled_sampler_skip(track_idx, nf);
+            clear_outputs(out, nf);
+            publish_slot_display_values(s, out, nf);
+            bars.skip_block(&clock, nf);
+            bars.store(s);
+            *s.add(IDX_LAST_RESET_COUNTER) = last_reset_counter;
+            return;
+        }
     }
 
     let slot_sources = [
@@ -1543,6 +1670,8 @@ unsafe extern "C" fn voice_modulator_process(
         if nf > 0 && !gate_in.is_null() {
             *s.add(IDX_PREV_GATE) = (*gate_in.add(nf - 1)).clamp(0.0, 1.0);
         }
+        bars.skip_block(&clock, nf);
+        bars.store(s);
         *s.add(IDX_LAST_RESET_COUNTER) = last_reset_counter;
         return;
     }
@@ -1558,6 +1687,10 @@ unsafe extern "C" fn voice_modulator_process(
     for i in 0..nf {
         let gate = (*gate_in.add(i)).clamp(0.0, 1.0);
         let trigger = (*trigger_in.add(i)).max(0.0);
+        // Bar wraps are counted before the not-yet-started skip below, so a
+        // sampler voice waiting for its first gate stays on the bar grid.
+        let (transport_bar_phase, transport_clock_advancing) = clock.frame(i);
+        bars.note_frame(transport_bar_phase, transport_clock_advancing);
         if !sampler_voice_started && gate <= 0.5 && trigger <= 0.5 {
             clear_output_frame(out, i);
             prev_gate = gate;
@@ -1567,22 +1700,6 @@ unsafe extern "C" fn voice_modulator_process(
             sampler_voice_started = true;
         }
         let note_on = (gate > 0.5 && prev_gate <= 0.5) || trigger > 0.5;
-        let transport_bar_phase =
-            if transport_clock_source > 0.5 && !transport_bar_phase_in.is_null() {
-                normalize_phase(*transport_bar_phase_in.add(i))
-            } else {
-                transport_bar_phase_for_frame(
-                    param_transport_bar_phase,
-                    param_transport_bar_phase_inc,
-                    event_slice_start + i,
-                )
-            };
-        let transport_clock_advancing =
-            if transport_clock_source > 0.5 && !transport_bar_phase_inc_in.is_null() {
-                *transport_bar_phase_inc_in.add(i) > 0.0
-            } else {
-                param_transport_bar_phase_inc > 0.0
-            };
 
         for (slot, source) in slot_sources.iter().copied().enumerate() {
             if source == SOURCE_OFF {
@@ -1601,6 +1718,7 @@ unsafe extern "C" fn voice_modulator_process(
                 bpm,
                 transport_bar_phase,
                 transport_clock_advancing,
+                bars.bar_count,
             );
         }
 
@@ -1608,6 +1726,7 @@ unsafe extern "C" fn voice_modulator_process(
     }
 
     *s.add(IDX_PREV_GATE) = prev_gate;
+    bars.store(s);
     *s.add(IDX_LAST_RESET_COUNTER) = last_reset_counter;
     publish_slot_display_values(s, out, nf);
 }
@@ -2431,6 +2550,151 @@ mod tests {
         let _ = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
         assert_eq!(state[STATE_DISPLAY_SLOT_PHASE], DISPLAY_PHASE_NONE);
     }
+
+    /// Input-clocked block with a fixed gate: the bar phase input is the
+    /// caller's ramp, the increment says the clock is advancing.
+    fn run_input_clocked_synced_block(
+        state: &mut [f32; STATE_SIZE],
+        bar: [f32; 64],
+        gate: f32,
+    ) -> [f32; 64] {
+        let gate_in = [gate; 64];
+        let pitch = [440.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let zeros = [0.0f32; 64];
+        let inc = [1.0 / 640.0f32; 64];
+        let mut outs = [[0.0f32; 64]; NUM_OUTPUTS];
+        let inputs = [
+            gate_in.as_ptr() as *mut f32,
+            pitch.as_ptr() as *mut f32,
+            velocity.as_ptr() as *mut f32,
+            zeros.as_ptr() as *mut f32,
+            zeros.as_ptr() as *mut f32,
+            zeros.as_ptr() as *mut f32,
+            zeros.as_ptr() as *mut f32,
+            zeros.as_ptr() as *mut f32,
+            bar.as_ptr() as *mut f32,
+            inc.as_ptr() as *mut f32,
+        ];
+        let mut out_ptrs = [std::ptr::null_mut::<f32>(); NUM_OUTPUTS];
+        for (slot, out) in outs.iter_mut().enumerate() {
+            out_ptrs[slot] = out.as_mut_ptr();
+        }
+        unsafe {
+            voice_modulator_process(
+                inputs.as_ptr(),
+                out_ptrs.as_ptr(),
+                64,
+                state.as_mut_ptr().cast(),
+                std::ptr::null_mut(),
+            );
+        }
+        outs[0]
+    }
+
+    /// One bar = 640 frames = 10 blocks; block `block` of that ramp.
+    fn bar_phase_block(block: usize) -> [f32; 64] {
+        let mut bar = [0.0f32; 64];
+        for (i, v) in bar.iter_mut().enumerate() {
+            *v = (block * 64 + i) as f32 / 640.0;
+        }
+        bar
+    }
+
+    fn input_clocked_synced_saw_state(division: SyncDivision) -> [f32; STATE_SIZE] {
+        let mut state = init_state();
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(division);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[IDX_TRANSPORT_CLOCK_SOURCE] = TRANSPORT_CLOCK_SOURCE_INPUT;
+        state
+    }
+
+    /// A mod resync is deferred to the bar line, so the frame before the reset
+    /// sits near phase 1 and the frame after it near phase 0. That step must
+    /// not read as a bar wrap: a freshly resynced 4-bar LFO starts at 0, not
+    /// a quarter of the way through its cycle.
+    #[test]
+    fn mod_reset_does_not_count_the_stale_pre_reset_phase_as_a_bar_wrap() {
+        let mut state = input_clocked_synced_saw_state(SyncDivision::FourBars);
+        // Run to the end of a bar so the latched phase is near 1.
+        for block in 0..10 {
+            let _ = run_input_clocked_synced_block(&mut state, bar_phase_block(block), 1.0);
+        }
+        state[PARAM_RESET_COUNTER] = 1.0;
+        let out = run_input_clocked_synced_block(&mut state, bar_phase_block(0), 1.0);
+        assert!(out[0] < 0.01, "resynced 4-bar LFO should start at 0, got {}", out[0]);
+        assert_eq!(state[IDX_BAR_COUNT], 0.0);
+    }
+
+    /// The scheduler's bar change and the host clock's wrap are not
+    /// sample-aligned: when the reset lands a few frames *before* the wrap,
+    /// the wrap that follows is the start of bar 0, not bar 1.
+    #[test]
+    fn mod_reset_just_before_the_bar_wrap_starts_at_bar_zero() {
+        let mut state = input_clocked_synced_saw_state(SyncDivision::FourBars);
+        for block in 0..9 {
+            let _ = run_input_clocked_synced_block(&mut state, bar_phase_block(block), 1.0);
+        }
+        // Reset lands at the top of a block that wraps half way through.
+        let mut bar = [0.0f32; 64];
+        for (i, v) in bar.iter_mut().enumerate() {
+            *v = ((9 * 64 + 32 + i) as f32 / 640.0).fract();
+        }
+        state[PARAM_RESET_COUNTER] = 1.0;
+        let out = run_input_clocked_synced_block(&mut state, bar, 1.0);
+        assert!(out[32] < 0.01, "bar 0 should begin at the wrap, got {}", out[32]);
+        assert_eq!(state[IDX_BAR_COUNT], 0.0);
+    }
+
+    /// Blocks a node skips (every source Off here, the idle sampler / disabled
+    /// custom voice returns take the same path) still count their bar wraps,
+    /// so a 2-bar LFO that becomes audible in bar 1 renders bar 1, not bar 0.
+    #[test]
+    fn skipped_blocks_still_count_bar_wraps() {
+        let mut state = input_clocked_synced_saw_state(SyncDivision::TwoBars);
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        let live_source = state[slot_source_param_idx(0)];
+        state[slot_source_param_idx(0)] = SOURCE_OFF as f32;
+        for slot in 1..SLOT_COUNT {
+            state[slot_source_param_idx(slot)] = SOURCE_OFF as f32;
+        }
+        // Bar 0 passes entirely through the all-off early return.
+        for block in 0..10 {
+            let out = run_input_clocked_synced_block(&mut state, bar_phase_block(block), 1.0);
+            assert!(out.iter().all(|v| *v == 0.0));
+        }
+        // Bar 1 begins: the wrap from block 9 to block 0 must be on record.
+        state[slot_source_param_idx(0)] = live_source;
+        let out = run_input_clocked_synced_block(&mut state, bar_phase_block(0), 1.0);
+        assert_eq!(state[IDX_BAR_COUNT], 1.0);
+        assert!(
+            (out[0] - 0.5).abs() < 0.02,
+            "second bar of a 2-bar cycle should start half way, got {}",
+            out[0]
+        );
+    }
+
+    /// A sampler voice waiting for its first gate skips rendering frame by
+    /// frame; those frames still count bar wraps.
+    #[test]
+    fn sampler_voice_waiting_for_its_gate_still_counts_bar_wraps() {
+        let mut state = init_sampler_voice_state(0, 0);
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(SyncDivision::TwoBars);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[IDX_TRANSPORT_CLOCK_SOURCE] = TRANSPORT_CLOCK_SOURCE_INPUT;
+        // The voice is marked active so the block is rendered, but the gate
+        // stays low: every frame takes the not-yet-started skip.
+        SAMPLER_ACTIVE_MASKS[0].fetch_or(1, Ordering::AcqRel);
+        for block in 0..10 {
+            let _ = run_input_clocked_synced_block(&mut state, bar_phase_block(block), 0.0);
+        }
+        // Bar 1 begins: the wrap back to block 0 is the one to count.
+        let _ = run_input_clocked_synced_block(&mut state, bar_phase_block(0), 0.0);
+        SAMPLER_ACTIVE_MASKS[0].fetch_and(!1, Ordering::AcqRel);
+        assert_eq!(state[IDX_BAR_COUNT], 1.0);
+    }
 }
 #[cfg(test)]
 mod retrigger_tests {
@@ -2556,5 +2820,74 @@ mod retrigger_tests {
         state[slot_param_idx(0, PARAM_LFO_RETRIGGER)] = 0.0;
         let relocked = run(&mut state, gate_on);
         assert!((relocked[0][0] - 0.6).abs() < 1e-3, "re-locked, got {}", relocked[0][0]);
+    }
+
+    /// A synced division longer than a bar must not restart at every bar
+    /// line: the modulator counts bar wraps so a 2-bar cycle spans two bars.
+    #[test]
+    fn multi_bar_sync_division_spans_bars_without_restarting() {
+        let mut state = [0.0f32; STATE_SIZE];
+        unsafe {
+            voice_modulator_init(state.as_mut_ptr().cast(), 48_000, 64, std::ptr::null());
+        }
+        state[slot_param_idx(0, PARAM_LFO_SYNC)] = 1.0;
+        state[slot_param_idx(0, PARAM_LFO_DIV)] = sync_division_index(SyncDivision::TwoBars);
+        state[slot_param_idx(0, PARAM_LFO_SHAPE)] = SHAPE_SAW as f32;
+        state[IDX_TRANSPORT_CLOCK_SOURCE] = TRANSPORT_CLOCK_SOURCE_INPUT;
+        let pitch = [440.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let zeros = [0.0f32; 64];
+        let gate_on = [1.0f32; 64];
+        let inc = [1.0 / 640.0f32; 64];
+        let run = |state: &mut [f32; STATE_SIZE], bar: [f32; 64]| {
+            let mut outs = [[0.0f32; 64]; NUM_OUTPUTS];
+            let inputs = [
+                gate_on.as_ptr() as *mut f32,
+                pitch.as_ptr() as *mut f32,
+                velocity.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                zeros.as_ptr() as *mut f32,
+                bar.as_ptr() as *mut f32,
+                inc.as_ptr() as *mut f32,
+            ];
+            let mut out_ptrs = [std::ptr::null_mut::<f32>(); NUM_OUTPUTS];
+            for (slot, out) in outs.iter_mut().enumerate() {
+                out_ptrs[slot] = out.as_mut_ptr();
+            }
+            unsafe {
+                voice_modulator_process(
+                    inputs.as_ptr(),
+                    out_ptrs.as_ptr(),
+                    64,
+                    state.as_mut_ptr().cast(),
+                    std::ptr::null_mut(),
+                );
+            }
+            outs[0]
+        };
+        // Two bars, each 640 frames = 10 blocks of a ramping bar phase.
+        let mut trace = Vec::new();
+        for _bar in 0..2 {
+            for block in 0..10 {
+                let mut bar = [0.0f32; 64];
+                for (i, v) in bar.iter_mut().enumerate() {
+                    *v = (block * 64 + i) as f32 / 640.0;
+                }
+                trace.extend_from_slice(&run(&mut state, bar));
+            }
+        }
+        // Saw rises monotonically across both bars: no drop at the bar line.
+        let bar_line = 640;
+        assert!(
+            trace[bar_line] > trace[bar_line - 1] - 0.01,
+            "phase reset at the bar line: {} -> {}",
+            trace[bar_line - 1],
+            trace[bar_line]
+        );
+        assert!((trace[bar_line] - 0.5).abs() < 0.02, "half way at bar 2, got {}", trace[bar_line]);
+        assert!(trace[1279] > 0.95, "end of the 2-bar cycle, got {}", trace[1279]);
     }
 }

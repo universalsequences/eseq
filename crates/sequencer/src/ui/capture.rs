@@ -158,6 +158,8 @@ struct CaptureTrackSpec {
 #[derive(Debug, Clone, PartialEq)]
 struct CaptureProjectSpec {
     tracks: Vec<CaptureTrackSpec>,
+    /// Source track, destination track, zero-based external modulation input.
+    mod_routes: Vec<(usize, usize, usize)>,
     /// How many scenes the project should have. The headless capture project
     /// starts with one; `(scenes N)` clones the first N-1 more so a fixture
     /// can define a song that actually CHANGES scene.
@@ -246,8 +248,27 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
         return Err("capture-project must be a list".to_string());
     };
     let mut tracks = Vec::new();
+    let mut mod_routes = Vec::new();
     let mut scenes = 1usize;
     for (index, expression) in items.iter().skip(1).enumerate() {
+        if expression_name(expression_head_item(expression)) == Some("mod-route") {
+            let Expression::List(items) = expression else { unreachable!() };
+            let error = "(mod-route SOURCE TRACK INPUT) expects three non-negative integers";
+            if items.len() != 4 {
+                return Err(error.to_string());
+            }
+            let mut indices = [0; 3];
+            for (index, item) in items.iter().skip(1).enumerate() {
+                let Expression::Number(value) = item else { return Err(error.to_string()) };
+                if !value.is_finite() || *value < 0.0 || value.fract() != 0.0
+                    || *value >= usize::MAX as f64 {
+                    return Err(error.to_string());
+                }
+                indices[index] = *value as usize;
+            }
+            mod_routes.push((indices[0], indices[1], indices[2]));
+            continue;
+        }
         if expression_name(expression_head_item(expression)) == Some("scenes") {
             let Expression::List(items) = expression else {
                 unreachable!("head matched, so this is a list");
@@ -264,7 +285,13 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
                 .map_err(|error| format!("capture-project track {}: {error}", index + 1))?,
         );
     }
-    Ok(CaptureProjectSpec { tracks, scenes })
+    for &(source, dest, input) in &mod_routes {
+        if source >= tracks.len() || dest >= tracks.len() || source == dest
+            || input >= sequencer::sequencer::EXT_MOD_INPUT_COUNT {
+            return Err(format!("invalid modulation route {source} -> {dest} input {input}"));
+        }
+    }
+    Ok(CaptureProjectSpec { tracks, mod_routes, scenes })
 }
 
 /// The head item of a list expression, for dispatching `capture-project`
@@ -622,6 +649,11 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
             &app.tracks,
             &app.graph.track_instrument_types,
         );
+    }
+    for &(source, dest, input) in &project.mod_routes {
+        app.graph_controller().set_mod_route_to_destination(
+            source, sequencer::sequencer::ModDestination::Track(dest), input,
+        ).map_err(|error| format!("capture modulation route {source} -> {dest}: {error}"))?;
     }
     Ok(())
 }
@@ -1015,6 +1047,12 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 
+    // capture-after-sync may apply a theme after the initial project sync.
+    // Mirror the live loop's display-color refresh before rendering.
+    sync_track_color_state(editor.runtime_mut(), &app, &state);
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
     let buffer_id = editor
         .buffers
         .iter()
@@ -1053,6 +1091,20 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_modulation_routes_and_rejects_invalid_endpoints() {
+        let source = |route: &str| format!(
+            "(capture-project (track :sampler) (track :modulator) {route})"
+        );
+        let parsed = parse_capture_source(&source("(mod-route 1 0 0)")).unwrap();
+        assert_eq!(parsed.project.mod_routes, vec![(1, 0, 0)]);
+        for route in ["(mod-route 0 0 0)", "(mod-route 2 0 0)", "(mod-route 1 2 0)",
+            "(mod-route 1 0 4)", "(mod-route -1 0 0)", "(mod-route 1.5 0 0)",
+            "(mod-route 1 0)"] {
+            assert!(parse_capture_source(&source(route)).is_err(), "{route}");
+        }
+    }
 
     #[test]
     fn parses_project_tracks_and_preserves_non_project_source() {

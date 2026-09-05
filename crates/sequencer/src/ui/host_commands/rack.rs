@@ -491,7 +491,8 @@ pub(super) fn handle(
                                     param_idx: param,
                                 },
                                 &selected_steps,
-                                false,
+                                RackPlockRowsSync::Unchanged,
+                                &ctx.shared.expanded_step_projection,
                                 &ui_epoch,
                             );
                         }
@@ -522,6 +523,14 @@ pub(super) fn handle(
                 ) => {
                     let steps: Vec<usize> =
                         selected_steps.lock().unwrap().iter().copied().collect();
+                    let plock_row_existed = rack_slot_effect_plock_exists(
+                        &state,
+                        track,
+                        rack_slot,
+                        effect_slot,
+                        param,
+                        displayed_plock_step(&state, track, selected_plock_step(&selected_steps)),
+                    );
                     let outcome = app::try_apply_command(
                         &mut app,
                         app::AppCommand::SetRackSlotEffectPlockMulti {
@@ -541,6 +550,9 @@ pub(super) fn handle(
                         )));
                     } else {
                         ctx.gesture.rack_control_snapshot_dirty = true;
+                        // Structural params (bool/enum) rebuild the panel;
+                        // a continuous lock drag repaints through its bound
+                        // value field and never bumps `fx_epoch` (eseq-lf72).
                         if rack_slot_effect_param_needs_panel_rebuild(
                             &state,
                             track,
@@ -556,6 +568,7 @@ pub(super) fn handle(
                                 &selected_steps,
                             );
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
                         } else {
                             refresh_rack_direct_param_reactive(
                                 &mut editor,
@@ -568,11 +581,11 @@ pub(super) fn handle(
                                     param_idx: param,
                                 },
                                 &selected_steps,
-                                true,
+                                RackPlockRowsSync::for_plock_write(plock_row_existed),
+                                &ctx.shared.expanded_step_projection,
                                 &ui_epoch,
                             );
                         }
-                        fx_epoch.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 _ => editor.handle_host_event(HostEvent::Status(
@@ -882,7 +895,8 @@ pub(super) fn handle(
                             param: RackSlotParam::Gain,
                         },
                         &selected_steps,
-                        false,
+                        RackPlockRowsSync::Unchanged,
+                        &ctx.shared.expanded_step_projection,
                         &ui_epoch,
                     );
                 }
@@ -925,7 +939,8 @@ pub(super) fn handle(
                             param: RackSlotParam::Pan,
                         },
                         &selected_steps,
-                        false,
+                        RackPlockRowsSync::Unchanged,
+                        &ctx.shared.expanded_step_projection,
                         &ui_epoch,
                     );
                 }
@@ -970,7 +985,8 @@ pub(super) fn handle(
                             param: RackSlotParam::Mute,
                         },
                         &selected_steps,
-                        false,
+                        RackPlockRowsSync::Unchanged,
+                        &ctx.shared.expanded_step_projection,
                         &ui_epoch,
                     );
                     // The rack panel's pad/slot dicts carry mute as a
@@ -1022,7 +1038,8 @@ pub(super) fn handle(
                             param: RackSlotParam::Solo,
                         },
                         &selected_steps,
-                        false,
+                        RackPlockRowsSync::Unchanged,
+                        &ctx.shared.expanded_step_projection,
                         &ui_epoch,
                     );
                     sync_rack_slot_instrument_authoring_display(
@@ -1071,7 +1088,8 @@ pub(super) fn handle(
                             param: RackSlotParam::MaxPolyphony,
                         },
                         &selected_steps,
-                        false,
+                        RackPlockRowsSync::Unchanged,
+                        &ctx.shared.expanded_step_projection,
                         &ui_epoch,
                     );
                 }
@@ -1103,7 +1121,8 @@ pub(super) fn handle(
                             param: RackSlotParam::BaseNote,
                         },
                         &selected_steps,
-                        false,
+                        RackPlockRowsSync::Unchanged,
+                        &ctx.shared.expanded_step_projection,
                         &ui_epoch,
                     );
                 }
@@ -1157,6 +1176,13 @@ pub(super) fn handle(
                 {
                     let steps: Vec<usize> =
                         selected_steps.lock().unwrap().iter().copied().collect();
+                    let plock_row_existed = rack_slot_snapshot_for_host(&state, track, slot_idx)
+                        .zip(displayed_plock_step(
+                            &state,
+                            track,
+                            selected_plock_step(&selected_steps),
+                        ))
+                        .is_some_and(|(slot, step)| slot.param_plocks.get(step, param).is_some());
                     app::apply_command(
                         &mut app,
                         app::AppCommand::SetRackSlotParamPlockMulti {
@@ -1175,10 +1201,17 @@ pub(super) fn handle(
                         track,
                         RackDirectDisplayTarget::SlotParam { slot_idx, param },
                         &selected_steps,
-                        true,
+                        RackPlockRowsSync::for_plock_write(plock_row_existed),
+                        &ctx.shared.expanded_step_projection,
                         &ui_epoch,
                     );
-                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                    // Mute/solo flip the slot header's structure; gain, pan,
+                    // base-note and polyphony are plain readouts bound to
+                    // `rack_slot_value_field` and must not rebuild *fx* per
+                    // drag event (eseq-lf72).
+                    if matches!(param, RackSlotParam::Mute | RackSlotParam::Solo) {
+                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -1207,7 +1240,6 @@ pub(super) fn handle(
                     &state,
                     &selected_steps,
                     &ui_epoch,
-                    &fx_epoch,
                 );
             }
         }
@@ -1242,7 +1274,6 @@ pub(super) fn handle(
                     &state,
                     &selected_steps,
                     &ui_epoch,
-                    &fx_epoch,
                 );
             }
         }
@@ -1546,7 +1577,8 @@ pub(super) fn handle(
                                         param_idx,
                                     },
                                     &selected_steps,
-                                    false,
+                                    RackPlockRowsSync::Unchanged,
+                                    &ctx.shared.expanded_step_projection,
                                     &ui_epoch,
                                 );
                             }
@@ -1573,6 +1605,14 @@ pub(super) fn handle(
                         {
                             let stored =
                                 desc.clamp(desc.user_input_to_stored(user_val));
+                            let plock_row_existed = displayed_plock_step(
+                                &state,
+                                track,
+                                selected_plock_step(&selected_steps),
+                            )
+                            .is_some_and(|step| {
+                                rack_slot_instrument_plock_exists(&slot, step, param_idx)
+                            });
                             let steps: Vec<usize> = selected_steps
                                 .lock()
                                 .unwrap()
@@ -1590,6 +1630,12 @@ pub(super) fn handle(
                                 },
                             );
                             ctx.gesture.rack_control_snapshot_dirty = true;
+                            // Same policy as `set-instrument-plock`: only a
+                            // structural param (bool/enum) rebuilds the *fx*
+                            // tree. A continuous p-lock drag is covered by
+                            // the bound value field; bumping `fx_epoch` per
+                            // event rebuilt every rack slot panel per mouse
+                            // move (eseq-lf72).
                             if param_change_needs_fx_rebuild(&desc) {
                                 sync_rack_slot_instrument_authoring_display(
                                     &mut editor,
@@ -1599,6 +1645,7 @@ pub(super) fn handle(
                                     &selected_steps,
                                 );
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
                             } else {
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
@@ -1610,11 +1657,11 @@ pub(super) fn handle(
                                         param_idx,
                                     },
                                     &selected_steps,
-                                    true,
+                                    RackPlockRowsSync::for_plock_write(plock_row_existed),
+                                    &ctx.shared.expanded_step_projection,
                                     &ui_epoch,
                                 );
                             }
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -2026,4 +2073,397 @@ fn rack_slot_effect_print_value(
             )
         })
         .map(|param| param.clamp(value))
+}
+
+/// Whether the displayed step already carries a p-lock on `param_idx` of a
+/// rack slot's instrument. Decides whether a lock write can change the *step*
+/// row set (first write) or is a later drag event of an existing lock.
+fn rack_slot_instrument_plock_exists(
+    slot: &sequencer::sequencer::RackSlotSnapshot,
+    step: usize,
+    param_idx: usize,
+) -> bool {
+    slot.instrument_slot
+        .plocks
+        .get(step)
+        .and_then(|row| row.get(param_idx))
+        .copied()
+        .flatten()
+        .is_some()
+}
+
+/// Rack-slot effect counterpart of [`rack_slot_instrument_plock_exists`].
+fn rack_slot_effect_plock_exists(
+    state: &Arc<SequencerState>,
+    track: usize,
+    rack_slot: usize,
+    effect_slot: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+) -> bool {
+    let Some(step) = display_step else {
+        return false;
+    };
+    state
+        .pattern
+        .rack_tracks
+        .lock()
+        .unwrap()
+        .get(track)
+        .and_then(Option::as_ref)
+        .and_then(|rack| rack.slots.get(rack_slot))
+        .and_then(|slot| slot.effect_slots.get(effect_slot))
+        .and_then(|effect| effect.plocks.get(step))
+        .and_then(|row| row.get(param_idx))
+        .copied()
+        .flatten()
+        .is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::{BTreeSet, HashSet};
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    const TRACK: usize = 0;
+    const SLOT: usize = 0;
+    const STEP: usize = 3;
+    /// builtin sampler param 0 = `attack`, continuous.
+    const PARAM: usize = 0;
+
+    fn number_payload(entries: &[(&str, f64)]) -> Value {
+        Value::Map(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        (*key).to_string(),
+                        Rc::new(RefCell::new(Value::Number(*value))),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn reactive_number(editor: &Editor, field: &str) -> f64 {
+        match editor.runtime().reactive_field_value("SEQ", field) {
+            Some(Value::Number(n)) => *n,
+            other => panic!("SEQ.{field} should be a number, got {other:?}"),
+        }
+    }
+
+    /// One-track app whose track 0 is a one-slot sampler Instrument Rack,
+    /// plus the real `SharedHandles`/`LoopCtx` seam, so tests drive the
+    /// production `dispatch_custom_host_command` path rather than a helper.
+    struct RackHarness {
+        state: Arc<sequencer::sequencer::SequencerState>,
+        app: app::App,
+        editor: Editor,
+        shared: SharedHandles,
+        sessions: EditSessionState,
+        frame: FrameDiffState,
+        gesture: GestureState,
+        meters: MeterCache,
+        track_names: Vec<String>,
+    }
+
+    impl RackHarness {
+        fn new(selected_steps: HashSet<usize>) -> Self {
+            let state = Arc::new(sequencer::sequencer::SequencerState::new(
+                1,
+                vec![sequencer::sequencer::default_empty_effect_chain()],
+            ));
+            let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+            let mut app = app::App::new(
+                state.clone(),
+                sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+                44_100,
+                app::AudioBuses {
+                    bus_l_id: 0,
+                    bus_r_id: 0,
+                    default_bus_nodes: Vec::new(),
+                    bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                    reverb_bus_id: 0,
+                    reverb_node_id: 0,
+                },
+                Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+                keyboard_tx.clone(),
+            );
+            app.tracks = vec!["Track 1".to_string()];
+            app.track_registry =
+                sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+
+            let sampler_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
+            state.set_rack_track_for_all_pattern_snapshots(
+                TRACK,
+                sequencer::sequencer::RackTrackSnapshot::new(
+                    vec![sequencer::sequencer::RackSlotSnapshot {
+                        instrument_type: sequencer::sequencer::InstrumentType::Sampler,
+                        instrument_run_mode:
+                            sequencer::sequencer::CustomInstrumentRunMode::Instrument,
+                        instrument_base_note_offset: 0.0,
+                        choke_group: None,
+                        gain: 1.0,
+                        pan: 0.0,
+                        mute: false,
+                        solo: false,
+                        max_polyphony: 8,
+                        param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
+                        instrument_slot:
+                            sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(
+                                &sampler_descriptor,
+                                46,
+                                0,
+                            ),
+                        effect_slots: sequencer::sequencer::RackSlotSnapshot::empty_effect_slots(),
+                        effect_descriptors:
+                            sequencer::effects::EffectDescriptor::default_full_chain(),
+                        custom_effect_names:
+                            sequencer::sequencer::RackSlotSnapshot::empty_effect_names(),
+                        track_sound_state: sequencer::sequencer::TrackSoundState::default(),
+                        sample_id: Some((1, "test.wav".to_string(), 44_100)),
+                    }],
+                    sequencer::sequencer::default_rack_macros(),
+                ),
+            );
+
+            let mut runtime = Runtime::new();
+            runtime.register_reactive("SEQ", Vec::new(), true);
+            let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
+            // Seed the per-step compact-grid render bindings the way a full
+            // `ui_epoch` sync would for a step with no p-locks.
+            {
+                let rt = editor.runtime_mut();
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_plock_kind_field(TRACK, STEP),
+                    Value::Number(0.0),
+                );
+            }
+
+            let sample_db = Rc::new(
+                sequencer::sample_db::SampleDb::open_in_memory()
+                    .expect("open in-memory sample db"),
+            );
+            let shared = SharedHandles {
+                state: state.clone(),
+                lg_raw: std::ptr::null_mut(),
+                current_track: Arc::new(AtomicUsize::new(TRACK)),
+                selected_tracks: Arc::new(Mutex::new(HashSet::new())),
+                selected_steps: Arc::new(Mutex::new(selected_steps)),
+                selected_neural_neurons: Arc::new(Mutex::new(BTreeSet::new())),
+                piano_roll_selection: Arc::new(Mutex::new(HashSet::new())),
+                piano_roll_move_state: Arc::new(Mutex::new(None)),
+                piano_roll_focus: super::super::super::new_shared_piano_roll_focus(),
+                step_clipboard: Arc::new(Mutex::new(None)),
+                ui_epoch: Arc::new(AtomicUsize::new(0)),
+                fx_epoch: Arc::new(AtomicUsize::new(0)),
+                fx_value_epoch: Arc::new(AtomicUsize::new(0)),
+                ui_invalidations: Arc::new(UiInvalidationQueue::new()),
+                expanded_step_projection: Arc::new(ExpandedStepProjectionRegistry::new()),
+                active_delete_target: Arc::new(Mutex::new(None)),
+                active_delete_target_version: Arc::new(AtomicUsize::new(0)),
+                auto_follow_override_until: Arc::new(Mutex::new(None)),
+                track_pan_ids: Arc::new(Mutex::new(Vec::new())),
+                track_collapsed: Arc::new(Mutex::new(app.track_collapsed.clone())),
+                bus_state: Arc::new(Mutex::new(app.buses.clone())),
+                bus_node_ids: Arc::new(Mutex::new(app.graph.bus_node_ids.clone())),
+                track_groups: Arc::new(Mutex::new(app.groups.clone())),
+                record_armed: Arc::new(Mutex::new(vec![false])),
+                armed_rack: Arc::new(Mutex::new(None)),
+                recording: Arc::new(AtomicBool::new(false)),
+                master_recording: Arc::new(AtomicBool::new(false)),
+                held_notes: Arc::new(Mutex::new(Vec::new())),
+                roll_record: Arc::new(Mutex::new(RollRecordBuffer::default())),
+                step_print: Arc::new(Mutex::new(StepPrintState::default())),
+                keyboard_octave: Arc::new(AtomicI32::new(0)),
+                sample_browser: Rc::new(RefCell::new(DebouncedSampleBrowser::new(
+                    sample_db,
+                    Duration::from_millis(100),
+                ))),
+                keyboard_tx,
+                accumulator_names: Arc::new(Mutex::new(Vec::new())),
+                piano_roll_clipboard: super::super::super::new_piano_roll_clipboard(),
+                arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
+            };
+            let meters = MeterCache {
+                cached_peak_l_level: 0.0,
+                cached_peak_r_level: 0.0,
+                cached_track_peak_levels: vec![0.0],
+                cached_rack_slot_peak_levels: Vec::new(),
+                cached_bus_peak_levels: Vec::new(),
+                cached_modulator_phases: Vec::new(),
+                cached_modulator_levels: Vec::new(),
+                cached_mod_display_values: Default::default(),
+                watched_display_modulators: std::collections::HashSet::new(),
+                mod_display_poll_fx_epoch: usize::MAX,
+                mod_display_poll_track: None,
+                cached_cpu_load_bits: 0.0f32.to_bits(),
+                last_meter_poll_at: Instant::now(),
+                last_cpu_ui_poll_at: Instant::now(),
+                last_neural_visualization_poll_at: Instant::now(),
+                visualization_liveness: VisualizationLiveness::default(),
+                last_voice_count_log_at: Instant::now(),
+            };
+            Self {
+                state,
+                app,
+                editor,
+                shared,
+                sessions: EditSessionState::default(),
+                frame: FrameDiffState::default(),
+                gesture: GestureState::default(),
+                meters,
+                track_names: vec!["Track 1".to_string()],
+            }
+        }
+
+        fn dispatch(&mut self, name: &str, payload: Value) {
+            let mut ctx = LoopCtx {
+                sessions: &mut self.sessions,
+                meters: &mut self.meters,
+                frame: &mut self.frame,
+                gesture: &mut self.gesture,
+                track_names: &mut self.track_names,
+                shared: &self.shared,
+            };
+            dispatch_custom_host_command(name, payload, &mut self.app, &mut self.editor, &mut ctx);
+        }
+
+        fn epochs(&self) -> (usize, usize) {
+            (
+                self.shared.ui_epoch.load(Ordering::Relaxed),
+                self.shared.fx_epoch.load(Ordering::Relaxed),
+            )
+        }
+
+        fn slot_plock(&self, step: usize, param_idx: usize) -> Option<f32> {
+            rack_slot_snapshot_for_host(&self.state, TRACK, SLOT)
+                .and_then(|slot| slot.instrument_slot.plocks.get(step).cloned())
+                .and_then(|row| row.get(param_idx).copied().flatten())
+        }
+
+        fn slot_param_payload(user_value: f64) -> Value {
+            number_payload(&[
+                ("track", TRACK as f64),
+                ("slot", SLOT as f64),
+                ("param-idx", PARAM as f64),
+                ("value", user_value),
+            ])
+        }
+    }
+
+    /// A continuous rack-slot knob drag with a step selected (eseq-lf72).
+    /// Only the FIRST write of the lock may run the epoch-driven resync (it
+    /// adds a *step* row and lights the step-grid tick); every later drag
+    /// event must repaint through the bound value field alone — the per-event
+    /// `fx_epoch` bump rebuilt every rack slot panel per mouse move. Drives
+    /// the real `dispatch_custom_host_command` -> `rack::handle` seam.
+    #[test]
+    fn rack_slot_instrument_plock_drag_resyncs_once_then_repaints_through_value_fields() {
+        let mut h = RackHarness::new(HashSet::from([STEP]));
+        let descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let param = descriptor.params[PARAM].clone();
+        assert!(
+            matches!(param.kind, sequencer::effects::ParamKind::Continuous { .. }),
+            "the probe param must be continuous"
+        );
+        let value_field = rack_slot_instrument_param_value_field(TRACK, SLOT, PARAM, &param.name);
+
+        // First drag event: creates the lock.
+        let before = h.epochs();
+        h.dispatch("set-rack-slot-instrument-plock", RackHarness::slot_param_payload(0.42));
+        let expected = param.clamp(param.user_input_to_stored(0.42));
+        assert_eq!(
+            h.slot_plock(STEP, PARAM),
+            Some(expected),
+            "the handler must write the rack-slot instrument p-lock"
+        );
+        let after_first = h.epochs();
+        assert_eq!(
+            after_first.1, before.1,
+            "a continuous p-lock write must never bump fx_epoch (that rebuilds the whole *fx* rack panel)"
+        );
+        assert_eq!(
+            after_first.0,
+            before.0 + 1,
+            "the first write of a lock runs the epoch-driven resync exactly once"
+        );
+        assert_ne!(
+            reactive_number(&h.editor, &track_step_plock_kind_field(TRACK, STEP)),
+            0.0,
+            "the first lock write must light the compact grid's p-lock tick itself"
+        );
+        assert!(
+            matches!(
+                h.editor
+                    .runtime()
+                    .reactive_field_value("SEQ", &track_step_plocked_field(TRACK, STEP)),
+                Some(Value::Bool(true))
+            ),
+            "the per-step p-lock presence bool must be published by the first write"
+        );
+        assert_eq!(
+            reactive_number(&h.editor, &value_field),
+            param.stored_to_user(expected) as f64,
+            "the rack knob's bound value field must follow the write"
+        );
+
+        // Later drag events of the same gesture: value-field only.
+        for (i, user_value) in [0.5f64, 0.61, 0.33].into_iter().enumerate() {
+            let before = h.epochs();
+            h.dispatch(
+                "set-rack-slot-instrument-plock",
+                RackHarness::slot_param_payload(user_value),
+            );
+            let expected = param.clamp(param.user_input_to_stored(user_value as f32));
+            assert_eq!(h.slot_plock(STEP, PARAM), Some(expected), "drag event {i}");
+            assert_eq!(
+                h.epochs(),
+                before,
+                "drag event {i} of an existing lock must not bump ui_epoch or fx_epoch"
+            );
+            assert_eq!(
+                reactive_number(&h.editor, &value_field),
+                param.stored_to_user(expected) as f64,
+                "drag event {i}: the bound value field carries the repaint"
+            );
+        }
+    }
+
+    /// The no-selection base-value drag on a rack slot knob went through the
+    /// same helper, whose unconditional `ui_epoch` bump resynced the whole UI
+    /// per drag event.
+    #[test]
+    fn rack_slot_instrument_param_drag_never_bumps_epochs() {
+        let mut h = RackHarness::new(HashSet::new());
+        let descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let param = descriptor.params[PARAM].clone();
+        let value_field = rack_slot_instrument_param_value_field(TRACK, SLOT, PARAM, &param.name);
+        for user_value in [0.42f64, 0.5, 0.61] {
+            let before = h.epochs();
+            h.dispatch(
+                "set-rack-slot-instrument-param",
+                RackHarness::slot_param_payload(user_value),
+            );
+            let expected = param.clamp(param.user_input_to_stored(user_value as f32));
+            let stored = rack_slot_snapshot_for_host(&h.state, TRACK, SLOT)
+                .and_then(|slot| slot.instrument_slot.defaults.get(PARAM).copied());
+            assert_eq!(stored, Some(expected), "the handler must write the slot base value");
+            assert_eq!(
+                h.epochs(),
+                before,
+                "a continuous base-value drag must not bump ui_epoch or fx_epoch"
+            );
+            assert_eq!(
+                reactive_number(&h.editor, &value_field),
+                param.stored_to_user(expected) as f64
+            );
+        }
+    }
 }

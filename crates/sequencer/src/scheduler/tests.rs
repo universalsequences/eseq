@@ -403,6 +403,40 @@
         );
     }
 
+    /// An inactive step on an Instrument Rack track gets a `RackParams`
+    /// event only when the rack has a p-lock there or a rack-macro print
+    /// latch is held for the track.
+    #[test]
+    fn rack_off_step_needs_a_lock_or_a_print_latch() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        let mut macros = crate::sequencer::default_rack_macros();
+        macros[2].plocks[6] = Some(0.5);
+        state.set_rack_track_for_all_pattern_snapshots(
+            0,
+            crate::sequencer::RackTrackSnapshot::new(Vec::new(), macros),
+        );
+        let snapshot = state.publish_scheduler_snapshot();
+
+        assert!(super::lookahead::rack_off_step_has_params(&state, &snapshot, 0, 6));
+        assert!(!super::lookahead::rack_off_step_has_params(&state, &snapshot, 0, 5));
+        assert!(
+            !super::lookahead::rack_off_step_has_params(&state, &snapshot, 1, 6),
+            "track 1 is not a rack"
+        );
+
+        state.rack_macro_print_override.set(0, &[(0, 0.7)]);
+        assert!(super::lookahead::rack_off_step_has_params(&state, &snapshot, 0, 5));
+        assert!(
+            !super::lookahead::rack_off_step_has_params(&state, &snapshot, 1, 5),
+            "the latch is per track"
+        );
+        state.rack_macro_print_override.clear();
+        assert!(!super::lookahead::rack_off_step_has_params(&state, &snapshot, 0, 5));
+    }
+
     #[test]
     fn process_write_targets_stable_rack_macro_without_mutating_rack_state() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
@@ -2419,7 +2453,8 @@
                     }),
                 }),
                 ScheduledEventKind::EffectParams { .. }
-                | ScheduledEventKind::InstrumentParams { .. } => {}
+                | ScheduledEventKind::InstrumentParams { .. }
+                | ScheduledEventKind::RackParams { .. } => {}
             }
         }
         out.sort_by_key(|event| {
@@ -4419,17 +4454,26 @@
         std::thread::Builder::new()
             .name("scheduler-routing-harness".to_string())
             .stack_size(super::SCHEDULER_THREAD_STACK_SIZE)
-            .spawn(scheduler_lookahead_routes_lisp_graph_seed_and_propagation_through_midi_fx_body)
+            .spawn(|| scheduler_lookahead_routes_lisp_graph_seed_and_propagation_through_midi_fx_body(0.0))
             .expect("spawn scheduler routing harness")
             .join()
             .expect("scheduler routing harness panicked");
     }
 
-    fn scheduler_lookahead_routes_lisp_graph_seed_and_propagation_through_midi_fx_body() {
+    #[test]
+    fn scene_transpose_routes_graph_and_midi_fx_exactly_once() {
+        run_with_scheduler_stack(|| {
+            scheduler_lookahead_routes_lisp_graph_seed_and_propagation_through_midi_fx_body(-9.0);
+        });
+    }
+
+    fn scheduler_lookahead_routes_lisp_graph_seed_and_propagation_through_midi_fx_body(transpose: f64) {
         let state = Arc::new(SequencerState::new(
             5,
             (0..5).map(|_| default_empty_effect_chain()).collect(),
         ));
+        state.write_current_scene_slot(crate::sequencer::SCENE_TRANSPOSE_SLOT,
+            crate::process::ProcessLiteral::Number(transpose)).unwrap();
         state.toggle_play();
         state.toggle_step_and_clear_plocks(0, 0);
         state.toggle_step_and_clear_plocks(0, 4);
@@ -4578,7 +4622,7 @@
                 event.kind == ScheduledTriggerKind::Step
                     && event.track == 0
                     && event.sample_time == 0
-                    && event.transpose == 7.0
+                    && event.transpose == 7.0 + transpose as f32
             }),
             "source seed step should be scheduled: {events:#?}"
         );
@@ -4587,7 +4631,7 @@
                 event.kind == ScheduledTriggerKind::Step
                     && event.track == 2
                     && event.sample_time == 0
-                    && event.transpose == 7.0
+                    && event.transpose == 7.0 + transpose as f32
                     && event.has_speed_param
             }),
             "seed step should route through trigger-to-track to target track with target params: {events:#?}"
@@ -4602,7 +4646,7 @@
         );
         assert!(
             target_networks.iter().all(|event| {
-                event.transpose == 7.0
+                event.transpose == 7.0 + transpose as f32
                     && event.duration == 0.25
                     && event.sampler_speed == Some(2.5)
                     && event.has_speed_param
@@ -5254,6 +5298,28 @@
         assert_eq!(params.slice_mode, 1.0);
         assert_eq!(params.slice_sensitivity, 0.8);
         assert!(params.start_point_locked);
+        assert!(!params.end_point_locked);
+    }
+
+    #[test]
+    fn sampler_slice_mode_survives_an_attack_plock() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[track].apply_descriptor_with_modulator(&desc, 12, 13);
+        let slot = &state.pattern.instrument_slots[track];
+        slot.defaults
+            .set(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 1.0);
+        slot.set_plock(step, 0, 25.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut params = resolve_sampler_params(&snapshot, track, step);
+        let inst = super::resolve_instrument_params(&snapshot, track, step, None);
+        super::apply_sampler_instrument_param_overrides(&snapshot, track, &mut params, &inst);
+        assert_eq!(params.attack_ms, 25.0);
+        assert_eq!(params.slice_mode, 1.0);
+        assert!(!params.start_point_locked);
         assert!(!params.end_point_locked);
     }
 
@@ -9660,4 +9726,52 @@ fn scheduler_process_param_lookup_aliases_pre_namespacing_names(
     assert_eq!(lookup("index"), None);
     // Legacy `:tag`/`@role` references keep their first-match behavior.
     assert_eq!(lookup(":attack"), Some(0));
+}
+
+#[test]
+fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
+    run_with_scheduler_stack(|| {
+        use crate::sequencer::{SceneSlotStore, SCENE_TRANSPOSE_SLOT};
+        let state = Arc::new(SequencerState::new(2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()]));
+        state.pattern.track_params[1].set_global_transpose(false);
+        for track in 0..2 {
+            for step in 0..16 {
+                state.toggle_step_and_clear_plocks(track, step);
+                state.set_step_param(track, step, StepParam::Transpose, 7.0);
+            }
+        }
+        state.toggle_play();
+        let published = state.publish_scheduler_snapshot();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        let mut scheduled_until = 0;
+        // Two scenes, then a live write to scene 1, then reset. Keep the same
+        // scheduler running; deliberately leave the snapshot's frozen slots empty.
+        for (scene, semitones) in [(0, -9.0), (1, 12.0), (1, -5.0), (0, 0.0)] {
+            let mut slots = SceneSlotStore::default();
+            slots.write_literal(SCENE_TRANSPOSE_SLOT,
+                crate::process::ProcessLiteral::Number(semitones)).unwrap();
+            let mut snapshot = (*published).clone();
+            snapshot.transport.current_pattern = scene;
+            let mut table = vec![Arc::new(SceneSlotStore::default()); 2];
+            table[scene] = Arc::new(slots);
+            snapshot.scene_slot_table = Arc::new(table);
+            let snapshot = Arc::new(snapshot);
+            let queue = ScheduledEventQueue::<128>::new();
+            let live = std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let result = schedule_playing_lookahead(
+                &mut scheduler, &state, &snapshot, &queue, &mut None, &live,
+                snapshot.transport.pattern_epoch, scheduled_until, 24_000, 24_000,
+                6_000, 24_000.0, scheduled_until, false, false);
+            scheduled_until = result.scheduled_until_sample;
+            let events = observed_triggers(&queue);
+            for track in 0..2 {
+                let notes: Vec<_> = events.iter().filter(|event| event.track == track).collect();
+                assert!(!notes.is_empty());
+                let expected = 7.0 + if track == 0 { semitones as f32 } else { 0.0 };
+                assert!(notes.iter().all(|event| event.transpose == expected), "{notes:?}");
+            }
+            assert_eq!(state.pattern.step_data[0].get(0, StepParam::Transpose), 7.0);
+        }
+    });
 }

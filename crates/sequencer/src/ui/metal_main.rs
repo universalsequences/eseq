@@ -82,6 +82,7 @@ mod edit_sessions;
 mod history_commands;
 mod event_loop;
 mod loop_ctx;
+mod midi_dispatch;
 mod scroll_inertia;
 mod reactive_tick;
 mod reactive_sync;
@@ -91,6 +92,7 @@ use edit_sessions::*;
 use history_commands::*;
 use event_loop::*;
 use loop_ctx::*;
+use midi_dispatch::*;
 use reactive_tick::*;
 use reactive_sync::*;
 

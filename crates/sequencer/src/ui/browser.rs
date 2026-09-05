@@ -136,6 +136,13 @@ pub(crate) fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
                     "label".to_string(),
                     Rc::new(RefCell::new(Value::String(item.label.clone()))),
                 );
+                // Category groups read as folders; sample leaves get the
+                // waveform glyph so search results are not bare text.
+                let icon = if item.children.is_empty() { "waveform" } else { "folder" };
+                map.insert(
+                    "icon".to_string(),
+                    Rc::new(RefCell::new(Value::Keyword(icon.to_string()))),
+                );
                 if !item.children.is_empty() {
                     map.insert(
                         "children".to_string(),
@@ -639,11 +646,26 @@ fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
                         "icon".to_string(),
                         Rc::new(RefCell::new(Value::Keyword("piano".to_string()))),
                     );
-                } else if let Some(folder) = &item.folder {
-                    map.insert(
-                        "folder".to_string(),
-                        Rc::new(RefCell::new(Value::String(folder.clone()))),
-                    );
+                } else if item.folder.is_some() || !item.children.is_empty() {
+                    // Factory folders have no movable folder id (see
+                    // `clear_instrument_folder_ids`) but are still folders:
+                    // they keep the kind and icon, only the drop id is absent.
+                    // Without an id the row is not a drop target either, so
+                    // the tree never resolves a drop onto it.
+                    match &item.folder {
+                        Some(folder) => {
+                            map.insert(
+                                "folder".to_string(),
+                                Rc::new(RefCell::new(Value::String(folder.clone()))),
+                            );
+                        }
+                        None => {
+                            map.insert(
+                                "drop-target".to_string(),
+                                Rc::new(RefCell::new(Value::Bool(false))),
+                            );
+                        }
+                    }
                     map.insert(
                         "kind".to_string(),
                         Rc::new(RefCell::new(Value::String("folder".to_string()))),
@@ -763,15 +785,50 @@ fn project_engine_nodes(engine_names: &[String]) -> Vec<InstrumentTreeNode> {
         .collect()
 }
 
-pub(crate) fn build_instrument_tree_value(query: &str, project_engines: &[String]) -> Value {
-    let query_lower = query.trim().to_lowercase();
-    let mut top = Vec::new();
-    for root in sequencer::app_paths::app_paths().instrument_dirs() {
-        top.extend(build_instrument_tree_nodes(&root, &root));
+/// Which saved-instrument tier the browser shows. `""` shows both.
+/// `"factory"` is the shipped tree, `"user"` the user's library.
+fn instrument_origin_visible(origin_filter: &str, origin: &str) -> bool {
+    origin_filter.is_empty() || origin_filter == origin
+}
+
+/// Factory folders cannot receive a move: `move-saved-instrument` only writes
+/// the user tier, so a folder id on a factory node would promise a move that
+/// fails. Clearing the id also makes `instrument_tree_nodes_to_value` mark
+/// the row `drop-target false`, so the tree refuses the drop outright.
+fn clear_instrument_folder_ids(items: &mut [InstrumentTreeNode]) {
+    for item in items {
+        item.folder = None;
+        clear_instrument_folder_ids(&mut item.children);
     }
-    let custom = list_items(instrument_tree_nodes_to_value(
-        &filter_instrument_tree_nodes(&top, &query_lower),
-    ));
+}
+
+pub(crate) fn build_instrument_tree_value(
+    query: &str,
+    project_engines: &[String],
+    origin_filter: &str,
+) -> Value {
+    let query_lower = query.trim().to_lowercase();
+    let paths = sequencer::app_paths::app_paths();
+    let tier_items = |root: std::path::PathBuf, movable: bool| {
+        let mut nodes = build_instrument_tree_nodes(&root, &root);
+        if !movable {
+            clear_instrument_folder_ids(&mut nodes);
+        }
+        list_items(instrument_tree_nodes_to_value(&filter_instrument_tree_nodes(
+            &nodes,
+            &query_lower,
+        )))
+    };
+    let factory = if instrument_origin_visible(origin_filter, "factory") {
+        tier_items(paths.instruments_dir(), false)
+    } else {
+        Vec::new()
+    };
+    let library = if instrument_origin_visible(origin_filter, "user") {
+        tier_items(paths.user_instruments_dir(), true)
+    } else {
+        Vec::new()
+    };
     let builtin = builtin_instrument_values(&query_lower);
     let engines = list_items(instrument_tree_nodes_to_value(
         &filter_instrument_tree_nodes(&project_engine_nodes(project_engines), &query_lower),
@@ -781,11 +838,13 @@ pub(crate) fn build_instrument_tree_value(query: &str, project_engines: &[String
     if query_lower.is_empty() {
         append_tree_section(&mut items, "Built-in", builtin);
         append_tree_section(&mut items, "Engines", engines);
-        append_tree_section(&mut items, "Library", custom);
+        append_tree_section(&mut items, "Factory", factory);
+        append_tree_section(&mut items, "Library", library);
     } else {
         items.extend(builtin);
         items.extend(engines);
-        items.extend(custom);
+        items.extend(factory);
+        items.extend(library);
     }
     list_value(items)
 }
@@ -900,10 +959,18 @@ fn script_tree_nodes_to_value(items: &[ScriptTreeNode]) -> Value {
                         "kind".to_string(),
                         Rc::new(RefCell::new(Value::String("script".to_string()))),
                     );
+                    map.insert(
+                        "icon".to_string(),
+                        Rc::new(RefCell::new(Value::Keyword("sine".to_string()))),
+                    );
                 } else {
                     map.insert(
                         "kind".to_string(),
                         Rc::new(RefCell::new(Value::String("folder".to_string()))),
+                    );
+                    map.insert(
+                        "icon".to_string(),
+                        Rc::new(RefCell::new(Value::Keyword("folder".to_string()))),
                     );
                 }
                 if !item.children.is_empty() {
@@ -997,6 +1064,7 @@ pub(crate) fn build_project_tree(query: &str) -> Value {
     list_value(items.into_iter().map(|item| {
         map_value([
             ("label", Value::String(item.name)),
+            ("icon", Value::Keyword("project".to_string())),
             (
                 "detail",
                 Value::String(format_project_recency(item.modified_at)),
@@ -1079,10 +1147,16 @@ pub(crate) fn build_preset_tree_from_list(items_value: Option<&Value>, query: &s
 }
 
 fn effect_leaf(label: String, kind: &'static str) -> Value {
+    let icon = if kind == "midi-effect" {
+        "note-arrow"
+    } else {
+        "drop"
+    };
     map_value([
         ("label", Value::String(label.clone())),
         ("name", Value::String(label)),
         ("kind", Value::String(kind.to_string())),
+        ("icon", Value::Keyword(icon.to_string())),
     ])
 }
 
@@ -1311,6 +1385,7 @@ mod tests {
         let tree = build_instrument_tree_value(
             "",
             &["drums/3d-drum/".to_string(), "drums/3d-drum/".to_string()],
+            "",
         );
         let labels = top_level_tree_labels(&tree);
 
@@ -1327,6 +1402,60 @@ mod tests {
             ]
         );
         assert_eq!(labels.iter().filter(|label| *label == "3d-drum").count(), 1);
+    }
+
+    #[test]
+    fn instrument_tree_origin_filter_hides_the_other_tier() {
+        let labels_for = |origin: &str| top_level_tree_labels(&build_instrument_tree_value("", &[], origin));
+        let both = labels_for("");
+        let factory_only = labels_for("factory");
+        let library_only = labels_for("user");
+
+        assert!(both.iter().any(|label| label == "Factory"));
+        assert!(factory_only.iter().any(|label| label == "Factory"));
+        assert!(!factory_only.iter().any(|label| label == "Library"));
+        assert!(!library_only.iter().any(|label| label == "Factory"));
+        // Built-ins are not a tier: the filter never hides them.
+        for labels in [&both, &factory_only, &library_only] {
+            assert_eq!(labels[0], "Built-in");
+        }
+    }
+
+    #[test]
+    fn instrument_tree_factory_folders_keep_icon_without_folder_id() {
+        let mut nodes = vec![InstrumentTreeNode {
+            label: "Drums".to_string(),
+            name: None,
+            folder: Some("Drums".to_string()),
+            children: vec![InstrumentTreeNode {
+                label: "Kick".to_string(),
+                name: Some("Drums/Kick/".to_string()),
+                folder: None,
+                children: Vec::new(),
+            }],
+        }];
+        clear_instrument_folder_ids(&mut nodes);
+        let Value::List(items) = instrument_tree_nodes_to_value(&nodes) else {
+            panic!("instrument tree should be a list");
+        };
+        let folder = items[0].borrow();
+        let Value::Map(folder) = &*folder else {
+            panic!("folder should be a map");
+        };
+        assert!(folder.get("folder").is_none());
+        assert_eq!(
+            folder.get("drop-target").map(|value| value.borrow().clone()),
+            Some(Value::Bool(false)),
+            "a folder without a movable id must not accept drops"
+        );
+        assert_eq!(
+            folder.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::String("folder".to_string()))
+        );
+        assert_eq!(
+            folder.get("icon").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("folder".to_string()))
+        );
     }
 
     #[test]
@@ -1393,6 +1522,18 @@ mod tests {
     fn audio_effect_tree_omits_empty_custom_header() {
         let tree = build_audio_effect_tree_from_names("", vec!["EQ8".to_string()], Vec::new());
         assert_eq!(top_level_tree_labels(&tree), vec!["Built-in", "EQ8"]);
+    }
+
+    #[test]
+    fn effect_leaves_carry_browser_icons() {
+        let audio = effect_leaf("EQ8".to_string(), "builtin-audio-effect");
+        let midi = effect_leaf("Arp".to_string(), "midi-effect");
+        let icon = |value: &Value| match value {
+            Value::Map(map) => map.get("icon").map(|value| value.borrow().clone()),
+            _ => None,
+        };
+        assert_eq!(icon(&audio), Some(Value::Keyword("drop".to_string())));
+        assert_eq!(icon(&midi), Some(Value::Keyword("note-arrow".to_string())));
     }
 
     #[test]

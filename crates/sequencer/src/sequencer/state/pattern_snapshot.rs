@@ -71,6 +71,45 @@ impl RackTrackSnapshot {
         self.runtime_macro_track = track;
     }
 
+    /// True when anything in this rack carries a p-lock at `step`: a macro,
+    /// a slot param (gain/pan/…), a slot instrument param, or a slot effect
+    /// param. Decides whether an inactive step is worth a `RackParams`
+    /// scheduled event.
+    pub fn step_has_plocks(&self, step: usize) -> bool {
+        if self
+            .macros
+            .iter()
+            .any(|rack_macro| rack_macro.plocks.get(step).copied().flatten().is_some())
+        {
+            return true;
+        }
+        self.slots.iter().any(|slot| {
+            slot.param_plocks
+                .rows
+                .get(step)
+                .is_some_and(|row| row.iter().any(Option::is_some))
+                || slot
+                    .instrument_slot
+                    .plocks
+                    .get(step)
+                    .is_some_and(|row| row.iter().any(Option::is_some))
+                || slot.effect_slots.iter().any(|effect| {
+                    effect
+                        .plocks
+                        .get(step)
+                        .is_some_and(|row| row.iter().any(Option::is_some))
+                })
+        })
+    }
+
+    /// The macro's current knob position (no p-lock), from the runtime
+    /// atomics the control thread updates on every turn.
+    pub(crate) fn runtime_macro_default(&self, id: RackMacroId) -> Option<f32> {
+        self.runtime_macro_values
+            .as_ref()
+            .and_then(|values| values.default_value(self.runtime_macro_track, id))
+    }
+
     pub(crate) fn runtime_macro_value_at(&self, id: RackMacroId, step: usize) -> Option<f32> {
         self.runtime_macro_values
             .as_ref()
@@ -129,6 +168,11 @@ impl RackMacroRuntimeValues {
             return;
         };
         cell.store(Self::encode_plock(value), Ordering::Relaxed);
+    }
+
+    pub(super) fn default_value(&self, track: usize, id: RackMacroId) -> Option<f32> {
+        let defaults = self.defaults.get(track)?;
+        Some(f32::from_bits(defaults[id.index()].load(Ordering::Relaxed)))
     }
 
     pub(super) fn value_at(&self, track: usize, id: RackMacroId, step: usize) -> Option<f32> {

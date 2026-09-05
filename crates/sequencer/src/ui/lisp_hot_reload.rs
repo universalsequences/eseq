@@ -561,7 +561,7 @@ mod tests {
         for path in [
             sequencer::app_paths::app_paths()
                 .instruments_dir()
-                .join("bass/korg1/ui.lisp"),
+                .join("Drums/Digi Hat/ui.lisp"),
             sequencer::app_paths::app_paths()
                 .effects_dir()
                 .join("sidechain/ui.lisp"),

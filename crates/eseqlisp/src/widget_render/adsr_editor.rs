@@ -5,7 +5,6 @@ use super::{
     CellBuffer, EventOutput, GpuPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
     WidgetInstance, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
 };
-use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
@@ -473,22 +472,22 @@ impl WidgetDefinition for AdsrEditorWidget {
         let curve_color = resolve_named_color(
             &node.props,
             "curve-color",
-            Color::rgba(113.0 / 255.0, 191.0 / 255.0, 207.0 / 255.0, 1.0),
+            crate::theme::ADSR_CURVE(),
         );
         let bg_color = resolve_named_color(
             &node.props,
             "background-color",
-            Color::rgba(0.035, 0.038, 0.043, 1.0),
+            crate::theme::ADSR_BG(),
         );
         let grid_color = resolve_named_color(
             &node.props,
             "grid-color",
-            Color::rgba(0.48, 0.50, 0.52, 0.32),
+            crate::theme::ADSR_GRID(),
         );
         let point_color = resolve_named_color(
             &node.props,
             "point-color",
-            Color::rgba(1.0, 0.55, 0.16, 1.0),
+            crate::theme::ADSR_POINT(),
         );
 
         let state = interaction_state(node.widget_id);

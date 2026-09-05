@@ -2043,6 +2043,10 @@ impl Editor {
                     | MouseEventKind::Up(MouseButton::Left)
                     | MouseEventKind::Down(MouseButton::Right)
                     | MouseEventKind::Up(MouseButton::Right)
+                    | MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
             )
         {
             let tile_id = self.overlay_owner_tile(entry).unwrap_or(self.active_tile);
@@ -2542,6 +2546,8 @@ impl Editor {
         self.pending_key = None;
         self.route_event_to_tile(owner_tile, 0, false, |editor| {
             editor.sync_modal_focus_state();
+            if !topmost_overlay.is_some_and(|entry| entry.kind == crate::widget_render::OverlayKind::Dropdown)
+                && editor.handle_context_menu_key(key) { return; }
 
             if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
                 // A dropdown inside the modal is the topmost keyboard target

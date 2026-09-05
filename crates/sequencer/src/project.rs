@@ -5282,10 +5282,17 @@ mod tests {
             .scene_slots
             .insert("figures".to_string(), value.clone());
 
+        project.patterns[0].scene_slots.insert(
+            crate::sequencer::SCENE_TRANSPOSE_SLOT.to_string(),
+            crate::process::ProcessLiteral::Number(-9.0),
+        );
         let json = serde_json::to_value(&project).expect("serialize scene slots");
         let restored: ProjectFile =
             serde_json::from_value(json.clone()).expect("deserialize scene slots");
         assert_eq!(restored.patterns[0].scene_slots.get("figures"), Some(&value));
+        let slots = crate::sequencer::SceneSlotStore::from_values(
+            restored.patterns[0].scene_slots.clone()).unwrap();
+        assert_eq!(slots.transpose_semitones(), -9.0);
 
         let mut legacy = json;
         legacy["version"] = serde_json::json!(8);

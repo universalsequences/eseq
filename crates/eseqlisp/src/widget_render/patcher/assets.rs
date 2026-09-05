@@ -10,7 +10,7 @@ use crate::layout::LayoutNode;
 use super::prop_str;
 
 struct AssetRoots {
-    fallback_base: PathBuf,
+    fallback_bases: Vec<PathBuf>,
     libraries: [PathBuf; 2],
 }
 
@@ -26,9 +26,12 @@ fn trusted_source_roots() -> &'static Mutex<BTreeSet<PathBuf>> {
 /// host metadata reads also use the content base when no draft path exists.
 /// This lets generated custom-UI buffers resolve fully content-relative paths
 /// even though they no longer have the original UI file as their active path.
-pub fn set_asset_roots(fallback_base: PathBuf, user: PathBuf, factory: PathBuf) {
+/// `fallback_bases` are the content roots tried, in order, for relative
+/// spellings that the draft directory does not satisfy (the factory content
+/// root, then the user data root, then any dev-only fixture root).
+pub fn set_asset_roots(fallback_bases: Vec<PathBuf>, user: PathBuf, factory: PathBuf) {
     let _ = ASSET_ROOTS.set(AssetRoots {
-        fallback_base,
+        fallback_bases,
         libraries: [user, factory],
     });
 }
@@ -72,10 +75,11 @@ pub(crate) fn resolve_registered_asset_reference(
 /// asset library. Absolute paths are deliberately excluded from host UI reads.
 pub(crate) fn resolve_asset_reference(reference: &str, draft_root: Option<&Path>) -> Option<PathBuf> {
     let roots = ASSET_ROOTS.get();
-    resolve_asset_reference_with_fallback_roots(
+    resolve_asset_reference_with_fallback_bases(
         reference,
         draft_root,
-        roots.map(|roots| roots.fallback_base.as_path()),
+        roots.map(|roots| roots.fallback_bases.as_slice())
+            .unwrap_or_else(crate::hot_reload::load_fallback_roots),
         roots.map(|roots| roots.libraries[0].as_path()),
         roots.map(|roots| roots.libraries[1].as_path()),
     )
@@ -88,12 +92,34 @@ pub(crate) fn resolve_asset_reference_with_fallback_roots(
     user_root: Option<&Path>,
     factory_root: Option<&Path>,
 ) -> Option<PathBuf> {
+    let fallback_bases = fallback_root
+        .map(|root| vec![root.to_path_buf()])
+        .unwrap_or_default();
+    resolve_asset_reference_with_fallback_bases(
+        reference,
+        draft_root,
+        &fallback_bases,
+        user_root,
+        factory_root,
+    )
+}
+
+fn resolve_asset_reference_with_fallback_bases(
+    reference: &str,
+    draft_root: Option<&Path>,
+    fallback_bases: &[PathBuf],
+    user_root: Option<&Path>,
+    factory_root: Option<&Path>,
+) -> Option<PathBuf> {
     let reference = Path::new(reference);
     if reference.is_absolute() {
         return None;
     }
 
-    for root in [draft_root, fallback_root].into_iter().flatten() {
+    for root in draft_root
+        .into_iter()
+        .chain(fallback_bases.iter().map(PathBuf::as_path))
+    {
         let candidate = root.join(reference);
         if candidate.is_file() {
             return Some(candidate.canonicalize().unwrap_or(candidate));

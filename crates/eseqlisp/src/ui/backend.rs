@@ -19,6 +19,30 @@ pub enum BackendEvent {
     Quit,
 }
 
+/// Cross-thread wake-up for a backend blocked in its event pump. A producer
+/// on another thread (the MIDI input callback) calls `wake` after queueing
+/// work so the host loop returns from `poll_backend_event_with_redraw` now
+/// instead of at its idle timeout.
+///
+/// The proxy is `Send` but not `Sync` on every platform, so it sits behind a
+/// mutex; a wake is one uncontended lock.
+#[derive(Clone)]
+pub struct EventLoopWaker(Arc<std::sync::Mutex<winit::event_loop::EventLoopProxy<()>>>);
+
+impl EventLoopWaker {
+    pub fn new(proxy: winit::event_loop::EventLoopProxy<()>) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(proxy)))
+    }
+
+    /// Returns false once the event loop is gone.
+    pub fn wake(&self) -> bool {
+        self.0
+            .lock()
+            .map(|proxy| proxy.send_event(()).is_ok())
+            .unwrap_or(false)
+    }
+}
+
 // ── Colors ───────────────────────────────────────────────────────────────────
 
 /// Backend-agnostic color in linear RGBA (0.0–1.0).

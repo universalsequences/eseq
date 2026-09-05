@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use super::live_audio::{LiveAudioSourceSelector, source_from_props};
 use super::{CellBuffer, WidgetDefinition, resolve_named_color, styled_cell};
 use super::{GpuPrimitive, GpuRectPrimitive, GpuTrianglePrimitive, WidgetViewport};
-use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::live_audio::CompressorMeterFrame;
 use crate::theme;
@@ -213,19 +212,19 @@ impl WidgetDefinition for CompressorDisplayWidget {
         let background = resolve_named_color(
             &node.props,
             "background-color",
-            Color::rgba(0.02, 0.022, 0.025, 1.0),
+            crate::theme::COMPRESSOR_BG(),
         );
         let level_color = resolve_named_color(
             &node.props,
             "level-color",
-            Color::rgba(0.52, 0.54, 0.56, 0.88),
+            crate::theme::COMPRESSOR_OUTPUT(),
         );
         let gr_color =
-            resolve_named_color(&node.props, "gr-color", Color::rgba(1.0, 0.62, 0.25, 1.0));
+            resolve_named_color(&node.props, "gr-color", crate::theme::COMPRESSOR_GR());
         let threshold_color = resolve_named_color(
             &node.props,
             "threshold-color",
-            Color::rgba(0.45, 0.78, 0.95, 1.0),
+            crate::theme::COMPRESSOR_THRESHOLD(),
         );
 
         let rect = node.rect;

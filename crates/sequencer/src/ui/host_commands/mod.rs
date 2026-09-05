@@ -10,6 +10,7 @@ mod packages;
 mod project;
 mod rack;
 mod routing;
+mod sample_import;
 mod samples;
 mod sampler_slices;
 mod scenes;

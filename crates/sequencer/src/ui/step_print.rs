@@ -109,6 +109,7 @@ pub(crate) fn print_step_param_from_keyword(name: &str) -> Option<StepParam> {
         "velocity" | "vel" => Some(StepParam::Velocity),
         "duration" | "dur" => Some(StepParam::Duration),
         "transpose" => Some(StepParam::Transpose),
+        "pan" => Some(StepParam::Pan),
         "retrig" | "rtrg" => Some(StepParam::Retrig),
         "retrig-rate" | "rate" => Some(StepParam::RetrigRate),
         _ => None,
@@ -184,6 +185,7 @@ impl StepPrintState {
         if !self.armed() {
             state.step_print_override.clear();
             state.device_print_override.clear();
+            state.rack_macro_print_override.clear();
             return;
         }
         let step_entries = self
@@ -225,6 +227,23 @@ impl StepPrintState {
             })
             .collect::<Vec<_>>();
         state.device_print_override.set(self.track, device_entries);
+        // Rack-macro analog: the audio thread substitutes latched macro
+        // positions when it applies rack macros at a trigger.
+        let rack_macro_entries = self
+            .values
+            .iter()
+            .filter_map(|(target, value)| match target {
+                PrintTarget::RackMacro { macro_idx } => Some((*macro_idx, *value)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if rack_macro_entries.is_empty() {
+            state.rack_macro_print_override.clear();
+        } else {
+            state
+                .rack_macro_print_override
+                .set(self.track, &rack_macro_entries);
+        }
     }
 
     /// Rolled hits recorded while print mode is armed take the latched
@@ -580,6 +599,7 @@ pub(crate) fn print_pass(
         print.disarm();
         state.step_print_override.clear();
         state.device_print_override.clear();
+        state.rack_macro_print_override.clear();
         return PrintedSteps::default();
     }
     let track = print.track;
@@ -1459,6 +1479,7 @@ mod step_print_tests {
                 StepParam::Velocity => "velocity",
                 StepParam::Duration => "duration",
                 StepParam::Transpose => "transpose",
+                StepParam::Pan => "pan",
                 StepParam::Retrig => "retrig",
                 StepParam::RetrigRate => "retrig-rate",
                 other => panic!("{other:?} is in STEP_INSPECTOR_PARAMS but has no keyword"),
@@ -1469,6 +1490,5 @@ mod step_print_tests {
                 "{keyword} must resolve for printing"
             );
         }
-        assert_eq!(super::print_step_param_from_keyword("pan"), None);
     }
 }

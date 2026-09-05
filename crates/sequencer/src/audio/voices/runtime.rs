@@ -709,7 +709,8 @@ fn remap_scheduled_event_after_track_delete(
     let keep = match &mut event.kind {
         ScheduledEventKind::ResolvedTrigger { track, .. }
         | ScheduledEventKind::InstrumentParams { track, .. }
-        | ScheduledEventKind::EffectParams { track, .. } => {
+        | ScheduledEventKind::EffectParams { track, .. }
+        | ScheduledEventKind::RackParams { track, .. } => {
             remap_track_index_after_delete(track, deleted_track)
         }
         ScheduledEventKind::NetworkTrigger { track, seed, .. } => {

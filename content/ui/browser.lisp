@@ -442,7 +442,7 @@
     (sdf/layer
       (sdf/fill __shape
         (material
-          :color (rgba 0.45 0.47 0.50 1.0))))))
+          :color :search-icon)))))
 
 ;; Headphone toggle for the preview strip (Ableton-style auto-preview): a
 ;; circular badge with the headphone glyph inside — headband arc (ring clipped
@@ -656,16 +656,15 @@
     (button name
       :variant :ghost
       :background-color (if selected 
-        :accent
+        :mixer-strip-selected-bg
         :mixer-control-bg
         )
-      :color (if selected (rgba 0.1 0.2 0.6 0.2) :dim)
-      :border-color (rgba 0.1 0.2 0.8 1)
-      
-      :height 0.9
-      :padding 0.5532
+      :color (if selected :fg :dimmer)
+      :border-color (if selected :dim  :none)
+      :height 1.0
+      :padding 0.8532
       :font-size 12.0
-      :corner-radius 17
+      :corner-radius 13
       :on-click |x y r| (do 
         (set! search-filter "") 
         (toggle-tag name)
@@ -675,14 +674,17 @@
   (let ((name (get origin :name))
       (selected (get origin :selected)))
     (button (if (= name "user") "Yours"
-      (if (= name "factory") "Factory"
-        (if (string-starts-with? name "pkg:") (substring name 4 (len name)) name)))
+        (if (= name "factory") "Factory"
+          (if (string-starts-with? name "pkg:") (substring name 4 (len name)) name)))
       :variant :ghost
-      :background-color (if selected :accent :mixer-control-bg)
-      :color (if selected (rgba 0.1 0.1 0.2 1) :dim)
-      :border-color (rgba 0.1 0.2 0.8 1)
-      :height 0.9
-      :padding 0.5532
+      :background-color (if selected 
+        :mixer-strip-selected-bg
+        :mixer-control-bg
+        )
+      :color (if selected :fg :dimmer)
+      :border-color (if selected :buffer-bg  :none)
+      :height 1.0
+      :padding 0.8532
       :font-size 12.0
       :corner-radius 24
       :on-click |x y r| (toggle-origin name))))
@@ -875,8 +877,38 @@
         :on-click |x y r| (save-project)
         :color :white))))
 
+;; Saved-instrument tier filter: "" shows both the shipped Factory tree and
+;; the user's Library, "factory" or "user" narrows to one. Single-select so a
+;; second click on the active chip clears it.
+(defstate instrument-origin-filter "")
+
+(def toggle-instrument-origin (origin)
+  (set! instrument-origin-filter
+    (if (= instrument-origin-filter origin) "" origin)))
+
+(def instrument-origin-chip (origin label)
+  (let ((selected (= instrument-origin-filter origin)))
+    (button label
+      :variant :ghost
+      :background-color (if selected
+        :mixer-strip-selected-bg
+        :mixer-control-bg)
+      :color (if selected :fg :gray)
+      :border-color (if selected :buffer-bg :none)
+      :height 1.0
+      :padding 0.8532
+      :font-size 12.0
+      :corner-radius 24
+      :on-click |x y r| (toggle-instrument-origin origin))))
+
+(def instrument-origin-filter-row ()
+  (box :key "instrument-origin-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
+    (h-stack :width :fill :gap 0.25 :align :center
+      (instrument-origin-chip "factory" "Factory")
+      (instrument-origin-chip "user" "Library"))))
+
 (def create-items ()
-  (seq-saved-instrument-tree search-filter SEQ.project-instrument-engines))
+  (seq-saved-instrument-tree search-filter SEQ.project-instrument-engines instrument-origin-filter))
 
 (def enter-new-instrument-editor ()
   (set! sbrowser-editor-name "")
@@ -971,6 +1003,7 @@
 (def create-picker ()
   (v-stack :key "create-picker-panel" :width :fill :gap 0.5 :flex 1
     (instrument-loading-row)
+    (instrument-origin-filter-row)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "create-picker-scroll" :width :fill :flex 1
         (tree
@@ -991,11 +1024,11 @@
     (dict :name "sounds" :label "Sounds" :icon :piano)
     (dict :name "kits" :label "Kits" :icon :sampler)
     (dict :name "instruments" :label "Instruments" :icon :piano)
-    (dict :name "audio-fx" :label "Audio FX" :icon :sliders)
+    (dict :name "audio-fx" :label "Audio FX" :icon :drop)
     (dict :name "midi-fx" :label "MIDI FX" :icon :note-arrow)
     (dict :name "presets" :label "Presets" :icon :dial)
     (dict :name "scripts" :label "Scripts" :icon :folder)
-    (dict :name "projects" :label "Projects" :icon :folder)))
+    (dict :name "projects" :label "Projects" :icon :project)))
 
 (def visible-sounds ()
   (if (= search-filter "") SEQ.sound-presets
@@ -1020,12 +1053,13 @@
         (empty-message "No Sounds found. Drag an instrument preset onto the Sounds tab to add one.")
         (scroll :key "sounds-tab-scroll" :width :fill :flex 1
           (tree :key "sounds-tab-tree"
-                :width :fill
-                :background-color :buffer-bg
-                :items items
-                :focusable true
-                :drag-type "sound"
-                :on-activate (lambda (item) (load-sound item))))))))
+            :width :fill
+            :background-color :buffer-bg
+            :items items
+            :font-size 12
+            :focusable true
+            :drag-type "sound"
+            :on-activate (lambda (item) (load-sound item))))))))
 
 ;; ── Kits (docs/drum-rack-v2-spec.md, "Polish") ──────────────────────────
 ;; A kit is a drum rack saved as a browser object: group config + one Sound
@@ -1103,12 +1137,13 @@
           (empty-message "No kits yet. Use the save icon in a drum rack's FX-panel header.")
           (scroll :key "kits-tab-scroll" :width :fill :flex 1
             (tree :key "kits-tab-tree"
-                  :width :fill
-                  :background-color :buffer-bg
-                  :items items
-                  :focusable true
-                  :drag-type "kit"
-                  :on-activate (lambda (item) (load-kit item)))))))))
+              :width :fill
+              :background-color :buffer-bg
+              :items items
+              :font-size 12
+              :focusable true
+              :drag-type "kit"
+              :on-activate (lambda (item) (load-kit item)))))))))
 
 (def drop-preset-on-sounds (event)
   (if (= (get event :drag-type) "instrument-preset")
@@ -1145,11 +1180,13 @@
 
 (def tab-rail ()
   (let ((tabs (tab-items)))
-    (box :key "tabs" :width 11.4 :height :fill 
+    (box :key "tabs" :width 12.5 :height :fill 
       (h-stack 
+        :width :fill
+        :gap 0
         :align :start
-        (box :width 0.005 :height 0.1)
-        (v-stack :width :fill :gap 0.08
+        (box :width 0.5)
+        (v-stack :width 12.0 :gap 0.08
           (box :height 0.5)
           (each (range 0 (len tabs)) |i|
             (let ((tab (nth tabs i)))
@@ -1196,16 +1233,16 @@
               (button "Clear"
                 :variant :ghost
                 :width :fill
-                :height 1.15
+                :height 1.35
                 :border-color :transparent
-                :font-size 9
+                :font-size 12
                 :on-click |x y r| (clear-sample-filters)
                 :color :white))
             (if (> (len origins) 0)
               (wrap :width :fill :gap 0.25 :row-gap 0.18 :align :center
                 (each (range 0 (len origins)) |i|
                   (origin-chip (nth origins i)))))
-            (wrap :width :fill :gap 0.25 :row-gap 0.18 :align :center
+            (wrap :width :fill :gap 0.20 :row-gap 0.10 :align :center
               (each (range 0 (len tags)) |i|
                 (tag-chip (nth tags i))))))
         (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
@@ -1221,6 +1258,7 @@
                 :focusable true
                 :background-color :buffer-bg
                 :items items
+                :font-size 12
                 :selected-path (sample-selected-path)
                 :expand-all true
                 :drag-type "sample"
@@ -1296,6 +1334,7 @@
           :width :fill
           :background-color :buffer-bg
           :items (create-items)
+          :font-size 12
           :expand-all (not (= search-filter ""))
           :focusable true
           :drag-type "instrument"
@@ -1340,6 +1379,7 @@
               :background-color :buffer-bg
               :items items
               :expand-all (not (= search-filter ""))
+              :font-size 12
               :focusable true
               :drag-type "audio-effect"
               :on-select (lambda (item) (select-audio-effect item))
@@ -1358,6 +1398,7 @@
             :width :fill
             :background-color :buffer-bg
             :items items
+            :font-size 12
             :expand-all (not (= search-filter ""))
             :focusable true
             :drag-type "midi-effect"
@@ -1380,6 +1421,7 @@
                 :width :fill
                 :background-color :buffer-bg
                 :items items
+                :font-size 12
                 :selected-label SEQ.sidebar-loaded-preset
                 :expand-all false
                 :focusable true
@@ -1440,6 +1482,7 @@
               :width :fill
               :background-color :buffer-bg
               :items items
+              :font-size 12
               :selected-label SEQ.current-p0roject-name
               :expand-all false
               :focusable true
@@ -1657,7 +1700,7 @@
                 :font-size 9
                 :on-click |x y r|
                 (host-command "set-draft-instrument-run-mode" (dict :run-mode "instrument"))
-                :color :white)
+                :color (if (= SEQ.editor-instrument-run-mode "instrument") :browser-primary-fg :white))
               (button "Free Patch"
                 :variant (if (= SEQ.editor-instrument-run-mode "free_patch") :primary :secondary)
                 :width 8.5
@@ -1665,7 +1708,7 @@
                 :font-size 9
                 :on-click |x y r|
                 (host-command "set-draft-instrument-run-mode" (dict :run-mode "free_patch"))
-                :color :white))
+                :color (if (= SEQ.editor-instrument-run-mode "free_patch") :browser-primary-fg :white)))
             (label "Save as"
               :font-size 9
               :color :gray
@@ -1775,7 +1818,7 @@
                   (if (= SEQ.editor-mode "new-effect")
                     (host-command "save-new-effect" (dict :name sbrowser-editor-name))
                     (host-command "update-effect" (dict))))))
-            :color :white)
+            :color :browser-primary-fg)
           ;; Fork sits next to the clobbering path on purpose: in edit modes the
           ;; primary button overwrites an instrument every project shares, and
           ;; the safe alternative should not require leaving the buffer.

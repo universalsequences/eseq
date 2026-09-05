@@ -39,8 +39,8 @@
 
 (export panel)
 
-(def yellow () (rgba 0.98 0.78 0.14 1.0))
-(def cream  () (rgba 0.93 0.88 0.72 1.0))
+(def control-on-color () :filterbank-control-on)
+(def readout-color () :filterbank-readout)
 
 ;; Effect-node selector for the live gate LED (same shape as Roar's meters).
 (def effect-source (fx)
@@ -53,7 +53,7 @@
 ;; live-audio analyzer publishes from the effect's state meter tail.
 (def gate-indicator (fx)
   (gate-led :width 0.9 :height 0.9
-    :on-color (yellow)
+    :on-color (control-on-color)
     :source (effect-source fx)))
 
 ;; Mod-wrapped knob (same pattern as the Space Echo knobs, so freq / res /
@@ -128,7 +128,7 @@
         :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
         :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color (yellow)
+        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color (control-on-color)
         :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
         :plock-default (eseq.effects.param-controls/param-plock-default fx p)
         :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -141,7 +141,7 @@
 (def parameter-toggle (fx p label-text w)
   (button label-text
     :width w :height 1.05 :padding 0 :font-size 8.5
-    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (yellow) :mixer-control-bg)
+    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (control-on-color) :mixer-control-bg)
     :border-color :transparent
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -155,7 +155,7 @@
   (let ((active (= (get p :text-value) (nth (get p :options) idx))))
     (button label-text
       :width w :height 1.05 :padding 0 :font-size 8.5
-      :background-color (if active (yellow) :mixer-control-bg)
+      :background-color (if active (control-on-color) :mixer-control-bg)
       :border-color :transparent
       :color (if active :black :dim)
       :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -185,7 +185,7 @@
   (box :width 9.9 :height 9.75 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
-      (label "INPUT" :font-size 8.0 :width 8.6 :color (yellow) :bg :transparent)
+      (label "INPUT" :font-size 8.0 :width 8.6 :color (control-on-color) :bg :transparent)
       (h-stack :gap 0.22 :align :center
         (parameter-knob fx "input" input-p 1)
         (v-stack :gap 0.10 :align :center
@@ -204,7 +204,7 @@
 
 (def filter-column (fx title freq-p res-p mode-p)
   (v-stack :gap 0.16 :align :center
-    (label title :font-size 8.0 :width 4.4 :color (yellow) :bg :transparent)
+    (label title :font-size 8.0 :width 4.4 :color (control-on-color) :bg :transparent)
     (freq-knob fx "freq" freq-p)
     (percent-knob fx "res" res-p)
     (percent-knob fx "mode" mode-p)
@@ -214,7 +214,7 @@
 ;; weight of the column between the two filters.
 (def link-column (fx harmonics-p correction-p serpar-p crunch-p)
   (v-stack :gap 0.18 :align :center
-    (label "HARMONICS" :font-size 8.5 :width 6.0 :color (yellow) :bg :transparent)
+    (label "HARMONICS" :font-size 8.5 :width 6.0 :color (control-on-color) :bg :transparent)
     (option fx harmonics-p 6.0 1.45 11.0)
     (box :height 0.20)
     (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "corr" correction-p)
@@ -240,7 +240,7 @@
   (box :width 23.4 :height 9.75 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.16 :align :center
-      (label "MODULATION" :font-size 8.0 :width 21.6 :color (yellow) :bg :transparent)
+      (label "MODULATION" :font-size 8.0 :width 21.6 :color (control-on-color) :bg :transparent)
       (h-stack :gap 0.22 :align :center
         (v-stack :gap 0.14 :align :center
           (choice fx envmode-p 0 "ADSR" 3.1)
@@ -279,7 +279,7 @@
   (box :width 9.9 :height 9.75 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
-      (label "OUTPUT" :font-size 8.0 :width 8.6 :color (yellow) :bg :transparent)
+      (label "OUTPUT" :font-size 8.0 :width 8.6 :color (control-on-color) :bg :transparent)
       (h-stack :gap 0.22 :align :center
         (parameter-knob fx "ar atk" ar-attack-p 1)
         (parameter-knob fx "ar rel" ar-release-p 0))

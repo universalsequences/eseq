@@ -812,6 +812,24 @@ impl Editor {
         // → ordinary subtree hit-testing rooted at the modal node; outside →
         // consume so the click can't reach the widgets underneath (the scrim
         // dismissal itself fires from the focus-click path on mouse-down).
+        // A menu can receive input after layout but before the first GPU
+        // frame registers overlays (including headless interaction captures).
+        // Its laid-out panel geometry is already authoritative for hit testing.
+        if widget_render::topmost_overlay().is_none()
+            && let Some(menu) = self.runtime.current_layout.as_deref()
+                .and_then(super::topmost_open_overlay_panel)
+                .filter(|node| node.widget_type == "context-menu")
+            && let Some(rect) = widget_render::context_menu::panel_bounds(menu)
+        {
+            widget_render::push_overlay(widget_render::OverlayEntry {
+                widget_id: menu.widget_id,
+                rect: crate::layout::Rect {
+                    col: rect.col - self.widget_layout_scroll_left(),
+                    row: rect.row - self.total_scroll_top(), ..rect
+                },
+                kind: widget_render::OverlayKind::Modal,
+            });
+        }
         if let Some(entry) = widget_render::topmost_overlay() {
             let local_col = precise_col - content_col as f32;
             let local_row = precise_row - content_row as f32;
@@ -860,7 +878,8 @@ impl Editor {
                 widget_render::OverlayKind::Modal
                     if matches!(
                         mouse.kind,
-                        MouseEventKind::Down(MouseButton::Left)
+                        MouseEventKind::Moved
+                            | MouseEventKind::Down(MouseButton::Left)
                             | MouseEventKind::Drag(MouseButton::Left)
                             | MouseEventKind::Up(MouseButton::Left)
                             | MouseEventKind::Down(MouseButton::Right)
@@ -871,6 +890,18 @@ impl Editor {
                             | MouseEventKind::ScrollRight
                     ) =>
                 {
+                    // Both exits below return before the shared hover update
+                    // further down, so refresh pointer hover here: inside the
+                    // panel `hover_node_at_local` restricts the hit test to the
+                    // modal subtree, outside it clears the stale pre-modal hover.
+                    if matches!(mouse.kind, MouseEventKind::Moved)
+                        && widget_render::set_pointer_hover_widget(
+                            self.hover_node_at_local(local_col, local_row)
+                                .map(|node| node.widget_id),
+                        )
+                    {
+                        self.mark_needs_redraw();
+                    }
                     if widget_render::overlay_contains(local_col, local_row) {
                         return self.handle_modal_pointer_event(
                             entry.widget_id,
@@ -1601,6 +1632,23 @@ impl Editor {
         let layout_col = local_col + self.widget_layout_scroll_left();
         let layout_row = local_row + self.total_scroll_top();
 
+        if modal_node.widget_type == "context-menu"
+            && matches!(mouse.kind, MouseEventKind::Down(_))
+            && !widget_render::context_menu::contains_panel(&modal_node, layout_row, layout_col)
+        {
+            self.fire_modal_on_close(modal_node.widget_id);
+            return true;
+        }
+        if modal_node.widget_type == "context-menu"
+            && matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+        {
+            let amount = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
+            if widget_render::context_menu::scroll_at(&modal_node, layout_row, layout_col, amount) {
+                self.runtime.invalidate_layout();
+                self.mark_needs_redraw();
+            }
+            return true;
+        }
         let hit = hit_test_layout(&modal_node, layout_row, layout_col).cloned();
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -1622,6 +1670,20 @@ impl Editor {
         let Some(hit) = hit else {
             return true;
         };
+        if modal_node.widget_type == "context-menu" && hit.widget_type == "menu-item"
+            && !widget_render::context_menu::item_disabled(&hit.props)
+            && matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left)) {
+            self.set_focused_widget(hit.clone());
+        }
+        if modal_node.widget_type == "context-menu"
+            && matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left))
+            && let Some(path) = widget_render::context_menu::path_to_item(&modal_node, hit.widget_id)
+            && widget_render::context_menu::set_branch(&modal_node, path)
+        {
+            self.runtime.invalidate_layout();
+            self.remap_focused_widget_after_layout_change();
+            self.mark_needs_redraw();
+        }
         let hit = pointer_dispatch_node(&layout, hit);
         let hit = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right)) {
             right_click_dispatch_node(&modal_node, hit)
@@ -1632,6 +1694,7 @@ impl Editor {
             && modal_node.widget_type == "context-menu"
             && hit.widget_type == "menu-item"
             && hit.props.contains_key("on-select")
+            && !widget_render::context_menu::has_submenu(&hit)
             && !widget_render::context_menu::item_disabled(&hit.props);
         let output = self.dispatch_widget_mouse_event(
             &hit,
@@ -2157,6 +2220,17 @@ impl Editor {
         else {
             return false;
         };
+        if let Some(root) = &modal_root
+            && root.widget_type == "context-menu"
+        {
+            if delta_y != 0.0 && widget_render::context_menu::scroll_at(root,
+                local_row + self.total_scroll_top(), local_col + self.widget_layout_scroll_left(),
+                if delta_y > 0.0 { 1 } else { -1 }) {
+                self.runtime.invalidate_layout();
+                self.mark_needs_redraw();
+            }
+            return true;
+        }
         let node = match &modal_root {
             Some(root) => {
                 let layout_col = local_col + self.widget_layout_scroll_left();

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "engine_name": "Drums/909 Open Hat/",
+  "source_file": "instruments/Drums/909 Open Hat/dsp.lisp",
+  "presets": [
+    {"id": "909 Open Hat", "name": "909 Open Hat", "base_note_offset": 0.0, "params": {}},
+    {"id": "Dry Metal", "name": "Dry Metal", "base_note_offset": 0.0, "params": {"wash": 0.0}},
+    {"id": "Wash Only", "name": "Wash Only", "base_note_offset": 0.0, "params": {"metal": 0.0}},
+    {"id": "No Swish", "name": "No Swish", "base_note_offset": 0.0, "params": {"swish": 0.0}},
+    {"id": "Swishy", "name": "Swishy", "base_note_offset": 0.0, "params": {"swish": 2.2}},
+    {"id": "Long", "name": "Long", "base_note_offset": 0.0, "params": {"decay": 2.4}},
+    {"id": "Pedal", "name": "Pedal", "base_note_offset": 0.0, "params": {"decay": 0.35, "bright": 0.7}},
+    {"id": "Trashy", "name": "Trashy", "base_note_offset": 0.0, "params": {"drive": 3.0, "metal": 1.6, "bright": 1.5}},
+    {"id": "Low Bell", "name": "Low Bell", "base_note_offset": -7.0, "params": {"tune": -7, "metal": 1.8, "wash": 0.5, "decay": 1.6}}
+  ]
+}

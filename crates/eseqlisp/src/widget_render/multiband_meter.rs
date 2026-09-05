@@ -15,7 +15,6 @@ use super::{
     CellBuffer, GpuPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
     resolve_named_color, styled_cell,
 };
-use crate::backend::Color;
 use crate::layout::LayoutNode;
 use crate::layout::{Constraints, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::live_audio::BandMeterFrame;
@@ -223,20 +222,20 @@ impl WidgetDefinition for MultibandMeterWidget {
         let bg_color = resolve_named_color(
             &node.props,
             "background-color",
-            Color::rgba(0.045, 0.048, 0.052, 1.0),
+            crate::theme::MULTIBAND_BG(),
         );
         let grid_color = resolve_named_color(
             &node.props,
             "grid-color",
-            Color::rgba(0.36, 0.36, 0.38, 0.34),
+            crate::theme::MULTIBAND_GRID(),
         );
         let level_color = resolve_named_color(
             &node.props,
             "level-color",
-            Color::rgba(0.36, 0.72, 0.92, 1.0),
+            crate::theme::MULTIBAND_LEVEL(),
         );
         let gain_color =
-            resolve_named_color(&node.props, "gain-color", Color::rgba(1.0, 0.62, 0.25, 1.0));
+            resolve_named_color(&node.props, "gain-color", crate::theme::MULTIBAND_GAIN());
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;

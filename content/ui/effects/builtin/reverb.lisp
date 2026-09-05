@@ -41,10 +41,10 @@
         reverb-input-curve-action
         reverb-network-curve-action)
 
-(def accent () (rgba 0.32 0.68 0.96 1.0))
-(def curve-bg () (rgba 0.055 0.058 0.06 1.0))
-(def curve-grid () (rgba 0.34 0.34 0.36 0.55))
-(def curve-point () (rgba 1.0 0.62 0.25 1.0))
+(def accent () :reverb-curve)
+(def curve-bg () :reverb-curve-bg)
+(def curve-grid () :reverb-curve-grid)
+(def curve-point () :reverb-curve-point)
 
 (def section-h () 6.3)
 (def curve-h () 3.5)

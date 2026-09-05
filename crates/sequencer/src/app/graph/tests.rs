@@ -4821,7 +4821,7 @@
             [crate::project::ProjectTrack {
                 kind: crate::project::ProjectTrackKind::Custom { instrument_name },
                 ..
-            }] if instrument_name == "factory:core/drift"
+            }] if *instrument_name == lisp_host::qualify_instrument_id("core/drift").unwrap()
         ));
         assert!(matches!(
             crate::app::edit::redo(&mut app),
@@ -4845,7 +4845,7 @@
             [crate::project::ProjectTrack {
                 kind: crate::project::ProjectTrackKind::Custom { instrument_name },
                 ..
-            }] if instrument_name == "factory:core/operator"
+            }] if *instrument_name == lisp_host::qualify_instrument_id("core/operator").unwrap()
         ));
         graph.process_block();
     }

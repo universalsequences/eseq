@@ -28,10 +28,10 @@
 
 (export ott-ui)
 
-(def band-yellow () (rgba 0.93 0.85 0.36 1.0))
-(def band-cyan   () (rgba 0.45 0.78 0.95 1.0))
-(def band-orange () (rgba 1.00 0.62 0.25 1.0))
-(def button-on   () (rgba 0.94 0.69 0.32 1.0))
+(def high-band-color () :ott-high)
+(def mid-band-color   () :ott-mid)
+(def low-band-color () :ott-low)
+(def button-on   () :ott-control-on)
 
 (def effect-source (fx)
   (if (get fx :rack-fx)
@@ -54,7 +54,7 @@
 (def parameter-knob (fx label-text p)
   (param-wrapper fx p "knob"
     (knob-number :label label-text
-    :value (eseq.effects.param-controls/fx-param-value p)
+    :value (eseq.effects.param-controls/fx-param-value-for fx p)
     :min (get p :min) :max (get p :max) :decimals 2 :unit "dB"
     :mod-offset (eseq.effects.param-controls/param-mod-offset p)
     :mod-scale (eseq.effects.param-controls/param-mod-scale p)
@@ -66,13 +66,13 @@
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :width 5.6 :height (band-row-h) :knob-size 1.5
-      :track-color '(rgba 0.4, 0.4, 0.4, 1)
+      :track-color :dynamics-knob-track
       :on-change (lambda (v) (eseq.effects.param-controls/fx-set-effect-value fx p v)))))
 
 (def percent-knob (fx label-text p)
   (param-wrapper fx p "percent-knob"
     (knob-number :label label-text
-    :value (eseq.effects.param-controls/fx-param-value p)
+    :value (eseq.effects.param-controls/fx-param-value-for fx p)
     :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0 :unit "%"
     :font-size 9.0 :label-font-size 8.0
     :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
@@ -82,12 +82,12 @@
     :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :width 5.6 :height (band-row-h) :knob-size 1.5
-      :track-color '(rgba 0.4, 0.4, 0.4, 1)
+      :track-color :dynamics-knob-track
       :on-change (lambda (v) (eseq.effects.param-controls/fx-set-effect-value fx p v)))))
 
 (def field (fx p decimals unit-text color width)
   (param-wrapper fx p "field"
-    (number-picker :value (eseq.effects.param-controls/fx-param-value p)
+    (number-picker :value (eseq.effects.param-controls/fx-param-value-for fx p)
     :min (get p :min) :max (get p :max) :decimals decimals :unit unit-text
     :noui true :font-size 9.0 :text-color color
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
@@ -144,7 +144,7 @@
       (split-cell fx
         (v-stack :gap 0.12 :align :start
           (parameter-toggle fx high-split-p "High" 5.0)
-          (field fx xh-p 0 "Hz" (rgba 0.75 0.75 0.75 1.0) 5.0))
+          (field fx xh-p 0 "Hz" :ott-frequency-fg 5.0))
         high-on-p high-solo-p)
       (split-cell fx
         (label "Mid" :font-size 9.0 :width 5.0 :color :dim :bg :transparent)
@@ -152,7 +152,7 @@
       (split-cell fx
         (v-stack :gap 0.12 :align :start
           (parameter-toggle fx low-split-p "Low" 5.0)
-          (field fx xl-p 0 "Hz" (rgba 0.75 0.75 0.75 1.0) 5.0))
+          (field fx xl-p 0 "Hz" :ott-frequency-fg 5.0))
         low-on-p low-solo-p)
       (parameter-toggle fx knee-p "Soft Knee" 6.4))))
 
@@ -184,9 +184,9 @@
         (h-stack :gap 0.4 :align :start
           (v-stack :gap 0.18 :align :start
             (label "Below" :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-            (thr-ratio-cell fx hb-thr hb-ratio (band-yellow))
-            (thr-ratio-cell fx mb-thr mb-ratio (band-cyan))
-            (thr-ratio-cell fx lb-thr lb-ratio (band-orange)))
+            (thr-ratio-cell fx hb-thr hb-ratio (high-band-color))
+            (thr-ratio-cell fx mb-thr mb-ratio (mid-band-color))
+            (thr-ratio-cell fx lb-thr lb-ratio (low-band-color)))
           (v-stack :gap 0.18 :align :start
             (box :height 0.8)
             (multiband-meter
@@ -205,14 +205,14 @@
               :high-split (eseq.effects.param-controls/instrument-param-base-value high-split)))
           (v-stack :gap 0.18 :align :start
             (label "Above" :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-            (thr-ratio-cell fx ha-thr ha-ratio (band-yellow))
-            (thr-ratio-cell fx ma-thr ma-ratio (band-cyan))
-            (thr-ratio-cell fx la-thr la-ratio (band-orange)))
+            (thr-ratio-cell fx ha-thr ha-ratio (high-band-color))
+            (thr-ratio-cell fx ma-thr ma-ratio (mid-band-color))
+            (thr-ratio-cell fx la-thr la-ratio (low-band-color)))
           (v-stack :gap 0.18 :align :start
             (label "Att/Rel" :font-size 8.5 :width 4.6 :color :dim :bg :transparent)
-            (att-rel-cell fx h-att h-rel (band-yellow))
-            (att-rel-cell fx m-att m-rel (band-cyan))
-            (att-rel-cell fx l-att l-rel (band-orange))))))))
+            (att-rel-cell fx h-att h-rel (high-band-color))
+            (att-rel-cell fx m-att m-rel (mid-band-color))
+            (att-rel-cell fx l-att l-rel (low-band-color))))))))
 
 (def output-box (fx high-out-p mid-out-p low-out-p)
   (box :width 6.4 :height 9.4 :padding 0.30

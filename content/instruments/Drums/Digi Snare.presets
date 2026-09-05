@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "engine_name": "Drums/Digi Snare/",
+  "source_file": "instruments/Drums/Digi Snare/dsp.lisp",
+  "presets": [
+    {
+      "id": "909 Tight",
+      "name": "909 Tight",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 1,
+        "dec": 220,
+        "bump": 18,
+        "benv": 24,
+        "snap": 0.62,
+        "tone": 0.48,
+        "tune": 0.1,
+        "clip": 0.12
+      }
+    },
+    {
+      "id": "808 Snappy",
+      "name": "808 Snappy",
+      "base_note_offset": -2.0,
+      "params": {
+        "engine": 1,
+        "dec": 420,
+        "bump": 8,
+        "snap": 0.86,
+        "tone": 0.34,
+        "noise": 0.8,
+        "ndec": 260,
+        "clip": 0.08
+      }
+    },
+    {
+      "id": "EFM Zap",
+      "name": "EFM Zap",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 2,
+        "ptch": 3,
+        "dec": 190,
+        "noise": 0.35,
+        "ndec": 80,
+        "mod_amt": 0.82,
+        "mfrq": 640,
+        "mdec": 26,
+        "hpf": 2100
+      }
+    },
+    {
+      "id": "EFM Clank",
+      "name": "EFM Clank",
+      "base_note_offset": -5.0,
+      "params": {
+        "engine": 2,
+        "dec": 420,
+        "noise": 0.5,
+        "ndec": 260,
+        "mod_amt": 0.95,
+        "mfrq": 1370,
+        "mdec": 140,
+        "hpf": 900,
+        "clip": 0.4,
+        "srr": 0.35
+      }
+    },
+    {
+      "id": "EFM Rim",
+      "name": "EFM Rim",
+      "base_note_offset": 2.0,
+      "params": {
+        "engine": 3,
+        "dec": 220,
+        "mod_amt": 0.6,
+        "mfrq": 420,
+        "mdec": 40,
+        "clip": 0.25
+      }
+    }
+  ]
+}

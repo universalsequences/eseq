@@ -20,6 +20,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "arrangement-scene-set",
     "arrangement-scene-remove",
     "arrangement-clip-create",
+    "arrangement-pattern-place",
     "arrangement-empty-take-create",
     "arrangement-clip-delete",
     "arrangement-clip-move",
@@ -370,6 +371,20 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             Ok(format!("Removed the scene change at beat {beat}"))
         }
         // --- track lanes (lane spec 8) -------------------------------
+        "arrangement-pattern-place" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let track_id = map_entity_id(map, "track-id")?;
+            // SEQ.track-ids uses the graph's persistent pan node identity,
+            // the same identity used by arrangement subtrees and mixer drags.
+            if app.graph.track_node_ids.get(track).map(|ids| ids.pan_id as u64) != Some(track_id) {
+                return Err("The target track changed; select the pattern again".to_string());
+            }
+            let pattern = PatternId(map_entity_id(map, "pattern-id")?);
+            let start = require_number(map, "start-beat")?;
+            app.arr_pattern_place(track, pattern, start)?;
+            Ok(format!("Placed linked pattern on track {} at beat {start}", track + 1))
+        }
         "arrangement-clip-create" => {
             let map = payload_map(payload)?;
             let track = require_track(map)?;

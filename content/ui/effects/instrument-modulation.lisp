@@ -155,17 +155,17 @@
       :on-change (lambda (v) (source-set-param-value p v)))))
 
 (def source-adsr-number (p title decimals unit)
-  (v-stack :width 3.8 :height 1.18 :gap 0.16 :align :start
-    (label title :font-size 7.4 :width 3.8 :height 0.52 :color :dim :bg :transparent)
+  (v-stack :width 4.8 :height 1.18 :gap 0.16 :align :start
+    (label title :font-size 10 :width 3.8 :height 0.52 :color :dim :bg :transparent :v-align :center)
     (number-picker :value (source-param-value p 0)
       :min (if p (pc/instrument-param-control-min p) 0)
       :max (if p (pc/instrument-param-control-max p) 0)
       :decimals decimals
       :unit unit
-      :noui true :font-size 9.0
-      :text-color :widget_focus_bg :edit-color :yellow
+      :noui true :font-size 10
+      :text-color :dim :edit-color :yellow
       :text-align :left
-      :width 3.8 :height 0.50
+      :width 4.8 :height 0.50
       :on-change (lambda (v) (source-set-param-value p v)))))
 
 (def env-source-editor (section)

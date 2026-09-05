@@ -99,6 +99,7 @@ pub(crate) fn build_kit_presets_value() -> Value {
         };
         Some(map_value([
             ("kind", Value::String("kit".to_string())),
+            ("icon", Value::Keyword("sampler".to_string())),
             ("label", Value::String(label.clone())),
             ("name", Value::String(label)),
             ("path", Value::String(path.to_string_lossy().to_string())),
@@ -112,10 +113,31 @@ pub(crate) fn build_kit_presets_value() -> Value {
     }))
 }
 
+/// Browser icon for a saved Sound. Every Sound is serialized as a rack track,
+/// but most hold a single slot: those read as the instrument they wrap
+/// (custom instrument or sampler) so the Sounds tab matches the Instruments
+/// and Samples tabs. Anything with several slots is a genuine instrument
+/// rack and takes the sidebar's rack glyph.
+pub(crate) fn sound_preset_icon(preset: &sequencer::project::ProjectSoundPreset) -> &'static str {
+    use sequencer::project::{ProjectInstrumentType, ProjectTrackKind};
+    let ProjectTrackKind::Rack { slots, .. } = &preset.track.kind else {
+        return "piano";
+    };
+    match slots.as_slice() {
+        [slot] => match slot.instrument_type {
+            ProjectInstrumentType::Sampler => "waveform",
+            ProjectInstrumentType::Modulator => "sine",
+            ProjectInstrumentType::Custom | ProjectInstrumentType::Rack => "piano",
+        },
+        _ => "sampler",
+    }
+}
+
 pub(crate) fn build_sound_presets_value() -> Value {
     let sounds = sequencer::project::list_sound_presets().unwrap_or_default();
     list_value(sounds.into_iter().filter_map(|path| {
         let preset = sequencer::project::load_sound_preset(&path).ok()?;
+        let icon = sound_preset_icon(&preset);
         let label = if preset.metadata.name.trim().is_empty() {
             path.file_stem()?.to_str()?.to_string()
         } else {
@@ -123,6 +145,7 @@ pub(crate) fn build_sound_presets_value() -> Value {
         };
         Some(map_value([
             ("kind", Value::String("sound".to_string())),
+            ("icon", Value::Keyword(icon.to_string())),
             ("label", Value::String(label.clone())),
             ("name", Value::String(label)),
             ("path", Value::String(path.to_string_lossy().to_string())),
@@ -728,4 +751,38 @@ pub(crate) fn sync_track_params_with_neural_selection(
         "track-plock-variants",
         build_track_plock_variants_value(state, track, selected),
     );
+}
+
+#[cfg(test)]
+mod sound_icon_tests {
+    use super::sound_preset_icon;
+    use sequencer::project::ProjectSoundPreset;
+
+    fn preset_with_slots(slots: &str) -> ProjectSoundPreset {
+        let json = format!(
+            r#"{{
+                "version": 1,
+                "metadata": {{ "name": "Fixture" }},
+                "track": {{ "id": 1, "kind": "rack", "routing": "broadcast", "slots": [{slots}] }},
+                "rack": {{ "routing": "broadcast", "slots": [] }}
+            }}"#
+        );
+        serde_json::from_str(&json).expect("fixture Sound should parse")
+    }
+
+    #[test]
+    fn single_slot_sounds_take_the_wrapped_instrument_icon() {
+        let custom = preset_with_slots(r#"{"instrument_type":"custom","instrument_name":"pluck"}"#);
+        assert_eq!(sound_preset_icon(&custom), "piano");
+        let sampler = preset_with_slots(r#"{"instrument_type":"sampler","sample_path":"a.wav"}"#);
+        assert_eq!(sound_preset_icon(&sampler), "waveform");
+    }
+
+    #[test]
+    fn multi_slot_sounds_take_the_rack_icon() {
+        let rack = preset_with_slots(
+            r#"{"instrument_type":"custom","instrument_name":"a"},{"instrument_type":"custom","instrument_name":"b"}"#,
+        );
+        assert_eq!(sound_preset_icon(&rack), "sampler");
+    }
 }

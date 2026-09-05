@@ -8,9 +8,10 @@
 //! keeps the compiled song and `song_revision` in lockstep). A failed
 //! primitive changes nothing and creates no history entry.
 //!
-//! Overlap is never rejected (spec 14, locked): every op that places or grows
+//! Existing clip edits occlude overlaps (spec 14): every op that moves or grows
 //! a clip first calls `occlude_span`, so the incoming clip always wins and
-//! non-overlap stays an invariant the ops maintain.
+//! non-overlap stays an invariant the ops maintain. The explicit pattern
+//! placement gesture instead requires an empty span, preserving existing clips.
 
 use crate::sequencer::{
     insert_clip_sorted, lower_rows_to_arrangement, occlude_span, pattern_play_step,
@@ -186,6 +187,30 @@ impl App {
     }
 
     // --- clip ops (spec 8) ----------------------------------------------
+
+    /// Place a linked pattern cycle without replacing existing arrangement
+    /// material. The pattern is resolved again at commit, so a stale UI
+    /// preview cannot insert a deleted source or an obsolete cycle length.
+    pub fn arr_pattern_place(
+        &mut self, track: usize, pattern: crate::sequencer::PatternId, start: f64,
+    ) -> Result<ClipId, String> {
+        self.require_song_edit_unlocked()?;
+        let start = finite_beat("Pattern start beat", start)?;
+        let duration = self.state.with_project_scenes(|scenes| {
+            let data = scenes.track_pools.get(track).and_then(|pool| pool.get(pattern))
+                .ok_or_else(|| "The pattern is no longer available on this track".to_string())?;
+            let steps = data.track_params.num_steps.max(1);
+            Ok::<_, String>(data.track_params.timebase.step_beats(steps) * steps as f64)
+        })?;
+        let end = start + duration;
+        let arrangement = self.require_arrangement()?;
+        let lane = arrangement.track_lanes.get(track)
+            .ok_or_else(|| "The target track is no longer available".to_string())?;
+        if lane.iter().any(|clip| clip.end_beat > start && clip.start_beat < end) {
+            return Err("Pattern overlaps an existing clip; choose an empty span".to_string());
+        }
+        self.arr_clip_create(track, start, end, LaneSource::Pattern(pattern), 0.0)
+    }
 
     /// Create a clip on `track` over `[start_beat, end_beat)`, truncating
     /// whatever it lands on (spec 8/14). Returns the new clip's id.
@@ -1824,6 +1849,29 @@ mod tests {
         assert!(matches!(redo(app), HistoryReplay::Applied(_)));
         assert_eq!(app.state.committed_arrangement(), arrangement_after);
         assert_eq!(app.state.committed_song(), song_after);
+    }
+
+    #[test]
+    fn pattern_placement_is_linked_atomic_and_rejects_overlap() {
+        let mut app = test_app();
+        app.state.set_committed_arrangement(Some(app.empty_arrangement())).unwrap();
+        assert_one_entry_and_undoable(&mut app, |app| {
+            app.arr_pattern_place(0, PatternId(1), 8.0).unwrap();
+        });
+        let arrangement = app.state.committed_arrangement().unwrap();
+        let clip = &arrangement.track_lanes[0][0];
+        assert_eq!(clip.pattern_id, Some(1));
+        assert_eq!(clip.take_id, None);
+        assert_eq!((clip.start_beat, clip.end_beat), (8.0, 12.0));
+        let depth = app.history.undo_len();
+        assert!(app.arr_pattern_place(0, PatternId(1), 10.0).is_err());
+        assert!(app.arr_pattern_place(0, PatternId(999), 20.0).is_err());
+        assert!(app.arr_pattern_place(0, PatternId(1), f64::NAN).is_err());
+        assert_eq!(app.history.undo_len(), depth);
+        assert_eq!(app.state.committed_arrangement(), Some(arrangement));
+        app.arr_pattern_place(0, PatternId(1), 12.0).unwrap();
+        let arrangement = app.state.committed_arrangement().unwrap();
+        assert!(arrangement.track_lanes[0].iter().all(|clip| clip.pattern_id == Some(1)));
     }
 
     #[test]

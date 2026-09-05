@@ -311,6 +311,7 @@ enum HoverEdge {
 }
 
 thread_local! {
+    static TIMELINE_PLACEMENT: RefCell<Option<(u64, f64)>> = const { RefCell::new(None) };
     static TIMELINE_HOVER_EDGE: RefCell<Option<(u64, Value, HoverEdge)>> =
         const { RefCell::new(None) };
 }
@@ -495,6 +496,7 @@ impl WidgetDefinition for TimelineWidget {
             "region-on",
             "selected-id",
             "bound-id",
+            "placement-active",
         ]
     }
 
@@ -609,7 +611,7 @@ impl WidgetDefinition for TimelineWidget {
                         if is_major {
                             theme::BRIGHT_BLACK()
                         } else {
-                            crate::backend::Color::from_hex(0x33, 0x33, 0x38)
+                            theme::TIMELINE_GRID_MINOR()
                         },
                         None,
                     ),
@@ -710,6 +712,9 @@ impl WidgetDefinition for TimelineWidget {
         _modifiers: KeyModifiers,
     ) -> Option<Value> {
         let view = TimelineView::from_props(&node.props, node.rect);
+        if get_num(&node.props, "placement-active", 0.0) > 0.0 {
+            return Some(action_map(vec![("kind", keyword(":placement"))]));
+        }
         view.begin_gesture(local_col, scroll_adjusted_row(local_row))
     }
 
@@ -727,6 +732,31 @@ impl WidgetDefinition for TimelineWidget {
     ) -> MouseEventOutcome {
         let local_row = scroll_adjusted_row(local_row);
         let view = TimelineView::from_props(&node.props, node.rect);
+        let placing = get_num(&node.props, "placement-active", 0.0) > 0.0;
+        if placing {
+            let time = view.snap_time(view.time_at_col(local_col)).max(0.0);
+            match mouse_kind {
+                MouseEventKind::Moved => {
+                    TIMELINE_PLACEMENT.with(|state| {
+                        let next = Some((node.widget_id, time));
+                        if *state.borrow() != next {
+                            *state.borrow_mut() = next;
+                            super::bump_widget_state_generation();
+                        }
+                    });
+                    return MouseEventOutcome::Consume;
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left) => return MouseEventOutcome::Consume,
+                MouseEventKind::Up(MouseButton::Left) => {
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(action_map(vec![
+                        ("type", keyword(":place-item")),
+                        ("time", Value::Number(time)),
+                    ])));
+                }
+                _ => {}
+            }
+        }
         match mouse_kind {
             MouseEventKind::Moved => {
                 let hovered_edge = match view.hit_test(local_col, local_row) {
@@ -765,6 +795,9 @@ impl WidgetDefinition for TimelineWidget {
     }
 
     fn cursor(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> super::WidgetCursor {
+        if get_num(&node.props, "placement-active", 0.0) > 0.0 {
+            return super::WidgetCursor::DragCopy;
+        }
         let view = TimelineView::from_props(&node.props, node.rect);
         match view.hit_test(local_col, scroll_adjusted_row(local_row)) {
             Some(HitRegion::ItemEdgeEnd { .. })
@@ -780,6 +813,11 @@ impl WidgetDefinition for TimelineWidget {
     }
 
     fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
+        if key.code == KeyCode::Esc && get_num(&node.props, "placement-active", 0.0) > 0.0 {
+            return Some(WidgetEvent::Custom(action_map(vec![
+                ("type", keyword(":cancel-placement")),
+            ])));
+        }
         let view = TimelineView::from_props(&node.props, node.rect);
         view.handle_key(key).map(WidgetEvent::Custom)
     }
@@ -790,6 +828,9 @@ impl WidgetDefinition for TimelineWidget {
         local_col: f32,
         local_row: f32,
     ) -> Option<WidgetEvent> {
+        if get_num(&node.props, "placement-active", 0.0) > 0.0 {
+            return None;
+        }
         let view = TimelineView::from_props(&node.props, node.rect);
         view.handle_double_click(local_col, scroll_adjusted_row(local_row))
             .map(WidgetEvent::Custom)
@@ -876,7 +917,29 @@ fn build_primitives(
     }
 
     let rect = node.rect;
-    let view = TimelineView::from_props(&node.props, rect);
+    let mut view = TimelineView::from_props(&node.props, rect);
+    if get_num(&node.props, "placement-active", 0.0) > 0.0
+        && super::pointer_hovered(node.widget_id)
+    {
+        let time = TIMELINE_PLACEMENT.with(|state| state.borrow()
+            .filter(|(id, _)| *id == node.widget_id).map(|(_, time)| time));
+        if let (Some(time), Some(item)) = (time, node.props.get("placement-item")) {
+            let props = HashMap::from([("items".to_string(), list_value(vec![item.clone()]))]);
+            if let Some(mut preview) = get_items(&props).into_iter().next() {
+                let duration = preview.end - preview.start;
+                preview.start = time;
+                preview.end = time + duration;
+                let overlaps = view.items.iter().any(|item|
+                    item.end > preview.start && item.start < preview.end);
+                let mut color = if overlaps {
+                    crate::backend::Color::from_hex(0xee, 0x55, 0x55)
+                } else { preview.color.unwrap_or(view.item_color) };
+                color.a = 0.5;
+                preview.color = Some(color);
+                view.items.push(preview);
+            }
+        }
+    }
     let content = view.content_rect();
     let mut primitives = Vec::new();
 
@@ -1074,7 +1137,7 @@ fn build_primitives(
             let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK());
             if view.sidebar_style == SidebarStyle::Piano {
                 let white_key = theme::WHITE();
-                let border_color = crate::backend::Color::from_hex(0x1a, 0x1a, 0x1d);
+                let border_color = theme::PIANO_KEY_BORDER();
                 let is_black_key = sidebar_bg == theme::BLACK();
                 primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                     x: rect.col,
@@ -1099,7 +1162,7 @@ fn build_primitives(
                 if is_black_key {
                     let black_width = (view.sidebar_width * 0.66).max(0.0);
                     let black_height = (lane_height * 0.78).max(0.24);
-                    let black_color = crate::backend::Color::from_hex(0x05, 0x05, 0x06);
+                    let black_color = theme::PIANO_BLACK_KEY();
                     let black_rect = Rect {
                         row: row_start + ((lane_height - black_height) * 0.5),
                         col: rect.col,
@@ -1174,9 +1237,9 @@ fn build_primitives(
         let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK());
         let grid_color = view.background_color.unwrap_or_else(|| {
             if sidebar_bg == theme::WHITE() {
-                crate::backend::Color::from_hex(0x16, 0x16, 0x18)
+                theme::PIANO_WHITE_LANE()
             } else {
-                crate::backend::Color::from_hex(0x0d, 0x0d, 0x0f)
+                theme::PIANO_BLACK_LANE()
             }
         });
         primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
@@ -1198,7 +1261,7 @@ fn build_primitives(
             color: if is_major {
                 theme::BRIGHT_BLACK()
             } else {
-                crate::backend::Color::from_hex(0x33, 0x33, 0x38)
+                theme::TIMELINE_GRID_MINOR()
             },
         }));
     }
@@ -1694,7 +1757,7 @@ fn build_primitives(
                 y: rect.row,
                 width: 0.125,
                 height: view.header_height,
-                color: theme::YELLOW(),
+                color: theme::TIMELINE_PLAYHEAD(),
             }));
         }
         primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
@@ -1702,7 +1765,7 @@ fn build_primitives(
             y: content.row,
             width: 0.125,
             height: content.height,
-            color: theme::YELLOW(),
+            color: theme::TIMELINE_PLAYHEAD(),
         }));
     }
 
@@ -4344,6 +4407,51 @@ fn list_value(items: Vec<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placement_with_reactive_activation_snaps_and_cancels_without_creating_takes() {
+        use std::sync::{Arc, atomic::AtomicU64};
+        let active = Value::ReactiveRef {
+            namespace: "SEQV".to_string(), field: "placement".to_string(), index: None,
+            kind: crate::vm::BindingKind::Float,
+            slot: Arc::new(AtomicU64::new(1.0_f64.to_bits())),
+        };
+        let node = LayoutNode {
+            widget_id: 987, stable_widget_id: None, subtree_root_id: None,
+            parent_subtree_root_id: None, stable_key: None,
+            widget_type: "timeline".into(),
+            rect: Rect { row: 0.0, col: 0.0, width: 64.0, height: 3.0 },
+            props: HashMap::from([
+                ("placement-active".into(), active),
+                ("sidebar-width".into(), Value::Number(0.0)),
+                ("header-height".into(), Value::Number(0.0)),
+                ("view-duration".into(), Value::Number(64.0)),
+                ("snap".into(), Value::Number(4.0)),
+                ("snap-mode".into(), keyword(":floor")),
+            ]),
+            children: vec![], focusable: true, animation: Default::default(),
+        };
+        assert!(TIMELINE_WIDGET.bindable_props().contains(&"placement-active"));
+        let widget = crate::widgets::build_widget("timeline", vec![
+            keyword(":placement-active"), node.props["placement-active"].clone(),
+        ]);
+        let Value::Map(widget) = widget else { panic!("timeline must accept reactive activation"); };
+        assert!(!widget.contains_key("__widget-diagnostic"));
+        let cancel = TIMELINE_WIDGET.key_event(&node, WidgetKeyEvent {
+            code: KeyCode::Esc, modifiers: KeyModifiers::NONE,
+        }).expect("Escape cancels placement");
+        let WidgetEvent::Custom(cancel) = cancel else { panic!("cancel action"); };
+        assert_eq!(get_map(&cancel).unwrap().get("type"), Some(&keyword(":cancel-placement")));
+        assert!(TIMELINE_WIDGET.double_click_event(&node, 10.0, 1.0).is_none());
+        let event = TIMELINE_WIDGET.mouse_event(&node, MouseEventKind::Up(MouseButton::Left),
+            10.0, 1.0, None, None, KeyModifiers::NONE, 10.0, 20.0);
+        let MouseEventOutcome::Dispatch(WidgetEvent::Custom(action)) = event else {
+            panic!("placement must dispatch one action");
+        };
+        let map = get_map(&action).unwrap();
+        assert_eq!(map.get("type"), Some(&keyword(":place-item")));
+        assert_eq!(map.get("time"), Some(&Value::Number(8.0)));
+    }
 
     /// The bound ghost channels must reproduce the arrangement's Lisp ghost
     /// projection exactly: rigid move, clamped end resize with cycle

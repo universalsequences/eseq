@@ -227,6 +227,16 @@ pub enum ScheduledEventKind {
         track: usize,
         effect_params: Vec<ScheduledEffectParam>,
     },
+    /// Off-step boundary on an Instrument Rack track: the rack's p-locks at
+    /// `step` (macros, slot params, slot instrument and effect params) and
+    /// any held rack-macro print latch apply to the rack's sounding voices
+    /// and per-slot chains without a trigger — the rack analog of
+    /// `InstrumentParams` + `EffectParams`. The audio side resolves the step
+    /// against its own copy of the scheduler snapshot.
+    RackParams {
+        track: usize,
+        step: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

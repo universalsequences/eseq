@@ -1488,6 +1488,8 @@ pub struct ProcessRuntime {
     conductors: Vec<AuthoredConductorAttachment>,
     pending_conductor_ticks: VecDeque<PendingConductorTick>,
     global_transpose: f32,
+    /// Authored scene baseline, refreshed at each scheduler chunk boundary.
+    scene_transpose: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -1510,7 +1512,11 @@ impl ProcessRuntime {
     }
 
     pub fn global_transpose(&self) -> f32 {
-        self.global_transpose
+        self.scene_transpose + self.global_transpose
+    }
+
+    pub fn set_scene_transpose(&mut self, slots: &crate::sequencer::SceneSlotStore) {
+        self.scene_transpose = slots.transpose_semitones();
     }
 
     /// Rebuild process-read aliases from the scheduler's current effective

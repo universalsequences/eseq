@@ -50,10 +50,12 @@ pub mod tree;
 pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
+pub mod drift_waveform;
 pub mod waveform;
 pub mod wavetable_viewer;
 pub(crate) mod wgsl;
 pub mod wrap;
+pub mod xy_pad;
 
 pub use focus_decoration::{FocusCornerStyle, FocusDecoration};
 
@@ -64,7 +66,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use crate::backend::{Cell, CellStyle, Color};
 use crate::layout::{
@@ -569,6 +571,7 @@ pub enum WidgetEvent {
     PointerUp(PointerEvent),
     Key(WidgetKeyEvent),
     Custom(Value),
+    ContextMenu(Value),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1270,6 +1273,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &timeline::TIMELINE_WIDGET,
     &timeline::TIMELINE_CURSOR_MARKER_WIDGET,
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
+    &drift_waveform::DRIFT_WAVEFORM_WIDGET,
     &waveform::WAVEFORM_WIDGET,
     &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
     &sound_glyph::SOUND_GLYPH_WIDGET,
@@ -1298,6 +1302,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &text_input::TEXTBOX_WIDGET,
     &tree::TREE_WIDGET,
     &tree::TREE_ROW_BG_WIDGET,
+    &xy_pad::XY_PAD_WIDGET,
 ];
 
 pub fn widget_definition(widget_type: &str) -> Option<&'static dyn WidgetDefinition> {
@@ -1351,6 +1356,8 @@ pub fn is_overlay_panel_widget(widget_type: &str) -> bool {
 }
 
 pub fn node_handles_pointer_events(node: &LayoutNode) -> bool {
+    // Submenu rows own hover/click navigation even without a leaf callback.
+    if node.widget_type == "menu-item" { return true; }
     let has_pointer_callback = node.props.contains_key("on-click")
         || node.props.contains_key("on-right-click")
         || node.props.contains_key("on-select")
@@ -2208,6 +2215,16 @@ fn collect_modal_overlay(
     };
     let screen_frame = shift(frame_rect);
     let screen_modal = shift(modal_rect);
+    if node.widget_type == "context-menu" {
+        context_menu::emit_panels(node, viewport, scroll_top, max_rows);
+        push_overlay(OverlayEntry {
+            widget_id: node.widget_id,
+            rect: shift(context_menu::panel_bounds(node).unwrap_or(modal_rect)),
+            kind: OverlayKind::Modal,
+        });
+        return;
+    }
+
 
     let mark = overlay_primitives_mark();
     let mut subtree = Vec::new();
@@ -2216,24 +2233,14 @@ fn collect_modal_overlay(
     }
     let nested_overlay = split_off_overlay_primitives(mark);
 
-    let is_context_menu = node.widget_type == "context-menu";
-    if is_context_menu {
-        // Context menus draw no scrim: the page beneath stays visible, and a
-        // click outside the panel dismisses via the same modal-family
-        // intercepts.
-        context_menu::emit_menu_chrome(&node.props, screen_modal, viewport);
-        push_overlay_primitive(GpuPrimitive::PushClipRect(screen_modal));
-    } else {
-        // The scrim gets its own clip segment: overlay drawing batches primitive
-        // classes within a segment, so an unsegmented scrim rect would paint over
-        // the panel background instance.
-        push_overlay_primitive(GpuPrimitive::PushClipRect(screen_frame));
-        modal::emit_modal_scrim(&node.props, screen_frame, viewport);
-        push_overlay_primitive(GpuPrimitive::PopClipRect);
-        modal::emit_modal_panel_chrome(&node.props, screen_modal, viewport);
-        push_overlay_primitive(GpuPrimitive::PushClipRect(screen_modal));
-        modal::emit_modal_title(&node.props, screen_modal, viewport);
-    }
+    // The scrim gets its own clip segment so background batching cannot
+    // paint it over the panel.
+    push_overlay_primitive(GpuPrimitive::PushClipRect(screen_frame));
+    modal::emit_modal_scrim(&node.props, screen_frame, viewport);
+    push_overlay_primitive(GpuPrimitive::PopClipRect);
+    modal::emit_modal_panel_chrome(&node.props, screen_modal, viewport);
+    push_overlay_primitive(GpuPrimitive::PushClipRect(screen_modal));
+    modal::emit_modal_title(&node.props, screen_modal, viewport);
     for mut prim in subtree {
         offset_primitive_x_mut(&mut prim, dx, viewport);
         offset_primitive_y_mut(&mut prim, dy, viewport);
@@ -3072,7 +3079,71 @@ fn offset_primitive_y_mut(prim: &mut GpuPrimitive, dy: f32, viewport: WidgetView
     }
 }
 
+pub(crate) fn pointer_event_info(
+    phase: &str,
+    modifiers: KeyModifiers,
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+) -> Value {
+    let mut info = pointer_modifier_info(modifiers);
+    info.insert(
+        "phase".to_string(),
+        Rc::new(RefCell::new(Value::String(phase.to_string()))),
+    );
+    let wc = local_col - node.rect.col;
+    let wr = local_row - node.rect.row;
+    let sx = if node.rect.width > 0.0 {
+        wc / node.rect.width * 2.0 - 1.0
+    } else {
+        0.0
+    };
+    let sy = if node.rect.height > 0.0 {
+        wr / node.rect.height * 2.0 - 1.0
+    } else {
+        0.0
+    };
+    info.insert(
+        "x".to_string(),
+        Rc::new(RefCell::new(Value::Number(wc as f64))),
+    );
+    info.insert(
+        "y".to_string(),
+        Rc::new(RefCell::new(Value::Number(wr as f64))),
+    );
+    // Absolute pointer position in tile-local layout CONTENT cells: the
+    // tile's own scroll offsets are already folded in, so this matches the
+    // space layout rects live in (the backend draws the layout, and the
+    // overlay channel, translated by -scroll). It is therefore the space
+    // `context-menu` :anchor-col/:anchor-row are expressed in — a
+    // frame-anchored widget reconciles the two via `current_frame_viewport`,
+    // which reports the frame in this same content space.
+    //
+    // Not folded in: the offset of an enclosing `scroll` WIDGET, which
+    // children read separately via `scroll::current_event_scroll_offset`.
+    info.insert(
+        "col".to_string(),
+        Rc::new(RefCell::new(Value::Number(local_col as f64))),
+    );
+    info.insert(
+        "row".to_string(),
+        Rc::new(RefCell::new(Value::Number(local_row as f64))),
+    );
+    info.insert(
+        "sx".to_string(),
+        Rc::new(RefCell::new(Value::Number(sx as f64))),
+    );
+    info.insert(
+        "sy".to_string(),
+        Rc::new(RefCell::new(Value::Number(sy as f64))),
+    );
+    Value::Map(info)
+}
+
 pub fn handle_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+    if let WidgetEvent::ContextMenu(info) = event {
+        return Some(EventOutput { callback: node.props.get("on-right-click")?.clone(), args: vec![info] });
+    }
     if let Some(output) = sdf_widget::sdf_handle_event(node, &event) {
         return Some(output);
     }
@@ -3090,6 +3161,15 @@ pub fn map_mouse_event(
     cell_w: f32,
     cell_h: f32,
 ) -> MouseEventOutcome {
+    // Context menus are a common pointer action, including for widgets with
+    // specialized gestures such as timelines. Dispatch before widget-specific
+    // handling so :on-right-click has the same contract on every widget.
+    if mouse_kind == MouseEventKind::Down(MouseButton::Right)
+        && node.props.contains_key("on-right-click") {
+        return MouseEventOutcome::Dispatch(WidgetEvent::ContextMenu(pointer_event_info(
+            "right-click", modifiers, node, local_col, local_row,
+        )));
+    }
     // SDF widgets handle their own mouse events
     if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
         return sdf_widget::sdf_map_mouse_event(node, mouse_kind, local_col, local_row);

@@ -16,7 +16,6 @@ use super::{
     CellBuffer, GpuPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
     resolve_named_color, styled_cell,
 };
-use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
@@ -307,19 +306,19 @@ impl WidgetDefinition for PhaserNotchWidget {
         let bg_color = resolve_named_color(
             &node.props,
             "background-color",
-            Color::rgba(0.045, 0.048, 0.052, 0.72),
+            crate::theme::PHASER_BG(),
         );
         let grid_color = resolve_named_color(
             &node.props,
             "grid-color",
-            Color::rgba(0.36, 0.36, 0.38, 0.30),
+            crate::theme::PHASER_GRID(),
         );
         let left_color =
-            resolve_named_color(&node.props, "left-color", Color::rgba(1.0, 0.62, 0.25, 1.0));
+            resolve_named_color(&node.props, "left-color", crate::theme::PHASER_LEFT());
         let right_color = resolve_named_color(
             &node.props,
             "right-color",
-            Color::rgba(0.45, 0.78, 0.95, 1.0),
+            crate::theme::PHASER_RIGHT(),
         );
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
@@ -336,12 +335,12 @@ impl WidgetDefinition for PhaserNotchWidget {
                     freq_scale: 0,
                     min_hz: FREQ_MIN_HZ,
                     max_hz: 20_000.0,
-                    min_color: Color::rgba(0.02, 0.025, 0.03, 0.28),
-                    mid_color: Color::rgba(0.12, 0.30, 0.34, 0.18),
-                    max_color: Color::rgba(0.35, 0.68, 0.72, 0.30),
-                    eq_line_color: Color::rgba(0.42, 0.76, 0.78, 0.28),
-                    eq_fill_color: Color::rgba(0.10, 0.36, 0.38, 0.12),
-                    background_color: Color::rgba(0.02, 0.025, 0.03, 1.0),
+                    min_color: crate::theme::PHASER_SPECTRUM_MIN(),
+                    mid_color: crate::theme::PHASER_SPECTRUM_MID(),
+                    max_color: crate::theme::PHASER_SPECTRUM_MAX(),
+                    eq_line_color: crate::theme::PHASER_SPECTRUM_LINE(),
+                    eq_fill_color: crate::theme::PHASER_SPECTRUM_FILL(),
+                    background_color: crate::theme::PHASER_SPECTRUM_BG(),
                 },
             ));
         }

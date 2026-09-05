@@ -292,6 +292,9 @@ impl Editor {
             self.mark_needs_redraw();
             return;
         };
+        if node.widget_type == "context-menu" {
+            crate::widget_render::context_menu::close_branches(&node);
+        }
         let Some(callback) = node.props.get("on-close").cloned() else {
             return;
         };
@@ -315,6 +318,94 @@ impl Editor {
             self.clear_focus_on_other_tiles();
             self.mark_needs_redraw();
         }
+    }
+
+    pub(super) fn handle_context_menu_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crate::widget_render::context_menu as menu;
+        use crossterm::event::KeyCode;
+        fn by_stable(node: &LayoutNode, id: u64) -> Option<&LayoutNode> {
+            if node.stable_widget_id.unwrap_or(node.widget_id) == id { return Some(node); }
+            node.children.iter().find_map(|child| by_stable(child, id))
+        }
+        fn parent_of(node: &LayoutNode, id: u64) -> Option<&LayoutNode> {
+            if node.children.iter().any(|child| child.widget_id == id) { return Some(node); }
+            node.children.iter().find_map(|child| parent_of(child, id))
+        }
+        let Some(layout) = self.runtime.current_layout.clone() else { return false; };
+        let Some(root) = super::topmost_open_overlay_panel(&layout)
+            .filter(|node| node.widget_type == "context-menu").cloned() else { return false; };
+        let path = menu::branch(&root);
+        let panel = path.last().and_then(|id| by_stable(&root, *id)).unwrap_or(&root);
+        let focused = self.focused_widget_node().filter(|node| node.widget_type == "menu-item")
+            .and_then(|node| by_stable(&root, node.stable_widget_id.unwrap_or(node.widget_id)).cloned())
+            .or_else(|| panel.children.iter().find(|node| node.widget_type == "menu-item" && !menu::item_disabled(&node.props)).cloned());
+        if matches!(key.code, KeyCode::Left | KeyCode::Esc) {
+            if let Some(parent) = path.last().copied() {
+                menu::set_branch(&root, path[..path.len() - 1].to_vec());
+                self.runtime.invalidate_layout();
+                if let Some(layout) = self.runtime.current_layout.clone()
+                    && let Some(node) = by_stable(&layout, parent) { self.set_focused_widget(node.clone()); }
+            } else if key.code == KeyCode::Esc { self.fire_modal_on_close(root.widget_id); }
+            self.mark_needs_redraw();
+            return true;
+        }
+        let Some(focused) = focused else { return true; };
+        if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            let panel = parent_of(&root, focused.widget_id).unwrap_or(&root);
+            let rows: Vec<_> = panel.children.iter().filter(|node| node.widget_type == "menu-item" && !menu::item_disabled(&node.props)).collect();
+            if !rows.is_empty() {
+                let index = rows.iter().position(|node| node.widget_id == focused.widget_id).unwrap_or(0);
+                let down = key.code == KeyCode::Down;
+                let (offset, max) = menu::scroll_window(panel);
+                if (down && index + 1 == rows.len() || !down && index == 0)
+                    && menu::scroll_panel(panel, if down { 1 } else { -1 }, true) {
+                    menu::set_branch(&root, menu::path_to_item(&root, panel.widget_id).unwrap_or_default());
+                    self.runtime.invalidate_layout();
+                    if let Some(layout) = self.runtime.current_layout.clone()
+                        && let Some(new_panel) = by_stable(&layout, panel.stable_widget_id.unwrap_or(panel.widget_id)) {
+                        let choices: Vec<_> = new_panel.children.iter().filter(|node| node.widget_type == "menu-item" && !menu::item_disabled(&node.props)).collect();
+                        let choose_first = if down { offset == max } else { offset != 0 };
+                        if let Some(node) = if choose_first { choices.first() } else { choices.last() } {
+                            self.set_focused_widget((*node).clone());
+                        }
+                    }
+                    self.mark_needs_redraw();
+                    return true;
+                }
+                let next = if key.code == KeyCode::Down { (index + 1) % rows.len() } else { (index + rows.len() - 1) % rows.len() };
+                let target = rows[next].clone();
+                let mut path = menu::path_to_item(&root, target.widget_id).unwrap_or_default();
+                if menu::has_submenu(&target) { path.pop(); }
+                menu::set_branch(&root, path);
+                self.runtime.invalidate_layout();
+                if let Some(layout) = self.runtime.current_layout.clone()
+                    && let Some(node) = by_stable(&layout, target.stable_widget_id.unwrap_or(target.widget_id)) { self.set_focused_widget(node.clone()); }
+            }
+            self.mark_needs_redraw();
+            return true;
+        }
+        if matches!(key.code, KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ')) {
+            if menu::item_disabled(&focused.props) { return true; }
+            if menu::has_submenu(&focused) {
+                menu::set_branch(&root, menu::path_to_item(&root, focused.widget_id).unwrap_or_default());
+                self.runtime.invalidate_layout();
+                if let Some(layout) = self.runtime.current_layout.clone()
+                    && let Some(parent) = by_stable(&layout, focused.stable_widget_id.unwrap_or(focused.widget_id))
+                    && let Some(child) = parent.children.iter().find(|node| node.widget_type == "menu-item" && !menu::item_disabled(&node.props)) {
+                    self.set_focused_widget(child.clone());
+                }
+            } else if key.code != KeyCode::Right {
+                if let Some(callback) = focused.props.get("on-select").cloned() {
+                    self.apply_widget_output(Some(crate::widget_render::EventOutput {
+                        callback, args: vec![menu::menu_item_select_info(&focused)],
+                    }));
+                    self.fire_modal_on_close(root.widget_id);
+                }
+            }
+            self.mark_needs_redraw();
+            return true;
+        }
+        true
     }
 
     /// Dismiss one overlay entry: dropdowns close directly; modal-family

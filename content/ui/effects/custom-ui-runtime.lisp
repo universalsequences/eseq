@@ -19,6 +19,7 @@
         custom-ui-set-adsr-in-scope
         custom-ui-param-change-callback
         custom-ui-param-change-callback-s
+        custom-ui-xy-change-callback-s
         custom-ui-current-param
         custom-ui-current-tensor-param
         custom-ui-current-base-note-param
@@ -94,34 +95,48 @@
       (str eseq.vanilla/audio-fx-ui-current-name "-bus-" (get eseq.vanilla/audio-fx-ui-current-fx :bus-idx)
            "-slot-" (get eseq.vanilla/audio-fx-ui-current-fx :slot-idx))
       (str eseq.vanilla/audio-fx-ui-current-name "-slot-" (get eseq.vanilla/audio-fx-ui-current-fx :slot-idx)))
-    eseq.vanilla/synth-ui-current-name))
+    (if (= eseq.vanilla/custom-ui-current-kind "midi-fx")
+      (str "midi-" eseq.vanilla/midi-fx-ui-current-name "-slot-" (get eseq.vanilla/midi-fx-ui-current-fx :slot-idx))
+      eseq.vanilla/synth-ui-current-name)))
 
 (def custom-ui-current-scope ()
   (dict
     :kind eseq.vanilla/custom-ui-current-kind
     :name (custom-ui-scope-name)
     :audio-fx eseq.vanilla/audio-fx-ui-current-fx
+    :midi-fx eseq.vanilla/midi-fx-ui-current-fx
     :inst eseq.vanilla/synth-ui-current-inst))
 
+;; MIDI effect UIs (content/midi-fx/**/ui.lisp) share the lego vocabulary
+;; with audio effects: the codegen sets custom-ui-current-kind to "midi-fx"
+;; and the param/fx lookups below route to the midi-fx slot dict, whose
+;; `:midi-fx true` flag makes param-controls issue set-midi-fx-* commands.
 (def custom-ui-param-in-scope (scope name)
   (if (= (get scope :kind) "audio-fx")
     (fxui/audio-fx-ui-param (get scope :audio-fx) name)
-    (inst-param (get scope :inst) name)))
+    (if (= (get scope :kind) "midi-fx")
+      (fxui/midi-fx-ui-param (get scope :midi-fx) name)
+      (inst-param (get scope :inst) name))))
+
+(def effect-scope? (scope)
+  (or (= (get scope :kind) "audio-fx") (= (get scope :kind) "midi-fx")))
 
 (def tensor-param-in-scope (scope name)
-  (if (= (get scope :kind) "audio-fx")
+  (if (effect-scope? scope)
     false
     (inst-tensor-param (get scope :inst) name)))
 
 (def base-note-param-in-scope (scope)
-  (if (= (get scope :kind) "audio-fx")
+  (if (effect-scope? scope)
     false
     (inst-base-note-param (get scope :inst))))
 
 (def fx-in-scope (scope)
   (if (= (get scope :kind) "audio-fx")
     (get scope :audio-fx)
-    false))
+    (if (= (get scope :kind) "midi-fx")
+      (get scope :midi-fx)
+      false)))
 
 (def current-fx ()
   (fx-in-scope (custom-ui-current-scope)))
@@ -179,20 +194,22 @@
         (sec/custom-ui-select-section-in-scope scope section)
         (custom-ui-set-param-in-scope scope p v)))))
 
+(def custom-ui-xy-change-callback-s (section x-p y-p)
+  (let ((scope (custom-ui-current-scope)))
+    (lambda (x y)
+      (do
+        (sec/custom-ui-select-section-in-scope scope section)
+        (custom-ui-set-param-in-scope scope x-p x)
+        (custom-ui-set-param-in-scope scope y-p y)))))
+
 (def custom-ui-current-param (name)
-  (if (= eseq.vanilla/custom-ui-current-kind "audio-fx")
-    (fxui/audio-fx-ui-param eseq.vanilla/audio-fx-ui-current-fx name)
-    (inst-param eseq.vanilla/synth-ui-current-inst name)))
+  (custom-ui-param-in-scope (custom-ui-current-scope) name))
 
 (def custom-ui-current-tensor-param (name)
-  (if (= eseq.vanilla/custom-ui-current-kind "audio-fx")
-    false
-    (inst-tensor-param eseq.vanilla/synth-ui-current-inst name)))
+  (tensor-param-in-scope (custom-ui-current-scope) name))
 
 (def custom-ui-current-base-note-param ()
-  (if (= eseq.vanilla/custom-ui-current-kind "audio-fx")
-    false
-    (inst-base-note-param eseq.vanilla/synth-ui-current-inst)))
+  (base-note-param-in-scope (custom-ui-current-scope)))
 
 (def custom-ui-set-param (p value)
   (custom-ui-set-param-in-scope (custom-ui-current-scope) p value))

@@ -1,0 +1,209 @@
+{
+  "version": 1,
+  "engine_name": "drums/modal-snare-wired/",
+  "source_file": "instruments/drums/modal-snare-wired/.lisp",
+  "presets": [
+    {
+      "id": "Open",
+      "name": "Open",
+      "base_note_offset": 0.0,
+      "params": {
+        "stroke": 0.5,
+        "press": 0.0
+      }
+    },
+    {
+      "id": "No Split No Visc",
+      "name": "No Split No Visc",
+      "base_note_offset": 0.0,
+      "params": {
+        "split": 0.0,
+        "visc": 0.0,
+        "tilt": 0.9,
+        "wire_tone": 0.0
+      }
+    },
+    {
+      "id": "Rimshot",
+      "name": "Rimshot",
+      "base_note_offset": 0.0,
+      "params": {
+        "stroke": 1.0,
+        "press": 0.0,
+        "rim_pitch": 2200.0,
+        "rim_decay": 320.0,
+        "rim_level": 1.6,
+        "drive": 0.3,
+        "punch": 0.6
+      }
+    },
+    {
+      "id": "Ghost",
+      "name": "Ghost",
+      "base_note_offset": 0.0,
+      "params": {
+        "stroke": 0.05,
+        "press": 0.15
+      }
+    },
+    {
+      "id": "Cross-Stick",
+      "name": "Cross-Stick",
+      "base_note_offset": 0.0,
+      "params": {
+        "stroke": 1.0,
+        "press": 0.9,
+        "rim_pitch": 1500.0,
+        "rim_decay": 140.0,
+        "rim_level": 1.4,
+        "snares": 0.15,
+        "bottom_mix": 0.15,
+        "tone": 0.2
+      }
+    },
+    {
+      "id": "Tight Piccolo",
+      "name": "Tight Piccolo",
+      "base_note_offset": 5.0,
+      "params": {
+        "release": 120.0,
+        "release2": 160.0,
+        "snare_tension": 0.95,
+        "wire_pitch": 900.0,
+        "stretch": 1.1,
+        "bright": 1.4,
+        "rattle": 4.0,
+        "tone": 0.4,
+        "punch": 0.5
+      }
+    },
+    {
+      "id": "Deep Fat",
+      "name": "Deep Fat",
+      "base_note_offset": -5.0,
+      "params": {
+        "release": 320.0,
+        "release2": 420.0,
+        "stretch": 0.7,
+        "tilt": 1.3,
+        "bright": 0.8,
+        "snare_tension": 0.6,
+        "drive": 0.35,
+        "tone": -0.3,
+        "punch": 0.5
+      }
+    },
+    {
+      "id": "Wires Off",
+      "name": "Wires Off",
+      "base_note_offset": 0.0,
+      "params": {
+        "snares": 0.0,
+        "rattle": 0.0,
+        "bottom_mix": 0.8
+      }
+    },
+    {
+      "id": "Plate Ring",
+      "name": "Plate Ring",
+      "base_note_offset": 0.0,
+      "params": {
+        "stretch": 1.5,
+        "tilt": 0.2,
+        "release": 600.0,
+        "bright": 1.6,
+        "bend": 0.0
+      }
+    },
+    {
+      "id": "Actual Rimshot (grid)",
+      "name": "Actual Rimshot (grid)",
+      "base_note_offset": 0.0,
+      "params": {
+        "press": 1.0,
+        "stroke": 0.656,
+        "stick_hard": 0.00713,
+        "stick_speed": 0.00566,
+        "scrape": 1.0,
+        "rim_pitch": 920.0,
+        "rim_decay": 140.0,
+        "rim_drive": 0.005,
+        "bottom_mix": 2.0,
+        "pitch2_ratio": 1.126,
+        "snare_tension": 0.882,
+        "snares": 0.35,
+        "rattle": 4.0,
+        "wire_kick": 1.22,
+        "head_couple": 0.6,
+        "tilt": 0.3,
+        "tune": -9.73,
+        "release": 3000.0,
+        "release2": 3000.0,
+        "rim_level": 1.4,
+        "wire_pitch": 1323.0,
+        "wire_decay": 20.0,
+        "bright": 1.0
+      }
+    },
+    {
+      "id": "Rimshot 3 (grid)",
+      "name": "Rimshot 3 (grid)",
+      "base_note_offset": 0.0,
+      "params": {
+        "press": 1.0,
+        "stroke": 0.638,
+        "stick_hard": 0.00713,
+        "stick_speed": 0.00566,
+        "scrape": 1.0,
+        "rim_pitch": 920.0,
+        "rim_decay": 140.0,
+        "rim_drive": 0.005,
+        "bottom_mix": 2.0,
+        "pitch2_ratio": 1.126,
+        "snare_tension": 0.882,
+        "snares": 0.35,
+        "rattle": 4.0,
+        "wire_kick": 1.22,
+        "head_couple": 0.6,
+        "tilt": 0.3,
+        "tune": -13.07,
+        "release": 592.0,
+        "release2": 506.0,
+        "rim_level": 0.746,
+        "wire_pitch": 1796.0,
+        "wire_decay": 2011.0,
+        "bright": 1.0
+      }
+    },
+    {
+      "id": "Sidesticky (grid)",
+      "name": "Sidesticky (grid)",
+      "base_note_offset": 0.0,
+      "params": {
+        "press": 1.0,
+        "stroke": 0.656,
+        "stick_hard": 0.00713,
+        "stick_speed": 0.00566,
+        "scrape": 1.0,
+        "rim_pitch": 920.0,
+        "rim_decay": 140.0,
+        "rim_drive": 0.005,
+        "bottom_mix": 2.0,
+        "pitch2_ratio": 1.126,
+        "snare_tension": 0.882,
+        "snares": 0.35,
+        "rattle": 4.0,
+        "wire_kick": 1.22,
+        "head_couple": 0.6,
+        "tilt": 0.3,
+        "tune": -9.73,
+        "release": 3000.0,
+        "release2": 3000.0,
+        "rim_level": 1.4,
+        "wire_pitch": 1323.0,
+        "wire_decay": 20.0,
+        "bright": 1.0
+      }
+    }
+  ]
+}

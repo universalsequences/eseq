@@ -66,6 +66,7 @@ pub mod learn_job;
 #[allow(dead_code)]
 pub mod lisp_host;
 pub mod macro_engine;
+pub mod midi_input;
 pub mod mixer_control;
 pub mod mixer_volume;
 pub mod neural;

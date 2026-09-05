@@ -9,7 +9,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::{
-    apply_rack_macros_at_step, clear_active_keyboard_note_by_lid,
+    apply_rack_macros_at_step, apply_rack_macros_live, clear_active_keyboard_note_by_lid,
+    off_step_macro_mask,
+    off_step_macro_targets, resolve_rack_slot_instrument_plocks,
     collect_rack_choke_group_track_releases, collect_rack_choke_group_voice_releases,
     for_each_custom_voice_route_update, free_patch_transport_route_cache_is_fresh,
     free_patch_transport_route_target, instrument_sound_fingerprint,
@@ -380,6 +382,22 @@ fn rack_routing_test_slot() -> RackSlotSnapshot {
     }
 }
 
+/// One slot whose gain is driven by macro 0 over 0..2.
+fn rack_macro_test_rack() -> RackTrackSnapshot {
+    let mut rack = RackTrackSnapshot::new(vec![rack_routing_test_slot()], default_rack_macros());
+    rack.macros[0].value = 0.75;
+    rack.macros[0].mappings.push(RackMacroMapping {
+        target: RackMacroTarget::SlotParam {
+            slot: 0,
+            param: "gain".to_string(),
+        },
+        range_min: 0.0,
+        range_max: 2.0,
+        curve: RackMacroCurve::Linear,
+    });
+    rack
+}
+
 #[test]
 fn rack_macro_is_effective_default_beneath_target_plock() {
     let mut rack = RackTrackSnapshot::new(vec![rack_routing_test_slot()], default_rack_macros());
@@ -393,15 +411,30 @@ fn rack_macro_is_effective_default_beneath_target_plock() {
         range_max: 2.0,
         curve: RackMacroCurve::Linear,
     });
-    apply_rack_macros_at_step(&mut rack, 2, [None; crate::sequencer::RACK_MACRO_COUNT]);
+    apply_rack_macros_at_step(
+        &mut rack,
+        2,
+        [None; crate::sequencer::RACK_MACRO_COUNT],
+        [None; crate::sequencer::RACK_MACRO_COUNT],
+    );
     assert_eq!(rack.slots[0].gain, 1.5);
 
     rack.macros[0].plocks[2] = Some(0.25);
-    apply_rack_macros_at_step(&mut rack, 2, [None; crate::sequencer::RACK_MACRO_COUNT]);
+    apply_rack_macros_at_step(
+        &mut rack,
+        2,
+        [None; crate::sequencer::RACK_MACRO_COUNT],
+        [None; crate::sequencer::RACK_MACRO_COUNT],
+    );
     assert_eq!(rack.slots[0].gain, 0.5);
 
     rack.slots[0].param_plocks.set(2, RackSlotParam::Gain, 0.25);
-    apply_rack_macros_at_step(&mut rack, 2, [None; crate::sequencer::RACK_MACRO_COUNT]);
+    apply_rack_macros_at_step(
+        &mut rack,
+        2,
+        [None; crate::sequencer::RACK_MACRO_COUNT],
+        [None; crate::sequencer::RACK_MACRO_COUNT],
+    );
     assert_eq!(
         rack.slots[0].param_value_at_step(RackSlotParam::Gain, 2),
         0.25
@@ -436,6 +469,7 @@ fn published_rack_snapshot_observes_live_macro_defaults_and_plocks() {
         &mut published_rack,
         2,
         [None; crate::sequencer::RACK_MACRO_COUNT],
+        [None; crate::sequencer::RACK_MACRO_COUNT],
     );
     assert_eq!(published_rack.slots[0].gain, 1.5);
 
@@ -444,8 +478,168 @@ fn published_rack_snapshot_observes_live_macro_defaults_and_plocks() {
         &mut published_rack,
         2,
         [None; crate::sequencer::RACK_MACRO_COUNT],
+        [None; crate::sequencer::RACK_MACRO_COUNT],
     );
     assert_eq!(published_rack.slots[0].gain, 0.5);
+}
+
+/// A live (keyboard/MIDI) rack note must sound at the macro knob's CURRENT
+/// position: the runtime default the control thread updates on every turn,
+/// never the stale snapshot value, and never a step p-lock (there is no
+/// step). Before this, a fresh voice was stamped with pre-knob defaults
+/// while the voice sounding during the turn had the live push.
+#[test]
+fn live_rack_note_applies_macros_at_their_current_knob_position() {
+    let state = crate::sequencer::SequencerState::new(1, vec![]);
+    let mut rack = rack_macro_test_rack();
+    rack.macros[0].plocks[2] = Some(0.1);
+    state.set_rack_track_for_all_pattern_snapshots(0, rack);
+    state.publish_scheduler_snapshot();
+    let macro_id = crate::sequencer::RackMacroId::from_index(0).expect("macro id");
+    let published = || {
+        state
+            .latest_scheduler_snapshot()
+            .tracks[0]
+            .rack_track
+            .clone()
+            .expect("published rack snapshot")
+    };
+
+    // Knob turned after the snapshot was published: the runtime default moves,
+    // the snapshot's stored value (0.75) does not.
+    state.set_live_rack_macro_default(0, macro_id, 0.25);
+    let mut live = published();
+    assert_eq!(live.macros[0].value, 0.75, "snapshot is stale by design");
+    apply_rack_macros_live(&mut live, [None; crate::sequencer::RACK_MACRO_COUNT]);
+    assert_eq!(live.slots[0].gain, 0.5, "0.25 over the 0..2 range, plock at step 2 ignored");
+
+    // A held print latch beats the knob position.
+    let mut printing = [None; crate::sequencer::RACK_MACRO_COUNT];
+    printing[0] = Some(1.0);
+    let mut live = published();
+    apply_rack_macros_live(&mut live, printing);
+    assert_eq!(live.slots[0].gain, 2.0);
+}
+
+/// A held record-print latch on a rack macro (knob turned while play+record
+/// is on) must be heard on the very next trigger, ahead of the step's own
+/// p-lock and any process overlay — the printed p-locks land behind the
+/// scheduled playhead and are otherwise only audible one loop later.
+#[test]
+fn rack_macro_print_override_beats_plock_and_process_overlay() {
+    let state = crate::sequencer::SequencerState::new(1, vec![]);
+    let mut rack = rack_macro_test_rack();
+    rack.macros[0].plocks[2] = Some(0.25);
+    let mut process_values = [None; crate::sequencer::RACK_MACRO_COUNT];
+    process_values[0] = Some(0.5);
+
+    state.rack_macro_print_override.set(0, &[(0, 1.0)]);
+    let print_values = state.rack_macro_print_override.values_for_track(0);
+    assert_eq!(print_values[0], Some(1.0));
+    assert!(print_values[1..].iter().all(Option::is_none));
+    apply_rack_macros_at_step(&mut rack, 2, process_values, print_values);
+    assert_eq!(rack.slots[0].gain, 2.0, "latched 1.0 maps to the 0..2 range top");
+
+    // Armed for another track: no substitution.
+    assert!(state
+        .rack_macro_print_override
+        .values_for_track(1)
+        .iter()
+        .all(Option::is_none));
+
+    state.rack_macro_print_override.clear();
+    let mut rack = rack_macro_test_rack();
+    rack.macros[0].plocks[2] = Some(0.25);
+    apply_rack_macros_at_step(
+        &mut rack,
+        2,
+        process_values,
+        state.rack_macro_print_override.values_for_track(0),
+    );
+    assert_eq!(rack.slots[0].gain, 1.0, "cleared: process overlay 0.5 wins over the p-lock");
+}
+
+/// Off-step rack p-locks (the rack analog of `InstrumentParams` on an
+/// inactive step): only macros locked at the step or held by a print latch
+/// are live, and their mapping targets are what gets pushed.
+#[test]
+fn off_step_macro_mask_selects_locked_or_printing_macros_and_their_targets() {
+    let mut rack = rack_macro_test_rack();
+    rack.macros[1].plocks[5] = Some(0.3);
+    rack.macros[1].mappings.push(RackMacroMapping {
+        target: RackMacroTarget::SlotInstrumentParam {
+            slot: 0,
+            param_index: 2,
+            param: String::new(),
+        },
+        range_min: 0.0,
+        range_max: 1.0,
+        curve: RackMacroCurve::Linear,
+    });
+    let mut print_values = [None; crate::sequencer::RACK_MACRO_COUNT];
+    print_values[3] = Some(0.9);
+
+    let none = off_step_macro_mask(&rack, 4, &[None; crate::sequencer::RACK_MACRO_COUNT]);
+    assert!(none.iter().all(|live| !live), "no lock, no latch: nothing is live");
+
+    let mask = off_step_macro_mask(&rack, 5, &print_values);
+    assert!(!mask[0], "macro 0 has a base value but no lock at step 5");
+    assert!(mask[1], "macro 1 is p-locked at step 5");
+    assert!(mask[3], "macro 3 is print-latched");
+    let targets = off_step_macro_targets(&rack, &mask);
+    assert_eq!(targets.len(), 1, "only macro 1 has a mapping: {targets:?}");
+    assert!(matches!(
+        targets[0],
+        RackMacroTarget::SlotInstrumentParam { slot: 0, param_index: 2, .. }
+    ));
+
+    assert!(rack.step_has_plocks(5));
+    assert!(!rack.step_has_plocks(4));
+}
+
+#[test]
+fn rack_slot_instrument_plocks_resolve_only_locked_or_macro_driven_params() {
+    let descriptor = EffectDescriptor::builtin_sampler();
+    let mut slot = EffectSlotSnapshot::new_default_with_modulator(&descriptor, 46, 0);
+    let step = 2;
+    let speed_idx = super::snapshot_slot_param_index_by_node_idx(
+        &slot,
+        crate::instruments::sampler::PARAM_SPEED as u32,
+    )
+    .expect("speed param");
+    slot.set_plock(step, speed_idx, 2.0);
+
+    let locked_only = resolve_rack_slot_instrument_plocks(&slot, step, |_| false);
+    assert_eq!(
+        locked_only.as_slice(),
+        &[crate::scheduled_event::ScheduledInstrumentParam {
+            target: ScheduledInstrumentParamTarget::Synth,
+            idx: crate::instruments::sampler::PARAM_SPEED,
+            span: 1,
+            value: 2.0,
+        }],
+        "an unlocked step contributes nothing but its explicit p-lock"
+    );
+    assert!(resolve_rack_slot_instrument_plocks(&slot, step + 1, |_| false).is_empty());
+
+    // A macro-driven param is pushed at its (macro-written) default even
+    // without a lock of its own.
+    let scrub_idx = super::snapshot_slot_param_index_by_node_idx(
+        &slot,
+        crate::instruments::sampler::PARAM_SCRUB_OFFSET as u32,
+    )
+    .expect("scrub param");
+    slot.defaults[scrub_idx] = 0.4;
+    let with_macro = resolve_rack_slot_instrument_plocks(&slot, step + 1, |p| p == scrub_idx);
+    assert_eq!(
+        with_macro.as_slice(),
+        &[crate::scheduled_event::ScheduledInstrumentParam {
+            target: ScheduledInstrumentParamTarget::Synth,
+            idx: crate::instruments::sampler::PARAM_SCRUB_OFFSET,
+            span: 1,
+            value: 0.4,
+        }]
+    );
 }
 
 fn audio_test_param(name: &str, default: f32, node_param_idx: u32) -> ParamDescriptor {

@@ -1,0 +1,4 @@
+# Reproducible Grampian analysis/optimization plots and listening WAVs.
+# Shipped parameters and evidence live in crates/sequencer/tests/fixtures/spring/.
+/grampian-*/
+/grampian-v2*.json

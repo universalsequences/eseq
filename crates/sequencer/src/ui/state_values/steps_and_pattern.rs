@@ -534,7 +534,7 @@ pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup
             ("name", Value::String(group.name.clone().into())),
             (
                 "color",
-                list_value(group.color.iter().map(|c| Value::Number(*c as f64))),
+                list_value(themed_track_rgb(group.color).into_iter().map(|c| Value::Number(c as f64))),
             ),
             ("bus-id", Value::Number(group.bus_id as f64)),
             ("anchor", Value::Number(anchor as f64)),

@@ -935,17 +935,7 @@ impl WidgetDefinition for TextInputWidget {
             Some(Value::Keyword(k)) if k == "transparent"
         );
 
-        let theme_bg = crate::theme::BG();
-        let bg_color = resolve_named_color(
-            &node.props,
-            "bg-color",
-            Color {
-                r: (theme_bg.r + 0.09).min(1.0),
-                g: (theme_bg.g + 0.10).min(1.0),
-                b: (theme_bg.b + 0.11).min(1.0),
-                a: 1.0,
-            },
-        );
+        let bg_color = resolve_named_color(&node.props, "bg-color", crate::theme::TEXT_INPUT_BG());
         let text_color = resolve_named_color(&node.props, "text-color", crate::theme::FG());
         let placeholder_color =
             resolve_named_color(&node.props, "placeholder-color", crate::theme::FG_MUTED());
@@ -1312,17 +1302,7 @@ impl WidgetDefinition for TextboxWidget {
             Some(Value::Keyword(k)) if k == "transparent"
         );
 
-        let theme_bg = crate::theme::BG();
-        let bg_color = resolve_named_color(
-            &node.props,
-            "bg-color",
-            Color {
-                r: (theme_bg.r + 0.09).min(1.0),
-                g: (theme_bg.g + 0.10).min(1.0),
-                b: (theme_bg.b + 0.11).min(1.0),
-                a: 1.0,
-            },
-        );
+        let bg_color = resolve_named_color(&node.props, "bg-color", crate::theme::TEXT_INPUT_BG());
         let text_color = resolve_named_color(&node.props, "text-color", crate::theme::FG());
         let placeholder_color =
             resolve_named_color(&node.props, "placeholder-color", crate::theme::FG_MUTED());

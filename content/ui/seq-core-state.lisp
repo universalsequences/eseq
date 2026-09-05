@@ -100,6 +100,7 @@
       (reactive-set "SEQ" "fx-step-value-transpose" (nth SEQ.transposes parameter-step))
       (reactive-set "SEQ" "fx-step-value-velocity" (nth SEQ.velocities parameter-step))
       (reactive-set "SEQ" "fx-step-value-duration" (nth SEQ.durations parameter-step))
+      (reactive-set "SEQ" "fx-step-value-pan" (nth SEQ.pans parameter-step))
       (reactive-set "SEQ" "fx-step-value-retrig" (nth SEQ.retrigs parameter-step))
       (reactive-set "SEQ" "fx-step-value-retrig-rate" (nth SEQ.retrig-rates parameter-step)))))
 
