@@ -890,6 +890,18 @@ impl Editor {
                             | MouseEventKind::ScrollRight
                     ) =>
                 {
+                    // Both exits below return before the shared hover update
+                    // further down, so refresh pointer hover here: inside the
+                    // panel `hover_node_at_local` restricts the hit test to the
+                    // modal subtree, outside it clears the stale pre-modal hover.
+                    if matches!(mouse.kind, MouseEventKind::Moved)
+                        && widget_render::set_pointer_hover_widget(
+                            self.hover_node_at_local(local_col, local_row)
+                                .map(|node| node.widget_id),
+                        )
+                    {
+                        self.mark_needs_redraw();
+                    }
                     if widget_render::overlay_contains(local_col, local_row) {
                         return self.handle_modal_pointer_event(
                             entry.widget_id,

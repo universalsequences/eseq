@@ -27,7 +27,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SR = 48000
 SECONDS = 5.0
 NFFT = 262144
-BIN = ROOT / "target/debug/spring_tune"
+# Matches docs/grampian-spring.md and grampian_audition.py: the documented
+# workflow only ever builds the release binary.
+BIN = ROOT / "target/release/spring_tune"
+BUILD_HINT = "cargo build --release -p sequencer --bin spring_tune"
 MANIFEST = ROOT / "content/impulses/spring-references.json"
 BANDS = [(250, 500), (500, 1000), (1000, 2000), (2000, 4000), (4000, 6000), (6000, 9000)]
 SPECTRAL_BANDS = [(80, 250)] + BANDS + [(9000, 12000), (12000, 16000)]
@@ -106,7 +109,15 @@ def rust_render(voice, params=None, sr=SR, seconds=SECONDS, tension=.5):
             "--amp", "1", "--tension", str(tension)]
     if params:
         args += ["--params", str(params)]
-    return np.frombuffer(subprocess.check_output(args), dtype="<f4").astype(float)
+    if not Path(args[0]).is_file():
+        raise SystemExit(f"spring_tune binary not found at {args[0]}; build it with "
+                         f"`{BUILD_HINT}` or pass --bin")
+    proc = subprocess.run(args, capture_output=True, check=False)
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode(errors="replace").strip()
+        raise SystemExit(f"{args[0]} failed (exit {proc.returncode}); a stale binary "
+                         f"wants a rebuild with `{BUILD_HINT}`:\n{stderr}")
+    return np.frombuffer(proc.stdout, dtype="<f4").astype(float)
 
 
 def features(x):

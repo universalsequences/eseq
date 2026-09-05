@@ -44406,8 +44406,9 @@ mod drift_waveform_tests;
         }
     }
 
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_drift_columns() {
+    /// Lay out one Drift-family instrument panel through the fx lisp and
+    /// assert every named control sits inside the visible instrument panel.
+    fn assert_drift_columns_lay_out(drift_ui: String, overlay_path: &str, suffixes: &[&str]) {
         fn find_stable_key_suffix<'a>(
             node: &'a eseqlisp::layout::LayoutNode,
             suffix: &str,
@@ -44425,11 +44426,9 @@ mod drift_waveform_tests;
         }
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let drift_ui =
-            read_fixture_instrument_source("core/drift/ui.lisp").expect("read drift ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
-            "instruments/core/drift/ui.lisp".to_string(),
+            overlay_path.to_string(),
             drift_ui,
         )));
         let mut drift_inst = test_instrument_map();
@@ -44444,6 +44443,9 @@ mod drift_waveform_tests;
                 Value::Map(test_param_map("volume_db", 4, -12.0, -36.0, 6.0)),
                 Value::Map(test_param_map("glide_ms", 5, 0.0, 0.0, 1000.0)),
                 Value::Map(test_param_map("drift", 6, 0.3, 0.0, 1.0)),
+                Value::Map(test_param_map("lp_res", 8, 0.2, 0.0, 1.0)),
+                Value::Map(test_param_map("filter_drive", 9, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("hp_freq", 10, 20.0, 20.0, 4000.0)),
             ]))),
         );
 
@@ -44518,7 +44520,7 @@ mod drift_waveform_tests;
             adsr_editor.rect
         );
 
-        for suffix in ["lfo_rate_hz", "mm2_amt", "volume_db", "lp_freq", "drift"] {
+        for suffix in suffixes {
             let node = find_stable_key_suffix(&layout, suffix)
                 .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
             assert!(
@@ -44693,6 +44695,40 @@ mod drift_waveform_tests;
         }
     }
 
+    /// The pre-curation `core/drift` panel, kept as a test fixture (it no
+    /// longer ships) to exercise the fx-lisp column layout engine.
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_fixture_drift_columns() {
+        let drift_ui =
+            read_fixture_instrument_source("core/drift/ui.lisp").expect("read drift ui");
+        assert_drift_columns_lay_out(
+            drift_ui,
+            "instruments/core/drift/ui.lisp",
+            &["lfo_rate_hz", "mm2_amt", "volume_db", "lp_freq", "drift"],
+        );
+    }
+
+    /// The shipped `Synths/Digi Drift` panel: vs the fixture, the filter column
+    /// exposes `filter_drive` and hp cutoff is a micro control beside keytrack.
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_digi_drift_columns() {
+        let drift_ui = read_factory_source("instruments/Synths/Digi Drift/ui.lisp")
+            .expect("read Digi Drift ui");
+        assert_drift_columns_lay_out(
+            drift_ui,
+            "instruments/Synths/Digi Drift/ui.lisp",
+            &[
+                "lfo_rate_hz",
+                "mm2_amt",
+                "volume_db",
+                "lp_freq",
+                "filter_drive",
+                "hp_freq",
+                "drift",
+            ],
+        );
+    }
+
     #[test]
     fn metal_seq_fx_lisp_lays_out_digiwave_columns() {
         fn find_stable_key_suffix<'a>(
@@ -44712,11 +44748,13 @@ mod drift_waveform_tests;
         }
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let digiwave_ui = read_fixture_instrument_source("factory/digiwave/ui.lisp")
-            .expect("read digiwave ui");
+        // The shipped panel, not the fixture copy: this test guards the
+        // instrument users actually see.
+        let digiwave_ui = read_factory_source("instruments/Synths/Digi Wave/ui.lisp")
+            .expect("read Digi Wave ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
-            "instruments/factory/digiwave/ui.lisp".to_string(),
+            "instruments/Synths/Digi Wave/ui.lisp".to_string(),
             digiwave_ui,
         )));
         let mut digiwave_inst = test_instrument_map();

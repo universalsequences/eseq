@@ -15241,6 +15241,59 @@ fn context_menu_item_hover_schedules_redraw_on_pointer_change() {
 }
 
 #[test]
+fn modal_overlay_pointer_move_updates_and_clears_hover() {
+    // The Modal overlay arm of the precise mouse path returns before the
+    // shared hover update, so it must refresh pointer hover itself: a stale
+    // pre-modal hover (a widget under the panel) clears when the pointer moves
+    // outside the panel, and a modal child lights up when the pointer is on it.
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let item = find_menu_item(&layout, "Rename").expect("Rename item").clone();
+    let entry = crate::widget_render::topmost_overlay().expect("context menu overlay entry");
+    let stale_widget_id = u64::MAX - 1;
+    crate::widget_render::set_pointer_hover_widget(Some(stale_widget_id));
+    assert!(crate::widget_render::pointer_hovered(stale_widget_id));
+
+    // Well outside the panel: the pre-modal hover must be cleared.
+    let outside_col = (entry.rect.col + entry.rect.width + 3.0).min(58.0);
+    let outside_row = (entry.rect.row + entry.rect.height + 2.0).min(18.0);
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Moved,
+            outside_col.floor() as u16,
+            outside_row.floor() as u16,
+        ),
+        outside_col,
+        outside_row,
+        0,
+    );
+    assert!(
+        !crate::widget_render::pointer_hovered(stale_widget_id),
+        "moving outside an open modal must clear the stale pre-modal hover"
+    );
+
+    let hover_col = item.rect.col + item.rect.width * 0.5;
+    let hover_row = item.rect.row + item.rect.height * 0.5;
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Moved,
+            hover_col.floor() as u16,
+            hover_row.floor() as u16,
+        ),
+        hover_col,
+        hover_row,
+        0,
+    );
+    assert!(
+        crate::widget_render::pointer_hovered(item.widget_id),
+        "moving onto a modal child must hover it"
+    );
+}
+
+#[test]
 fn context_menu_item_click_fires_exactly_its_handler_and_closes() {
     let _overlay_guard = OverlayClearGuard;
     let mut editor = context_menu_two_tile_editor();

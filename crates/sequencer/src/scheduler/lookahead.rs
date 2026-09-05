@@ -781,6 +781,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 if let Some(value) = overrides.get(StepParam::RetrigRate) {
                     resolved.retrig_rate = value;
                 }
+                // Pan is printable too; without the substitution the latched
+                // knob is only heard once the loop wraps.
+                if let Some(value) = overrides.get(StepParam::Pan) {
+                    resolved.pan = value;
+                }
             }
             let mut process_overlay = ProcessTargetOverlay::default();
             let mut process_base_alive = true;

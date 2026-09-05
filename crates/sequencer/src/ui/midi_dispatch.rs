@@ -67,7 +67,8 @@ pub(crate) fn midi_message_value(event: &MidiInputEvent) -> Value {
 /// which case the caller must not also feed it to the live keyboard. A
 /// missing module (bare test editors, a broken init) means nothing is
 /// consumed; a Lisp error is surfaced through the runtime's status line and
-/// the message falls through.
+/// the message falls through. The caller runs `refresh_runtime_side_effects`
+/// once per drained batch rather than per message.
 pub(crate) fn dispatch_midi_to_lisp(editor: &mut Editor, event: &MidiInputEvent) -> bool {
     let Some(callable) = editor.runtime_mut().global_value(DISPATCH_GLOBAL) else {
         return false;
@@ -83,7 +84,6 @@ pub(crate) fn dispatch_midi_to_lisp(editor: &mut Editor, event: &MidiInputEvent)
             false
         }
     };
-    editor.refresh_runtime_side_effects();
     consumed
 }
 

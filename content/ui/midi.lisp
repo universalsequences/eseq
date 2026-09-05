@@ -138,11 +138,23 @@
 ;; (midi-map* source target (dict :mode :relative :step 0.02)) — with options.
 ;; Relative mode treats the CC as an endless encoder (two's-complement
 ;; deltas, 1..63 up / 65..127 down) and nudges the target from its current
-;; value; `:step` scales one detent (default 1/127).
+;; value; `:step` scales one detent (default 1/127). Only CC sources carry
+;; the 7-bit `:raw` a relative delta is decoded from, so `:relative` on a
+;; note / pitch-bend / aftertouch source is refused here (returns nil and
+;; installs nothing) rather than raising on every event it would receive.
 (def midi-map (source target)
   (midi-map* source target (dict)))
 
+(def relative-mode-supported? (source)
+  (= (get source :kind) :cc))
+
 (def midi-map* (source target opts)
+  (if (and (= (get opts :mode) :relative)
+           (not (relative-mode-supported? source)))
+    nil
+    (midi-map-install source target opts)))
+
+(def midi-map-install (source target opts)
   (let ((key (source-key source)))
    (let ((mapping (dict :key key
                        :source source
@@ -172,9 +184,15 @@
 
 (def apply-rack-macro (target mapping msg)
   (let ((track (or-default (get target :track) (armed-rack-track)))
-        (index (get target :macro)))
-    (if (and (present? track) (seq-track-is-rack? track))
-      (let ((value (if (= (get mapping :mode) :relative)
+        (index (get target :macro))
+        (relative (= (get mapping :mode) :relative)))
+    ;; A relative mapping needs the message's 7-bit `:raw` (CC only); a
+    ;; message without one is not consumed rather than decoded from nil —
+    ;; its `:value` is not a macro position (pitch bend is -1..1).
+    (if (and (present? track)
+             (seq-track-is-rack? track)
+             (or (not relative) (present? (get msg :raw))))
+      (let ((value (if relative
                      (let ((current (seq-rack-macro-value track index)))
                        (clamp (+ (or-default current 0.0)
                                  (* (relative-delta (get msg :raw)) (get mapping :step)))

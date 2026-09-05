@@ -650,11 +650,21 @@ fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
                     // Factory folders have no movable folder id (see
                     // `clear_instrument_folder_ids`) but are still folders:
                     // they keep the kind and icon, only the drop id is absent.
-                    if let Some(folder) = &item.folder {
-                        map.insert(
-                            "folder".to_string(),
-                            Rc::new(RefCell::new(Value::String(folder.clone()))),
-                        );
+                    // Without an id the row is not a drop target either, so
+                    // the tree never resolves a drop onto it.
+                    match &item.folder {
+                        Some(folder) => {
+                            map.insert(
+                                "folder".to_string(),
+                                Rc::new(RefCell::new(Value::String(folder.clone()))),
+                            );
+                        }
+                        None => {
+                            map.insert(
+                                "drop-target".to_string(),
+                                Rc::new(RefCell::new(Value::Bool(false))),
+                            );
+                        }
                     }
                     map.insert(
                         "kind".to_string(),
@@ -781,9 +791,10 @@ fn instrument_origin_visible(origin_filter: &str, origin: &str) -> bool {
     origin_filter.is_empty() || origin_filter == origin
 }
 
-/// Factory folders are not drop targets: `move-saved-instrument` only writes
+/// Factory folders cannot receive a move: `move-saved-instrument` only writes
 /// the user tier, so a folder id on a factory node would promise a move that
-/// fails.
+/// fails. Clearing the id also makes `instrument_tree_nodes_to_value` mark
+/// the row `drop-target false`, so the tree refuses the drop outright.
 fn clear_instrument_folder_ids(items: &mut [InstrumentTreeNode]) {
     for item in items {
         item.folder = None;
@@ -1432,6 +1443,11 @@ mod tests {
             panic!("folder should be a map");
         };
         assert!(folder.get("folder").is_none());
+        assert_eq!(
+            folder.get("drop-target").map(|value| value.borrow().clone()),
+            Some(Value::Bool(false)),
+            "a folder without a movable id must not accept drops"
+        );
         assert_eq!(
             folder.get("kind").map(|value| value.borrow().clone()),
             Some(Value::String("folder".to_string()))

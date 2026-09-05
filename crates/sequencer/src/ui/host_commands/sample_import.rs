@@ -23,9 +23,9 @@ pub(super) fn handle(
                 &sequencer::app_paths::app_paths().sample_db_path(),
                 &sequencer::app_paths::app_paths().samples_dir(),
             );
-            close_import_modal(editor);
             match summary {
                 Ok(summary) => {
+                    close_import_modal(editor);
                     editor.show_transient_message(format!(
                         "Imported {} sample(s), skipped {} duplicate(s), {} failed",
                         summary.imported, summary.duplicates, summary.failed
@@ -33,7 +33,12 @@ pub(super) fn handle(
                     let _ = refresh_sample_browser_buffer(editor);
                 }
                 Err(error) => {
+                    // The draft (titles, tags) is untouched by a failed
+                    // commit: put it back and keep the modal open so the
+                    // user can retry instead of re-staging everything.
+                    install_draft(draft);
                     editor.show_transient_message(format!("Sample import failed: {error}"));
+                    editor.mark_needs_redraw();
                 }
             }
         }

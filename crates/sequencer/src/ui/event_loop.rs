@@ -138,13 +138,17 @@ fn apply_touchpad_scroll_delta(
 /// host-command dispatch, ending each iteration in the reactive tick.
 #[allow(clippy::too_many_lines)]
 /// React to a live note press/release outcome the same way for every source
-/// (musical typing, hardware MIDI).
+/// (musical typing, hardware MIDI). `blur_focus_on_trigger` says whether a
+/// triggered note may drop widget focus: musical typing always may, because
+/// it only reaches the live keyboard once no text widget has focus; hardware
+/// MIDI skips that gate, so it must leave an in-progress text edit alone.
 fn apply_live_note_outcome(
     outcome: RecordingKeyOutcome,
+    blur_focus_on_trigger: bool,
     app: &mut app::App,
     editor: &mut Editor,
 ) {
-    if outcome.triggered_note() {
+    if outcome.triggered_note() && blur_focus_on_trigger {
         // A live key fired an armed track: the user is playing now, so drop
         // any widget focus left by an earlier click (e.g. a number picker),
         // the same way the transport flip does in the reactive tick.
@@ -333,6 +337,10 @@ pub(crate) fn run_event_loop(
     eprintln!("metal_seq: entering event loop");
     let mut ui_loop_stats = UiLoopStats::new();
     let mut pointer_is_down = false;
+    // Hardware MIDI note-ons a Lisp mapping consumed, so their note-offs route
+    // the same way even if the mapping's answer has changed meanwhile.
+    let mut lisp_consumed_midi_notes: std::collections::HashSet<LiveNoteSource> =
+        std::collections::HashSet::new();
 
     loop {
         let mut pointer_released_this_loop = false;
@@ -1135,7 +1143,7 @@ pub(crate) fn run_event_loop(
                     } else {
                         RecordingKeyOutcome::Ignored
                     };
-                    apply_live_note_outcome(recording_key_outcome, &mut app, &mut editor);
+                    apply_live_note_outcome(recording_key_outcome, true, &mut app, &mut editor);
                     let intercepted = recording_key_outcome.consumed();
                     // Only pass Press events to the editor (Release is only for note-off)
                     if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
@@ -1201,26 +1209,59 @@ pub(crate) fn run_event_loop(
         // eseq-egs6). Note-ons need an arm target; a note-off always goes
         // through so a release never strands a sounding voice.
         if let Some(midi_input) = &midi_input {
+            let mut dispatched_to_lisp = false;
             for event in midi_input.drain() {
+                let port = event.port;
+                let note_source = match event.message {
+                    sequencer::midi_input::MidiMessage::Note { channel, note } => Some((
+                        LiveNoteSource::Midi {
+                            port,
+                            channel,
+                            note: note.note,
+                        },
+                        channel,
+                        note,
+                    )),
+                    _ => None,
+                };
+                let held = note_source
+                    .is_some_and(|(source, _, _)| held_note_for_source(&shared.held_notes, source));
                 // Lisp mappings (content/ui/midi.lisp) see every message
                 // first; a consumed message never reaches the live keyboard.
-                if dispatch_midi_to_lisp(&mut editor, &event) {
+                // Whether a mapping consumes a note is decided at event time
+                // against mutable state (an armed rack, a reloaded init.lisp),
+                // so a note-off is routed like its note-on rather than asked
+                // again: a note the live keyboard holds always gets its
+                // release, and a note-on Lisp consumed keeps its note-off.
+                let consumed = dispatch_midi_to_lisp(&mut editor, &event);
+                dispatched_to_lisp = true;
+                let route_to_live_keyboard = match note_source {
+                    Some((source, _, note)) if note.on => {
+                        if consumed {
+                            lisp_consumed_midi_notes.insert(source);
+                        }
+                        !consumed
+                    }
+                    Some((source, _, _)) => {
+                        let consumed_on = lisp_consumed_midi_notes.remove(&source);
+                        held || !(consumed || consumed_on)
+                    }
+                    None => false,
+                };
+                if !route_to_live_keyboard {
                     continue;
                 }
-                let sequencer::midi_input::MidiMessage::Note { note: event, .. } = event.message
-                else {
+                let Some((_, channel, event)) = note_source else {
                     continue;
                 };
                 let any_armed = shared.record_armed.lock().unwrap().iter().any(|a| *a)
                     || shared.armed_rack.lock().unwrap().is_some();
-                let held = held_note_for_source(
-                    &shared.held_notes,
-                    LiveNoteSource::Midi(event.note),
-                );
                 if !(any_armed || held) {
                     continue;
                 }
                 let outcome = handle_midi_note(
+                    port,
+                    channel,
                     event,
                     &mut app,
                     &shared.state,
@@ -1232,7 +1273,17 @@ pub(crate) fn run_event_loop(
                     &shared.roll_record,
                     &shared.ui_invalidations,
                 );
-                apply_live_note_outcome(outcome, &mut app, &mut editor);
+                // A hardware note is never a text keystroke, so unlike musical
+                // typing it can arrive while a text widget is focused; that
+                // edit must survive the note (only stale non-text focus, e.g.
+                // a number picker, is dropped).
+                let blur_focus = !focused_widget_captures_text_input(&editor);
+                apply_live_note_outcome(outcome, blur_focus, &mut app, &mut editor);
+            }
+            // One runtime refresh per drained batch, not per message: a CC
+            // sweep can queue dozens of messages between iterations.
+            if dispatched_to_lisp {
+                editor.refresh_runtime_side_effects();
             }
         }
 

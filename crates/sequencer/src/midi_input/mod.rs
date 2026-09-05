@@ -149,7 +149,11 @@ impl MidiInputPorts {
         let (tx, rx) = mpsc::channel();
         let mut connections = Vec::new();
         let mut port_names = Vec::new();
-        for (port_index, port) in ports.iter().enumerate() {
+        for port in ports.iter() {
+            // Index into `port_names`, decided by the ports that actually
+            // opened: a port that fails to connect must not shift the
+            // numbering of the ones after it.
+            let port_index = port_names.len();
             let name = probe
                 .port_name(port)
                 .unwrap_or_else(|_| "unnamed".to_string());

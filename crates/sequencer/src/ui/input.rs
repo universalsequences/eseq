@@ -12,12 +12,13 @@ use eseqlisp::widget_render::number_picker::{
 
 /// What is holding a live note down. Dedup and release lookups key on this,
 /// so a hardware C4 and the `a` key never collide (bead eseq-egs6).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum LiveNoteSource {
     /// Computer-keyboard musical typing, by lowercase character.
     Key(char),
-    /// Hardware MIDI input, by note number.
-    Midi(u8),
+    /// Hardware MIDI input: one physical key, so the same note number on a
+    /// second port or channel is a distinct hold with its own release.
+    Midi { port: usize, channel: u8, note: u8 },
     /// The momentary sequence-roll hold marker (no note of its own).
     SequenceRoll,
 }
@@ -2166,6 +2167,8 @@ pub(crate) fn handle_recording_key(
 /// the caller only checks that something is armed (or that this note is
 /// already held, so its release always lands).
 pub(crate) fn handle_midi_note(
+    port: usize,
+    channel: u8,
     event: sequencer::midi_input::MidiNoteEvent,
     app: &mut sequencer::app::App,
     state: &Arc<SequencerState>,
@@ -2177,7 +2180,11 @@ pub(crate) fn handle_midi_note(
     roll_record: &Arc<Mutex<RollRecordBuffer>>,
     ui_invalidations: &UiInvalidationQueue,
 ) -> RecordingKeyOutcome {
-    let source = LiveNoteSource::Midi(event.note);
+    let source = LiveNoteSource::Midi {
+        port,
+        channel,
+        note: event.note,
+    };
     if event.on {
         live_note_on(
             source,
@@ -3066,6 +3073,8 @@ mod live_keyboard_tests {
         let ui_invalidations = UiInvalidationQueue::new();
         let drive = |event: sequencer::midi_input::MidiNoteEvent, app: &mut sequencer::app::App| {
             handle_midi_note(
+                0,
+                0,
                 event,
                 app,
                 &state,
@@ -3084,8 +3093,13 @@ mod live_keyboard_tests {
             velocity: 0.5,
             on: true,
         };
+        let midi_96 = LiveNoteSource::Midi {
+            port: 0,
+            channel: 0,
+            note: 96,
+        };
         assert!(drive(on, &mut app).triggered_note());
-        assert!(held_note_for_source(&held, LiveNoteSource::Midi(96)));
+        assert!(held_note_for_source(&held, midi_96));
         assert!(
             !drive(on, &mut app).triggered_note(),
             "a repeated note-on for a held note is a no-op"
@@ -3111,7 +3125,7 @@ mod live_keyboard_tests {
             on: false,
         };
         assert!(drive(off, &mut app).consumed());
-        assert!(!held_note_for_source(&held, LiveNoteSource::Midi(96)));
+        assert!(!held_note_for_source(&held, midi_96));
         let mut offs: Vec<_> = keyboard_rx.try_iter().collect();
         offs.sort_by_key(|trigger| trigger.track);
         assert_eq!(offs.len(), 2);
@@ -3127,7 +3141,66 @@ mod live_keyboard_tests {
             press_time: Instant::now(),
             targets: Vec::new(),
         });
-        assert!(!held_note_for_source(&held, LiveNoteSource::Midi(60)));
+        assert!(!held_note_for_source(
+            &held,
+            LiveNoteSource::Midi {
+                port: 0,
+                channel: 0,
+                note: 60,
+            }
+        ));
+        held.lock().unwrap().clear();
+
+        // The same note number from a second port or channel is another
+        // physical key: it sounds on its own and its release only ends its
+        // own hold, never the first key's.
+        assert!(drive(on, &mut app).triggered_note());
+        let _ = keyboard_rx.try_iter().count();
+        let drive_at = |port: usize,
+                        channel: u8,
+                        event: sequencer::midi_input::MidiNoteEvent,
+                        app: &mut sequencer::app::App| {
+            handle_midi_note(
+                port,
+                channel,
+                event,
+                app,
+                &state,
+                &record_armed,
+                &armed_rack,
+                &recording,
+                &keyboard_tx,
+                &held,
+                &roll_record,
+                &ui_invalidations,
+            )
+        };
+        assert!(
+            drive_at(1, 0, on, &mut app).triggered_note(),
+            "port 1 note 96 is a distinct key from port 0 note 96"
+        );
+        assert!(
+            drive_at(0, 5, on, &mut app).triggered_note(),
+            "channel 5 note 96 is a distinct key from channel 0 note 96"
+        );
+        assert_eq!(held.lock().unwrap().len(), 3);
+        let _ = keyboard_rx.try_iter().count();
+        assert!(drive_at(1, 0, off, &mut app).consumed());
+        assert!(
+            held_note_for_source(&held, midi_96),
+            "releasing the port-1 key must not end the port-0 hold"
+        );
+        assert!(!held_note_for_source(
+            &held,
+            LiveNoteSource::Midi {
+                port: 1,
+                channel: 0,
+                note: 96,
+            }
+        ));
+        assert!(drive_at(0, 5, off, &mut app).consumed());
+        assert!(drive(off, &mut app).consumed());
+        assert!(held.lock().unwrap().is_empty());
     }
 
     #[test]

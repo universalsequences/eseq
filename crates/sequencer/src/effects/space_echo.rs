@@ -168,7 +168,12 @@ const STATE_SPRING_A: usize = 96;
 const STATE_SPRING_B: usize = STATE_SPRING_A + SPRING_TANK_STATE_LEN;
 
 const STATE_SPRING_TYPE_MIX: usize = STATE_SPRING_B + SPRING_TANK_STATE_LEN;
-const STATE_GRAMPIAN: usize = STATE_SPRING_TYPE_MIX + 1;
+// 1.0 while the previous processed block ran the spring bus (a reverb mode,
+// node enabled). A 0 -> 1 edge means the whole spring stage was dormant (an
+// echo-only mode or bypass, where neither voice runs and the crossfade is
+// frozen), so both voices restart from rest instead of resuming a stale tail.
+const STATE_SPRING_ACTIVE: usize = STATE_SPRING_TYPE_MIX + 1;
+const STATE_GRAMPIAN: usize = STATE_SPRING_ACTIVE + 1;
 const STATE_TAPE_OFFSET: usize = STATE_GRAMPIAN + grampian::STATE_LEN;
 const STATE_END: usize = STATE_TAPE_OFFSET + TAPE_BUF_LEN;
 
@@ -453,6 +458,9 @@ unsafe extern "C" fn space_echo_process(
     // derived from it, so pass the input through untouched rather than run the
     // whole echo on garbage.
     if *s.add(STATE_ENABLED) <= 0.5 || !super::sample_rate_is_usable(*s.add(STATE_SAMPLE_RATE)) {
+        // Bypass leaves the spring voices dormant; re-enabling must not
+        // resurrect whatever tail they were holding.
+        *s.add(STATE_SPRING_ACTIVE) = 0.0;
         std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
         std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
         return;
@@ -561,7 +569,23 @@ unsafe extern "C" fn space_echo_process(
     let spring_type = (*s.add(STATE_SPRING_TYPE)).round().clamp(0.0, 1.0) as usize;
     let mut spring_type_mix = *s.add(STATE_SPRING_TYPE_MIX);
     let type_fade_step = 1.0 / (0.020 * sr);
-    if reverb_on && spring_type == 1 && spring_type_mix == 0.0 {
+    let spring_was_active = *s.add(STATE_SPRING_ACTIVE) > 0.5;
+    *s.add(STATE_SPRING_ACTIVE) = if reverb_on { 1.0 } else { 0.0 };
+    if reverb_on && !spring_was_active {
+        // The whole spring bus was dormant (echo-only mode or bypass): the
+        // selected voice's delay lines, the gate envelopes and the crossfade
+        // were all frozen mid-flight. Start both voices from rest and seat
+        // the crossfade on the current type.
+        std::ptr::write_bytes(
+            s.add(STATE_SPRING_BASS_LP_A),
+            0,
+            STATE_SPRING_A - STATE_SPRING_BASS_LP_A,
+        );
+        std::ptr::write_bytes(s.add(STATE_SPRING_A), 0, 2 * SPRING_TANK_STATE_LEN);
+        std::ptr::write_bytes(s.add(STATE_GRAMPIAN), 0, grampian::STATE_LEN);
+        spring_type_mix = if spring_type == 1 { 1.0 } else { 0.0 };
+        *s.add(STATE_SPRING_TYPE_MIX) = spring_type_mix;
+    } else if reverb_on && spring_type == 1 && spring_type_mix == 0.0 {
         // Reactivating a dormant voice starts from rest, never a frozen tail.
         std::ptr::write_bytes(s.add(STATE_GRAMPIAN), 0, grampian::STATE_LEN);
     } else if reverb_on && spring_type == 0 && spring_type_mix == 1.0 {
@@ -1661,6 +1685,10 @@ mod tests {
         );
     }
 
+    /// The RE-201 voice's envelope gate (`SPRING_GATE_THRESH`): a dead tail
+    /// is cut to exact silence, and the gate reopens on new input. Type 0
+    /// only — the Grampian ignores the gate and sleeps on its own detector
+    /// (see `grampian_sleeps_to_exact_silence_after_its_tail`).
     #[test]
     fn spring_gate_silences_dead_tails_and_reopens() {
         let mut state = clean_state();
@@ -1669,10 +1697,10 @@ mod tests {
         state[STATE_SMOOTH_DRY] = 0.0;
         state[STATE_REVERB_VOL] = 1.0;
         state[STATE_SMOOTH_REVERB] = 1.0;
-        state[STATE_SPRING_TYPE] = 1.0;
-        // The new tank preserves low modes and gates at -100 rather than
-        // -80 dBFS. Its measured tail falls below that floor after ~6 s.
-        let frames = SR as usize * 8;
+        state[STATE_SPRING_TYPE] = 0.0;
+        assert_eq!(state[STATE_SPRING_TYPE_MIX], 0.0, "RE-201 voice must be seated");
+        // The RE-201 tail crosses the -80 dBFS gate threshold after ~13.5 s.
+        let frames = SR as usize * 15;
         let (out_l, _) = render(&mut state, &impulse(frames), &impulse(frames));
         let tail = &out_l[frames - SR as usize / 2..];
         assert!(
@@ -1693,6 +1721,85 @@ mod tests {
             "gate failed to reopen: rms {}",
             rms(&out2)
         );
+    }
+
+    /// The Grampian has no envelope gate: it preserves low modes and its
+    /// own silence detector clears it at -100 rather than -80 dBFS. Its
+    /// measured tail falls below that floor after ~6 s, after which the
+    /// output is exactly zero and a new impulse wakes it with no gap.
+    #[test]
+    fn grampian_sleeps_to_exact_silence_after_its_tail() {
+        let mut state = clean_state();
+        state[STATE_MODE] = 11.0; // reverb only
+        state[STATE_DRY] = 0.0;
+        state[STATE_SMOOTH_DRY] = 0.0;
+        state[STATE_REVERB_VOL] = 1.0;
+        state[STATE_SMOOTH_REVERB] = 1.0;
+        state[STATE_SPRING_TYPE] = 1.0;
+        let frames = SR as usize * 8;
+        let (out_l, _) = render(&mut state, &impulse(frames), &impulse(frames));
+        let tail = &out_l[frames - SR as usize / 2..];
+        assert!(tail.iter().all(|x| *x == 0.0), "dormant Grampian should be exactly silent");
+        let last_nz = out_l.iter().rposition(|x| *x != 0.0).unwrap();
+        let cutoff = out_l[last_nz.saturating_sub(2400)..=last_nz]
+            .iter()
+            .fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(cutoff < 3.0e-4, "Grampian slept on an audible tail: peak {cutoff}");
+        let half = SR as usize / 2;
+        let (out2, _) = render(&mut state, &impulse(half), &impulse(half));
+        assert!(rms(&out2) > 2.0e-4, "Grampian failed to wake: rms {}", rms(&out2));
+    }
+
+    /// The spring bus goes dormant through an echo-only mode or bypass too,
+    /// not only through the type crossfade endpoints: neither voice runs and
+    /// the crossfade is frozen, so re-entry must clear the selected voice
+    /// rather than resume the tail it was holding minutes ago.
+    #[test]
+    fn dormant_spring_tail_is_cleared_on_mode_and_bypass_reentry() {
+        let spring_range = |state: &[f32]| {
+            let mut cleared = state.to_vec();
+            cleared[STATE_SPRING_BASS_LP_A..STATE_SPRING_A].fill(0.0);
+            cleared[STATE_SPRING_A..STATE_SPRING_A + 2 * SPRING_TANK_STATE_LEN].fill(0.0);
+            cleared[STATE_GRAMPIAN..STATE_GRAMPIAN + grampian::STATE_LEN].fill(0.0);
+            cleared
+        };
+        let silence = vec![0.0; 4800];
+        for spring_type in [0.0f32, 1.0] {
+            for bypass in [false, true] {
+                let mut state = clean_state();
+                state[STATE_MODE] = 11.0;
+                state[STATE_DRY] = 0.0;
+                state[STATE_SMOOTH_DRY] = 0.0;
+                // Echo return off so the echo-only mode is audibly silent
+                // (the tape still runs and still feeds the spring bus).
+                state[STATE_ECHO_VOL] = 0.0;
+                state[STATE_SMOOTH_ECHO] = 0.0;
+                state[STATE_SPRING_TYPE] = spring_type;
+                state[STATE_SPRING_TYPE_MIX] = spring_type;
+                let (excited, _) = render(&mut state, &impulse(4800), &impulse(4800));
+                assert!(rms(&excited) > 1e-4);
+                // Go dormant while the tail is still ringing.
+                if bypass {
+                    state[STATE_ENABLED] = 0.0;
+                } else {
+                    state[STATE_MODE] = 4.0; // heads 2+3, no reverb
+                }
+                let (dormant, _) = render(&mut state, &silence, &silence);
+                assert!(rms(&dormant) < 1e-6, "dormant spring leaked: type {spring_type}");
+                assert_eq!(state[STATE_SPRING_TYPE_MIX], spring_type, "crossfade is frozen");
+                // Re-enter: the held tail must be forgotten, everything else kept.
+                state[STATE_ENABLED] = 1.0;
+                state[STATE_MODE] = 11.0;
+                let mut cleared = spring_range(&state);
+                let actual = render(&mut state, &silence, &silence);
+                let expected = render(&mut cleared, &silence, &silence);
+                assert_eq!(
+                    actual, expected,
+                    "old spring tail returned: type {spring_type} bypass {bypass}"
+                );
+                assert_eq!(state[STATE_SPRING_TYPE_MIX], spring_type);
+            }
+        }
     }
 
     #[test]

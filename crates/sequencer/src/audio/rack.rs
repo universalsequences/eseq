@@ -1166,6 +1166,32 @@ fn macro_targets_slot_param(targets: &[crate::sequencer::RackMacroTarget], slot_
     })
 }
 
+/// Whether an off-step event at `step` can change any slot's solo state:
+/// some slot carries a Solo (or Mute) p-lock there, or a live macro drives
+/// one. `MUTED_BY_SOLO` is a cross-slot value (computed from every slot's
+/// solo), so when this is true every slot's panner needs it re-pushed, not
+/// only the slots that own a lock.
+pub(super) fn off_step_solo_state_changed(
+    rack: &RackTrackSnapshot,
+    step: usize,
+    targets: &[crate::sequencer::RackMacroTarget],
+) -> bool {
+    let solo_idx = RackSlotParam::Solo.index();
+    let mute_idx = RackSlotParam::Mute.index();
+    rack.slots.iter().any(|slot| {
+        slot.param_plocks.rows.get(step).is_some_and(|row| {
+            row.get(solo_idx).copied().flatten().is_some()
+                || row.get(mute_idx).copied().flatten().is_some()
+        })
+    }) || targets.iter().any(|target| {
+        matches!(
+            target,
+            crate::sequencer::RackMacroTarget::SlotParam { param, .. }
+                if matches!(RackSlotParam::from_name(param), Some(RackSlotParam::Solo | RackSlotParam::Mute))
+        )
+    })
+}
+
 fn macro_targets_slot_instrument_param(
     targets: &[crate::sequencer::RackMacroTarget],
     slot_idx: usize,
@@ -1410,23 +1436,38 @@ pub(super) fn apply_rack_params_off_step(
         .map(|slot| resolve_rack_slot_params(slot, step))
         .collect();
     let has_solo = resolved_slot_params.iter().any(|params| params.solo);
+    let solo_state_changed = off_step_solo_state_changed(&rack, step, &targets);
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
         let slot_param_locked = slot
             .param_plocks
             .rows
             .get(step)
             .is_some_and(|row| row.iter().any(Option::is_some));
-        if slot_param_locked || macro_targets_slot_param(&targets, slot_idx) {
-            if let Some(slot_params) = resolved_slot_params.get(slot_idx).copied() {
-                let muted_by_solo = has_solo && !slot_params.solo;
-                let slot_pan_lid = data.state.runtime.rack_slot_pan_lids[track_idx][slot_idx]
-                    .load(Ordering::Acquire);
+        if let Some(slot_params) = resolved_slot_params.get(slot_idx).copied() {
+            let muted_by_solo = has_solo && !slot_params.solo;
+            let slot_pan_lid = data.state.runtime.rack_slot_pan_lids[track_idx][slot_idx]
+                .load(Ordering::Acquire);
+            if slot_param_locked || macro_targets_slot_param(&targets, slot_idx) {
                 unsafe {
                     push_rack_slot_panner_params(
                         data.lg.0,
                         slot_pan_lid,
                         slot_params,
                         muted_by_solo,
+                    );
+                }
+            } else if solo_state_changed && slot_pan_lid != 0 {
+                // Another slot's Solo/Mute lock changed the cross-slot solo
+                // state. Push only MUTED_BY_SOLO: this slot has no lock of
+                // its own, so its gain/pan/mute stay live (not snapshot).
+                unsafe {
+                    params_push_wrapper(
+                        data.lg.0,
+                        ParamMsg {
+                            idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+                            logical_id: slot_pan_lid,
+                            fvalue: if muted_by_solo { 1.0 } else { 0.0 },
+                        },
                     );
                 }
             }
@@ -1644,4 +1685,71 @@ pub(super) fn fire_rack_resolved(
         track_idx,
     );
     data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod off_step_solo_tests {
+    use super::*;
+    use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
+    use crate::sequencer::{
+        default_rack_macros, CustomInstrumentRunMode, RackMacroCurve, RackMacroMapping,
+        RackMacroTarget, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot,
+        TrackSoundState,
+    };
+
+    fn slot() -> RackSlotSnapshot {
+        RackSlotSnapshot {
+            instrument_type: InstrumentType::Sampler,
+            instrument_run_mode: CustomInstrumentRunMode::Instrument,
+            instrument_base_note_offset: 0.0,
+            choke_group: None,
+            gain: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            max_polyphony: 1,
+            param_plocks: RackSlotParamPlocks::new(),
+            instrument_slot: EffectSlotSnapshot::new_empty(),
+            effect_slots: RackSlotSnapshot::empty_effect_slots(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: RackSlotSnapshot::empty_effect_names(),
+            track_sound_state: TrackSoundState::default(),
+            sample_id: None,
+        }
+    }
+
+    /// `MUTED_BY_SOLO` is cross-slot: a Solo p-lock on slot 1 at an inactive
+    /// step must re-push it to slot 0 too, even though slot 0 owns no lock.
+    /// A gain lock alone must not (slot 0's live gain/pan would be clobbered
+    /// by the snapshot for no reason).
+    #[test]
+    fn off_step_solo_lock_on_one_slot_repushes_every_slot() {
+        let mut rack = RackTrackSnapshot::new(vec![slot(), slot()], default_rack_macros());
+        assert!(!off_step_solo_state_changed(&rack, 4, &[]));
+
+        rack.slots[1].param_plocks.rows[4][RackSlotParam::Gain.index()] = Some(0.5);
+        assert!(!off_step_solo_state_changed(&rack, 4, &[]), "gain lock is slot-local");
+
+        rack.slots[1].param_plocks.rows[4][RackSlotParam::Solo.index()] = Some(0.0);
+        assert!(off_step_solo_state_changed(&rack, 4, &[]), "solo lock (even off) is cross-slot");
+        assert!(!off_step_solo_state_changed(&rack, 5, &[]));
+
+        rack.slots[1].param_plocks.rows[4][RackSlotParam::Solo.index()] = None;
+        rack.slots[1].param_plocks.rows[4][RackSlotParam::Mute.index()] = Some(1.0);
+        assert!(off_step_solo_state_changed(&rack, 4, &[]), "mute lock is cross-slot too");
+
+        // A live macro driving a slot's solo counts the same way.
+        let mapping = |param: &str| RackMacroMapping {
+            target: RackMacroTarget::SlotParam {
+                slot: 0,
+                param: param.to_string(),
+            },
+            range_min: 0.0,
+            range_max: 1.0,
+            curve: RackMacroCurve::Linear,
+        };
+        let empty = RackTrackSnapshot::new(vec![slot(), slot()], default_rack_macros());
+        assert!(!off_step_solo_state_changed(&empty, 4, &[mapping("gain").target]));
+        assert!(off_step_solo_state_changed(&empty, 4, &[mapping("solo").target]));
+    }
 }
