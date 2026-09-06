@@ -88,12 +88,13 @@ pub(super) fn handle(
                 0.0,
             );
             if keyboard_tx
-                .send(KeyboardTrigger {
+                .send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+                source: None,
                     track,
                     transpose: 0.0,
                     velocity: 1.0,
                     note_off: false,
-                })
+                }))
                 .is_ok()
             {
                 ctx.sessions

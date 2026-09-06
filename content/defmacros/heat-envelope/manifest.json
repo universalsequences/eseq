@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "heat-envelope",
+  "params": ["gate", "restart", "attack_ms", "decay_ms", "sustain", "sustain_seconds", "release_ms", "exponential", "loop_mode", "free_run"],
+  "outputs": ["out"],
+  "summary": "Heat's independent linear/exponential contour with finite sustain decay, three loop modes and Free operation.",
+  "tags": ["envelope", "synth", "heat"]
+}

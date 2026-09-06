@@ -76,7 +76,7 @@ def extract_preamble():
 
 class Instrument:
     def __init__(self, path, sample_rate=48000.0, max_frames=128, voices=1,
-                 verbose=False):
+                 verbose=False, compiler=None, toolchain_root=None):
         """path: instrument folder or a dsp.lisp file."""
         path = os.path.abspath(path)
         self.dsp_path = path if path.endswith(".lisp") else os.path.join(path, "dsp.lisp")
@@ -87,13 +87,38 @@ class Instrument:
         self.max_frames = int(max_frames)
         self.voices = int(voices)
         self.verbose = verbose
+        self.toolchain_root = toolchain_root or os.environ.get("ESEQ_DGEN_TOOLCHAIN_ROOT")
+        self.compiler = self._resolve_compiler(compiler or os.environ.get("ESEQ_DGENLISP_TOOL"))
+        with open(self.compiler, "rb") as f:
+            self.compiler_sha256 = hashlib.sha256(f.read()).hexdigest()
         self._compile()
         self._load()
 
     # -- compile ------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_compiler(compiler):
+        if compiler is not None:
+            path = os.path.abspath(os.path.expanduser(compiler))
+            if not os.path.isfile(path) or not os.access(path, os.X_OK):
+                raise ValueError(f"DGenLisp compiler is not executable: {path}")
+            return path
+        # Build before looking in the audition cache: a source-identical patch
+        # must not reuse audio from an older compiler after a compiler fix.
+        build = subprocess.run(["swift", "build", "--product", "DGenLisp"],
+                               cwd=DGEN_ROOT, capture_output=True, text=True)
+        if build.returncode != 0:
+            raise RuntimeError(f"DGenLisp build failed:\n{build.stderr[-4000:]}")
+        location = subprocess.run(["swift", "build", "--show-bin-path"],
+                                  cwd=DGEN_ROOT, capture_output=True, text=True, check=True)
+        return os.path.join(location.stdout.strip(), "DGenLisp")
+
     def _cache_key(self):
         h = hashlib.sha256()
+        h.update(self.compiler_sha256.encode())
+        h.update((self.toolchain_root or "").encode())
+        with open(os.path.join(REPO_ROOT, "content", "dgen-toolchain.lock"), "rb") as f:
+            h.update(f.read())
         h.update(extract_preamble().encode())
         h.update(open(self.dsp_path, "rb").read())
         # Tensor default-files are BAKED into the dylib at compile time, so
@@ -118,15 +143,17 @@ class Instrument:
             f.write(extract_preamble())
             f.write("\n")
             f.write(open(self.dsp_path).read())
-        cmd = ["swift", "run", "DGenLisp", combined,
+        cmd = [self.compiler, combined,
                "-o", self.build_dir, "--name", "patch",
                "--sample-rate", str(self.sample_rate),
                "--max-frames", str(self.max_frames),
                "--voices", str(self.voices),
                "--asset-base", self.asset_dir]
+        if self.toolchain_root:
+            cmd.extend(["--toolchain-root", self.toolchain_root])
         if self.verbose:
             print(f"[audition] compiling: {' '.join(cmd)}", file=sys.stderr)
-        r = subprocess.run(cmd, cwd=DGEN_ROOT, capture_output=True, text=True)
+        r = subprocess.run(cmd, cwd=self.asset_dir, capture_output=True, text=True)
         if r.returncode != 0 or not os.path.exists(manifest_path):
             raise RuntimeError(
                 f"DGenLisp compile failed (exit {r.returncode}):\n{r.stderr[-4000:]}")

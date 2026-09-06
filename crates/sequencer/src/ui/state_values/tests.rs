@@ -44708,8 +44708,246 @@ mod drift_waveform_tests;
         );
     }
 
-    /// The shipped `Synths/Digi Drift` panel: vs the fixture, the filter column
-    /// exposes `filter_drive` and hp cutoff is a micro control beside keytrack.
+    /// Heat's real instrument source, including the editable envelopes and the compact
+    /// detail controls, must fit in the production instrument panel.
+    #[test]
+    fn heat_development_ui_sections_have_visible_parameter_controls() {
+        fn find_param<'a>(node: &'a eseqlisp::layout::LayoutNode, suffix: &str)
+            -> Option<&'a eseqlisp::layout::LayoutNode>
+        {
+            if node.stable_key.as_deref().is_some_and(|key| key.ends_with(suffix)) {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| find_param(child, suffix))
+        }
+        fn assert_controls_visible(node: &eseqlisp::layout::LayoutNode, panel: &eseqlisp::layout::LayoutNode) {
+            if matches!(node.widget_type.as_str(), "number-picker" | "knob-number" | "dropdown") {
+                assert!(node.rect.width > 0.0 && node.rect.height > 0.0);
+                assert!(node.rect.row >= panel.rect.row
+                    && node.rect.row + node.rect.height <= panel.rect.row + panel.rect.height
+                    && node.rect.col >= panel.rect.col
+                    && node.rect.col + node.rect.width <= panel.rect.col + panel.rect.width,
+                    "control outside panel: {} {:?} / {:?}", node.widget_type, node.rect, panel.rect);
+            }
+            for child in &node.children { assert_controls_visible(child, panel); }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/heat/instrument");
+        let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
+        let ui = std::fs::read_to_string(root.join("ui.lisp")).unwrap();
+        let mut values = Vec::new();
+        let params = dsp.lines().filter(|line| line.starts_with("(param "))
+            .enumerate().map(|(index, line)| {
+                let words: Vec<_> = line.trim_end_matches(')').split_whitespace().collect();
+                let number = |key| {
+                    let pos = words.iter().position(|word| *word == key).unwrap();
+                    words[pos + 1].parse::<f64>().unwrap()
+                };
+                let mut param = test_param_map(words[1], index, number("@default"), number("@min"), number("@max"));
+                let field = format!("heat-test-{}", words[1]);
+                param.insert("value-field".to_string(), Rc::new(RefCell::new(Value::String(field.clone()))));
+                values.push((field, Value::Number(number("@default"))));
+                Value::Map(param)
+            }).collect();
+        let mut inst = test_instrument_map();
+        inst.insert("synth".to_string(), Rc::new(RefCell::new(test_list(params))));
+        let custom_ui = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(), root.join("ui.lisp").display().to_string(), ui,
+        )));
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 24);
+        editor.runtime_mut().register_reactive("SEQ", vec![
+            ("num-tracks", Value::Number(1.0)), ("compiling", Value::Bool(false)),
+            ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
+            ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
+            ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
+            ("instrument-panel", test_list(vec![Value::Map(inst)])), ("bus-effects", test_list(vec![])),
+        ], true);
+        for (field, value) in &values {
+            editor.runtime_mut().set_reactive("SEQ", field, value.clone());
+        }
+        editor.runtime_mut().eval_str(r#"
+            (def eseq.seq-core-state/selected-bus-name () "Mix")
+            (def seq-has-selection? () false)
+            (def eseq.browser/sbrowser-editor-name "")
+            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+            (def custom-midi-fx-ui (fx) false)
+            (def custom-audio-fx-ui (fx) false)
+            (defstate eseq.seq-core-state/selected-bus -1)
+        "#).unwrap();
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&custom_ui).expect("load Heat UI");
+        editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
+        editor.set_active_buffer(fx_id);
+        // The initial detail is Global, and each routing button applies the
+        // complete configuration as one undoable parameter batch.
+        let layout = editor.widget_layout().expect("default Heat layout");
+        let route_names = ["osc1_to_filter1", "osc2_to_filter1", "noise_to_filter1",
+            "filter1_to_filter2", "filter1_enabled", "filter2_enabled", "amp1_enabled", "amp2_enabled"];
+        let param_index = |name: &str| dsp.lines().filter(|line| line.starts_with("(param "))
+            .position(|line| line.split_whitespace().nth(1) == Some(name)).unwrap() as f64;
+        for (mode, expected) in [
+            [1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            [0.5, 0.5, 0.5, 0.0, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0],
+        ].iter().enumerate() {
+            let button = find_layout_node_by_debug_name(&layout, &format!("heat-route-{mode}"))
+                .expect("routing button visible by default");
+            assert!(button.rect.width > 0.0 && button.rect.height > 0.0);
+            let callback = button.props.get("on-click").unwrap().clone();
+            editor.drain_host_commands();
+            editor.runtime_mut().invoke(callback, vec![Value::Number(0.0); 3]).unwrap();
+            let commands = editor.drain_host_commands();
+            let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else {
+                panic!("routing must emit one batch: {commands:?}");
+            };
+            assert_eq!(name, "set-instrument-param-batch");
+            assert_eq!(*payload["commit"].borrow(), Value::Bool(true));
+            let updates = payload["updates"].borrow();
+            let Value::List(updates) = &*updates else { panic!("batch updates"); };
+            assert_eq!(updates.len(), 8);
+            for ((update, param), value) in updates.iter().zip(route_names).zip(expected) {
+                let update = update.borrow();
+                let Value::Map(update) = &*update else { panic!("parameter update"); };
+                assert_eq!(*update["param-idx"].borrow(), Value::Number(param_index(param)));
+                assert_eq!(*update["value"].borrow(), Value::Number(*value));
+            }
+            for (param, value) in route_names.iter().zip(expected) {
+                editor.runtime_mut().set_reactive("SEQ", &format!("heat-test-{param}"), Value::Number(*value));
+            }
+            editor.refresh_runtime_side_effects();
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let selected_layout = editor.widget_layout().unwrap();
+            for candidate in 0..4 {
+                let button = find_layout_node_by_debug_name(&selected_layout, &format!("heat-route-{candidate}")).unwrap();
+                let selected = match button.props.get("selected") {
+                    Some(Value::Number(value)) => *value,
+                    Some(Value::ReactiveRef { slot, .. }) => f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed)),
+                    value => panic!("selected routing prop: {value:?}"),
+                };
+                assert_eq!(selected, if candidate == mode { 1.0 } else { 0.0 });
+            }
+        }
+        for (section, suffix) in [
+            (1, "osc1_pulse_duty"), (2, "filter1_env_attack_ms"),
+            (3, "amp1_env_release_ms"), (4, "lfo1_delay_ms"),
+            (5, "osc2_sub_level"), (6, "filter2_env_decay_ms"),
+            (7, "amp2_env_sustain"), (4, "lfo2_fade_ms"),
+            (0, "noise_color_hz"), (0, "pressure_amp_db"),
+        ] {
+            editor.runtime_mut().eval_str(&format!(r#"
+                (do
+                  (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+                  (def heat-test-click (eseq.effects.custom-ui-sections/ui-section-select-callback {section}))
+                  (heat-test-click false))
+            "#)).unwrap();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().expect("Heat layout");
+            assert_finite_layout_tree(&layout);
+            let panel = find_layout_node_by_debug_name(&layout, "instrument-panel").unwrap();
+            assert_controls_visible(panel, panel);
+            for name in ["osc1_level_db", "filter2_cutoff_hz", suffix] {
+                let control = find_param(&layout, name).unwrap_or_else(|| panic!("missing {name} in section {section}"));
+                assert!(control.rect.width > 0.0 && control.rect.height > 0.0, "zero-sized {name}");
+                assert!(control.rect.row >= panel.rect.row
+                    && control.rect.row + control.rect.height <= panel.rect.row + panel.rect.height,
+                    "{name} outside panel: {:?} / {:?}", control.rect, panel.rect);
+            }
+            for name in ["osc1_semitones", "osc2_semitones"] {
+                let control = find_param(&layout, name).unwrap();
+                let knob = find_layout_node_by_widget_type(control, "knob-number").unwrap();
+                assert_eq!(knob.props.get("step"), Some(&Value::Number(1.0)));
+            }
+            let noise = find_layout_node_by_debug_name(&layout, "heat-noise-strip").unwrap();
+            assert!(!noise.props.contains_key("on-click"));
+            if section == 4 {
+                for prefix in ["lfo1", "lfo2"] {
+                    let curve = find_layout_node_by_debug_name(&layout, &format!("heat-{prefix}-curve")).unwrap();
+                    assert_eq!(curve.widget_type, "lfo-curve");
+                    assert!(curve.rect.width > 0.0 && curve.rect.height > 0.0);
+                    assert!(matches!(curve.props.get("pw"), Some(Value::ReactiveRef { .. })));
+                }
+            }
+            if section == 1 || section == 5 {
+                let curve = find_layout_node_by_debug_name(&layout, "heat-pitch-envelope").unwrap();
+                assert_eq!(curve.widget_type, "adsr-editor");
+                assert!(curve.rect.width > 0.0 && curve.rect.height > 0.0);
+                for prop in ["initial", "time"] {
+                    assert!(matches!(curve.props.get(prop), Some(Value::ReactiveRef { .. })), "reactive {prop}");
+                }
+                let callback = curve.props["on-change"].clone();
+                let env = Value::Map([("initial", -12.0), ("time", 420.0)].into_iter()
+                    .map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(Value::Number(value))))).collect());
+                editor.drain_host_commands();
+                editor.runtime_mut().invoke(callback, vec![env]).unwrap();
+                let commands = editor.drain_host_commands();
+                let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else { panic!("pitch batch: {commands:?}"); };
+                assert_eq!(name, "set-instrument-param-batch");
+                assert_eq!(*payload["commit"].borrow(), Value::Bool(true));
+                let updates = payload["updates"].borrow();
+                let Value::List(updates) = &*updates else { panic!("pitch updates"); };
+                assert_eq!(updates.len(), 2);
+                let prefix = if section == 1 { "osc1" } else { "osc2" };
+                for (update, (suffix, expected)) in updates.iter().zip([("initial", -12.0), ("time_ms", 420.0)]) {
+                    let update = update.borrow();
+                    let Value::Map(update) = &*update else { panic!("pitch update"); };
+                    assert_eq!(*update["value"].borrow(), Value::Number(expected));
+                    assert_eq!(*update["param-idx"].borrow(), Value::Number(param_index(&format!("{prefix}_pitch_env_{suffix}"))));
+                }
+                // Editing Noise must leave the previously selected oscillator open.
+                let control = find_param(&layout, "noise_color_hz").unwrap();
+                let picker = find_layout_node_by_widget_type(control, "number-picker").unwrap();
+                editor.runtime_mut().invoke(picker.props["on-change"].clone(), vec![Value::Number(3000.0)]).unwrap();
+                editor.refresh_runtime_side_effects();
+                let after_noise = editor.widget_layout().unwrap();
+                assert!(find_layout_node_by_debug_name(&after_noise, "heat-pitch-envelope").is_some());
+            }
+            let plot = match section {
+                2 | 3 | 6 | 7 => Some(("heat-envelope", "attack")),
+                _ => None,
+            };
+            if let Some((name, prop)) = plot {
+                let plot = find_layout_node_by_debug_name(&layout, name).expect("visible ADSR editor");
+                assert_eq!(plot.widget_type, "adsr-editor");
+                assert!(plot.rect.width > 0.0 && plot.rect.height > 0.0);
+                let Some(Value::ReactiveRef { namespace, field, slot, .. }) = plot.props.get(prop) else {
+                    panic!("{name} must bind {prop} directly to the parameter: {:?}", plot.props);
+                };
+                let (namespace, field, slot) = (namespace.clone(), field.clone(), slot.clone());
+                let callback = plot.props.get("on-change").expect("editable envelope").clone();
+                editor.drain_host_commands();
+                let env = Value::Map([("attack", 11.0), ("decay", 220.0), ("sustain", 0.42), ("release", 330.0)]
+                    .into_iter().map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(Value::Number(value))))).collect());
+                editor.runtime_mut().invoke(callback, vec![env]).unwrap();
+                let commands = editor.drain_host_commands();
+                let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else {
+                    panic!("envelope edit must emit one batch: {commands:?}");
+                };
+                assert_eq!(name, "set-instrument-param-batch");
+                assert_eq!(*payload["commit"].borrow(), Value::Bool(true));
+                let updates = payload["updates"].borrow();
+                let Value::List(updates) = &*updates else { panic!("ADSR updates"); };
+                assert_eq!(updates.len(), 4);
+                let prefix = match section { 2 => "filter1", 3 => "amp1", 6 => "filter2", _ => "amp2" };
+                for (update, (suffix, value)) in updates.iter().zip([
+                    ("attack_ms", 11.0), ("decay_ms", 220.0), ("sustain", 0.42), ("release_ms", 330.0),
+                ]) {
+                    let update = update.borrow();
+                    let Value::Map(update) = &*update else { panic!("ADSR parameter update"); };
+                    assert_eq!(*update["param-idx"].borrow(), Value::Number(param_index(&format!("{prefix}_env_{suffix}"))));
+                    assert_eq!(*update["value"].borrow(), Value::Number(value));
+                }
+
+                editor.runtime_mut().set_reactive(&namespace, &field, Value::Number(0.37));
+                assert_eq!(f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed)), 0.37,
+                    "parameter changes must reach the editor without rebuilding the panel");
+            }
+        }
+    }
+
     #[test]
     fn metal_seq_fx_lisp_lays_out_digi_drift_columns() {
         let drift_ui = read_factory_source("instruments/Synths/Digi Drift/ui.lisp")
@@ -56421,4 +56659,3 @@ mod drift_waveform_tests;
             "only the loose tracks keep their step grids while the rack is collapsed"
         );
     }
-

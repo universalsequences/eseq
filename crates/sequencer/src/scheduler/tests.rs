@@ -6603,6 +6603,7 @@
         let mut live_tracks: [super::LiveMidiFxTrackState; MAX_TRACKS] =
             std::array::from_fn(|_| super::LiveMidiFxTrackState::default());
         live_tracks[0].notes.push(super::LiveMidiFxNote {
+            source: None,
             transpose: 7.0,
             velocity: 0.8,
             pending_event: true,
@@ -6652,6 +6653,48 @@
             false,
         ));
         assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn live_midi_fx_holds_follow_source_identity_across_ports_channels_and_transpose() {
+        use crate::sequencer::{KeyboardTrigger, LiveNoteSource};
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let snapshot = state.publish_scheduler_snapshot();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut live_tracks: [super::LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| super::LiveMidiFxTrackState::default());
+        let note = |port, channel| KeyboardTrigger {
+            source: Some(LiveNoteSource::Midi { port, channel, note: 60 }),
+            track: 0, transpose: 0.0, velocity: 0.8, note_off: false,
+        };
+        let a = note(0, 0);
+        let b = note(1, 0);
+        let c = note(0, 1);
+        for event in [a, b, c] { tx.send(event).unwrap(); }
+        super::drain_live_keyboard_inputs(&rx, &snapshot, 1000, &mut live_tracks);
+        assert_eq!(live_tracks[0].notes.len(), 3);
+        live_tracks[0].notes[0].pending_event = false;
+        tx.send(KeyboardTrigger { transpose: 12.0, velocity: 0.6, ..a }).unwrap();
+        super::drain_live_keyboard_inputs(&rx, &snapshot, 1100, &mut live_tracks);
+        assert_eq!(live_tracks[0].notes.len(), 3, "repress replaces only its own hold");
+        let updated = live_tracks[0].notes.iter().find(|n| n.source == a.source).unwrap();
+        assert_eq!(updated.transpose, 12.0);
+        assert_eq!(updated.velocity, 0.6);
+        assert!(updated.pending_event);
+        for event in [b, c] {
+            tx.send(KeyboardTrigger { note_off: true, ..event }).unwrap();
+        }
+        super::drain_live_keyboard_inputs(&rx, &snapshot, 1200, &mut live_tracks);
+        assert_eq!(live_tracks[0].notes.len(), 1);
+        assert_eq!(live_tracks[0].notes[0].source, a.source);
+        assert_eq!(live_tracks[0].next_tick_sample, 1000);
+        // Release carries the original pitch, as it does after a keyboard
+        // octave change. The source identity still closes the updated hold.
+        tx.send(KeyboardTrigger { note_off: true, ..a }).unwrap();
+        super::drain_live_keyboard_inputs(&rx, &snapshot, 1300, &mut live_tracks);
+        assert!(live_tracks[0].notes.is_empty());
+        assert_eq!(live_tracks[0].next_tick_sample, 0);
+        assert!(!live_tracks[0].quantize_next_tick);
     }
 
     #[test]

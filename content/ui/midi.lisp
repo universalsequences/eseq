@@ -8,6 +8,7 @@
 ;;   {:kind :note-off   :channel 0 :note 60 :velocity 0.0 :port 0}
 ;;   {:kind :pitch-bend :channel 0 :value -0.5 :port 0}
 ;;   {:kind :aftertouch :channel 0 :value 0.3 :port 0}
+;;   {:kind :poly-pressure :channel 0 :note 60 :value 0.3 :port 0}
 ;;
 ;; `:value` is always normalised (0..1, or -1..1 for pitch bend) so targets
 ;; never see raw 7-bit numbers unless they ask for `:raw`.

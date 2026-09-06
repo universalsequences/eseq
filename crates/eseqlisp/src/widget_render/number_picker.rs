@@ -46,6 +46,19 @@ pub struct NumberPickerEditState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn numeric_display_aliases_match_model_values_before_scaling() {
+        let mut runtime = crate::Runtime::new();
+        let labels = runtime.eval_str("'((-1 \"infinite\"))").unwrap().unwrap();
+        let props = HashMap::from([
+            ("value-labels".to_string(), labels),
+            ("value-scale".to_string(), Value::Number(1000.0)),
+        ]);
+        assert_eq!(formatted_model_value(&props, -1.0, 2), "infinite");
+        assert_eq!(formatted_model_value(&props, 0.5, 2), "500.00");
+        assert_eq!(formatted_model_value(&props, -0.999, 2), "-999.00");
+    }
+
     fn color_value(r: f64, g: f64, b: f64, a: f64) -> Value {
         Value::List(
             [r, g, b, a]
@@ -442,6 +455,23 @@ fn format_value(value: f64, decimals: u32) -> String {
     format!("{:.*}", decimals as usize, value)
 }
 
+// Optional display aliases for sentinel values, e.g. ((-1 "inf")). Values
+// remain numeric for dragging, automation and text editing. Match in the
+// model domain, before value-scale is applied.
+fn formatted_model_value(props: &HashMap<String, Value>, value: f32, decimals: u32) -> String {
+    if let Some(Value::List(labels)) = props.get("value-labels") {
+        for entry in labels {
+            let entry = entry.borrow();
+            let Value::List(pair) = &*entry else { continue };
+            if pair.len() != 2 { continue; }
+            if let (Value::Number(key), Value::String(label)) = (&*pair[0].borrow(), &*pair[1].borrow()) {
+                if *key as f32 == value { return label.clone(); }
+            }
+        }
+    }
+    format_value(display_value(props, value) as f64, decimals)
+}
+
 fn value_scale(props: &HashMap<String, Value>) -> f32 {
     get_f32_prop(props, "value-scale", 1.0).max(0.000001)
 }
@@ -644,7 +674,7 @@ impl WidgetDefinition for NumberPickerWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["width", "height", "font-size", "decimals", "noui", "unit"]
+        &["width", "height", "font-size", "decimals", "noui", "unit", "value-labels"]
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
@@ -669,6 +699,7 @@ impl WidgetDefinition for NumberPickerWidget {
             "decimals",
             "unit",
             "value-scale",
+            "value-labels",
             "taper",
             "drag-rows",
             "width",
@@ -959,7 +990,7 @@ impl WidgetDefinition for NumberPickerWidget {
             Some(Value::String(unit)) => unit.as_str(),
             _ => "",
         };
-        let value_text = format_value(display_value(props, value) as f64, decimals);
+        let value_text = formatted_model_value(props, value, decimals);
         let display_value = if unit.is_empty() {
             value_text
         } else {
@@ -1240,7 +1271,7 @@ impl WidgetDefinition for NumberPickerWidget {
             a: 0.0,
         };
 
-        let value_text = format_value(display_value(&node.props, value) as f64, decimals);
+        let value_text = formatted_model_value(&node.props, value, decimals);
         let display_value = if unit.is_empty() {
             value_text
         } else {

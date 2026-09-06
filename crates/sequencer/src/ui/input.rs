@@ -10,18 +10,7 @@ use eseqlisp::widget_render::number_picker::{
     number_picker_edit_state, NumberPickerEditOutcome,
 };
 
-/// What is holding a live note down. Dedup and release lookups key on this,
-/// so a hardware C4 and the `a` key never collide (bead eseq-egs6).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum LiveNoteSource {
-    /// Computer-keyboard musical typing, by lowercase character.
-    Key(char),
-    /// Hardware MIDI input: one physical key, so the same note number on a
-    /// second port or channel is a distinct hold with its own release.
-    Midi { port: usize, channel: u8, note: u8 },
-    /// The momentary sequence-roll hold marker (no note of its own).
-    SequenceRoll,
-}
+pub(crate) use sequencer::sequencer::LiveNoteSource;
 
 /// Pitch a live press asks for, before per-track resolution. Musical typing
 /// carries one relative transpose for every target; a MIDI note is absolute
@@ -2003,7 +1992,7 @@ pub(crate) fn handle_recording_key(
     record_armed: &Arc<Mutex<Vec<bool>>>,
     armed_rack: &Arc<Mutex<Option<u64>>>,
     recording: &Arc<AtomicBool>,
-    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::LiveInputEvent>,
     keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     roll_record: &Arc<Mutex<RollRecordBuffer>>,
@@ -2175,7 +2164,7 @@ pub(crate) fn handle_midi_note(
     record_armed: &Arc<Mutex<Vec<bool>>>,
     armed_rack: &Arc<Mutex<Option<u64>>>,
     recording: &Arc<AtomicBool>,
-    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::LiveInputEvent>,
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     roll_record: &Arc<Mutex<RollRecordBuffer>>,
     ui_invalidations: &UiInvalidationQueue,
@@ -2236,7 +2225,7 @@ fn live_note_on(
     state: &Arc<SequencerState>,
     record_armed: &Arc<Mutex<Vec<bool>>>,
     armed_rack: &Arc<Mutex<Option<u64>>>,
-    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::LiveInputEvent>,
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
 ) -> RecordingKeyOutcome {
     let roll_mode = state.transport.roll_mode.load(Ordering::Relaxed);
@@ -2297,12 +2286,13 @@ fn live_note_on(
                 transpose: target.transpose,
             });
         } else {
-            let _ = keyboard_tx.send(KeyboardTrigger {
+            let _ = keyboard_tx.send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+                source: Some(source),
                 track: target.track,
                 transpose: target.transpose,
                 velocity,
                 note_off: false,
-            });
+            }));
         }
     }
 
@@ -2330,7 +2320,7 @@ fn live_note_off(
     app: &mut sequencer::app::App,
     state: &Arc<SequencerState>,
     recording: &Arc<AtomicBool>,
-    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::LiveInputEvent>,
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     roll_record: &Arc<Mutex<RollRecordBuffer>>,
     ui_invalidations: &UiInvalidationQueue,
@@ -2396,12 +2386,13 @@ fn live_note_off(
             }
             // The audio note-off always goes out so a sounding voice
             // (rolled or normal) releases its envelope.
-            let _ = keyboard_tx.send(KeyboardTrigger {
+            let _ = keyboard_tx.send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+                source: Some(source),
                 track: target.track,
                 transpose: target.transpose,
                 velocity: 0.0,
                 note_off: true,
-            });
+            }));
         }
         if roll_mode {
             // Rolled hits were already written into live pattern
@@ -2583,6 +2574,13 @@ fn live_note_off(
 
 #[cfg(test)]
 mod live_keyboard_tests {
+    fn expect_note(event: sequencer::sequencer::LiveInputEvent) -> sequencer::sequencer::KeyboardTrigger {
+        match event {
+            sequencer::sequencer::LiveInputEvent::Note(note) => note,
+            other => panic!("expected live note, got {other:?}"),
+        }
+    }
+
     use super::{
         apply_live_trigger_stamps,
         armed_rack_pad_track, build_selection_value, current_step_param_number_picker_id,
@@ -3015,7 +3013,7 @@ mod live_keyboard_tests {
         record_armed: &Arc<Mutex<Vec<bool>>>,
         armed_rack: &Arc<Mutex<Option<u64>>>,
         recording: &Arc<AtomicBool>,
-        keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::KeyboardTrigger>,
+        keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::LiveInputEvent>,
         held: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     ) -> RecordingKeyOutcome {
         let keyboard_octave = Arc::new(std::sync::atomic::AtomicI32::new(36));
@@ -3105,7 +3103,7 @@ mod live_keyboard_tests {
             "a repeated note-on for a held note is a no-op"
         );
 
-        let mut triggers: Vec<_> = keyboard_rx.try_iter().collect();
+        let mut triggers: Vec<_> = keyboard_rx.try_iter().map(expect_note).collect();
         triggers.sort_by_key(|trigger| trigger.track);
         assert_eq!(triggers.len(), 2, "armed track + rack pad: {triggers:?}");
         assert_eq!(
@@ -3126,7 +3124,7 @@ mod live_keyboard_tests {
         };
         assert!(drive(off, &mut app).consumed());
         assert!(!held_note_for_source(&held, midi_96));
-        let mut offs: Vec<_> = keyboard_rx.try_iter().collect();
+        let mut offs: Vec<_> = keyboard_rx.try_iter().map(expect_note).collect();
         offs.sort_by_key(|trigger| trigger.track);
         assert_eq!(offs.len(), 2);
         assert!(offs.iter().all(|trigger| trigger.note_off));
@@ -3250,14 +3248,14 @@ mod live_keyboard_tests {
             &keyboard_tx,
             &held,
         );
-        let on = keyboard_rx.recv().expect("pad note-on");
+        let on = expect_note(keyboard_rx.recv().expect("pad note-on"));
         assert_eq!(on.track, 1, "pad 36 triggers its member track");
         assert_eq!(
             on.transpose, 0.0,
             "a pad plays its member at base pitch, not at the key's pitch"
         );
         assert!(!on.note_off);
-        let off = keyboard_rx.recv().expect("pad note-off");
+        let off = expect_note(keyboard_rx.recv().expect("pad note-off"));
         assert_eq!((off.track, off.transpose, off.note_off), (1, 0.0, true));
 
         // 'w' is MIDI 37 — no pad answers it.
@@ -3299,13 +3297,13 @@ mod live_keyboard_tests {
             &keyboard_tx,
             &held,
         );
-        let on = keyboard_rx.recv().expect("chromatic note-on");
+        let on = expect_note(keyboard_rx.recv().expect("chromatic note-on"));
         assert_eq!(
             (on.track, on.transpose),
             (1, 36.0),
             "an armed member plays the key's pitch, not a pad at base pitch"
         );
-        let off = keyboard_rx.recv().expect("chromatic note-off");
+        let off = expect_note(keyboard_rx.recv().expect("chromatic note-off"));
         assert_eq!((off.track, off.transpose, off.note_off), (1, 36.0, true));
         assert!(
             keyboard_rx.try_recv().is_err(),

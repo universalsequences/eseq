@@ -356,21 +356,22 @@ pub(super) struct PendingKeyLockAudition {
 pub(super) const KEY_LOCK_AUDITION_DURATION: Duration = Duration::from_millis(220);
 
 pub(super) fn send_keyboard_note_off(
-    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::LiveInputEvent>,
     track: usize,
     transpose: f32,
 ) {
-    let _ = keyboard_tx.send(KeyboardTrigger {
+    let _ = keyboard_tx.send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+                source: None,
         track,
         transpose,
         velocity: 0.0,
         note_off: true,
-    });
+    }));
 }
 
 pub(super) fn release_due_key_lock_auditions(
     pending: &mut Vec<PendingKeyLockAudition>,
-    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::LiveInputEvent>,
     now: Instant,
 ) {
     let mut idx = 0;
@@ -386,7 +387,7 @@ pub(super) fn release_due_key_lock_auditions(
 
 pub(super) fn release_matching_key_lock_auditions(
     pending: &mut Vec<PendingKeyLockAudition>,
-    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::LiveInputEvent>,
     track: usize,
     transpose: f32,
 ) {

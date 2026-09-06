@@ -735,6 +735,7 @@ pub(super) fn capture_track_params_snapshot(track_params: &TrackParams) -> Track
         accum_limit: track_params.get_accum_limit(),
         accum_mode: track_params.get_accum_mode(),
         fts_scale: track_params.get_fts_scale(),
+        mono_trigger: track_params.get_mono_trigger(),
         mute_group: track_params.get_mute_group(),
         global_transpose: track_params.uses_global_transpose(),
     }
@@ -763,6 +764,7 @@ pub(super) fn restore_track_params_snapshot(track_params: &TrackParams, snapshot
     track_params.set_accum_limit(snapshot.accum_limit);
     track_params.set_accum_mode(snapshot.accum_mode);
     track_params.set_fts_scale(snapshot.fts_scale);
+    track_params.set_mono_trigger(snapshot.mono_trigger);
     track_params.set_mute_group(snapshot.mute_group);
     track_params.set_global_transpose(snapshot.global_transpose);
 }

@@ -1,0 +1,506 @@
+[
+  {
+    "name": "drive0-q0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive0-q0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.75,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive0-q1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive1-q0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 1,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive1-q0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 1,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.75,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive1-q1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 1,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive2-q0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 2,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive2-q0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 2,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.75,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive2-q1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 2,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive3-q0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 3,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive3-q0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 3,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.75,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive3-q1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 3,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive4-q0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 4,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive4-q0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 4,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.75,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive4-q1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 4,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive5-q0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 5,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive5-q0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 5,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.75,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive5-q1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 5,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive6-q0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 6,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive6-q0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 6,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 0.75,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "drive6-q1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 6,
+      "SignalChain1/FilterCutoffFrequency": 0.0129,
+      "SignalChain1/FilterQFactor": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 24,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  }
+]

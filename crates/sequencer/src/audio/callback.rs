@@ -169,7 +169,22 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
 
     // Process keyboard triggers
     let mut processed_keyboard_trigger = false;
-    while let Ok(kt) = data.keyboard_rx.try_recv() {
+    while let Ok(event) = data.keyboard_rx.try_recv() {
+        let mut kt = match event {
+            crate::sequencer::LiveInputEvent::Note(note) => note,
+            crate::sequencer::LiveInputEvent::Pressure { port, channel, note, value } => {
+                data.pressure.set(port, channel, note, value);
+                super::pressure::dispatch_held_pressure(data,
+                    super::pressure::PressureTarget::Source { port, channel, note });
+                continue;
+            }
+            crate::sequencer::LiveInputEvent::ResetControllers { port, channel } => {
+                data.pressure.reset_channel(port, channel);
+                super::pressure::dispatch_held_pressure(data,
+                    super::pressure::PressureTarget::Source { port, channel, note: None });
+                continue;
+            }
+        };
         processed_keyboard_trigger = true;
         if kt.track >= num_tracks {
             continue;
@@ -186,8 +201,45 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         );
 
         if kt.note_off {
+            data.pressure.release(kt.track, kt.source);
+        } else {
+            data.pressure.press(kt.track, kt.source);
+        }
+        let mono = is_custom && (!track_polyphonic || track_max_polyphony == 1)
+            && track_custom_run_mode(&data.state, kt.track) != CustomInstrumentRunMode::FreePatch
+            && live_key_release_cuts_voice(&data.state, kt.track);
+        let mut resumed_hold = false;
+        let mut held_transpose = None;
+        if mono {
+            if kt.note_off {
+                match data.mono_held[kt.track].release(&kt) {
+                    MonoRelease::Buried => continue,
+                    MonoRelease::Resume(previous) => {
+                        // Transfer ownership without sending a gate-off. The
+                        // allocator and GatePitch apply the chosen trigger policy.
+                        let active = take_active_keyboard_note(
+                            &mut data.active_keyboard_notes, kt.track, kt.transpose, kt.source,
+                        );
+                        if active.is_none() {
+                            // The live voice was stolen or reset; releasing a
+                            // stale key must not resurrect an unrelated note.
+                            data.mono_held[kt.track].clear();
+                            continue;
+                        }
+                        kt = previous.trigger;
+                        held_transpose = Some(previous.resolved_transpose);
+                        resumed_hold = true;
+                    }
+                    MonoRelease::Unheld | MonoRelease::Last => {}
+                }
+            }
+        } else {
+            data.mono_held[kt.track].clear();
+        }
+
+        if kt.note_off {
             if let Some(active_note) =
-                take_active_keyboard_note(&mut data.active_keyboard_notes, kt.track, kt.transpose)
+                take_active_keyboard_note(&mut data.active_keyboard_notes, kt.track, kt.transpose, kt.source)
             {
                 if live_key_release_cuts_voice(&data.state, kt.track) {
                     // A released key must stop an infinite retrig roll on this
@@ -202,7 +254,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 }
             }
         } else {
-            if transport_playing {
+            if transport_playing && !resumed_hold {
                 // Stamp the render-timeline beat this live note-on sounds at
                 // (bead eseq-2awi): live recording repositions the pressed
                 // note from this instead of its wall-clock press estimate.
@@ -212,12 +264,15 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             // Note-on: allocate voice and trigger
             enforce_mute_group_for_winning_track(data, kt.track, block_start_sample, 0);
             release_rack_choke_group_track_voices(data, kt.track, block_start_sample, 0);
-            let resolved_transpose = resolve_live_keyboard_transpose(
+            let resolved_transpose = held_transpose.unwrap_or_else(|| resolve_live_keyboard_transpose(
                 &data.state,
                 data.accumulator_states[kt.track],
                 kt.track,
                 kt.transpose,
-            );
+            ));
+            if mono && !resumed_hold {
+                data.mono_held[kt.track].press(kt, resolved_transpose);
+            }
             if instrument_type == InstrumentType::Rack {
                 let rack = data
                     .scheduler_snapshot
@@ -254,6 +309,10 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         track_max_polyphony,
                     )
                 };
+                let legato = !free_patch && allocation.continues_mono_note(
+                    kt.track, track_polyphonic, track_max_polyphony,
+                    data.state.pattern.track_params[kt.track].get_mono_trigger(),
+                );
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
                 let voice_lid = allocation.logical_id;
@@ -323,7 +382,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     }
                 }
                 data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint = fingerprint;
-                if allocation.stole_active_voice || !track_polyphonic || free_patch {
+                if !legato && (allocation.stole_active_voice || !track_polyphonic || free_patch) {
                     let off_seq = next_block_event_sequence(data);
                     unsafe {
                         send_custom_note_off(data.lg.0, voice_lid, 0, off_seq);
@@ -331,12 +390,13 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 }
                 let on_seq = next_block_event_sequence(data);
                 unsafe {
-                    send_custom_trigger(data.lg.0, voice_lid, 0, on_seq, pitch_hz, kt.velocity);
+                    send_custom_note_on(data.lg.0, voice_lid, 0, on_seq, pitch_hz, kt.velocity, legato);
                 }
                 store_active_keyboard_note(
                     &mut data.active_keyboard_notes,
                     kt.track,
                     kt.transpose,
+                    kt.source,
                     midi_note_from_transpose(resolved_transpose, base_note_offset),
                     kt.velocity,
                     &[ActiveKeyboardVoice {
@@ -485,6 +545,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     &mut data.active_keyboard_notes,
                     kt.track,
                     kt.transpose,
+                    kt.source,
                     midi_note_from_transpose(resolved_transpose, base_note_offset),
                     kt.velocity,
                     &[ActiveKeyboardVoice {
@@ -498,6 +559,8 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 data.state.mark_live_note_trigger(kt.track, note);
             }
             data.state.transport.trigger_flash[kt.track].store(255, Ordering::Relaxed);
+            super::pressure::dispatch_held_pressure(data,
+                super::pressure::PressureTarget::Track(kt.track));
         }
     }
     for track in 0..num_tracks {

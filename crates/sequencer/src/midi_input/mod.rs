@@ -19,6 +19,10 @@ use std::sync::{Arc, Mutex};
 
 use midir::{Ignore, MidiInput, MidiInputConnection};
 
+/// Bound controller storage before audio starts. MIDI exposes sixteen
+/// channels and 128 keys on each of these independently addressed ports.
+pub const MAX_INPUT_PORTS: usize = 64;
+
 /// One parsed note message from a hardware port.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MidiNoteEvent {
@@ -47,6 +51,12 @@ pub enum MidiMessage {
         /// -1.0..=1.0, 0.0 at centre.
         value: f32,
     },
+    PolyPressure {
+        channel: u8,
+        note: u8,
+        /// Key pressure, independent of note-on velocity, 0.0..=1.0.
+        value: f32,
+    },
     Aftertouch {
         channel: u8,
         /// Channel pressure, 0.0..=1.0.
@@ -61,7 +71,11 @@ pub fn parse_message(bytes: &[u8]) -> Option<MidiMessage> {
     let (&status, rest) = bytes.split_first()?;
     let channel = status & 0x0F;
     let data1 = *rest.first()?;
-    let data2 = rest.get(1).copied().unwrap_or(0);
+    let data2 = if status & 0xF0 == 0xD0 {
+        0
+    } else {
+        *rest.get(1)?
+    };
     if data1 > 127 || data2 > 127 {
         return None;
     }
@@ -86,6 +100,11 @@ pub fn parse_message(bytes: &[u8]) -> Option<MidiMessage> {
             channel,
             controller: data1,
             value: data2,
+        }),
+        0xA0 => Some(MidiMessage::PolyPressure {
+            channel,
+            note: data1,
+            value: f32::from(data2) / 127.0,
         }),
         0xD0 => Some(MidiMessage::Aftertouch {
             channel,
@@ -150,6 +169,10 @@ impl MidiInputPorts {
         let mut connections = Vec::new();
         let mut port_names = Vec::new();
         for port in ports.iter() {
+            if port_names.len() == MAX_INPUT_PORTS {
+                eprintln!("midi: maximum {MAX_INPUT_PORTS} input ports reached; remaining ports not opened");
+                break;
+            }
             // Index into `port_names`, decided by the ports that actually
             // opened: a port that fails to connect must not shift the
             // numbering of the ones after it.
@@ -223,6 +246,18 @@ pub type SharedMidiInput = Arc<Mutex<Option<MidiInputPorts>>>;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pressure_preserves_channel_key_and_rejects_truncated_messages() {
+        use super::{parse_message, MidiMessage};
+        assert_eq!(parse_message(&[0xA9, 72, 127]),
+            Some(MidiMessage::PolyPressure { channel: 9, note: 72, value: 1.0 }));
+        assert_eq!(parse_message(&[0xD9, 0]),
+            Some(MidiMessage::Aftertouch { channel: 9, value: 0.0 }));
+        for truncated in [&[0xA9, 72][..], &[0x90, 60], &[0x80, 60], &[0xB0, 1], &[0xE0, 0]] {
+            assert_eq!(parse_message(truncated), None);
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -302,8 +337,8 @@ mod tests {
         assert_eq!(parse_message(&[0xF8]), None, "clock is dropped");
         assert_eq!(
             parse_message(&[0xA0, 60, 10]),
-            None,
-            "poly aftertouch unsupported"
+            Some(MidiMessage::PolyPressure { channel: 0, note: 60, value: 10.0 / 127.0 }),
+            "poly pressure keeps the addressed key"
         );
     }
 }

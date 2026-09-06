@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "heat-formant-bank",
+  "params": ["input", "f1", "f2", "f3", "weight1", "weight2", "weight3", "steep"],
+  "outputs": ["out"],
+  "summary": "Heat's three parallel formant bands, with physical center frequencies, signed weights, and measured 6/12 resonance modes.",
+  "tags": ["filter", "synth", "heat"]
+}

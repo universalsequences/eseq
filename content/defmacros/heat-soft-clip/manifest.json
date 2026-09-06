@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "heat-soft-clip",
+  "params": ["input", "knee", "ceiling"],
+  "outputs": ["out"],
+  "summary": "Measured rational soft knee with a linear center and bounded symmetric tails.",
+  "tags": ["distortion", "synth", "heat"]
+}

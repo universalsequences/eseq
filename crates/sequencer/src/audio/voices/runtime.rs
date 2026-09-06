@@ -33,6 +33,21 @@ pub(in crate::audio) struct CustomVoiceAllocation {
     pub(in crate::audio) stole_active_voice: bool,
 }
 
+impl CustomVoiceAllocation {
+    pub(in crate::audio) fn continues_mono_note(
+        self,
+        route: usize,
+        polyphonic: bool,
+        max_polyphony: usize,
+        mode: crate::sequencer::MonoTrigger,
+    ) -> bool {
+        mode == crate::sequencer::MonoTrigger::Legato
+            && (!polyphonic || max_polyphony == 1)
+            && self.stole_active_voice
+            && self.previous_route == Some(route)
+    }
+}
+
 pub(in crate::audio) struct CustomEnginePool {
     pub(in crate::audio) voices: [CustomVoiceSlot; MAX_VOICES],
     pub(in crate::audio) num_voices: usize,
@@ -785,9 +800,11 @@ fn reconcile_audio_runtime_after_track_delete(
         }
     }
 
+    data.pressure.delete_track(deleted_track);
     for track in deleted_track..num_tracks {
         data.voice_pools.swap(track, track + 1);
         data.active_keyboard_notes.swap(track, track + 1);
+        data.mono_held.swap(track, track + 1);
         data.rack_choke_last_trigger.swap(track, track + 1);
         for slot in 0..MAX_RACK_SLOTS {
             let current = rack_slot_pool_index(track, slot).expect("validated rack pool");
@@ -797,6 +814,7 @@ fn reconcile_audio_runtime_after_track_delete(
     }
     data.voice_pools[num_tracks].reset();
     data.active_keyboard_notes[num_tracks] = [None; MAX_VOICES];
+    data.mono_held[num_tracks].clear();
     data.rack_choke_last_trigger[num_tracks] = u64::MAX;
     for track in 0..num_tracks {
         for note in data.active_keyboard_notes[track].iter_mut().flatten() {
@@ -874,6 +892,8 @@ pub(in crate::audio) fn reset_audio_runtime_for_track_topology(
         crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
     }
     data.active_keyboard_notes.fill([None; MAX_VOICES]);
+    data.pressure.reset();
+    for held in &mut data.mono_held { held.clear(); }
     data.pending_accum_reset = [true; MAX_TRACKS];
     data.scheduled_events.clear();
     clear_countdown_events(data);
@@ -1185,7 +1205,9 @@ pub(in crate::audio) fn release_track_active_voices(
         &mut data.block_events,
         track_idx,
     );
+    data.pressure.release_track(track_idx);
     data.active_keyboard_notes[track_idx] = [None; MAX_VOICES];
+    data.mono_held[track_idx].clear();
 
     let instrument_type = InstrumentType::from_runtime_flag(
         data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),

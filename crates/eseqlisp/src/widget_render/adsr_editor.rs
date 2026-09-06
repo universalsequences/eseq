@@ -26,6 +26,7 @@ struct AdsrInteractionState {
     hovered_handle: Option<i32>,
     active_handle: Option<i32>,
     last_drag_envelope: Option<AdsrEnvelope>,
+    last_drag_decay: Option<DecayEnvelope>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,6 +50,68 @@ impl AdsrEnvelope {
     fn into_value(self, active: Option<&str>) -> Value {
         env_map(self.attack, self.decay, self.sustain, self.release, active)
     }
+}
+
+/// Bipolar initial value decaying to zero over a finite time. This mode
+/// shares the ADSR editor's geometry, handles and gesture lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DecayEnvelope {
+    initial: f32,
+    time: f32,
+}
+
+fn decay_mode(node: &LayoutNode) -> bool {
+    matches!(node.props.get("mode"), Some(Value::Keyword(mode)) if mode == "decay")
+}
+
+fn initial_range(node: &LayoutNode) -> (f32, f32) {
+    let min = super::get_f32_prop(&node.props, "initial-min", -1.0).min(0.0);
+    let max = super::get_f32_prop(&node.props, "initial-max", 1.0).max(0.0).max(min + f32::EPSILON);
+    (min, max)
+}
+
+impl DecayEnvelope {
+    fn from_node(node: &LayoutNode) -> Self {
+        let (min, max) = initial_range(node);
+        Self { initial: super::get_f32_prop(&node.props, "initial", 0.0).clamp(min, max),
+            time: prop_ms(&node.props, "time", 500.0) }
+    }
+    fn into_value(self, active: Option<&str>) -> Value {
+        Value::Map(HashMap::from([
+            ("initial".into(), Rc::new(RefCell::new(Value::Number(self.initial as f64)))),
+            ("time".into(), Rc::new(RefCell::new(Value::Number(self.time as f64)))),
+            ("active".into(), Rc::new(RefCell::new(active.map(|name| Value::Keyword(name.into())).unwrap_or(Value::Bool(false))))),
+        ]))
+    }
+}
+
+fn decay_time_norm(node: &LayoutNode, time: f32) -> f32 {
+    let max = super::get_f32_prop(&node.props, "time-max", DECAY_MAX_DEFAULT).max(1.0);
+    (adsr_log_weight(time) / adsr_log_weight(max)).clamp(0.0, 1.0)
+}
+
+fn decay_handle(node: &LayoutNode, handle: i32) -> Option<(f32, f32)> {
+    let envelope = DecayEnvelope::from_node(node);
+    let (min, max) = initial_range(node);
+    let point = match handle {
+        1 => (ATTACK_ORIGIN, (envelope.initial - min) / (max - min)),
+        2 => (ATTACK_ORIGIN + (1.0 - ATTACK_ORIGIN) * decay_time_norm(node, envelope.time), -min / (max - min)),
+        _ => return None,
+    };
+    Some(plot_point(point.0, point.1, node.rect))
+}
+
+fn decay_for_drag(node: &LayoutNode, handle: i32, col: f32, row: f32) -> DecayEnvelope {
+    let mut envelope = DecayEnvelope::from_node(node);
+    let (x, y) = data_from_local(node.rect, col, row);
+    if handle == 1 {
+        let (min, max) = initial_range(node);
+        envelope.initial = min + y * (max - min);
+    } else if handle == 2 {
+        let max = super::get_f32_prop(&node.props, "time-max", DECAY_MAX_DEFAULT).max(1.0);
+        envelope.time = adsr_ms_from_norm((x - ATTACK_ORIGIN) / (1.0 - ATTACK_ORIGIN), max);
+    }
+    envelope
 }
 
 thread_local! {
@@ -85,6 +148,7 @@ fn visual_envelope(node: &LayoutNode) -> AdsrEnvelope {
 /// 3=sustain, 4=release), so harnesses can aim real pointer events at a
 /// handle. Mirrors the plot points `nearest_handle` hit-tests against.
 pub fn adsr_handle_center(node: &LayoutNode, handle_idx: i32) -> Option<(f32, f32)> {
+    if decay_mode(node) { return decay_handle(node, handle_idx); }
     let (x1, x2, x3, x4) = adsr_x_positions(&node.props);
     let sustain = prop_unit(&node.props, "sustain", 0.5);
     let (data_x, data_y) = match handle_idx {
@@ -194,14 +258,7 @@ fn data_from_local(rect: Rect, col: f32, row: f32) -> (f32, f32) {
 }
 
 fn nearest_handle(node: &LayoutNode, col: f32, row: f32) -> i32 {
-    let (x1, x2, x3, x4) = adsr_x_positions(&node.props);
-    let sustain = prop_unit(&node.props, "sustain", 0.5);
-    let points = [
-        (1, plot_point(x1, 1.0, node.rect)),
-        (2, plot_point(x2, sustain, node.rect)),
-        (3, plot_point(x3, sustain, node.rect)),
-        (4, plot_point(x4, 0.0, node.rect)),
-    ];
+    let points: Vec<_> = (1..=4).filter_map(|i| adsr_handle_center(node, i).map(|point| (i, point))).collect();
     let mut best_idx = -1;
     let mut best_dist = f32::MAX;
     for (idx, (px, py)) in points {
@@ -312,7 +369,7 @@ impl WidgetDefinition for AdsrEditorWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["attack", "decay", "sustain", "release"]
+        &["attack", "decay", "sustain", "release", "initial", "time"]
     }
 
     fn measure(
@@ -337,7 +394,11 @@ impl WidgetDefinition for AdsrEditorWidget {
         let decay = prop_ms(props, "decay", 400.0);
         let sustain = prop_unit(props, "sustain", 0.5);
         let release = prop_ms(props, "release", 300.0);
-        let label = format!("A{attack:.0} D{decay:.0} S{sustain:.2} R{release:.0}");
+        let label = if matches!(props.get("mode"), Some(Value::Keyword(mode)) if mode == "decay") {
+            format!("Initial {:.2} Time {:.0}ms", super::get_f32_prop(props, "initial", 0.0), prop_ms(props, "time", 500.0))
+        } else {
+            format!("A{attack:.0} D{decay:.0} S{sustain:.2} R{release:.0}")
+        };
         let row = rect.row.round() as u16;
         let col_start = rect.col.round() as u16;
         for (i, ch) in label.chars().enumerate() {
@@ -384,6 +445,40 @@ impl WidgetDefinition for AdsrEditorWidget {
             Some(Value::Number(n)) => *n as i32,
             _ => nearest_handle(node, local_col, local_row),
         };
+        if decay_mode(node) {
+            return match mouse_kind {
+                MouseEventKind::Moved => {
+                    update_interaction_state(node.widget_id, |state| state.hovered_handle = (handle_idx > 0).then_some(handle_idx));
+                    MouseEventOutcome::Consume
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    update_interaction_state(node.widget_id, |state| {
+                        state.active_handle = (handle_idx > 0).then_some(handle_idx);
+                        state.last_drag_decay = None;
+                    });
+                    MouseEventOutcome::Consume
+                }
+                MouseEventKind::Drag(MouseButton::Left) if handle_idx > 0 => {
+                    let envelope = decay_for_drag(node, handle_idx, local_col, local_row);
+                    update_interaction_state(node.widget_id, |state| {
+                        state.active_handle = Some(handle_idx);
+                        state.last_drag_decay = Some(envelope);
+                    });
+                    MouseEventOutcome::Dispatch(WidgetEvent::Custom(envelope.into_value(Some(if handle_idx == 1 { "initial" } else { "time" }))))
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    let state = interaction_state(node.widget_id);
+                    update_interaction_state(node.widget_id, |state| {
+                        state.active_handle = None;
+                        state.last_drag_decay = None;
+                    });
+                    if state.active_handle.is_some() {
+                        MouseEventOutcome::Dispatch(WidgetEvent::Custom(state.last_drag_decay.unwrap_or_else(|| DecayEnvelope::from_node(node)).into_value(None)))
+                    } else { MouseEventOutcome::Consume }
+                }
+                _ => MouseEventOutcome::Ignore,
+            };
+        }
         match mouse_kind {
             MouseEventKind::Moved => {
                 let hovered = (handle_idx > 0).then_some(handle_idx);
@@ -457,6 +552,8 @@ impl WidgetDefinition for AdsrEditorWidget {
         node: &LayoutNode,
         viewport: WidgetViewport,
     ) -> Vec<GpuPrimitive> {
+        let decay_display = interaction_state(node.widget_id).last_drag_decay.unwrap_or_else(|| DecayEnvelope::from_node(node));
+        let (initial_min, initial_max) = initial_range(node);
         let envelope = visual_envelope(node);
         let attack = envelope.attack;
         let decay = envelope.decay;
@@ -509,7 +606,9 @@ impl WidgetDefinition for AdsrEditorWidget {
                 uniform_a: [attack, decay, sustain, release],
                 uniform_b: [hold, visual_handle, super::ui_px_scale(), 0.0],
                 uniform_c: [attack_max, decay_max, release_max, 0.0],
-                uniform_d: [0.0; 4],
+                uniform_d: [if decay_mode(node) { 1.0 } else { 0.0 },
+                    (decay_display.initial - initial_min) / (initial_max - initial_min),
+                    decay_time_norm(node, decay_display.time), -initial_min / (initial_max - initial_min)],
                 color_a: curve_color.to_rgba(),
                 color_b: bg_color.to_rgba(),
                 color_c: grid_color.to_rgba(),
@@ -577,8 +676,42 @@ float adsr_bracketDistance(float2 p, float2 corner, float2 inward, float2 length
     return min(horizontal, vertical);
 }
 
+float4 adsr_decayDisplay(WidgetVaryings in) {
+    float2 uv = in.uv;
+    float2 perPixel = max(float2(fwidth(uv.x), fwidth(uv.y)), float2(1e-6));
+    float2 p = uv / perPixel;
+    float initial = in.uniform_d.y;
+    float zero = in.uniform_d.w;
+    float end = mix(0.03, 1.0, in.uniform_d.z);
+    float4 col = in.color_b;
+    float baseline = abs(p.y - adsr_toPlot(float2(0.0, zero)).y / perPixel.y);
+    col.rgb = mix(col.rgb, in.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * in.color_c.a * 0.4);
+    float distance = 10000.0;
+    float2 previous = adsr_toPlot(float2(0.03, initial)) / perPixel;
+    for (int i = 1; i <= 64; ++i) {
+        float t = float(i) / 64.0;
+        float2 current = adsr_toPlot(float2(mix(0.03, end, t), adsr_expFall(t, initial, zero))) / perPixel;
+        distance = min(distance, adsr_sdSegment(p, previous, current));
+        previous = current;
+    }
+    distance = min(distance, adsr_sdSegment(p, previous, adsr_toPlot(float2(1.0, zero)) / perPixel));
+    col.rgb = mix(col.rgb, in.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * in.color_a.a);
+    float scale = max(in.uniform_b.z, 0.001);
+    for (int i = 1; i <= 2; ++i) {
+        float2 h = adsr_toPlot(i == 1 ? float2(0.03, initial) : float2(end, zero)) / perPixel;
+        bool active = abs(float(i) - in.uniform_b.y) < 0.5;
+        float halfSize = (active ? 7.2 : 6.0) * scale;
+        float d = max(abs(p.x - h.x), abs(p.y - h.y));
+        float outer = 1.0 - smoothstep(halfSize, halfSize + 0.75, d);
+        float inner = 1.0 - smoothstep(halfSize - 1.5 * scale, halfSize - 1.5 * scale + 0.75, d);
+        col.rgb = mix(col.rgb, in.color_d.rgb, (active ? outer : max(outer - inner, 0.0)) * in.color_d.a);
+    }
+    return col;
+}
+
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
+    if (in.uniform_d.x > 0.5) return adsr_decayDisplay(in);
     float attack = in.uniform_a.x;
     float decay = in.uniform_a.y;
     float sustain = clamp(in.uniform_a.z, 0.0, 1.0);
@@ -722,6 +855,35 @@ mod tests {
             panic!("expected map");
         };
         map.get(key).expect("map entry").borrow().clone()
+    }
+
+    #[test]
+    fn bipolar_decay_handles_edit_independently_and_commit_on_release() {
+        let mut node = test_node(987654);
+        node.props.extend([
+            ("mode".into(), Value::Keyword("decay".into())),
+            ("initial".into(), Value::Number(-24.0)),
+            ("time".into(), Value::Number(500.0)),
+            ("initial-min".into(), Value::Number(-48.0)),
+            ("initial-max".into(), Value::Number(48.0)),
+            ("time-max".into(), Value::Number(15000.0)),
+        ]);
+        assert!(adsr_handle_center(&node, 3).is_none());
+        for (handle, x, y, key, expected) in [(1, 0.03, 0.75, "initial", 24.0), (2, 1.0, 0.5, "time", 15000.0)] {
+            let center = adsr_handle_center(&node, handle).unwrap();
+            let gesture = Value::Number(handle as f64);
+            ADSR_EDITOR_WIDGET.mouse_event(&node, MouseEventKind::Down(MouseButton::Left), center.0, center.1, None, Some(&gesture), KeyModifiers::empty(), 10.0, 20.0);
+            let target = plot_point(x, y, node.rect);
+            let MouseEventOutcome::Dispatch(WidgetEvent::Custom(drag)) = ADSR_EDITOR_WIDGET.mouse_event(&node, MouseEventKind::Drag(MouseButton::Left), target.0, target.1, None, Some(&gesture), KeyModifiers::empty(), 10.0, 20.0) else { panic!("decay drag"); };
+            let Value::Number(value) = map_value(&drag, key) else { panic!("numeric edit"); };
+            assert!((value - expected).abs() < 0.01);
+            assert_eq!(map_value(&drag, "active"), Value::Keyword(key.into()));
+            assert_eq!(map_value(&drag, if handle == 1 { "time" } else { "initial" }), Value::Number(if handle == 1 { 500.0 } else { -24.0 }));
+            let MouseEventOutcome::Dispatch(WidgetEvent::Custom(commit)) = ADSR_EDITOR_WIDGET.mouse_event(&node, MouseEventKind::Up(MouseButton::Left), target.0, target.1, None, Some(&gesture), KeyModifiers::empty(), 10.0, 20.0) else { panic!("decay commit"); };
+            assert_eq!(map_value(&commit, "active"), Value::Bool(false));
+            assert_eq!(map_value(&commit, key), map_value(&drag, key));
+            assert!(interaction_state(node.widget_id).last_drag_decay.is_none());
+        }
     }
 
     #[test]

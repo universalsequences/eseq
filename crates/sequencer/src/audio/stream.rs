@@ -20,7 +20,7 @@ pub fn build_output_stream(
     num_channels: usize,
     block_size: usize,
     master_recorder: Arc<MasterRecorder>,
-    keyboard_rx: std::sync::mpsc::Receiver<KeyboardTrigger>,
+    keyboard_rx: std::sync::mpsc::Receiver<crate::sequencer::LiveInputEvent>,
     bus_effect_runtime: Arc<Mutex<Arc<Vec<BusEffectRuntimeState>>>>,
 ) -> Result<Stream, String> {
     // The DEVICE half of the record latency only. CPAL does not expose
@@ -60,10 +60,14 @@ pub fn build_output_stream(
         let _ = std::thread::Builder::new()
             .name("keyboard-midi-fx-router".to_string())
             .spawn(move || {
-                while let Ok(trigger) = keyboard_rx.recv() {
+                while let Ok(event) = keyboard_rx.recv() {
+                    let crate::sequencer::LiveInputEvent::Note(trigger) = event else {
+                        let _ = audio_keyboard_tx.send(event);
+                        continue;
+                    };
                     if trigger.note_off {
                         let _ = live_keyboard_tx.send(trigger);
-                        let _ = audio_keyboard_tx.send(trigger);
+                        let _ = audio_keyboard_tx.send(event);
                         continue;
                     }
                     let use_midi_fx = trigger.track
@@ -74,7 +78,7 @@ pub fn build_output_stream(
                     if use_midi_fx {
                         let _ = live_keyboard_tx.send(trigger);
                     } else {
-                        let _ = audio_keyboard_tx.send(trigger);
+                        let _ = audio_keyboard_tx.send(event);
                     }
                 }
             });
@@ -103,6 +107,8 @@ pub fn build_output_stream(
         custom_engine_pools,
         scheduler_snapshot: initial_scheduler_snapshot,
         scheduler_snapshot_version: initial_scheduler_snapshot_version,
+        pressure: super::pressure::PressureState::new(),
+        mono_held: (0..MAX_TRACKS).map(|_| MonoHeldNotes::default()).collect(),
         active_keyboard_notes: (0..MAX_TRACKS).map(|_| [None; MAX_VOICES]).collect(),
         keyboard_rx: audio_keyboard_rx,
         master_recorder,

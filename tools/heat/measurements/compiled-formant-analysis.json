@@ -1,0 +1,137 @@
+{
+  "scope": "Check the compiled formant resonators, independently predicting F12 from F6.\n\nThe F6 identification supplies center frequencies at each cutoff setting and\none set of signed weights. F12 is predicted with fixed Q/gain changes. This\nvalidates the resonator architecture, not the unresolved vowel/control mapping.\n",
+  "sample_rate": 48000,
+  "cases": {
+    "type8-cut0": {
+      "reference_sha256": "730e5adcab7e04f5fef802c6ebf54b27b0dde262d8dcabc6f686043e5329f9df",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.000315157101474497,
+      "rms_phase_error_radians": 1.528082634148917e-05,
+      "passed": true
+    },
+    "type9-cut0": {
+      "reference_sha256": "484e25094af54ddd9dbfa4a04caea8fed5d249d39f765c29f2f3b9596961e17c",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.0003333126172906071,
+      "rms_phase_error_radians": 1.9255519503696156e-05,
+      "passed": true
+    },
+    "type8-cut0.125": {
+      "reference_sha256": "b7c62af02fb8adf1df810f765c0b7bd2245bdf1e8f2f0304d09d36eb7b0d6f68",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.00033242038816274055,
+      "rms_phase_error_radians": 1.473962323598177e-05,
+      "passed": true
+    },
+    "type9-cut0.125": {
+      "reference_sha256": "83b34f219728aa9c2873bcfc4da84020cf30b5e6cec626f6c70bfc4639e9f8b6",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.00033968359936614826,
+      "rms_phase_error_radians": 2.1636768609625467e-05,
+      "passed": true
+    },
+    "type8-cut0.25": {
+      "reference_sha256": "9601cdcfcd4260263c46de13a411b22d44ade5fe6888f6f4a7ebd12335521813",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.0003082677851980066,
+      "rms_phase_error_radians": 1.1663187298526606e-05,
+      "passed": true
+    },
+    "type9-cut0.25": {
+      "reference_sha256": "afeb5226986376d5c278f80015ce333b1eecd569971d31e003cddaa8bd50fc15",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.0003122378276785344,
+      "rms_phase_error_radians": 1.4708236683402373e-05,
+      "passed": true
+    },
+    "type8-cut0.375": {
+      "reference_sha256": "851e65138257b9b3cdf6a4adc73b754918533e7e710d8b43191fa721642914b7",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.00031477279050566006,
+      "rms_phase_error_radians": 1.234815978598589e-05,
+      "passed": true
+    },
+    "type9-cut0.375": {
+      "reference_sha256": "6580928f706fb201cc6309f22e8e466f8e298e30d46e959b261af6c0367c5ca1",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.00033939517657352407,
+      "rms_phase_error_radians": 2.0922197856813077e-05,
+      "passed": true
+    },
+    "type8-cut0.5": {
+      "reference_sha256": "5ef7d0d57a756d3ca0fca444f1b33bdae5b4e9e6532e4e67656efbaf4fab974c",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.0002957989511939721,
+      "rms_phase_error_radians": 1.4474423627725383e-05,
+      "passed": true
+    },
+    "type9-cut0.5": {
+      "reference_sha256": "b46fe4e737139c017cc16001522ca64fcc5c0cc31b34e3ab2649191d98a8bcf7",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.0003180380231562516,
+      "rms_phase_error_radians": 2.0120109980191533e-05,
+      "passed": true
+    },
+    "type8-cut0.625": {
+      "reference_sha256": "5020231843a3fe276428722aafefbb814702ed2788bf4366ecc3345e30dbbf46",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.000336189877587084,
+      "rms_phase_error_radians": 3.494458571544792e-05,
+      "passed": true
+    },
+    "type9-cut0.625": {
+      "reference_sha256": "604b433378407e46681d2ab9fa8872ed758689880b42eac2f28e07ef24c97f66",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.00046553860221412724,
+      "rms_phase_error_radians": 5.218208337766594e-05,
+      "passed": true
+    },
+    "type8-cut0.75": {
+      "reference_sha256": "5518c3a3db97fe0c298433496a809bdc9619b582e14a7ff84168f72accb5f905",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.0003219854571951848,
+      "rms_phase_error_radians": 2.784401788164177e-05,
+      "passed": true
+    },
+    "type9-cut0.75": {
+      "reference_sha256": "525891c6bb18bca783209e37fcf362275e2b5efaa8b2c6017c4e1aca314aeb12",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.00040600932316787693,
+      "rms_phase_error_radians": 3.988188359181589e-05,
+      "passed": true
+    },
+    "type8-cut0.875": {
+      "reference_sha256": "98affc386048aa059b9035e2a9672e6014a5950d3a4224f6ff986dfbce77c692",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.0003463187594283761,
+      "rms_phase_error_radians": 2.2572759781616328e-05,
+      "passed": true
+    },
+    "type9-cut0.875": {
+      "reference_sha256": "8e0b6aecc3ff0d0de0558f76d4b327227c6214bd8a1d7c95c36bb983ca23058e",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.00040215659621320736,
+      "rms_phase_error_radians": 3.334262798413209e-05,
+      "passed": true
+    },
+    "type8-cut1": {
+      "reference_sha256": "789ebb3e8506bd3b3bf80e8a309a9c6f76f708d134b81e11bc98941813c1306c",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.0003715534578551152,
+      "rms_phase_error_radians": 1.906761580455049e-05,
+      "passed": true
+    },
+    "type9-cut1": {
+      "reference_sha256": "3ca62518d0bcacf246423791235e0074a2f275a5f97c8e069b0e3da8a80a08ec",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.00041256694981026094,
+      "rms_phase_error_radians": 2.8185515798664582e-05,
+      "passed": true
+    }
+  },
+  "macro_sha256": "1cdd5ff9e97095f1231bf8c3d4b4251481f354328fcf47fdfabdd60d70c2b018",
+  "identification_sha256": "e620b31d6f521ced914931da5e870f57d6a4b1e482fcf77f4435c95640e99666",
+  "source_sha256": "be26a48a99fa5f8c2b7b286d629c882600bed295e9006f0a1c84ac83578b9131",
+  "compiler_sha256": "8ad665c55afb9d1dbf0dcb59bcbcc9afe8fb94399ff182d5e844f07625c967bb",
+  "passed": true
+}

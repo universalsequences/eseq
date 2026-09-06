@@ -1,0 +1,442 @@
+[
+  {
+    "name": "boundary-v0.007",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.007
+    }
+  },
+  {
+    "name": "boundary-v0.008",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.008
+    }
+  },
+  {
+    "name": "boundary-v0.015",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.015
+    }
+  },
+  {
+    "name": "boundary-v0.016",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.016
+    }
+  },
+  {
+    "name": "boundary-v0.023",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.023
+    }
+  },
+  {
+    "name": "boundary-v0.024",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.024
+    }
+  },
+  {
+    "name": "boundary-v0.495",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.495
+    }
+  },
+  {
+    "name": "boundary-v0.499",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.499
+    }
+  },
+  {
+    "name": "boundary-v0.501",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.501
+    }
+  },
+  {
+    "name": "boundary-v0.505",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.505
+    }
+  },
+  {
+    "name": "boundary-v0.695",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.695
+    }
+  },
+  {
+    "name": "boundary-v0.7",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.7
+    }
+  },
+  {
+    "name": "boundary-v0.702",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.702
+    }
+  },
+  {
+    "name": "boundary-v0.704",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.704
+    }
+  },
+  {
+    "name": "boundary-v0.706",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.706
+    }
+  },
+  {
+    "name": "boundary-v0.708",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.708
+    }
+  },
+  {
+    "name": "boundary-v0.71",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.71
+    }
+  },
+  {
+    "name": "boundary-v0.712",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.712
+    }
+  },
+  {
+    "name": "boundary-v0.714",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.714
+    }
+  },
+  {
+    "name": "boundary-v0.716",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.716
+    }
+  },
+  {
+    "name": "boundary-v0.718",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.718
+    }
+  },
+  {
+    "name": "boundary-v0.72",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.72
+    }
+  },
+  {
+    "name": "boundary-v0.985",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.985
+    }
+  },
+  {
+    "name": "boundary-v0.99",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.99
+    }
+  },
+  {
+    "name": "boundary-v0.995",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.995
+    }
+  },
+  {
+    "name": "boundary-v1.0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 1.0
+    }
+  },
+  {
+    "name": "type8-cut0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type8-cut0.125",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.125,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type8-cut0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.25,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type8-cut0.375",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.375,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type8-cut0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type8-cut0.625",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.625,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type8-cut0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.75,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type8-cut0.875",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 0.875,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type8-cut1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 8,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type9-cut0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 9,
+      "SignalChain1/FilterCutoffFrequency": 0,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type9-cut0.125",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 9,
+      "SignalChain1/FilterCutoffFrequency": 0.125,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type9-cut0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 9,
+      "SignalChain1/FilterCutoffFrequency": 0.25,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type9-cut0.375",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 9,
+      "SignalChain1/FilterCutoffFrequency": 0.375,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type9-cut0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 9,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type9-cut0.625",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 9,
+      "SignalChain1/FilterCutoffFrequency": 0.625,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type9-cut0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 9,
+      "SignalChain1/FilterCutoffFrequency": 0.75,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type9-cut0.875",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 9,
+      "SignalChain1/FilterCutoffFrequency": 0.875,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "type9-cut1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 9,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0
+    }
+  }
+]

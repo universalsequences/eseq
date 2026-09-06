@@ -277,7 +277,12 @@ fn namespace_local_helpers(
         Expression::QuoteSymbol(value) => Expression::QuoteSymbol(value.clone()),
         Expression::QuoteList(items) => Expression::QuoteList(items.clone()),
         Expression::Number(value) => Expression::Number(*value),
-        Expression::Quasiquote(inner) => Expression::Quasiquote(inner.clone()),
+        // Macro templates emit executable forms. Their local helper references
+        // need the same namespace as calls authored outside the template.
+        // Plain quoted data above deliberately remains untouched.
+        Expression::Quasiquote(inner) => Expression::Quasiquote(Box::new(
+            namespace_local_helpers(inner, helpers, prefix),
+        )),
         Expression::Unquote(inner) => {
             Expression::Unquote(Box::new(namespace_local_helpers(inner, helpers, prefix)))
         }
@@ -293,8 +298,15 @@ fn namespace_local_helpers(
     }
 }
 
+fn instrument_logical_name(instrument_name: &str) -> &str {
+    instrument_name.strip_prefix("factory:")
+        .or_else(|| instrument_name.strip_prefix("user:"))
+        .unwrap_or(instrument_name)
+        .trim_end_matches('/')
+}
+
 fn instrument_leaf_name(instrument_name: &str) -> Option<String> {
-    let normalized = instrument_name.trim_end_matches('/');
+    let normalized = instrument_logical_name(instrument_name);
     Path::new(normalized)
         .file_name()
         .and_then(|name| name.to_str())
@@ -312,7 +324,11 @@ fn instrument_ui_dispatch_aliases(
     aliases.insert(normalized.to_string());
 
     if let Some(leaf) = instrument_leaf_name(instrument_name) {
-        if leaf != normalized && leaf_name_counts.get(&leaf).copied() == Some(1) {
+        if leaf_name_counts.get(&leaf).copied() == Some(1) {
+            // Bare aliases are only safe when no other UI shares the leaf,
+            // including a same-named instrument in the other content tier.
+            aliases.insert(instrument_logical_name(instrument_name).to_string());
+            aliases.insert(format!("{}/", instrument_logical_name(instrument_name)));
             aliases.insert(leaf.clone());
             aliases.insert(format!("{leaf}/"));
         }
@@ -330,7 +346,7 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
 ) -> String {
     use eseqlisp::parser::{ASTParser, Expression, Parser};
 
-    fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, String, String)>) {
+    fn collect(dir: &Path, root: &Path, tier: &str, out: &mut Vec<(String, String, String)>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -348,19 +364,20 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
                             (path.strip_prefix(root), std::fs::read_to_string(&ui_path))
                         {
                             let inst_name =
-                                format!("{}/", rel.to_string_lossy().replace('\\', "/"));
+                                format!("{tier}:{}/", rel.to_string_lossy().replace('\\', "/"));
                             out.push((inst_name, ui_path.display().to_string(), src));
                         }
                     }
                 }
-                collect(&path, root, out);
+                collect(&path, root, tier, out);
             }
         }
     }
 
     let mut ui_sources = Vec::new();
-    for root in sequencer::app_paths::app_paths().instrument_dirs() {
-        collect(&root, &root, &mut ui_sources);
+    let paths = sequencer::app_paths::app_paths();
+    for (root, tier) in [(paths.instruments_dir(), "factory"), (paths.user_instruments_dir(), "user")] {
+        collect(&root, &root, tier, &mut ui_sources);
     }
 
     let mut functions = r#"
@@ -374,9 +391,14 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     if let Some((instrument_name, ui_path, src)) = overlay {
         if let Some(existing) = ui_sources
             .iter_mut()
-            .find(|(name, _, _)| name == &instrument_name)
+            .find(|(name, _, _)| {
+                name.trim_end_matches('/') == instrument_name.trim_end_matches('/')
+                    || (!instrument_name.contains(':')
+                        && instrument_logical_name(name) == instrument_logical_name(&instrument_name))
+            })
         {
-            *existing = (instrument_name, ui_path, src);
+            existing.1 = ui_path;
+            existing.2 = src;
         } else {
             ui_sources.push((instrument_name, ui_path, src));
         }
@@ -441,7 +463,8 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
             .map(|alias| format!("(= (get inst :name) {})", lisp_string_literal(alias)))
             .collect::<Vec<_>>();
         if let Some(leaf) = instrument_leaf_name(&instrument_name) {
-            if leaf != normalized_instrument_name && leaf_name_counts.get(&leaf).copied() == Some(1)
+            if !instrument_name.contains(':') && leaf != normalized_instrument_name
+                && leaf_name_counts.get(&leaf).copied() == Some(1)
             {
                 name_clauses.push(format!(
                     "(custom-ui-string-ends-with? (get inst :name) {})",
@@ -828,6 +851,42 @@ mod tests {
     }
 
     #[test]
+    fn instrument_ui_namespaces_nested_sdf_macros_with_reactive_uniforms() {
+        use eseqlisp::parser::{ASTParser, Parser};
+        use eseqlisp::Runtime;
+        use eseqlisp::vm::Value;
+        use super::{local_helper_names, expr_to_lisp, namespace_local_helpers};
+        let authored = r#"
+            (defmacro contour (v) `(* ,v 0.8))
+            (defmacro shape (v) `(sdf/circle (contour ,v)))
+            (defwidget plot :width 8 :height 3
+              :state (level) :bindable (level)
+              :shader (sdf/layer (sdf/stroke (shape level) 0.04 :dim)))
+        "#;
+        let exprs = ASTParser::new(Parser::new(authored.to_string()).parse().unwrap()).parse().unwrap();
+        let helpers = local_helper_names(&exprs);
+        let source = exprs.iter().map(|expr| {
+            expr_to_lisp(&namespace_local_helpers(expr, &helpers, "test_heat_"))
+        }).collect::<Vec<_>>().join("\n");
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("HEAT", vec![("level", Value::Number(0.25))], true);
+        let result = runtime.eval_str(&source).unwrap();
+        assert!(!matches!(result, Some(Value::String(ref error)) if error.contains("error")), "{result:?}");
+        runtime.eval_str(r#"(effect (test_heat_plot :level (bind "HEAT" "level")))"#).unwrap();
+        let layout = runtime.current_layout.as_ref().expect("SDF plot");
+        assert_eq!(layout.widget_type, "test_heat_plot");
+        let Some(Value::ReactiveRef { slot, .. }) = layout.props.get("level") else {
+            panic!("the authored parameter must remain a reactive binding: {:?}", layout.props);
+        };
+        let slot = slot.clone();
+        assert_eq!(f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed)), 0.25);
+        runtime.set_reactive("HEAT", "level", Value::Number(0.8));
+        runtime.run_reactive_cycle();
+        assert_eq!(f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed)), 0.8);
+        assert_eq!(runtime.current_layout.as_ref().unwrap().widget_type, "test_heat_plot");
+    }
+
+    #[test]
     fn instrument_ui_injection_namespaces_local_helpers() {
         let source = build_custom_instrument_ui_source_with_overlay(Some((
             "agent-draft-1/".to_string(),
@@ -905,6 +964,24 @@ mod tests {
         assert!(aliases.contains(&"folder-a/shared-name".to_string()));
         assert!(!aliases.contains(&"shared-name/".to_string()));
         assert!(!aliases.contains(&"shared-name".to_string()));
+    }
+
+    #[test]
+    fn instrument_ui_dispatch_preserves_content_tier_for_root_level_names() {
+        let mut counts = BTreeMap::new();
+        counts.insert("Heat".to_string(), 1);
+        let aliases = instrument_ui_dispatch_aliases("user:Heat/", &counts);
+        assert!(aliases.contains(&"user:Heat".to_string()));
+        assert!(aliases.contains(&"user:Heat/".to_string()));
+        assert!(aliases.contains(&"Heat".to_string()));
+        assert!(!aliases.contains(&"factory:Heat".to_string()));
+
+        counts.insert("Heat".to_string(), 2);
+        for tier in ["factory", "user"] {
+            let name = format!("{tier}:Heat");
+            let aliases = instrument_ui_dispatch_aliases(&format!("{name}/"), &counts);
+            assert_eq!(aliases, vec![name.clone(), format!("{name}/")]);
+        }
     }
 
     #[test]

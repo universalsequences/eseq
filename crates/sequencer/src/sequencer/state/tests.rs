@@ -262,6 +262,7 @@
             accum_limit: (1 + id) as f32,
             accum_mode: id as u32,
             fts_scale: id + 1,
+            mono_trigger: crate::sequencer::MonoTrigger::Retrig,
             mute_group: (id % 9) as u8,
             global_transpose: id % 2 == 0,
         }

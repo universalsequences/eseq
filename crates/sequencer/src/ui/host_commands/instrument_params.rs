@@ -166,12 +166,13 @@ pub(super) fn handle(
                             transpose,
                         );
                         if keyboard_tx
-                            .send(KeyboardTrigger {
+                            .send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+                source: None,
                                 track,
                                 transpose,
                                 velocity: 1.0,
                                 note_off: false,
-                            })
+                            }))
                             .is_ok()
                         {
                             ctx.sessions.pending_key_lock_auditions.push(PendingKeyLockAudition {

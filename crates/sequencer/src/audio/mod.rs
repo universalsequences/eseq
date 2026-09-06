@@ -43,6 +43,7 @@ mod events;
 mod fire;
 mod graph_dispatch;
 mod params;
+mod pressure;
 #[cfg(target_os = "linux")]
 mod pipewire;
 mod rack;

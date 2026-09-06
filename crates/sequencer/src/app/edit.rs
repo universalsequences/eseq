@@ -4872,6 +4872,7 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
         accum_limit,
         accum_mode,
         fts_scale,
+        mono_trigger,
         mute_group,
         global_transpose,
     } = snapshot;
@@ -4917,6 +4918,7 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
     bytes.f32(*accum_limit);
     bytes.u32(*accum_mode);
     bytes.usize(*fts_scale);
+    bytes.u32(*mono_trigger as u32);
     bytes.u32(*mute_group as u32);
     bytes.bool(*global_transpose);
     bytes.0
@@ -5397,6 +5399,7 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
         | AppCommand::SetTrackTimebase { .. }
         | AppCommand::NextTrackTimebase { .. }
         | AppCommand::PrevTrackTimebase { .. }
+        | AppCommand::SetTrackMonoTrigger { .. }
         | AppCommand::SetTrackFtsScale { .. }
         | AppCommand::SetTrackAccumIdx { .. }
         | AppCommand::SetTrackAccumLimit { .. }
@@ -5487,6 +5490,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::SetTrackTimebase { track, .. }
         | AppCommand::NextTrackTimebase { track }
         | AppCommand::PrevTrackTimebase { track }
+        | AppCommand::SetTrackMonoTrigger { track, .. }
         | AppCommand::SetTrackFtsScale { track, .. }
         | AppCommand::SetTrackAccumIdx { track, .. }
         | AppCommand::SetTrackAccumLimit { track, .. }
@@ -7470,6 +7474,7 @@ fn track_params_command_track(cmd: &AppCommand) -> Option<usize> {
         | AppCommand::SetTrackTimebase { track, .. }
         | AppCommand::NextTrackTimebase { track }
         | AppCommand::PrevTrackTimebase { track }
+        | AppCommand::SetTrackMonoTrigger { track, .. }
         | AppCommand::SetTrackFtsScale { track, .. }
         | AppCommand::SetTrackAccumIdx { track, .. }
         | AppCommand::SetTrackAccumLimit { track, .. }
@@ -7512,6 +7517,7 @@ fn track_params_label(cmd: &AppCommand) -> &'static str {
         AppCommand::SetTrackTimebase { .. }
         | AppCommand::NextTrackTimebase { .. }
         | AppCommand::PrevTrackTimebase { .. } => "Set track timebase",
+        AppCommand::SetTrackMonoTrigger { .. } => "Set track mono trigger",
         AppCommand::SetTrackFtsScale { .. } => "Set track FTS scale",
         AppCommand::SetTrackAccumIdx { .. } => "Set track accumulator",
         AppCommand::SetTrackAccumLimit { .. } | AppCommand::AdjustTrackAccumLimit { .. } => {

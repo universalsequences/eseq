@@ -74,6 +74,7 @@
         ui-lego-badge-dark
         ui-lego-knob
         ui-lego-knob-s
+        ui-lego-knob-styled-s
         ui-lego-knob-track-s
         ui-lego-knob-full-s
         ui-lego-log-knob-full-s
@@ -409,6 +410,11 @@
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-knob-taper-track-sized-s (section name title width height knob-size accent decimals taper track)
+  (ui-lego-knob-styled-s section name title width height knob-size accent decimals taper track 10.8 9.6 :center))
+
+;; Compact device panels can choose readable type independently of knob size
+;; without reimplementing the parameter/modulation/p-lock contract.
+(def ui-lego-knob-styled-s (section name title width height knob-size accent decimals taper track font-size label-font-size value-align)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
     (if p
       (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
@@ -434,7 +440,7 @@
             :mod-range-8-slot (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-slot-prop p 8) :mod-range-8-depth (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-depth-prop p 8)
             :mod-range-9-slot (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-depth-prop p 9)
             :selected-mod-slot (eseq.effects.custom-ui-runtime/custom-ui-selected-mod-slot-prop p)
-            :font-size 10.8 :label-font-size 9.6
+            :font-size font-size :label-font-size label-font-size
             :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :label-color :dim
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-default (eseq.effects.custom-ui-runtime/custom-ui-param-plock-default p)
@@ -443,7 +449,7 @@
             :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
             	    :track-color track
             	    :width width :height height :knob-size knob-size
-            :value-align :center
+            :value-align value-align
             	    :arc-color accent
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))

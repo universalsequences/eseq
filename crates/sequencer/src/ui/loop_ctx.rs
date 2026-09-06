@@ -256,7 +256,7 @@ pub(crate) struct SharedHandles {
     pub(crate) step_print: Arc<Mutex<StepPrintState>>,
     pub(crate) keyboard_octave: Arc<std::sync::atomic::AtomicI32>,
     pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,
-    pub(crate) keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
+    pub(crate) keyboard_tx: std::sync::mpsc::Sender<sequencer::sequencer::LiveInputEvent>,
     pub(crate) accumulator_names: Arc<Mutex<Vec<String>>>,
     pub(crate) piano_roll_clipboard: PianoRollClipboard,
     /// Arrangement region clipboard (region spec 5.1). Lives beside the
