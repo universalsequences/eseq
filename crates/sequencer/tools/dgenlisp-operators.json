@@ -5142,6 +5142,72 @@
       "summary": "Ramp oscillator from 0 to 1."
     },
     {
+      "aliases": [],
+      "arity": {
+        "maximum": 4,
+        "minimum": 3
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "stateful",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated"
+      },
+      "implementation": {
+        "function": "evalPoke",
+        "source_file": "LispEvaluator.swift"
+      },
+      "input_count": {
+        "maximum": 4,
+        "minimum": 3
+      },
+      "inputs": [
+        {
+          "kind": "tensor",
+          "name": "tensor",
+          "required": true,
+          "summary": "Stored mutable buffer of shape [samples] or [samples channels]."
+        },
+        {
+          "kind": "signal|float",
+          "name": "index",
+          "required": true,
+          "summary": "Sample index, wrapped and floored before writing."
+        },
+        {
+          "kind": "signal|float",
+          "name": "channel-or-value",
+          "required": true,
+          "summary": "Written value in the three-argument form; zero-based channel in the four-argument form."
+        },
+        {
+          "kind": "signal|float",
+          "name": "value",
+          "required": false,
+          "summary": "Written value when an explicit channel is supplied."
+        }
+      ],
+      "name": "poke",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "signal",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(poke tensor index value)",
+        "(poke tensor index channel value)"
+      ],
+      "summary": "Write one scalar sample to a stored tensor; return the written value. Index wraps and floors; channel clamps and floors. Use seq to order reads and writes."
+    },
+    {
       "aliases": [
         "polarfft"
       ],
@@ -6026,6 +6092,60 @@
         "(selector mode option1 option2 ...)"
       ],
       "summary": "1-based selector over options; mode <= 0 yields 0."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": null,
+        "minimum": 2
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "stateful",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated"
+      },
+      "implementation": {
+        "function": "signal",
+        "source_file": "LispEvaluator.swift"
+      },
+      "input_count": {
+        "maximum": null,
+        "minimum": 2
+      },
+      "inputs": [
+        {
+          "kind": "signal|float",
+          "name": "first",
+          "required": true,
+          "summary": "First scalar expression, including any memory effects."
+        },
+        {
+          "kind": "signal|float",
+          "name": "next",
+          "required": true,
+          "summary": "Subsequent ordered scalar expressions; the last value is returned.",
+          "variadic": true
+        }
+      ],
+      "name": "seq",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "signal",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(seq first second ...)"
+      ],
+      "summary": "Order memory effects left to right within each sample and return the last scalar value. Shared bindings remain shared snapshots."
     },
     {
       "aliases": [],

@@ -340,6 +340,37 @@ binding for the whole-row `sampleRow` read — it is a Swift/training-path API.
 **Naming rule:** nouns are tensor-driven (`tensor`, `tensor-param`, `@shape`);
 verbs follow Max/MSP gen (`peek`, `poke`, `sample`).
 
+### Mutable Sample Buffers
+
+```lisp
+(poke buffer index value)          ; channel 0
+(poke buffer index channel value)  ; explicit zero-based channel
+(seq first second ...)             ; order memory effects, return last scalar
+```
+
+`poke` writes one sample and returns the written value. The destination must
+be stored tensor memory of shape `[samples]` or `[samples channels]`. The index
+wraps and floors; the channel clamps and floors. Reads with `peek`/`sample`
+interpolate normally. Buffer memory persists across host audio blocks.
+
+```lisp
+(def recording (tensor @shape [48000]))
+(make-history cursor)
+(def position (read-history cursor))
+(write-history cursor (wrap (+ position 1) 0 48000))
+(out (seq (poke recording position (in 1))
+          (peek recording (- position 2400))) 1)
+```
+
+Use `seq` for read/write order, not textual `def` order. Bindings are shared
+graph values: reusing a previously bound `peek` returns its snapshot, not a
+second read. Use a fresh `peek` expression to observe a subsequent write.
+`seq` accepts at least two scalars. Tensor views/computed destinations and
+whole-tensor math on mutable buffers are rejected rather than silently using
+stale storage. This API is for forward DSP, not differentiable buffer updates.
+
+Requires DGenLisp v0.1.8 or newer; target pins may differ.
+
 ### Tensor Shape Operations
 
 ```lisp

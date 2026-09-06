@@ -127,6 +127,8 @@ CURATED_OPERATORS = {
     "matmul": {"category": "tensor_op", "summary": "Matrix multiplication.", "signatures": ["(matmul a b)"], "arity": {"minimum": 2, "maximum": 2}},
     "conv1d": {"category": "tensor_op", "summary": "1D convolution.", "signatures": ["(conv1d input kernel)"], "arity": {"minimum": 2, "maximum": 2}},
     "peek": {"category": "tensor_op", "summary": "Read a scalar from a tensor.", "signatures": ["(peek tensor index)", "(peek tensor index channel)"], "arity": {"minimum": 2, "maximum": 3}},
+    "poke": {"category": "stateful", "summary": "Write one scalar sample to a stored tensor; return the written value. Index wraps and floors; channel clamps and floors. Use seq to order reads and writes.", "signatures": ["(poke tensor index value)", "(poke tensor index channel value)"], "arity": {"minimum": 3, "maximum": 4}},
+    "seq": {"category": "stateful", "summary": "Order memory effects left to right within each sample and return the last scalar value. Shared bindings remain shared snapshots.", "signatures": ["(seq first second ...)"], "arity": {"minimum": 2, "maximum": None}},
     "peek-row": {"category": "tensor_op", "summary": "Read a tensor row as a signalTensor.", "signatures": ["(peek-row tensor rowIndex)"], "arity": {"minimum": 2, "maximum": 2}},
     "gather": {
         "category": "tensor_op",
@@ -328,6 +330,16 @@ HIDDEN_OPERATORS = {"wavetable", "wavetable-param"}
 
 
 CURATED_OPERATOR_INPUTS = {
+    "poke": [
+        {"name": "tensor", "kind": "tensor", "required": True, "summary": "Stored mutable buffer of shape [samples] or [samples channels]."},
+        {"name": "index", "kind": "signal|float", "required": True, "summary": "Sample index, wrapped and floored before writing."},
+        {"name": "channel-or-value", "kind": "signal|float", "required": True, "summary": "Written value in the three-argument form; zero-based channel in the four-argument form."},
+        {"name": "value", "kind": "signal|float", "required": False, "summary": "Written value when an explicit channel is supplied."},
+    ],
+    "seq": [
+        {"name": "first", "kind": "signal|float", "required": True, "summary": "First scalar expression, including any memory effects."},
+        {"name": "next", "kind": "signal|float", "required": True, "variadic": True, "summary": "Subsequent ordered scalar expressions; the last value is returned."},
+    ],
     "adsr": [
         {"name": "gate_sig", "kind": "signal|float", "summary": "Gate signal; nonzero while the note is held.", "required": True},
         {"name": "trigger_sig", "kind": "signal|float", "summary": "Trigger signal for envelope restart.", "required": True},
@@ -862,7 +874,7 @@ def result_kind_for_operator(name: str, category: str) -> str:
     if name == "delay":
         # Tensor in -> tensor out; scalar in -> signal out.
         return "same-as-inputs"
-    if name in {"param", "in", "phasor", "stateful-phasor", "sample", "click", "ramp2trig", "accum", "latch", "mix", "biquad", "compressor", "peek", "to-signal", "overlap-add", "scale", "triangle", "wrap", "clip", "selector", "partitioned-convolve", "__modulated-param"}:
+    if name in {"param", "in", "phasor", "stateful-phasor", "sample", "click", "ramp2trig", "accum", "latch", "mix", "biquad", "compressor", "peek", "poke", "seq", "to-signal", "overlap-add", "scale", "triangle", "wrap", "clip", "selector", "partitioned-convolve", "__modulated-param"}:
         return "signal"
     if name in {"tensor", "zeros", "ones", "full", "randn", "tensor-param", "audio-tensor", "ir", "matmul", "conv1d", "conv2d", "reshape", "transpose", "shrink", "pad", "expand", "repeat", "windows", "hann", "window", "softmax"}:
         return "tensor"
