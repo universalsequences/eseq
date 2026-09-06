@@ -317,18 +317,26 @@ fn instrument_leaf_name(instrument_name: &str) -> Option<String> {
 fn instrument_ui_dispatch_aliases(
     instrument_name: &str,
     leaf_name_counts: &BTreeMap<String, usize>,
+    logical_path_counts: &BTreeMap<String, usize>,
 ) -> Vec<String> {
     let normalized = instrument_name.trim_end_matches('/');
     let mut aliases = BTreeSet::new();
     aliases.insert(instrument_name.to_string());
     aliases.insert(normalized.to_string());
 
+    // The untiered full path is safe unless the same path exists in the other
+    // content tier. A shared leaf in a different folder does not make it
+    // ambiguous.
+    let logical = instrument_logical_name(instrument_name);
+    if logical_path_counts.get(logical).copied() == Some(1) {
+        aliases.insert(logical.to_string());
+        aliases.insert(format!("{logical}/"));
+    }
+
     if let Some(leaf) = instrument_leaf_name(instrument_name) {
         if leaf_name_counts.get(&leaf).copied() == Some(1) {
-            // Bare aliases are only safe when no other UI shares the leaf,
+            // Bare leaf aliases are only safe when no other UI shares the leaf,
             // including a same-named instrument in the other content tier.
-            aliases.insert(instrument_logical_name(instrument_name).to_string());
-            aliases.insert(format!("{}/", instrument_logical_name(instrument_name)));
             aliases.insert(leaf.clone());
             aliases.insert(format!("{leaf}/"));
         }
@@ -405,10 +413,12 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     }
 
     let mut leaf_name_counts = BTreeMap::new();
+    let mut logical_path_counts = BTreeMap::new();
     for (name, _, _) in &ui_sources {
         if let Some(leaf) = instrument_leaf_name(name) {
             *leaf_name_counts.entry(leaf).or_insert(0) += 1;
         }
+        *logical_path_counts.entry(instrument_logical_name(name).to_string()).or_insert(0) += 1;
     }
 
     for (instrument_name, ui_path, src) in ui_sources {
@@ -457,7 +467,8 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
             "\n(def {fn_name} (inst) (do (set! synth-ui-current-inst inst) (set! synth-ui-current-name {}) (set! custom-ui-current-kind \"instrument\") (set! custom-ui-selected-section (eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope)) {body}))\n",
             lisp_string_literal(normalized_instrument_name)
         ));
-        let aliases = instrument_ui_dispatch_aliases(&instrument_name, &leaf_name_counts);
+        let aliases =
+            instrument_ui_dispatch_aliases(&instrument_name, &leaf_name_counts, &logical_path_counts);
         let mut name_clauses = aliases
             .iter()
             .map(|alias| format!("(= (get inst :name) {})", lisp_string_literal(alias)))
@@ -957,12 +968,21 @@ mod tests {
     fn instrument_ui_dispatch_does_not_alias_ambiguous_leaf_name() {
         let mut counts = BTreeMap::new();
         counts.insert("shared-name".to_string(), 2);
+        let mut paths = BTreeMap::new();
+        paths.insert("folder-a/shared-name".to_string(), 1);
+        paths.insert("folder-b/shared-name".to_string(), 1);
 
-        let aliases = instrument_ui_dispatch_aliases("folder-a/shared-name/", &counts);
+        let aliases = instrument_ui_dispatch_aliases("folder-a/shared-name/", &counts, &paths);
 
         assert!(aliases.contains(&"folder-a/shared-name/".to_string()));
         assert!(aliases.contains(&"folder-a/shared-name".to_string()));
         assert!(!aliases.contains(&"shared-name/".to_string()));
+        assert!(!aliases.contains(&"shared-name".to_string()));
+
+        // A tiered id keeps its untiered full path when only the leaf collides.
+        let aliases = instrument_ui_dispatch_aliases("factory:folder-a/shared-name/", &counts, &paths);
+        assert!(aliases.contains(&"folder-a/shared-name/".to_string()));
+        assert!(aliases.contains(&"folder-a/shared-name".to_string()));
         assert!(!aliases.contains(&"shared-name".to_string()));
     }
 
@@ -970,16 +990,19 @@ mod tests {
     fn instrument_ui_dispatch_preserves_content_tier_for_root_level_names() {
         let mut counts = BTreeMap::new();
         counts.insert("Heat".to_string(), 1);
-        let aliases = instrument_ui_dispatch_aliases("user:Heat/", &counts);
+        let mut paths = BTreeMap::new();
+        paths.insert("Heat".to_string(), 1);
+        let aliases = instrument_ui_dispatch_aliases("user:Heat/", &counts, &paths);
         assert!(aliases.contains(&"user:Heat".to_string()));
         assert!(aliases.contains(&"user:Heat/".to_string()));
         assert!(aliases.contains(&"Heat".to_string()));
         assert!(!aliases.contains(&"factory:Heat".to_string()));
 
         counts.insert("Heat".to_string(), 2);
+        paths.insert("Heat".to_string(), 2);
         for tier in ["factory", "user"] {
             let name = format!("{tier}:Heat");
-            let aliases = instrument_ui_dispatch_aliases(&format!("{name}/"), &counts);
+            let aliases = instrument_ui_dispatch_aliases(&format!("{name}/"), &counts, &paths);
             assert_eq!(aliases, vec![name.clone(), format!("{name}/")]);
         }
     }
