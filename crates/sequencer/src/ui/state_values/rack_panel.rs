@@ -828,6 +828,11 @@ pub(super) fn build_rack_slot_effect_value(
                 RackModDisplay::None,
                 param.ui_metadata.as_ref(),
             );
+            if let sequencer::effects::ParamKind::Continuous { unit: Some(unit) } = &param.kind {
+                if let Value::Map(map) = &mut *value.borrow_mut() {
+                    map.insert("unit".to_string(), value_cell(Value::String(unit.clone())));
+                }
+            }
             if matches!(param.kind, sequencer::effects::ParamKind::Boolean) {
                 if let Value::Map(map) = &mut *value.borrow_mut() {
                     map.insert("boolean".to_string(), value_cell(Value::Bool(true)));

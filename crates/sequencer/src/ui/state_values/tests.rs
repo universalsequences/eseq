@@ -47382,6 +47382,176 @@ mod drift_waveform_tests;
     }
 
     #[test]
+    fn slowdown_controls_are_modulatable_and_have_visible_geometry() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_insert("Slowdown").unwrap();
+        let state = Arc::new(SequencerState::new(
+            1, vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let effects = build_effects_value(&state, 0, &[vec![desc.clone()]], &selected);
+        let Value::List(slots) = &effects else { panic!("effect list"); };
+        let slot = slots[0].borrow();
+        let Value::Map(slot) = &*slot else { panic!("effect map"); };
+        let params = slot.get("params").unwrap().borrow();
+        let Value::List(params) = &*params else { panic!("parameter list"); };
+        for param in params {
+            let param = param.borrow();
+            let Value::Map(param) = &*param else { panic!("parameter map"); };
+            let name = param.get("name").unwrap().borrow();
+            let Value::String(name) = &*name else { panic!("parameter name"); };
+            let expected = !matches!(name.as_str(), "enabled" | "sync");
+            let modulatable = param.get("modulatable")
+                .is_some_and(|v| matches!(&*v.borrow(), Value::Bool(true)));
+            assert_eq!(modulatable, expected, "{name}");
+        }
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut projection_app = test_app_for_track_visual_state(Arc::clone(&state));
+        projection_app.graph.effect_descriptors = vec![vec![desc.clone()]];
+        for idx in 0..desc.params.len() {
+            sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
+        }
+        editor.runtime_mut().set_reactive("SEQ", "effects", effects.clone());
+        editor.runtime_mut().eval_str(
+            r#"(set-layout (list :buf "*fx*" :hide-status true))"#,
+        ).expect("isolate effect panel");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let id = editor.buffers.iter().find(|b| b.name == "*fx*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(180, 24);
+        let layout = editor.widget_layout().expect("Slowdown layout");
+        assert_finite_layout_tree(&layout);
+        let panel = find_layout_node_by_debug_name(&layout, "audio-fx-panel-root-0-Slowdown")
+            .expect("Slowdown panel");
+        assert_finite_nonzero_rect(panel, "Slowdown panel");
+        assert_layout_inside(panel, &layout, "visible Slowdown panel");
+        for idx in 1..8 {
+            let name = if idx == 2 { "slowdown-clock".to_string() } else { format!("slowdown-param-{idx}") };
+            let row = find_layout_node_by_debug_name(panel, &name).expect("parameter row");
+            assert_finite_nonzero_rect(row, &desc.params[idx].name);
+            assert_layout_inside(row, panel, &desc.params[idx].name);
+            let widget = if idx == 2 { "dropdown" } else { "knob-number" };
+            let control = find_layout_node_by_widget_type(row, widget).expect("parameter control");
+            assert_finite_nonzero_rect(control, &desc.params[idx].name);
+            assert_layout_inside(control, panel, &desc.params[idx].name);
+        }
+        assert_eq!(count_widget_type(panel, "knob-number"), 6);
+        for (idx, unit, scale) in [(1, "×", 1.0), (3, "ms", 1.0), (4, "beats", 1.0),
+                                   (5, "ms", 1.0), (6, "kHz", 0.001), (7, "%", 100.0)] {
+            let row = find_layout_node_by_debug_name(panel, &format!("slowdown-param-{idx}")).unwrap();
+            let knob = find_layout_node_by_widget_type(row, "knob-number").unwrap();
+            assert_eq!(knob.props.get("unit"), Some(&Value::String(unit.to_string())));
+            assert_eq!(knob.props.get("value-scale"), Some(&Value::Number(scale)));
+        }
+        let clock = find_layout_node_by_debug_name(panel, "slowdown-clock").unwrap();
+        let clock_callback = clock.props["on-change"].clone();
+        let division = find_layout_node_by_debug_name(panel, "slowdown-division").unwrap();
+        let division_callback = division.props["on-change"].clone();
+        editor.drain_host_commands();
+        editor.runtime_mut().invoke(clock_callback, vec![Value::String("Free time".to_string())]).unwrap();
+        assert_slowdown_param_command(editor.drain_host_commands(), "set-effect-param", 2, "value", Value::Number(0.0));
+        editor.runtime_mut().invoke(division_callback, vec![Value::String("1/8".to_string())]).unwrap();
+        assert_slowdown_param_command(editor.drain_host_commands(), "set-effect-param", 4, "value", Value::Number(0.5));
+
+        editor.runtime_mut().eval_str(r#"
+            (set! eseq.effects.state/effect-mods-chain "audio")
+            (set! eseq.effects.state/effect-mods-track 0)
+            (set! eseq.effects.state/effect-mods-slot 0)
+            (set! eseq.effects.state/effect-mods-rack-slot -1)
+            (set! eseq.effects.state/effect-mods-bus -1)
+            (set! eseq.effects.state/effect-mods-open true)
+        "#).unwrap();
+        for slot in 1..=4 {
+            editor.runtime_mut().eval_str(&format!("(set! eseq.effects.state/effect-selected-mod-slot {slot})")).unwrap();
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().unwrap();
+            let selector = find_layout_node_by_debug_name(&layout, "effect-mod-selector").unwrap();
+            fn selectors(node: &eseqlisp::layout::LayoutNode, out: &mut Vec<Value>) {
+                if node.widget_type == "dropdown" {
+                    let Some(Value::List(options)) = node.props.get("options") else { panic!("source options"); };
+                    assert!(options.iter().any(|v| *v.borrow() == Value::String("lfo".to_string())));
+                    out.push(node.props["on-change"].clone());
+                }
+                for child in &node.children { selectors(child, out); }
+            }
+            let mut callbacks = Vec::new(); selectors(selector, &mut callbacks);
+            assert_eq!(callbacks.len(), 4);
+            editor.drain_host_commands();
+            editor.runtime_mut().invoke(callbacks[slot - 1].clone(), vec![Value::String("lfo".to_string())]).unwrap();
+            let idx = desc.params.iter().position(|p| p.name == format!("mod{slot}_source")).unwrap();
+            assert_slowdown_param_command(editor.drain_host_commands(), "set-effect-param-option", idx, "label", Value::String("lfo".to_string()));
+            state.pattern.effect_chains[0][0].defaults.set(idx, 1.0);
+            sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
+            let effects = build_effects_value(&state, 0, &[vec![desc.clone()]], &selected);
+            editor.runtime_mut().set_reactive("SEQ", "effects", effects);
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().unwrap();
+            let source = find_layout_node_by_debug_name(&layout, "effect-lfo-source-editor").expect("selected source editor");
+            assert_finite_nonzero_rect(source, "LFO source controls");
+            let row = find_layout_node_by_debug_name(&layout, "slowdown-param-1").unwrap();
+            let knob = find_layout_node_by_widget_type(row, "knob-number").unwrap();
+            assert_eq!(knob.props.get("min"), Some(&Value::Number(-0.75)));
+            assert_eq!(knob.props.get("max"), Some(&Value::Number(0.75)));
+            let callback = knob.props["on-change"].clone();
+            editor.drain_host_commands();
+            editor.runtime_mut().invoke(callback, vec![Value::Number(0.25)]).unwrap();
+            let target = desc.instrument_modulation_targets.iter().find(|t| t.base_param_idx == 1 && t.modulator_slot == slot).unwrap();
+            assert_slowdown_param_command(editor.drain_host_commands(), "set-effect-param", target.depth_param_idx, "value", Value::Number(0.25));
+        }
+    }
+
+    #[test]
+    fn slowdown_units_and_sources_survive_bus_and_rack_projection() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_insert("Slowdown").unwrap();
+        let mut app = test_app_with_rack_panel();
+        let snapshot = sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(&desc, 43, 44);
+        assert!(app.state.update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+            slot.effect_descriptors[0] = desc.clone();
+            slot.effect_slots[0] = snapshot.clone();
+        }));
+        let rack = app.state.pattern.rack_tracks.lock().unwrap()[0].clone().unwrap();
+        let rack_value = build_rack_slot_effect_value(&rack, 0, 0, 0, &desc, &snapshot, None);
+        app.buses[0].effect_descriptors = vec![desc.clone()];
+        app.buses[0].effect_slots = vec![snapshot];
+        let bus_value = build_bus_effects_value_for_selection(&app, None);
+        let Value::List(buses) = bus_value else { panic!("bus list"); };
+        let bus = buses[0].borrow();
+        let Value::List(slots) = &*bus else { panic!("bus effects"); };
+        for effect in [&*rack_value.borrow(), &*slots[0].borrow()] {
+            let Value::Map(effect) = effect else { panic!("effect"); };
+            let params = effect.get("params").unwrap().borrow();
+            for p in value_list_maps(&params) {
+                let idx = match *p.get("idx").unwrap().borrow() { Value::Number(v) => v as usize, _ => panic!("index") };
+                if let sequencer::effects::ParamKind::Continuous { unit: Some(unit) } = &desc.params[idx].kind {
+                    assert_eq!(*p.get("unit").unwrap().borrow(), Value::String(unit.clone()));
+                    let targets = p.get("mod-targets").unwrap().borrow();
+                    let Value::List(targets) = &*targets else { panic!("modulation targets"); };
+                    assert_eq!(targets.len(), 4);
+                }
+            }
+            let sources = effect.get("sources").unwrap().borrow();
+            assert_eq!(value_list_maps(&sources).len(), 4);
+            for source in value_list_maps(&sources) {
+                assert!(source.contains_key("source-param"));
+            }
+        }
+    }
+
+    fn assert_slowdown_param_command(commands: Vec<eseqlisp::host::HostCommand>, expected_name: &str,
+                                    idx: usize, key: &str, expected_value: Value) {
+        let payload = commands.iter().find_map(|command| match command {
+            eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) } if name == expected_name => Some(payload),
+            _ => None,
+        }).unwrap_or_else(|| panic!("missing {expected_name}: {commands:?}"));
+        assert_eq!(*payload.get("slot-idx").unwrap().borrow(), Value::Number(0.0));
+        assert_eq!(*payload.get("param-idx").unwrap().borrow(), Value::Number(idx as f64));
+        assert_eq!(*payload.get(key).unwrap().borrow(), expected_value);
+    }
+
+    #[test]
     fn builtin_reverb_params_are_host_modulatable_without_depth_slots() {
         fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
             let Value::Map(map) = value else {

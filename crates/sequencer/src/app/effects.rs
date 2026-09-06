@@ -1725,6 +1725,10 @@ impl App {
                 crate::effects::space_echo::space_echo_vtable(),
                 crate::effects::space_echo::SPACE_ECHO_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "Slowdown" => (
+                crate::effects::slowdown::vtable(),
+                crate::effects::slowdown::state_size(self.graph.sample_rate as f32),
+            ),
             "Dimension" => (
                 crate::effects::dimension::dimension_vtable(),
                 crate::effects::dimension::DIMENSION_STATE_SIZE * std::mem::size_of::<f32>(),
@@ -1906,6 +1910,27 @@ impl App {
 
     pub fn push_all_delay_bpm(&self) {
         let bpm = self.state.transport.bpm.load(Ordering::Relaxed) as f32;
+        let push = |node_id: u32, idx: u64| {
+            if node_id != 0 {
+                unsafe {
+                    crate::audiograph::params_push_wrapper(
+                        self.graph.lg.0,
+                        crate::audiograph::ParamMsg { logical_id: node_id as u64, idx, fvalue: bpm },
+                    );
+                }
+            }
+        };
+        // Rack inserts need tempo updates on installation and tempo edits too.
+        let racks = self.state.pattern.rack_tracks.lock().unwrap();
+        for rack in racks.iter().flatten() {
+            for slot in &rack.slots {
+                for (desc, effect) in slot.effect_descriptors.iter().zip(&slot.effect_slots) {
+                    if let Some(idx) = desc.bpm_param_idx() { push(effect.node_id, idx); }
+                    push(effect.modulator_node_id, crate::instruments::voice_modulator::PARAM_BPM as u64);
+                }
+            }
+        }
+        drop(racks);
         for (track_idx, descs) in self.graph.effect_descriptors.iter().enumerate() {
             for (slot_idx, desc) in descs.iter().enumerate() {
                 let Some(slot) = self
@@ -1932,19 +1957,7 @@ impl App {
                     }
                 }
                 if node_id != 0 {
-                    let idx = match desc.name.as_str() {
-                        "Delay" => crate::effects::delay::DELAY_PARAM_BPM,
-                        "Str8 Delay" => crate::effects::str8_delay::STR8_DELAY_PARAM_BPM,
-                        "Space Echo" => crate::effects::space_echo::SPACE_ECHO_PARAM_BPM,
-                        "Phaser-Flanger" => {
-                            crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_BPM
-                        }
-                        "Roar" => crate::effects::roar::ROAR_PARAM_BPM,
-                        "Filter" => crate::effects::filter::FILTER_PARAM_BPM,
-                        "DJ Mixer" => crate::effects::dj_mixer::DJ_MIXER_PARAM_BPM,
-                        "Filterbank" => crate::effects::filterbank::FILTERBANK_PARAM_BPM,
-                        _ => continue,
-                    };
+                    let Some(idx) = desc.bpm_param_idx() else { continue; };
                     unsafe {
                         crate::audiograph::params_push_wrapper(
                             self.graph.lg.0,
@@ -1976,19 +1989,7 @@ impl App {
                             );
                         }
                     }
-                    let idx = match desc.name.as_str() {
-                        "Delay" => crate::effects::delay::DELAY_PARAM_BPM,
-                        "Str8 Delay" => crate::effects::str8_delay::STR8_DELAY_PARAM_BPM,
-                        "Space Echo" => crate::effects::space_echo::SPACE_ECHO_PARAM_BPM,
-                        "Phaser-Flanger" => {
-                            crate::effects::phaser_flanger::PHASER_FLANGER_PARAM_BPM
-                        }
-                        "Roar" => crate::effects::roar::ROAR_PARAM_BPM,
-                        "Filter" => crate::effects::filter::FILTER_PARAM_BPM,
-                        "DJ Mixer" => crate::effects::dj_mixer::DJ_MIXER_PARAM_BPM,
-                        "Filterbank" => crate::effects::filterbank::FILTERBANK_PARAM_BPM,
-                        _ => continue,
-                    };
+                    let Some(idx) = desc.bpm_param_idx() else { continue; };
                     unsafe {
                         crate::audiograph::params_push_wrapper(
                             self.graph.lg.0,
@@ -5812,6 +5813,91 @@ mod tests {
         assert_eq!(app.graph.bus_node_ids[0].volume_id, 205);
         assert_eq!(app.graph.bus_node_ids[1].id, first_id);
         assert_eq!(app.graph.bus_node_ids[1].volume_id, 105);
+    }
+
+    #[test]
+    fn slowdown_installs_on_all_hosts_and_receives_tempo_and_macro_values() {
+        let graph = TestLiveGraph::new("slowdown-host-routing", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_sampler_rack_track(&[
+            std::path::PathBuf::from("../../content/impulses/lexicon-300-rich-plate.wav"),
+        ]).expect("sampler rack");
+        let track_slot = app.add_builtin_effect_sync(0, "Slowdown").unwrap();
+        let rack_slot = app.add_builtin_rack_slot_effect_sync(0, 0, "Slowdown").unwrap();
+        let bus_id = app.add_bus_channel("Slowdown test");
+        let bus = app.buses.iter().position(|b| b.id == bus_id).unwrap();
+        let bus_slot = app.add_builtin_bus_effect_sync(bus, "Slowdown").unwrap();
+        let nodes = [
+            app.state.pattern.effect_chains[0][track_slot].node_id.load(Ordering::Relaxed),
+            app.rack_slot_effect_snapshot(0, 0).unwrap().effect_slots[rack_slot].node_id,
+            app.buses[bus].effect_slots[bus_slot].node_id,
+        ];
+        for node in nodes {
+            assert!(node > 0);
+            assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, node as i32) });
+        }
+        let source_nodes = [
+            app.state.pattern.effect_chains[0][track_slot].modulator_node_id.load(Ordering::Relaxed),
+            app.rack_slot_effect_snapshot(0, 0).unwrap().effect_slots[rack_slot].modulator_node_id,
+            app.buses[bus].effect_slots[bus_slot].modulator_node_id,
+        ];
+        assert!(source_nodes.iter().all(|node| *node > 0), "all hosts need a real effect modulator node");
+        let desc = EffectDescriptor::builtin_insert("Slowdown").unwrap();
+        assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, source_nodes[0] as i32) });
+        for slot in 1..=4 {
+            let source_idx = desc.params.iter().position(|p| p.name == format!("mod{slot}_source")).unwrap();
+            app.send_slot_param(0, track_slot, source_idx, 1.0);
+            let target = desc.instrument_modulation_targets.iter()
+                .find(|t| t.base_param_idx == 1 && t.modulator_slot == slot).unwrap();
+            app.send_slot_param(0, track_slot, target.depth_param_idx, 0.1);
+        }
+        let macro_id = app.macro_engine.create_macro("slowdown test", crate::macro_engine::MacroKind::Mapped).unwrap();
+        for param in desc.params.iter().filter(|p| p.is_host_modulatable()) {
+            // Use the production mapper: live slots have stable parameter IDs,
+            // so an index-only synthetic mapping does not identify this node.
+            app.map_macro_param(macro_id, 0, crate::process::ParamTarget::EffectParam {
+                slot: track_slot, effect: desc.name.clone(), param: param.name.clone(), param_id: None,
+            }).unwrap();
+        }
+        let size = crate::effects::slowdown::state_size(44_100.0);
+        let mut memory = vec![0.0f32; size.div_ceil(4)];
+        let mut source_memory = vec![0.0f32; crate::instruments::voice_modulator::STATE_SIZE];
+        for (tempo, position) in [(83, 0.0), (137, 0.5), (201, 1.0)] {
+            app.state.transport.bpm.store(tempo, Ordering::Relaxed);
+            app.push_all_delay_bpm();
+            app.set_macro_value(macro_id, position);
+            let mut seen = [false; 3];
+            for _ in 0..16 {
+                graph.process_block();
+                for (host, node) in nodes.iter().enumerate() {
+                    let mut written = 0;
+                    if !unsafe { crate::audiograph::get_node_state_into(
+                        graph.ptr.0, *node as i32, memory.as_mut_ptr().cast(), size, &mut written,
+                    ) } { continue; }
+                    assert_eq!(written, size);
+                    let tempo_matches = memory[crate::effects::slowdown::PARAM_BPM as usize] == tempo as f32;
+                    let macro_matches = host != 0 || desc.params.iter().filter(|p| p.is_host_modulatable()).all(|p| {
+                        let expected = p.min + position * (p.max - p.min);
+                        (memory[p.node_param_idx as usize] - expected).abs() <= 1e-4
+                    });
+                    let routing_matches = host != 0 || {
+                        let mut written = 0;
+                        let copied = unsafe { crate::audiograph::get_node_state_into(
+                            graph.ptr.0, source_nodes[0] as i32, source_memory.as_mut_ptr().cast(),
+                            source_memory.len() * 4, &mut written,
+                        ) };
+                        copied && (0..4).all(|slot| source_memory[crate::instruments::voice_modulator::slot_source_param_idx(slot)] == 1.0)
+                            && desc.instrument_modulation_targets.iter().filter(|t| t.base_param_idx == 1)
+                                .all(|t| memory[desc.params[t.depth_param_idx].node_param_idx as usize] == 0.1)
+                    };
+                    seen[host] = tempo_matches && macro_matches && routing_matches;
+                }
+                if seen.iter().all(|v| *v) { break; }
+            }
+            assert_eq!(seen, [true; 3], "tempo={tempo}, macro={position}");
+        }
+        assert_eq!(app.rack_slot_effect_snapshot(0, 0).unwrap().custom_effect_names[rack_slot].as_deref(), Some("builtin:Slowdown"));
+        assert_eq!(app.state.latest_scheduler_snapshot().tracks[0].effect_descriptors[track_slot].name, "Slowdown");
     }
 
     #[test]

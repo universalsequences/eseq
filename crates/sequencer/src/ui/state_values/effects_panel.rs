@@ -450,7 +450,8 @@ pub(crate) fn build_effects_value(
                                 );
                             }
                         }
-                        ParamKind::Continuous { .. } => {
+                        ParamKind::Continuous { unit } => {
+                            if let Some(unit) = unit { insert_string_prop(&mut pmap, "unit", unit.clone()); }
                             if desc.name == "Delay" && param_idx == 2 && delay_synced {
                                 let labels: Vec<String> = SyncDivision::ALL
                                     .iter()
@@ -1112,7 +1113,8 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                         );
                                     }
                                 }
-                                ParamKind::Continuous { .. } => {
+                                ParamKind::Continuous { unit } => {
+                                    if let Some(unit) = unit { insert_string_prop(&mut pmap, "unit", unit.clone()); }
                                     if desc.name == "Delay" && param_idx == 2 && delay_synced {
                                         let labels: Vec<String> = SyncDivision::ALL
                                             .iter()

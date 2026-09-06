@@ -40,6 +40,7 @@ pub mod roar;
 #[allow(dead_code)]
 pub(crate) mod space_echo;
 pub mod spring;
+pub(crate) mod slowdown;
 #[allow(dead_code)]
 pub mod stereo_panner;
 #[allow(dead_code)]
@@ -2096,6 +2097,7 @@ mod tests {
                 "Phaser-Flanger",
                 "Reverb",
                 "Roar",
+                "Slowdown",
                 "Space Echo",
                 "Str8 Delay",
                 "Tape"
@@ -2117,6 +2119,7 @@ mod tests {
                 "Phaser-Flanger",
                 "Reverb",
                 "Roar",
+                "Slowdown",
                 "Space Echo",
                 "Str8 Delay",
                 "Tape"
@@ -2139,6 +2142,7 @@ mod tests {
                 "Phaser-Flanger",
                 "Reverb",
                 "Roar",
+                "Slowdown",
                 "Space Echo",
                 "Str8 Delay",
                 "Tape"
@@ -3146,6 +3150,22 @@ pub struct EffectDescriptor {
 impl EffectDescriptor {
     pub const BUILTIN_INSERT_PREFIX: &'static str = "builtin:";
 
+    /// Hidden tempo input for native effects, shared by track, bus and rack chains.
+    pub fn bpm_param_idx(&self) -> Option<u64> {
+        Some(match self.name.as_str() {
+            "Delay" => delay::DELAY_PARAM_BPM,
+            "Str8 Delay" => str8_delay::STR8_DELAY_PARAM_BPM,
+            "Space Echo" => space_echo::SPACE_ECHO_PARAM_BPM,
+            "Slowdown" => slowdown::PARAM_BPM,
+            "Phaser-Flanger" => phaser_flanger::PHASER_FLANGER_PARAM_BPM,
+            "Roar" => roar::ROAR_PARAM_BPM,
+            "Filter" => filter::FILTER_PARAM_BPM,
+            "DJ Mixer" => dj_mixer::DJ_MIXER_PARAM_BPM,
+            "Filterbank" => filterbank::FILTERBANK_PARAM_BPM,
+            _ => return None,
+        })
+    }
+
     pub fn transport_phase_param_idx(&self) -> Option<u32> {
         if self.name == "DJ Mixer" {
             Some(crate::effects::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32)
@@ -3239,6 +3259,7 @@ impl EffectDescriptor {
             "Phaser-Flanger",
             "Reverb",
             "Roar",
+            "Slowdown",
             "Space Echo",
             "Str8 Delay",
             "Tape",
@@ -3298,6 +3319,7 @@ impl EffectDescriptor {
             "Delay" => Some(Self::builtin_delay()),
             "Str8 Delay" => Some(Self::builtin_str8_delay()),
             "Space Echo" => Some(Self::builtin_space_echo()),
+            "Slowdown" => Some(slowdown::descriptor()),
             "Dimension" => Some(Self::builtin_dimension()),
             "Phaser-Flanger" => Some(Self::builtin_phaser_flanger()),
             "Roar" => Some(Self::builtin_roar()),
