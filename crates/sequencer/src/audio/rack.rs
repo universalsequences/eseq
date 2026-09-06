@@ -878,6 +878,7 @@ pub(super) fn fire_live_keyboard_rack_note(
         &mut data.active_keyboard_notes,
         parent_track_idx,
         trigger.transpose,
+        trigger.source,
         midi_note_from_transpose(
             transpose,
             f32::from_bits(

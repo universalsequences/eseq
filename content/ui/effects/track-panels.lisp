@@ -549,6 +549,13 @@
                     (seq-set-track-param :voices v))))
               :width 3.4 :height 1.15)
             )
+          (if SEQ.tp-supports-mono-trigger
+            (v-stack :align :center :gap 0.40
+              (label "trigger" :font-size 8 :color :dim :bg :transparent)
+              (dropdown :value SEQ.tp-mono-trigger :options '("retrig" "legato")
+                :on-change (lambda (v)
+                  (seq-set-track-param :mono-trigger (if (= v "legato") 1 0)))
+                :width 6.0 :height 1.25 :font-size 9)))
           (v-stack :align :center :gap 0.40
             (label "scale" :font-size 8 :color :dim :bg :transparent)
             (dropdown :value SEQ.tp-fts

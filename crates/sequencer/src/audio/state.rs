@@ -33,6 +33,7 @@ pub(super) struct ActiveKeyboardVoice {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ActiveKeyboardNote {
+    pub(super) source: Option<crate::sequencer::LiveNoteSource>,
     pub(super) source_transpose: f32,
     pub(super) midi_note: Option<u8>,
     pub(super) velocity: f32,
@@ -43,6 +44,7 @@ pub(super) struct ActiveKeyboardNote {
 impl ActiveKeyboardNote {
     pub(super) fn new(
         source_transpose: f32,
+        source: Option<crate::sequencer::LiveNoteSource>,
         midi_note: Option<u8>,
         velocity: f32,
         voices: &[ActiveKeyboardVoice],
@@ -51,6 +53,7 @@ impl ActiveKeyboardNote {
             return None;
         }
         let mut note = Self {
+            source,
             source_transpose,
             midi_note,
             velocity: velocity.clamp(0.0, 1.0),
@@ -232,8 +235,10 @@ pub(super) struct AudioCallbackData {
     pub(super) custom_engine_pools: Vec<CustomEnginePool>,
     pub(super) scheduler_snapshot: Arc<SequencerSnapshot>,
     pub(super) scheduler_snapshot_version: u64,
+    pub(super) pressure: super::pressure::PressureState,
+    pub(super) mono_held: Vec<MonoHeldNotes>,
     pub(super) active_keyboard_notes: Vec<[Option<ActiveKeyboardNote>; MAX_VOICES]>,
-    pub(super) keyboard_rx: std::sync::mpsc::Receiver<KeyboardTrigger>,
+    pub(super) keyboard_rx: std::sync::mpsc::Receiver<crate::sequencer::LiveInputEvent>,
     pub(super) master_recorder: Arc<MasterRecorder>,
     pub(super) accumulator_states: [crate::accumulator::AccumulatorRuntimeState; MAX_TRACKS],
     pub(super) last_playing: bool,
@@ -358,11 +363,12 @@ pub(super) fn store_active_keyboard_note(
     active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]],
     track_idx: usize,
     source_transpose: f32,
+    source: Option<crate::sequencer::LiveNoteSource>,
     midi_note: Option<u8>,
     velocity: f32,
     voices: &[ActiveKeyboardVoice],
 ) {
-    let Some(note) = ActiveKeyboardNote::new(source_transpose, midi_note, velocity, voices) else {
+    let Some(note) = ActiveKeyboardNote::new(source_transpose, source, midi_note, velocity, voices) else {
         return;
     };
     for voice in voices {
@@ -370,7 +376,7 @@ pub(super) fn store_active_keyboard_note(
     }
     let track_notes = &mut active_notes[track_idx];
     if let Some(slot) = track_notes.iter_mut().find(|slot| {
-        slot.is_some_and(|note| (note.source_transpose - source_transpose).abs() < 0.01)
+        slot.is_some_and(|note| note.source == source && (source.is_some() || (note.source_transpose - source_transpose).abs() < 0.01))
     }) {
         *slot = Some(note);
         return;
@@ -386,10 +392,11 @@ pub(super) fn take_active_keyboard_note(
     active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]],
     track_idx: usize,
     source_transpose: f32,
+    source: Option<crate::sequencer::LiveNoteSource>,
 ) -> Option<ActiveKeyboardNote> {
     let track_notes = &mut active_notes[track_idx];
     for slot in track_notes.iter_mut() {
-        if slot.is_some_and(|note| (note.source_transpose - source_transpose).abs() < 0.01) {
+        if slot.is_some_and(|note| note.source == source && (source.is_some() || (note.source_transpose - source_transpose).abs() < 0.01)) {
             return slot.take();
         }
     }

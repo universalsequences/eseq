@@ -1180,6 +1180,7 @@ fn rack_v2_choke_clears_held_keyboard_notes_on_choked_tracks() {
         &mut active_keyboard_notes,
         0,
         3.0,
+        None,
         Some(63),
         0.8,
         &[ActiveKeyboardVoice {
@@ -1217,7 +1218,7 @@ fn rack_v2_choke_clears_held_keyboard_notes_on_choked_tracks() {
         "the choked track's held-key entries must be cleared"
     );
     assert!(
-        take_active_keyboard_note(&mut active_keyboard_notes, 0, 3.0).is_none(),
+        take_active_keyboard_note(&mut active_keyboard_notes, 0, 3.0, None).is_none(),
         "releasing the held key after a choke must not emit a note-off on a recycled lid"
     );
 }
@@ -1262,8 +1263,8 @@ fn active_keyboard_note_stores_all_rack_slot_voices_for_one_key() {
         },
     ];
 
-    store_active_keyboard_note(&mut notes, 0, 3.0, Some(63), 0.7, &voices);
-    let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
+    store_active_keyboard_note(&mut notes, 0, 3.0, None, Some(63), 0.7, &voices);
+    let note = take_active_keyboard_note(&mut notes, 0, 3.0, None).unwrap();
 
     assert_eq!(note.source_transpose, 3.0);
     assert_eq!(note.midi_note, Some(63));
@@ -1295,9 +1296,9 @@ fn active_keyboard_note_clear_by_lid_preserves_other_slot_voices() {
         },
     ];
 
-    store_active_keyboard_note(&mut notes, 0, 3.0, Some(63), 0.7, &voices);
+    store_active_keyboard_note(&mut notes, 0, 3.0, None, Some(63), 0.7, &voices);
     clear_active_keyboard_note_by_lid(&mut notes, 12);
-    let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
+    let note = take_active_keyboard_note(&mut notes, 0, 3.0, None).unwrap();
 
     assert_eq!(note.voices(), &[voices[0], voices[2]]);
 }

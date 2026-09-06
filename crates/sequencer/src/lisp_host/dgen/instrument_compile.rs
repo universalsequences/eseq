@@ -522,6 +522,9 @@ pub fn render_loaded_instrument_for_test(
     let pitch_hz = 440.0 * 2f32.powf((options.midi_note - 69.0) / 12.0);
     let n_inputs = manifest.n_inputs.max(4);
     let n_outputs = manifest.n_outputs.max(1);
+    let input_routes: Vec<_> = manifest.inputs.iter().filter_map(|input| {
+        manifest.host_signal_output_for_input(input).map(|output| (input.channel, output))
+    }).collect();
     let mut rendered = Vec::with_capacity(options.frames);
     let mut frames_done = 0usize;
 
@@ -541,18 +544,29 @@ pub fn render_loaded_instrument_for_test(
             .max(frames_done);
         let block_limit = options.block_size.min(options.frames - frames_done);
         let block = block_limit.min((next_event_frame - frames_done).max(1));
-        let gate_value = if frames_done < options.gate_frames {
-            1.0
-        } else {
-            0.0
-        };
         let trigger_value = if frames_done == 0 { 1.0 } else { 0.0 };
 
         let mut input_buffers = vec![vec![0.0f32; block]; n_inputs];
-        input_buffers[0].fill(gate_value);
-        input_buffers[1].fill(pitch_hz);
-        input_buffers[2].fill(options.velocity);
-        input_buffers[3][0] = trigger_value;
+        for &(channel, output) in &input_routes {
+            let buffer = input_buffers.get_mut(channel)
+                .ok_or_else(|| format!("Manifest input channel {channel} exceeds {n_inputs} inputs"))?;
+            use crate::effects::gatepitch as gp;
+            match output {
+                output if output == gp::PARAM_GATE as usize => {
+                    for (frame, value) in buffer.iter_mut().enumerate() {
+                        *value = if frames_done + frame < options.gate_frames { 1.0 } else { 0.0 };
+                    }
+                }
+                output if output == gp::PARAM_PITCH as usize => buffer.fill(pitch_hz),
+                output if output == gp::PARAM_VELOCITY as usize => buffer.fill(options.velocity),
+                output if output == gp::PARAM_TRIGGER as usize || output == gp::OUTPUT_NOTE_ON => {
+                    buffer[0] = trigger_value;
+                }
+                // A single isolated note has no legato/pressure/transport
+                // input unless the caller explicitly supplies an override.
+                _ => {}
+            }
+        }
         for &(channel, value) in &options.input_overrides {
             if let Some(buffer) = input_buffers.get_mut(channel) {
                 buffer.fill(value);

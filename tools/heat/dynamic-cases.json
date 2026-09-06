@@ -1,0 +1,639 @@
+[
+  {
+    "name": "env-exp0-loop0-free0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/Loop": 0,
+      "SignalChain1/Envelope.1/FreeRun": false
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp0-loop0-free1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/Loop": 0,
+      "SignalChain1/Envelope.1/FreeRun": true
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp0-loop1-free0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/Loop": 1,
+      "SignalChain1/Envelope.1/FreeRun": false
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp0-loop1-free1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/Loop": 1,
+      "SignalChain1/Envelope.1/FreeRun": true
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp0-loop2-free0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/Loop": 2,
+      "SignalChain1/Envelope.1/FreeRun": false
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp0-loop2-free1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/Loop": 2,
+      "SignalChain1/Envelope.1/FreeRun": true
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp0-loop3-free0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/Loop": 3,
+      "SignalChain1/Envelope.1/FreeRun": false
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp0-loop3-free1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/Loop": 3,
+      "SignalChain1/Envelope.1/FreeRun": true
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp1-loop0-free0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": true,
+      "SignalChain1/Envelope.1/Loop": 0,
+      "SignalChain1/Envelope.1/FreeRun": false
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp1-loop0-free1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": true,
+      "SignalChain1/Envelope.1/Loop": 0,
+      "SignalChain1/Envelope.1/FreeRun": true
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp1-loop1-free0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": true,
+      "SignalChain1/Envelope.1/Loop": 1,
+      "SignalChain1/Envelope.1/FreeRun": false
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp1-loop1-free1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": true,
+      "SignalChain1/Envelope.1/Loop": 1,
+      "SignalChain1/Envelope.1/FreeRun": true
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp1-loop2-free0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": true,
+      "SignalChain1/Envelope.1/Loop": 2,
+      "SignalChain1/Envelope.1/FreeRun": false
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp1-loop2-free1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": true,
+      "SignalChain1/Envelope.1/Loop": 2,
+      "SignalChain1/Envelope.1/FreeRun": true
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp1-loop3-free0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": true,
+      "SignalChain1/Envelope.1/Loop": 3,
+      "SignalChain1/Envelope.1/FreeRun": false
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-exp1-loop3-free1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/ExponentialSlope": true,
+      "SignalChain1/Envelope.1/Loop": 3,
+      "SignalChain1/Envelope.1/FreeRun": true
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-sustain-time0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/SustainTime": 0
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-sustain-time0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/SustainTime": 0.25
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-sustain-time0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/SustainTime": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "env-sustain-time0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/Envelope.1/AttackTime": 0.5,
+      "SignalChain1/Envelope.1/DecayTime": 0.5,
+      "SignalChain1/Envelope.1/SustainLevel": 0.4,
+      "SignalChain1/Envelope.1/ReleaseTime": 0.5,
+      "SignalChain1/Envelope.1/SustainTime": 0.75
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-wave0-width0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOWaveShape": 0,
+      "SignalChain1/LFOPulseWidth": 0.5,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-wave1-width0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOWaveShape": 1,
+      "SignalChain1/LFOPulseWidth": 0,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-wave1-width0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOWaveShape": 1,
+      "SignalChain1/LFOPulseWidth": 0.5,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-wave1-width1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOWaveShape": 1,
+      "SignalChain1/LFOPulseWidth": 1,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-wave2-width0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOWaveShape": 2,
+      "SignalChain1/LFOPulseWidth": 0,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-wave2-width0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOWaveShape": 2,
+      "SignalChain1/LFOPulseWidth": 0.5,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-wave2-width1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOWaveShape": 2,
+      "SignalChain1/LFOPulseWidth": 1,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-wave3-width0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOWaveShape": 3,
+      "SignalChain1/LFOPulseWidth": 0.5,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-wave4-width0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOWaveShape": 4,
+      "SignalChain1/LFOPulseWidth": 0.5,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-delay0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5,
+      "SignalChain1/LFODelay": 0
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-delay0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5,
+      "SignalChain1/LFODelay": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  },
+  {
+    "name": "lfo-delay1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0.5,
+      "SignalChain1/LFODelay": 1
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 2
+      }
+    ]
+  }
+]

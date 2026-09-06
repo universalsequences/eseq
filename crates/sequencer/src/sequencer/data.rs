@@ -1095,6 +1095,25 @@ impl TrackPattern {
     }
 }
 
+/// Whether overlapping mono notes restart the instrument's envelopes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[repr(u32)]
+pub enum MonoTrigger {
+    #[default]
+    Retrig = 0,
+    Legato = 1,
+}
+
+impl MonoTrigger {
+    pub fn from_index(index: u32) -> Self {
+        match index {
+            1 => Self::Legato,
+            _ => Self::Retrig,
+        }
+    }
+}
+
 pub struct TrackParams {
     pub gate: AtomicBool,
     pub attack_ms: AtomicU32,
@@ -1123,6 +1142,7 @@ pub struct TrackParams {
     pub accum_limit: AtomicU32,
     pub accum_mode: AtomicU32,
     pub fts_scale: AtomicU32,
+    pub mono_trigger: AtomicU32,
     pub mute_group: AtomicU32,
     pub global_transpose: AtomicBool,
 }
@@ -1154,6 +1174,7 @@ impl TrackParams {
             accum_limit: AtomicU32::new(48.0_f32.to_bits()),
             accum_mode: AtomicU32::new(0),
             fts_scale: AtomicU32::new(0),
+            mono_trigger: AtomicU32::new(MonoTrigger::Retrig as u32),
             mute_group: AtomicU32::new(0),
             global_transpose: AtomicBool::new(true),
         }
@@ -1352,6 +1373,13 @@ impl TrackParams {
     pub fn set_accum_mode(&self, mode: u32) {
         self.accum_mode.store(mode, Ordering::Relaxed);
     }
+    pub fn get_mono_trigger(&self) -> MonoTrigger {
+        MonoTrigger::from_index(self.mono_trigger.load(Ordering::Relaxed))
+    }
+    pub fn set_mono_trigger(&self, mode: MonoTrigger) {
+        self.mono_trigger.store(mode as u32, Ordering::Relaxed);
+    }
+
     pub fn get_fts_scale(&self) -> usize {
         self.fts_scale.load(Ordering::Relaxed) as usize
     }
@@ -1412,6 +1440,7 @@ pub struct TrackParamsSnapshot {
     pub accum_limit: f32,
     pub accum_mode: u32,
     pub fts_scale: usize,
+    pub mono_trigger: MonoTrigger,
     pub mute_group: u8,
     pub global_transpose: bool,
 }
@@ -1441,6 +1470,7 @@ impl Default for TrackParamsSnapshot {
             accum_limit: 48.0,
             accum_mode: 0,
             fts_scale: 0,
+            mono_trigger: MonoTrigger::Retrig,
             mute_group: 0,
             global_transpose: true,
         }
@@ -1766,12 +1796,43 @@ impl LiveTriggerStampRing {
     }
 }
 
+/// What is holding a live note down. Dedup and release lookups key on this,
+/// so a hardware C4 and the `a` key never collide (bead eseq-egs6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LiveNoteSource {
+    /// Computer-keyboard musical typing, by lowercase character.
+    Key(char),
+    /// Hardware MIDI input: one physical key, so the same note number on a
+    /// second port or channel is a distinct hold with its own release.
+    Midi { port: usize, channel: u8, note: u8 },
+    /// The momentary sequence-roll hold marker (no note of its own).
+    SequenceRoll,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KeyboardTrigger {
+    pub source: Option<LiveNoteSource>,
     pub track: usize,
     pub transpose: f32,
     pub velocity: f32,
     pub note_off: bool,
+}
+
+/// Ordered live performance messages. Notes and controllers share one queue
+/// so a pressure change before a note-on is visible to that new voice.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LiveInputEvent {
+    Note(KeyboardTrigger),
+    Pressure {
+        port: usize,
+        channel: u8,
+        note: Option<u8>,
+        value: f32,
+    },
+    ResetControllers {
+        port: usize,
+        channel: u8,
+    },
 }
 
 pub struct Trigger {

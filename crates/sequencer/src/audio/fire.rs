@@ -416,6 +416,10 @@ pub(super) fn fire_resolved(
                         track_max_polyphony,
                     )
                 };
+                let legato = !free_patch && allocation.continues_mono_note(
+                    track_idx, track_polyphonic, track_max_polyphony,
+                    data.state.pattern.track_params[track_idx].get_mono_trigger(),
+                );
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
                 let lid = allocation.logical_id;
@@ -454,7 +458,7 @@ pub(super) fn fire_resolved(
                 if allocation.stole_active_voice || !track_polyphonic || free_patch {
                     let off_seq = next_event_sequence_from(&mut data.event_seq);
                     unsafe {
-                        send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
+                        if !legato { send_custom_note_off(data.lg.0, lid, frame_offset, off_seq); }
                         route_custom_voice_to_consumer(
                             data.lg.0,
                             &data.state,
@@ -510,7 +514,7 @@ pub(super) fn fire_resolved(
                     note_fingerprint;
                 let on_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
-                    send_custom_trigger(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity);
+                    send_custom_note_on(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity, legato);
                 }
                 if retrig_custom_count < MAX_VOICES {
                     retrig_custom_voices[retrig_custom_count] = RetrigCustomVoice {
@@ -649,7 +653,11 @@ pub(super) fn fire_resolved(
                     track_max_polyphony,
                 )
             };
-            let voice_idx = allocation.voice_idx;
+            let legato = !free_patch && allocation.continues_mono_note(
+                    track_idx, track_polyphonic, track_max_polyphony,
+                    data.state.pattern.track_params[track_idx].get_mono_trigger(),
+                );
+                let voice_idx = allocation.voice_idx;
             data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
             let lid = allocation.logical_id;
             let synth_id = data.state.runtime.engine_synth_node_ids[engine_id][voice_idx]
@@ -686,7 +694,7 @@ pub(super) fn fire_resolved(
             if allocation.stole_active_voice || !track_polyphonic || free_patch {
                 let off_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
-                    send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
+                    if !legato { send_custom_note_off(data.lg.0, lid, frame_offset, off_seq); }
                     route_custom_voice_to_consumer(
                         data.lg.0,
                         &data.state,
@@ -741,7 +749,7 @@ pub(super) fn fire_resolved(
             data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint = note_fingerprint;
             let on_seq = next_event_sequence_from(&mut data.event_seq);
             unsafe {
-                send_custom_trigger(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity);
+                send_custom_note_on(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity, legato);
             }
             if retrig_custom_count < MAX_VOICES {
                 retrig_custom_voices[retrig_custom_count] = RetrigCustomVoice {

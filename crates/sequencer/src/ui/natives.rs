@@ -5669,6 +5669,18 @@ pub(crate) fn init_runtime(
                     Ok(Value::Bool(want_on)),
                 )
             }
+            "mono-trigger" => {
+                let Some(value) = numeric_value else {
+                    return Err("seq-set-track-param: :mono-trigger expects 0 or 1".into());
+                };
+                if value != 0.0 && value != 1.0 {
+                    return Err("seq-set-track-param: :mono-trigger expects 0 or 1".into());
+                }
+                ctx.enqueue_command(slice3_numeric_history_command(
+                    "mono-trigger", Some(track), value,
+                ));
+                (TrackParamInvalidation::MonoTrigger, Ok(Value::Number(value)))
+            }
             "max-poly" | "max-polyphony" | "voices" => {
                 let Some(val) = numeric_value else {
                     return Err("seq-set-track-param: :max-poly expects a number".into());

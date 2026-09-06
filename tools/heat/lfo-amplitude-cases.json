@@ -1,0 +1,528 @@
+[
+  {
+    "name": "unmodulated",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": false,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape0-width0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 0,
+      "SignalChain1/LFOPulseWidth": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape1-width0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 1,
+      "SignalChain1/LFOPulseWidth": 0
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape1-width0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 1,
+      "SignalChain1/LFOPulseWidth": 0.25
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape1-width0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 1,
+      "SignalChain1/LFOPulseWidth": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape1-width0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 1,
+      "SignalChain1/LFOPulseWidth": 0.75
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape1-width1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 1,
+      "SignalChain1/LFOPulseWidth": 1
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape2-width0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 2,
+      "SignalChain1/LFOPulseWidth": 0
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape2-width0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 2,
+      "SignalChain1/LFOPulseWidth": 0.25
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape2-width0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 2,
+      "SignalChain1/LFOPulseWidth": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape2-width0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 2,
+      "SignalChain1/LFOPulseWidth": 0.75
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape2-width1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 2,
+      "SignalChain1/LFOPulseWidth": 1
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape3-width0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 3,
+      "SignalChain1/LFOPulseWidth": 0
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape3-width0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 3,
+      "SignalChain1/LFOPulseWidth": 0.25
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape3-width0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 3,
+      "SignalChain1/LFOPulseWidth": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape3-width0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 3,
+      "SignalChain1/LFOPulseWidth": 0.75
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape3-width1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 3,
+      "SignalChain1/LFOPulseWidth": 1
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape4-width0",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 4,
+      "SignalChain1/LFOPulseWidth": 0
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape4-width0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 4,
+      "SignalChain1/LFOPulseWidth": 0.25
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape4-width0.5",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 4,
+      "SignalChain1/LFOPulseWidth": 0.5
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape4-width0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 4,
+      "SignalChain1/LFOPulseWidth": 0.75
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  },
+  {
+    "name": "lfo-shape4-width1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/LFOToggle": true,
+      "SignalChain1/LFOGateReset": true,
+      "SignalChain1/OscillatorLFOModPitch": 0,
+      "SignalChain1/AmplifierLFOAmpMod": 1,
+      "SignalChain1/Envelope.1/ExponentialSlope": false,
+      "SignalChain1/Envelope.1/AttackTime": 0,
+      "SignalChain1/Envelope.1/DecayTime": 0,
+      "SignalChain1/Envelope.1/SustainLevel": 1,
+      "SignalChain1/LFOWaveShape": 4,
+      "SignalChain1/LFOPulseWidth": 1
+    },
+    "notes": [
+      {
+        "note": 84,
+        "velocity": 100,
+        "start_seconds": 0.5,
+        "duration_seconds": 10
+      }
+    ]
+  }
+]

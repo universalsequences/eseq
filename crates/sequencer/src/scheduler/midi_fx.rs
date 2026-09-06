@@ -99,9 +99,17 @@ impl MidiFxQuantizerState {
 
 #[derive(Clone, Copy)]
 pub(super) struct LiveMidiFxNote {
+    pub(super) source: Option<crate::sequencer::LiveNoteSource>,
     pub(super) transpose: f32,
     pub(super) velocity: f32,
     pub(super) pending_event: bool,
+}
+
+impl LiveMidiFxNote {
+    fn matches_trigger(&self, trigger: &KeyboardTrigger) -> bool {
+        self.source == trigger.source
+            && (trigger.source.is_some() || self.transpose == trigger.transpose)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -963,7 +971,7 @@ pub(super) fn drain_live_keyboard_inputs(
         if trigger.note_off {
             track_state
                 .notes
-                .retain(|note| note.transpose != trigger.transpose);
+                .retain(|note| !note.matches_trigger(&trigger));
             if track_state.notes.is_empty() {
                 track_state.next_tick_sample = 0;
                 track_state.quantize_next_tick = false;
@@ -974,12 +982,14 @@ pub(super) fn drain_live_keyboard_inputs(
         if let Some(note) = track_state
             .notes
             .iter_mut()
-            .find(|note| note.transpose == trigger.transpose)
+            .find(|note| note.matches_trigger(&trigger))
         {
+            note.transpose = trigger.transpose;
             note.velocity = trigger.velocity;
             note.pending_event = true;
         } else {
             track_state.notes.push(LiveMidiFxNote {
+                source: trigger.source,
                 transpose: trigger.transpose,
                 velocity: trigger.velocity,
                 pending_event: true,

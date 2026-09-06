@@ -542,6 +542,11 @@ pub enum AppCommand {
         track: usize,
     },
 
+    SetTrackMonoTrigger {
+        track: usize,
+        mode: crate::sequencer::MonoTrigger,
+    },
+
     SetTrackFtsScale {
         track: usize,
         scale_idx: usize,
@@ -1021,6 +1026,7 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::SetTrackTimebase { .. }
         | AppCommand::NextTrackTimebase { .. }
         | AppCommand::PrevTrackTimebase { .. }
+        | AppCommand::SetTrackMonoTrigger { .. }
         | AppCommand::SetTrackFtsScale { .. }
         | AppCommand::SetTrackAccumIdx { .. }
         | AppCommand::SetTrackAccumMode { .. }
@@ -3425,6 +3431,10 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
 
         AppCommand::PrevTrackTimebase { track } => {
             app.state.pattern.track_params[track].prev_timebase();
+        }
+
+        AppCommand::SetTrackMonoTrigger { track, mode } => {
+            app.state.pattern.track_params[track].set_mono_trigger(mode);
         }
 
         AppCommand::SetTrackFtsScale { track, scale_idx } => {

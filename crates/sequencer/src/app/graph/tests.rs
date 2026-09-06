@@ -307,7 +307,7 @@
                 crate::effects::gatepitch::GATEPITCH_STATE_SIZE * std::mem::size_of::<f32>(),
                 gp_name.as_ptr(),
                 0,
-                6,
+                crate::effects::gatepitch::OUTPUT_COUNT as i32,
                 std::ptr::null(),
                 0,
             )
@@ -422,6 +422,90 @@
             assert_eq!(state_size, std::mem::size_of_val(&state));
             assert_eq!(state[0], expected);
         }
+    }
+
+    // Accumulate transient event outputs so the watchlist's snapshot cadence
+    // cannot hide a one-sample pulse. Continuous inputs retain their last value.
+    unsafe extern "C" fn host_input_observer_process(
+        inputs: *const *mut f32,
+        _outputs: *const *mut f32,
+        frame_count: std::os::raw::c_int,
+        state: *mut std::os::raw::c_void,
+        _buffers: *mut std::os::raw::c_void,
+    ) {
+        let state = std::slice::from_raw_parts_mut(state.cast::<f32>(), 7);
+        for frame in 0..frame_count as usize {
+            for channel in 0..7 {
+                let value = *(*inputs.add(channel)).add(frame);
+                if (1..=3).contains(&channel) {
+                    state[channel] += value;
+                } else {
+                    state[channel] = value;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn named_host_inputs_deliver_pressure_and_legato_through_live_graph() {
+        use crate::effects::gatepitch as gp;
+        let graph = TestLiveGraph::new("host-expression-routing");
+        let name = CString::new("expression_gatepitch").unwrap();
+        let gp_id = unsafe {
+            crate::audiograph::add_node(
+                graph.ptr.0, gp::gatepitch_vtable(),
+                gp::GATEPITCH_STATE_SIZE * std::mem::size_of::<f32>(),
+                name.as_ptr(), 0, gp::OUTPUT_COUNT as i32, std::ptr::null(), 0,
+            )
+        };
+        let name = CString::new("expression_observer").unwrap();
+        let observer_id = unsafe {
+            crate::audiograph::add_node(
+                graph.ptr.0,
+                crate::audiograph::NodeVTable {
+                    process: Some(host_input_observer_process),
+                    ..crate::audiograph::NodeVTable::default()
+                },
+                7 * std::mem::size_of::<f32>(), name.as_ptr(), 7, 0,
+                std::ptr::null(), 0,
+            )
+        };
+        assert!(gp_id >= 0 && observer_id >= 0);
+        let mut manifest = test_instrument_manifest();
+        // Deliberately reorder the ports: the manifest names, not ordinals,
+        // must select the GatePitch outputs (pressure state and output differ).
+        manifest.inputs = ["pressure", "legato", "note-on", "trigger", "gate", "pitch", "velocity"]
+            .into_iter().enumerate()
+            .map(|(channel, name)| lisp_host::DGenInput { channel, name: name.into() })
+            .collect();
+        manifest.n_inputs = manifest.inputs.len();
+        for route in custom_host_input_routes(&manifest, "expression test").unwrap() {
+            let CustomHostInputSource::GatePitch(port) = route.source else {
+                panic!("unexpected modulator route");
+            };
+            unsafe {
+                crate::audiograph::graph_connect(graph.ptr.0, gp_id, port, observer_id, route.input_channel);
+            }
+        }
+        graph.process_block();
+        assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, observer_id) });
+        for (frame_offset, kind, values) in [
+            (8, crate::audiograph::GBE_NOTE_ON, vec![440.0, 0.5, 0.0, 0.25]),
+            (24, crate::audiograph::GBE_NOTE_ON, vec![660.0, 0.8, 1.0, 0.25]),
+            (40, crate::audiograph::GBE_PRESSURE, vec![0.75]),
+        ] {
+            let mut aux = [0.0; crate::audiograph::GBE_AUX_CAP];
+            aux[..values.len()].copy_from_slice(&values);
+            assert!(unsafe {
+                crate::audiograph::push_block_event(graph.ptr.0, crate::audiograph::GraphBlockEvent {
+                    logical_id: gp_id as u64, frame_offset, sequence: frame_offset as u32,
+                    kind, aux_count: values.len() as _, aux,
+                })
+            });
+        }
+        for _ in 0..8 { graph.process_block(); }
+        let observed = graph.read_node_state::<7>(observer_id).expect("expression observer snapshot");
+        assert_eq!(observed, [0.75, 1.0, 2.0, 1.0, 1.0, 660.0, 0.8]);
     }
 
     struct RouteTargets {

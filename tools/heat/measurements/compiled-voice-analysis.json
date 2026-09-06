@@ -1,0 +1,237 @@
+{
+  "scope": "Development voice integration; not reference sonic parity",
+  "source_sha256": {
+    "content/defmacros/heat-envelope/macro.lisp": "fb4b8dc4de34404b1a95d2292fbee256c95b92cea915b24cebe0ec744baa49ea",
+    "content/defmacros/heat-pitch-envelope/macro.lisp": "9f10733b47da26a39e9f91c6f646f3c1a0290afb17f9cf93f34d5efa896945b7",
+    "content/defmacros/heat-lfo/macro.lisp": "289d09fd4794937749f4ba70de3ef6415c8d211beafcc383e6b9beaf91a0f901",
+    "content/defmacros/heat-linear-filter/macro.lisp": "94016f004639ca92f86a2166d166140a700f83db2b3a57fd67dd3c481adf64fe",
+    "content/defmacros/heat-soft-clip/macro.lisp": "950650ed8a64f9411e7f56e9720262bb41ae5c701f58c13e7fcd6ece9b04ea59",
+    "content/defmacros/heat-drive/macro.lisp": "7b1bead23324aaddc431f8abe0e3dc7692898d30c5d39d687f5a12cb88424d30",
+    "tools/heat/instrument/dsp.lisp": "ea0f6cc463623390cdbf1a2e8b665b90a73f88c7d48f693a938e2eec26c245e8"
+  },
+  "cases": {
+    "44100-default": {
+      "passed": true,
+      "peak": 0.04753046855330467,
+      "rms": 0.014658380299806595
+    },
+    "44100-released": {
+      "passed": true,
+      "tail_peak": 0.0
+    },
+    "44100-serial-parallel-routing": {
+      "passed": true,
+      "max_error": 3.0946615936500166e-08
+    },
+    "44100-amp-mute": {
+      "passed": true
+    },
+    "44100-pressure-level": {
+      "passed": true,
+      "max_error": 7.450580596923828e-09
+    },
+    "44100-independent-legato-envelope-policy": {
+      "passed": true,
+      "held_max_error": 7.450580596923828e-09,
+      "retrigger_difference": 0.0010044537484645844
+    },
+    "44100-filter0-extremes": {
+      "passed": true,
+      "peak": 0.10438166558742523
+    },
+    "44100-filter1-extremes": {
+      "passed": true,
+      "peak": 0.39700672030448914
+    },
+    "44100-filter2-extremes": {
+      "passed": true,
+      "peak": 0.15936945378780365
+    },
+    "44100-filter3-extremes": {
+      "passed": true,
+      "peak": 0.8580852150917053
+    },
+    "44100-filter4-extremes": {
+      "passed": true,
+      "peak": 0.09085363894701004
+    },
+    "44100-filter5-extremes": {
+      "passed": true,
+      "peak": 0.06615837663412094
+    },
+    "44100-filter6-extremes": {
+      "passed": true,
+      "peak": 0.15780512988567352
+    },
+    "44100-filter7-extremes": {
+      "passed": true,
+      "peak": 0.672142505645752
+    },
+    "48000-default": {
+      "passed": true,
+      "peak": 0.04763409495353699,
+      "rms": 0.014660065062344074
+    },
+    "48000-released": {
+      "passed": true,
+      "tail_peak": 0.0
+    },
+    "48000-serial-parallel-routing": {
+      "passed": true,
+      "max_error": 3.1035003900115044e-08
+    },
+    "48000-amp-mute": {
+      "passed": true
+    },
+    "48000-pressure-level": {
+      "passed": true,
+      "max_error": 7.450580596923828e-09
+    },
+    "48000-independent-legato-envelope-policy": {
+      "passed": true,
+      "held_max_error": 7.450580596923828e-09,
+      "retrigger_difference": 0.0010134130716323853
+    },
+    "48000-filter0-extremes": {
+      "passed": true,
+      "peak": 0.1637870967388153
+    },
+    "48000-filter1-extremes": {
+      "passed": true,
+      "peak": 0.6818878054618835
+    },
+    "48000-filter2-extremes": {
+      "passed": true,
+      "peak": 0.36790621280670166
+    },
+    "48000-filter3-extremes": {
+      "passed": true,
+      "peak": 1.0397430658340454
+    },
+    "48000-filter4-extremes": {
+      "passed": true,
+      "peak": 0.08923108130693436
+    },
+    "48000-filter5-extremes": {
+      "passed": true,
+      "peak": 0.06691814213991165
+    },
+    "48000-filter6-extremes": {
+      "passed": true,
+      "peak": 0.3586658239364624
+    },
+    "48000-filter7-extremes": {
+      "passed": true,
+      "peak": 0.8374603390693665
+    },
+    "preset-Init-complete": {
+      "passed": true,
+      "missing": [],
+      "unknown": []
+    },
+    "preset-Init-audio": {
+      "passed": true,
+      "peak": 0.04763409495353699
+    },
+    "preset-Warm Bass-complete": {
+      "passed": true,
+      "missing": [],
+      "unknown": []
+    },
+    "preset-Warm Bass-audio": {
+      "passed": true,
+      "peak": 0.10383396595716476
+    },
+    "preset-Open Pad-complete": {
+      "passed": true,
+      "missing": [],
+      "unknown": []
+    },
+    "preset-Open Pad-audio": {
+      "passed": true,
+      "peak": 0.06939955800771713
+    },
+    "preset-Moving Pulse-complete": {
+      "passed": true,
+      "missing": [],
+      "unknown": []
+    },
+    "preset-Moving Pulse-audio": {
+      "passed": true,
+      "peak": 0.06519220024347305
+    },
+    "preset-Pressure Bloom-complete": {
+      "passed": true,
+      "missing": [],
+      "unknown": []
+    },
+    "preset-Pressure Bloom-audio": {
+      "passed": true,
+      "peak": 0.07771789282560349
+    },
+    "96000-default": {
+      "passed": true,
+      "peak": 0.04691581428050995,
+      "rms": 0.014666811563074589
+    },
+    "96000-released": {
+      "passed": true,
+      "tail_peak": 0.0
+    },
+    "96000-serial-parallel-routing": {
+      "passed": true,
+      "max_error": 3.118891811482172e-08
+    },
+    "96000-amp-mute": {
+      "passed": true
+    },
+    "96000-pressure-level": {
+      "passed": true,
+      "max_error": 7.450580596923828e-09
+    },
+    "96000-independent-legato-envelope-policy": {
+      "passed": true,
+      "held_max_error": 7.450580596923828e-09,
+      "retrigger_difference": 0.0010135658085346222
+    },
+    "96000-filter0-extremes": {
+      "passed": true,
+      "peak": 0.3705865144729614
+    },
+    "96000-filter1-extremes": {
+      "passed": true,
+      "peak": 0.7157976031303406
+    },
+    "96000-filter2-extremes": {
+      "passed": true,
+      "peak": 0.6872943043708801
+    },
+    "96000-filter3-extremes": {
+      "passed": true,
+      "peak": 1.0677002668380737
+    },
+    "96000-filter4-extremes": {
+      "passed": true,
+      "peak": 0.09230642765760422
+    },
+    "96000-filter5-extremes": {
+      "passed": true,
+      "peak": 0.07854856550693512
+    },
+    "96000-filter6-extremes": {
+      "passed": true,
+      "peak": 0.6797472238540649
+    },
+    "96000-filter7-extremes": {
+      "passed": true,
+      "peak": 0.9132829308509827
+    }
+  },
+  "compiler_sha256": "8ad665c55afb9d1dbf0dcb59bcbcc9afe8fb94399ff182d5e844f07625c967bb",
+  "demo": {
+    "path": "/tmp/heat-development-demo.wav",
+    "peak": 0.10517310351133347,
+    "normalized": false
+  },
+  "preset_bank_sha256": "788bd151f624dfc64666355f1bce1ec662ec2bf82b1f34f227393a463843c48e"
+}

@@ -13,7 +13,7 @@ pub use clock::{SequencerClock, TrackClockState};
 pub use data::{
     ceil_to_grid, rack_slot_pool_index, sync_beats, BusId, ChordData, ChordSnapshot,
     CustomInstrumentRunMode, PatternStepGeometry,
-    InstrumentType, KeyboardTrigger, MidiFxPosition, ModConnection, ModDestination,
+    InstrumentType, KeyboardTrigger, LiveNoteSource, LiveInputEvent, MidiFxPosition, MonoTrigger, ModConnection, ModDestination,
     LiveTriggerStamp, LiveTriggerStampRing, RollCommand, RollHitRecorded,
     StepData, StepParam, SwingResolution, Timebase, TimebasePLockData, TrackOutput, TrackParams,
     TrackParamsSnapshot, TrackPattern, TrackSendBaseline, TrackSendPLockData,

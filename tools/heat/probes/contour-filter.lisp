@@ -1,0 +1,13 @@
+; Production compile/load probe for Heat's shared contour and linear filter.
+(use-defmacro heat-envelope)
+(use-defmacro heat-linear-filter)
+(def gate (in 1 @name gate))
+(def pitch (in 2 @name pitch))
+(def velocity (in 3 @name velocity))
+(def trigger (in 4 @name trigger))
+(param mode @default 0 @min 0 @max 7)
+(def envelope (heat-envelope gate trigger 5 200 0.5 -1 200 1 0 0))
+(def oscillator (polyblep_saw (phasor pitch) pitch))
+(def filtered (heat-linear-filter oscillator 833.782 0.59684 mode))
+(out (* 0.1 velocity envelope filtered) 1)
+(out (* 0.1 velocity envelope filtered) 2)

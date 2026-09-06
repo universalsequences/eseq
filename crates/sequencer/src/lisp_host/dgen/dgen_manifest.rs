@@ -50,6 +50,37 @@ pub struct DGenManifest {
     pub voice_cell_id: Option<usize>,
 }
 
+impl DGenManifest {
+    /// Shared by the live graph and offline renderer. Named inputs never
+    /// inherit a positional signal; only wholly unnamed manifests use the
+    /// original four-port convention. Modulator-owned ports route separately.
+    pub(crate) fn host_signal_output_for_input(&self, input: &DGenInput) -> Option<usize> {
+        use crate::effects::gatepitch as gp;
+        if self.modulators.iter().any(|m| m.input_channel == input.channel) {
+            return None;
+        }
+        let normalized: String = input.name.chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .flat_map(|ch| ch.to_lowercase())
+            .collect();
+        match normalized.as_str() {
+            "gate" => Some(gp::PARAM_GATE as usize),
+            "pitch" => Some(gp::PARAM_PITCH as usize),
+            "velocity" | "vel" => Some(gp::PARAM_VELOCITY as usize),
+            "trigger" | "trig" => Some(gp::PARAM_TRIGGER as usize),
+            "pressure" => Some(gp::OUTPUT_PRESSURE),
+            "noteon" => Some(gp::OUTPUT_NOTE_ON),
+            "legato" => Some(gp::OUTPUT_LEGATO),
+            "clockinc" => Some(gp::PARAM_CLOCK_INC as usize),
+            "clock" | "barclock" => Some(gp::PARAM_CLOCK_PHASE as usize),
+            _ if input.channel < 4 && self.inputs.iter().all(|i| i.name.trim().is_empty()) => {
+                Some(input.channel)
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DGenParam {
     /// Canonical host-facing identity (`group.name` for grouped params).
