@@ -619,6 +619,23 @@ fn sync_track_param_fields(
         None => (tp.is_polyphonic(), tp.get_max_polyphony()),
     };
     rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp_poly));
+    rt.set_reactive("SEQ", "tp-supports-mono-trigger", Value::Bool(
+        app.graph.track_instrument_types.get(track)
+            == Some(&sequencer::sequencer::InstrumentType::Custom),
+    ));
+    rt.set_reactive("SEQ", "tp-voice-priority", Value::String(
+        match tp.get_voice_priority() {
+            sequencer::sequencer::VoicePriority::Last => "Last",
+            sequencer::sequencer::VoicePriority::High => "High",
+            sequencer::sequencer::VoicePriority::Low => "Low",
+        }.to_string(),
+    ));
+    rt.set_reactive("SEQ", "tp-mono-trigger", Value::String(
+        match tp.get_mono_trigger() {
+            sequencer::sequencer::MonoTrigger::Retrig => "retrig",
+            sequencer::sequencer::MonoTrigger::Legato => "legato",
+        }.to_string(),
+    ));
     rt.set_reactive(
         "SEQ",
         "tp-max-polyphony",

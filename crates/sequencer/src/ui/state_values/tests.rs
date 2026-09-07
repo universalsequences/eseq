@@ -18,18 +18,6 @@ mod drift_waveform_tests;
         )
     }
 
-    /// Instrument sources from the pre-curation factory tree, kept under
-    /// `crates/sequencer/tests/fixtures/instruments` (see
-    /// `AppPaths::dev_instrument_fixtures_dir`).
-    fn read_fixture_instrument_source(relative: &str) -> std::io::Result<String> {
-        std::fs::read_to_string(
-            sequencer::app_paths::app_paths()
-                .dev_instrument_fixtures_dir()
-                .expect("tests run on the dev layout")
-                .join(relative),
-        )
-    }
-
     #[test]
     fn process_lane_short_label_preserves_the_complete_inlet_name() {
         assert_eq!(
@@ -3213,8 +3201,8 @@ mod drift_waveform_tests;
             .expect("browser lisp should create the *samples* buffer");
         let tree = browser.widget_tree.as_ref().expect("browser widget tree");
         assert!(
-            value_contains_string(tree, "digitone") || value_contains_string(tree, "minimoog"),
-            "instrument tab should render saved instruments"
+            value_contains_string(tree, "Synths") || value_contains_string(tree, "Drums"),
+            "instrument tab should render the shipped factory instrument folders"
         );
     }
 
@@ -3937,7 +3925,7 @@ mod drift_waveform_tests;
         for (cols, rows) in [(32, 60), (220, 90)] {
             let rendered = render_instrument_browser(cols, rows);
             assert!(
-                rendered.contains("emulations") || rendered.contains("strings"),
+                rendered.contains("Synths") || rendered.contains("Drums"),
                 "instrument tab should visibly render top-level instrument rows at {cols}x{rows}; rendered:\n{rendered}"
             );
         }
@@ -5951,7 +5939,7 @@ mod drift_waveform_tests;
                 .rect;
             let rendered = render_layout_cells(&layout, 220, 90);
             let has_instrument_rows =
-                rendered.contains("emulations") || rendered.contains("strings");
+                rendered.contains("Synths") || rendered.contains("Drums");
             (scroll, tree, has_instrument_rows, rendered)
         }
 
@@ -8566,78 +8554,6 @@ mod drift_waveform_tests;
         inst
     }
 
-    fn korg1_test_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
-        let mut inst = std::collections::HashMap::new();
-        inst.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String("korg1/".to_string()))),
-        );
-        inst.insert(
-            "display-name".to_string(),
-            Rc::new(RefCell::new(Value::String("korg1".to_string()))),
-        );
-        inst.insert(
-            "type".to_string(),
-            Rc::new(RefCell::new(Value::String("synth".to_string()))),
-        );
-
-        let params = [
-            ("base_note", 48.0, 0.0, 127.0),
-            ("vco1_saw", 0.75, 0.0, 1.0),
-            ("vco1_pulse", 0.35, 0.0, 1.0),
-            ("vco2_level", 0.45, 0.0, 1.0),
-            ("sub_level", 0.25, 0.0, 1.0),
-            ("gain", 0.80, 0.0, 1.0),
-            ("analog_drift", 0.15, 0.0, 1.0),
-            ("noise_level", 0.10, 0.0, 1.0),
-            ("vco2_interval", 7.0, -24.0, 24.0),
-            ("vco2_fine", 0.0, -100.0, 100.0),
-            ("pulse_width", 0.50, 0.0, 1.0),
-            ("pwm_amount", 0.20, 0.0, 1.0),
-            ("input_drive", 0.35, 0.0, 1.0),
-            ("output_bite", 0.25, 0.0, 1.0),
-            ("ring_level", 0.15, 0.0, 1.0),
-            ("cutoff", 0.58, 0.0, 1.0),
-            ("resonance", 0.30, 0.0, 1.0),
-            ("filter_env_amount", 0.40, -1.0, 1.0),
-            ("keytrack", 0.50, 0.0, 1.0),
-            ("hp_cutoff", 0.15, 0.0, 1.0),
-            ("hp_resonance", 0.20, 0.0, 1.0),
-            ("scream", 0.18, 0.0, 1.0),
-            ("filter_drive", 0.28, 0.0, 1.0),
-            ("lfo_rate", 4.0, 0.0, 20.0),
-            ("lfo_filter_amount", 0.30, -1.0, 1.0),
-            ("lfo_pitch", 0.0, -1.0, 1.0),
-            ("pitch_env_amount", 0.0, -1.0, 1.0),
-            ("amp_attack", 5.0, 1.0, 1000.0),
-            ("amp_decay", 120.0, 1.0, 2000.0),
-            ("amp_sustain", 0.70, 0.0, 1.0),
-            ("amp_release", 150.0, 1.0, 3000.0),
-            ("filt_attack", 8.0, 1.0, 1000.0),
-            ("filt_decay", 180.0, 1.0, 2000.0),
-            ("filt_sustain", 0.55, 0.0, 1.0),
-            ("filt_release", 220.0, 1.0, 3000.0),
-        ];
-        inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(
-                params
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, (name, value, min, max))| {
-                        Value::Map(test_param_map(name, idx, *value, *min, *max))
-                    })
-                    .collect(),
-            ))),
-        );
-        inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
-        inst.insert(
-            "sources".to_string(),
-            Rc::new(RefCell::new(test_list(vec![]))),
-        );
-        inst
-    }
-
     fn mutant_909_test_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
         fn test_mod_target(source_idx: f64, depth_idx: f64, source_slot: f64, depth: f64) -> Value {
             Value::Map(HashMap::from([
@@ -8882,76 +8798,6 @@ mod drift_waveform_tests;
                     )
                     .collect(),
             ))),
-        );
-        inst
-    }
-
-    fn minimoog_lad2_test_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>>
-    {
-        let mut inst = std::collections::HashMap::new();
-        inst.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                "emulations/minimoog-lad2".to_string(),
-            ))),
-        );
-        inst.insert(
-            "display-name".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                "emulations/minimoog-lad2".to_string(),
-            ))),
-        );
-        inst.insert(
-            "type".to_string(),
-            Rc::new(RefCell::new(Value::String("synth".to_string()))),
-        );
-
-        let params = [
-            ("base_note", 48.0, 0.0, 127.0),
-            ("osc1_level", 0.80, 0.0, 1.0),
-            ("osc2_level", 0.45, 0.0, 1.0),
-            ("osc3_level", 0.25, 0.0, 1.0),
-            ("noise_level", 0.10, 0.0, 1.0),
-            ("gain", 0.80, 0.0, 1.0),
-            ("drive", 0.35, 0.0, 1.0),
-            ("key_track", 0.50, 0.0, 1.0),
-            ("osc1_wave", 0.0, 0.0, 1.0),
-            ("osc2_wave", 0.2, 0.0, 1.0),
-            ("osc3_wave", 0.4, 0.0, 1.0),
-            ("pulse_width", 0.50, 0.0, 1.0),
-            ("osc1_oct", 0.0, -2.0, 2.0),
-            ("osc2_oct", 0.0, -2.0, 2.0),
-            ("osc3_oct", -1.0, -2.0, 2.0),
-            ("osc2_detune", 0.0, -100.0, 100.0),
-            ("osc3_detune", 0.0, -100.0, 100.0),
-            ("cutoff", 1200.0, 20.0, 18_000.0),
-            ("resonance", 0.30, 0.0, 1.0),
-            ("filter_env_amount", 600.0, -6000.0, 6000.0),
-            ("amp_attack", 5.0, 1.0, 1000.0),
-            ("amp_decay", 120.0, 1.0, 2000.0),
-            ("amp_sustain", 0.70, 0.0, 1.0),
-            ("amp_release", 150.0, 1.0, 3000.0),
-            ("filt_attack", 8.0, 1.0, 1000.0),
-            ("filt_decay", 180.0, 1.0, 2000.0),
-            ("filt_sustain", 0.55, 0.0, 1.0),
-            ("filt_release", 220.0, 1.0, 3000.0),
-        ];
-        inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(
-                params
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, (name, value, min, max))| {
-                        Value::Map(test_param_map(name, idx, *value, *min, *max))
-                    })
-                    .collect(),
-            ))),
-        );
-        inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
-        inst.insert(
-            "sources".to_string(),
-            Rc::new(RefCell::new(test_list(vec![]))),
         );
         inst
     }
@@ -19997,6 +19843,9 @@ mod drift_waveform_tests;
     #[test]
     fn metal_seq_track_panel_lays_out_timebase_and_mute_group_dropdowns() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive("SEQ", "tp-supports-mono-trigger", Value::Bool(true));
+        editor.runtime_mut().set_reactive("SEQ", "tp-voice-priority", Value::String("High".into()));
+        editor.runtime_mut().set_reactive("SEQ", "tp-mono-trigger", Value::String("legato".into()));
         editor.refresh_runtime_side_effects();
 
         let track_id = editor
@@ -20048,6 +19897,12 @@ mod drift_waveform_tests;
         let primary_panel =
             find_layout_node_by_debug_name(track_params_panel, "track-primary-parameters-panel")
                 .expect("primary track parameters panel");
+        for value in ["High", "legato"] {
+            let control = find_dropdown_by_value(primary_panel, value).expect("voice policy control");
+            assert_finite_nonzero_rect(control, "voice policy control");
+            assert!(control.rect.col >= primary_panel.rect.col
+                && control.rect.col + control.rect.width <= primary_panel.rect.col + primary_panel.rect.width);
+        }
         let groove_panel =
             find_layout_node_by_debug_name(track_params_panel, "track-groove-parameters-panel")
                 .expect("groove track parameters panel");
@@ -44129,283 +43984,6 @@ mod drift_waveform_tests;
         );
     }
 
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_real_korg1_custom_instrument_ui() {
-        fn assert_finite_layout(node: &eseqlisp::layout::LayoutNode) {
-            assert!(
-                node.rect.width.is_finite()
-                    && node.rect.height.is_finite()
-                    && node.rect.col.is_finite()
-                    && node.rect.row.is_finite()
-                    && node.rect.width < 10_000.0
-                    && node.rect.col.abs() < 10_000.0,
-                "non-finite or runaway layout node: type={} rect=({:.2},{:.2},{:.2},{:.2})",
-                node.widget_type,
-                node.rect.row,
-                node.rect.col,
-                node.rect.width,
-                node.rect.height
-            );
-            for child in &node.children {
-                assert_finite_layout(child);
-            }
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let korg1_ui =
-            read_fixture_instrument_source("bass/korg1/ui.lisp").expect("read korg1 ui");
-        let initial_custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
-        let korg1_custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "korg1/".to_string(),
-            "instruments/bass/korg1/ui.lisp".to_string(),
-            korg1_ui,
-        )));
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(160, 20);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(korg1_test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&initial_custom_ui_source)
-            .expect("load initial empty custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor
-            .runtime_mut()
-            .eval_str(&korg1_custom_ui_source)
-            .expect("load korg1 custom instrument ui");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("real korg1 custom instrument fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(160, 20);
-        let layout = editor.widget_layout().expect("korg1 fx layout");
-        assert_finite_layout_tree(&layout);
-
-        let tree = editor
-            .active_buffer()
-            .widget_tree
-            .as_ref()
-            .expect("fx tree");
-        for title in ["OSC MIX", "OSC SHAPE", "MS FILTER"] {
-            assert!(
-                value_contains_string(tree, title),
-                "real korg1 custom UI should contain panel {title}"
-            );
-        }
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        let mut layout_summaries = Vec::new();
-        collect_layout_node_summaries(&layout, &mut layout_summaries);
-        let osc_mix = find_layout_node_by_text(&layout, "OSC MIX")
-            .unwrap_or_else(|| panic!("OSC MIX label; layout={layout_summaries:#?}"));
-        let ms_filter = find_layout_node_by_text(&layout, "MS FILTER")
-            .unwrap_or_else(|| panic!("MS FILTER label; layout={layout_summaries:#?}"));
-
-        assert!(
-            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-        assert!(
-            osc_mix.rect.width > 1.0
-                && osc_mix.rect.col >= instrument_panel.rect.col
-                && osc_mix.rect.col < instrument_panel.rect.col + instrument_panel.rect.width,
-            "OSC MIX label should be measured inside the instrument panel, got {:?}",
-            osc_mix.rect
-        );
-        assert!(
-            ms_filter.rect.width > 1.0
-                && ms_filter.rect.col > osc_mix.rect.col + 40.0
-                && ms_filter.rect.col < instrument_panel.rect.col + instrument_panel.rect.width,
-            "MS FILTER should be measured as a later korg1 column, got {:?}; OSC MIX={:?}; panel={:?}",
-            ms_filter.rect,
-            osc_mix.rect,
-            instrument_panel.rect
-        );
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_analog_bread_and_butter_lfo_column() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let analog_ui = read_fixture_instrument_source("core/analog-bread-and-butter/ui.lisp")
-            .expect("read analog bread-and-butter ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/core/analog-bread-and-butter/ui.lisp".to_string(),
-            analog_ui,
-        )));
-        let mut analog_inst = test_instrument_map();
-        analog_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("lfo2_wave", 0, 1.0, 0.0, 3.0)),
-                Value::Map(test_param_map("lfo2_rate_hz", 1, 0.21, 0.03, 18.0)),
-                Value::Map(test_param_map("lfo2_to_f1", 2, 35.0, 0.0, 2200.0)),
-                Value::Map(test_param_map("lfo2_to_f2", 3, 15.0, 0.0, 2200.0)),
-                Value::Map(test_param_map("output_gain", 4, 0.28, 0.0, 1.0)),
-                Value::Map(test_param_map("glide_ms", 5, 0.0, 0.0, 500.0)),
-                Value::Map(test_param_map("vibrato", 6, 0.0, 0.0, 0.12)),
-            ]))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(analog_inst)])),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load analog custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("analog bread-and-butter fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor
-            .widget_layout()
-            .expect("analog bread-and-butter layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        let adsr_editor =
-            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
-        assert!(
-            adsr_editor.rect.width > 8.0
-                && adsr_editor.rect.height > 2.0
-                && adsr_editor.rect.height <= 4.0,
-            "ADSR editor should stay constrained in the medium detail panel, got {:?}",
-            adsr_editor.rect
-        );
-        assert!(
-            adsr_editor.rect.row >= instrument_panel.rect.row
-                && adsr_editor.rect.row + adsr_editor.rect.height
-                    <= instrument_panel.rect.row + instrument_panel.rect.height,
-            "ADSR editor should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-            adsr_editor.rect,
-            instrument_panel.rect
-        );
-
-        for suffix in ["lfo2_rate_hz", "lfo2_to_f2", "output_gain"] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-        }
-    }
-
     /// Lay out one Drift-family instrument panel through the fx lisp and
     /// assert every named control sits inside the visible instrument panel.
     fn assert_drift_columns_lay_out(drift_ui: String, overlay_path: &str, suffixes: &[&str]) {
@@ -44539,177 +44117,254 @@ mod drift_waveform_tests;
         }
     }
 
+    /// Heat's real instrument source, including the editable envelopes and the compact
+    /// detail controls, must fit in the production instrument panel.
     #[test]
-    fn metal_seq_fx_lisp_lays_out_triton_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
+    fn heat_development_ui_sections_have_visible_parameter_controls() {
+        fn find_param<'a>(node: &'a eseqlisp::layout::LayoutNode, suffix: &str)
+            -> Option<&'a eseqlisp::layout::LayoutNode>
+        {
+            if node.stable_key.as_deref().is_some_and(|key| key.ends_with(suffix)) {
                 return Some(node);
             }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
+            node.children.iter().find_map(|child| find_param(child, suffix))
         }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let triton_ui =
-            read_fixture_instrument_source("core/triton/ui.lisp").expect("read triton ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/core/triton/ui.lisp".to_string(),
-            triton_ui,
+        fn assert_controls_visible(node: &eseqlisp::layout::LayoutNode, panel: &eseqlisp::layout::LayoutNode) {
+            if matches!(node.widget_type.as_str(), "number-picker" | "knob-number" | "dropdown") {
+                assert!(node.rect.width > 0.0 && node.rect.height > 0.0);
+                assert!(node.rect.row >= panel.rect.row
+                    && node.rect.row + node.rect.height <= panel.rect.row + panel.rect.height
+                    && node.rect.col >= panel.rect.col
+                    && node.rect.col + node.rect.width <= panel.rect.col + panel.rect.width,
+                    "control outside panel: {} {:?} / {:?}", node.widget_type, node.rect, panel.rect);
+            }
+            for child in &node.children { assert_controls_visible(child, panel); }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/heat/instrument");
+        let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
+        let ui = std::fs::read_to_string(root.join("ui.lisp")).unwrap();
+        let mut values = Vec::new();
+        let params = dsp.lines().filter(|line| line.starts_with("(param "))
+            .enumerate().map(|(index, line)| {
+                let words: Vec<_> = line.trim_end_matches(')').split_whitespace().collect();
+                let number = |key| {
+                    let pos = words.iter().position(|word| *word == key).unwrap();
+                    words[pos + 1].parse::<f64>().unwrap()
+                };
+                let mut param = test_param_map(words[1], index, number("@default"), number("@min"), number("@max"));
+                let field = format!("heat-test-{}", words[1]);
+                param.insert("value-field".to_string(), Rc::new(RefCell::new(Value::String(field.clone()))));
+                values.push((field, Value::Number(number("@default"))));
+                Value::Map(param)
+            }).collect();
+        let mut inst = test_instrument_map();
+        inst.insert("synth".to_string(), Rc::new(RefCell::new(test_list(params))));
+        let custom_ui = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(), root.join("ui.lisp").display().to_string(), ui,
         )));
-        let mut triton_inst = test_instrument_map();
-        triton_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("osc1_set", 0, 0.0, 0.0, 31.0)),
-                Value::Map(test_param_map("osc1_wave", 1, 0.0, 0.0, 15.0)),
-                Value::Map(test_param_map("osc2_detune", 2, 0.0, -24.0, 24.0)),
-                Value::Map(test_param_map("cutoff", 3, 3500.0, 20.0, 18000.0)),
-                Value::Map(test_param_map("feg_int_oct", 4, 1.5, -8.0, 8.0)),
-                Value::Map(test_param_map("feg_start", 5, 0.0, -1.0, 1.0)),
-                Value::Map(test_param_map("aeg_break", 6, 1.0, 0.0, 1.0)),
-                Value::Map(test_param_map("lfo1_rate_hz", 7, 5.0, 0.01, 30.0)),
-                Value::Map(test_param_map("ams2_amt", 8, 0.0, -1.0, 1.0)),
-                Value::Map(test_param_map("glide_ms", 9, 0.0, 0.0, 1000.0)),
-                Value::Map(test_param_map("volume_db", 10, -10.0, -36.0, 6.0)),
-            ]))),
-        );
-
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(triton_inst)])),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                (def asset-metadata (path)
-                  (dict :sets '("Metadata Alpha" "Metadata Omega") :waves-per-set 7))
-                "#,
-            )
-            .expect("install fx test helpers");
+        editor.set_layout_viewport(180, 24);
+        editor.runtime_mut().register_reactive("SEQ", vec![
+            ("num-tracks", Value::Number(1.0)), ("compiling", Value::Bool(false)),
+            ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
+            ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
+            ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
+            ("instrument-panel", test_list(vec![Value::Map(inst)])), ("bus-effects", test_list(vec![])),
+        ], true);
+        for (field, value) in &values {
+            editor.runtime_mut().set_reactive("SEQ", field, value.clone());
+        }
+        editor.runtime_mut().eval_str(r#"
+            (def eseq.seq-core-state/selected-bus-name () "Mix")
+            (def seq-has-selection? () false)
+            (def eseq.browser/sbrowser-editor-name "")
+            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+            (def custom-midi-fx-ui (fx) false)
+            (def custom-audio-fx-ui (fx) false)
+            (defstate eseq.seq-core-state/selected-bus -1)
+        "#).unwrap();
         register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load triton custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.runtime_mut().eval_str(&custom_ui).expect("load Heat UI");
+        editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
         editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("triton fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
+        let fx_id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
         editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor.widget_layout().expect("triton layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        let adsr_editor =
-            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
-        assert!(
-            adsr_editor.rect.width > 8.0
-                && adsr_editor.rect.height > 2.0
-                && adsr_editor.rect.height <= 4.0,
-            "ADSR editor should stay constrained in the medium detail panel, got {:?}",
-            adsr_editor.rect
-        );
-
-        let osc1_set = find_stable_key_suffix(&layout, "osc1_set")
-            .expect("osc1 set control should be present in layout");
-        let osc1_set_dropdown = find_layout_node_by_widget_type(osc1_set, "dropdown")
-            .expect("osc1 set control should contain a dropdown");
-        assert_eq!(
-            osc1_set_dropdown.props.get("options"),
-            Some(&test_string_list(&["Metadata Alpha", "Metadata Omega"])),
-            "Triton set labels should come from the bank's asset metadata"
-        );
-
-        for suffix in [
-            "osc1_set",
-            "osc2_detune",
-            "cutoff",
-            "feg_start",
-            "aeg_break",
-            "lfo1_rate_hz",
-            "ams2_amt",
-            "glide_ms",
-            "volume_db",
+        // The initial detail is Global, and each routing button applies the
+        // complete configuration as one undoable parameter batch.
+        let layout = editor.widget_layout().expect("default Heat layout");
+        for name in ["unison_voices", "unison_detune_cents", "unison_delay_ms", "unison_spread",
+            "glide_mode", "glide_rate_mode", "glide_time_ms", "octave", "tune_semitones",
+            "detune_cents", "stretch_cents", "tuning_error_cents", "bend_range_semitones",
+            "vibrato_rate_hz", "vibrato_amount_cents", "vibrato_wheel_cents",
+            "vibrato_delay_ms", "vibrato_attack_ms"] {
+            let control = find_param(&layout, name).unwrap_or_else(|| panic!("missing Global {name}"));
+            assert_finite_nonzero_rect(control, name);
+        }
+        let route_names = ["osc1_to_filter1", "osc2_to_filter1", "noise_to_filter1",
+            "filter1_to_filter2", "filter1_enabled", "filter2_enabled", "amp1_enabled", "amp2_enabled"];
+        let param_index = |name: &str| dsp.lines().filter(|line| line.starts_with("(param "))
+            .position(|line| line.split_whitespace().nth(1) == Some(name)).unwrap() as f64;
+        for (mode, expected) in [
+            [1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            [0.5, 0.5, 0.5, 0.0, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0],
+        ].iter().enumerate() {
+            let button = find_layout_node_by_debug_name(&layout, &format!("heat-route-{mode}"))
+                .expect("routing button visible by default");
+            assert!(button.rect.width > 0.0 && button.rect.height > 0.0);
+            let callback = button.props.get("on-click").unwrap().clone();
+            editor.drain_host_commands();
+            editor.runtime_mut().invoke(callback, vec![Value::Number(0.0); 3]).unwrap();
+            let commands = editor.drain_host_commands();
+            let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else {
+                panic!("routing must emit one batch: {commands:?}");
+            };
+            assert_eq!(name, "set-instrument-param-batch");
+            assert_eq!(*payload["commit"].borrow(), Value::Bool(true));
+            let updates = payload["updates"].borrow();
+            let Value::List(updates) = &*updates else { panic!("batch updates"); };
+            assert_eq!(updates.len(), 8);
+            for ((update, param), value) in updates.iter().zip(route_names).zip(expected) {
+                let update = update.borrow();
+                let Value::Map(update) = &*update else { panic!("parameter update"); };
+                assert_eq!(*update["param-idx"].borrow(), Value::Number(param_index(param)));
+                assert_eq!(*update["value"].borrow(), Value::Number(*value));
+            }
+            for (param, value) in route_names.iter().zip(expected) {
+                editor.runtime_mut().set_reactive("SEQ", &format!("heat-test-{param}"), Value::Number(*value));
+            }
+            editor.refresh_runtime_side_effects();
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let selected_layout = editor.widget_layout().unwrap();
+            for candidate in 0..4 {
+                let button = find_layout_node_by_debug_name(&selected_layout, &format!("heat-route-{candidate}")).unwrap();
+                let selected = match button.props.get("selected") {
+                    Some(Value::Number(value)) => *value,
+                    Some(Value::ReactiveRef { slot, .. }) => f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed)),
+                    value => panic!("selected routing prop: {value:?}"),
+                };
+                assert_eq!(selected, if candidate == mode { 1.0 } else { 0.0 });
+            }
+        }
+        for (section, suffix) in [
+            (1, "osc1_pulse_duty"), (2, "filter1_env_attack_ms"),
+            (3, "amp1_env_release_ms"), (4, "lfo1_delay_ms"),
+            (5, "osc2_sub_level"), (6, "filter2_env_decay_ms"),
+            (7, "amp2_env_sustain"), (4, "lfo2_fade_ms"),
+            (0, "noise_color_hz"), (0, "pressure_amp_db"),
         ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
+            editor.runtime_mut().eval_str(&format!(r#"
+                (do
+                  (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+                  (def heat-test-click (eseq.effects.custom-ui-sections/ui-section-select-callback {section}))
+                  (heat-test-click false))
+            "#)).unwrap();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().expect("Heat layout");
+            assert_finite_layout_tree(&layout);
+            let panel = find_layout_node_by_debug_name(&layout, "instrument-panel").unwrap();
+            assert_controls_visible(panel, panel);
+            for name in ["osc1_level_db", "filter2_cutoff_hz", suffix] {
+                let control = find_param(&layout, name).unwrap_or_else(|| panic!("missing {name} in section {section}"));
+                assert!(control.rect.width > 0.0 && control.rect.height > 0.0, "zero-sized {name}");
+                assert!(control.rect.row >= panel.rect.row
+                    && control.rect.row + control.rect.height <= panel.rect.row + panel.rect.height,
+                    "{name} outside panel: {:?} / {:?}", control.rect, panel.rect);
+            }
+            for name in ["osc1_semitones", "osc2_semitones"] {
+                let control = find_param(&layout, name).unwrap();
+                let knob = find_layout_node_by_widget_type(control, "knob-number").unwrap();
+                assert_eq!(knob.props.get("step"), Some(&Value::Number(1.0)));
+            }
+            let noise = find_layout_node_by_debug_name(&layout, "heat-noise-strip").unwrap();
+            assert!(!noise.props.contains_key("on-click"));
+            if section == 4 {
+                for prefix in ["lfo1", "lfo2"] {
+                    let curve = find_layout_node_by_debug_name(&layout, &format!("heat-{prefix}-curve")).unwrap();
+                    assert_eq!(curve.widget_type, "lfo-curve");
+                    assert!(curve.rect.width > 0.0 && curve.rect.height > 0.0);
+                    assert!(matches!(curve.props.get("pw"), Some(Value::ReactiveRef { .. })));
+                }
+            }
+            if section == 1 || section == 5 {
+                let curve = find_layout_node_by_debug_name(&layout, "heat-pitch-envelope").unwrap();
+                assert_eq!(curve.widget_type, "adsr-editor");
+                assert!(curve.rect.width > 0.0 && curve.rect.height > 0.0);
+                for prop in ["initial", "time"] {
+                    assert!(matches!(curve.props.get(prop), Some(Value::ReactiveRef { .. })), "reactive {prop}");
+                }
+                let callback = curve.props["on-change"].clone();
+                let env = Value::Map([("initial", -12.0), ("time", 420.0)].into_iter()
+                    .map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(Value::Number(value))))).collect());
+                editor.drain_host_commands();
+                editor.runtime_mut().invoke(callback, vec![env]).unwrap();
+                let commands = editor.drain_host_commands();
+                let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else { panic!("pitch batch: {commands:?}"); };
+                assert_eq!(name, "set-instrument-param-batch");
+                assert_eq!(*payload["commit"].borrow(), Value::Bool(true));
+                let updates = payload["updates"].borrow();
+                let Value::List(updates) = &*updates else { panic!("pitch updates"); };
+                assert_eq!(updates.len(), 2);
+                let prefix = if section == 1 { "osc1" } else { "osc2" };
+                for (update, (suffix, expected)) in updates.iter().zip([("initial", -12.0), ("time_ms", 420.0)]) {
+                    let update = update.borrow();
+                    let Value::Map(update) = &*update else { panic!("pitch update"); };
+                    assert_eq!(*update["value"].borrow(), Value::Number(expected));
+                    assert_eq!(*update["param-idx"].borrow(), Value::Number(param_index(&format!("{prefix}_pitch_env_{suffix}"))));
+                }
+                // Editing Noise must leave the previously selected oscillator open.
+                let control = find_param(&layout, "noise_color_hz").unwrap();
+                let picker = find_layout_node_by_widget_type(control, "number-picker").unwrap();
+                editor.runtime_mut().invoke(picker.props["on-change"].clone(), vec![Value::Number(3000.0)]).unwrap();
+                editor.refresh_runtime_side_effects();
+                let after_noise = editor.widget_layout().unwrap();
+                assert!(find_layout_node_by_debug_name(&after_noise, "heat-pitch-envelope").is_some());
+            }
+            let plot = match section {
+                2 | 3 | 6 | 7 => Some(("heat-envelope", "attack")),
+                _ => None,
+            };
+            if let Some((name, prop)) = plot {
+                let plot = find_layout_node_by_debug_name(&layout, name).expect("visible ADSR editor");
+                assert_eq!(plot.widget_type, "adsr-editor");
+                assert!(plot.rect.width > 0.0 && plot.rect.height > 0.0);
+                let Some(Value::ReactiveRef { namespace, field, slot, .. }) = plot.props.get(prop) else {
+                    panic!("{name} must bind {prop} directly to the parameter: {:?}", plot.props);
+                };
+                let (namespace, field, slot) = (namespace.clone(), field.clone(), slot.clone());
+                let callback = plot.props.get("on-change").expect("editable envelope").clone();
+                editor.drain_host_commands();
+                let env = Value::Map([("attack", 11.0), ("decay", 220.0), ("sustain", 0.42), ("release", 330.0)]
+                    .into_iter().map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(Value::Number(value))))).collect());
+                editor.runtime_mut().invoke(callback, vec![env]).unwrap();
+                let commands = editor.drain_host_commands();
+                let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else {
+                    panic!("envelope edit must emit one batch: {commands:?}");
+                };
+                assert_eq!(name, "set-instrument-param-batch");
+                assert_eq!(*payload["commit"].borrow(), Value::Bool(true));
+                let updates = payload["updates"].borrow();
+                let Value::List(updates) = &*updates else { panic!("ADSR updates"); };
+                assert_eq!(updates.len(), 4);
+                let prefix = match section { 2 => "filter1", 3 => "amp1", 6 => "filter2", _ => "amp2" };
+                for (update, (suffix, value)) in updates.iter().zip([
+                    ("attack_ms", 11.0), ("decay_ms", 220.0), ("sustain", 0.42), ("release_ms", 330.0),
+                ]) {
+                    let update = update.borrow();
+                    let Value::Map(update) = &*update else { panic!("ADSR parameter update"); };
+                    assert_eq!(*update["param-idx"].borrow(), Value::Number(param_index(&format!("{prefix}_env_{suffix}"))));
+                    assert_eq!(*update["value"].borrow(), Value::Number(value));
+                }
+
+                editor.runtime_mut().set_reactive(&namespace, &field, Value::Number(0.37));
+                assert_eq!(f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed)), 0.37,
+                    "parameter changes must reach the editor without rebuilding the panel");
+            }
         }
     }
 
-    /// The pre-curation `core/drift` panel, kept as a test fixture (it no
-    /// longer ships) to exercise the fx-lisp column layout engine.
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_fixture_drift_columns() {
-        let drift_ui =
-            read_fixture_instrument_source("core/drift/ui.lisp").expect("read drift ui");
-        assert_drift_columns_lay_out(
-            drift_ui,
-            "instruments/core/drift/ui.lisp",
-            &["lfo_rate_hz", "mm2_amt", "volume_db", "lp_freq", "drift"],
-        );
-    }
-
-    /// The shipped `Synths/Digi Drift` panel: vs the fixture, the filter column
-    /// exposes `filter_drive` and hp cutoff is a micro control beside keytrack.
     #[test]
     fn metal_seq_fx_lisp_lays_out_digi_drift_columns() {
         let drift_ui = read_factory_source("instruments/Synths/Digi Drift/ui.lisp")
@@ -46361,1457 +46016,6 @@ mod drift_waveform_tests;
             count_stable_key_suffix(&layout, &format!("-{suffix}"), &mut count);
             assert_eq!(count, 1, "{suffix} should be laid out exactly once, got {count}");
         }
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_membrane_tabla_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let tabla_ui = read_fixture_instrument_source("drums/membrane-tabla/ui.lisp")
-            .expect("read membrane-tabla ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/drums/membrane-tabla/ui.lisp".to_string(),
-            tabla_ui,
-        )));
-        let mut tabla_inst = test_instrument_map();
-        tabla_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("release", 0, 700.0, 20.0, 4000.0)),
-                Value::Map(test_param_map("tune", 1, 5.0, -48.0, 24.0)),
-                Value::Map(test_param_map("bend", 2, 0.2, 0.0, 4.0)),
-                Value::Map(test_param_map("tone_damp", 3, 0.002, 0.0, 0.02)),
-                Value::Map(test_param_map("syahi", 4, 1.0, 0.0, 1.5)),
-                Value::Map(test_param_map("finger_hard", 5, 0.004, 0.0002, 0.05)),
-                Value::Map(test_param_map("finger_speed", 6, 0.02, 0.002, 0.2)),
-                Value::Map(test_param_map("scrape", 7, 0.05, 0.0, 1.0)),
-                Value::Map(test_param_map("stroke", 8, 0.5, 0.0, 1.0)),
-                Value::Map(test_param_map("press", 9, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("gliss_range", 10, 0.4, 0.0, 0.8)),
-                Value::Map(test_param_map("damp", 11, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("mic_blend", 12, 0.35, 0.0, 1.0)),
-                Value::Map(test_param_map("body1_freq", 13, 250.0, 40.0, 2000.0)),
-                Value::Map(test_param_map("body1_gain", 14, 1.0, 0.0, 8.0)),
-                Value::Map(test_param_map("body2_freq", 15, 520.0, 40.0, 4000.0)),
-                Value::Map(test_param_map("body2_gain", 16, 0.6, 0.0, 8.0)),
-                Value::Map(test_param_map("body3_freq", 17, 1400.0, 100.0, 8000.0)),
-                Value::Map(test_param_map("body3_gain", 18, 0.3, 0.0, 8.0)),
-                Value::Map(test_param_map("level", 19, 0.3, 0.0, 2.0)),
-            ]))),
-        );
-        let mut tensor = HashMap::new();
-        tensor.insert("idx".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
-        tensor.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String("strike_mask".to_string()))),
-        );
-        tensor.insert(
-            "rows".to_string(),
-            Rc::new(RefCell::new(Value::Number(8.0))),
-        );
-        tensor.insert(
-            "cols".to_string(),
-            Rc::new(RefCell::new(Value::Number(8.0))),
-        );
-        tensor.insert("min".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
-        tensor.insert("max".to_string(), Rc::new(RefCell::new(Value::Number(2.0))));
-        tensor.insert(
-            "value-field".to_string(),
-            Rc::new(RefCell::new(Value::String("tabla-strike-mask".to_string()))),
-        );
-        tensor.insert(
-            "value".to_string(),
-            Rc::new(RefCell::new(test_list(
-                (0..64).map(|_| Value::Number(0.0)).collect(),
-            ))),
-        );
-        tabla_inst.insert(
-            "tensors".to_string(),
-            Rc::new(RefCell::new(test_list(vec![Value::Map(tensor)]))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(tabla_inst)])),
-                (
-                    "tabla-strike-mask",
-                    test_list((0..64).map(|_| Value::Number(0.0)).collect()),
-                ),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load membrane-tabla custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("membrane-tabla fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor
-            .widget_layout()
-            .expect("membrane-tabla layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 40.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-        for suffix in [
-            "strike_mask",
-            "stroke",
-            "press",
-            "syahi",
-            "gliss_range",
-            "body1_freq",
-            "mic_blend",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-        }
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_membrane_hat_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let hat_ui = read_fixture_instrument_source("drums/membrane-hat/ui.lisp")
-            .expect("read membrane-hat ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/drums/membrane-hat/ui.lisp".to_string(),
-            hat_ui,
-        )));
-        let mut hat_inst = test_instrument_map();
-        hat_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("open", 0, 0.25, 0.0, 1.0)),
-                Value::Map(test_param_map("choke", 1, 0.35, 0.0, 1.0)),
-                Value::Map(test_param_map("decay", 2, 900.0, 60.0, 6000.0)),
-                Value::Map(test_param_map("tilt", 3, 0.55, 0.0, 1.5)),
-                Value::Map(test_param_map("tune", 4, -1.0, -36.0, 24.0)),
-                Value::Map(test_param_map("plate_ratio", 5, 1.32, 0.5, 3.0)),
-                Value::Map(test_param_map("strike", 6, 0.7, 0.0, 1.0)),
-                Value::Map(test_param_map("stick_hard", 7, 0.015, 0.0005, 0.05)),
-                Value::Map(test_param_map("stick_speed", 8, 0.03, 0.002, 0.2)),
-                Value::Map(test_param_map("scrape", 9, 0.4, 0.0, 1.0)),
-                Value::Map(test_param_map("rattle", 10, 1.0, 0.0, 4.0)),
-                Value::Map(test_param_map("contact_loss", 11, 0.012, 0.0, 0.08)),
-                Value::Map(test_param_map("sizzle", 12, 0.8, 0.0, 4.0)),
-                Value::Map(test_param_map("wash", 13, 0.5, 0.0, 2.0)),
-                Value::Map(test_param_map("bottom_mix", 14, 0.7, 0.0, 2.0)),
-                Value::Map(test_param_map("body1_freq", 15, 3800.0, 200.0, 12000.0)),
-                Value::Map(test_param_map("body1_gain", 16, 0.8, 0.0, 8.0)),
-                Value::Map(test_param_map("body2_freq", 17, 8200.0, 400.0, 16000.0)),
-                Value::Map(test_param_map("body2_gain", 18, 0.6, 0.0, 8.0)),
-                Value::Map(test_param_map("level", 19, 0.5, 0.0, 2.0)),
-            ]))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(hat_inst)])),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load membrane-hat custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("membrane-hat fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor
-            .widget_layout()
-            .expect("membrane-hat layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 40.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        for suffix in [
-            "open",
-            "choke",
-            "decay",
-            "strike",
-            "rattle",
-            "wash",
-            "tune",
-            "sizzle",
-            "body1_freq",
-            "level",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-        }
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_mnm_vox_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let vox_ui =
-            read_fixture_instrument_source("monomachine/vox/ui.lisp").expect("read vox ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/monomachine/vox/ui.lisp".to_string(),
-            vox_ui,
-        )));
-        let mut vox_inst = test_instrument_map();
-        vox_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("glottis", 0, 0.35, 0.02, 0.5)),
-                Value::Map(test_param_map("vowel", 1, 0.0, 0.0, 9.0)),
-                Value::Map(test_param_map("cons_type", 2, 0.0, 0.0, 7.0)),
-                Value::Map(test_param_map("cons_level", 3, 0.5, 0.0, 1.5)),
-                Value::Map(test_param_map("flt_base", 4, 60.0, 20.0, 11000.0)),
-                Value::Map(test_param_map("env_to_base", 5, 0.0, -6.0, 6.0)),
-                Value::Map(test_param_map("srr", 6, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("amp_hold_ms", 7, 120.0, 0.0, 4000.0)),
-            ]))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(vox_inst)])),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load vox custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("vox fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor.widget_layout().expect("vox layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        for suffix in [
-            "glottis",
-            "vowel",
-            "cons_type",
-            "cons_level",
-            "flt_base",
-            "env_to_base",
-            "srr",
-            "amp_hold_ms",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-        }
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_mnm_grit_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let grit_ui =
-            read_fixture_instrument_source("monomachine/grit/ui.lisp").expect("read grit ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/monomachine/grit/ui.lisp".to_string(),
-            grit_ui,
-        )));
-        let mut grit_inst = test_instrument_map();
-        grit_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("osc_wave", 0, 2.0, 0.0, 4.0)),
-                Value::Map(test_param_map("osc_mode", 1, 0.0, 0.0, 3.0)),
-                Value::Map(test_param_map("tune_semi", 2, 7.0, -36.0, 36.0)),
-                Value::Map(test_param_map("interlace", 3, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("flt_base", 4, 140.0, 20.0, 11000.0)),
-                Value::Map(test_param_map("env_to_width", 5, -1.0, -8.0, 8.0)),
-                Value::Map(test_param_map("srr", 6, 0.12, 0.0, 1.0)),
-                Value::Map(test_param_map("bits", 7, 16.0, 3.0, 16.0)),
-            ]))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(grit_inst)])),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load grit custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("grit fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor.widget_layout().expect("grit layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        for suffix in [
-            "osc_wave",
-            "osc_mode",
-            "tune_semi",
-            "interlace",
-            "flt_base",
-            "env_to_width",
-            "srr",
-            "bits",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-        }
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_mnm_melt_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let melt_ui =
-            read_fixture_instrument_source("monomachine/melt/ui.lisp").expect("read melt ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/monomachine/melt/ui.lisp".to_string(),
-            melt_ui,
-        )));
-        let mut melt_inst = test_instrument_map();
-        melt_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("ratio1", 0, 1.0, 0.25, 16.0)),
-                Value::Map(test_param_map("sweep2", 1, -2.0, -4.0, 4.0)),
-                Value::Map(test_param_map("stack", 2, 0.5, 0.0, 1.0)),
-                Value::Map(test_param_map("feedback", 3, 0.2, 0.0, 1.2)),
-                Value::Map(test_param_map("ratio_snap", 4, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("flt_base", 5, 50.0, 20.0, 11000.0)),
-                Value::Map(test_param_map("env_to_base", 6, 0.0, -6.0, 6.0)),
-                Value::Map(test_param_map("op2_decay_ms", 7, 140.0, 5.0, 8000.0)),
-            ]))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(melt_inst)])),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load melt custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("melt fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor.widget_layout().expect("melt layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        for suffix in [
-            "ratio1",
-            "sweep2",
-            "stack",
-            "feedback",
-            "ratio_snap",
-            "flt_base",
-            "env_to_base",
-            "op2_decay_ms",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-        }
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_mnm_wave3_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        fn find_focusable_descendant(
-            node: &eseqlisp::layout::LayoutNode,
-        ) -> Option<&eseqlisp::layout::LayoutNode> {
-            if node.focusable {
-                return Some(node);
-            }
-            node.children.iter().find_map(find_focusable_descendant)
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let wave3_ui = read_fixture_instrument_source("monomachine/wave3/ui.lisp")
-            .expect("read wave3 ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/monomachine/wave3/ui.lisp".to_string(),
-            wave3_ui,
-        )));
-        let mut wave3_inst = test_instrument_map();
-        wave3_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("wave", 0, 7.0, 1.0, 32.0)),
-                Value::Map(test_param_map("wp", 1, 0.0, 0.0, 127.0)),
-                Value::Map(test_param_map("phase_morph", 2, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("sync_mode", 3, 0.0, 0.0, 2.0)),
-                Value::Map(test_param_map("stack_semi", 4, 12.0, -24.0, 24.0)),
-                Value::Map(test_param_map("bits", 5, 12.0, 4.0, 16.0)),
-                Value::Map(test_param_map("flt_width", 6, 6.5, 0.1, 9.0)),
-                Value::Map(test_param_map("sfrq", 7, 440.0, 20.0, 8000.0)),
-                Value::Map(test_param_map("fenv_decay_ms", 8, 1000.0, 1.0, 8000.0)),
-            ]))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(wave3_inst)])),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load wave3 custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("wave3 fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor.widget_layout().expect("wave3 layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        for suffix in [
-            "wave",
-            "wp",
-            "phase_morph",
-            "sync_mode",
-            "stack_semi",
-            "bits",
-            "flt_width",
-            "sfrq",
-            "fenv_decay_ms",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-        }
-
-        let bits = find_stable_key_suffix(&layout, "bits").expect("bits control");
-        let filter_decay = find_stable_key_suffix(&layout, "fenv_decay_ms")
-            .expect("filter envelope decay control");
-        let bits_picker = find_focusable_descendant(bits).expect("bits number picker");
-        let filter_decay_picker =
-            find_focusable_descendant(filter_decay).expect("filter decay number picker");
-        assert_ne!(
-            bits_picker.stable_widget_id, filter_decay_picker.stable_widget_id,
-            "focusable descendants of distinct keyed controls need distinct stable identities"
-        );
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_operator_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let operator_ui =
-            read_fixture_instrument_source("core/operator/ui.lisp").expect("read operator ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/core/operator/ui.lisp".to_string(),
-            operator_ui,
-        )));
-        let mut operator_inst = test_instrument_map();
-        operator_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("opa_wave", 0, 0.0, 0.0, 6.0)),
-                Value::Map(test_param_map("opd_level_db", 1, -60.0, -60.0, 0.0)),
-                Value::Map(test_param_map("algorithm", 2, 0.0, 0.0, 10.0)),
-                Value::Map(test_param_map("filter_freq", 3, 12000.0, 20.0, 18000.0)),
-                Value::Map(test_param_map("lfo_rate_hz", 4, 5.0, 0.01, 40.0)),
-                Value::Map(test_param_map("penv_amount", 5, 0.0, -48.0, 48.0)),
-                Value::Map(test_param_map("opa_attack", 6, 5.0, 0.1, 10000.0)),
-                Value::Map(test_param_map("volume_db", 7, -12.0, -36.0, 6.0)),
-                Value::Map(test_param_map("shaper_wet", 8, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("penv_mode", 9, 0.0, 0.0, 2.0)),
-                Value::Map(test_param_map("opa_env_mode", 10, 0.0, 0.0, 2.0)),
-                Value::Map(test_param_map("env_sync_div", 11, 2.0, 0.0, 5.0)),
-            ]))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(operator_inst)]),
-                ),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load operator custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("operator fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor
-            .widget_layout()
-            .expect("operator layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        let adsr_editor =
-            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
-        assert!(
-            adsr_editor.rect.width > 8.0
-                && adsr_editor.rect.height > 2.0
-                && adsr_editor.rect.height <= 4.0,
-            "ADSR editor should stay constrained in the medium detail panel, got {:?}",
-            adsr_editor.rect
-        );
-
-        for suffix in [
-            "opa_wave",
-            "opd_level_db",
-            "algorithm",
-            "filter_freq",
-            "lfo_rate_hz",
-            "penv_amount",
-            "opa_attack",
-            "volume_db",
-            "shaper_wet",
-            "penv_mode",
-            "opa_env_mode",
-            "env_sync_div",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-        }
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_flute_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let flute_ui =
-            read_fixture_instrument_source("woodwinds/flute/ui.lisp").expect("read flute ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/woodwinds/flute/ui.lisp".to_string(),
-            flute_ui,
-        )));
-        let mut flute_inst = test_instrument_map();
-        flute_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("attack", 0, 35.0, 1.0, 500.0)),
-                Value::Map(test_param_map("release", 1, 180.0, 5.0, 2000.0)),
-                Value::Map(test_param_map("pressure", 2, 0.72, 0.2, 1.4)),
-                Value::Map(test_param_map("breath", 3, 0.25, 0.0, 1.0)),
-                Value::Map(test_param_map("chiff", 4, 0.35, 0.0, 1.0)),
-                Value::Map(test_param_map("vib_rate", 5, 4.8, 0.1, 12.0)),
-                Value::Map(test_param_map("vib_depth", 6, 8.0, 0.0, 60.0)),
-                Value::Map(test_param_map("jet_ratio", 7, 0.5, 0.2, 0.8)),
-                Value::Map(test_param_map("brightness", 8, 0.55, 0.0, 1.0)),
-                Value::Map(test_param_map("lock", 9, 0.5, 0.0, 1.0)),
-                Value::Map(test_param_map("refl", 10, 0.55, 0.3, 0.8)),
-                Value::Map(test_param_map("chaos", 11, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("chaos_rate", 12, 3.5, 0.1, 25.0)),
-                Value::Map(test_param_map("overblow", 13, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("growl", 14, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("growl_ratio", 15, 1.5, 0.25, 3.0)),
-                Value::Map(test_param_map("flutter", 16, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("tune", 17, 0.0, -100.0, 100.0)),
-                Value::Map(test_param_map("vel_to_press", 18, 0.5, 0.0, 1.0)),
-                Value::Map(test_param_map("gain", 19, 0.4, 0.0, 1.0)),
-            ]))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(flute_inst)])),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load flute custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("flute fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor.widget_layout().expect("flute layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 40.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        for suffix in [
-            "pressure",
-            "breath",
-            "chiff",
-            "brightness",
-            "lock",
-            "refl",
-            "jet_ratio",
-            "vib_rate",
-            "chaos",
-            "overblow",
-            "growl",
-            "chaos_rate",
-            "flutter",
-            "gain",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-        }
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_wavetable_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let wavetable_ui = read_fixture_instrument_source("core/wavetable/ui.lisp")
-            .expect("read wavetable ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/core/wavetable/ui.lisp".to_string(),
-            wavetable_ui,
-        )));
-        let mut wavetable_inst = test_instrument_map();
-        wavetable_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("osc1_set", 0, 0.0, 0.0, 19.0)),
-                Value::Map(test_param_map("osc1_wave", 1, 0.0, 0.0, 15.0)),
-                Value::Map(test_param_map("osc1_warp", 2, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("osc1_fold", 3, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("osc1_semi", 4, 0.0, -24.0, 24.0)),
-                Value::Map(test_param_map("osc1_detune", 5, 0.0, -50.0, 50.0)),
-                Value::Map(test_param_map("osc1_gain_db", 6, -6.0, -60.0, 6.0)),
-                Value::Map(test_param_map("osc2_on", 7, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("osc2_set", 8, 0.0, 0.0, 19.0)),
-                Value::Map(test_param_map("osc2_wave", 9, 0.0, 0.0, 15.0)),
-                Value::Map(test_param_map("osc2_warp", 10, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("osc2_fold", 11, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("osc2_semi", 12, 0.0, -24.0, 24.0)),
-                Value::Map(test_param_map("osc2_detune", 13, 0.0, -50.0, 50.0)),
-                Value::Map(test_param_map("osc2_gain_db", 14, -6.0, -60.0, 6.0)),
-                Value::Map(test_param_map("filter_mode", 15, 0.0, 0.0, 2.0)),
-                Value::Map(test_param_map("cutoff", 16, 9000.0, 40.0, 16000.0)),
-                Value::Map(test_param_map("resonance", 17, 0.6, 0.5, 6.0)),
-                Value::Map(test_param_map("amp_attack_ms", 18, 3.0, 1.0, 8000.0)),
-                Value::Map(test_param_map("volume_db", 19, -8.0, -60.0, 6.0)),
-            ]))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(wavetable_inst)]),
-                ),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                (def asset-metadata (path)
-                  (dict :sets '("Metadata Alpha" "Metadata Omega") :waves-per-set 7))
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load wavetable custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("wavetable fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor
-            .widget_layout()
-            .expect("wavetable layout should build");
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        let viewer = find_layout_node_by_widget_type(&layout, "wavetable-viewer")
-            .expect("wavetable viewer widget");
-        assert!(
-            viewer.rect.width > 10.0 && viewer.rect.height > 3.0 && viewer.rect.height < 4.2,
-            "the single wavetable viewer should occupy visible space while leaving explicit room for the oscillator tabs, got {:?}",
-            viewer.rect
-        );
-        assert_eq!(
-            viewer.props.get("waves-per-set"),
-            Some(&Value::Number(7.0)),
-            "wavetable viewer grouping should come from the bank's asset metadata"
-        );
-        let osc1_set = find_stable_key_suffix(&layout, "osc1_set")
-            .expect("osc1 set control should be present in layout");
-        let osc1_set_dropdown = find_layout_node_by_widget_type(osc1_set, "dropdown")
-            .expect("osc1 set control should contain a dropdown");
-        assert_eq!(
-            osc1_set_dropdown.props.get("options"),
-            Some(&test_string_list(&["Metadata Alpha", "Metadata Omega"])),
-            "wavetable set labels should come from the bank's asset metadata"
-        );
-        assert_eq!(
-            count_widget_type(&layout, "wavetable-viewer"),
-            1,
-            "only the selected oscillator viewer should be measured"
-        );
-
-        for (tab_name, debug_name) in [("Osc 1", "wt-osc-tab-1"), ("Osc 2", "wt-osc-tab-2")] {
-            let tab = find_layout_node_by_debug_name(&layout, debug_name)
-                .unwrap_or_else(|| panic!("{tab_name} tab should render"));
-            assert!(
-                tab.rect.width > 5.0 && tab.rect.height > 0.5,
-                "{tab_name} tab should have visible geometry, got {:?}",
-                tab.rect
-            );
-        }
-        let tab_divider = find_layout_node_by_debug_name(&layout, "wt-osc-tabs-divider")
-            .expect("oscillator tabs divider");
-        assert!(
-            tab_divider.rect.width > 10.0 && tab_divider.rect.height > 0.0,
-            "oscillator tab divider should span the oscillator panel, got {:?}",
-            tab_divider.rect
-        );
-
-        let adsr_editor = find_layout_node_by_widget_type(&layout, "adsr-editor")
-            .expect("wavetable ADSR editor widget");
-        assert!(
-            adsr_editor.rect.width > viewer.rect.width * 1.6 && adsr_editor.rect.height > 6.0,
-            "Wavetable should reserve a full-height envelope slice roughly 1.75x wider than an oscillator plot, viewer={:?} adsr={:?}",
-            viewer.rect,
-            adsr_editor.rect
-        );
-        assert!(
-            adsr_editor.rect.row >= instrument_panel.rect.row
-                && adsr_editor.rect.row + adsr_editor.rect.height
-                    <= instrument_panel.rect.row + instrument_panel.rect.height,
-            "wide ADSR editor should remain inside the instrument panel, editor={:?} panel={:?}",
-            adsr_editor.rect,
-            instrument_panel.rect
-        );
-
-        let filter_curve = find_layout_node_by_widget_type(&layout, "response-curve-editor")
-            .expect("wavetable filter response curve");
-        assert!(
-            filter_curve.rect.width > 15.0 && filter_curve.rect.height > 4.5,
-            "filter response curve should own the upper filter surface, got {:?}",
-            filter_curve.rect
-        );
-        assert!(
-            filter_curve.props.contains_key("on-action"),
-            "filter response curve should be interactive"
-        );
-
-        for suffix in [
-            "osc1_set",
-            "osc1_wave",
-            "osc1_warp",
-            "osc1_fold",
-            "osc1_semi",
-            "osc1_detune",
-            "osc1_gain_db",
-            "filter_mode",
-            "cutoff",
-            "resonance",
-            "volume_db",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-        }
-        for suffix in ["cutoff", "resonance"] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("large {suffix} knob should render"));
-            assert!(
-                node.rect.height > 4.0,
-                "{suffix} should use the large knob layout below the curve, got {:?}",
-                node.rect
-            );
-        }
-        assert!(
-            find_stable_key_suffix(&layout, "vel_sens").is_none(),
-            "velocity sensitivity should not remain in the Wavetable UI"
-        );
-
-        assert!(
-            find_stable_key_suffix(&layout, "osc2_set").is_none(),
-            "unselected oscillator controls should not remain in the layout"
-        );
-        let osc2_tab = find_layout_node_by_debug_name(&layout, "wt-osc-tab-2").expect("Osc 2 tab");
-        let callback = osc2_tab
-            .props
-            .get("on-click")
-            .cloned()
-            .expect("Osc 2 tab click callback");
-        editor
-            .runtime_mut()
-            .invoke(callback, vec![Value::Bool(false)])
-            .expect("select Osc 2");
-        editor.refresh_runtime_side_effects();
-        let osc2_layout = editor
-            .widget_layout()
-            .expect("wavetable layout after selecting Osc 2");
-        assert_finite_layout_tree(&osc2_layout);
-        assert_eq!(
-            count_widget_type(&osc2_layout, "wavetable-viewer"),
-            1,
-            "switching tabs should still measure one viewer"
-        );
-        assert_eq!(
-            count_widget_type(&osc2_layout, "toggle"),
-            1,
-            "Osc 2 on/off should use a toggle rather than an option dropdown"
-        );
-        let osc2_toggle =
-            find_layout_node_by_widget_type(&osc2_layout, "toggle").expect("Osc 2 on/off toggle");
-        assert!(
-            matches!(osc2_toggle.props.get("value"), Some(Value::Bool(_))),
-            "instrument 0/1 state should be normalized to a boolean before reaching the toggle; props={:?}",
-            osc2_toggle.props
-        );
-        assert!(
-            osc2_toggle.rect.width > 2.0 && osc2_toggle.rect.height > 0.5,
-            "Osc 2 toggle should have visible measured geometry, got {:?}",
-            osc2_toggle.rect
-        );
-        for suffix in [
-            "osc2_on",
-            "osc2_set",
-            "osc2_wave",
-            "osc2_warp",
-            "osc2_fold",
-            "osc2_semi",
-            "osc2_detune",
-            "osc2_gain_db",
-        ] {
-            let node = find_stable_key_suffix(&osc2_layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} should render after selecting Osc 2"));
-            assert!(
-                node.rect.width > 1.0 && node.rect.height > 0.0,
-                "{suffix} should have visible geometry after selecting Osc 2, got {:?}",
-                node.rect
-            );
-        }
-        assert!(
-            find_stable_key_suffix(&osc2_layout, "osc1_set").is_none(),
-            "Osc 1 controls should leave the layout after selecting Osc 2"
-        );
     }
 
     #[test]
@@ -49837,719 +48041,6 @@ mod drift_waveform_tests;
             "modulator curve should be visible inside panel, curve={:?}; panel={:?}",
             curve.rect,
             panel.rect
-        );
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_collects_modded_909_mutant_knob_primitives() {
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-
-        fn find_descendant_widget<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            widget_type: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.widget_type == widget_type {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_descendant_widget(child, widget_type))
-        }
-
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
-            MouseEvent {
-                kind,
-                column,
-                row,
-                modifiers: KeyModifiers::NONE,
-            }
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let ui = read_fixture_instrument_source("drums/909-mutant-fm/ui.lisp")
-            .expect("read 909 ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "909-mutant-fm/".to_string(),
-            "instruments/drums/909-mutant-fm/ui.lisp".to_string(),
-            ui,
-        )));
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(220, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(mutant_909_test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load 909 custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor
-            .runtime_mut()
-            .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 0) (set! eseq.effects.state/instrument-mods-open false) (set! eseq.effects.state/instrument-selected-mod-slot 1))")
-            .expect("show synth tab before opening inline mods");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("909 custom instrument fx lisp status after synth refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        let synth_layout = editor
-            .widget_layout()
-            .expect("909 synth layout should build");
-        assert_finite_layout_tree(&synth_layout);
-        let synth_sweep =
-            find_stable_key_suffix(&synth_layout, "pitch_sweep").expect("synth sweep knob wrapper");
-        let synth_sweep_knob = find_descendant_widget(synth_sweep, "knob-number")
-            .expect("synth sweep wrapper should contain its knob-number");
-        assert!(
-            synth_sweep_knob.rect.width > 0.0 && synth_sweep_knob.rect.height > 0.0,
-            "synth sweep knob-number should be measured before opening mods: {:?}",
-            synth_sweep_knob.rect
-        );
-        let _synth_frame =
-            eseqlisp::ui::frame::build_tiled_render_frame_borderless(&mut editor, 220, 18);
-
-        let mods_label =
-            find_layout_node_by_text(&synth_layout, "mods").expect("mods header label");
-        let click_col = mods_label.rect.col + mods_label.rect.width * 0.5;
-        let click_row = mods_label.rect.row + mods_label.rect.height * 0.5;
-        editor.handle_mouse_precise(
-            mouse_event(
-                MouseEventKind::Down(MouseButton::Left),
-                click_col as u16,
-                click_row as u16,
-            ),
-            0,
-            0,
-            220,
-            18,
-            click_col,
-            click_row,
-        );
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("909 custom instrument fx lisp status after mods refresh: {status}");
-        }
-        editor.set_active_buffer(fx_id);
-        let _mods_frame =
-            eseqlisp::ui::frame::build_tiled_render_frame_borderless(&mut editor, 220, 18);
-        let layout = editor.widget_layout().expect("909 mod layout should build");
-        assert_finite_layout_tree(&layout);
-        let selector = find_layout_node_by_debug_name(&layout, "instrument-mod-selector")
-            .expect("909 mods-open layout should include the inline mod selector");
-        assert!(
-            selector.rect.width > 0.0 && selector.rect.height > 0.0,
-            "909 mods selector should be measured: {:?}",
-            selector.rect
-        );
-        let selector_button_count = count_widget_type(selector, "button");
-        assert!(selector_button_count >= 4, "{}", {
-            let mut summaries = Vec::new();
-            collect_layout_node_summaries(selector, &mut summaries);
-            format!(
-                "909 mods-open layout should render one selector button per mod slot; got {selector_button_count}\n{}",
-                summaries.join("\n")
-            )
-        });
-        let sweep = find_stable_key_suffix(&layout, "pitch_sweep").expect("sweep knob wrapper");
-        assert!(
-            sweep.rect.width > 0.0 && sweep.rect.height > 0.0,
-            "sweep knob wrapper should be measured: {:?}",
-            sweep.rect
-        );
-        let sweep_knob = find_descendant_widget(sweep, "knob-number")
-            .expect("sweep wrapper should contain its knob-number while mods are open");
-        assert!(
-            sweep_knob.rect.width > 0.0 && sweep_knob.rect.height > 0.0,
-            "sweep knob-number should be measured while mods are open: {:?}",
-            sweep_knob.rect
-        );
-        for prop in [
-            "base-value",
-            "base-min",
-            "base-max",
-            "selected-mod-slot",
-            "mod-range-0-slot",
-            "mod-range-0-depth",
-        ] {
-            assert!(
-                !matches!(sweep_knob.props.get(prop), None | Some(Value::Bool(false))),
-                "sweep knob-number should carry active mod prop {prop:?} in mods tab; props={:?}",
-                sweep_knob.props.keys().collect::<Vec<_>>()
-            );
-        }
-
-        {
-            use eseqlisp::widget_render::{GpuPrimitive, WidgetViewport};
-
-            let viewport = WidgetViewport {
-                cell_w: 10.0,
-                cell_h: 10.0,
-                vp_w: 2200.0,
-                vp_h: 180.0,
-                time_seconds: 0.0,
-                focused_widget_id: None,
-                focused_branch: false,
-                overlay_viewport_bottom: 18.0,
-                scroll_top: 0.0,
-                scroll_left: 0.0,
-                inherited_hover: false,
-            };
-            let (primitives, _) =
-                eseqlisp::widget_render::collect_gpu_primitives(&layout, viewport, 0.0, 18);
-            let knob_instances = primitives
-                .iter()
-                .filter(|primitive| {
-                    matches!(
-                        primitive,
-                        GpuPrimitive::WidgetInstance { widget_type, .. }
-                            if widget_type == "knob-number"
-                    )
-                })
-                .count();
-            let knob_text = primitives
-                .iter()
-                .filter_map(|primitive| match primitive {
-                    GpuPrimitive::ProportionalText(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .filter(|text| matches!(*text, "sweep" | "FM" | "body" | "drv"))
-                .collect::<Vec<_>>();
-            assert!(
-                knob_instances >= 12,
-                "909 mods-open primitive stream should include knob-number instances; got {knob_instances}"
-            );
-            assert!(
-                knob_text.len() >= 4,
-                "909 mods-open primitive stream should include knob labels; got {knob_text:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_prophet_6_inspired_condensed_controls() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let ui = read_fixture_instrument_source("emulations/prophet-6-inspired/ui.lisp")
-            .expect("read prophet-6-inspired ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "emulations/prophet-6-inspired/".to_string(),
-            "instruments/emulations/prophet-6-inspired/ui.lisp".to_string(),
-            ui,
-        )));
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(prophet_6_inspired_test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load prophet-6-inspired custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("prophet-6-inspired custom instrument fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor
-            .widget_layout()
-            .expect("prophet-6-inspired layout should build");
-        let rendered = render_layout_cells(&layout, 180, 18);
-        assert!(
-            !rendered.contains("missing:"),
-            "prophet-6-inspired condensed UI should not render missing-param diagnostics:\n{rendered}"
-        );
-
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        let adsr_editor =
-            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
-        assert!(
-            adsr_editor.rect.width > 8.0 && adsr_editor.rect.height > 2.0,
-            "prophet-6-inspired ADSR editor should have a visible measured rect, got {:?}",
-            adsr_editor.rect
-        );
-
-        for suffix in [
-            "osc1_shape",
-            "osc2_shape",
-            "cutoff",
-            "filter_drive",
-            "lfo_rate_hz",
-            "gain",
-        ] {
-            let node = find_stable_key_suffix(&layout, suffix)
-                .unwrap_or_else(|| panic!("{suffix} control should be present"));
-            assert!(
-                node.rect.width > 1.0
-                    && node.rect.height > 0.4
-                    && node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should have a finite visible rect inside the instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-        }
-    }
-
-    #[test]
-    fn machinedrum_custom_ui_engine_blocks_update_from_reactive_engine_value() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        fn dsp_param_names(path: &str) -> Vec<String> {
-            read_fixture_instrument_source(path)
-                .unwrap_or_else(|error| panic!("read {path}: {error}"))
-                .lines()
-                .filter_map(|line| {
-                    let line = line.trim_start();
-                    line.strip_prefix("(param ")
-                        .and_then(|rest| rest.split_whitespace().next())
-                        .map(str::to_string)
-                })
-                .collect()
-        }
-
-        fn md_hat_instrument_map() -> HashMap<String, Rc<RefCell<Value>>> {
-            let mut inst = test_instrument_map();
-            inst.insert(
-                "name".to_string(),
-                Rc::new(RefCell::new(Value::String("drums/md-hat/".to_string()))),
-            );
-            inst.insert(
-                "display-name".to_string(),
-                Rc::new(RefCell::new(Value::String("drums/md-hat".to_string()))),
-            );
-
-            let synth_params: Vec<Value> = std::iter::once(Value::Map(test_base_note_param_map(0)))
-                .chain(
-                    dsp_param_names("drums/md-hat/dsp.lisp")
-                        .into_iter()
-                        .enumerate()
-                        .map(|(idx, name)| {
-                            let mut param = test_param_map(&name, idx + 1, 0.0, -10000.0, 10000.0);
-                            if name == "engine" {
-                                param.insert(
-                                    "value-field".to_string(),
-                                    Rc::new(RefCell::new(Value::String(
-                                        "md-hat-test-engine".to_string(),
-                                    ))),
-                                );
-                            }
-                            Value::Map(param)
-                        }),
-                )
-                .collect();
-            inst.insert(
-                "synth".to_string(),
-                Rc::new(RefCell::new(test_list(synth_params))),
-            );
-            inst
-        }
-
-        let ui =
-            read_fixture_instrument_source("drums/md-hat/ui.lisp").expect("read md-hat ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "drums/md-hat/".to_string(),
-            "instruments/drums/md-hat/ui.lisp".to_string(),
-            ui,
-        )));
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("md-hat-test-engine", Value::Number(2.0)),
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(md_hat_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load md-hat custom UI");
-        editor
-            .runtime_mut()
-            .eval_str(&read_ui_source("effects.lisp").expect("read fx lisp"))
-            .expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("md-hat custom UI status after refresh: {status}");
-        }
-
-        let numeric_param_value = editor
-            .runtime_mut()
-            .eval_str(
-                r#"(> (eseq.effects.custom-ui-runtime/custom-ui-param-value
-                       (eseq.effects.custom-ui-runtime/inst-param (nth SEQ.instrument-panel 0) "engine"))
-                      0.5)"#,
-            )
-            .expect("custom UI numeric parameter API should support arithmetic");
-        assert_eq!(numeric_param_value, Some(Value::Bool(true)));
-        let bound_param_value = editor
-            .runtime_mut()
-            .eval_str(
-                r#"(eseq.effects.custom-ui-runtime/custom-ui-param-binding
-                    (eseq.effects.custom-ui-runtime/inst-param (nth SEQ.instrument-panel 0) "engine"))"#,
-            )
-            .expect("custom UI widget parameter API should return a binding");
-        assert!(
-            matches!(bound_param_value, Some(Value::ReactiveRef { .. })),
-            "custom UI widget values must retain their reactive binding, got {bound_param_value:?}"
-        );
-        let binding_backed_effect_toggle = editor
-            .runtime_mut()
-            .eval_str(
-                r#"(eseq.effects.param-controls/fx-param-on-for?
-                    false
-                    (dict :value 0 :value-field "md-hat-test-engine"))"#,
-            )
-            .expect("effect boolean helper should dereference value-field bindings");
-        assert_eq!(binding_backed_effect_toggle, Some(Value::Bool(true)));
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        let initial_layout = editor.widget_layout().expect("initial md-hat layout");
-        assert!(
-            find_stable_key_suffix(&initial_layout, "mod_amt").is_some(),
-            "initial md-hat engine=2 reactive value should contain mod_amt"
-        );
-        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
-
-        editor
-            .runtime_mut()
-            .eval_str(r#"(reactive-set "SEQ" "md-hat-test-engine" 1)"#)
-            .expect("set md-hat engine reactively");
-        editor.refresh_runtime_side_effects();
-        let updated_layout = editor.widget_layout().expect("updated md-hat layout");
-        assert!(
-            find_stable_key_suffix(&updated_layout, "gap").is_some(),
-            "changing the engine value should rerender the TRX-HH engine block immediately"
-        );
-        assert!(
-            find_stable_key_suffix(&updated_layout, "mod_amt").is_none(),
-            "EFM-HH controls should leave the visible layout after switching back to TRX-HH"
-        );
-    }
-
-    #[test]
-    fn minimoog_lad2_filter_controls_select_filter_envelope() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        fn collect_stable_keys(node: &eseqlisp::layout::LayoutNode, keys: &mut Vec<String>) {
-            if let Some(key) = &node.stable_key {
-                keys.push(key.clone());
-            }
-            for child in &node.children {
-                collect_stable_keys(child, keys);
-            }
-        }
-
-        fn layout_node_contains_string(node: &eseqlisp::layout::LayoutNode, needle: &str) -> bool {
-            node.props
-                .values()
-                .any(|value| value_contains_string(value, needle))
-                || node
-                    .children
-                    .iter()
-                    .any(|child| layout_node_contains_string(child, needle))
-        }
-
-        fn find_clickable_node_containing<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            needle: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.props.contains_key("on-click") && layout_node_contains_string(node, needle) {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_clickable_node_containing(child, needle))
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let minimoog_ui = read_fixture_instrument_source("emulations/minimoog-lad2/ui.lisp")
-            .expect("read ui");
-        let initial_custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
-        let minimoog_custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "emulations/minimoog-lad2".to_string(),
-            "instruments/emulations/minimoog-lad2/ui.lisp".to_string(),
-            minimoog_ui,
-        )));
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(160, 20);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                (
-                    "instrument-panel",
-                    test_list(vec![Value::Map(minimoog_lad2_test_instrument_map())]),
-                ),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&initial_custom_ui_source)
-            .expect("load initial empty custom instrument UI");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor
-            .runtime_mut()
-            .eval_str(&minimoog_custom_ui_source)
-            .expect("load minimoog-lad2 custom instrument UI");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("minimoog-lad2 custom instrument fx lisp status after refresh: {status}");
-        }
-
-        let initial_tree = editor
-            .runtime_mut()
-            .eval_str("(custom-instrument-synth-ui (nth SEQ.instrument-panel 0))")
-            .expect("render initial minimoog-lad2 UI")
-            .expect("initial UI value");
-        assert!(value_contains_string(&initial_tree, "AMP ENV"));
-        assert!(
-            !value_contains_string(&initial_tree, "FILTER ENV"),
-            "filter envelope should not be selected before filter controls are used"
-        );
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        let layout = editor.widget_layout().expect("minimoog-lad2 layout");
-        let mut layout_summaries = Vec::new();
-        collect_layout_node_summaries(&layout, &mut layout_summaries);
-        let mut stable_keys = Vec::new();
-        collect_stable_keys(&layout, &mut stable_keys);
-        let env_amount =
-            find_stable_key_suffix(&layout, "filter_env_amount").unwrap_or_else(|| {
-                panic!(
-                "filter_env_amount knob; stable_keys={stable_keys:#?}; layout={layout_summaries:#?}"
-            )
-            });
-        let callback = env_amount
-            .props
-            .get("on-change")
-            .cloned()
-            .expect("filter_env_amount on-change");
-        editor
-            .runtime_mut()
-            .invoke(callback, vec![Value::Number(750.0)])
-            .expect("invoke filter_env_amount on-change");
-        let sections = editor
-            .runtime_mut()
-            .eval_str("eseq.effects.custom-ui-sections/custom-ui-selected-sections")
-            .expect("read custom UI selected sections")
-            .expect("selected sections value");
-
-        let selected_tree = editor
-            .runtime_mut()
-            .eval_str("(custom-instrument-synth-ui (nth SEQ.instrument-panel 0))")
-            .expect("render selected minimoog-lad2 UI")
-            .expect("selected UI value");
-        assert!(
-            value_contains_string(&selected_tree, "FILTER ENV"),
-            "using filter controls should select the filter envelope; sections={sections:?}; tree={selected_tree:?}"
         );
     }
 
@@ -53919,134 +51410,6 @@ mod drift_waveform_tests;
     }
 
     #[test]
-    fn generated_custom_instrument_uis_eval_and_dispatch() {
-        let mut runtime = Runtime::new();
-        runtime
-            .eval_str(
-                r#"
-                (def synth-ui-current-inst false)
-                (def synth-ui-current-name "")
-                (def eseq.effects.custom-ui-runtime/inst-param (inst name)
-                  (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
-                (def eseq.effects.custom-ui-runtime/inst-base-note-param (inst)
-                  (nth (filter |p| (= (get p :control) "eseq.effects.custom-ui-runtime/base-note") (get inst :synth)) 0))
-                (def eseq.effects.param-controls/fx-param-value (p)
-                  (if (get p :value-field)
-                    (bind-seq (get p :value-field))
-                    (get p :value)))
-                (def eseq.effects.custom-ui-runtime/base-note ()
-                  (label "base" :font-size 10 :color :gray :bg :transparent))
-                (def custom-ui-current-kind "instrument")
-                (def custom-ui-selected-section 0)
-                (def eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope () custom-ui-selected-section)
-                (def eseq.effects.custom-ui-sections/ui-select-section (section) (set! custom-ui-selected-section section))
-                (def eseq.effects.custom-ui-lego/ui-accent-blue () :blue)
-                (def eseq.effects.custom-ui-lego/ui-accent-cyan () :cyan)
-                (def eseq.effects.custom-ui-lego/ui-accent-orange () :orange)
-                (def eseq.effects.custom-ui-lego/ui-accent-green () :green)
-                (def eseq.effects.custom-ui-lego/ui-accent-violet () :magenta)
-                (def eseq.effects.custom-ui-lego/ui-lego-gap () 0.25)
-                (def eseq.effects.custom-ui-lego/ui-lego-small-h () 1.95)
-                (def eseq.effects.custom-ui-lego/ui-lego-medium-h () 4.08)
-                (def eseq.effects.custom-ui-lego/ui-lego-dense-h () 3.08)
-                (def eseq.effects.custom-ui-lego/ui-lego-full-h () 8.48)
-                (def eseq.effects.custom-ui-lego/ui-lego-col-w () 24.0)
-                (def eseq.effects.custom-ui-lego/ui-lego-strip-w () 7.2)
-                (def eseq.effects.custom-ui-lego/ui-control-block-small (title accent body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-block-medium (title accent body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-block-full (title accent body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-block-small-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-block-medium-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-block-small-wide-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-block-medium-wide-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-block-dense-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-panel-dense-s (section body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-panel-small-s (section body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-panel-medium-s (section body) body)
-                (def eseq.effects.custom-ui-lego/ui-control-block-full-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-readout-block-small (title accent body) body)
-                (def eseq.effects.custom-ui-lego/ui-readout-block-small-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-readout-block-small-wide-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-readout-block-dense-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-readout-panel-small-s (section body) body)
-                (def eseq.effects.custom-ui-lego/ui-readout-panel-dense-s (section body) body)
-                (def eseq.effects.custom-ui-lego/ui-readout-panel-medium-s (section body) body)
-                (def eseq.effects.custom-ui-lego/ui-readout-block-medium (title accent body) body)
-                (def eseq.effects.custom-ui-lego/ui-readout-block-full (title accent body) body)
-                (def eseq.effects.custom-ui-lego/ui-lego-column (a b c) (v-stack a b c))
-                (def eseq.effects.custom-ui-lego/ui-lego-column-2 (a b) (v-stack a b))
-                (def eseq.effects.custom-ui-lego/ui-lego-column-full (a) (v-stack a))
-                (def eseq.effects.custom-ui-lego/ui-lego-column-wide (a b c) (v-stack a b c))
-                (def eseq.effects.custom-ui-lego/ui-lego-column-wide-2 (a b) (v-stack a b))
-                (def eseq.effects.custom-ui-lego/ui-lego-column-wide-full (a) (v-stack a))
-                (def eseq.effects.custom-ui-lego/ui-lego-strip-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-lego-strip-half-s (title accent section body) body)
-                (def eseq.effects.custom-ui-lego/ui-lego-strip-panel-s (section body) body)
-                (def eseq.effects.custom-ui-lego/ui-lego-badge (title width accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-badge-s (section title width accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-knob (name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-knob-s (section name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-num (name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-micro-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-option (name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-micro-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-row (name title decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-base-note (width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s (section width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-lego-text-row-3 (a b c) (h-stack a b c))
-                (def eseq.effects.custom-ui-lego/ui-lego-text-row-4 (a b c d) (h-stack a b c d))
-                (def eseq.effects.custom-ui-lego/ui-lego-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-detail-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-detail-adsr-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-adsr-compact-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-adsr-compact-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
-                (def eseq.effects.custom-ui-lego/ui-adsr-number-s (section name title decimals unit) (label title :font-size 10 :color :gray :bg :transparent))
-                "#,
-            )
-            .expect("load custom UI test helpers");
-
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
-        runtime
-            .eval_str(&custom_ui_source)
-            .expect("load custom instrument UIs");
-
-        for instrument_name in [
-            "emulations/dx7-4op/",
-            "emulations/digitone/",
-            "emulations/hammond-organ/",
-            "emulations/minimoog/",
-            "emulations/monomachine-digipro/",
-            "emulations/monomachine-dpro-bbox-v1/",
-            "emulations/monomachine-dpro-dens-v1/",
-            "emulations/monomachine-dpro-ddrw-v1/",
-            "emulations/monomachine-dpro-wave-v2/",
-            "emulations/monomachine-fmplus/",
-            "emulations/monomachine-fmplus-par-v1/",
-            "emulations/monomachine-fmplus-stat-v1/",
-            "emulations/monomachine-sid/",
-            "emulations/monomachine-superwave/",
-            "emulations/oberheim-sem/",
-            "emulations/prophet-5/",
-            "emulations/prophet-6/",
-            "emulations/prophet-6-emu/",
-            "emulations/prophet-6-inspired/",
-            "emulations/rhodes-additive-v2/",
-        ] {
-            let expr = format!(
-                "(custom-instrument-synth-ui (dict :name {:?} :synth (list (dict :name \"base_note\" :control \"eseq.effects.custom-ui-runtime/base-note\" :value 0 :min -48 :max 48))))",
-                instrument_name
-            );
-            let rendered = runtime.eval_str(&expr).expect(instrument_name);
-            assert!(
-                !matches!(rendered, Some(Value::Bool(false)) | None),
-                "{instrument_name} did not dispatch to a custom UI"
-            );
-        }
-    }
-
-    #[test]
     fn generated_custom_midi_fx_uis_eval_and_dispatch() {
         let mut runtime = Runtime::new();
         runtime
@@ -56421,4 +53784,3 @@ mod drift_waveform_tests;
             "only the loose tracks keep their step grids while the rack is collapsed"
         );
     }
-

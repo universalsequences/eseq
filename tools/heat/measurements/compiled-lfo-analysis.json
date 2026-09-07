@@ -1,0 +1,123 @@
+{
+  "scope": "Audio-rate LFO timing checks and provisional reference waveform errors; control-grid parity excluded",
+  "macro_sha256": "289d09fd4794937749f4ba70de3ef6415c8d211beafcc383e6b9beaf91a0f901",
+  "timing_cases": {
+    "44100-retrigger0": {
+      "max_error": 7.016997666253744e-07,
+      "passed": true
+    },
+    "44100-retrigger1": {
+      "max_error": 7.016997666253744e-07,
+      "passed": true
+    },
+    "44100-stopped-offset-0.75": {
+      "max_error": 1.242912274213026e-07,
+      "passed": true
+    },
+    "44100-stopped-offset0.25": {
+      "max_error": 1.242912274213026e-07,
+      "passed": true
+    },
+    "48000-retrigger0": {
+      "max_error": 8.90765924355108e-07,
+      "passed": true
+    },
+    "48000-retrigger1": {
+      "max_error": 8.90765924355108e-07,
+      "passed": true
+    },
+    "48000-stopped-offset-0.75": {
+      "max_error": 1.2238820401577755e-07,
+      "passed": true
+    },
+    "48000-stopped-offset0.25": {
+      "max_error": 1.2238820401577755e-07,
+      "passed": true
+    },
+    "96000-retrigger0": {
+      "max_error": 8.941345867041761e-07,
+      "passed": true
+    },
+    "96000-retrigger1": {
+      "max_error": 8.941345867041761e-07,
+      "passed": true
+    },
+    "96000-stopped-offset-0.75": {
+      "max_error": 1.2238820401577755e-07,
+      "passed": true
+    },
+    "96000-stopped-offset0.25": {
+      "max_error": 1.2238820401577755e-07,
+      "passed": true
+    }
+  },
+  "reference_cases": {
+    "lfo-shape0-width0.5": {
+      "reference_sha256": "fe411b14432538599f6ea480ecc4d641dd405287f46f16aade000de5e72323d3",
+      "rms_error": 0.009814229551862912,
+      "max_error": 0.020615810792193878,
+      "mean_error": 0.0006190063465208441
+    },
+    "lfo-shape1-width0": {
+      "reference_sha256": "a40e589f94b210e0218eb0f12f2f13f13b52eb221030c9f0ccce95c0fad9705d",
+      "rms_error": 0.04643908115583423,
+      "max_error": 2.1052632331848145,
+      "mean_error": -0.003500216790466151
+    },
+    "lfo-shape1-width0.25": {
+      "reference_sha256": "c8692a28165397e3b01c554bc12d2b6f37ecba60db39b9af46cc070cd1969458",
+      "rms_error": 0.010742795084131042,
+      "max_error": 0.27007885586841107,
+      "mean_error": -0.0037062470832619704
+    },
+    "lfo-shape1-width0.5": {
+      "reference_sha256": "1a0433704cf81865b46fe80dbd7118d88d03487f8bacc34ac228a388a9116689",
+      "rms_error": 0.006306822329368343,
+      "max_error": 0.014102399513125974,
+      "mean_error": -0.0033977982632404
+    },
+    "lfo-shape1-width0.75": {
+      "reference_sha256": "4cb459b09fcc459f7b0b287625881ec760a05989357bac7c4ddc93fb081a3269",
+      "rms_error": 0.020109778461732328,
+      "max_error": 0.2790221143449638,
+      "mean_error": -0.003038300505201464
+    },
+    "lfo-shape1-width1": {
+      "reference_sha256": "96378b799de0e665aa780213d42c11cf15b20b1fe910e0381e540fbebe5dbedc",
+      "rms_error": 0.09829195827039518,
+      "max_error": 2.10524582862854,
+      "mean_error": -0.003042341153719832
+    },
+    "lfo-shape2-width0": {
+      "reference_sha256": "16819f6cec082ebb1c1bbb76cf5b2aef465d95512afa7d16c072451906057df0",
+      "rms_error": 0.019946312300093055,
+      "max_error": 2.0,
+      "mean_error": -0.00027085110769056075
+    },
+    "lfo-shape2-width0.25": {
+      "reference_sha256": "5f33963e30498cb497d6a86a3a23efcef378cfb3bd7d479b23e7765280467af1",
+      "rms_error": 0.08442867237151629,
+      "max_error": 2.0,
+      "mean_error": -0.002073418604749728
+    },
+    "lfo-shape2-width0.5": {
+      "reference_sha256": "01015bf7407427d94708f0439e8e2b3cc99388704f2aaa3d9825fdfaa989e91a",
+      "rms_error": 0.10770127576843759,
+      "max_error": 2.0,
+      "mean_error": -0.004327996927261609
+    },
+    "lfo-shape2-width0.75": {
+      "reference_sha256": "61836a8eff1f007771f8227b082c77ce3c1b5d1f1057f3762c5259a6e97ed9b4",
+      "rms_error": 0.13174104899291914,
+      "max_error": 2.0,
+      "mean_error": 0.009633660975474197
+    },
+    "lfo-shape2-width1": {
+      "reference_sha256": "cbdd540cfb9c4ea327f274651259c5277344a3e5df20b19ba5fa591a01333a68",
+      "rms_error": 0.09950879104809161,
+      "max_error": 2.0,
+      "mean_error": 0.006214778491332954
+    }
+  },
+  "compiler_sha256": "8ad665c55afb9d1dbf0dcb59bcbcc9afe8fb94399ff182d5e844f07625c967bb"
+}

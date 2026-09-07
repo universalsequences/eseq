@@ -15573,6 +15573,38 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn offline_instrument_routes_named_inputs_and_releases_gate_within_block() {
+        let source = r#"
+            (def spare (in 1 @name unconnected))
+            (def trigger (in 2 @name trigger))
+            (def gate (in 3 @name gate))
+            (def pitch (in 4 @name pitch))
+            (def velocity (in 5 @name velocity))
+            (def note_on (in 6 @name note-on))
+            (def legato (in 7 @name legato))
+            (def pressure (in 8 @name pressure))
+            (out (+ (* 10000 spare) (* 100 trigger) (* 10 gate)
+                    (* 0.001 pitch) velocity (* 1000 note_on) legato pressure) 1)
+        "#;
+        let report = super::render_instrument_source_for_test(
+            source, None,
+            &super::InstrumentRenderOptions {
+                sample_rate: 48_000, block_size: 8, frames: 16,
+                midi_note: 69.0, velocity: 0.25, gate_frames: 5, voice_index: 0,
+                param_overrides: Vec::new(), param_events: Vec::new(),
+                input_overrides: vec![(7, 0.5)],
+            },
+        ).expect("named-input probe should compile and render");
+        assert_eq!(report.non_finite_samples, 0);
+        for (frame, &actual) in report.first_samples.iter().enumerate() {
+            let expected = 1.19 + if frame < 5 { 10.0 } else { 0.0 }
+                + if frame == 0 { 1100.0 } else { 0.0 };
+            assert!((actual - expected).abs() < 0.001,
+                "frame {frame}: expected {expected}, got {actual}");
+        }
+    }
+
+    #[test]
     fn adsrexp_runtime_shapes_attack_and_falling_segments_independently() {
         let source = r#"
             (def gate (in 1 @name gate))

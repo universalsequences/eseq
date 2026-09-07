@@ -1,0 +1,7 @@
+(use-defmacro heat-lfo)
+(def gate (in 1 @name gate))
+(def pitch (in 2 @name pitch))
+(def trigger (in 3 @name trigger))
+(param shape @default 0 @min 0 @max 4)
+(def modulation (heat-lfo 0.930166 0.5 shape trigger 1 0 0 0))
+(out (* 0.01 gate (+ 1 modulation) (polyblep_saw (phasor pitch) pitch)) 1)

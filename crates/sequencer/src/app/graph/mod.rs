@@ -244,31 +244,11 @@ fn push_graph_param_span(
     }
 }
 
-fn normalized_host_input_name(name: &str) -> String {
-    name.chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(|ch| ch.to_lowercase())
-        .collect()
-}
-
 fn host_signal_output_for_input(
     manifest: &DGenManifest,
     input: &lisp_host::DGenInput,
 ) -> Option<i32> {
-    let manifest_lacks_names = manifest
-        .inputs
-        .iter()
-        .all(|candidate| candidate.name.trim().is_empty());
-    let normalized = normalized_host_input_name(&input.name);
-    match normalized.as_str() {
-        "gate" => Some(crate::effects::gatepitch::PARAM_GATE as i32),
-        "pitch" => Some(crate::effects::gatepitch::PARAM_PITCH as i32),
-        "velocity" | "vel" => Some(crate::effects::gatepitch::PARAM_VELOCITY as i32),
-        "trigger" | "trig" => Some(crate::effects::gatepitch::PARAM_TRIGGER as i32),
-        "clock" | "barclock" => Some(crate::effects::gatepitch::PARAM_CLOCK_PHASE as i32),
-        _ if manifest_lacks_names && input.channel < 4 => Some(input.channel as i32),
-        _ => None,
-    }
+    manifest.host_signal_output_for_input(input).map(|port| port as i32)
 }
 
 #[derive(Clone, Copy)]

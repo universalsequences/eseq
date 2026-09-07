@@ -17,7 +17,7 @@ use crate::audio;
 use crate::audiograph::{self, LiveGraphPtr};
 use crate::effects::reverb;
 use crate::recorder::MasterRecorder;
-use crate::sequencer::{BusId, KeyboardTrigger, SequencerState};
+use crate::sequencer::{BusId, SequencerState};
 use crate::app::{AudioBuses, BusEffectRuntimeState, BusNodeIds};
 
 const INITIAL_GRAPH_CAPACITY: i32 = 256;
@@ -29,7 +29,7 @@ pub struct Engine {
     pub sample_rate: u32,
     pub channels: u16,
     pub master_recorder: Arc<MasterRecorder>,
-    pub keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
+    pub keyboard_tx: std::sync::mpsc::Sender<crate::sequencer::LiveInputEvent>,
     pub _stream: Stream,
 }
 
@@ -40,7 +40,7 @@ pub struct HeadlessEngine {
     pub sample_rate: u32,
     pub channels: u16,
     pub master_recorder: Arc<MasterRecorder>,
-    pub keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
+    pub keyboard_tx: std::sync::mpsc::Sender<crate::sequencer::LiveInputEvent>,
 }
 
 impl HeadlessEngine {
@@ -88,8 +88,8 @@ struct EngineParts {
     channels: u16,
     block_size: usize,
     master_recorder: Arc<MasterRecorder>,
-    keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
-    keyboard_rx: std::sync::mpsc::Receiver<KeyboardTrigger>,
+    keyboard_tx: std::sync::mpsc::Sender<crate::sequencer::LiveInputEvent>,
+    keyboard_rx: std::sync::mpsc::Receiver<crate::sequencer::LiveInputEvent>,
 }
 
 pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {

@@ -1121,6 +1121,7 @@ mod tests {
                 retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
             },
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; MAX_VOICES],
                 durations: [0.0; MAX_VOICES],

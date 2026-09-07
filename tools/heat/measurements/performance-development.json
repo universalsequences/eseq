@@ -1,0 +1,211 @@
+{
+  "source_sha256": {
+    "content/defmacros/heat-envelope/macro.lisp": "fb4b8dc4de34404b1a95d2292fbee256c95b92cea915b24cebe0ec744baa49ea",
+    "content/defmacros/heat-pitch-envelope/macro.lisp": "9f10733b47da26a39e9f91c6f646f3c1a0290afb17f9cf93f34d5efa896945b7",
+    "content/defmacros/heat-lfo/macro.lisp": "289d09fd4794937749f4ba70de3ef6415c8d211beafcc383e6b9beaf91a0f901",
+    "content/defmacros/heat-glide/macro.lisp": "465850d8aff67f5cd8a7ab0506b1eff49901472e0f65954e0fb3ce9a3fa1f5c6",
+    "content/defmacros/heat-sync/macro.lisp": "ab7addaf09cb231902328ea5e5cc34c3221fabea4211b2259e59a2ac5687a021",
+    "content/defmacros/heat-unison-onset/macro.lisp": "ce3704ab36875db8d96cfb6a085d18f772533f3be2a9874d69d88defd3a04994",
+    "content/defmacros/heat-linear-filter/macro.lisp": "94016f004639ca92f86a2166d166140a700f83db2b3a57fd67dd3c481adf64fe",
+    "content/defmacros/heat-soft-clip/macro.lisp": "950650ed8a64f9411e7f56e9720262bb41ae5c701f58c13e7fcd6ece9b04ea59",
+    "content/defmacros/heat-drive/macro.lisp": "7b1bead23324aaddc431f8abe0e3dc7692898d30c5d39d687f5a12cb88424d30",
+    "tools/heat/instrument/dsp.lisp": "1755550eb6c1fe224c06a07c4298f7c5916e284e8a7874ea56de2bec7dadee2c"
+  },
+  "cases": [
+    {
+      "sample_rate": 44100,
+      "glide_mode": 0,
+      "proportional": 0,
+      "error_octaves": 0.0
+    },
+    {
+      "sample_rate": 44100,
+      "glide_mode": 1,
+      "proportional": 0,
+      "error_octaves": 5.957761350927626e-08
+    },
+    {
+      "sample_rate": 44100,
+      "glide_mode": 1,
+      "proportional": 1,
+      "error_octaves": 5.957761350927626e-08
+    },
+    {
+      "sample_rate": 44100,
+      "glide_mode": 2,
+      "proportional": 0,
+      "error_octaves": 5.957761350927626e-08
+    },
+    {
+      "sample_rate": 44100,
+      "controls": {
+        "pitch_bend": 1
+      },
+      "params": {
+        "bend_range_semitones": 12
+      },
+      "error_hz": 6.103515625e-05
+    },
+    {
+      "sample_rate": 44100,
+      "controls": {
+        "pitch_bend": -0.5
+      },
+      "params": {
+        "bend_range_semitones": 12
+      },
+      "error_hz": 3.0517578125e-05
+    },
+    {
+      "sample_rate": 44100,
+      "controls": {},
+      "params": {
+        "octave": 1,
+        "detune_cents": 50
+      },
+      "error_hz": 0.0001220703125
+    },
+    {
+      "sample_rate": 44100,
+      "controls": {},
+      "params": {
+        "stretch_cents": 100
+      },
+      "error_hz": 0.0
+    },
+    {
+      "sample_rate": 44100,
+      "vibrato_depth_cents": 49.999996185302734
+    },
+    {
+      "sample_rate": 48000,
+      "glide_mode": 0,
+      "proportional": 0,
+      "error_octaves": 0.0
+    },
+    {
+      "sample_rate": 48000,
+      "glide_mode": 1,
+      "proportional": 0,
+      "error_octaves": 5.880991649220846e-08
+    },
+    {
+      "sample_rate": 48000,
+      "glide_mode": 1,
+      "proportional": 1,
+      "error_octaves": 5.880991649220846e-08
+    },
+    {
+      "sample_rate": 48000,
+      "glide_mode": 2,
+      "proportional": 0,
+      "error_octaves": 5.880991649220846e-08
+    },
+    {
+      "sample_rate": 48000,
+      "controls": {
+        "pitch_bend": 1
+      },
+      "params": {
+        "bend_range_semitones": 12
+      },
+      "error_hz": 6.103515625e-05
+    },
+    {
+      "sample_rate": 48000,
+      "controls": {
+        "pitch_bend": -0.5
+      },
+      "params": {
+        "bend_range_semitones": 12
+      },
+      "error_hz": 3.0517578125e-05
+    },
+    {
+      "sample_rate": 48000,
+      "controls": {},
+      "params": {
+        "octave": 1,
+        "detune_cents": 50
+      },
+      "error_hz": 0.0001220703125
+    },
+    {
+      "sample_rate": 48000,
+      "controls": {},
+      "params": {
+        "stretch_cents": 100
+      },
+      "error_hz": 0.0
+    },
+    {
+      "sample_rate": 48000,
+      "vibrato_depth_cents": 49.999996185302734
+    },
+    {
+      "sample_rate": 96000,
+      "glide_mode": 0,
+      "proportional": 0,
+      "error_octaves": 0.0
+    },
+    {
+      "sample_rate": 96000,
+      "glide_mode": 1,
+      "proportional": 0,
+      "error_octaves": 5.880991649220846e-08
+    },
+    {
+      "sample_rate": 96000,
+      "glide_mode": 1,
+      "proportional": 1,
+      "error_octaves": 5.880991649220846e-08
+    },
+    {
+      "sample_rate": 96000,
+      "glide_mode": 2,
+      "proportional": 0,
+      "error_octaves": 5.880991649220846e-08
+    },
+    {
+      "sample_rate": 96000,
+      "controls": {
+        "pitch_bend": 1
+      },
+      "params": {
+        "bend_range_semitones": 12
+      },
+      "error_hz": 6.103515625e-05
+    },
+    {
+      "sample_rate": 96000,
+      "controls": {
+        "pitch_bend": -0.5
+      },
+      "params": {
+        "bend_range_semitones": 12
+      },
+      "error_hz": 3.0517578125e-05
+    },
+    {
+      "sample_rate": 96000,
+      "controls": {},
+      "params": {
+        "octave": 1,
+        "detune_cents": 50
+      },
+      "error_hz": 0.0001220703125
+    },
+    {
+      "sample_rate": 96000,
+      "controls": {},
+      "params": {
+        "stretch_cents": 100
+      },
+      "error_hz": 0.0
+    },
+    {
+      "sample_rate": 96000,
+      "vibrato_depth_cents": 50.0
+    }
+  ]
+}

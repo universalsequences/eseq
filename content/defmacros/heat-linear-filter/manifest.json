@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "heat-linear-filter",
+  "params": ["input", "cutoff", "q", "mode"],
+  "outputs": ["out"],
+  "summary": "Heat's eight linear filter modes with measured two-stage resonance distribution; cutoff in Hz, Q from 0.1 to 100.",
+  "tags": ["filter", "synth", "heat"]
+}

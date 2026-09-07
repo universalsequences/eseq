@@ -216,6 +216,8 @@ pub(crate) enum TrackParamInvalidation {
     Gate,
     Poly,
     MaxPolyphony,
+    MonoTrigger,
+    VoicePriority,
     MuteGroup,
     GlobalTranspose,
     Timebase,

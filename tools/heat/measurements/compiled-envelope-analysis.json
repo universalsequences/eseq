@@ -1,0 +1,232 @@
+{
+  "scope": "Envelope slope/loop/Free plus six A/D/R settings, with fixed control-to-time mapping",
+  "macro_sha256": "fb4b8dc4de34404b1a95d2292fbee256c95b92cea915b24cebe0ec744baa49ea",
+  "sample_rate": 48000,
+  "sine_reference_amplitude": 0.0632825419306755,
+  "cases": {
+    "env-exp0-loop0-free0": {
+      "reference_sha256": "e6ce8945647e973a6d6ad7fa224c0400218f4bec928fb440d53cf46a025ff106",
+      "rms_full_scale_error": 0.00026010951842181385,
+      "max_full_scale_error": 0.0016996264457702637,
+      "passed": true
+    },
+    "env-exp0-loop0-free1": {
+      "reference_sha256": "54674c5034dd54d128e296b0f1bc3e7642e8d48cbe498ae8f7e3c4b6607a21a1",
+      "rms_full_scale_error": 0.00019647518638521433,
+      "max_full_scale_error": 0.0016996264457702637,
+      "passed": true
+    },
+    "env-exp0-loop1-free0": {
+      "reference_sha256": "641dba33780443021f17eed43e38410b5455471c6e3e0c14004e5b2e2939c5fd",
+      "rms_full_scale_error": 0.00038059972575865686,
+      "max_full_scale_error": 0.002010822296142578,
+      "passed": true
+    },
+    "env-exp0-loop1-free1": {
+      "reference_sha256": "294ed4cea034aac8ec1ba73774dd31c5ba4d38371e506645312ef955d481429f",
+      "rms_full_scale_error": 0.001227267668582499,
+      "max_full_scale_error": 0.0034035444259643555,
+      "passed": true
+    },
+    "env-exp0-loop2-free0": {
+      "reference_sha256": "ba519aeb3d8b0eb22308f106a66055984eba47872cbcf51894ab31cc55bc14b3",
+      "rms_full_scale_error": 0.00032050107256509364,
+      "max_full_scale_error": 0.002012908458709717,
+      "passed": true
+    },
+    "env-exp0-loop2-free1": {
+      "reference_sha256": "56662204aa9af7c1d1d1d18abef34cedbc6b61022b6baae4ec6615b7e5f380dd",
+      "rms_full_scale_error": 0.0012505153426900506,
+      "max_full_scale_error": 0.0034543275833129883,
+      "passed": true
+    },
+    "env-exp0-loop3-free0": {
+      "reference_sha256": "e3afd8dc3b19ae2a06fe3fbba23f31d500fd261cf5c50f1ea1e72b1cf6d2fbfd",
+      "rms_full_scale_error": 0.0003067543148063123,
+      "max_full_scale_error": 0.0017251968383789062,
+      "passed": true
+    },
+    "env-exp0-loop3-free1": {
+      "reference_sha256": "cf66760557e0aa9add46c5821c2fe1d6581f2306daa4d80c11767f5881f64503",
+      "rms_full_scale_error": 0.0002568150230217725,
+      "max_full_scale_error": 0.0018927454948425293,
+      "passed": true
+    },
+    "env-exp1-loop0-free0": {
+      "reference_sha256": "a98dfc472ee4bba6826d436e160d3f8949f0b6d67348d4603e738440c12b0bc0",
+      "rms_full_scale_error": 0.0002687894448172301,
+      "max_full_scale_error": 0.003901768010109663,
+      "passed": true
+    },
+    "env-exp1-loop0-free1": {
+      "reference_sha256": "e6c3626e0cbc1e4a189076d93fbb426e687b68faf3949562225e34268e3d74c5",
+      "rms_full_scale_error": 0.00020482215040829033,
+      "max_full_scale_error": 0.0039017940871417522,
+      "passed": true
+    },
+    "env-exp1-loop1-free0": {
+      "reference_sha256": "e445bad82c5ad65ac271d5811300fa851466af6206a99462ca27744087c0af98",
+      "rms_full_scale_error": 0.0004363555053714663,
+      "max_full_scale_error": 0.0039017186500132084,
+      "passed": true
+    },
+    "env-exp1-loop1-free1": {
+      "reference_sha256": "bad5cb9eae8bc09d6fa697ddbfb3ff87149604fac219c0553abc1b1f57028c9a",
+      "rms_full_scale_error": 0.0016276482492685318,
+      "max_full_scale_error": 0.007370054721832275,
+      "passed": true
+    },
+    "env-exp1-loop2-free0": {
+      "reference_sha256": "363d4e331b152f60dc17ccbd3504adaff39032f522f0fc26e18412d997f5863a",
+      "rms_full_scale_error": 0.0003983842907473445,
+      "max_full_scale_error": 0.003901649732142687,
+      "passed": true
+    },
+    "env-exp1-loop2-free1": {
+      "reference_sha256": "9a70926b17520c7cdb6e9804f4662324e1330a096a8d3c94ded9042300a8458a",
+      "rms_full_scale_error": 0.001777165336534381,
+      "max_full_scale_error": 0.009139176458120346,
+      "passed": true
+    },
+    "env-exp1-loop3-free0": {
+      "reference_sha256": "8f0401e7589b478b8f2bd34955dc3659f9b3e138f00a1525e80441f1f742a915",
+      "rms_full_scale_error": 0.0003294674097560346,
+      "max_full_scale_error": 0.0039017326198518276,
+      "passed": true
+    },
+    "env-exp1-loop3-free1": {
+      "reference_sha256": "8a724816cc6a6d5284a7a11fdff69b7852f1a4514d5542ca817900af0871b331",
+      "rms_full_scale_error": 0.00029583103605546057,
+      "max_full_scale_error": 0.0039018639363348484,
+      "passed": true
+    },
+    "env-time0-exp0": {
+      "reference_sha256": "3b1704a3213902474e936ff69d1adac305980dd7b7f28ecf1ebfa55bed95e999",
+      "predicted_duration_ms": 5.0,
+      "rms_full_scale_error": 0.0006851914804428816,
+      "max_full_scale_error": 0.005579471588134766,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0-exp1": {
+      "reference_sha256": "45c5158724023fb5c5ffa31249569d29ddecaa86893ca04922cfdcd8acbb3699",
+      "predicted_duration_ms": 5.0,
+      "rms_full_scale_error": 0.0006866931216791272,
+      "max_full_scale_error": 0.01114797592163086,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0-paired-slopes": {
+      "rms_full_scale_error": 1.3968950952403247e-05,
+      "max_full_scale_error": 0.0009587763343006372,
+      "passed": true
+    },
+    "env-time0.125-exp0": {
+      "reference_sha256": "546d1080cc947639d65c29d185088d232e458246e5a1a43706c8916b49596afb",
+      "predicted_duration_ms": 13.70984436297798,
+      "rms_full_scale_error": 0.0006855730316601694,
+      "max_full_scale_error": 0.004049241542816162,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0.125-exp1": {
+      "reference_sha256": "a82a008b7c41ff3f8baa0110da245ae1f874a6e7a36b375d676d94d18e9f9a4e",
+      "predicted_duration_ms": 13.70984436297798,
+      "rms_full_scale_error": 0.0006862738518975675,
+      "max_full_scale_error": 0.005609989166259766,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0.125-paired-slopes": {
+      "rms_full_scale_error": 9.01231851457851e-06,
+      "max_full_scale_error": 0.0001230332418344915,
+      "passed": true
+    },
+    "env-time0.25-exp0": {
+      "reference_sha256": "a0ca46bd030358730b257d31379d49e1c1c3d5801cf38d70077cb515e56b6468",
+      "predicted_duration_ms": 37.59196649141583,
+      "rms_full_scale_error": 0.0006885810289531946,
+      "max_full_scale_error": 0.004348874092102051,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0.25-exp1": {
+      "reference_sha256": "82a47c47ad44effee969460a1bcba0342bda121d51b50d017ae3b9aa092c15a2",
+      "predicted_duration_ms": 37.59196649141583,
+      "rms_full_scale_error": 0.0006894863909110427,
+      "max_full_scale_error": 0.004221439361572266,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0.25-paired-slopes": {
+      "rms_full_scale_error": 1.2120667634007987e-05,
+      "max_full_scale_error": 0.00026931919273920357,
+      "passed": true
+    },
+    "env-time0.5-exp0": {
+      "reference_sha256": "77cdaa883916b61747d2f30a03bff238e6528ae01ad1c39e4493b173672cd911",
+      "predicted_duration_ms": 282.6311889383461,
+      "rms_full_scale_error": 0.0007194154313765466,
+      "max_full_scale_error": 0.004190504550933838,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0.5-exp1": {
+      "reference_sha256": "08ccf0eca0ac8a883300738fdb89101d43a841a06a059238f0be5fa21fb8bbb5",
+      "predicted_duration_ms": 282.6311889383461,
+      "rms_full_scale_error": 0.0007240387494675815,
+      "max_full_scale_error": 0.004282891750335693,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0.5-paired-slopes": {
+      "rms_full_scale_error": 3.022285454790108e-05,
+      "max_full_scale_error": 0.0003830513742286712,
+      "passed": true
+    },
+    "env-time0.625-exp0": {
+      "reference_sha256": "f50cd1575660bf416c28d02ac944e2a179eb0cc900984a235aa3469a12b35112",
+      "predicted_duration_ms": 762.8477662055866,
+      "rms_full_scale_error": 0.0007844033534638584,
+      "max_full_scale_error": 0.004153907299041748,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0.625-exp1": {
+      "reference_sha256": "c36e844d87b6c0de4f00c25c53ad28b0f233afe7a0c854990a361c3801bf19cc",
+      "predicted_duration_ms": 762.8477662055866,
+      "rms_full_scale_error": 0.0007985054980963469,
+      "max_full_scale_error": 0.004626154899597168,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0.625-paired-slopes": {
+      "rms_full_scale_error": 3.8659098208881915e-05,
+      "max_full_scale_error": 0.00046646673581562936,
+      "passed": true
+    },
+    "env-time0.75-exp0": {
+      "reference_sha256": "c0723e23f704aa7e83b7879ebb821845a501919c9daf1b30bd5a1a8bdef22f70",
+      "predicted_duration_ms": 2058.9968028326784,
+      "rms_full_scale_error": 0.0012116844300180674,
+      "max_full_scale_error": 0.005429983139038086,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0.75-exp1": {
+      "reference_sha256": "1305ac5dee68e6c01756b77e09dbca723865aa7d7e88f80d6c52f3909c340a97",
+      "predicted_duration_ms": 2058.9968028326784,
+      "rms_full_scale_error": 0.0010438092285767198,
+      "max_full_scale_error": 0.006439924240112305,
+      "demodulation_start_frame": 128,
+      "passed": true
+    },
+    "env-time0.75-paired-slopes": {
+      "rms_full_scale_error": 0.00024899718118831515,
+      "max_full_scale_error": 0.0016681895358487964,
+      "passed": true
+    }
+  },
+  "compiler_sha256": "8ad665c55afb9d1dbf0dcb59bcbcc9afe8fb94399ff182d5e844f07625c967bb",
+  "passed": true
+}

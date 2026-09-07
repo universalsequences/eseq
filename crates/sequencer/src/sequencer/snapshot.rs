@@ -339,6 +339,8 @@ fn capture_live_track(
         accum_limit: tp.get_accum_limit(),
         accum_mode: tp.get_accum_mode(),
         fts_scale: tp.get_fts_scale(),
+        mono_trigger: tp.get_mono_trigger(),
+        voice_priority: tp.get_voice_priority(),
         mute_group: tp.get_mute_group(),
         global_transpose: tp.uses_global_transpose(),
     };

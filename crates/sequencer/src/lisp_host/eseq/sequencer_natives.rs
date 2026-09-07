@@ -1685,9 +1685,10 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
             }
             let mut chord = Vec::new();
             let mut chord_durations = Vec::new();
-            let target_track =
+            let (target_track, origin_note) =
                 apply_acc_emit_overrides(&args, 2, &mut resolved, &mut chord, &mut chord_durations)?;
             eval.emitted.push(EmittedAccumulatorEvent {
+                origin_note,
                 offset_beats: *tick as f32 * rate_beats,
                 track: target_track,
                 resolved,
@@ -1718,9 +1719,10 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
             let mut chord = eval.chord.clone();
             let mut chord_durations = eval.chord_durations.clone();
             let chord_step_transpose = eval.chord_step_transpose;
-            let target_track =
+            let (target_track, origin_note) =
                 apply_acc_emit_overrides(&args, idx, &mut resolved, &mut chord, &mut chord_durations)?;
             eval.emitted.push(EmittedAccumulatorEvent {
+                origin_note,
                 offset_beats,
                 track: target_track,
                 resolved,
@@ -1889,7 +1891,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     runtime.register_native_with_docs(
         "fx-notes",
         "(fx-notes)",
-        "Return all notes for the current MIDI FX event as maps with :note, :start, and :end fields.",
+        "Return notes as maps with :note, :start, :end, and :origin-note. Preserve :origin-note through transforms and pass it to fx-emit to retain live expression ownership.",
         move |_args, _ctx| eval_note_spans_as_list(&fx_eval_for_notes),
     );
 
@@ -3247,6 +3249,7 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
         offset_beats = (snapped - ctx.beat) as f32;
     }
     Ok(EmittedAccumulatorEvent {
+        origin_note: None,
         offset_beats,
         track: target_track,
         resolved,

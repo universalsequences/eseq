@@ -22,6 +22,7 @@ pub(in crate::audio) struct CustomVoiceSlot {
     pub(in crate::audio) assigned_track: Option<usize>,
     pub(in crate::audio) assigned_route: Option<usize>,
     pub(in crate::audio) fingerprint: u64,
+    pub(in crate::audio) expression: crate::audio::pressure::VoiceExpression,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +32,21 @@ pub(in crate::audio) struct CustomVoiceAllocation {
     pub(in crate::audio) previous_track: Option<usize>,
     pub(in crate::audio) previous_route: Option<usize>,
     pub(in crate::audio) stole_active_voice: bool,
+}
+
+impl CustomVoiceAllocation {
+    pub(in crate::audio) fn continues_mono_note(
+        self,
+        route: usize,
+        polyphonic: bool,
+        max_polyphony: usize,
+        mode: crate::sequencer::MonoTrigger,
+    ) -> bool {
+        mode == crate::sequencer::MonoTrigger::Legato
+            && (!polyphonic || max_polyphony == 1)
+            && self.stole_active_voice
+            && self.previous_route == Some(route)
+    }
 }
 
 pub(in crate::audio) struct CustomEnginePool {
@@ -52,6 +68,7 @@ impl CustomEnginePool {
                 assigned_track: None,
                 assigned_route: None,
                 fingerprint: 0,
+                expression: crate::audio::pressure::VoiceExpression::default(),
             }),
             num_voices: 0,
             enabled_voice_count: 1,
@@ -70,6 +87,7 @@ impl CustomEnginePool {
                 assigned_track: None,
                 assigned_route: None,
                 fingerprint: 0,
+                expression: crate::audio::pressure::VoiceExpression::default(),
             };
             self.num_voices += 1;
         }
@@ -89,25 +107,40 @@ impl CustomEnginePool {
                 assigned_track: None,
                 assigned_route: None,
                 fingerprint: 0,
+                expression: crate::audio::pressure::VoiceExpression::default(),
             };
         }
     }
 
     pub(in crate::audio) fn allocate_voice(
+        &mut self, track: usize, route_idx: usize, note: f32, polyphonic: bool, max_polyphony: usize,
+    ) -> CustomVoiceAllocation {
+        self.allocate_voice_with_priority(track, route_idx, note, polyphonic, max_polyphony,
+            crate::sequencer::VoicePriority::Last, None).expect("last-note allocation always accepts")
+    }
+
+    pub(in crate::audio) fn allocate_voice_with_priority(
         &mut self,
         track: usize,
         route_idx: usize,
         note: f32,
         polyphonic: bool,
         max_polyphony: usize,
-    ) -> CustomVoiceAllocation {
+        priority: crate::sequencer::VoicePriority,
+        origin: Option<crate::sequencer::LiveNoteOrigin>,
+    ) -> Option<CustomVoiceAllocation> {
         self.age_counter += 1;
         let max_polyphony = max_polyphony.clamp(1, MAX_VOICES);
+        // Priority is a keyboard policy: a sequenced note has no held key to
+        // lose against, and a gate-off track never clears `active`, so a
+        // rejected step would otherwise stay silent for the rest of playback.
+        let priority = if origin.is_some() { priority } else { crate::sequencer::VoicePriority::Last };
         if !polyphonic {
             if let Some(idx) =
                 (0..self.num_voices).find(|&i| self.voices[i].assigned_route == Some(route_idx))
             {
                 let slot = &mut self.voices[idx];
+                if slot.active && !priority.prefers(note, slot.note) { return None; }
                 let previous_track = slot.assigned_track;
                 let previous_route = slot.assigned_route;
                 let stole_active_voice = slot.active;
@@ -115,15 +148,16 @@ impl CustomEnginePool {
                 slot.active = true;
                 slot.release_started_sample = None;
                 slot.note = note;
+                slot.expression = crate::audio::pressure::VoiceExpression::with_origin(origin);
                 slot.assigned_track = Some(track);
                 slot.assigned_route = Some(route_idx);
-                return CustomVoiceAllocation {
+                return Some(CustomVoiceAllocation {
                     voice_idx: idx,
                     logical_id: slot.logical_id,
                     previous_track,
                     previous_route,
                     stole_active_voice,
-                };
+                });
             }
         }
 
@@ -189,6 +223,7 @@ impl CustomEnginePool {
             }
             if voice.active
                 && voice.assigned_route == Some(route_idx)
+                && voice.expression.source == origin.map(|origin| origin.source)
                 && (voice.note - note).abs() < 0.01
             {
                 active_same_note_idx = Some(i);
@@ -206,6 +241,25 @@ impl CustomEnginePool {
             }
         }
 
+        let mut active_count = 0;
+        let mut priority_victim = None;
+        if priority != crate::sequencer::VoicePriority::Last {
+            for i in 0..self.num_voices {
+                let voice = &self.voices[i];
+                if voice.active && voice.assigned_route == Some(route_idx) {
+                    active_count += 1;
+                    if priority_victim.is_none_or(|old: usize|
+                        priority.prefers(self.voices[old].note, voice.note)) {
+                        priority_victim = Some(i);
+                    }
+                }
+            }
+        }
+        let priority_victim = if active_count >= max_polyphony {
+            let victim = priority_victim.expect("full route has a voice");
+            if !priority.prefers(note, self.voices[victim].note) { return None; }
+            Some(victim)
+        } else { None };
         let idx = if assigned_same_track_count >= max_polyphony {
             active_same_note_idx
                 .or(releasing_same_note_idx)
@@ -224,6 +278,7 @@ impl CustomEnginePool {
                 .or(releasing_other_track_idx)
                 .unwrap_or(oldest_idx)
         };
+        let idx = active_same_note_idx.or(priority_victim).unwrap_or(idx);
         let slot = &mut self.voices[idx];
         let previous_track = slot.assigned_track;
         let previous_route = slot.assigned_route;
@@ -232,15 +287,16 @@ impl CustomEnginePool {
         slot.active = true;
         slot.release_started_sample = None;
         slot.note = note;
+        slot.expression = crate::audio::pressure::VoiceExpression::with_origin(origin);
         slot.assigned_track = Some(track);
         slot.assigned_route = Some(route_idx);
-        CustomVoiceAllocation {
+        Some(CustomVoiceAllocation {
             voice_idx: idx,
             logical_id: slot.logical_id,
             previous_track,
             previous_route,
             stole_active_voice,
-        }
+        })
     }
 
     pub(in crate::audio) fn allocate_free_patch_voice(
@@ -261,6 +317,7 @@ impl CustomEnginePool {
         slot.active = true;
         slot.release_started_sample = None;
         slot.note = note;
+        slot.expression = crate::audio::pressure::VoiceExpression::default();
         slot.assigned_track = Some(track);
         slot.assigned_route = Some(route_idx);
         Some(CustomVoiceAllocation {
@@ -785,9 +842,11 @@ fn reconcile_audio_runtime_after_track_delete(
         }
     }
 
+    data.pressure.delete_track(deleted_track);
     for track in deleted_track..num_tracks {
         data.voice_pools.swap(track, track + 1);
         data.active_keyboard_notes.swap(track, track + 1);
+        data.mono_held.swap(track, track + 1);
         data.rack_choke_last_trigger.swap(track, track + 1);
         for slot in 0..MAX_RACK_SLOTS {
             let current = rack_slot_pool_index(track, slot).expect("validated rack pool");
@@ -797,6 +856,7 @@ fn reconcile_audio_runtime_after_track_delete(
     }
     data.voice_pools[num_tracks].reset();
     data.active_keyboard_notes[num_tracks] = [None; MAX_VOICES];
+    data.mono_held[num_tracks].clear();
     data.rack_choke_last_trigger[num_tracks] = u64::MAX;
     for track in 0..num_tracks {
         for note in data.active_keyboard_notes[track].iter_mut().flatten() {
@@ -874,6 +934,8 @@ pub(in crate::audio) fn reset_audio_runtime_for_track_topology(
         crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
     }
     data.active_keyboard_notes.fill([None; MAX_VOICES]);
+    data.pressure.reset();
+    for held in &mut data.mono_held { held.clear(); }
     data.pending_accum_reset = [true; MAX_TRACKS];
     data.scheduled_events.clear();
     clear_countdown_events(data);
@@ -1185,7 +1247,9 @@ pub(in crate::audio) fn release_track_active_voices(
         &mut data.block_events,
         track_idx,
     );
+    data.pressure.release_track(track_idx);
     data.active_keyboard_notes[track_idx] = [None; MAX_VOICES];
+    data.mono_held[track_idx].clear();
 
     let instrument_type = InstrumentType::from_runtime_flag(
         data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),

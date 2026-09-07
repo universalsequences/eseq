@@ -25,7 +25,7 @@ use crate::quantized_launch::{DuePatternLaunch, PatternLaunchTarget};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
     BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
-    KeyboardTrigger, RackTrackSnapshot, SequencerState, StepParam, StepSnapshot, MAX_STEPS,
+    RackTrackSnapshot, SequencerState, StepParam, StepSnapshot, MAX_STEPS,
     STEPS_PER_PAGE,
 };
 use crate::track_color::TrackColor;
@@ -570,7 +570,7 @@ pub struct GraphState {
     pub effect_descriptors: Vec<Vec<EffectDescriptor>>,
     pub instrument_descriptors: Vec<EffectDescriptor>,
     pub record_armed: Vec<bool>,
-    pub keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
+    pub keyboard_tx: std::sync::mpsc::Sender<crate::sequencer::LiveInputEvent>,
     /// Cross-track mod routes currently connected in the audiograph, stored as
     /// (source mod_out node id, dest mod_in_clip node id). Owned exclusively by
     /// GraphController::sync_current_pattern_mod_routes so scene switches can
@@ -2334,7 +2334,7 @@ impl App {
         sample_rate: u32,
         buses: AudioBuses,
         master_recorder: Arc<MasterRecorder>,
-        keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
+        keyboard_tx: std::sync::mpsc::Sender<crate::sequencer::LiveInputEvent>,
     ) -> Self {
         let has_tracks = state.active_track_count() > 0;
         let focused_region = if has_tracks {

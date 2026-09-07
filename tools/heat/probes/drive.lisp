@@ -1,0 +1,8 @@
+(use-defmacro heat-drive)
+(def gate (in 1 @name gate))
+(def pitch (in 2 @name pitch))
+(param mode @default 6 @min 0 @max 6)
+(def source (* 4 (polyblep_saw (phasor pitch) pitch)))
+(def signal (* 0.01 gate (heat-drive source mode)))
+(out signal 1)
+(out signal 2)

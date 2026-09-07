@@ -1,0 +1,275 @@
+{
+  "scope": "Development law; Analog timing calibration pending",
+  "cases": [
+    {
+      "sample_rate": 44100,
+      "time_ms": 0,
+      "initial": -48,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 0,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 0,
+      "initial": 48,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 1,
+      "initial": -48,
+      "max_error": 3.814697265625e-06
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 1,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 1,
+      "initial": 48,
+      "max_error": 3.814697265625e-06
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 37.5,
+      "initial": -48,
+      "max_error": 7.2053259430049366e-06
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 37.5,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 37.5,
+      "initial": 48,
+      "max_error": 7.2053259430049366e-06
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 500,
+      "initial": -48,
+      "max_error": 8.091368130180854e-06
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 500,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 500,
+      "initial": 48,
+      "max_error": 8.091368130180854e-06
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 15000,
+      "initial": -48,
+      "max_error": 6.986101652728394e-06
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 15000,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 44100,
+      "time_ms": 15000,
+      "initial": 48,
+      "max_error": 6.986101652728394e-06
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 0,
+      "initial": -48,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 0,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 0,
+      "initial": 48,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 1,
+      "initial": -48,
+      "max_error": 4.7802821896425485e-06
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 1,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 1,
+      "initial": 48,
+      "max_error": 4.7802821896425485e-06
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 37.5,
+      "initial": -48,
+      "max_error": 6.610223593384035e-06
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 37.5,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 37.5,
+      "initial": 48,
+      "max_error": 6.610223593384035e-06
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 500,
+      "initial": -48,
+      "max_error": 8.273601210362358e-06
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 500,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 500,
+      "initial": 48,
+      "max_error": 8.273601210362358e-06
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 15000,
+      "initial": -48,
+      "max_error": 7.1325197552596364e-06
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 15000,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 48000,
+      "time_ms": 15000,
+      "initial": 48,
+      "max_error": 7.1325197552596364e-06
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 0,
+      "initial": -48,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 0,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 0,
+      "initial": 48,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 1,
+      "initial": -48,
+      "max_error": 4.7802821896425485e-06
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 1,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 1,
+      "initial": 48,
+      "max_error": 4.7802821896425485e-06
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 37.5,
+      "initial": -48,
+      "max_error": 6.610223593384035e-06
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 37.5,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 37.5,
+      "initial": 48,
+      "max_error": 6.610223593384035e-06
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 500,
+      "initial": -48,
+      "max_error": 8.273601210362358e-06
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 500,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 500,
+      "initial": 48,
+      "max_error": 8.273601210362358e-06
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 15000,
+      "initial": -48,
+      "max_error": 7.1325197552596364e-06
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 15000,
+      "initial": 0,
+      "max_error": 0.0
+    },
+    {
+      "sample_rate": 96000,
+      "time_ms": 15000,
+      "initial": 48,
+      "max_error": 7.1325197552596364e-06
+    }
+  ]
+}

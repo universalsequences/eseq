@@ -54,6 +54,12 @@ pub(crate) fn midi_message_value(event: &MidiInputEvent) -> Value {
             map.insert("channel".into(), cell(Value::Number(f64::from(channel))));
             map.insert("value".into(), cell(Value::Number(f64::from(value))));
         }
+        MidiMessage::PolyPressure { channel, note, value } => {
+            map.insert("kind".into(), cell(Value::Keyword("poly-pressure".into())));
+            map.insert("channel".into(), cell(Value::Number(f64::from(channel))));
+            map.insert("note".into(), cell(Value::Number(f64::from(note))));
+            map.insert("value".into(), cell(Value::Number(f64::from(value))));
+        }
         MidiMessage::Aftertouch { channel, value } => {
             map.insert("kind".into(), cell(Value::Keyword("aftertouch".into())));
             map.insert("channel".into(), cell(Value::Number(f64::from(channel))));

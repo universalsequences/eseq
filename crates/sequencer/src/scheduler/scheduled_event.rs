@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScheduledChordData {
+    /// Index zero also carries the source of a single (count == 0) note.
+    pub live_origins: [Option<crate::sequencer::LiveNoteOrigin>; MAX_VOICES],
     pub count: usize,
     pub notes: [f32; MAX_VOICES],
     pub durations: [f32; MAX_VOICES],
@@ -386,6 +388,7 @@ mod tests {
                         retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     chord: ScheduledChordData {
+                        live_origins: [None; crate::audio::MAX_VOICES],
                         count: 0,
                         notes: [0.0; MAX_VOICES],
                         durations: [0.0; MAX_VOICES],
@@ -429,6 +432,7 @@ mod tests {
                         retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     chord: ScheduledChordData {
+                        live_origins: [None; crate::audio::MAX_VOICES],
                         count: 0,
                         notes: [0.0; MAX_VOICES],
                         durations: [0.0; MAX_VOICES],
@@ -467,6 +471,7 @@ mod tests {
                         retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     chord: ScheduledChordData {
+                        live_origins: [None; crate::audio::MAX_VOICES],
                         count: 0,
                         notes: [0.0; MAX_VOICES],
                         durations: [0.0; MAX_VOICES],
@@ -511,6 +516,7 @@ mod tests {
                         retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     chord: ScheduledChordData {
+                        live_origins: [None; crate::audio::MAX_VOICES],
                         count: 0,
                         notes: [0.0; MAX_VOICES],
                         durations: [0.0; MAX_VOICES],
@@ -553,6 +559,7 @@ mod tests {
                         retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                     },
                     chord: ScheduledChordData {
+                        live_origins: [None; crate::audio::MAX_VOICES],
                         count: 0,
                         notes: [0.0; MAX_VOICES],
                         durations: [0.0; MAX_VOICES],
@@ -589,6 +596,7 @@ mod tests {
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 chord: ScheduledChordData {
+                    live_origins: [None; crate::audio::MAX_VOICES],
                     count: 0,
                     notes: [0.0; MAX_VOICES],
                     durations: [0.0; MAX_VOICES],

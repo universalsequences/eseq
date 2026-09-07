@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "heat-glide",
+  "params": [
+    "target",
+    "note_on",
+    "legato",
+    "mode",
+    "time_ms",
+    "rate_mode"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "Continuous logarithmic portamento with fixed-time or fixed-rate law and legato-only policy.",
+  "tags": [
+    "pitch",
+    "synth",
+    "heat"
+  ]
+}

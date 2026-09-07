@@ -1970,6 +1970,7 @@ pub(super) fn enqueue_network_trigger<const QUEUE_CAP: usize>(
                 let note_delay =
                     chord.delays[note_idx].clamp(StepParam::Delay.min(), StepParam::Delay.max());
                 let mut note_chord = ScheduledChordData {
+                    live_origins: [None; crate::audio::MAX_VOICES],
                     count: 1,
                     notes: [0.0; MAX_VOICES],
                     durations: [0.0; MAX_VOICES],
@@ -1977,6 +1978,7 @@ pub(super) fn enqueue_network_trigger<const QUEUE_CAP: usize>(
                     step_transpose: chord.step_transpose,
                 };
                 note_chord.notes[0] = chord.notes[note_idx];
+                note_chord.live_origins[0] = chord.live_origins[note_idx];
                 note_chord.durations[0] = chord.durations[note_idx];
                 let note_sample_time = sample_time.saturating_add(
                     (note_delay as f64 * samples_per_step.max(0.0) as f64).round() as u64,

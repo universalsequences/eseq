@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "heat-pitch-envelope",
+  "params": [
+    "note_on",
+    "initial",
+    "time_ms"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "Finite bipolar pitch decay in semitones and milliseconds. Analog timing calibration pending.",
+  "tags": [
+    "envelope",
+    "synth",
+    "heat"
+  ]
+}

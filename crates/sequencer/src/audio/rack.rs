@@ -779,15 +779,23 @@ pub(super) fn fire_live_keyboard_rack_note(
                     };
                     allocation
                 } else {
-                    data.custom_engine_pools[engine_id].allocate_voice(
+                    let Some(allocation) = data.custom_engine_pools[engine_id].allocate_voice_with_priority(
                         parent_track_idx,
                         rack_slot_pool_index(parent_track_idx, slot_idx)
                             .expect("validated rack slot must have a route identity"),
                         transpose,
                         slot.max_polyphony > 1,
                         slot.max_polyphony,
-                    )
+                        data.state.pattern.track_params[parent_track_idx].get_voice_priority(),
+                        trigger.origin(),
+                    ) else { continue; };
+                    allocation
                 };
+                let legato = !free_patch && allocation.continues_mono_note(
+                    rack_slot_pool_index(parent_track_idx, slot_idx).expect("validated rack route"),
+                    slot.max_polyphony > 1, slot.max_polyphony,
+                    data.state.pattern.track_params[parent_track_idx].get_mono_trigger(),
+                );
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
                 let voice_lid = allocation.logical_id;
@@ -838,18 +846,19 @@ pub(super) fn fire_live_keyboard_rack_note(
                             &key_locked_instrument_params,
                         );
                     }
-                    if allocation.stole_active_voice || slot.max_polyphony <= 1 || free_patch {
+                    if !legato && (allocation.stole_active_voice || slot.max_polyphony <= 1 || free_patch) {
                         let off_seq = next_event_sequence_from(&mut data.event_seq);
                         send_custom_note_off(data.lg.0, voice_lid, 0, off_seq);
                     }
                     let on_seq = next_event_sequence_from(&mut data.event_seq);
-                    send_custom_trigger(
+                    send_custom_note_on(
                         data.lg.0,
                         voice_lid,
                         0,
                         on_seq,
                         pitch_hz,
                         trigger.velocity,
+                        legato,
                     );
                 }
                 data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint =
@@ -878,6 +887,7 @@ pub(super) fn fire_live_keyboard_rack_note(
         &mut data.active_keyboard_notes,
         parent_track_idx,
         trigger.transpose,
+        trigger.source,
         midi_note_from_transpose(
             transpose,
             f32::from_bits(
@@ -907,6 +917,7 @@ pub(super) fn fire_rack_slot_note(
     instrument_params: &ScheduledInstrumentParams,
     sampler_params: Option<ScheduledSamplerParams>,
     instrument_fingerprint: u64,
+    origin: Option<crate::sequencer::LiveNoteOrigin>,
 ) {
     match slot.instrument_type {
         InstrumentType::Sampler => {
@@ -1051,15 +1062,23 @@ pub(super) fn fire_rack_slot_note(
                 };
                 allocation
             } else {
-                data.custom_engine_pools[engine_id].allocate_voice(
+                let Some(allocation) = data.custom_engine_pools[engine_id].allocate_voice_with_priority(
                     parent_track_idx,
                     rack_slot_pool_index(parent_track_idx, slot_idx)
                         .expect("validated rack slot must have a route identity"),
                     transpose,
                     slot_params.max_polyphony > 1,
                     slot_params.max_polyphony,
-                )
+                    data.state.pattern.track_params[parent_track_idx].get_voice_priority(),
+                    origin,
+                ) else { return; };
+                allocation
             };
+            let legato = !free_patch && allocation.continues_mono_note(
+                rack_slot_pool_index(parent_track_idx, slot_idx).expect("validated rack route"),
+                slot_params.max_polyphony > 1, slot_params.max_polyphony,
+                data.state.pattern.track_params[parent_track_idx].get_mono_trigger(),
+            );
             let voice_idx = allocation.voice_idx;
             data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
             let lid = allocation.logical_id;
@@ -1073,7 +1092,7 @@ pub(super) fn fire_rack_slot_note(
             let pitch_hz = custom_pitch_hz(transpose, slot_params.base_note_offset);
             cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
             unsafe {
-                if allocation.stole_active_voice || slot_params.max_polyphony <= 1 || free_patch {
+                if !legato && (allocation.stole_active_voice || slot_params.max_polyphony <= 1 || free_patch) {
                     let off_seq = next_event_sequence_from(&mut data.event_seq);
                     send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
                 }
@@ -1101,7 +1120,8 @@ pub(super) fn fire_rack_slot_note(
                 instrument_fingerprint;
             let on_seq = next_event_sequence_from(&mut data.event_seq);
             unsafe {
-                send_custom_trigger(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity);
+                send_custom_note_on(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity, legato);
+                super::pressure::dispatch_voice_expression(data, engine_id, voice_idx, frame_offset);
             }
             if gate_mode > 0.5 {
                 schedule_gate_off_event(
@@ -1618,6 +1638,7 @@ pub(super) fn fire_rack_resolved(
                     &note_instrument_params,
                     sampler_params,
                     instrument_fingerprint,
+                    chord.live_origins[n],
                 );
             }
         } else {
@@ -1662,6 +1683,7 @@ pub(super) fn fire_rack_resolved(
                 &note_instrument_params,
                 sampler_params,
                 instrument_fingerprint,
+                chord.live_origins[0],
             );
         }
     }

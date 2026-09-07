@@ -58,9 +58,43 @@ fn adsr_bracketDistance(p: vec2<f32>, corner: vec2<f32>, inward: vec2<f32>, leng
     return min(horizontal, vertical);
 }
 
+fn adsr_decayDisplay(input: WidgetVaryings) -> vec4<f32> {
+    var uv: vec2<f32> = input.uv;
+    var perPixel: vec2<f32> = max(vec2<f32>(fwidth(uv.x), fwidth(uv.y)), vec2<f32>(1e-6));
+    var p: vec2<f32> = uv / perPixel;
+    var initial: f32 = input.uniform_d.y;
+    var zero: f32 = input.uniform_d.w;
+    var end: f32 = mix(0.03, 1.0, input.uniform_d.z);
+    var col: vec4<f32> = input.color_b;
+    var baseline: f32 = abs(p.y - adsr_toPlot(vec2<f32>(0.0, zero)).y / perPixel.y);
+    col = vec4<f32>(mix(col.rgb, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * input.color_c.a * 0.4), col.a);
+    var distance: f32 = 10000.0;
+    var previous: vec2<f32> = adsr_toPlot(vec2<f32>(0.03, initial)) / perPixel;
+    for (var i: i32 = 1; i <= 64; i = i + 1) {
+        var t: f32 = f32(i) / 64.0;
+        var current: vec2<f32> = adsr_toPlot(vec2<f32>(mix(0.03, end, t), adsr_expFall(t, initial, zero))) / perPixel;
+        distance = min(distance, adsr_sdSegment(p, previous, current));
+        previous = current;
+    }
+    distance = min(distance, adsr_sdSegment(p, previous, adsr_toPlot(vec2<f32>(1.0, zero)) / perPixel));
+    col = vec4<f32>(mix(col.rgb, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * input.color_a.a), col.a);
+    var scale: f32 = max(input.uniform_b.z, 0.001);
+    for (var i: i32 = 1; i <= 2; i = i + 1) {
+        var h: vec2<f32> = adsr_toPlot(select(vec2<f32>(end, zero), vec2<f32>(0.03, initial), i == 1)) / perPixel;
+        var highlighted: bool = abs(f32(i) - input.uniform_b.y) < 0.5;
+        var halfSize: f32 = select(6.0, 7.2, highlighted) * scale;
+        var d: f32 = max(abs(p.x - h.x), abs(p.y - h.y));
+        var outer: f32 = 1.0 - smoothstep(halfSize, halfSize + 0.75, d);
+        var inner: f32 = 1.0 - smoothstep(halfSize - 1.5 * scale, halfSize - 1.5 * scale + 0.75, d);
+        col = vec4<f32>(mix(col.rgb, input.color_d.rgb, select(max(outer - inner, 0.0), outer, highlighted) * input.color_d.a), col.a);
+    }
+    return col;
+}
+
 @fragment
 fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 {
+    if (input.uniform_d.x > 0.5) { return adsr_decayDisplay(input); }
     var attack: f32 = input.uniform_a.x;
     var decay: f32 = input.uniform_a.y;
     var sustain: f32 = clamp(input.uniform_a.z, 0.0, 1.0);
@@ -935,6 +969,10 @@ fn lc_plot(data: vec2<f32>) -> vec2<f32> {
         pad.y + (1.0 - (data.y * 0.5 + 0.5)) * (1.0 - pad.y * 2.0));
 }
 
+fn lc_random(cycle: f32) -> f32 {
+    let levels = array<f32, 8>(0.7, -0.45, 0.15, -0.8, 0.5, -0.1, 0.9, -0.6);
+    return levels[u32(cycle - floor(cycle / 8.0) * 8.0)];
+}
 fn lc_shape(shape: i32, x: f32, pw: f32) -> f32 {
     var phase: f32 = x - floor(x);
     if (shape == 1) {
@@ -944,6 +982,14 @@ fn lc_shape(shape: i32, x: f32, pw: f32) -> f32 {
     } else if (shape == 3) {
         return phase * 2.0 - 1.0;
     }
+    if (shape == 4) { return lc_random(floor(x)); }
+    if (shape == 5) { return mix(lc_random(floor(x) - 1.0), lc_random(floor(x)), clamp(phase / 0.4, 0.0, 1.0)); }
+    if (shape == 6) {
+        let duty = clamp(pw, 0.0, 1.0);
+        let skew = 0.05 + 0.9 * duty;
+        return min(1.0, select(1.0 - 2.0 * (1.0 - phase) / (1.0 - skew), 1.0 - 2.0 * phase / skew, phase < duty));
+    }
+    if (shape == 7) { return select(-1.0, 1.0, phase < clamp(pw, 0.0, 1.0)); }
     var peak: f32 = clamp(pw, 0.05, 0.95);
     return select(1.0 - 2.0 * (phase - peak) / (1.0 - peak), -1.0 + 2.0 * phase / peak, phase < peak);
 }
@@ -953,10 +999,11 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 {
     var uv: vec2<f32> = input.uv;
     var aspect: f32 = max(input.aspect, 0.0001);
-    var shape: i32 = i32(round(clamp(input.uniform_a.x, 0.0, 3.0)));
+    var shape: i32 = i32(round(clamp(input.uniform_a.x, 0.0, 7.0)));
     var pw: f32 = input.uniform_a.y;
     var offset: f32 = input.uniform_a.z;
     var markerPhase: f32 = input.uniform_a.w;
+    let cycles = input.uniform_b.x;
 
     var col: vec4<f32> = input.color_b;
 
@@ -968,7 +1015,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 
     // Fill between the zero line and the curve.
     var dataX: f32 = clamp((uv.x - 0.04) / 0.92, 0.0, 1.0);
-    var curveAtX: f32 = lc_shape(shape, dataX + offset, pw);
+    var curveAtX: f32 = lc_shape(shape, dataX * cycles + offset, pw);
     var curveY: f32 = lc_plot(vec2<f32>(dataX, curveAtX)).y;
     var between: f32 = step(min(curveY, zero.y) - 0.002, uv.y) * step(uv.y, max(curveY, zero.y) + 0.002);
     col = vec4<f32>((mix(col.rgb, input.color_d.rgb, between * input.color_d.a)), col.a);
@@ -979,7 +1026,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var prevY: f32 = lc_shape(shape, offset, pw);
     for (var i: i32 = 1; i <= steps; i = i + 1) {
         var x: f32 = f32(i) / f32(steps);
-        var y: f32 = lc_shape(shape, x + offset, pw);
+        var y: f32 = lc_shape(shape, x * cycles + offset, pw);
         var a: vec2<f32> = lc_plot(vec2<f32>(prevX, prevY));
         var b: vec2<f32> = lc_plot(vec2<f32>(x, y));
         var d: f32 = lc_sdSegment(vec2<f32>(uv.x * aspect, uv.y), vec2<f32>(a.x * aspect, a.y), vec2<f32>(b.x * aspect, b.y));
@@ -994,8 +1041,8 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 
     if (markerPhase >= 0.0) {
         var running: f32 = markerPhase - offset;
-        var markerX: f32 = clamp(running - floor(running), 0.0, 1.0);
-        var marker: vec2<f32> = lc_plot(vec2<f32>(markerX, lc_shape(shape, markerX + offset, pw)));
+        var markerX: f32 = clamp(running - floor(running), 0.0, 1.0) / cycles;
+        var marker: vec2<f32> = lc_plot(vec2<f32>(markerX, lc_shape(shape, markerX * cycles + offset, pw)));
         var markerDist: f32 = length(vec2<f32>((uv.x - marker.x) * aspect, uv.y - marker.y));
         var outer: f32 = smoothstep(0.058, 0.042, markerDist);
         var inner: f32 = smoothstep(0.036, 0.022, markerDist);

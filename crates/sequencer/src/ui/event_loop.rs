@@ -1235,6 +1235,26 @@ pub(crate) fn run_event_loop(
                 // release, and a note-on Lisp consumed keeps its note-off.
                 let consumed = dispatch_midi_to_lisp(&mut editor, &event);
                 dispatched_to_lisp = true;
+                if !consumed {
+                    use sequencer::midi_input::MidiMessage;
+                    use sequencer::sequencer::LiveInputEvent;
+                    let controller = match event.message {
+                        MidiMessage::Aftertouch { channel, value } =>
+                            Some(LiveInputEvent::Pressure { port, channel, note: None, value }),
+                        MidiMessage::PolyPressure { channel, note, value } =>
+                            Some(LiveInputEvent::Pressure { port, channel, note: Some(note), value }),
+                        MidiMessage::PitchBend { channel, value } =>
+                            Some(LiveInputEvent::PitchBend { port, channel, value }),
+                        MidiMessage::ControlChange { channel, controller: 1, value } =>
+                            Some(LiveInputEvent::ModWheel { port, channel, value: value as f32 / 127.0 }),
+                        MidiMessage::ControlChange { channel, controller: 121, .. } =>
+                            Some(LiveInputEvent::ResetControllers { port, channel }),
+                        _ => None,
+                    };
+                    if let Some(controller) = controller {
+                        let _ = shared.keyboard_tx.send(controller);
+                    }
+                }
                 let route_to_live_keyboard = match note_source {
                     Some((source, _, note)) if note.on => {
                         if consumed {

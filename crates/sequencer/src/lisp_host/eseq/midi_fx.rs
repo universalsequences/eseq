@@ -15,6 +15,14 @@ reads (`fx-param`, `midi-fx-param`, `fx-track`, `fx-velocity`), note spans
 
 use super::super::*;
 
+fn validate_origin_note(eval: &AccumulatorEvalContext, origin: Option<usize>) -> Result<(), String> {
+    let count = eval.note_spans.as_ref().map_or(eval.chord.len().max(1), Vec::len);
+    if origin.is_some_and(|index| index >= count) {
+        return Err(format!("fx-emit :origin-note is outside the current {count} input notes"));
+    }
+    Ok(())
+}
+
 pub(in crate::lisp_host) fn eval_suppress_current_event(
     accumulator_eval: &SharedAccumulatorEvalContext,
     label: &str,
@@ -45,9 +53,11 @@ pub(in crate::lisp_host) fn eval_emit_current_event(
     let mut chord = eval.chord.clone();
     let mut chord_durations = eval.chord_durations.clone();
     let chord_step_transpose = eval.chord_step_transpose;
-    let target_track =
+    let (target_track, origin_note) =
         apply_acc_emit_overrides(args, idx, &mut resolved, &mut chord, &mut chord_durations)?;
+    validate_origin_note(eval, origin_note)?;
     eval.emitted.push(EmittedAccumulatorEvent {
+        origin_note,
         offset_beats,
         track: target_track,
         resolved,
@@ -121,7 +131,7 @@ pub(in crate::lisp_host) fn eval_arp_emit_current_event(
         return Ok(EValue::Bool(false));
     }
     let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
-    let Some(note) = accumulator_arp_note(eval, rate_beats, *tick as usize) else {
+    let Some((selected_origin, note)) = accumulator_arp_selection(eval, rate_beats, *tick as usize, 0) else {
         return Ok(EValue::Bool(false));
     };
 
@@ -132,9 +142,11 @@ pub(in crate::lisp_host) fn eval_arp_emit_current_event(
     }
     let mut chord = Vec::new();
     let mut chord_durations = Vec::new();
-    let target_track =
+    let (target_track, origin_note) =
         apply_acc_emit_overrides(args, 2, &mut resolved, &mut chord, &mut chord_durations)?;
+    validate_origin_note(eval, origin_note)?;
     eval.emitted.push(EmittedAccumulatorEvent {
+        origin_note: Some(origin_note.unwrap_or(selected_origin)),
         offset_beats: *tick as f32 * rate_beats,
         track: target_track,
         resolved,
@@ -169,8 +181,8 @@ pub(in crate::lisp_host) fn eval_arp_emit_directed_current_event(
         return Ok(EValue::Bool(false));
     }
     let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
-    let Some(note) =
-        accumulator_arp_note_directed(eval, rate_beats, *tick as usize, *direction as i32)
+    let Some((selected_origin, note)) =
+        accumulator_arp_selection(eval, rate_beats, *tick as usize, *direction as i32)
     else {
         return Ok(EValue::Bool(false));
     };
@@ -182,9 +194,11 @@ pub(in crate::lisp_host) fn eval_arp_emit_directed_current_event(
     }
     let mut chord = Vec::new();
     let mut chord_durations = Vec::new();
-    let target_track =
+    let (target_track, origin_note) =
         apply_acc_emit_overrides(args, 3, &mut resolved, &mut chord, &mut chord_durations)?;
+    validate_origin_note(eval, origin_note)?;
     eval.emitted.push(EmittedAccumulatorEvent {
+        origin_note: Some(origin_note.unwrap_or(selected_origin)),
         offset_beats: *tick as f32 * rate_beats,
         track: target_track,
         resolved,
@@ -405,8 +419,10 @@ pub(in crate::lisp_host) fn eval_note_spans_as_list(
     Ok(lisp_list(
         notes
             .into_iter()
-            .map(|(transpose, start_beats, end_beats)| {
+            .enumerate()
+            .map(|(index, (transpose, start_beats, end_beats))| {
                 let mut map = HashMap::new();
+                map.insert("origin-note".to_string(), lisp_number(index as f64));
                 map.insert("note".to_string(), lisp_number(transpose as f64));
                 map.insert("start".to_string(), lisp_number(start_beats as f64));
                 map.insert("end".to_string(), lisp_number(end_beats as f64));
@@ -563,11 +579,17 @@ pub(in crate::lisp_host) fn directed_note_index(tick: usize, len: usize, directi
 }
 
 pub(in crate::lisp_host) fn accumulator_arp_note_directed(
+    eval: &AccumulatorEvalContext, rate_beats: f32, tick: usize, direction: i32,
+) -> Option<f32> {
+    accumulator_arp_selection(eval, rate_beats, tick, direction).map(|(_, pitch)| pitch)
+}
+
+pub(in crate::lisp_host) fn accumulator_arp_selection(
     eval: &AccumulatorEvalContext,
     rate_beats: f32,
     tick: usize,
     direction: i32,
-) -> Option<f32> {
+) -> Option<(usize, f32)> {
     if rate_beats <= 0.0 {
         return None;
     }
@@ -576,8 +598,8 @@ pub(in crate::lisp_host) fn accumulator_arp_note_directed(
     if let Some(note_spans) = eval.note_spans.as_ref() {
         let phased_tick = tick.saturating_add(phase_tick);
         let active = note_spans
-            .iter()
-            .filter(|note| {
+            .iter().enumerate()
+            .filter(|(_, note)| {
                 elapsed >= note.start_beats - f32::EPSILON
                     && elapsed < note.end_beats - f32::EPSILON
             })
@@ -585,7 +607,8 @@ pub(in crate::lisp_host) fn accumulator_arp_note_directed(
         if active.is_empty() {
             return None;
         }
-        return Some(active[directed_note_index(phased_tick, active.len(), direction)].transpose);
+        let (index, note) = active[directed_note_index(phased_tick, active.len(), direction)];
+        return Some((index, note.transpose));
     }
     let notes = accumulator_chord_notes(eval);
     if notes.is_empty() || eval.step_beats <= 0.0 {
@@ -594,7 +617,7 @@ pub(in crate::lisp_host) fn accumulator_arp_note_directed(
     let note_idx = directed_note_index(tick.saturating_add(phase_tick), notes.len(), direction);
     let duration_beats = notes[note_idx].duration_steps * eval.step_beats;
     if elapsed < duration_beats - f32::EPSILON {
-        Some(notes[note_idx].transpose)
+        Some((note_idx, notes[note_idx].transpose))
     } else {
         None
     }

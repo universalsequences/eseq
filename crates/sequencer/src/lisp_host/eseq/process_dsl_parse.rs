@@ -1891,6 +1891,7 @@ pub(in crate::lisp_host) fn build_process_emit_event(args: &[EValue]) -> Result<
         idx += 1;
     }
     Ok(EmittedAccumulatorEvent {
+        origin_note: None,
         offset_beats,
         track,
         resolved,

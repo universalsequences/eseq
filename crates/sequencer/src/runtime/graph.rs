@@ -2220,6 +2220,7 @@ impl GraphRuntime {
         out: &mut Vec<GraphEmission>,
     ) {
         let mut event = EmittedAccumulatorEvent {
+            origin_note: None,
             offset_beats: 0.0,
             track: self.nodes[node_index].route,
             resolved: default_resolved(),

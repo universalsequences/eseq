@@ -1,0 +1,82 @@
+{
+  "source_sha256": {
+    "content/defmacros/heat-unison-onset/macro.lisp": "ce3704ab36875db8d96cfb6a085d18f772533f3be2a9874d69d88defd3a04994"
+  },
+  "cases": [
+    {
+      "sample_rate": 44100,
+      "delay_ms": 0,
+      "onset": 0
+    },
+    {
+      "sample_rate": 44100,
+      "delay_ms": 7.5,
+      "onset": 331
+    },
+    {
+      "sample_rate": 44100,
+      "delay_ms": 100,
+      "onset": 4410
+    },
+    {
+      "sample_rate": 44100,
+      "delay_ms": 300,
+      "onset": 13230
+    },
+    {
+      "sample_rate": 48000,
+      "delay_ms": 0,
+      "onset": 0
+    },
+    {
+      "sample_rate": 48000,
+      "delay_ms": 7.5,
+      "onset": 360
+    },
+    {
+      "sample_rate": 48000,
+      "delay_ms": 100,
+      "onset": 4800
+    },
+    {
+      "sample_rate": 48000,
+      "delay_ms": 300,
+      "onset": 14400
+    },
+    {
+      "sample_rate": 96000,
+      "delay_ms": 0,
+      "onset": 0
+    },
+    {
+      "sample_rate": 96000,
+      "delay_ms": 7.5,
+      "onset": 720
+    },
+    {
+      "sample_rate": 96000,
+      "delay_ms": 100,
+      "onset": 9600
+    },
+    {
+      "sample_rate": 96000,
+      "delay_ms": 300,
+      "onset": 28800
+    },
+    {
+      "voices": 2,
+      "normalized_sum_error": 0.0,
+      "stereo_difference_rms": 0.018516812473535538
+    },
+    {
+      "voices": 3,
+      "normalized_sum_error": 3.725290298461914e-09,
+      "stereo_difference_rms": 0.012344542890787125
+    },
+    {
+      "voices": 4,
+      "normalized_sum_error": 0.0,
+      "stereo_difference_rms": 0.009889757260680199
+    }
+  ]
+}

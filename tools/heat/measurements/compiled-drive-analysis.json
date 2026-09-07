@@ -1,0 +1,108 @@
+{
+  "scope": "Six drive modes and output limiting, two resonance levels; amplifier control mapping excluded",
+  "sample_rate": 48000,
+  "comparison_frames": [
+    48000,
+    96000
+  ],
+  "macro_sha256": {
+    "heat-soft-clip": "950650ed8a64f9411e7f56e9720262bb41ae5c701f58c13e7fcd6ece9b04ea59",
+    "heat-drive": "7b1bead23324aaddc431f8abe0e3dc7692898d30c5d39d687f5a12cb88424d30"
+  },
+  "source_level_ratio": 16.935896717021315,
+  "source_gain_max_residual": 3.952256893979822e-08,
+  "drive_output_scale": 0.0904724,
+  "cases": {
+    "drive-independent drive0-q1": {
+      "rms_full_scale_error": 0.00011449244386052432,
+      "max_full_scale_error": 0.0005710124969482422,
+      "passed": true
+    },
+    "drive-independent drive1-q1": {
+      "rms_full_scale_error": 3.7918391447533966e-05,
+      "max_full_scale_error": 0.0005176737904548645,
+      "passed": true
+    },
+    "drive-independent drive2-q1": {
+      "rms_full_scale_error": 3.409215314936758e-05,
+      "max_full_scale_error": 0.0007321015000343323,
+      "passed": true
+    },
+    "drive-independent drive3-q1": {
+      "rms_full_scale_error": 3.2041397366779117e-05,
+      "max_full_scale_error": 0.001035347580909729,
+      "passed": true
+    },
+    "drive-independent drive4-q1": {
+      "rms_full_scale_error": 3.361344425063118e-05,
+      "max_full_scale_error": 0.0005176737904548645,
+      "passed": true
+    },
+    "drive-independent drive5-q1": {
+      "rms_full_scale_error": 3.715437481245503e-05,
+      "max_full_scale_error": 0.0007321015000343323,
+      "passed": true
+    },
+    "drive-independent drive6-q1": {
+      "rms_full_scale_error": 4.294184839680521e-05,
+      "max_full_scale_error": 0.001035347580909729,
+      "passed": true
+    },
+    "drive-steady drive0-q0.5": {
+      "rms_full_scale_error": 1.6499784262414092e-08,
+      "max_full_scale_error": 5.960464477539063e-08,
+      "passed": true
+    },
+    "drive-steady drive1-q0.5": {
+      "rms_full_scale_error": 7.459310515002625e-08,
+      "max_full_scale_error": 3.129243850708008e-07,
+      "passed": true
+    },
+    "drive-steady drive2-q0.5": {
+      "rms_full_scale_error": 6.077240605539462e-08,
+      "max_full_scale_error": 1.341104507446289e-07,
+      "passed": true
+    },
+    "drive-steady drive3-q0.5": {
+      "rms_full_scale_error": 4.609352452141362e-08,
+      "max_full_scale_error": 7.450580596923828e-08,
+      "passed": true
+    },
+    "drive-steady drive4-q0.5": {
+      "rms_full_scale_error": 6.499829181766608e-08,
+      "max_full_scale_error": 3.129243850708008e-07,
+      "passed": true
+    },
+    "drive-steady drive5-q0.5": {
+      "rms_full_scale_error": 6.595303633699028e-08,
+      "max_full_scale_error": 2.905726432800293e-07,
+      "passed": true
+    },
+    "drive-steady drive6-q0.5": {
+      "rms_full_scale_error": 7.30956876176279e-08,
+      "max_full_scale_error": 3.2782554626464844e-07,
+      "passed": true
+    }
+  },
+  "reference_sha256": {
+    "drive-independent linear-level0.5-filter0": "6c105ad09df310f97e545ca97d3e9869a38f2e9835bcb50d5a78d62daa84d2a6",
+    "drive-independent linear-level1-filter0": "90f33d74e30d335bc03ea0f53862a3a5ecd273cd986f6e75b34ac60b705921df",
+    "drive-independent linear-level0.5-filter1": "10829b64839a31b381369aef7c6bc2a9479ba0ce41b2e71b75d0dcd775da8a90",
+    "drive-steady drive0-q0.5": "e865399283ee6c5bab7c8c0e32df4e4df10380abfe995553cb2e0f53592106b6",
+    "drive-independent drive0-q1": "81e254e5d4dacfaa30944e0f0808e03bae5dc893792a09edfb2aea324314b44f",
+    "drive-independent drive1-q1": "fa40b17c15948ae16721ccfe4b1bffbd8431352debd8af5cbe10a8e0824c9d6b",
+    "drive-independent drive2-q1": "f4c3eb1e19d038dcaec3c757cb3691d375c28dd8932e3b81ca1e2c5618ef9cbe",
+    "drive-independent drive3-q1": "cb08594a78cfc74986e79fa9412cbb3e306511a2e32493c92f7addd339e29bc1",
+    "drive-independent drive4-q1": "de3821055212cc58de8f0983b3da17213428fe5ffd1f87b93b76fa8084f213a8",
+    "drive-independent drive5-q1": "9a5703fb334ca1bfa4264c545e1bb48825eb5f7001d9bcf58e5902abfe06dac8",
+    "drive-independent drive6-q1": "700593be8fc6119b780bd7854ef7f5339981b0b3d0bef3035a3bc2792ebd8124",
+    "drive-steady drive1-q0.5": "ed0f799600eba0c84f99db7dae3a5855ac1ea77ded88a1d8b3b0621566b7bbe9",
+    "drive-steady drive2-q0.5": "897e47de4e16bb237bd64e34ca097c48cd4f20df6b92234d8c353f92bac81eb9",
+    "drive-steady drive3-q0.5": "02ba3b9218eea7df1636cd34411046f5b1ec120b51dcccc556dc5e34167b0721",
+    "drive-steady drive4-q0.5": "2f39a18c1c472754cf23e4ffd7cf56e7530342f69a32956c36c413e90c497fb2",
+    "drive-steady drive5-q0.5": "9b9677e9968785eeb7036e8a0db5b8e8a1e3201f7f61122d6bf73ed6a592d48c",
+    "drive-steady drive6-q0.5": "1bc5d33c385b73898da9643da933cc235307f4329e3e0e9de99478da292e3dfc"
+  },
+  "compiler_sha256": "8ad665c55afb9d1dbf0dcb59bcbcc9afe8fb94399ff182d5e844f07625c967bb",
+  "extreme_input_checks_passed": true
+}

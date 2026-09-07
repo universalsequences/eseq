@@ -256,13 +256,26 @@ pub(super) unsafe fn send_custom_trigger(
     pitch_hz: f32,
     velocity: f32,
 ) {
+    send_custom_note_on(lg, gatepitch_lid, frame_offset, sequence, pitch_hz, velocity, false);
+}
+
+/// Legato is resolved by GatePitch at the event's sample, not at block start.
+pub(super) unsafe fn send_custom_note_on(
+    lg: *mut LiveGraph,
+    gatepitch_lid: u64,
+    frame_offset: u32,
+    sequence: u32,
+    pitch_hz: f32,
+    velocity: f32,
+    legato: bool,
+) {
     push_graph_block_event(
         lg,
         gatepitch_lid,
         frame_offset,
         sequence,
         GBE_NOTE_ON,
-        &[pitch_hz, velocity],
+        &[pitch_hz, velocity, if legato { 1.0 } else { 0.0 }],
     );
 }
 

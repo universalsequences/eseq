@@ -1,0 +1,479 @@
+[
+  {
+    "name": "lp12-f0-q0",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "lp12-f0-q0.25",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0,
+      "SignalChain1/FilterQFactor": 0.25
+    }
+  },
+  {
+    "name": "lp12-f0-q0.5",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0,
+      "SignalChain1/FilterQFactor": 0.5
+    }
+  },
+  {
+    "name": "lp12-f0-q0.75",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0,
+      "SignalChain1/FilterQFactor": 0.75
+    }
+  },
+  {
+    "name": "lp12-f0-q1",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0,
+      "SignalChain1/FilterQFactor": 1
+    }
+  },
+  {
+    "name": "lp12-f0.25-q0",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.25,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "lp12-f0.25-q0.25",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.25,
+      "SignalChain1/FilterQFactor": 0.25
+    }
+  },
+  {
+    "name": "lp12-f0.25-q0.5",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.25,
+      "SignalChain1/FilterQFactor": 0.5
+    }
+  },
+  {
+    "name": "lp12-f0.25-q0.75",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.25,
+      "SignalChain1/FilterQFactor": 0.75
+    }
+  },
+  {
+    "name": "lp12-f0.25-q1",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.25,
+      "SignalChain1/FilterQFactor": 1
+    }
+  },
+  {
+    "name": "lp12-f0.5-q0",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "lp12-f0.5-q0.25",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.25
+    }
+  },
+  {
+    "name": "lp12-f0.5-q0.5",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.5
+    }
+  },
+  {
+    "name": "lp12-f0.5-q0.75",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 0.75
+    }
+  },
+  {
+    "name": "lp12-f0.5-q1",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.5,
+      "SignalChain1/FilterQFactor": 1
+    }
+  },
+  {
+    "name": "lp12-f0.75-q0",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.75,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "lp12-f0.75-q0.25",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.75,
+      "SignalChain1/FilterQFactor": 0.25
+    }
+  },
+  {
+    "name": "lp12-f0.75-q0.5",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.75,
+      "SignalChain1/FilterQFactor": 0.5
+    }
+  },
+  {
+    "name": "lp12-f0.75-q0.75",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.75,
+      "SignalChain1/FilterQFactor": 0.75
+    }
+  },
+  {
+    "name": "lp12-f0.75-q1",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 0.75,
+      "SignalChain1/FilterQFactor": 1
+    }
+  },
+  {
+    "name": "lp12-f1-q0",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0
+    }
+  },
+  {
+    "name": "lp12-f1-q0.25",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.25
+    }
+  },
+  {
+    "name": "lp12-f1-q0.5",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5
+    }
+  },
+  {
+    "name": "lp12-f1-q0.75",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.75
+    }
+  },
+  {
+    "name": "lp12-f1-q1",
+    "overrides": {
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 1
+    }
+  },
+  {
+    "name": "drive-0-level0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.25,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 0
+    }
+  },
+  {
+    "name": "drive-0-level0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.75,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 0
+    }
+  },
+  {
+    "name": "drive-0-level1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 0
+    }
+  },
+  {
+    "name": "drive-1-level0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.25,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 1
+    }
+  },
+  {
+    "name": "drive-1-level0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.75,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 1
+    }
+  },
+  {
+    "name": "drive-1-level1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 1
+    }
+  },
+  {
+    "name": "drive-2-level0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.25,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 2
+    }
+  },
+  {
+    "name": "drive-2-level0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.75,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 2
+    }
+  },
+  {
+    "name": "drive-2-level1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 2
+    }
+  },
+  {
+    "name": "drive-3-level0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.25,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 3
+    }
+  },
+  {
+    "name": "drive-3-level0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.75,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 3
+    }
+  },
+  {
+    "name": "drive-3-level1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 3
+    }
+  },
+  {
+    "name": "drive-4-level0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.25,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 4
+    }
+  },
+  {
+    "name": "drive-4-level0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.75,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 4
+    }
+  },
+  {
+    "name": "drive-4-level1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 4
+    }
+  },
+  {
+    "name": "drive-5-level0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.25,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 5
+    }
+  },
+  {
+    "name": "drive-5-level0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.75,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 5
+    }
+  },
+  {
+    "name": "drive-5-level1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 5
+    }
+  },
+  {
+    "name": "drive-6-level0.25",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.25,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 6
+    }
+  },
+  {
+    "name": "drive-6-level0.75",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 0.75,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 6
+    }
+  },
+  {
+    "name": "drive-6-level1",
+    "overrides": {
+      "SignalChain1/OscillatorWaveShape": 0,
+      "SignalChain1/OscillatorLevel": 1,
+      "SignalChain1/FilterToggle": true,
+      "SignalChain1/FilterCutoffFrequency": 1,
+      "SignalChain1/FilterQFactor": 0.5,
+      "SignalChain1/FilterType": 0,
+      "SignalChain1/FilterDrive": 6
+    }
+  }
+]

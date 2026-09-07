@@ -1,4 +1,4 @@
-//! `lfo-curve`: one cycle of a voice-modulator LFO shape with a live phase
+//! `lfo-curve`: LFO shape preview with a configurable cycle count and live phase
 //! marker. The source editor draws the waveform the user is designing (shape,
 //! pulse width, phase offset) and rides the marker on the most recently
 //! triggered voice's effective phase, published by the host as a reactive
@@ -25,6 +25,17 @@ pub const SHAPE_TRIANGLE: f32 = 0.0;
 pub const SHAPE_SINE: f32 = 1.0;
 pub const SHAPE_PULSE: f32 = 2.0;
 pub const SHAPE_SAW: f32 = 3.0;
+pub const SHAPE_RANDOM_STEP: f32 = 4.0;
+pub const SHAPE_RANDOM_RAMP: f32 = 5.0;
+/// The clipped, descending triangle used by Analog-style LFOs.
+pub const SHAPE_CLIPPED_TRIANGLE: f32 = 6.0;
+pub const SHAPE_FULL_WIDTH_PULSE: f32 = 7.0;
+
+// Stable illustrative random levels, not a claim to display a live noise stream.
+fn random_level(cycle: f32) -> f32 {
+    const LEVELS: [f32; 8] = [0.7, -0.45, 0.15, -0.8, 0.5, -0.1, 0.9, -0.6];
+    LEVELS[cycle.rem_euclid(8.0) as usize]
+}
 
 fn value_num(value: &Value) -> Option<f32> {
     match value {
@@ -42,6 +53,7 @@ fn prop_num(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
 /// modulator's `shape_value`, kept here so the TUI fallback and tests can
 /// describe the curve without a GPU.
 pub fn shape_value(shape: f32, phase: f32, pulse_width: f32) -> f32 {
+    let cycle = phase.floor();
     let phase = phase.rem_euclid(1.0);
     match shape.round() as i32 {
         1 => (std::f32::consts::TAU * phase).sin(),
@@ -53,6 +65,18 @@ pub fn shape_value(shape: f32, phase: f32, pulse_width: f32) -> f32 {
             }
         }
         3 => phase * 2.0 - 1.0,
+        4 => random_level(cycle),
+        5 => {
+            let start = random_level(cycle - 1.0);
+            start + (random_level(cycle) - start) * (phase / 0.4).clamp(0.0, 1.0)
+        }
+        6 => {
+            let duty = pulse_width.clamp(0.0, 1.0);
+            let skew = 0.05 + 0.9 * duty;
+            (if phase < duty { 1.0 - 2.0 * phase / skew }
+             else { 1.0 - 2.0 * (1.0 - phase) / (1.0 - skew) }).min(1.0)
+        }
+        7 => if phase < pulse_width.clamp(0.0, 1.0) { 1.0 } else { -1.0 },
         _ => {
             // Skewed triangle: `pulse_width` is the peak position.
             let peak = pulse_width.clamp(0.05, 0.95);
@@ -105,11 +129,13 @@ impl WidgetDefinition for LfoCurveWidget {
     ) {
         let shape = prop_num(props, "shape", SHAPE_TRIANGLE);
         let pw = prop_num(props, "pw", 0.5);
+        let cycles = prop_num(props, "cycles", 1.0).clamp(1.0, 8.0);
+        let offset = prop_num(props, "phase-offset", 0.0) / 360.0;
         let width = rect.width.round().max(1.0) as usize;
         let row = rect.row.round() as u16;
         let col_start = rect.col.round() as u16;
         for i in 0..width {
-            let phase = i as f32 / width.max(1) as f32;
+            let phase = cycles * i as f32 / width.max(1) as f32 + offset;
             let ch = if shape_value(shape, phase, pw) >= 0.0 {
                 '▀'
             } else {
@@ -137,8 +163,8 @@ impl WidgetDefinition for LfoCurveWidget {
         node: &LayoutNode,
         viewport: WidgetViewport,
     ) -> Vec<GpuPrimitive> {
-        let shape = prop_num(&node.props, "shape", SHAPE_TRIANGLE).clamp(0.0, 3.0);
-        let pw = prop_num(&node.props, "pw", 0.5).clamp(0.05, 0.95);
+        let shape = prop_num(&node.props, "shape", SHAPE_TRIANGLE).clamp(0.0, 7.0);
+        let pw = prop_num(&node.props, "pw", 0.5).clamp(0.0, 1.0);
         // Degrees, like the `modN_lfo_phase` param; the shader works in cycles.
         let phase_offset = prop_num(&node.props, "phase-offset", 0.0) / 360.0;
         let phase = prop_num(&node.props, "phase", -1.0);
@@ -175,7 +201,7 @@ impl WidgetDefinition for LfoCurveWidget {
                 orientation: 0.0,
                 itime: viewport.time_seconds,
                 uniform_a: [shape, pw, phase_offset, phase],
-                uniform_b: [0.0; 4],
+                uniform_b: [prop_num(&node.props, "cycles", 1.0).clamp(1.0, 8.0), 0.0, 0.0, 0.0],
                 uniform_c: [0.0; 4],
                 uniform_d: [0.0; 4],
                 color_a: curve_color.to_rgba(),
@@ -211,6 +237,10 @@ float2 lc_plot(float2 data) {
         pad.y + (1.0 - (data.y * 0.5 + 0.5)) * (1.0 - pad.y * 2.0));
 }
 
+float lc_random(float cycle) {
+    const float levels[8] = {0.7, -0.45, 0.15, -0.8, 0.5, -0.1, 0.9, -0.6};
+    return levels[int(cycle - floor(cycle / 8.0) * 8.0)];
+}
 float lc_shape(int shape, float x, float pw) {
     float phase = x - floor(x);
     if (shape == 1) {
@@ -220,6 +250,14 @@ float lc_shape(int shape, float x, float pw) {
     } else if (shape == 3) {
         return phase * 2.0 - 1.0;
     }
+    if (shape == 4) return lc_random(floor(x));
+    if (shape == 5) return mix(lc_random(floor(x) - 1.0), lc_random(floor(x)), clamp(phase / 0.4, 0.0, 1.0));
+    if (shape == 6) {
+        float duty = clamp(pw, 0.0, 1.0);
+        float skew = 0.05 + 0.9 * duty;
+        return min(1.0, phase < duty ? 1.0 - 2.0 * phase / skew : 1.0 - 2.0 * (1.0 - phase) / (1.0 - skew));
+    }
+    if (shape == 7) return phase < clamp(pw, 0.0, 1.0) ? 1.0 : -1.0;
     float peak = clamp(pw, 0.05, 0.95);
     return phase < peak ? -1.0 + 2.0 * phase / peak : 1.0 - 2.0 * (phase - peak) / (1.0 - peak);
 }
@@ -228,10 +266,11 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
     float aspect = max(in.aspect, 0.0001);
-    int shape = int(round(clamp(in.uniform_a.x, 0.0, 3.0)));
+    int shape = int(round(clamp(in.uniform_a.x, 0.0, 7.0)));
     float pw = in.uniform_a.y;
     float offset = in.uniform_a.z;
     float markerPhase = in.uniform_a.w;
+    float cycles = in.uniform_b.x;
 
     float4 col = in.color_b;
 
@@ -243,7 +282,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     // Fill between the zero line and the curve.
     float dataX = clamp((uv.x - 0.04) / 0.92, 0.0, 1.0);
-    float curveAtX = lc_shape(shape, dataX + offset, pw);
+    float curveAtX = lc_shape(shape, dataX * cycles + offset, pw);
     float curveY = lc_plot(float2(dataX, curveAtX)).y;
     float between = step(min(curveY, zero.y) - 0.002, uv.y) * step(uv.y, max(curveY, zero.y) + 0.002);
     col.rgb = mix(col.rgb, in.color_d.rgb, between * in.color_d.a);
@@ -254,7 +293,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float prevY = lc_shape(shape, offset, pw);
     for (int i = 1; i <= steps; i++) {
         float x = float(i) / float(steps);
-        float y = lc_shape(shape, x + offset, pw);
+        float y = lc_shape(shape, x * cycles + offset, pw);
         float2 a = lc_plot(float2(prevX, prevY));
         float2 b = lc_plot(float2(x, y));
         float d = lc_sdSegment(float2(uv.x * aspect, uv.y), float2(a.x * aspect, a.y), float2(b.x * aspect, b.y));
@@ -269,8 +308,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     if (markerPhase >= 0.0) {
         float running = markerPhase - offset;
-        float markerX = clamp(running - floor(running), 0.0, 1.0);
-        float2 marker = lc_plot(float2(markerX, lc_shape(shape, markerX + offset, pw)));
+        float markerX = clamp(running - floor(running), 0.0, 1.0) / cycles;
+        float2 marker = lc_plot(float2(markerX, lc_shape(shape, markerX * cycles + offset, pw)));
         float markerDist = length(float2((uv.x - marker.x) * aspect, uv.y - marker.y));
         float outer = smoothstep(0.058, 0.042, markerDist);
         float inner = smoothstep(0.036, 0.022, markerDist);
@@ -287,6 +326,27 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extended_shapes_have_correct_boundaries_and_repeatable_random_transitions() {
+        for width in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            for i in 0..100 {
+                let phase = i as f32 / 100.0;
+                let skew = 0.05 + 0.9 * width;
+                let expected = (if phase < width { 1.0 - 2.0 * phase / skew }
+                    else { 1.0 - 2.0 * (1.0 - phase) / (1.0 - skew) }).min(1.0);
+                assert!((shape_value(SHAPE_CLIPPED_TRIANGLE, phase, width) - expected).abs() < 1e-6);
+                assert_eq!(shape_value(SHAPE_FULL_WIDTH_PULSE, phase, width), if phase < width { 1.0 } else { -1.0 });
+            }
+        }
+        assert_eq!(shape_value(SHAPE_RANDOM_STEP, 0.0, 0.5), shape_value(SHAPE_RANDOM_STEP, 0.999, 0.5));
+        assert_ne!(shape_value(SHAPE_RANDOM_STEP, 0.0, 0.5), shape_value(SHAPE_RANDOM_STEP, 1.0, 0.5));
+        for cycle in -2..10 {
+            let c = cycle as f32;
+            assert!((shape_value(SHAPE_RANDOM_RAMP, c, 0.5) - random_level(c - 1.0)).abs() < 1e-6);
+            assert!((shape_value(SHAPE_RANDOM_RAMP, c + 0.4, 0.5) - random_level(c)).abs() < 3e-6);
+        }
+    }
 
     #[test]
     fn shapes_span_the_bipolar_range() {

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "heat-lfo",
+  "params": ["rate_hz", "width", "shape", "note_on", "retrigger", "phase_offset", "delay_ms", "fade_ms"],
+  "outputs": ["out"],
+  "summary": "Heat audio-rate modulation oscillator with delay and fade; waveform calibration in progress.",
+  "tags": ["modulation", "synth", "heat"]
+}

@@ -1,0 +1,122 @@
+{
+  "scope": "Linear filters only; cutoff 833.782 Hz, two measured Q settings",
+  "macro_sha256": "94016f004639ca92f86a2166d166140a700f83db2b3a57fd67dd3c481adf64fe",
+  "source_sha256": "1ca9189fec772c1857583e79444b5e9d1004dd123a5d02d6f5804080d723e4dc",
+  "sample_rate": 48000,
+  "cases": {
+    "filter-0-q0": {
+      "reference_sha256": "2d197487cc4a69128f18159bbb84cbce4496cfe2443ef108eb04f16448cd2aab",
+      "harmonics_compared": 256,
+      "rms_error_db": 7.924696786285637e-05,
+      "rms_phase_error_radians": 8.996394040465243e-06,
+      "passed": true
+    },
+    "filter-0-q0.75": {
+      "reference_sha256": "852b4c9217ae30c2cfff2806ef3bd4b56006b292c0029f1e1527648dd8d57527",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.00010180667285087232,
+      "rms_phase_error_radians": 1.3786703968150906e-05,
+      "passed": true
+    },
+    "filter-1-q0": {
+      "reference_sha256": "9ebe02b718282ddc2e93c1070c639491ea4a646514620c00b843c537dff254f4",
+      "harmonics_compared": 131,
+      "rms_error_db": 0.0004284836829796661,
+      "rms_phase_error_radians": 5.966584733557809e-05,
+      "passed": true
+    },
+    "filter-1-q0.75": {
+      "reference_sha256": "7370f986dd17430a54096b9ae6d50d7d6e2555b43b995af2d0823c4c0e14457c",
+      "harmonics_compared": 141,
+      "rms_error_db": 0.0013631192748551925,
+      "rms_phase_error_radians": 0.0001184495579137996,
+      "passed": true
+    },
+    "filter-2-q0": {
+      "reference_sha256": "6f4d4dc7d0dfdc687d4fb4c0b1f03e44f5d74f1fabb2ff7fa07cc2bf6ea47e58",
+      "harmonics_compared": 256,
+      "rms_error_db": 5.7623527910909235e-06,
+      "rms_phase_error_radians": 1.1626182932278913e-06,
+      "passed": true
+    },
+    "filter-2-q0.75": {
+      "reference_sha256": "52f88bade0aede4fea3390c332f004e74431923eb5adeca577288f037bf32887",
+      "harmonics_compared": 256,
+      "rms_error_db": 1.5855594686635446e-05,
+      "rms_phase_error_radians": 2.4482771838273333e-06,
+      "passed": true
+    },
+    "filter-3-q0": {
+      "reference_sha256": "03a25222a99acc4bc22ec8e664d19d38b5efbce118ff5bdba2050d28b36342ec",
+      "harmonics_compared": 256,
+      "rms_error_db": 1.1409776706798049e-05,
+      "rms_phase_error_radians": 2.323976410567226e-06,
+      "passed": true
+    },
+    "filter-3-q0.75": {
+      "reference_sha256": "e2240380a7a334dfd01f782c1758b10c09393f85873ad94bb74990660ce90208",
+      "harmonics_compared": 256,
+      "rms_error_db": 0.0008556790633087715,
+      "rms_phase_error_radians": 8.627947066045148e-05,
+      "passed": true
+    },
+    "filter-4-q0": {
+      "reference_sha256": "9eccafbb7fe0dca44f2f42b94e6eea42f5aef25fba5c1743bc24711368ac5011",
+      "harmonics_compared": 256,
+      "rms_error_db": 4.8968190617417564e-05,
+      "rms_phase_error_radians": 3.852396711434197e-06,
+      "passed": true
+    },
+    "filter-4-q0.75": {
+      "reference_sha256": "c01486e92e92e0fe781764371e74ab9cc6b4893d44f18bed3e1ba25410c8a209",
+      "harmonics_compared": 256,
+      "rms_error_db": 1.2752118330061225e-05,
+      "rms_phase_error_radians": 2.5921739375748484e-06,
+      "passed": true
+    },
+    "filter-5-q0": {
+      "reference_sha256": "7aeab964379c88d8e909509730556bf793f743c53cc42b5d76d9e1431b4547a0",
+      "harmonics_compared": 248,
+      "rms_error_db": 6.784287011701046e-05,
+      "rms_phase_error_radians": 9.427942079790915e-06,
+      "passed": true
+    },
+    "filter-5-q0.75": {
+      "reference_sha256": "47dc4d80537b69f4d7a3d5f2930740ece1f9f35a151ebec4913610d9b660f2cc",
+      "harmonics_compared": 256,
+      "rms_error_db": 2.5440185573750536e-05,
+      "rms_phase_error_radians": 5.138361747260872e-06,
+      "passed": true
+    },
+    "filter-6-q0": {
+      "reference_sha256": "24fe190cd58c10d9cf5dde36d1e53dccb62d984b5eb63e7276f6ec5eaa377bc6",
+      "harmonics_compared": 256,
+      "rms_error_db": 7.665414048592599e-06,
+      "rms_phase_error_radians": 4.106307961046491e-06,
+      "passed": true
+    },
+    "filter-6-q0.75": {
+      "reference_sha256": "877d30d9ff5d67f45bb41bddea4cb40e528be7afc0d9bc914bfb416f4cd85d36",
+      "harmonics_compared": 256,
+      "rms_error_db": 1.3531249798540996e-05,
+      "rms_phase_error_radians": 2.2815543331891905e-06,
+      "passed": true
+    },
+    "filter-7-q0": {
+      "reference_sha256": "0467a92307dd0398a82e65afce896959e60c6af1c72b82513c01042154f18cb0",
+      "harmonics_compared": 252,
+      "rms_error_db": 1.6385192147939053e-05,
+      "rms_phase_error_radians": 2.4203854778278306e-06,
+      "passed": true
+    },
+    "filter-7-q0.75": {
+      "reference_sha256": "8a7e6b98f9080fa3ba37caf1ea2c4c5b4eec4e42e9a70e56a06ac688779a4077",
+      "harmonics_compared": 252,
+      "rms_error_db": 1.8279880582139523e-05,
+      "rms_phase_error_radians": 3.7816400962124267e-06,
+      "passed": true
+    }
+  },
+  "compiler_sha256": "8ad665c55afb9d1dbf0dcb59bcbcc9afe8fb94399ff182d5e844f07625c967bb",
+  "passed": true
+}

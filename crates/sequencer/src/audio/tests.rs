@@ -1180,6 +1180,7 @@ fn rack_v2_choke_clears_held_keyboard_notes_on_choked_tracks() {
         &mut active_keyboard_notes,
         0,
         3.0,
+        None,
         Some(63),
         0.8,
         &[ActiveKeyboardVoice {
@@ -1217,7 +1218,7 @@ fn rack_v2_choke_clears_held_keyboard_notes_on_choked_tracks() {
         "the choked track's held-key entries must be cleared"
     );
     assert!(
-        take_active_keyboard_note(&mut active_keyboard_notes, 0, 3.0).is_none(),
+        take_active_keyboard_note(&mut active_keyboard_notes, 0, 3.0, None).is_none(),
         "releasing the held key after a choke must not emit a note-off on a recycled lid"
     );
 }
@@ -1262,8 +1263,8 @@ fn active_keyboard_note_stores_all_rack_slot_voices_for_one_key() {
         },
     ];
 
-    store_active_keyboard_note(&mut notes, 0, 3.0, Some(63), 0.7, &voices);
-    let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
+    store_active_keyboard_note(&mut notes, 0, 3.0, None, Some(63), 0.7, &voices);
+    let note = take_active_keyboard_note(&mut notes, 0, 3.0, None).unwrap();
 
     assert_eq!(note.source_transpose, 3.0);
     assert_eq!(note.midi_note, Some(63));
@@ -1295,9 +1296,9 @@ fn active_keyboard_note_clear_by_lid_preserves_other_slot_voices() {
         },
     ];
 
-    store_active_keyboard_note(&mut notes, 0, 3.0, Some(63), 0.7, &voices);
+    store_active_keyboard_note(&mut notes, 0, 3.0, None, Some(63), 0.7, &voices);
     clear_active_keyboard_note_by_lid(&mut notes, 12);
-    let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
+    let note = take_active_keyboard_note(&mut notes, 0, 3.0, None).unwrap();
 
     assert_eq!(note.voices(), &[voices[0], voices[2]]);
 }
@@ -1563,6 +1564,7 @@ fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 chord: ScheduledChordData {
+                    live_origins: [None; crate::audio::MAX_VOICES],
                     count: 0,
                     notes: [0.0; crate::audio::MAX_VOICES],
                     durations: [0.0; crate::audio::MAX_VOICES],
@@ -1605,6 +1607,7 @@ fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 chord: ScheduledChordData {
+                    live_origins: [None; crate::audio::MAX_VOICES],
                     count: 0,
                     notes: [0.0; crate::audio::MAX_VOICES],
                     durations: [0.0; crate::audio::MAX_VOICES],
@@ -1799,6 +1802,48 @@ fn sampler_warp_repitch_mode_needs_no_analysis() {
     assert!(enabled > 0.5);
     assert!((ratio - (120.0 / 174.0)).abs() < 0.0001);
     assert_eq!((ptr_lo, ptr_hi), (0.0, 0.0));
+}
+
+#[test]
+fn custom_voice_priority_preserves_higher_ranked_notes_and_source_identity() {
+    use crate::sequencer::{LiveNoteOrigin, LiveNoteSource, VoicePriority};
+    let live = |port: usize, note: u8, generation: u64| Some(LiveNoteOrigin {
+        source: LiveNoteSource::Midi { port, channel: 0, note }, generation,
+    });
+    let (a, b) = (live(0, 60, 1), live(1, 60, 2));
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=6 { pool.add_voice(lid); }
+    let first = pool.allocate_voice_with_priority(0, 0, 60.0, true, 2, VoicePriority::High, a).unwrap();
+    let second = pool.allocate_voice_with_priority(0, 0, 60.0, true, 2, VoicePriority::High, b).unwrap();
+    assert_ne!(first.logical_id, second.logical_id);
+    assert!(pool.allocate_voice_with_priority(0, 0, 55.0, true, 2, VoicePriority::High, live(0, 55, 3)).is_none());
+    let higher = pool.allocate_voice_with_priority(0, 0, 67.0, true, 2, VoicePriority::High, live(0, 67, 4)).unwrap();
+    assert!(higher.stole_active_voice);
+    assert_eq!(pool.voices[..pool.num_voices].iter().filter(|v| v.active).count(), 2);
+    let lower = pool.allocate_voice_with_priority(0, 0, 50.0, true, 2, VoicePriority::Low, live(0, 50, 5)).unwrap();
+    assert_eq!(lower.logical_id, higher.logical_id);
+    assert!(pool.allocate_voice_with_priority(0, 0, 70.0, true, 2, VoicePriority::Low, live(0, 70, 6)).is_none());
+    pool.release_voice_by_logical_id(lower.logical_id, 100);
+    assert!(pool.allocate_voice_with_priority(0, 0, 70.0, true, 2, VoicePriority::Low, live(0, 70, 7)).is_some());
+}
+
+#[test]
+fn custom_voice_priority_never_rejects_sequenced_notes() {
+    use crate::sequencer::VoicePriority;
+    // A gate-off track never releases its voice, so a rejected step would stay
+    // silent for the rest of playback. Sequenced notes always steal (Last).
+    for (polyphonic, max) in [(false, 1), (true, 1), (true, 2)] {
+        let mut pool = CustomEnginePool::new();
+        for lid in 1..=4 { pool.add_voice(lid); }
+        for note in [60.0, 55.0, 72.0, 48.0] {
+            for priority in [VoicePriority::High, VoicePriority::Low] {
+                let allocation = pool
+                    .allocate_voice_with_priority(0, 0, note, polyphonic, max, priority, None)
+                    .expect("sequenced note allocates regardless of priority");
+                assert!(allocation.logical_id > 0);
+            }
+        }
+    }
 }
 
 #[test]

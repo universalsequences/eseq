@@ -78,6 +78,8 @@ pub(crate) struct AccumulatorEvalContext {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmittedAccumulatorEvent {
+    /// Explicit source-note index, retained before pitch/direction transforms.
+    pub origin_note: Option<usize>,
     pub offset_beats: f32,
     pub track: Option<usize>,
     pub resolved: ResolvedStep,
