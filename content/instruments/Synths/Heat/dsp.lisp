@@ -41,6 +41,34 @@
   (write-history value_hist value)
   value)
 
+; Finite 2 ms enable ramp. Continuous levels retain their exponential slew.
+; A disabled section finishes its fade before its DSP state is frozen.
+(defmacro heat-enable (target)
+  (make-history ready)
+  (make-history level)
+  (def old (read-history level))
+  (def step (/ 1 (* 0.002 samplerate)))
+  (def value (gswitch (eq (read-history ready) 0) target
+    (+ old (clip (- target old) (- 0 step) step))))
+  (write-history ready 1)
+  (write-history level value)
+  value)
+
+; Execution window for a section that owns released state. It rises to exact
+; one immediately and falls to exact zero only after hold_ms, so a section can
+; be kept executing after its audible fade has finished and then be frozen at
+; a known-idle state rather than mid-release.
+(defmacro heat-run (target hold_ms)
+  (make-history ready)
+  (make-history level)
+  (def old (read-history level))
+  (def step (/ 1000 (* (max 1 hold_ms) samplerate)))
+  (def value (gswitch (eq (read-history ready) 0) target
+    (gswitch (gt target 0.5) 1 (max 0 (- old step)))))
+  (write-history ready 1)
+  (write-history level value)
+  value)
+
 ; Analytical source family, normalized peak amplitude. The two oscillators
 ; own separate phases and sub phases; no sampled reference waveforms are used.
 (defmacro heat-source (frequency wave duty sub_level sync_mode sync_semitones)
@@ -48,15 +76,17 @@
   (def phase (phasor hz))
   (def sub_hz (* 0.5 hz))
   (def sub_phase (phasor sub_hz))
-  (def main (selector (+ 1 (clip (round wave) 0 3))
-    (sin (* 6.28318530718 phase))
-    (polyblep_saw phase hz)
-    (polyblep_pulse phase (clip duty 0.01 0.99) hz)
-    (noise)))
-  (def synced (heat-sync hz (heat-octaves (/ sync_semitones 12)) wave duty))
+  (def shape (clip (round wave) 0 3))
+  (def main (selector (+ 1 shape)
+    (block-gate (eq shape 0) (sin (* 6.28318530718 phase)))
+    (block-gate (eq shape 1) (polyblep_saw phase hz))
+    (block-gate (eq shape 2) (polyblep_pulse phase (clip duty 0.01 0.99) hz))
+    (block-gate (eq shape 3) (noise))))
+  (def synced (block-gate (* (gt sync_mode 0.5) (lt wave 2.5)) (heat-sync hz (heat-octaves (/ sync_semitones 12)) wave duty)))
   ; Noise has no periodic master/slave relationship; mode does not color it.
   (gswitch (* (gt sync_mode 0.5) (lt wave 2.5)) synced
-    (+ main (* (clip sub_level 0 1) (polyblep_pulse sub_phase 0.5 sub_hz)))))
+    (block-gate (eq (* (gt sync_mode 0.5) (lt wave 2.5)) 0)
+    (+ main (* (clip sub_level 0 1) (block-gate sub_level (polyblep_pulse sub_phase 0.5 sub_hz)))))))
 
 (param volume_db @default -18 @min -60 @max 6 @unit dB @mod true @mod-mode additive)
 (param tune_semitones @default 0 @min -48 @max 48 @unit st @mod true @mod-mode additive)
@@ -242,9 +272,9 @@
   (def tuning_error (latch (noise) (gt note_on 0.5)))
   (def voice_tuning (+ tuning (/ (+ (* played_octave stretch_cents)
     (* tuning_error tuning_error_cents)) 100)))
-  (def lfo1 (* lfo1_enabled
+  (def lfo1 (block-gate lfo1_enabled (* lfo1_enabled
     (heat-lfo lfo1_rate_hz lfo1_width lfo1_shape note_on
-      lfo1_retrigger lfo1_phase lfo1_delay_ms lfo1_fade_ms)))
+      lfo1_retrigger lfo1_phase lfo1_delay_ms lfo1_fade_ms))))
   (def filter1_env
     (* (+ (- 1 filter1_env_velocity) (* filter1_env_velocity (clip velocity 0 1)))
       (heat-envelope gate (gswitch (gt filter1_env_legato 0.5) trigger note_on)
@@ -260,13 +290,14 @@
       (/ (+ voice_tuning m_osc1_semitones (/ m_osc1_cents 100)
         (* lfo1 osc1_lfo_pitch_semitones)
         (heat-pitch-envelope note_on osc1_pitch_env_initial osc1_pitch_env_time_ms)) 12)))))
-  (def osc1 (* (heat-control (* osc1_enabled (heat-db m_osc1_level_db)))
+  (def osc1_fade (heat-enable osc1_enabled))
+  (def osc1 (block-gate osc1_fade (* (* osc1_fade (heat-control (heat-db m_osc1_level_db)))
     (heat-source osc1_hz osc1_wave
-      (+ m_osc1_pulse_duty (* lfo1 osc1_lfo_pw)) m_osc1_sub_level osc1_sub_sync m_osc1_sync_semitones)))
+      (+ m_osc1_pulse_duty (* lfo1 osc1_lfo_pw)) m_osc1_sub_level osc1_sub_sync m_osc1_sync_semitones))))
   (def balance1 (heat-control (clip m_osc1_to_filter1 0 1)))
-  (def lfo2 (* lfo2_enabled
+  (def lfo2 (block-gate lfo2_enabled (* lfo2_enabled
     (heat-lfo lfo2_rate_hz lfo2_width lfo2_shape note_on
-      lfo2_retrigger lfo2_phase lfo2_delay_ms lfo2_fade_ms)))
+      lfo2_retrigger lfo2_phase lfo2_delay_ms lfo2_fade_ms))))
   (def filter2_env
     (* (+ (- 1 filter2_env_velocity) (* filter2_env_velocity (clip velocity 0 1)))
       (heat-envelope gate (gswitch (gt filter2_env_legato 0.5) trigger note_on)
@@ -282,13 +313,15 @@
       (/ (+ voice_tuning m_osc2_semitones (/ m_osc2_cents 100)
         (* lfo2 osc2_lfo_pitch_semitones)
         (heat-pitch-envelope note_on osc2_pitch_env_initial osc2_pitch_env_time_ms)) 12)))))
-  (def osc2 (* (heat-control (* osc2_enabled (heat-db m_osc2_level_db)))
+  (def osc2_fade (heat-enable osc2_enabled))
+  (def osc2 (block-gate osc2_fade (* (* osc2_fade (heat-control (heat-db m_osc2_level_db)))
     (heat-source osc2_hz osc2_wave
-      (+ m_osc2_pulse_duty (* lfo2 osc2_lfo_pw)) m_osc2_sub_level osc2_sub_sync m_osc2_sync_semitones)))
+      (+ m_osc2_pulse_duty (* lfo2 osc2_lfo_pw)) m_osc2_sub_level osc2_sub_sync m_osc2_sync_semitones))))
   (def balance2 (heat-control (clip m_osc2_to_filter1 0 1)))
 
-  (def colored_noise (* (heat-control (* noise_enabled (heat-db m_noise_level_db)))
-    (svf (noise) m_noise_color_hz 0.70710678 0)))
+  (def noise_fade (heat-enable noise_enabled))
+  (def colored_noise (block-gate noise_fade (* (* noise_fade (heat-control (heat-db m_noise_level_db)))
+    (svf (noise) m_noise_color_hz 0.70710678 0))))
   (def noise_balance (heat-control (clip m_noise_to_filter1 0 1)))
   (def input1 (+ (* osc1 balance1) (* osc2 balance2) (* colored_noise noise_balance)))
   (def input2 (+ (* osc1 (- 1 balance1)) (* osc2 (- 1 balance2))
@@ -334,13 +367,44 @@
       (* lane2 (sin (* 0.7853981634 (+ 1 pan2))))))
 )
 
+; A unison copy is skipped while it is disabled, and block-gate freezes rather
+; than releases the state it skips. A copy frozen part-way through its release
+; resumes there: heat-envelope starts every attack from its previous value, so
+; raising unison_voices during a later note would begin that copy's attack from
+; the frozen level instead of from idle. Keep the copy executing, with its own
+; gate already low, for as long as its contours can still be sounding, and only
+; then freeze it -- at idle, which is indistinguishable from a copy that has
+; never run, so its next onset attacks from zero and latches its own tuning
+; error. The window is the slowest complete attack/decay/release the four
+; contours can be configured for, plus 5 ms covering the enable fade. It is
+; paid once per change of unison_voices, never in the steady disabled state
+; that the skip exists to make cheap.
+(def contour_hold_ms (+ 5
+  (max (max amp1_env_attack_ms amp2_env_attack_ms)
+    (max filter1_env_attack_ms filter2_env_attack_ms))
+  (max (max amp1_env_decay_ms amp2_env_decay_ms)
+    (max filter1_env_decay_ms filter2_env_decay_ms))
+  (max (max amp1_env_release_ms amp2_env_release_ms)
+    (max filter1_env_release_ms filter2_env_release_ms))))
+; Free-running loop contours ignore note-off and never return to idle, so a
+; copy configured that way must not be frozen at all.
+(defmacro heat-contour-loops (loop_mode free_run)
+  (* (gt free_run 0.5) (gt loop_mode 0.5) (lt loop_mode 2.5)))
+(def contour_never_idle
+  (max (max (heat-contour-loops amp1_env_loop amp1_env_free)
+      (heat-contour-loops amp2_env_loop amp2_env_free))
+    (max (heat-contour-loops filter1_env_loop filter1_env_free)
+      (heat-contour-loops filter2_env_loop filter2_env_free))))
+
 (def copies (clip (round unison_voices) 1 4))
 
 (def enabled0 (gt copies 0))
 (def position0 (gswitch (gt copies 1) (- (/ 0 (max 1 (- copies 1))) 1) 0))
 (def (gate0 on0 trigger0 legato0 pitch0 velocity0)
   (heat-unison-onset gate note_on trigger legato played_octave velocity enabled0 (* 0 unison_delay_ms)))
-(def (left0 right0) (heat-voice gate0 on0 trigger0 velocity0 pitch0
+(def fade0 (heat-enable enabled0))
+(def run0 (max (heat-run enabled0 contour_hold_ms) contour_never_idle))
+(def (left0 right0) (block-gate run0 (heat-voice gate0 on0 trigger0 velocity0 pitch0
   (+ tuning (/ (* position0 unison_detune_cents) 100)) expression (* position0 unison_spread)
   (mod osc1_semitones) (mod osc1_cents) (mod osc1_level_db) (mod osc1_pulse_duty)
   (mod osc1_sub_level) (mod osc1_sync_semitones) (mod osc1_to_filter1) (mod osc2_semitones)
@@ -350,13 +414,15 @@
   (mod filter1_to_filter2) (mod amp1_level_db) (mod amp1_pan) (mod filter2_offset_octaves)
   (mod filter2_cutoff_hz) (mod filter2_env_octaves) (mod filter2_q) (mod amp2_level_db)
   (mod amp2_pan)
-))
+)))
 
 (def enabled1 (gt copies 1))
 (def position1 (gswitch (gt copies 1) (- (/ 2 (max 1 (- copies 1))) 1) 0))
 (def (gate1 on1 trigger1 legato1 pitch1 velocity1)
   (heat-unison-onset gate note_on trigger legato played_octave velocity enabled1 (* 1 unison_delay_ms)))
-(def (left1 right1) (heat-voice gate1 on1 trigger1 velocity1 pitch1
+(def fade1 (heat-enable enabled1))
+(def run1 (max (heat-run enabled1 contour_hold_ms) contour_never_idle))
+(def (left1 right1) (block-gate run1 (heat-voice gate1 on1 trigger1 velocity1 pitch1
   (+ tuning (/ (* position1 unison_detune_cents) 100)) expression (* position1 unison_spread)
   (mod osc1_semitones) (mod osc1_cents) (mod osc1_level_db) (mod osc1_pulse_duty)
   (mod osc1_sub_level) (mod osc1_sync_semitones) (mod osc1_to_filter1) (mod osc2_semitones)
@@ -366,13 +432,15 @@
   (mod filter1_to_filter2) (mod amp1_level_db) (mod amp1_pan) (mod filter2_offset_octaves)
   (mod filter2_cutoff_hz) (mod filter2_env_octaves) (mod filter2_q) (mod amp2_level_db)
   (mod amp2_pan)
-))
+)))
 
 (def enabled2 (gt copies 2))
 (def position2 (gswitch (gt copies 1) (- (/ 4 (max 1 (- copies 1))) 1) 0))
 (def (gate2 on2 trigger2 legato2 pitch2 velocity2)
   (heat-unison-onset gate note_on trigger legato played_octave velocity enabled2 (* 2 unison_delay_ms)))
-(def (left2 right2) (heat-voice gate2 on2 trigger2 velocity2 pitch2
+(def fade2 (heat-enable enabled2))
+(def run2 (max (heat-run enabled2 contour_hold_ms) contour_never_idle))
+(def (left2 right2) (block-gate run2 (heat-voice gate2 on2 trigger2 velocity2 pitch2
   (+ tuning (/ (* position2 unison_detune_cents) 100)) expression (* position2 unison_spread)
   (mod osc1_semitones) (mod osc1_cents) (mod osc1_level_db) (mod osc1_pulse_duty)
   (mod osc1_sub_level) (mod osc1_sync_semitones) (mod osc1_to_filter1) (mod osc2_semitones)
@@ -382,13 +450,15 @@
   (mod filter1_to_filter2) (mod amp1_level_db) (mod amp1_pan) (mod filter2_offset_octaves)
   (mod filter2_cutoff_hz) (mod filter2_env_octaves) (mod filter2_q) (mod amp2_level_db)
   (mod amp2_pan)
-))
+)))
 
 (def enabled3 (gt copies 3))
 (def position3 (gswitch (gt copies 1) (- (/ 6 (max 1 (- copies 1))) 1) 0))
 (def (gate3 on3 trigger3 legato3 pitch3 velocity3)
   (heat-unison-onset gate note_on trigger legato played_octave velocity enabled3 (* 3 unison_delay_ms)))
-(def (left3 right3) (heat-voice gate3 on3 trigger3 velocity3 pitch3
+(def fade3 (heat-enable enabled3))
+(def run3 (max (heat-run enabled3 contour_hold_ms) contour_never_idle))
+(def (left3 right3) (block-gate run3 (heat-voice gate3 on3 trigger3 velocity3 pitch3
   (+ tuning (/ (* position3 unison_detune_cents) 100)) expression (* position3 unison_spread)
   (mod osc1_semitones) (mod osc1_cents) (mod osc1_level_db) (mod osc1_pulse_duty)
   (mod osc1_sub_level) (mod osc1_sync_semitones) (mod osc1_to_filter1) (mod osc2_semitones)
@@ -398,10 +468,10 @@
   (mod filter1_to_filter2) (mod amp1_level_db) (mod amp1_pan) (mod filter2_offset_octaves)
   (mod filter2_cutoff_hz) (mod filter2_env_octaves) (mod filter2_q) (mod amp2_level_db)
   (mod amp2_pan)
-))
+)))
 
 ; Equal-power pan and explicit master gain. Normalize the sum by copy count;
 ; continuous controls are smoothed, with no hidden limiter on the result.
 (def gain (heat-control (/ (heat-db (+ (mod volume_db) (* expression pressure_amp_db))) copies)))
-(out (* gain (+ (* (heat-control enabled0) left0) (* (heat-control enabled1) left1) (* (heat-control enabled2) left2) (* (heat-control enabled3) left3))) 1)
-(out (* gain (+ (* (heat-control enabled0) right0) (* (heat-control enabled1) right1) (* (heat-control enabled2) right2) (* (heat-control enabled3) right3))) 2)
+(out (* gain (+ (* fade0 left0) (* fade1 left1) (* fade2 left2) (* fade3 left3))) 1)
+(out (* gain (+ (* fade0 right0) (* fade1 right1) (* fade2 right2) (* fade3 right3))) 2)

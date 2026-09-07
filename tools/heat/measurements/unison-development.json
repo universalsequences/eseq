@@ -66,17 +66,17 @@
     {
       "voices": 2,
       "normalized_sum_error": 0.0,
-      "stereo_difference_rms": 0.018516812473535538
+      "stereo_difference_rms": 0.018516818061470985
     },
     {
       "voices": 3,
       "normalized_sum_error": 3.725290298461914e-09,
-      "stereo_difference_rms": 0.012344542890787125
+      "stereo_difference_rms": 0.0123445438221097
     },
     {
       "voices": 4,
       "normalized_sum_error": 0.0,
-      "stereo_difference_rms": 0.009889757260680199
+      "stereo_difference_rms": 0.009889759123325348
     }
   ]
 }

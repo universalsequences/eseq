@@ -506,123 +506,120 @@
 
 (def track-parameters-panel ()
   (box :debug-name "track-parameters-strip" :padding 0.0
-    (v-stack :gap 0.175
-      (box :debug-name "track-primary-parameters-panel" :padding 0.5
-        :background-color :mixer-strip-bg
-        :corner-radius 16
-        :border-color :mixer-strip-border
-        (h-stack :gap 1.05 :align :center
-          (v-stack :gap 0.5 :align :center
-            (label "steps" :font-size 8 :color :dim :bg :transparent)
-            (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
-              :border-color :none
-              :noui false :font-size 8 :text-color :white
-              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :num-steps v)))
-              :width 4.2 :height 1.15))
-          
-          (v-stack :align :center :gap 0.34
-            (label "poly" :font-size 8 :color :dim :bg :transparent)
-            (button  (if SEQ.tp-poly "ON" "OFF") :width 3.2 :height 1.3
-              :background-color (if SEQ.tp-poly :control-on-bg :poly-off-bg)
-              :border-color :none
-              :font-size 11
-              :color (if SEQ.tp-poly :control-on-fg :poly-off-fg)
-              ;; Rack tracks: playback polyphony is per-slot (RackSlotSnapshot::max_polyphony),
-              ;; never the track-level param below — route there instead, or this control
-              ;; silently edits a value playback ignores.
-              :on-click |x y r| (do (eseq.seq-core-state/cool-off-follow)
+    (v-stack :gap 0.25
+      (h-stack :gap 1.05 :align :center
+        (v-stack :gap 0.15 :align :center
+          (label "steps" :font-size 8 :color :dim :bg :transparent :v-align :center)
+          (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
+            :border-color :none
+            :noui false :font-size 8 :text-color :white
+            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :num-steps v)))
+            :width 4.2 :height 1.0))
+        
+        (v-stack :align :center :gap 0.15
+          (label "poly" :font-size 8 :color :dim :bg :transparent :v-align :center)
+          (button  (if SEQ.tp-poly "ON" "OFF") :width 3.0 :height 1.0
+            :background-color (if SEQ.tp-poly :control-on-bg :poly-off-bg)
+            :border-color :none
+            :font-size 10
+            :color (if SEQ.tp-poly :control-on-fg :poly-off-fg)
+            ;; Rack tracks: playback polyphony is per-slot (RackSlotSnapshot::max_polyphony),
+            ;; never the track-level param below — route there instead, or this control
+            ;; silently edits a value playback ignores.
+            :on-click |x y r| (do (eseq.seq-core-state/cool-off-follow)
+              (if SEQ.tp-is-rack
+                (host-command "set-rack-slot-max-polyphony"
+                  (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
+                (seq-set-track-param :poly (if SEQ.tp-poly 0 1))))
+            )
+          )
+        (v-stack :gap 0.15 :align :center
+          (label "voices" :font-size 8 :color :dim :bg :transparent :v-align :center)
+          (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
+            :border-color :none
+            :noui false :font-size 8 :text-color :white
+            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow)
                 (if SEQ.tp-is-rack
                   (host-command "set-rack-slot-max-polyphony"
-                    (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
-                  (seq-set-track-param :poly (if SEQ.tp-poly 0 1))))
-              )
-            )
-          (v-stack :gap 0.5 :align :center
-            (label "voices" :font-size 8 :color :dim :bg :transparent)
-            (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
-              :border-color :none
-              :noui false :font-size 8 :text-color :white
-              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow)
-                  (if SEQ.tp-is-rack
-                    (host-command "set-rack-slot-max-polyphony"
-                      (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
-                    (seq-set-track-param :voices v))))
-              :width 3.4 :height 1.15)
-            )
-          (if SEQ.tp-supports-mono-trigger
-            (v-stack :align :center :gap 0.40
-              (label "priority" :v-align :center :font-size 8 :color :dim :bg :transparent)
-              (dropdown :value SEQ.tp-voice-priority :options '("Last" "High" "Low")
-                :on-change (lambda (v)
-                  (seq-set-track-param :voice-priority
-                    (if (= v "High") 1 (if (= v "Low") 2 0))))
-                :width 6.0 :height 1.25 :font-size 9)))
-          (if SEQ.tp-supports-mono-trigger
-            (v-stack :align :center :gap 0.40
-              (label "trigger" :v-align :center :font-size 8 :color :dim :bg :transparent)
-              (dropdown :value SEQ.tp-mono-trigger :options '("retrig" "legato")
-                :on-change (lambda (v)
-                  (seq-set-track-param :mono-trigger (if (= v "legato") 1 0)))
-                :width 6.0 :height 1.25 :font-size 9)))
-          (v-stack :align :center :gap 0.40
-            (label "scale" :font-size 8 :color :dim :bg :transparent)
-            (dropdown :value SEQ.tp-fts
-              :options SEQ.fts-options
-              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-fts v)))
-              :width 7.0 :height 1.25 :font-size 9))
-          
-          ))
-      (box :debug-name "track-groove-parameters-panel" :padding 0.5
-        :background-color :mixer-strip-bg
-        :corner-radius 16
-        :border-color :mixer-strip-border
-        (h-stack :gap 1.05 :align :center
-          (v-stack :align :center :gap 0.40
-            (label "swg res" :font-size 8 :color :dim :bg :transparent)
-            (dropdown :value SEQ.tp-swing-resolution
-              :key "track-swing-resolution"
-              :options '("1/16" "1/8" "1/4" "1/2")
-              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-swing-resolution v)))
-              :plock-active (if (track-param-plock-active? "swing-resolution") 1 0)
-              :plock-color-r (pc/param-plock-color-r)
-              :plock-color-g (pc/param-plock-color-g)
-              :plock-color-b (pc/param-plock-color-b)
-              :width 5.0 :height 1.25 :font-size 9))
-          (v-stack :align :center :gap 0.22
-            (v-stack :gap 0.5 :align :center
-              (label "swing" :font-size 8 :color :dim :bg :transparent)
-              (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
-                :key "track-swing"
-                :border-color :none
-                :noui false :font-size 8 :text-color :dim
-                :plock-active (if (track-param-plock-active? "swing") 1 0)
-                :plock-default (track-param-plock-default "swing" SEQ.tp-swing)
-                :plock-color-r (pc/param-plock-color-r)
-                :plock-color-g (pc/param-plock-color-g)
-                :plock-color-b (pc/param-plock-color-b)
-                :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :swing v)))
-                :width 5.2 :height 1.15))
-            )
-          
-          (v-stack :align :center :gap 0.40
-            (label "timebase" :font-size 8 :color :dim :bg :transparent)
-            (dropdown :value SEQ.tp-timebase
-              :key "track-timebase"
-              :options st/seq-timebase-options
-              :on-change (lambda (v) (set-timebase v))
-              :plock-active (if (track-param-plock-active? "timebase") 1 0)
-              :plock-color-r (pc/param-plock-color-r)
-              :plock-color-g (pc/param-plock-color-g)
-              :plock-color-b (pc/param-plock-color-b)
-              :width 6.0 :height 1.25 :font-size 9))
-          
-          (v-stack :align :center :gap 0.40
-            (label "mute grp" :font-size 8 :color :dim :bg :transparent)
-            (dropdown :value SEQ.tp-mute-group
-              :options SEQ.mute-group-options
+                    (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
+                  (seq-set-track-param :voices v))))
+            :width 3.4 :height 1.0)
+          )
+        (if SEQ.tp-supports-mono-trigger
+          (v-stack :align :center :gap 0.15
+            (label "priority"  :font-size 8 :color :dim :bg :transparent :v-align :center)
+            (dropdown :value SEQ.tp-voice-priority :options '("Last" "High" "Low")
               :on-change (lambda (v)
-                (do
-                  (eseq.seq-core-state/cool-off-follow)
-                  (seq-set-track-param :mute-group (mute-group-value v))))
-              :width 5.4 :height 1.25 :font-size 9))
-          )))))
+                (seq-set-track-param :voice-priority
+                  (if (= v "High") 1 (if (= v "Low") 2 0))))
+              :width 6.0 :height 1.0 :font-size 9)))
+        (if SEQ.tp-supports-mono-trigger
+          (v-stack :align :center :gap 0.15
+            (label "trigger"  :font-size 8 :color :dim :bg :transparent :v-align :center)
+            (dropdown :value SEQ.tp-mono-trigger :options '("retrig" "legato")
+              :on-change (lambda (v)
+                (seq-set-track-param :mono-trigger (if (= v "legato") 1 0)))
+              :width 6.0 :height 1.0 :font-size 9)))
+      
+        
+        )
+      (h-stack :gap 1.05 :align :center
+        (v-stack :align :center :gap 0.15
+          (label "swg res" :font-size 8 :color :dim :bg :transparent :v-align :center)
+          (dropdown :value SEQ.tp-swing-resolution
+            :key "track-swing-resolution"
+            :options '("1/16" "1/8" "1/4" "1/2")
+            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-swing-resolution v)))
+            :plock-active (if (track-param-plock-active? "swing-resolution") 1 0)
+            :plock-color-r (pc/param-plock-color-r)
+            :plock-color-g (pc/param-plock-color-g)
+            :plock-color-b (pc/param-plock-color-b)
+            :width 5.0 :height 1.0 :font-size 9))
+        (v-stack :align :center :gap 0.22
+          (v-stack :gap 0.15 :align :center
+            (label "swing" :font-size 8 :color :dim :bg :transparent :v-align :center)
+            (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
+              :key "track-swing"
+              :border-color :none
+              :noui false :font-size 8 :text-color :dim
+              :plock-active (if (track-param-plock-active? "swing") 1 0)
+              :plock-default (track-param-plock-default "swing" SEQ.tp-swing)
+              :plock-color-r (pc/param-plock-color-r)
+              :plock-color-g (pc/param-plock-color-g)
+              :plock-color-b (pc/param-plock-color-b)
+              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :swing v)))
+              :width 5.2 :height 1.0))
+          )
+        
+        (v-stack :align :center :gap 0.15
+          (label "timebase" :font-size 8 :color :dim :bg :transparent :v-align :center)
+          (dropdown :value SEQ.tp-timebase
+            :key "track-timebase"
+            :options st/seq-timebase-options
+            :on-change (lambda (v) (set-timebase v))
+            :plock-active (if (track-param-plock-active? "timebase") 1 0)
+            :plock-color-r (pc/param-plock-color-r)
+            :plock-color-g (pc/param-plock-color-g)
+            :plock-color-b (pc/param-plock-color-b)
+            :width 6.0 :height 1.0 :font-size 9))
+        
+        (v-stack :align :center :gap 0.15
+          (label "mute grp" :font-size 8 :color :dim :bg :transparent :v-align :center)
+          (dropdown :value SEQ.tp-mute-group
+            :options SEQ.mute-group-options
+            :on-change (lambda (v)
+              (do
+                (eseq.seq-core-state/cool-off-follow)
+                (seq-set-track-param :mute-group (mute-group-value v))))
+            :width 5.4 :height 1.0 :font-size 9))
+        )
+      (v-stack :align :center :gap 0.5
+  	(v-stack :align :center :gap 0.15
+          (label "scale" :font-size 8 :color :dim :bg :transparent :v-align :center)
+          (dropdown :value SEQ.tp-fts
+            :options SEQ.fts-options
+            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-fts v)))
+            :width 7.0 :height 1.0 :font-size 9))        )
+      )
+    )
+  )

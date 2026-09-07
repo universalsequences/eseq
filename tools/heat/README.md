@@ -124,26 +124,46 @@ and pass it to `fx-emit` when selecting/expanding notes. One-to-one emissions
 preserve origin order, and copies from one source inherit that source. An
 ambiguous new chord from several sources needs explicit source selection.
 
-Known remaining integration: two assignable pressure destinations, pressure
-performance recording/replay, MIDI disconnect/panic cleanup, full rack held-key
-fallback, formant control mapping and LFO tempo sync. This implementation must
-not be called feature-complete or promoted to factory until those are resolved.
-The compiler fixes also still need a published/pinned distribution.
+Heat now ships as a factory instrument. It is not feature-complete: two
+assignable pressure destinations, pressure performance recording/replay, MIDI
+disconnect/panic cleanup, full rack held-key fallback, formant control mapping
+and LFO tempo sync are still open. Those are caveats on the shipped instrument,
+not blockers on shipping it; describe Heat as shipped-but-incomplete rather than
+finished.
+The macOS compiler is now pinned to DGenLisp v0.1.12. Fetch the published
+compiler and its pinned native toolchain with:
 
-Unison currently uses four statically expanded DSP copies even when disabled;
-DGen evaluates signal branches eagerly. Measured at 48 kHz, a five-second
-single-note render rose from 0.115 s to 0.504 s (roughly 4.4×). This is a known
-performance cost, not an optimization. A production solution that skips unused
-copies needs proper host voice groups or compiler conditional execution; a
-cosmetic enable switch cannot provide that saving.
+```sh
+./scripts/fetch_dgenlisp.sh
+./scripts/fetch_dgen_toolchain.sh
+```
 
-Run `tools/heat/run-development.sh` with the compiler/toolchain environment above
-to open this checkout's app. It links the development source and preset bank
-into this checkout's own Library as **Heat Development**, without replacing an
-existing entry. The locally fixed Heat compiler is currently required; the
-installed app/compiler distribution has not been updated. The launcher has been syntax checked and the development app has started
-successfully with its audio callback and MIDI input active. The custom panel
-was verified separately through production headless captures and layout tests.
+Heat uses explicit `block-gate` execution regions for unused unison copies,
+oscillators, LFOs, waveform/sync branches, the second filter stage, and drive.
+The compiler also skips unassigned modulation arithmetic automatically. Enable
+fades reach exact zero in 2 ms; continuous parameters retain their existing
+slew. Gates freeze state rather than resetting it, so two paths hold their
+gate open past the fade: a disabled unison copy keeps running until its
+contours have released (a contour-length hold window; a free-running looping
+contour is never frozen), so a later enable attacks from idle and latches its
+tuning error, and the second filter stage cross-fades in over 10 ms so a
+mid-note LP12 to LP24 switch does not resume from stale integrators. Audio-rate
+gates freeze at process-call granularity. The 20-second host release policy is
+unchanged.
+
+Default Heat measured **5.69× faster at 128 frames and 6.60× at 512 frames**
+(M1 Max, 48 kHz, one host voice, `--voices 12` compilation). Default audio is
+bit-exact. See `docs/heat-performance-analysis.md` and
+`measurements/execution-gating-20260907.json` for scope, raw trials, and hashes.
+This is DSP performance; it does not measure the app transport meter. Downstream
+rate specialization for unassigned parameters remains separate future work.
+
+Heat lives at `content/instruments/Synths/Heat`, with presets at
+`content/instruments/Synths/Heat.presets`. It appears under Instruments > Factory
+> Synths as **Heat**. The Linux compiler pin has not advanced to this release;
+the gated patch requires a compiler containing `block-gate`, so Heat does not
+compile on Linux yet. That gap is tracked as bead **eseq-jwwd**. The custom panel
+was verified in the earlier UI pass through production captures and layout tests.
 
 The compact UI follows Analog's upper/lower signal paths and central detail
 display. Global/Volume is the initial view, with four clickable Quick Routing
@@ -183,7 +203,7 @@ python tools/heat/check_pitch_envelope.py
 python tools/heat/check_voice.py \
   --out tools/heat/measurements/compiled-voice-analysis.json \
   --demo /tmp/heat-development-demo.wav
-cargo run -p sequencer --bin instrument_probe -- 'user:Heat Development' \
+cargo run -p sequencer --bin instrument_probe -- 'Synths/Heat' \
   --preset 'Open Pad' --frames 96000 --gate-frames 48000 \
   --min-peak 0.01 --min-rms 0.001 --json
 cargo run -p sequencer --bin metal_seq -- capture \
@@ -209,3 +229,24 @@ They verify glide endpoints and timing, tuning laws, delayed wheel vibrato,
 held tuning error, hard-sync spectra at three rates, independent unison onsets,
 normalization, stereo separation, and release cancellation. The integrated
 voice check also verifies every preset has the complete parameter set.
+
+To compare two compiled artifacts using native timing (numpy and a C compiler
+required):
+
+```sh
+python3 tools/heat/profile_execution.py /path/to/baseline /path/to/candidate \
+  --out /tmp/heat-execution.json --min-speedup 4
+```
+
+Both directories must contain `patch.c`, `patch.json`, and `patch.dylib` (or
+`patch.so`), compiled at 48 kHz with `--voices 12 --max-frames 512 --name patch`.
+Use the original Heat source/compiler for the baseline and the current source
+with v0.1.11 for the candidate. It checks default, four-voice, all-on and
+fractional-waveform audio equivalence, enable/disable sequences, and paired
+native timing trials. Timing thresholds depend on machine load.
+
+Use v0.1.12 or later: v0.1.11 exposed an incorrect SIMD address classification
+in delay buffers, causing spikes in other modulated synths such as Vox. The
+renderer fix retains gating and the Heat speedup. The original v0.1.11 timing
+report is historical; v0.1.12 measurements are in
+`measurements/execution-gating-v12-20260907.json`.

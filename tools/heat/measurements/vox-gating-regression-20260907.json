@@ -1,0 +1,190 @@
+{
+  "sound": "80s guitar",
+  "instrument": "monomachine/vox",
+  "scope": "Effects-free isolated DSP; saved sound scalar parameters; synthetic smooth 5/1.7/0.37/5 Hz LFO inputs, not a live callback capture",
+  "sample_rate": 48000,
+  "frames": 144000,
+  "compile_voices": 12,
+  "releases": {
+    "baseline": "v0.1.10",
+    "regression": "v0.1.11",
+    "fixed": "v0.1.12 (5458b54)"
+  },
+  "comparisons": {
+    "new/128/lfo-False": {
+      "max_error": 10.780000686645508,
+      "rms_error": 0.0381462536752224,
+      "peak": 10.783397674560547,
+      "frames_error_above_0.01": [
+        18,
+        19,
+        88018,
+        88019
+      ]
+    },
+    "fixed/128/lfo-False": {
+      "max_error": 3.7997961044311523e-07,
+      "rms_error": 3.773684298380431e-08,
+      "peak": 0.17809471487998962,
+      "frames_error_above_0.01": []
+    },
+    "new/128/lfo-True": {
+      "max_error": 10.780000686645508,
+      "rms_error": 0.03813976049423218,
+      "peak": 10.78339672088623,
+      "frames_error_above_0.01": [
+        18,
+        19,
+        88018,
+        88019
+      ]
+    },
+    "fixed/128/lfo-True": {
+      "max_error": 4.3353065848350525e-07,
+      "rms_error": 5.5766676609891874e-08,
+      "peak": 0.17788946628570557,
+      "frames_error_above_0.01": []
+    },
+    "new/512/lfo-False": {
+      "max_error": 43.12000274658203,
+      "rms_error": 0.1375219076871872,
+      "peak": 43.12339782714844,
+      "frames_error_above_0.01": [
+        18,
+        19,
+        88018,
+        88019
+      ]
+    },
+    "fixed/512/lfo-False": {
+      "max_error": 3.7997961044311523e-07,
+      "rms_error": 3.773684298380431e-08,
+      "peak": 0.17809471487998962,
+      "frames_error_above_0.01": []
+    },
+    "new/512/lfo-True": {
+      "max_error": 43.12000274658203,
+      "rms_error": 0.13752010464668274,
+      "peak": 43.12339782714844,
+      "frames_error_above_0.01": [
+        18,
+        19,
+        88018,
+        88019
+      ]
+    },
+    "fixed/512/lfo-True": {
+      "max_error": 4.3353065848350525e-07,
+      "rms_error": 5.5766676609891874e-08,
+      "peak": 0.17788946628570557,
+      "frames_error_above_0.01": []
+    }
+  },
+  "source_sha256": {
+    ".local/sounds/80s-guitar.sound": "ef17817f3a289acebc025fe82f97c23c94c7facf61509e9745afb540e8b18853",
+    ".local/instruments/monomachine/vox/dsp.lisp": "471dd62d2722cd3cf552c174df0802c60da91f6d25a310b51912f1e9660081ff",
+    "content/defmacros/mnm_srr/macro.lisp": "4f53d7c2a176532a0656d5ef9808aebb42ed730a641cd354f08cff46eb35eeaa"
+  },
+  "production_probe_v11": {
+    "effective_midi_note": 69.0,
+    "first_non_finite_frame": null,
+    "first_non_finite_state_slot": null,
+    "first_nonzero_frame": 0,
+    "first_samples": [
+      1.8153214114136063e-06,
+      3.8314461562549695e-05,
+      0.00026355692534707487,
+      0.0009632231085561216,
+      0.0022917361930012703,
+      0.004041202366352081,
+      0.005839542951434851,
+      0.0074391416274011135,
+      0.008728798478841782,
+      0.009657626040279865,
+      0.010229658335447311,
+      0.010505078360438347,
+      0.010578843764960766,
+      0.010572693310678005,
+      0.010627356357872486,
+      0.010872239246964455,
+      0.011412108317017555,
+      0.012310304678976536,
+      -43.106475830078125,
+      -28.65708351135254,
+      0.01615005172789097,
+      0.01705903373658657,
+      0.017346659675240517,
+      0.01676822081208229,
+      0.015154891647398472,
+      0.012438852339982986,
+      0.00865869503468275,
+      0.003992834128439426,
+      -0.0012547723017632961,
+      -0.006736738607287407,
+      -0.012089275754988194,
+      -0.01695382595062256
+    ],
+    "frames": 96000,
+    "instrument": ".local/instruments/monomachine/vox",
+    "mean_abs": 0.007907225750386715,
+    "midi_note": 69.0,
+    "non_finite_samples": 0,
+    "non_finite_state_slots": 0,
+    "nonzero_frames": 52011,
+    "peak": 43.106475830078125,
+    "preset": null,
+    "rms": 0.16990646719932556
+  },
+  "production_probe_v12": {
+    "effective_midi_note": 69.0,
+    "first_non_finite_frame": null,
+    "first_non_finite_state_slot": null,
+    "first_nonzero_frame": 0,
+    "first_samples": [
+      1.8153214114136063e-06,
+      3.8314461562549695e-05,
+      0.00026355692534707487,
+      0.0009632231085561216,
+      0.0022917361930012703,
+      0.004041202366352081,
+      0.005839542951434851,
+      0.0074391416274011135,
+      0.008728798478841782,
+      0.009657626040279865,
+      0.010229658335447311,
+      0.010505078360438347,
+      0.010578843764960766,
+      0.010572693310678005,
+      0.010627356357872486,
+      0.010872239246964455,
+      0.011412108317017555,
+      0.012310304678976536,
+      0.01352518517524004,
+      0.014885623008012772,
+      0.01615005172789097,
+      0.01705903373658657,
+      0.017346659675240517,
+      0.01676822081208229,
+      0.015154891647398472,
+      0.012438852339982986,
+      0.00865869503468275,
+      0.003992834128439426,
+      -0.0012547723017632961,
+      -0.006736738607287407,
+      -0.012089275754988194,
+      -0.01695382595062256
+    ],
+    "frames": 96000,
+    "instrument": ".local/instruments/monomachine/vox",
+    "mean_abs": 0.007066505495458841,
+    "midi_note": 69.0,
+    "non_finite_samples": 0,
+    "non_finite_state_slots": 0,
+    "nonzero_frames": 52009,
+    "peak": 0.159292533993721,
+    "preset": null,
+    "rms": 0.022834183648228645
+  },
+  "installed_compiler_sha256": "4f3aaf2edea9e2863467685581e340c0f79e4d752b05a1a870b15bef759a28d1",
+  "installation": "Published GitHub API download, archive SHA256 verified; normal release URL returned HTTP504. Standard fetch script confirms installed pin."
+}

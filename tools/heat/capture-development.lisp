@@ -1,2 +1,2 @@
 (capture-project
-  (track :instrument "user:Heat Development" :name "Heat"))
+  (track :instrument "Synths/Heat" :name "Heat"))

@@ -177,6 +177,7 @@ CURATED_OPERATORS = {
     "triangle": {"category": "utility", "summary": "Convert a 0..1 phase to a triangle wave with optional duty.", "signatures": ["(triangle phase)", "(triangle phase duty)"], "arity": {"minimum": 1, "maximum": 2}},
     "wrap": {"category": "utility", "summary": "Wrap into a range.", "signatures": ["(wrap sig min max)"], "arity": {"minimum": 3, "maximum": 3}},
     "clip": {"category": "utility", "summary": "Clamp into a range.", "signatures": ["(clip sig min max)"], "arity": {"minimum": 3, "maximum": 3}},
+    "block-gate": {"category": "conditional", "summary": "C scalar execution gate: mask a scalar or tuple and freeze exclusive DSP state during wholly disabled process calls.", "signatures": ["(block-gate condition body)"], "arity": {"minimum": 2, "maximum": 2}},
     "gswitch": {"category": "conditional", "summary": "Conditional branch.", "signatures": ["(gswitch condition true_value false_value)"], "arity": {"minimum": 3, "maximum": 3}},
     "selector": {"category": "conditional", "summary": "1-based selector over options; mode <= 0 yields 0.", "signatures": ["(selector mode option1 option2 ...)"], "arity": {"minimum": 2, "maximum": None}},
     "atan": {"category": "math", "summary": "Arctangent.", "signatures": ["(atan x)"], "arity": {"minimum": 1, "maximum": 1}},
@@ -330,6 +331,10 @@ HIDDEN_OPERATORS = {"wavetable", "wavetable-param"}
 
 
 CURATED_OPERATOR_INPUTS = {
+    "block-gate": [
+        {"name": "condition", "kind": "signal|float", "required": True, "summary": "Positive enables output; exclusive DSP freezes when every frame is non-positive."},
+        {"name": "body", "kind": "signal|tuple", "required": True, "summary": "Scalar or tuple of scalar DSP values to gate."},
+    ],
     "poke": [
         {"name": "tensor", "kind": "tensor", "required": True, "summary": "Stored mutable buffer of shape [samples] or [samples channels]."},
         {"name": "index", "kind": "signal|float", "required": True, "summary": "Sample index, wrapped and floored before writing."},

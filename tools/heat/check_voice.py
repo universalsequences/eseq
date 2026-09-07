@@ -23,7 +23,7 @@ from check_filters import Instrument, ROOT
 def compile_source():
     paths = [ROOT / 'content/defmacros' / name / 'macro.lisp' for name in
              ('heat-envelope', 'heat-pitch-envelope', 'heat-lfo', 'heat-glide', 'heat-sync', 'heat-unison-onset', 'heat-linear-filter', 'heat-soft-clip', 'heat-drive')]
-    paths.append(ROOT / 'tools/heat/instrument/dsp.lisp')
+    paths.append(ROOT / 'content/instruments/Synths/Heat/dsp.lisp')
     # Explicit dependency order keeps this check independent of host resolution.
     # A new dependency must be added here; unresolved imports hard-fail compile.
     text = '\n'.join(p.read_text() for p in paths)
@@ -150,7 +150,7 @@ def run(out, demo):
                 report['demo'] = {'path': str(demo), 'peak': float(abs(audio).max()),
                                   'normalized': False}
             if sr == 48000:
-                bank_path = ROOT / 'tools/heat/instrument.presets'
+                bank_path = ROOT / 'content/instruments/Synths/Heat.presets'
                 report['preset_bank_sha256'] = hashlib.sha256(bank_path.read_bytes()).hexdigest()
                 for preset in json.loads(bank_path.read_text())['presets']:
                     expected_names = {name for name, param in inst.params.items() if not param.get('hidden', False)}

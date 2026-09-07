@@ -27370,6 +27370,56 @@ mod drift_waveform_tests;
         );
     }
 
+    #[test]
+    fn metal_seq_arrangement_grid_fills_viewport_after_resize_and_scroll() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().eval_str("(eseq.seq-panels/seq-open-arrangement)")
+            .expect("open arrangement");
+        editor.refresh_runtime_side_effects();
+        for populated in [false, true] {
+            editor.runtime_mut().set_reactive("SEQ", "song-end-beat",
+                Value::Number(if populated { 128.0 } else { 0.0 }));
+            editor.runtime_mut().set_reactive("SEQ", "song-lanes", test_list(if populated {
+                vec![test_list(vec![lane_clip(0.0, 0.0, 8.0, Value::Number(1.0))])]
+            } else { vec![] }));
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            for (width, height, start) in [(140, 60, 0), (200, 80, 12), (120, 18, 24), (160, 70, 0)] {
+                editor.runtime_mut().eval_str(&format!(
+                    "(eseq.arrangement/set-view-start {start} 64)"))
+                    .expect("pan shared time axis");
+                editor.refresh_runtime_side_effects();
+                editor.set_layout_viewport(width, height);
+                let layout = editor.widget_layout().expect("arrangement layout");
+                let scroll = find_layout_node_by_stable_key_suffix(&layout, "/track-scroll").unwrap();
+                let scene = find_layout_node_by_stable_key_suffix(&layout, "/scene-lane").unwrap();
+                let grid = find_layout_node_by_stable_key_suffix(&layout, "/arr-grid-continuation").unwrap();
+                let ruler = find_layout_node_by_stable_key_suffix(&layout, "/arr-bottom-ruler").unwrap();
+                for node in [scroll, scene, grid, ruler] {
+                    assert_finite_nonzero_rect(node, "arrangement viewport surface");
+                }
+                let track = find_layout_node_by_stable_key_suffix(&layout, "/track-lane-0").unwrap();
+                for node in [grid, ruler, track] {
+                    assert!((node.rect.col - scene.rect.col).abs() < 0.01);
+                    assert!((node.rect.width - scene.rect.width).abs() < 0.01);
+                    for prop in ["view-start", "view-duration", "time-ruler", "grid-density"] {
+                        assert_eq!(node.props.get(prop), scene.props.get(prop), "{prop}");
+                    }
+                }
+                let content = &scroll.children[0];
+                assert!(content.rect.height >= scroll.rect.height);
+                assert!((grid.rect.row + grid.rect.height
+                    - content.rect.row - content.rect.height).abs() < 0.01);
+                let key = eseqlisp::widget_render::scroll::scroll_state_key(scroll);
+                let mut state = eseqlisp::widget_render::scroll::get_scroll_state(key);
+                state.offset_y = (content.rect.height - scroll.rect.height).max(0.0);
+                eseqlisp::widget_render::scroll::set_scroll_state(key, state.clone());
+                assert!((grid.rect.row + grid.rect.height - state.offset_y
+                    - scroll.rect.row - scroll.rect.height).abs() < 0.01);
+            }
+        }
+    }
+
     /// Arrangement layout (docs/arrangement-timeline-ui-spec.md 4-6): the
     /// scene lane is the only timeline instance with a header/time ruler,
     /// track lanes are headerless and sidebar-less, both have finite nonzero
@@ -44524,7 +44574,7 @@ mod drift_waveform_tests;
     /// Heat's real instrument source, including the editable envelopes and the compact
     /// detail controls, must fit in the production instrument panel.
     #[test]
-    fn heat_development_ui_sections_have_visible_parameter_controls() {
+    fn heat_ui_sections_have_visible_parameter_controls() {
         fn find_param<'a>(node: &'a eseqlisp::layout::LayoutNode, suffix: &str)
             -> Option<&'a eseqlisp::layout::LayoutNode>
         {
@@ -44544,7 +44594,7 @@ mod drift_waveform_tests;
             }
             for child in &node.children { assert_controls_visible(child, panel); }
         }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/heat/instrument");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/instruments/Synths/Heat");
         let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
         let ui = std::fs::read_to_string(root.join("ui.lisp")).unwrap();
         let mut values = Vec::new();

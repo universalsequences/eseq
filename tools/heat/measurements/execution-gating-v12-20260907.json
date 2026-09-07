@@ -1,0 +1,158 @@
+{
+  "scope": "One host voice; 48 kHz; 12-voice compilation; native wall time",
+  "machine": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "baseline": {
+    "directory": "/private/tmp/heat-profile-20260907/full-host12",
+    "sha256": {
+      "patch.c": "fd4e34785be9f080e8cd16947a4ac49d1523441c14268a5e49891c0611a9c438",
+      "patch.json": "6799d7ec102072bba79638f2828989c9232590d5acd9fb5c58ac099d2a420ff6",
+      "patch.dylib": "ff2189c10db8caa13f988300a178e198dd287aa2d823c4ec9a6b776fe387e48a"
+    }
+  },
+  "candidate": {
+    "directory": "/private/tmp/vox-gating-investigation/heat-fixed",
+    "sha256": {
+      "patch.c": "948cd83b5069be6a67242dad4167eaa9478739b9a5e242a7e4afdee0029540a4",
+      "patch.json": "8e1f6397c7c692ef3bf9388c2dd7182e1055b8f316774d409bc6222a167c6415",
+      "patch.dylib": "4d9dcb6ba646ed698be49a32550fc072a2951d310448f7873eb4e6e9eb06401f"
+    }
+  },
+  "comparisons": {
+    "default/128": {
+      "max_error": 0.0,
+      "peak": 0.04763409495353699,
+      "tail_peak": 0.0
+    },
+    "unison4/128": {
+      "max_error": 7.450580596923828e-09,
+      "peak": 0.044032059609889984,
+      "tail_peak": 0.0
+    },
+    "all-on/128": {
+      "max_error": 6.034970283508301e-07,
+      "peak": 0.19208590686321259,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-0.4/128": {
+      "max_error": 0.0,
+      "peak": 0.04446866363286972,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-0.6/128": {
+      "max_error": 0.0,
+      "peak": 0.04763409495353699,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-1.6/128": {
+      "max_error": 0.0,
+      "peak": 0.04908021539449692,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-2.6/128": {
+      "max_error": 0.0,
+      "peak": 0.04050492122769356,
+      "tail_peak": 0.0
+    },
+    "toggle/128": {
+      "tail_peak": 0.0
+    },
+    "default/512": {
+      "max_error": 0.0,
+      "peak": 0.04763409495353699,
+      "tail_peak": 0.0
+    },
+    "unison4/512": {
+      "max_error": 7.450580596923828e-09,
+      "peak": 0.044032059609889984,
+      "tail_peak": 0.0
+    },
+    "all-on/512": {
+      "max_error": 6.034970283508301e-07,
+      "peak": 0.19208590686321259,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-0.4/512": {
+      "max_error": 0.0,
+      "peak": 0.04446866363286972,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-0.6/512": {
+      "max_error": 0.0,
+      "peak": 0.04763409495353699,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-1.6/512": {
+      "max_error": 0.0,
+      "peak": 0.04908021539449692,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-2.6/512": {
+      "max_error": 0.0,
+      "peak": 0.04050492122769356,
+      "tail_peak": 0.0
+    },
+    "toggle/512": {
+      "tail_peak": 0.0
+    },
+    "modulation-assign-remove/128": {
+      "max_error": 0.0,
+      "effect_peak": 0.120254747569561
+    },
+    "modulation-assign-remove/512": {
+      "max_error": 0.0,
+      "effect_peak": 0.10719817876815796
+    }
+  },
+  "timings": {
+    "128": {
+      "baseline_us": [
+        289.432,
+        282.0586666666667,
+        281.05733333333336,
+        282.85733333333326,
+        280.968,
+        283.4626666666667,
+        283.0906666666667,
+        303.63066666666657,
+        283.1933333333333
+      ],
+      "candidate_us": [
+        50.42400000000001,
+        49.06133333333334,
+        49.76533333333334,
+        49.412,
+        49.742666666666665,
+        49.23066666666667,
+        52.232,
+        52.332,
+        49.44533333333333
+      ],
+      "speedup": 5.691103546251375
+    },
+    "512": {
+      "baseline_us": [
+        1118.0,
+        1122.7860962566842,
+        1139.5401069518716,
+        1126.75935828877,
+        1110.1871657754011,
+        1081.8663101604277,
+        1076.668449197861,
+        1078.7005347593583,
+        1078.4171122994653
+      ],
+      "candidate_us": [
+        171.27272727272728,
+        168.3475935828877,
+        176.3957219251337,
+        168.93582887700535,
+        166.90909090909093,
+        164.475935828877,
+        163.4919786096257,
+        163.60427807486633,
+        164.0053475935829
+      ],
+      "speedup": 6.6514481609637315
+    }
+  }
+}
