@@ -172,16 +172,32 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     while let Ok(event) = data.keyboard_rx.try_recv() {
         let mut kt = match event {
             crate::sequencer::LiveInputEvent::Note(note) => note,
+            crate::sequencer::LiveInputEvent::SourceNote(note) => {
+                data.pressure.press_generation(note.track, note.source, note.generation);
+                continue;
+            }
             crate::sequencer::LiveInputEvent::Pressure { port, channel, note, value } => {
                 data.pressure.set(port, channel, note, value);
                 super::pressure::dispatch_held_pressure(data,
                     super::pressure::PressureTarget::Source { port, channel, note });
                 continue;
             }
+            crate::sequencer::LiveInputEvent::PitchBend { port, channel, value } => {
+                data.pressure.set_pitch_bend(port, channel, value);
+                super::pressure::dispatch_held_pressure(data,
+                    super::pressure::PressureTarget::Source { port, channel, note: None });
+                continue;
+            }
+            crate::sequencer::LiveInputEvent::ModWheel { port, channel, value } => {
+                data.pressure.set_mod_wheel(port, channel, value);
+                super::pressure::dispatch_held_pressure(data,
+                    super::pressure::PressureTarget::Source { port, channel, note: None });
+                continue;
+            }
             crate::sequencer::LiveInputEvent::ResetControllers { port, channel } => {
                 data.pressure.reset_channel(port, channel);
                 super::pressure::dispatch_held_pressure(data,
-                    super::pressure::PressureTarget::Source { port, channel, note: None });
+                    super::pressure::PressureTarget::Reset { port, channel });
                 continue;
             }
         };
@@ -201,9 +217,9 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         );
 
         if kt.note_off {
-            data.pressure.release(kt.track, kt.source);
+            if !data.pressure.release_generation(kt.track, kt.source, kt.generation) { continue; }
         } else {
-            data.pressure.press(kt.track, kt.source);
+            data.pressure.press_generation(kt.track, kt.source, kt.generation);
         }
         let mono = is_custom && (!track_polyphonic || track_max_polyphony == 1)
             && track_custom_run_mode(&data.state, kt.track) != CustomInstrumentRunMode::FreePatch
@@ -262,17 +278,20 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     .push_live_trigger_stamp(kt.track, kt.transpose, data.transport_beats);
             }
             // Note-on: allocate voice and trigger
-            enforce_mute_group_for_winning_track(data, kt.track, block_start_sample, 0);
-            release_rack_choke_group_track_voices(data, kt.track, block_start_sample, 0);
-            let resolved_transpose = held_transpose.unwrap_or_else(|| resolve_live_keyboard_transpose(
+            let mut resolved_transpose = held_transpose.unwrap_or_else(|| resolve_live_keyboard_transpose(
                 &data.state,
                 data.accumulator_states[kt.track],
                 kt.track,
                 kt.transpose,
             ));
             if mono && !resumed_hold {
-                data.mono_held[kt.track].press(kt, resolved_transpose);
+                let Some(selected) = data.mono_held[kt.track].press_with_priority(kt, resolved_transpose,
+                    data.state.pattern.track_params[kt.track].get_voice_priority()) else { continue; };
+                kt = selected.trigger;
+                resolved_transpose = selected.resolved_transpose;
             }
+            enforce_mute_group_for_winning_track(data, kt.track, block_start_sample, 0);
+            release_rack_choke_group_track_voices(data, kt.track, block_start_sample, 0);
             if instrument_type == InstrumentType::Rack {
                 let rack = data
                     .scheduler_snapshot
@@ -301,13 +320,16 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     };
                     allocation
                 } else {
-                    data.custom_engine_pools[engine_id].allocate_voice(
+                    let Some(allocation) = data.custom_engine_pools[engine_id].allocate_voice_with_priority(
                         kt.track,
                         kt.track,
                         resolved_transpose,
                         track_polyphonic,
                         track_max_polyphony,
-                    )
+                        if mono { crate::sequencer::VoicePriority::Last } else { data.state.pattern.track_params[kt.track].get_voice_priority() },
+                        kt.origin(),
+                    ) else { continue; };
+                    allocation
                 };
                 let legato = !free_patch && allocation.continues_mono_note(
                     kt.track, track_polyphonic, track_max_polyphony,

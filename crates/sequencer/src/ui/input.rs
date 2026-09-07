@@ -51,6 +51,7 @@ impl LiveNotePitch {
 
 #[derive(Clone, Debug)]
 pub(crate) struct HeldKeyboardNote {
+    generation: u64,
     source: LiveNoteSource,
     sequence_roll_code: Option<crossterm::event::KeyCode>,
     transpose: f32,
@@ -2023,6 +2024,7 @@ pub(crate) fn handle_recording_key(
                     .any(|note| note.sequence_roll_code == Some(normalized_code))
                 {
                     held.push(HeldKeyboardNote {
+                        generation: 0,
                         source: LiveNoteSource::SequenceRoll,
                         sequence_roll_code: Some(normalized_code),
                         transpose: 0.0,
@@ -2235,6 +2237,8 @@ fn live_note_on(
         return RecordingKeyOutcome::Consumed;
     }
 
+    static NEXT_LIVE_NOTE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let generation = NEXT_LIVE_NOTE.fetch_add(1, Ordering::Relaxed);
     let pad_note = pitch.pad_note();
     let press_time = Instant::now();
     let mut targets: Vec<LiveNoteTarget> = Vec::new();
@@ -2287,6 +2291,7 @@ fn live_note_on(
             });
         } else {
             let _ = keyboard_tx.send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+                generation,
                 source: Some(source),
                 track: target.track,
                 transpose: target.transpose,
@@ -2298,6 +2303,7 @@ fn live_note_on(
 
     let triggered = !targets.is_empty();
     held.push(HeldKeyboardNote {
+        generation,
         source,
         sequence_roll_code: None,
         transpose: pad_note,
@@ -2387,6 +2393,7 @@ fn live_note_off(
             // The audio note-off always goes out so a sounding voice
             // (rolled or normal) releases its envelope.
             let _ = keyboard_tx.send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+                generation: note.generation,
                 source: Some(source),
                 track: target.track,
                 transpose: target.transpose,
@@ -2695,6 +2702,7 @@ mod live_keyboard_tests {
     #[test]
     fn held_note_lookup_is_case_insensitive_for_release_matching() {
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
+            generation: 0,
             source: LiveNoteSource::Key('a'),
             sequence_roll_code: None,
             transpose: 0.0,
@@ -2719,6 +2727,7 @@ mod live_keyboard_tests {
     fn live_trigger_stamps_reposition_only_the_matching_unstamped_target() {
         let state = Arc::new(SequencerState::new(2, vec![]));
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
+            generation: 0,
             source: LiveNoteSource::Key('a'),
             sequence_roll_code: None,
             transpose: 5.0,
@@ -2889,6 +2898,7 @@ mod live_keyboard_tests {
     fn held_note_release_bypasses_live_key_mode_gate() {
         let editor = Editor::new(Runtime::new(), EditorConfig::default());
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
+            generation: 0,
             source: LiveNoteSource::Key('a'),
             sequence_roll_code: None,
             transpose: 0.0,
@@ -3132,6 +3142,7 @@ mod live_keyboard_tests {
 
         // A key and a MIDI note at the same pitch are distinct holds.
         held.lock().unwrap().push(HeldKeyboardNote {
+            generation: 0,
             source: LiveNoteSource::Key('a'),
             sequence_roll_code: None,
             transpose: 0.0,

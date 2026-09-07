@@ -1114,6 +1114,27 @@ impl MonoTrigger {
     }
 }
 
+/// Which pitches retain voices when more keys are held than can sound.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[repr(u32)]
+pub enum VoicePriority {
+    #[default]
+    Last = 0,
+    High = 1,
+    Low = 2,
+}
+
+impl VoicePriority {
+    pub fn from_index(index: u32) -> Self {
+        match index { 1 => Self::High, 2 => Self::Low, _ => Self::Last }
+    }
+
+    pub fn prefers(self, candidate: f32, current: f32) -> bool {
+        match self { Self::Last => true, Self::High => candidate >= current, Self::Low => candidate <= current }
+    }
+}
+
 pub struct TrackParams {
     pub gate: AtomicBool,
     pub attack_ms: AtomicU32,
@@ -1143,6 +1164,7 @@ pub struct TrackParams {
     pub accum_mode: AtomicU32,
     pub fts_scale: AtomicU32,
     pub mono_trigger: AtomicU32,
+    pub voice_priority: AtomicU32,
     pub mute_group: AtomicU32,
     pub global_transpose: AtomicBool,
 }
@@ -1175,6 +1197,7 @@ impl TrackParams {
             accum_mode: AtomicU32::new(0),
             fts_scale: AtomicU32::new(0),
             mono_trigger: AtomicU32::new(MonoTrigger::Retrig as u32),
+            voice_priority: AtomicU32::new(VoicePriority::Last as u32),
             mute_group: AtomicU32::new(0),
             global_transpose: AtomicBool::new(true),
         }
@@ -1373,6 +1396,12 @@ impl TrackParams {
     pub fn set_accum_mode(&self, mode: u32) {
         self.accum_mode.store(mode, Ordering::Relaxed);
     }
+    pub fn get_voice_priority(&self) -> VoicePriority {
+        VoicePriority::from_index(self.voice_priority.load(Ordering::Relaxed))
+    }
+    pub fn set_voice_priority(&self, priority: VoicePriority) {
+        self.voice_priority.store(priority as u32, Ordering::Relaxed);
+    }
     pub fn get_mono_trigger(&self) -> MonoTrigger {
         MonoTrigger::from_index(self.mono_trigger.load(Ordering::Relaxed))
     }
@@ -1441,6 +1470,7 @@ pub struct TrackParamsSnapshot {
     pub accum_mode: u32,
     pub fts_scale: usize,
     pub mono_trigger: MonoTrigger,
+    pub voice_priority: VoicePriority,
     pub mute_group: u8,
     pub global_transpose: bool,
 }
@@ -1471,6 +1501,7 @@ impl Default for TrackParamsSnapshot {
             accum_mode: 0,
             fts_scale: 0,
             mono_trigger: MonoTrigger::Retrig,
+            voice_priority: VoicePriority::Last,
             mute_group: 0,
             global_transpose: true,
         }
@@ -1809,8 +1840,16 @@ pub enum LiveNoteSource {
     SequenceRoll,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LiveNoteOrigin {
+    pub source: LiveNoteSource,
+    pub generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KeyboardTrigger {
+    /// Zero denotes an untracked trigger; physical live presses use a unique id.
+    pub generation: u64,
     pub source: Option<LiveNoteSource>,
     pub track: usize,
     pub transpose: f32,
@@ -1818,17 +1857,27 @@ pub struct KeyboardTrigger {
     pub note_off: bool,
 }
 
+impl KeyboardTrigger {
+    pub fn origin(self) -> Option<LiveNoteOrigin> {
+        self.source.map(|source| LiveNoteOrigin { source, generation: self.generation })
+    }
+}
+
 /// Ordered live performance messages. Notes and controllers share one queue
 /// so a pressure change before a note-on is visible to that new voice.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LiveInputEvent {
     Note(KeyboardTrigger),
+    /// MIDI-FX-routed input still owns expression even before a voice is emitted.
+    SourceNote(KeyboardTrigger),
     Pressure {
         port: usize,
         channel: u8,
         note: Option<u8>,
         value: f32,
     },
+    PitchBend { port: usize, channel: u8, value: f32 },
+    ModWheel { port: usize, channel: u8, value: f32 },
     ResetControllers {
         port: usize,
         channel: u8,

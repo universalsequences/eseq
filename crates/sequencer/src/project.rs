@@ -1718,6 +1718,8 @@ pub struct ProjectTrackParams {
     #[serde(default)]
     pub mono_trigger: crate::sequencer::MonoTrigger,
     #[serde(default)]
+    pub voice_priority: crate::sequencer::VoicePriority,
+    #[serde(default)]
     pub mute_group: u8,
     #[serde(default = "default_true")]
     pub global_transpose: bool,
@@ -2070,6 +2072,7 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
             mono_trigger: value.mono_trigger,
+            voice_priority: value.voice_priority,
             mute_group: value.mute_group.min(8),
             global_transpose: value.global_transpose,
         }
@@ -2106,6 +2109,7 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
             mono_trigger: value.mono_trigger,
+            voice_priority: value.voice_priority,
             mute_group: value.mute_group.min(8),
             global_transpose: value.global_transpose,
         }
@@ -3495,6 +3499,17 @@ pub fn chord_snapshot_from_steps_and_durations(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn voice_priority_roundtrips_in_project_and_runtime_snapshots() {
+        use crate::sequencer::{VoicePriority, TrackParamsSnapshot};
+        for priority in [VoicePriority::Last, VoicePriority::High, VoicePriority::Low] {
+            let snapshot = TrackParamsSnapshot { voice_priority: priority, ..TrackParamsSnapshot::default() };
+            let value = serde_json::to_value(super::ProjectTrackParams::from(snapshot)).unwrap();
+            let restored: super::ProjectTrackParams = serde_json::from_value(value).unwrap();
+            assert_eq!(TrackParamsSnapshot::from(restored).voice_priority, priority);
+        }
+    }
+
+    #[test]
     fn mono_trigger_roundtrips_with_project_and_defaults_when_absent() {
         use crate::sequencer::{MonoTrigger, TrackParamsSnapshot};
         let snapshot = TrackParamsSnapshot {
@@ -3792,6 +3807,7 @@ mod tests {
                         accum_mode: 2,
                         fts_scale: 0,
                         mono_trigger: crate::sequencer::MonoTrigger::Retrig,
+                        voice_priority: crate::sequencer::VoicePriority::Last,
                         mute_group: 3,
                         global_transpose: true,
                     },
@@ -3820,6 +3836,7 @@ mod tests {
                         accum_mode: 0,
                         fts_scale: 0,
                         mono_trigger: crate::sequencer::MonoTrigger::Retrig,
+                        voice_priority: crate::sequencer::VoicePriority::Last,
                         mute_group: 0,
                         global_transpose: true,
                     },

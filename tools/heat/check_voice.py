@@ -22,21 +22,23 @@ from check_filters import Instrument, ROOT
 
 def compile_source():
     paths = [ROOT / 'content/defmacros' / name / 'macro.lisp' for name in
-             ('heat-envelope', 'heat-pitch-envelope', 'heat-lfo', 'heat-linear-filter', 'heat-soft-clip', 'heat-drive')]
+             ('heat-envelope', 'heat-pitch-envelope', 'heat-lfo', 'heat-glide', 'heat-sync', 'heat-unison-onset', 'heat-linear-filter', 'heat-soft-clip', 'heat-drive')]
     paths.append(ROOT / 'tools/heat/instrument/dsp.lisp')
     # Explicit dependency order keeps this check independent of host resolution.
     # A new dependency must be added here; unresolved imports hard-fail compile.
     text = '\n'.join(p.read_text() for p in paths)
-    for name in ('heat-envelope', 'heat-pitch-envelope', 'heat-lfo', 'heat-linear-filter', 'heat-soft-clip', 'heat-drive'):
+    for name in ('heat-envelope', 'heat-pitch-envelope', 'heat-lfo', 'heat-glide', 'heat-sync', 'heat-unison-onset', 'heat-linear-filter', 'heat-soft-clip', 'heat-drive'):
         text = text.replace(f'(use-defmacro {name})', '')
     return text, {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 
 
-def render(inst, seconds=1.5, params=None, notes=None, pressure=0):
+def render(inst, seconds=1.5, params=None, notes=None, pressure=0, controllers=None):
     frames = round(seconds * inst.sample_rate)
     notes = notes or [(0, .75, 220, False)]
     signal = {name: np.zeros(frames, np.float32) for name in inst.inputs}
     signal['pressure'][:] = pressure
+    for name, value in (controllers or {}).items():
+        signal[name][:] = value
     signal['velocity'][:] = 1
     signal['pitch'][:] = notes[0][2]
     for start, end, hz, legato in notes:

@@ -263,6 +263,7 @@
             accum_mode: id as u32,
             fts_scale: id + 1,
             mono_trigger: crate::sequencer::MonoTrigger::Retrig,
+            voice_priority: crate::sequencer::VoicePriority::Last,
             mute_group: (id % 9) as u8,
             global_transpose: id % 2 == 0,
         }

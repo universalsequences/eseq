@@ -76,6 +76,7 @@ pub fn build_output_stream(
                             .midi_fx_chain()
                             .is_empty();
                     if use_midi_fx {
+                        let _ = audio_keyboard_tx.send(crate::sequencer::LiveInputEvent::SourceNote(trigger));
                         let _ = live_keyboard_tx.send(trigger);
                     } else {
                         let _ = audio_keyboard_tx.send(event);

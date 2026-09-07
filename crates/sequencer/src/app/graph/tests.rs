@@ -433,9 +433,9 @@
         state: *mut std::os::raw::c_void,
         _buffers: *mut std::os::raw::c_void,
     ) {
-        let state = std::slice::from_raw_parts_mut(state.cast::<f32>(), 7);
+        let state = std::slice::from_raw_parts_mut(state.cast::<f32>(), 9);
         for frame in 0..frame_count as usize {
-            for channel in 0..7 {
+            for channel in 0..9 {
                 let value = *(*inputs.add(channel)).add(frame);
                 if (1..=3).contains(&channel) {
                     state[channel] += value;
@@ -466,7 +466,7 @@
                     process: Some(host_input_observer_process),
                     ..crate::audiograph::NodeVTable::default()
                 },
-                7 * std::mem::size_of::<f32>(), name.as_ptr(), 7, 0,
+                9 * std::mem::size_of::<f32>(), name.as_ptr(), 9, 0,
                 std::ptr::null(), 0,
             )
         };
@@ -474,7 +474,7 @@
         let mut manifest = test_instrument_manifest();
         // Deliberately reorder the ports: the manifest names, not ordinals,
         // must select the GatePitch outputs (pressure state and output differ).
-        manifest.inputs = ["pressure", "legato", "note-on", "trigger", "gate", "pitch", "velocity"]
+        manifest.inputs = ["pressure", "legato", "note-on", "trigger", "gate", "pitch", "velocity", "pitch-bend", "mod-wheel"]
             .into_iter().enumerate()
             .map(|(channel, name)| lisp_host::DGenInput { channel, name: name.into() })
             .collect();
@@ -492,7 +492,7 @@
         for (frame_offset, kind, values) in [
             (8, crate::audiograph::GBE_NOTE_ON, vec![440.0, 0.5, 0.0, 0.25]),
             (24, crate::audiograph::GBE_NOTE_ON, vec![660.0, 0.8, 1.0, 0.25]),
-            (40, crate::audiograph::GBE_PRESSURE, vec![0.75]),
+            (40, crate::audiograph::GBE_EXPRESSION, vec![0.75, -0.4, 0.6]),
         ] {
             let mut aux = [0.0; crate::audiograph::GBE_AUX_CAP];
             aux[..values.len()].copy_from_slice(&values);
@@ -504,8 +504,8 @@
             });
         }
         for _ in 0..8 { graph.process_block(); }
-        let observed = graph.read_node_state::<7>(observer_id).expect("expression observer snapshot");
-        assert_eq!(observed, [0.75, 1.0, 2.0, 1.0, 1.0, 660.0, 0.8]);
+        let observed = graph.read_node_state::<9>(observer_id).expect("expression observer snapshot");
+        assert_eq!(observed, [0.75, 1.0, 2.0, 1.0, 1.0, 660.0, 0.8, -0.4, 0.6]);
     }
 
     struct RouteTargets {

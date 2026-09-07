@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "heat-unison-onset",
+  "params": [
+    "gate",
+    "note_on",
+    "trigger",
+    "legato",
+    "pitch",
+    "velocity",
+    "enabled",
+    "delay_ms"
+  ],
+  "outputs": [
+    "gate",
+    "note_on",
+    "trigger",
+    "legato",
+    "pitch",
+    "velocity"
+  ],
+  "summary": "Cancellable per-copy unison onset delay with immediate legato continuation.",
+  "tags": [
+    "voice",
+    "synth",
+    "heat"
+  ]
+}

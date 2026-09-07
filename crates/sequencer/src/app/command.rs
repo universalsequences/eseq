@@ -542,6 +542,11 @@ pub enum AppCommand {
         track: usize,
     },
 
+    SetTrackVoicePriority {
+        track: usize,
+        priority: crate::sequencer::VoicePriority,
+    },
+
     SetTrackMonoTrigger {
         track: usize,
         mode: crate::sequencer::MonoTrigger,
@@ -1027,6 +1032,7 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::NextTrackTimebase { .. }
         | AppCommand::PrevTrackTimebase { .. }
         | AppCommand::SetTrackMonoTrigger { .. }
+        | AppCommand::SetTrackVoicePriority { .. }
         | AppCommand::SetTrackFtsScale { .. }
         | AppCommand::SetTrackAccumIdx { .. }
         | AppCommand::SetTrackAccumMode { .. }
@@ -3431,6 +3437,10 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
 
         AppCommand::PrevTrackTimebase { track } => {
             app.state.pattern.track_params[track].prev_timebase();
+        }
+
+        AppCommand::SetTrackVoicePriority { track, priority } => {
+            app.state.pattern.track_params[track].set_voice_priority(priority);
         }
 
         AppCommand::SetTrackMonoTrigger { track, mode } => {

@@ -1564,6 +1564,7 @@ fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 chord: ScheduledChordData {
+                    live_origins: [None; crate::audio::MAX_VOICES],
                     count: 0,
                     notes: [0.0; crate::audio::MAX_VOICES],
                     durations: [0.0; crate::audio::MAX_VOICES],
@@ -1606,6 +1607,7 @@ fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
                     retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
                 },
                 chord: ScheduledChordData {
+                    live_origins: [None; crate::audio::MAX_VOICES],
                     count: 0,
                     notes: [0.0; crate::audio::MAX_VOICES],
                     durations: [0.0; crate::audio::MAX_VOICES],
@@ -1800,6 +1802,27 @@ fn sampler_warp_repitch_mode_needs_no_analysis() {
     assert!(enabled > 0.5);
     assert!((ratio - (120.0 / 174.0)).abs() < 0.0001);
     assert_eq!((ptr_lo, ptr_hi), (0.0, 0.0));
+}
+
+#[test]
+fn custom_voice_priority_preserves_higher_ranked_notes_and_source_identity() {
+    use crate::sequencer::{LiveNoteOrigin, LiveNoteSource, VoicePriority};
+    let a = Some(LiveNoteOrigin { source: LiveNoteSource::Midi { port: 0, channel: 0, note: 60 }, generation: 1 });
+    let b = Some(LiveNoteOrigin { source: LiveNoteSource::Midi { port: 1, channel: 0, note: 60 }, generation: 2 });
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=6 { pool.add_voice(lid); }
+    let first = pool.allocate_voice_with_priority(0, 0, 60.0, true, 2, VoicePriority::High, a).unwrap();
+    let second = pool.allocate_voice_with_priority(0, 0, 60.0, true, 2, VoicePriority::High, b).unwrap();
+    assert_ne!(first.logical_id, second.logical_id);
+    assert!(pool.allocate_voice_with_priority(0, 0, 55.0, true, 2, VoicePriority::High, None).is_none());
+    let higher = pool.allocate_voice_with_priority(0, 0, 67.0, true, 2, VoicePriority::High, None).unwrap();
+    assert!(higher.stole_active_voice);
+    assert_eq!(pool.voices[..pool.num_voices].iter().filter(|v| v.active).count(), 2);
+    let lower = pool.allocate_voice_with_priority(0, 0, 50.0, true, 2, VoicePriority::Low, None).unwrap();
+    assert_eq!(lower.logical_id, higher.logical_id);
+    assert!(pool.allocate_voice_with_priority(0, 0, 70.0, true, 2, VoicePriority::Low, None).is_none());
+    pool.release_voice_by_logical_id(lower.logical_id, 100);
+    assert!(pool.allocate_voice_with_priority(0, 0, 70.0, true, 2, VoicePriority::Low, None).is_some());
 }
 
 #[test]

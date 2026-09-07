@@ -1,6 +1,6 @@
 # Heat — factory analog synthesizer
 
-Revision 1 · 2026-09-05 · Specification and inspection: `eseq-38fe`
+Revision 2 · 2026-09-06 · Specification and inspection: `eseq-38fe`
 
 Implementation epic: `eseq-vumc`; shared mono-legato foundation: `eseq-xpa`.
 
@@ -8,7 +8,7 @@ Implementation epic: `eseq-vumc`; shared mono-legato foundation: `eseq-xpa`.
 
 Heat is eseq's factory counterpart to Ableton Analog. The target is complete
 functional and performance parity with the inspected Live 12 device within
-the expression scope below, followed by measured sonic matching. It is not a rename of `analog-bread-and-butter`
+the expression scope below. The author accepted the current sound on 2026-09-06; exact measured sonic matching is no longer a release gate. It is not a rename of `analog-bread-and-butter`
 and must not inherit that experiment's reduced architecture as a constraint.
 
 Heat must cover simple subtractive sounds and Analog's deeper capabilities:
@@ -31,14 +31,15 @@ target. The old experiment can remain available independently.
 
 1. **Functional:** every in-scope reference control has its actual behavior, including
    interactions, off states, event handling, and expression routing.
-2. **Sonic:** matched settings produce acceptably matched spectra, dynamics,
-   tuning, stereo image, and modulation. The test corpus below defines this.
+2. **Sound and stability:** preserve the user-approved baseline and verify finite,
+   controlled behavior across supported rates and performance settings. The
+   reference corpus below remains useful research, not an exact-match release gate.
 3. **Factory:** the packaged application loads, plays, edits, saves, forks, and
    restores Heat without development files or a developer toolchain checkout.
 
-The current inspection establishes neither a numerical similarity percentage
-nor sonic equivalence. No matched audio was captured or auditioned in this
-session. “50% there” remains the author's qualitative assessment.
+The original inspection did not establish sonic equivalence. Subsequent component
+measurements and listening informed the implementation; the author has now
+approved Heat's sound. No numerical whole-instrument similarity claim is made.
 
 ## 2. Evidence and scope of inspection
 

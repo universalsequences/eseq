@@ -1,8 +1,8 @@
 use std::os::raw::{c_int, c_void};
 
-use crate::audiograph::{GraphBlockEvent, NodeVTable, GBE_GATE_OFF, GBE_NOTE_ON, GBE_PRESSURE};
+use crate::audiograph::{GraphBlockEvent, NodeVTable, GBE_GATE_OFF, GBE_NOTE_ON, GBE_PRESSURE, GBE_EXPRESSION};
 
-const TIMELINE_EVENT_WIDTH: usize = 6;
+const TIMELINE_EVENT_WIDTH: usize = 8;
 const TIMELINE_FRAME: usize = 0;
 const TIMELINE_KIND: usize = 1;
 const TIMELINE_PITCH: usize = 2;
@@ -10,17 +10,21 @@ const TIMELINE_VELOCITY: usize = 3;
 const TIMELINE_LEGATO: usize = 4;
 const TIMELINE_PRESSURE: usize = 5;
 pub const GATEPITCH_TIMELINE_CAPACITY: usize = crate::sequencer::MAX_STEPS;
-const PARAM_TIMELINE_COUNT: usize = 7;
-const PARAM_TIMELINE_BASE: usize = 8;
+const TIMELINE_PITCH_BEND: usize = 6;
+const TIMELINE_MOD_WHEEL: usize = 7;
+const PARAM_TIMELINE_COUNT: usize = 9;
+const PARAM_TIMELINE_BASE: usize = 10;
 
 // State layout starts with the public ParamMsg slots, then a fixed per-slice
-// event timeline: [count, event(frame, kind, pitch, velocity, legato, pressure) * MAX_STEPS].
+// event timeline: [count, event(frame, kind, pitch, velocity, legato, pressure, bend, wheel) * MAX_STEPS].
 pub const GATEPITCH_STATE_SIZE: usize =
     PARAM_TIMELINE_BASE + GATEPITCH_TIMELINE_CAPACITY * TIMELINE_EVENT_WIDTH;
 pub const OUTPUT_NOTE_ON: usize = 6;
 pub const OUTPUT_LEGATO: usize = 7;
 pub const OUTPUT_PRESSURE: usize = 8;
-pub const OUTPUT_COUNT: usize = 9;
+pub const OUTPUT_PITCH_BEND: usize = 9;
+pub const OUTPUT_MOD_WHEEL: usize = 10;
+pub const OUTPUT_COUNT: usize = 11;
 pub const PARAM_GATE: u64 = 0;
 pub const PARAM_PITCH: u64 = 1;
 pub const PARAM_VELOCITY: u64 = 2;
@@ -28,6 +32,8 @@ pub const PARAM_TRIGGER: u64 = 3;
 pub const PARAM_CLOCK_PHASE: u64 = 4;
 pub const PARAM_CLOCK_INC: u64 = 5;
 pub const PARAM_PRESSURE: u64 = 6;
+pub const PARAM_PITCH_BEND: u64 = 7;
+pub const PARAM_MOD_WHEEL: u64 = 8;
 
 unsafe extern "C" fn gatepitch_init(
     state: *mut c_void,
@@ -43,6 +49,8 @@ unsafe extern "C" fn gatepitch_init(
     *s.add(4) = 0.0; // transport bar phase
     *s.add(5) = 0.0; // per-sample clock increment
     *s.add(PARAM_PRESSURE as usize) = 0.0;
+    *s.add(PARAM_PITCH_BEND as usize) = 0.0;
+    *s.add(PARAM_MOD_WHEEL as usize) = 0.0;
     *s.add(PARAM_TIMELINE_COUNT) = 0.0;
 }
 
@@ -76,6 +84,7 @@ unsafe extern "C" fn gatepitch_schedule_event(
             (event.aux[0].max(0.0), event.aux[1].clamp(0.0, 1.0))
         }
         GBE_GATE_OFF => (0.0, 0.0),
+        GBE_EXPRESSION if event.aux_count >= 3 && event.aux[..3].iter().all(|v| v.is_finite()) => (0.0, 0.0),
         GBE_PRESSURE if event.aux_count >= 1 && event.aux[0].is_finite() => (0.0, 0.0),
         _ => return false,
     };
@@ -95,10 +104,16 @@ unsafe extern "C" fn gatepitch_schedule_event(
         };
     *s.add(PARAM_TIMELINE_COUNT) = (count + 1) as f32;
     *s.add(base + TIMELINE_PRESSURE) = match event.kind {
-        GBE_PRESSURE => event.aux[0].clamp(0.0, 1.0),
+        GBE_PRESSURE | GBE_EXPRESSION => event.aux[0].clamp(0.0, 1.0),
         GBE_NOTE_ON if event.aux_count >= 4 && event.aux[3].is_finite() => event.aux[3].clamp(0.0, 1.0),
         _ => 0.0,
     };
+    *s.add(base + TIMELINE_PITCH_BEND) = if event.kind == GBE_EXPRESSION {
+        event.aux[1].clamp(-1.0, 1.0)
+    } else { 0.0 };
+    *s.add(base + TIMELINE_MOD_WHEEL) = if event.kind == GBE_EXPRESSION {
+        event.aux[2].clamp(0.0, 1.0)
+    } else { 0.0 };
     true
 }
 
@@ -114,6 +129,8 @@ unsafe extern "C" fn gatepitch_process(
     let mut pitch = *s.add(PARAM_PITCH as usize);
     let mut velocity = *s.add(PARAM_VELOCITY as usize);
     let mut pressure = *s.add(PARAM_PRESSURE as usize);
+    let mut pitch_bend = *s.add(PARAM_PITCH_BEND as usize);
+    let mut mod_wheel = *s.add(PARAM_MOD_WHEEL as usize);
     let mut clock_phase = *s.add(PARAM_CLOCK_PHASE as usize);
     let clock_inc = *s.add(PARAM_CLOCK_INC as usize);
     let event_count = (*s.add(PARAM_TIMELINE_COUNT)).max(0.0) as usize;
@@ -139,6 +156,8 @@ unsafe extern "C" fn gatepitch_process(
             let kind = *s.add(base + TIMELINE_KIND) as u32;
             if kind == GBE_NOTE_ON {
                 pressure = *s.add(base + TIMELINE_PRESSURE);
+                pitch_bend = 0.0;
+                mod_wheel = 0.0;
                 pitch = *s.add(base + TIMELINE_PITCH);
                 velocity = *s.add(base + TIMELINE_VELOCITY);
                 let continues_note = gate > 0.5 && *s.add(base + TIMELINE_LEGATO) > 0.5;
@@ -149,6 +168,10 @@ unsafe extern "C" fn gatepitch_process(
                     trigger = 1.0;
                 }
                 gate = 1.0;
+            } else if kind == GBE_EXPRESSION {
+                pressure = *s.add(base + TIMELINE_PRESSURE);
+                pitch_bend = *s.add(base + TIMELINE_PITCH_BEND);
+                mod_wheel = *s.add(base + TIMELINE_MOD_WHEEL);
             } else if kind == GBE_PRESSURE {
                 pressure = *s.add(base + TIMELINE_PRESSURE);
             } else if kind == GBE_GATE_OFF {
@@ -165,12 +188,16 @@ unsafe extern "C" fn gatepitch_process(
         *(*out.add(OUTPUT_NOTE_ON)).add(i) = note_on;
         *(*out.add(OUTPUT_LEGATO)).add(i) = legato;
         *(*out.add(OUTPUT_PRESSURE)).add(i) = pressure;
+        *(*out.add(OUTPUT_PITCH_BEND)).add(i) = pitch_bend;
+        *(*out.add(OUTPUT_MOD_WHEEL)).add(i) = mod_wheel;
         clock_phase += clock_inc;
         if clock_phase >= 1.0 {
             clock_phase -= clock_phase.floor();
         }
     }
     *s.add(PARAM_PRESSURE as usize) = pressure;
+    *s.add(PARAM_PITCH_BEND as usize) = pitch_bend;
+    *s.add(PARAM_MOD_WHEEL as usize) = mod_wheel;
     *s.add(PARAM_GATE as usize) = gate;
     *s.add(PARAM_PITCH as usize) = pitch;
     *s.add(PARAM_VELOCITY as usize) = velocity;
@@ -192,7 +219,7 @@ pub fn gatepitch_vtable() -> NodeVTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audiograph::{GBE_AUX_CAP, GBE_GATE_OFF, GBE_NOTE_ON, GBE_PRESSURE};
+    use crate::audiograph::{GBE_AUX_CAP, GBE_GATE_OFF, GBE_NOTE_ON, GBE_PRESSURE, GBE_EXPRESSION};
 
     fn event(frame_offset: u32, kind: u32, aux: &[f32]) -> GraphBlockEvent {
         let mut event = GraphBlockEvent {
@@ -205,6 +232,35 @@ mod tests {
         };
         event.aux[..aux.len()].copy_from_slice(aux);
         event
+    }
+
+    #[test]
+    fn expression_updates_are_atomic_sample_accurate_and_reset_on_reuse() {
+        let mut state = [0.0_f32; GATEPITCH_STATE_SIZE];
+        let mut outputs = [[0.0_f32; 8]; OUTPUT_COUNT];
+        let pointers = outputs.each_mut().map(|output| output.as_mut_ptr());
+        unsafe {
+            gatepitch_init(state.as_mut_ptr().cast(), 48_000, 8, std::ptr::null());
+            gatepitch_begin_event_slice(state.as_mut_ptr().cast(), 1, 0, 8);
+            for change in [
+                event(0, GBE_NOTE_ON, &[220.0, 1.0]),
+                event(0, GBE_EXPRESSION, &[0.2, -0.5, 0.8]),
+                event(2, GBE_PRESSURE, &[0.7]),
+                event(3, GBE_GATE_OFF, &[]),
+                event(4, GBE_EXPRESSION, &[0.4, 0.25, 0.6]),
+                event(6, GBE_NOTE_ON, &[330.0, 1.0]),
+            ] {
+                assert!(gatepitch_schedule_event(state.as_mut_ptr().cast(), &change));
+            }
+            assert!(!gatepitch_schedule_event(state.as_mut_ptr().cast(),
+                &event(7, GBE_EXPRESSION, &[0.0, f32::NAN, 0.0])));
+            gatepitch_process(std::ptr::null(), pointers.as_ptr(), 8,
+                state.as_mut_ptr().cast(), std::ptr::null_mut());
+        }
+        assert_eq!(outputs[OUTPUT_PRESSURE], [0.2, 0.2, 0.7, 0.7, 0.4, 0.4, 0.0, 0.0]);
+        assert_eq!(outputs[OUTPUT_PITCH_BEND], [-0.5, -0.5, -0.5, -0.5, 0.25, 0.25, 0.0, 0.0]);
+        assert_eq!(outputs[OUTPUT_MOD_WHEEL], [0.8, 0.8, 0.8, 0.8, 0.6, 0.6, 0.0, 0.0]);
+        assert_eq!(outputs[PARAM_TRIGGER as usize], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
     }
 
     #[test]
@@ -289,6 +345,8 @@ mod tests {
         let mut note_on = [0.0; 4];
         let mut legato = [0.0; 4];
         let mut pressure = [0.0; 4];
+        let mut pitch_bend = [0.0; 4];
+        let mut mod_wheel = [0.0; 4];
         let outputs = [
             gate.as_mut_ptr(),
             pitch.as_mut_ptr(),
@@ -299,6 +357,8 @@ mod tests {
             note_on.as_mut_ptr(),
             legato.as_mut_ptr(),
             pressure.as_mut_ptr(),
+            pitch_bend.as_mut_ptr(),
+            mod_wheel.as_mut_ptr(),
         ];
 
         unsafe {
@@ -339,6 +399,8 @@ mod tests {
         let mut note_on = [0.0; 8];
         let mut legato = [0.0; 8];
         let mut pressure = [0.0; 8];
+        let mut pitch_bend = [0.0; 8];
+        let mut mod_wheel = [0.0; 8];
         let outputs = [
             gate.as_mut_ptr(),
             pitch.as_mut_ptr(),
@@ -349,6 +411,8 @@ mod tests {
             note_on.as_mut_ptr(),
             legato.as_mut_ptr(),
             pressure.as_mut_ptr(),
+            pitch_bend.as_mut_ptr(),
+            mod_wheel.as_mut_ptr(),
         ];
 
         unsafe {
@@ -389,6 +453,8 @@ mod tests {
         let mut note_on = [0.0; 4];
         let mut legato = [0.0; 4];
         let mut pressure = [0.0; 4];
+        let mut pitch_bend = [0.0; 4];
+        let mut mod_wheel = [0.0; 4];
         let outputs = [
             gate.as_mut_ptr(),
             pitch.as_mut_ptr(),
@@ -399,6 +465,8 @@ mod tests {
             note_on.as_mut_ptr(),
             legato.as_mut_ptr(),
             pressure.as_mut_ptr(),
+            pitch_bend.as_mut_ptr(),
+            mod_wheel.as_mut_ptr(),
         ];
 
         unsafe {

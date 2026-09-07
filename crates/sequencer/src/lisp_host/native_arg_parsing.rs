@@ -228,8 +228,9 @@ pub(super) fn apply_acc_emit_overrides(
     resolved: &mut ResolvedStep,
     chord: &mut Vec<f32>,
     chord_durations: &mut Vec<f32>,
-) -> Result<Option<usize>, String> {
+) -> Result<(Option<usize>, Option<usize>), String> {
     let mut target_track = None;
+    let mut origin_note = None;
     while idx < args.len() {
         let key = match &args[idx] {
             EValue::Keyword(name) | EValue::String(name) | EValue::Symbol(name) => {
@@ -273,6 +274,13 @@ pub(super) fn apply_acc_emit_overrides(
                 resolved.retrig_rate = acc_emit_number(value, "retrig-rate")?
                     .clamp(StepParam::RetrigRate.min(), StepParam::RetrigRate.max());
             }
+            "origin-note" => {
+                let index = acc_emit_number(value, "origin-note")?;
+                if !index.is_finite() || index < 0.0 || index.fract() != 0.0 {
+                    return Err("acc-emit :origin-note must be a nonnegative integer".into());
+                }
+                origin_note = Some(index as usize);
+            }
             "track" => {
                 let track = acc_emit_number(value, "track")?;
                 if track < 0.0 {
@@ -284,5 +292,5 @@ pub(super) fn apply_acc_emit_overrides(
         }
         idx += 1;
     }
-    Ok(target_track)
+    Ok((target_track, origin_note))
 }

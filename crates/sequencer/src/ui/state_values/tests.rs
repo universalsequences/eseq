@@ -19997,6 +19997,9 @@ mod drift_waveform_tests;
     #[test]
     fn metal_seq_track_panel_lays_out_timebase_and_mute_group_dropdowns() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive("SEQ", "tp-supports-mono-trigger", Value::Bool(true));
+        editor.runtime_mut().set_reactive("SEQ", "tp-voice-priority", Value::String("High".into()));
+        editor.runtime_mut().set_reactive("SEQ", "tp-mono-trigger", Value::String("legato".into()));
         editor.refresh_runtime_side_effects();
 
         let track_id = editor
@@ -20048,6 +20051,12 @@ mod drift_waveform_tests;
         let primary_panel =
             find_layout_node_by_debug_name(track_params_panel, "track-primary-parameters-panel")
                 .expect("primary track parameters panel");
+        for value in ["High", "legato"] {
+            let control = find_dropdown_by_value(primary_panel, value).expect("voice policy control");
+            assert_finite_nonzero_rect(control, "voice policy control");
+            assert!(control.rect.col >= primary_panel.rect.col
+                && control.rect.col + control.rect.width <= primary_panel.rect.col + primary_panel.rect.width);
+        }
         let groove_panel =
             find_layout_node_by_debug_name(track_params_panel, "track-groove-parameters-panel")
                 .expect("groove track parameters panel");
@@ -44783,6 +44792,14 @@ mod drift_waveform_tests;
         // The initial detail is Global, and each routing button applies the
         // complete configuration as one undoable parameter batch.
         let layout = editor.widget_layout().expect("default Heat layout");
+        for name in ["unison_voices", "unison_detune_cents", "unison_delay_ms", "unison_spread",
+            "glide_mode", "glide_rate_mode", "glide_time_ms", "octave", "tune_semitones",
+            "detune_cents", "stretch_cents", "tuning_error_cents", "bend_range_semitones",
+            "vibrato_rate_hz", "vibrato_amount_cents", "vibrato_wheel_cents",
+            "vibrato_delay_ms", "vibrato_attack_ms"] {
+            let control = find_param(&layout, name).unwrap_or_else(|| panic!("missing Global {name}"));
+            assert_finite_nonzero_rect(control, name);
+        }
         let route_names = ["osc1_to_filter1", "osc2_to_filter1", "noise_to_filter1",
             "filter1_to_filter2", "filter1_enabled", "filter2_enabled", "amp1_enabled", "amp2_enabled"];
         let param_index = |name: &str| dsp.lines().filter(|line| line.starts_with("(param "))

@@ -13,13 +13,19 @@
 (def heat-num (section name title)
   (heat-num-labeled section name title false))
 (def heat-num-labeled (section name title labels)
+  (heat-readout section name title labels 5.7 1.24 0.68 2 0.01))
+(def heat-compact (section name title)
+  (heat-readout section name title false 4.6 1.02 0.46 2 0.01))
+(def heat-integer (section name title)
+  (heat-readout section name title false 4.6 1.02 0.46 0 1))
+(def heat-readout (section name title labels width height label-height decimals step)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "heat-num-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "heat-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
-        (v-stack :width 5.7 :height 1.24 :gap 0.06
-          (label title :v-align :center :height 0.68 :font-size 7.6 :color :dim :bg :transparent)
-          (number-picker :width 5.7 :height 0.50 :noui true :decimals 2 :font-size 8.0 :value-labels labels
+        (v-stack :width width :height height :gap 0.06
+          (label title :v-align :center :height label-height :font-size 7.6 :color :dim :bg :transparent)
+          (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
@@ -33,13 +39,17 @@
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))))
 (def heat-option (section name title options)
+  (heat-option-sized section name title options 6.2 1.24))
+(def heat-choice (section name title options)
+  (heat-option-sized section name title options 4.6 1.02))
+(def heat-option-sized (section name title options width height)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
         (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "heat-option-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "heat-option-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
-        (v-stack :width 6.2 :height 1.24 :gap 0.04
-          (label title :v-align :center :height 0.6 :font-size 7.6 :color :dim :bg :transparent)
-          (dropdown :width 6.2 :height 0.6 :font-size 7.6
+        (v-stack :width width :height height :gap 0.04
+          (label title :v-align :center :height (- height 0.64) :font-size 7.6 :color :dim :bg :transparent)
+          (dropdown :width width :height 0.6 :font-size 7.6
             :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :value-index-offset (get p :min) :options options
             :text-color :dim :chevron-color :dim :badge-color :transparent
@@ -149,7 +159,8 @@
         (heat-num section (str prefix "_keytrack") "Freq<Key")
         (heat-num section (str prefix "_env_octaves") "Freq<Env")
         (heat-num section (str prefix "_lfo_q") "Res<LFO")
-        (heat-num section (str prefix "_env_q") "Res<Env")))))
+        (heat-num section (str prefix "_env_q") "Res<Env")
+        (if (= section 6) (heat-num section "filter2_offset_octaves" "F2 Offset") false)))))
 (def heat-amp-detail (section prefix)
   (h-stack :gap 0.6 :align :start
     (heat-env-plot section (str prefix "_env"))
@@ -204,8 +215,12 @@
           (h-stack :gap 0.5
             (heat-num section (str prefix "_pulse_duty") "Width")
             (heat-num section (str prefix "_lfo_pw") (if (= section 1) "LFO1" "LFO2"))))
-        (heat-group "Sub"
-          (heat-num section (str prefix "_sub_level") "Level"))))))
+        (heat-group "Sub / Sync"
+          (h-stack :gap 0.4
+            (heat-option section (str prefix "_sub_sync") "Mode" '("Sub" "Sync"))
+            (if (> (reactive-value (heat-bound (str prefix "_sub_sync") 0)) 0.5)
+              (heat-num section (str prefix "_sync_semitones") "Ratio st")
+              (heat-num section (str prefix "_sub_level") "Level"))))))))
 (def heat-lfo-curve (prefix color)
   (let ((shape (heat-bound (str prefix "_shape") 0))
         (width (heat-bound (str prefix "_width") 0.5))
@@ -234,8 +249,9 @@
     :background-color :instrument-group-bg :debug-name "heat-noise-strip"
     (v-stack :gap 0.02 :align :center
       (heat-switch false "noise_enabled" "Noise")
-      (heat-num false "noise_level_db" "Level dB")
-      (heat-num false "noise_color_hz" "Color Hz"))))
+      (heat-compact false "noise_level_db" "Level dB")
+      (heat-compact false "noise_color_hz" "Color Hz")
+      (heat-compact false "noise_to_filter1" "F2 / F1"))))
 ; Quick Routing writes the same eight ordinary parameters as Analog.
 (def heat-routing-values (mode)
   (nth '((1 0 1 0 1 1 1 1)
@@ -271,7 +287,7 @@
 (defmacro heat-route-node (xx yy color)
   `(sdf/stroke (sdf/translate ,xx ,yy (sdf/rect (* width 0.10) 0.27)) 0.035 ,color))
 (defwidget heat-routing-diagram
-  :width 8.6 :height 1.3
+  :width 6.6 :height 1.3
   :state (mode selected) :bindable (selected)
   :shader
   (let ((sx (* width -0.68)) (ax (* width 0.68))
@@ -311,24 +327,52 @@
       (heat-routing-diagram :mode mode :selected (if (heat-routing-selected bindings) 1 0)
         :debug-name (str "heat-route-" mode) :on-click callback))))
 (def heat-quick-routing ()
-  (v-stack :width 18 :height 3.8 :gap 0.22
+  (v-stack :width 14 :height 3.8 :gap 0.22
     (label "Quick Routing" :v-align :center :height 0.65 :font-size 9 :color :dim :bg :transparent)
     (h-stack :gap 0.35 (heat-route-button 0) (heat-route-button 1))
     (h-stack :gap 0.35 (heat-route-button 2) (heat-route-button 3))))
 
 (def heat-global-detail ()
-  (h-stack :gap 2 :align :start
+  (h-stack :gap 0.65 :align :start
     (heat-quick-routing)
-    (v-stack :gap 0.7
-      (heat-num 0 "tune_semitones" "Tune st")
-      (heat-num 0 "filter2_offset_octaves" "F2 Offset"))
-    (heat-num 0 "noise_to_filter1" "Noise F1")
-    (v-stack :gap 0.7
-      (label "Pressure" :v-align :center :font-size 9 :color :dim :bg :transparent)
-      (h-stack :gap 1
-        (heat-num 0 "pressure_pitch_semitones" "Pitch st")
-        (heat-num 0 "pressure_filter_octaves" "Filter oct")
-        (heat-num 0 "pressure_amp_db" "Level dB")))))
+    (heat-group "Vibrato"
+      (v-stack :gap 0.08
+        (h-stack :gap 0.4
+          (heat-compact 0 "vibrato_rate_hz" "Rate Hz")
+          (heat-compact 0 "vibrato_amount_cents" "Amount ct"))
+        (h-stack :gap 0.4
+          (heat-compact 0 "vibrato_delay_ms" "Delay ms")
+          (heat-compact 0 "vibrato_attack_ms" "Attack ms"))
+        (heat-compact 0 "vibrato_wheel_cents" "Amt<MW")))
+    (heat-group "Keyboard"
+      (v-stack :gap 0.08
+        (h-stack :gap 0.4
+          (heat-integer 0 "octave" "Octave")
+          (heat-integer 0 "tune_semitones" "Semi"))
+        (h-stack :gap 0.4
+          (heat-compact 0 "detune_cents" "Detune ct")
+          (heat-compact 0 "stretch_cents" "Stretch"))
+        (h-stack :gap 0.4
+          (heat-compact 0 "tuning_error_cents" "Error ct")
+          (heat-compact 0 "bend_range_semitones" "PB Range"))))
+    (heat-group "Unison"
+      (v-stack :gap 0.08
+        (h-stack :gap 0.4
+          (heat-choice 0 "unison_voices" "Voices" '("Off" "2" "3" "4"))
+          (heat-compact 0 "unison_detune_cents" "Detune ct"))
+        (h-stack :gap 0.4
+          (heat-compact 0 "unison_delay_ms" "Delay ms")
+          (heat-compact 0 "unison_spread" "Spread"))))
+    (heat-group "Glide"
+      (v-stack :gap 0.08
+        (heat-choice 0 "glide_mode" "Apply" '("Off" "Always" "Legato"))
+        (heat-choice 0 "glide_rate_mode" "Mode" '("Const" "Prop"))
+        (heat-compact 0 "glide_time_ms" "Time ms")))
+    (heat-group "Pressure"
+      (v-stack :gap 0.08
+        (heat-compact 0 "pressure_pitch_semitones" "Pitch st")
+        (heat-compact 0 "pressure_filter_octaves" "Filter oct")
+        (heat-compact 0 "pressure_amp_db" "Level dB")))))
 (def heat-detail ()
   (let ((section eseq.vanilla/custom-ui-selected-section))
     (box :width 63 :height 4.4 :padding 0.2 :corner-radius 2

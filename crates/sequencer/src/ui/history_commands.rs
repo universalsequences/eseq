@@ -399,6 +399,10 @@ pub(super) fn apply_slice3_history_host_command(
             track: track_required()?,
             timebase: Timebase::from_index(value()? as u32),
         },
+        "voice-priority" => app::AppCommand::SetTrackVoicePriority {
+            track: track_required()?,
+            priority: sequencer::sequencer::VoicePriority::from_index(value()? as u32),
+        },
         "mono-trigger" => app::AppCommand::SetTrackMonoTrigger {
             track: track_required()?,
             mode: sequencer::sequencer::MonoTrigger::from_index(value()? as u32),

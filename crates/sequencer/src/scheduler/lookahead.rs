@@ -1129,6 +1129,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                     process_overlay.instrument_params.clone(),
                                 );
                                 accumulator_events.push(MidiFxEvent {
+                                    live_origins: Vec::new(),
                                     offset_beats: 0.0,
                                     track: trigger.track,
                                     step: trigger.step,
@@ -1188,6 +1189,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                     );
                                 }
                                 let event = MidiFxEvent {
+                                    live_origins: Vec::new(),
                                     offset_beats: emitted.offset_beats,
                                     track: trigger.track,
                                     step: trigger.step,

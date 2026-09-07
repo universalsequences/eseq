@@ -69,6 +69,8 @@ impl DGenManifest {
             "velocity" | "vel" => Some(gp::PARAM_VELOCITY as usize),
             "trigger" | "trig" => Some(gp::PARAM_TRIGGER as usize),
             "pressure" => Some(gp::OUTPUT_PRESSURE),
+            "pitchbend" => Some(gp::OUTPUT_PITCH_BEND),
+            "modwheel" => Some(gp::OUTPUT_MOD_WHEEL),
             "noteon" => Some(gp::OUTPUT_NOTE_ON),
             "legato" => Some(gp::OUTPUT_LEGATO),
             "clockinc" => Some(gp::PARAM_CLOCK_INC as usize),

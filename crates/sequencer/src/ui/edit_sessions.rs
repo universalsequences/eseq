@@ -361,6 +361,7 @@ pub(super) fn send_keyboard_note_off(
     transpose: f32,
 ) {
     let _ = keyboard_tx.send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+        generation: 0,
                 source: None,
         track,
         transpose,

@@ -331,6 +331,7 @@ mod tests {
     fn emit_one() -> GeneratorTickResult {
         GeneratorTickResult {
             emitted: vec![EmittedAccumulatorEvent {
+                origin_note: None,
                 offset_beats: 0.0,
                 track: Some(0),
                 resolved: default_resolved(),

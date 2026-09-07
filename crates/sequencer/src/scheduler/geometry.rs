@@ -13,6 +13,7 @@ pub(super) fn chord_data_from_parts(
     step_transpose: f32,
 ) -> ScheduledChordData {
     let mut chord = ScheduledChordData {
+        live_origins: [None; crate::audio::MAX_VOICES],
         count: notes.len().min(MAX_VOICES),
         notes: [0.0; MAX_VOICES],
         durations: [0.0; MAX_VOICES],

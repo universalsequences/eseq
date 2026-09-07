@@ -2,8 +2,9 @@
 
 These tools compare original Heat DSP with isolated captures from the installed
 Ableton Live 12.4.5 Analog device. Component measurements do not constitute a
-finished-synth sonic-match verdict. See `docs/heat-synth-spec.md` for the full
-acceptance contract.
+finished-synth sonic-match verdict. The author accepted the current sound on
+2026-09-06, so exact sonic matching is no longer a release gate. See
+`docs/heat-synth-spec.md` for the functional and factory acceptance contract.
 
 `make_reference.py` builds disposable Live sets from an explicitly saved copy.
 It preserves the input, replaces copied clips and automation, records every
@@ -56,7 +57,7 @@ It uses a separate sustained sine as its amplitude reference, identical
 measurement smoothing, and a paired raw-sample comparison between slopes to
 cancel common oscillator onset behavior without a fitted gain or time shift.
 The demodulated time-range check excludes the first 128 frames; the paired
-check includes them. Oscillator onset itself remains a separate release gate.
+check includes them. Oscillator onset comparison remains historical calibration work.
 
 The longer captures show that the displayed infinite sustain setting holds
 for linear slope but continues a slow exponential fall for exponential slope.
@@ -96,10 +97,45 @@ they are not pass/fail tests for reproducing the reference's control grid.
 colored noise, two independently routed filter/drive/amp lanes, four filter/amp contours, two pitch decays,
 two LFOs, and pitch/filter/level pressure destinations. `instrument/ui.lisp`
 provides the persistent overview and eight section views. `instrument.presets`
-contains five fully specified development sounds. This remains outside the
-factory content tree. Its source waveforms, level laws and modulation depths
-are provisional; hard sync, glide, unison, vibrato, formant
-control mapping and complete reference matching are not implemented here yet.
+contains nine fully specified development sounds. This remains outside the
+factory content tree pending the remaining integration and compiler distribution.
+
+Hard sync now provides an independent internal master for each oscillator;
+Sub/Sync chooses the sub source or fractional BLEP/BLAMP-corrected sync. Glide
+supports Off/Always/Legato and constant-time/proportional timing. Global controls
+include octave, semitones, cents, keyboard stretch, per-note tuning error, bend
+range, and independent vibrato with delay, attack and mod-wheel depth. Unison
+provides two, three or four complete stereo voices with detune, spread and
+cancellable onset delay. Each copy has its own two oscillators, two filters,
+four envelopes and two LFOs. Disabling it preserves the previous default sound.
+
+The host Track panel provides Last/High/Low priority alongside voice count and
+Retrig/Legato. For fingered glide, turn Poly off (or choose one voice), choose
+Legato, then overlap keys. New presets: **Sync Brass**, **Wide Unison**,
+**Gliding Bass**, and **Wheel Lead**. Track voice policy is a track setting;
+it is not silently changed by an instrument preset.
+
+MIDI bend and mod wheel are normalized named GatePitch outputs (`pitch_bend`
+and `mod_wheel`), alongside channel/poly pressure. Custom voice release tails
+keep their original key pressure while following channel bend/wheel. A physical
+hold carries a generation through live MIDI FX, octave expansion and cross-track
+routing. `fx-notes` maps expose `:origin-note`; transforming scripts preserve it
+and pass it to `fx-emit` when selecting/expanding notes. One-to-one emissions
+preserve origin order, and copies from one source inherit that source. An
+ambiguous new chord from several sources needs explicit source selection.
+
+Known remaining integration: two assignable pressure destinations, pressure
+performance recording/replay, MIDI disconnect/panic cleanup, full rack held-key
+fallback, formant control mapping and LFO tempo sync. This implementation must
+not be called feature-complete or promoted to factory until those are resolved.
+The compiler fixes also still need a published/pinned distribution.
+
+Unison currently uses four statically expanded DSP copies even when disabled;
+DGen evaluates signal branches eagerly. Measured at 48 kHz, a five-second
+single-note render rose from 0.115 s to 0.504 s (roughly 4.4×). This is a known
+performance cost, not an optimization. A production solution that skips unused
+copies needs proper host voice groups or compiler conditional execution; a
+cosmetic enable switch cannot provide that saving.
 
 Run `tools/heat/run-development.sh` with the compiler/toolchain environment above
 to open this checkout's app. It links the development source and preset bank
@@ -121,9 +157,9 @@ It uses the standard editor's contour rendering; finite sustain, loop and slope
 modes remain separate controls. Oscillator details extend the builtin editor
 with a bipolar, two-handle decay mode. Initial pitch is in semitones and duration
 in milliseconds. This finite k=5 exponential is a development law; Analog's
-normalized depth/time mapping and measured contour matching remain release work.
+normalized depth/time mapping remains reference research rather than a release gate.
 It retriggers on physical note-on, including legato, and reaches exact zero after
-a whole-sample duration. The default initial depth is zero in all five presets.
+a whole-sample duration. The default initial depth is zero.
 
 Both LFOs share one selectable panel and detail page, using the builtin
 `lfo-curve` with two cycles visible. The widget now supports Heat's clipped
@@ -160,3 +196,16 @@ independent legato envelope policy, pressure level scaling, finite filter
 extremes at 44.1/48/96 kHz, and preset completeness/audio. The output is float
 WAV at its authored gain, without normalization. Extreme resonance can exceed
 full scale; no concealed limiter is used to make a stability check pass.
+
+Performance validation commands (same compiler/toolchain environment as above):
+
+```sh
+python tools/heat/check_performance.py
+python tools/heat/check_sync.py
+python tools/heat/check_unison.py
+```
+
+They verify glide endpoints and timing, tuning laws, delayed wheel vibrato,
+held tuning error, hard-sync spectra at three rates, independent unison onsets,
+normalization, stereo separation, and release cancellation. The integrated
+voice check also verifies every preset has the complete parameter set.

@@ -85,6 +85,7 @@
     (if note
       (fx-emit :beats (fx-time rate tick)
         :note (get note :note)
+        :origin-note (get note :origin-note)
         :vel velocity
         :dur (* gate (/ (fx-time rate) (fx-source-time))))
       false)))

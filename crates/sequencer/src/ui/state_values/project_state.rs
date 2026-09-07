@@ -623,6 +623,13 @@ fn sync_track_param_fields(
         app.graph.track_instrument_types.get(track)
             == Some(&sequencer::sequencer::InstrumentType::Custom),
     ));
+    rt.set_reactive("SEQ", "tp-voice-priority", Value::String(
+        match tp.get_voice_priority() {
+            sequencer::sequencer::VoicePriority::Last => "Last",
+            sequencer::sequencer::VoicePriority::High => "High",
+            sequencer::sequencer::VoicePriority::Low => "Low",
+        }.to_string(),
+    ));
     rt.set_reactive("SEQ", "tp-mono-trigger", Value::String(
         match tp.get_mono_trigger() {
             sequencer::sequencer::MonoTrigger::Retrig => "retrig",

@@ -167,6 +167,7 @@ pub(super) fn handle(
                         );
                         if keyboard_tx
                             .send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+                                generation: 0,
                 source: None,
                                 track,
                                 transpose,

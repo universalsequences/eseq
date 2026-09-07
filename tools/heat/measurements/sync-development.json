@@ -1,0 +1,871 @@
+{
+  "source_sha256": {
+    "content/defmacros/heat-sync/macro.lisp": "ab7addaf09cb231902328ea5e5cc34c3221fabea4211b2259e59a2ac5687a021"
+  },
+  "cases": [
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 0,
+      "ratio": 1,
+      "rms_error": 9.334076790159979e-08,
+      "naive_rms_error": 1.1457002169314513e-16
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 0,
+      "ratio": 2.37,
+      "rms_error": 0.0402439479189299,
+      "naive_rms_error": 0.13911098241869413
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 0,
+      "ratio": 7.2,
+      "rms_error": 0.1469690209587071,
+      "naive_rms_error": 0.2633098807768989
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 0,
+      "ratio": 16,
+      "rms_error": 0.1469690209587071,
+      "naive_rms_error": 0.2633098807768989
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 1,
+      "ratio": 1,
+      "rms_error": 0.07541714441694611,
+      "naive_rms_error": 0.2611004415110408
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 1,
+      "ratio": 2.37,
+      "rms_error": 0.09022122990562072,
+      "naive_rms_error": 0.17571151007497596
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 1,
+      "ratio": 7.2,
+      "rms_error": 0.20765337999033268,
+      "naive_rms_error": 0.32221629120404716
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 1,
+      "ratio": 16,
+      "rms_error": 0.20765337999033268,
+      "naive_rms_error": 0.32221629120404716
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 2,
+      "ratio": 1,
+      "rms_error": 0.11687351023782326,
+      "naive_rms_error": 0.3467036181779398
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 2,
+      "ratio": 2.37,
+      "rms_error": 0.0992000760230711,
+      "naive_rms_error": 0.2278048261748015
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 2,
+      "ratio": 7.2,
+      "rms_error": 0.41048645869366185,
+      "naive_rms_error": 0.5390633202568089
+    },
+    {
+      "sample_rate": 44100,
+      "period": 16,
+      "wave": 2,
+      "ratio": 16,
+      "rms_error": 0.41048645869366185,
+      "naive_rms_error": 0.5390633202568089
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 0,
+      "ratio": 1,
+      "rms_error": 1.099448020342988e-07,
+      "naive_rms_error": 1.4221000090961916e-16
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 0,
+      "ratio": 2.37,
+      "rms_error": 0.015446599399905184,
+      "naive_rms_error": 0.05280325387696713
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 0,
+      "ratio": 7.2,
+      "rms_error": 0.020781100778271035,
+      "naive_rms_error": 0.06890713167702751
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 0,
+      "ratio": 16,
+      "rms_error": 4.3711388353062964e-08,
+      "naive_rms_error": 6.646423967236213e-17
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 1,
+      "ratio": 1,
+      "rms_error": 0.04118440755911386,
+      "naive_rms_error": 0.1315527842940308
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 1,
+      "ratio": 2.37,
+      "rms_error": 0.06182848762104186,
+      "naive_rms_error": 0.19209972983985393
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 1,
+      "ratio": 7.2,
+      "rms_error": 0.08366112215383267,
+      "naive_rms_error": 0.17510938171294066
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 1,
+      "ratio": 16,
+      "rms_error": 0.0966049767900884,
+      "naive_rms_error": 0.509067201921184
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 2,
+      "ratio": 1,
+      "rms_error": 0.05177168606429099,
+      "naive_rms_error": 0.14205694816074277
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 2,
+      "ratio": 2.37,
+      "rms_error": 0.08448807934927649,
+      "naive_rms_error": 0.2557145830189348
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 2,
+      "ratio": 7.2,
+      "rms_error": 0.13536822307149207,
+      "naive_rms_error": 0.27240785265987016
+    },
+    {
+      "sample_rate": 44100,
+      "period": 64,
+      "wave": 2,
+      "ratio": 16,
+      "rms_error": 0.20077546973573332,
+      "naive_rms_error": 0.46224561729107133
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 0,
+      "ratio": 1,
+      "rms_error": 1.0237278343607799e-07,
+      "naive_rms_error": 1.4929519226631032e-16
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 0,
+      "ratio": 2.37,
+      "rms_error": 0.01084374204235826,
+      "naive_rms_error": 0.03562559694382267
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 0,
+      "ratio": 7.2,
+      "rms_error": 0.01426065628588417,
+      "naive_rms_error": 0.046425698466109416
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 0,
+      "ratio": 16,
+      "rms_error": 1.0134598067871118e-07,
+      "naive_rms_error": 5.630482960772886e-17
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 1,
+      "ratio": 1,
+      "rms_error": 0.029533907940911142,
+      "naive_rms_error": 0.09311075200259777
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 1,
+      "ratio": 2.37,
+      "rms_error": 0.04218014348296461,
+      "naive_rms_error": 0.13337894230473646
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 1,
+      "ratio": 7.2,
+      "rms_error": 0.05834533106913105,
+      "naive_rms_error": 0.1359159697174983
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 1,
+      "ratio": 16,
+      "rms_error": 0.09371585177021319,
+      "naive_rms_error": 0.3654709808263052
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 2,
+      "ratio": 1,
+      "rms_error": 0.03498032460682216,
+      "naive_rms_error": 0.09783092884122058
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 2,
+      "ratio": 2.37,
+      "rms_error": 0.059792519300020705,
+      "naive_rms_error": 0.1821988708996035
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 2,
+      "ratio": 7.2,
+      "rms_error": 0.07913867027968102,
+      "naive_rms_error": 0.19295752657402687
+    },
+    {
+      "sample_rate": 44100,
+      "period": 128,
+      "wave": 2,
+      "ratio": 16,
+      "rms_error": 0.10017578554666484,
+      "naive_rms_error": 0.494992483507727
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 0,
+      "ratio": 1,
+      "rms_error": 9.334076790159979e-08,
+      "naive_rms_error": 1.1457002169314513e-16
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 0,
+      "ratio": 2.37,
+      "rms_error": 0.0402439479189299,
+      "naive_rms_error": 0.13911098241869413
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 0,
+      "ratio": 7.2,
+      "rms_error": 0.1469690209587071,
+      "naive_rms_error": 0.2633098807768989
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 0,
+      "ratio": 16,
+      "rms_error": 0.1469690209587071,
+      "naive_rms_error": 0.2633098807768989
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 1,
+      "ratio": 1,
+      "rms_error": 0.07541714441694611,
+      "naive_rms_error": 0.2611004415110408
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 1,
+      "ratio": 2.37,
+      "rms_error": 0.09022122990562072,
+      "naive_rms_error": 0.17571151007497596
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 1,
+      "ratio": 7.2,
+      "rms_error": 0.20765337999033268,
+      "naive_rms_error": 0.32221629120404716
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 1,
+      "ratio": 16,
+      "rms_error": 0.20765337999033268,
+      "naive_rms_error": 0.32221629120404716
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 2,
+      "ratio": 1,
+      "rms_error": 0.11687351023782326,
+      "naive_rms_error": 0.3467036181779398
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 2,
+      "ratio": 2.37,
+      "rms_error": 0.0992000760230711,
+      "naive_rms_error": 0.2278048261748015
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 2,
+      "ratio": 7.2,
+      "rms_error": 0.41048645869366185,
+      "naive_rms_error": 0.5390633202568089
+    },
+    {
+      "sample_rate": 48000,
+      "period": 16,
+      "wave": 2,
+      "ratio": 16,
+      "rms_error": 0.41048645869366185,
+      "naive_rms_error": 0.5390633202568089
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 0,
+      "ratio": 1,
+      "rms_error": 1.099448020342988e-07,
+      "naive_rms_error": 1.4221000090961916e-16
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 0,
+      "ratio": 2.37,
+      "rms_error": 0.015446599399905184,
+      "naive_rms_error": 0.05280325387696713
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 0,
+      "ratio": 7.2,
+      "rms_error": 0.020781100778271035,
+      "naive_rms_error": 0.06890713167702751
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 0,
+      "ratio": 16,
+      "rms_error": 4.3711388353062964e-08,
+      "naive_rms_error": 6.646423967236213e-17
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 1,
+      "ratio": 1,
+      "rms_error": 0.04118440755911386,
+      "naive_rms_error": 0.1315527842940308
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 1,
+      "ratio": 2.37,
+      "rms_error": 0.06182848762104186,
+      "naive_rms_error": 0.19209972983985393
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 1,
+      "ratio": 7.2,
+      "rms_error": 0.08366112215383267,
+      "naive_rms_error": 0.17510938171294066
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 1,
+      "ratio": 16,
+      "rms_error": 0.0966049767900884,
+      "naive_rms_error": 0.509067201921184
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 2,
+      "ratio": 1,
+      "rms_error": 0.05177168606429099,
+      "naive_rms_error": 0.14205694816074277
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 2,
+      "ratio": 2.37,
+      "rms_error": 0.08448807934927649,
+      "naive_rms_error": 0.2557145830189348
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 2,
+      "ratio": 7.2,
+      "rms_error": 0.13536822307149207,
+      "naive_rms_error": 0.27240785265987016
+    },
+    {
+      "sample_rate": 48000,
+      "period": 64,
+      "wave": 2,
+      "ratio": 16,
+      "rms_error": 0.20077546973573332,
+      "naive_rms_error": 0.46224561729107133
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 0,
+      "ratio": 1,
+      "rms_error": 1.0237278343607799e-07,
+      "naive_rms_error": 1.4929519226631032e-16
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 0,
+      "ratio": 2.37,
+      "rms_error": 0.01084374204235826,
+      "naive_rms_error": 0.03562559694382267
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 0,
+      "ratio": 7.2,
+      "rms_error": 0.01426065628588417,
+      "naive_rms_error": 0.046425698466109416
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 0,
+      "ratio": 16,
+      "rms_error": 1.0134598067871118e-07,
+      "naive_rms_error": 5.630482960772886e-17
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 1,
+      "ratio": 1,
+      "rms_error": 0.029533907940911142,
+      "naive_rms_error": 0.09311075200259777
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 1,
+      "ratio": 2.37,
+      "rms_error": 0.04218014348296461,
+      "naive_rms_error": 0.13337894230473646
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 1,
+      "ratio": 7.2,
+      "rms_error": 0.05834533106913105,
+      "naive_rms_error": 0.1359159697174983
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 1,
+      "ratio": 16,
+      "rms_error": 0.09371585177021319,
+      "naive_rms_error": 0.3654709808263052
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 2,
+      "ratio": 1,
+      "rms_error": 0.03498032460682216,
+      "naive_rms_error": 0.09783092884122058
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 2,
+      "ratio": 2.37,
+      "rms_error": 0.059792519300020705,
+      "naive_rms_error": 0.1821988708996035
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 2,
+      "ratio": 7.2,
+      "rms_error": 0.07913867027968102,
+      "naive_rms_error": 0.19295752657402687
+    },
+    {
+      "sample_rate": 48000,
+      "period": 128,
+      "wave": 2,
+      "ratio": 16,
+      "rms_error": 0.10017578554666484,
+      "naive_rms_error": 0.494992483507727
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 0,
+      "ratio": 1,
+      "rms_error": 9.334076790159979e-08,
+      "naive_rms_error": 1.1457002169314513e-16
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 0,
+      "ratio": 2.37,
+      "rms_error": 0.0402439479189299,
+      "naive_rms_error": 0.13911098241869413
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 0,
+      "ratio": 7.2,
+      "rms_error": 0.1469690209587071,
+      "naive_rms_error": 0.2633098807768989
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 0,
+      "ratio": 16,
+      "rms_error": 0.1469690209587071,
+      "naive_rms_error": 0.2633098807768989
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 1,
+      "ratio": 1,
+      "rms_error": 0.07541714441694611,
+      "naive_rms_error": 0.2611004415110408
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 1,
+      "ratio": 2.37,
+      "rms_error": 0.09022122990562072,
+      "naive_rms_error": 0.17571151007497596
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 1,
+      "ratio": 7.2,
+      "rms_error": 0.20765337999033268,
+      "naive_rms_error": 0.32221629120404716
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 1,
+      "ratio": 16,
+      "rms_error": 0.20765337999033268,
+      "naive_rms_error": 0.32221629120404716
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 2,
+      "ratio": 1,
+      "rms_error": 0.11687351023782326,
+      "naive_rms_error": 0.3467036181779398
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 2,
+      "ratio": 2.37,
+      "rms_error": 0.0992000760230711,
+      "naive_rms_error": 0.2278048261748015
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 2,
+      "ratio": 7.2,
+      "rms_error": 0.41048645869366185,
+      "naive_rms_error": 0.5390633202568089
+    },
+    {
+      "sample_rate": 96000,
+      "period": 16,
+      "wave": 2,
+      "ratio": 16,
+      "rms_error": 0.41048645869366185,
+      "naive_rms_error": 0.5390633202568089
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 0,
+      "ratio": 1,
+      "rms_error": 1.099448020342988e-07,
+      "naive_rms_error": 1.4221000090961916e-16
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 0,
+      "ratio": 2.37,
+      "rms_error": 0.015446599399905184,
+      "naive_rms_error": 0.05280325387696713
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 0,
+      "ratio": 7.2,
+      "rms_error": 0.020781100778271035,
+      "naive_rms_error": 0.06890713167702751
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 0,
+      "ratio": 16,
+      "rms_error": 4.3711388353062964e-08,
+      "naive_rms_error": 6.646423967236213e-17
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 1,
+      "ratio": 1,
+      "rms_error": 0.04118440755911386,
+      "naive_rms_error": 0.1315527842940308
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 1,
+      "ratio": 2.37,
+      "rms_error": 0.06182848762104186,
+      "naive_rms_error": 0.19209972983985393
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 1,
+      "ratio": 7.2,
+      "rms_error": 0.08366112215383267,
+      "naive_rms_error": 0.17510938171294066
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 1,
+      "ratio": 16,
+      "rms_error": 0.0966049767900884,
+      "naive_rms_error": 0.509067201921184
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 2,
+      "ratio": 1,
+      "rms_error": 0.05177168606429099,
+      "naive_rms_error": 0.14205694816074277
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 2,
+      "ratio": 2.37,
+      "rms_error": 0.08448807934927649,
+      "naive_rms_error": 0.2557145830189348
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 2,
+      "ratio": 7.2,
+      "rms_error": 0.13536822307149207,
+      "naive_rms_error": 0.27240785265987016
+    },
+    {
+      "sample_rate": 96000,
+      "period": 64,
+      "wave": 2,
+      "ratio": 16,
+      "rms_error": 0.20077546973573332,
+      "naive_rms_error": 0.46224561729107133
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 0,
+      "ratio": 1,
+      "rms_error": 1.0237278343607799e-07,
+      "naive_rms_error": 1.4929519226631032e-16
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 0,
+      "ratio": 2.37,
+      "rms_error": 0.01084374204235826,
+      "naive_rms_error": 0.03562559694382267
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 0,
+      "ratio": 7.2,
+      "rms_error": 0.01426065628588417,
+      "naive_rms_error": 0.046425698466109416
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 0,
+      "ratio": 16,
+      "rms_error": 1.0134598067871118e-07,
+      "naive_rms_error": 5.630482960772886e-17
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 1,
+      "ratio": 1,
+      "rms_error": 0.029533907940911142,
+      "naive_rms_error": 0.09311075200259777
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 1,
+      "ratio": 2.37,
+      "rms_error": 0.04218014348296461,
+      "naive_rms_error": 0.13337894230473646
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 1,
+      "ratio": 7.2,
+      "rms_error": 0.05834533106913105,
+      "naive_rms_error": 0.1359159697174983
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 1,
+      "ratio": 16,
+      "rms_error": 0.09371585177021319,
+      "naive_rms_error": 0.3654709808263052
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 2,
+      "ratio": 1,
+      "rms_error": 0.03498032460682216,
+      "naive_rms_error": 0.09783092884122058
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 2,
+      "ratio": 2.37,
+      "rms_error": 0.059792519300020705,
+      "naive_rms_error": 0.1821988708996035
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 2,
+      "ratio": 7.2,
+      "rms_error": 0.07913867027968102,
+      "naive_rms_error": 0.19295752657402687
+    },
+    {
+      "sample_rate": 96000,
+      "period": 128,
+      "wave": 2,
+      "ratio": 16,
+      "rms_error": 0.10017578554666484,
+      "naive_rms_error": 0.494992483507727
+    }
+  ]
+}

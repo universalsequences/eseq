@@ -488,6 +488,7 @@
             sample_time,
             node_index,
             event: lisp_host::EmittedAccumulatorEvent {
+                origin_note: None,
                 offset_beats: 0.0,
                 track,
                 resolved,
@@ -514,6 +515,7 @@
             sample_time,
             generator_index,
             event: lisp_host::EmittedAccumulatorEvent {
+                origin_note: None,
                 offset_beats: 0.0,
                 track,
                 resolved,
@@ -543,6 +545,7 @@
                 samples_per_step: 12_000.0,
                 resolved,
                 chord: ScheduledChordData {
+                    live_origins: [None; crate::audio::MAX_VOICES],
                     count: 0,
                     notes: [0.0; crate::audio::MAX_VOICES],
                     durations: [0.0; crate::audio::MAX_VOICES],
@@ -709,6 +712,7 @@
             samples_per_step: 24_000.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -1193,6 +1197,7 @@
             retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
         };
         let mut chord = ScheduledChordData {
+            live_origins: [None; crate::audio::MAX_VOICES],
             count: 2,
             notes: [0.0; crate::audio::MAX_VOICES],
             durations: [1.0; crate::audio::MAX_VOICES],
@@ -1255,6 +1260,7 @@
             6_000.0,
             test_resolved_step(),
             ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -1300,6 +1306,7 @@
             6_000.0,
             test_resolved_step(),
             ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -1334,6 +1341,7 @@
             samples_per_step: 12_000.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -1390,6 +1398,7 @@
             samples_per_step: 12_000.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -1486,6 +1495,7 @@
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
             lisp_host::EmittedAccumulatorEvent {
+                origin_note: None,
                 offset_beats: 0.0,
                 track: Some(0),
                 resolved: test_resolved_step(),
@@ -1573,6 +1583,7 @@
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
             lisp_host::EmittedAccumulatorEvent {
+                origin_note: None,
                 offset_beats: 0.0,
                 track: Some(0),
                 resolved: ResolvedStep {
@@ -1651,6 +1662,7 @@
         let snapshot = state.publish_scheduler_snapshot();
 
         let event = |beat: f32, velocity: f32, transpose: f32| MidiFxEvent {
+            live_origins: Vec::new(),
             offset_beats: 0.0,
             track: 0,
             step: 0,
@@ -2235,6 +2247,7 @@
                 node_index: 0,
             },
             lisp_host::EmittedAccumulatorEvent {
+                origin_note: None,
                 offset_beats: 0.0,
                 track: None,
                 resolved: ResolvedStep {
@@ -2301,6 +2314,7 @@
                 node_index: 0,
             },
             lisp_host::EmittedAccumulatorEvent {
+                origin_note: None,
                 offset_beats: 0.0,
                 track: Some(1),
                 resolved: ResolvedStep {
@@ -4687,6 +4701,7 @@
             samples_per_step: 12_000.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -4773,6 +4788,7 @@
             samples_per_step: 12_000.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -4853,6 +4869,7 @@
             samples_per_step: 12_000.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -4905,6 +4922,49 @@
     }
 
     #[test]
+    fn arp_octaves_and_cross_track_routing_preserve_live_note_origins() {
+        use crate::sequencer::{LiveNoteOrigin, LiveNoteSource};
+        let state = Arc::new(SequencerState::new(
+            2, vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state.pattern.track_params[0].set_midi_fx_chain(vec!["arp".into(), "route-expressed-note".into()]);
+        let arp_desc = lisp_host::load_midi_fx_descriptor("arp").unwrap();
+        state.pattern.midi_fx_slots[0][0].apply_descriptor(&arp_desc, 0);
+        state.pattern.midi_fx_slots[0][0].defaults.set(0, 4.0);
+        state.pattern.midi_fx_slots[0][0].defaults.set(2, 2.0);
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state), vec![Vec::new(), Vec::new()],
+            vec![EffectDescriptor::builtin_sampler(), EffectDescriptor::builtin_sampler()], 0, 0,
+        );
+        runtime.eval(&lisp_host::load_midi_fx_library_source()).unwrap();
+        runtime.eval(r#"(def-midi-fx "route-expressed-note" (do (fx-suppress) (fx-emit 0 :track 1)))"#).unwrap();
+        let origins = [0, 1].map(|port| Some(LiveNoteOrigin {
+            source: LiveNoteSource::Midi { port, channel: 2, note: 60 }, generation: port as u64 + 11,
+        }));
+        let event = MidiFxEvent {
+            live_origins: origins.to_vec(), offset_beats: 0.0, track: 0, step: 0,
+            samples_per_step: 48_000.0, step_beats: 1.0,
+            resolved: test_resolved_step(), chord: vec![7.0, 7.0],
+            chord_durations: vec![1.0, 1.0], chord_delays: vec![0.0, 0.0],
+            chord_step_transpose: 0.0, note_spans: None, arp_phase_beats: 0.0,
+            midi_fx_params: Vec::new(), effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            source: EventSource::Step { track: 0, step: 0, instrument_fingerprint: 0 },
+        };
+        let events = run_midi_fx_chain_for_track(&mut runtime, &snapshot, 0, vec![event], None, 0, false);
+        assert_eq!(events.len(), 4);
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(event.track, 1);
+            assert_eq!(event.resolved.transpose, if index < 2 { 7.0 } else { 19.0 });
+            assert_eq!(event.live_origins, vec![origins[index % 2]]);
+        }
+    }
+
+    #[test]
     fn trigger_to_track_midi_fx_drops_recursive_route_cycles() {
         let state = Arc::new(SequencerState::new(
             2,
@@ -4935,6 +4995,7 @@
             )
             .unwrap();
         let event = MidiFxEvent {
+            live_origins: Vec::new(),
             offset_beats: 0.0,
             track: 0,
             step: 0,
@@ -4975,6 +5036,7 @@
         let mut resolved = test_resolved_step();
         resolved.transpose = 3.2;
         let mut chord = ScheduledChordData {
+            live_origins: [None; crate::audio::MAX_VOICES],
             count: 2,
             notes: [0.0; crate::audio::MAX_VOICES],
             durations: [1.0; crate::audio::MAX_VOICES],
@@ -5033,6 +5095,7 @@
             )
             .unwrap();
         let event = MidiFxEvent {
+            live_origins: Vec::new(),
             offset_beats: 0.0,
             track: 0,
             step: 0,
@@ -5388,6 +5451,7 @@
             samples_per_step: 6_000.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -5607,6 +5671,7 @@
             samples_per_step: 1.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -5723,6 +5788,7 @@
             samples_per_step: 1.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -5834,6 +5900,7 @@
             samples_per_step: 1.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -5960,6 +6027,7 @@
             samples_per_step: 1.0,
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
+                live_origins: [None; crate::audio::MAX_VOICES],
                 count: 0,
                 notes: [0.0; crate::audio::MAX_VOICES],
                 durations: [0.0; crate::audio::MAX_VOICES],
@@ -6603,6 +6671,7 @@
         let mut live_tracks: [super::LiveMidiFxTrackState; MAX_TRACKS] =
             std::array::from_fn(|_| super::LiveMidiFxTrackState::default());
         live_tracks[0].notes.push(super::LiveMidiFxNote {
+            generation: 0,
             source: None,
             transpose: 7.0,
             velocity: 0.8,
@@ -6664,6 +6733,7 @@
         let mut live_tracks: [super::LiveMidiFxTrackState; MAX_TRACKS] =
             std::array::from_fn(|_| super::LiveMidiFxTrackState::default());
         let note = |port, channel| KeyboardTrigger {
+            generation: 0,
             source: Some(LiveNoteSource::Midi { port, channel, note: 60 }),
             track: 0, transpose: 0.0, velocity: 0.8, note_off: false,
         };

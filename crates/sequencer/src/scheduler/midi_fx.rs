@@ -7,6 +7,7 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) struct MidiFxEvent {
+    pub(super) live_origins: Vec<Option<crate::sequencer::LiveNoteOrigin>>,
     pub(super) offset_beats: f32,
     pub(super) track: usize,
     pub(super) step: usize,
@@ -99,6 +100,7 @@ impl MidiFxQuantizerState {
 
 #[derive(Clone, Copy)]
 pub(super) struct LiveMidiFxNote {
+    pub(super) generation: u64,
     pub(super) source: Option<crate::sequencer::LiveNoteSource>,
     pub(super) transpose: f32,
     pub(super) velocity: f32,
@@ -133,6 +135,7 @@ pub(super) fn midi_fx_event_from_step(
 ) -> MidiFxEvent {
     let step = &snapshot.tracks[track_idx].steps[step_idx];
     MidiFxEvent {
+        live_origins: Vec::new(),
         offset_beats: 0.0,
         track: track_idx,
         step: step_idx,
@@ -191,6 +194,7 @@ pub(super) fn midi_fx_event_from_step_event(
         EventSource::Step { .. } => resolve_sampler_params(snapshot, event.track, step_idx),
     };
     MidiFxEvent {
+        live_origins: event.chord.live_origins[..event.chord.count.max(1)].to_vec(),
         offset_beats,
         track: event.track,
         step: step_idx,
@@ -426,6 +430,7 @@ pub(super) fn midi_fx_window_events_from_step(
         window_resolved.transpose = first_transpose;
 
         events.push(MidiFxEvent {
+            live_origins: Vec::new(),
             offset_beats: window_start,
             track: track_idx,
             step: step_idx,
@@ -758,6 +763,13 @@ pub(super) fn run_midi_fx_chain_for_track_inner(
                             );
                         }
                         let routed = MidiFxEvent {
+                            live_origins: if let Some(index) = emitted.origin_note {
+                                vec![event.live_origins.get(index).copied().flatten(); chord_len.max(1)]
+                            } else if chord_len == event.chord.len() {
+                                event.live_origins.clone()
+                            } else if event.live_origins.len() == 1 {
+                                vec![event.live_origins[0]; chord_len.max(1)]
+                            } else { vec![None; chord_len.max(1)] },
                             offset_beats: event.offset_beats + emitted.offset_beats,
                             track: event.track,
                             step: event.step,
@@ -869,13 +881,16 @@ pub(super) fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
             .saturating_add((event.offset_beats.max(0.0) * samples_per_quarter).round() as u64);
         let enqueue_track = event.track;
         let enqueue_sample_time = sample_time;
-        let chord = chord_data_from_parts(
+        let mut chord = chord_data_from_parts(
             &event.chord,
             &event.chord_durations,
             &event.chord_delays,
             event.resolved.duration,
             event.chord_step_transpose,
         );
+        for (slot, origin) in chord.live_origins.iter_mut().zip(&event.live_origins) {
+            *slot = *origin;
+        }
         let instrument_fingerprint = instrument_sound_fingerprint(
             snapshot,
             event.track,
@@ -971,7 +986,8 @@ pub(super) fn drain_live_keyboard_inputs(
         if trigger.note_off {
             track_state
                 .notes
-                .retain(|note| !note.matches_trigger(&trigger));
+                .retain(|note| !note.matches_trigger(&trigger)
+                    || (trigger.generation != 0 && note.generation != trigger.generation));
             if track_state.notes.is_empty() {
                 track_state.next_tick_sample = 0;
                 track_state.quantize_next_tick = false;
@@ -984,12 +1000,14 @@ pub(super) fn drain_live_keyboard_inputs(
             .iter_mut()
             .find(|note| note.matches_trigger(&trigger))
         {
+            note.generation = trigger.generation;
             note.transpose = trigger.transpose;
             note.velocity = trigger.velocity;
             note.pending_event = true;
         } else {
             track_state.notes.push(LiveMidiFxNote {
                 source: trigger.source,
+                generation: trigger.generation,
                 transpose: trigger.transpose,
                 velocity: trigger.velocity,
                 pending_event: true,
@@ -1139,6 +1157,7 @@ pub(super) fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
             };
             let print_overrides = state.device_print_override.values_for_track(track_idx);
             let event = MidiFxEvent {
+                live_origins: pending_notes.iter().map(|note| note.source.map(|source| crate::sequencer::LiveNoteOrigin { source, generation: note.generation })).collect(),
                 offset_beats: 0.0,
                 track: track_idx,
                 step,
@@ -1249,6 +1268,9 @@ pub(super) fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                     end_beats: live_tick_beats,
                 })
                 .collect::<Vec<_>>();
+            let mut live_origins = vec![None; chord.len()];
+            live_origins.extend(notes.iter().map(|note| note.source.map(|source|
+                crate::sequencer::LiveNoteOrigin { source, generation: note.generation })));
             chord.extend(live_spans.iter().map(|note| note.transpose));
             note_spans.extend(live_spans);
             if chord.is_empty() {
@@ -1271,6 +1293,7 @@ pub(super) fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
             };
             let print_overrides = state.device_print_override.values_for_track(track_idx);
             let event = MidiFxEvent {
+                live_origins,
                 offset_beats: 0.0,
                 track: track_idx,
                 step,

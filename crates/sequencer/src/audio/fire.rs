@@ -408,13 +408,16 @@ pub(super) fn fire_resolved(
                     };
                     allocation
                 } else {
-                    data.custom_engine_pools[engine_id].allocate_voice(
+                    let Some(allocation) = data.custom_engine_pools[engine_id].allocate_voice_with_priority(
                         track_idx,
                         track_idx,
                         transpose,
                         track_polyphonic,
                         track_max_polyphony,
-                    )
+                        data.state.pattern.track_params[track_idx].get_voice_priority(),
+                        chord.live_origins[n],
+                    ) else { continue; };
+                    allocation
                 };
                 let legato = !free_patch && allocation.continues_mono_note(
                     track_idx, track_polyphonic, track_max_polyphony,
@@ -515,6 +518,7 @@ pub(super) fn fire_resolved(
                 let on_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
                     send_custom_note_on(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity, legato);
+                    super::pressure::dispatch_voice_expression(data, engine_id, voice_idx, frame_offset);
                 }
                 if retrig_custom_count < MAX_VOICES {
                     retrig_custom_voices[retrig_custom_count] = RetrigCustomVoice {
@@ -645,13 +649,16 @@ pub(super) fn fire_resolved(
                 };
                 allocation
             } else {
-                data.custom_engine_pools[engine_id].allocate_voice(
+                let Some(allocation) = data.custom_engine_pools[engine_id].allocate_voice_with_priority(
                     track_idx,
                     track_idx,
                     transpose,
                     track_polyphonic,
                     track_max_polyphony,
-                )
+                    data.state.pattern.track_params[track_idx].get_voice_priority(),
+                    chord.live_origins[0],
+                ) else { return; };
+                allocation
             };
             let legato = !free_patch && allocation.continues_mono_note(
                     track_idx, track_polyphonic, track_max_polyphony,
@@ -750,6 +757,7 @@ pub(super) fn fire_resolved(
             let on_seq = next_event_sequence_from(&mut data.event_seq);
             unsafe {
                 send_custom_note_on(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity, legato);
+                    super::pressure::dispatch_voice_expression(data, engine_id, voice_idx, frame_offset);
             }
             if retrig_custom_count < MAX_VOICES {
                 retrig_custom_voices[retrig_custom_count] = RetrigCustomVoice {

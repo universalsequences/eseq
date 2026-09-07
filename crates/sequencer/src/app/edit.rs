@@ -4873,6 +4873,7 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
         accum_mode,
         fts_scale,
         mono_trigger,
+        voice_priority,
         mute_group,
         global_transpose,
     } = snapshot;
@@ -4919,6 +4920,7 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
     bytes.u32(*accum_mode);
     bytes.usize(*fts_scale);
     bytes.u32(*mono_trigger as u32);
+    bytes.u32(*voice_priority as u32);
     bytes.u32(*mute_group as u32);
     bytes.bool(*global_transpose);
     bytes.0
@@ -5400,6 +5402,7 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
         | AppCommand::NextTrackTimebase { .. }
         | AppCommand::PrevTrackTimebase { .. }
         | AppCommand::SetTrackMonoTrigger { .. }
+        | AppCommand::SetTrackVoicePriority { .. }
         | AppCommand::SetTrackFtsScale { .. }
         | AppCommand::SetTrackAccumIdx { .. }
         | AppCommand::SetTrackAccumLimit { .. }
@@ -5491,6 +5494,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::NextTrackTimebase { track }
         | AppCommand::PrevTrackTimebase { track }
         | AppCommand::SetTrackMonoTrigger { track, .. }
+        | AppCommand::SetTrackVoicePriority { track, .. }
         | AppCommand::SetTrackFtsScale { track, .. }
         | AppCommand::SetTrackAccumIdx { track, .. }
         | AppCommand::SetTrackAccumLimit { track, .. }
@@ -7475,6 +7479,7 @@ fn track_params_command_track(cmd: &AppCommand) -> Option<usize> {
         | AppCommand::NextTrackTimebase { track }
         | AppCommand::PrevTrackTimebase { track }
         | AppCommand::SetTrackMonoTrigger { track, .. }
+        | AppCommand::SetTrackVoicePriority { track, .. }
         | AppCommand::SetTrackFtsScale { track, .. }
         | AppCommand::SetTrackAccumIdx { track, .. }
         | AppCommand::SetTrackAccumLimit { track, .. }
@@ -7518,6 +7523,7 @@ fn track_params_label(cmd: &AppCommand) -> &'static str {
         | AppCommand::NextTrackTimebase { .. }
         | AppCommand::PrevTrackTimebase { .. } => "Set track timebase",
         AppCommand::SetTrackMonoTrigger { .. } => "Set track mono trigger",
+        AppCommand::SetTrackVoicePriority { .. } => "Set track voice priority",
         AppCommand::SetTrackFtsScale { .. } => "Set track FTS scale",
         AppCommand::SetTrackAccumIdx { .. } => "Set track accumulator",
         AppCommand::SetTrackAccumLimit { .. } | AppCommand::AdjustTrackAccumLimit { .. } => {
@@ -13443,6 +13449,8 @@ mod tests {
             AppCommand::ToggleTrackPolyphonic { track: 0 },
             AppCommand::ToggleTrackMute { track: 0 },
             AppCommand::SetTrackMaxPolyphony { track: 0, value: 12 },
+            AppCommand::SetTrackVoicePriority { track: 0, priority: crate::sequencer::VoicePriority::High },
+            AppCommand::SetTrackMonoTrigger { track: 0, mode: crate::sequencer::MonoTrigger::Legato },
             AppCommand::SetTrackAttack { track: 0, ms: 17.25 },
             AppCommand::SetTrackRelease { track: 0, ms: 912.5 },
             AppCommand::SetTrackSwing { track: 0, value: 61.5 },

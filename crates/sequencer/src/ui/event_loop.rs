@@ -1243,6 +1243,10 @@ pub(crate) fn run_event_loop(
                             Some(LiveInputEvent::Pressure { port, channel, note: None, value }),
                         MidiMessage::PolyPressure { channel, note, value } =>
                             Some(LiveInputEvent::Pressure { port, channel, note: Some(note), value }),
+                        MidiMessage::PitchBend { channel, value } =>
+                            Some(LiveInputEvent::PitchBend { port, channel, value }),
+                        MidiMessage::ControlChange { channel, controller: 1, value } =>
+                            Some(LiveInputEvent::ModWheel { port, channel, value: value as f32 / 127.0 }),
                         MidiMessage::ControlChange { channel, controller: 121, .. } =>
                             Some(LiveInputEvent::ResetControllers { port, channel }),
                         _ => None,

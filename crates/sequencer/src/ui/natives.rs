@@ -5669,6 +5669,18 @@ pub(crate) fn init_runtime(
                     Ok(Value::Bool(want_on)),
                 )
             }
+            "voice-priority" => {
+                let Some(value) = numeric_value else {
+                    return Err("seq-set-track-param: :voice-priority expects 0, 1 or 2".into());
+                };
+                if value != 0.0 && value != 1.0 && value != 2.0 {
+                    return Err("seq-set-track-param: :voice-priority expects 0, 1 or 2".into());
+                }
+                ctx.enqueue_command(slice3_numeric_history_command(
+                    "voice-priority", Some(track), value,
+                ));
+                (TrackParamInvalidation::VoicePriority, Ok(Value::Number(value)))
+            }
             "mono-trigger" => {
                 let Some(value) = numeric_value else {
                     return Err("seq-set-track-param: :mono-trigger expects 0 or 1".into());

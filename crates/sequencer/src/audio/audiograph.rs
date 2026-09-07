@@ -74,6 +74,8 @@ pub const GBE_NOTE_ON: u32 = 1;
 pub const GBE_GATE_OFF: u32 = 2;
 pub const GBE_PULSE: u32 = 3;
 pub const GBE_PRESSURE: u32 = 4;
+/// Atomic pressure, normalized pitch bend, and mod wheel update.
+pub const GBE_EXPRESSION: u32 = 5;
 
 /// Mirrors C `GraphBlockEvent`.
 #[repr(C)]

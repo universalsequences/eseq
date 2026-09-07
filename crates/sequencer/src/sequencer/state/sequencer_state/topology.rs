@@ -100,6 +100,7 @@ impl SequencerState {
         params.set_accum_mode(defaults.accum_mode);
         params.set_fts_scale(defaults.fts_scale);
         params.set_mono_trigger(defaults.mono_trigger);
+        params.set_voice_priority(defaults.voice_priority);
         params.set_mute_group(defaults.mute_group);
         params.set_global_transpose(defaults.global_transpose);
     }

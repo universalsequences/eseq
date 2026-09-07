@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "heat-sync",
+  "params": [
+    "frequency",
+    "ratio",
+    "wave",
+    "pulse_width"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "Internal-master hard sync with fractional polynomial BLEP and sine BLAMP correction.",
+  "tags": [
+    "oscillator",
+    "synth",
+    "heat"
+  ]
+}
