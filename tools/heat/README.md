@@ -124,10 +124,12 @@ and pass it to `fx-emit` when selecting/expanding notes. One-to-one emissions
 preserve origin order, and copies from one source inherit that source. An
 ambiguous new chord from several sources needs explicit source selection.
 
-Known remaining integration: two assignable pressure destinations, pressure
-performance recording/replay, MIDI disconnect/panic cleanup, full rack held-key
-fallback, formant control mapping and LFO tempo sync. This implementation must
-not be called feature-complete or promoted to factory until those are resolved.
+Heat now ships as a factory instrument. It is not feature-complete: two
+assignable pressure destinations, pressure performance recording/replay, MIDI
+disconnect/panic cleanup, full rack held-key fallback, formant control mapping
+and LFO tempo sync are still open. Those are caveats on the shipped instrument,
+not blockers on shipping it; describe Heat as shipped-but-incomplete rather than
+finished.
 The macOS compiler is now pinned to DGenLisp v0.1.12. Fetch the published
 compiler and its pinned native toolchain with:
 
@@ -139,10 +141,15 @@ compiler and its pinned native toolchain with:
 Heat uses explicit `block-gate` execution regions for unused unison copies,
 oscillators, LFOs, waveform/sync branches, the second filter stage, and drive.
 The compiler also skips unassigned modulation arithmetic automatically. Enable
-fades reach exact zero in 2 ms before freezing state; continuous parameters
-retain their existing slew. Re-enabling resumes state, with normal note-on
-handling still active. Audio-rate gates freeze at process-call granularity.
-The 20-second host release policy is unchanged.
+fades reach exact zero in 2 ms; continuous parameters retain their existing
+slew. Gates freeze state rather than resetting it, so two paths hold their
+gate open past the fade: a disabled unison copy keeps running until its
+contours have released (a contour-length hold window; a free-running looping
+contour is never frozen), so a later enable attacks from idle and latches its
+tuning error, and the second filter stage cross-fades in over 10 ms so a
+mid-note LP12 to LP24 switch does not resume from stale integrators. Audio-rate
+gates freeze at process-call granularity. The 20-second host release policy is
+unchanged.
 
 Default Heat measured **5.69× faster at 128 frames and 6.60× at 512 frames**
 (M1 Max, 48 kHz, one host voice, `--voices 12` compilation). Default audio is
@@ -154,7 +161,8 @@ rate specialization for unassigned parameters remains separate future work.
 Heat lives at `content/instruments/Synths/Heat`, with presets at
 `content/instruments/Synths/Heat.presets`. It appears under Instruments > Factory
 > Synths as **Heat**. The Linux compiler pin has not advanced to this release;
-the gated patch requires a compiler containing `block-gate`. The custom panel
+the gated patch requires a compiler containing `block-gate`, so Heat does not
+compile on Linux yet. That gap is tracked as bead **eseq-jwwd**. The custom panel
 was verified in the earlier UI pass through production captures and layout tests.
 
 The compact UI follows Analog's upper/lower signal paths and central detail

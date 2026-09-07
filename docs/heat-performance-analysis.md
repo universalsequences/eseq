@@ -189,7 +189,8 @@ trials are described in `tools/heat/measurements/execution-gating-20260907.json`
 The reusable `tools/heat/profile_execution.py` checks equivalent compiled pairs.
 Baseline artifacts remain in `/tmp/heat-profile-20260907/full-host12`; release
 candidate artifacts remain in `/tmp/heat-gating/published`. Recreate the original
-source from eseq commit `e2c6f72f` (the old `tools/heat/instrument/dsp.lisp` path),
+source from eseq commit `e2c6f72f`, where that file lived at the historical
+`tools/heat/instrument/dsp.lisp` path (now `content/instruments/Synths/Heat/dsp.lisp`),
 resolve its macros and host preamble, and compile with v0.1.10. Compile the
 current resolved source with v0.1.11; use the same pinned native stage, 48 kHz,
 12 voices and 512 maximum frames for both.

@@ -190,7 +190,9 @@
 (def scene-lane-height 4.6)
 (def track-lane-height 2.85)
 ;; Timeline borders are drawn inside the widget, in physical pixels, without
-;; changing row pitch or the shared ruler/grid alignment.
+;; changing row pitch or the shared ruler/grid alignment. Lanes that stack
+;; flush (the track rows) must draw only ONE of the two edges, otherwise two
+;; adjacent 1 px borders read as a 2 px seam — see `track-lane`.
 (def lane-border-top-color :mixer-strip-border)
 (def lane-border-bottom-color :mixer-strip-border)
 (def lane-border-width 1)
@@ -1785,10 +1787,18 @@
 
 ;; Headerless, sidebar-less, single-lane track instance (spec 4.2). Lane
 ;; scrolling is inert; the outer buffer viewport owns vertical navigation.
+(def first-visible-track? (i)
+  (let ((visible (eseq.track-collapse/visible-track-indices)))
+    (if (= (len visible) 0) false (= i (nth visible 0)))))
+
 (def track-lane (i)
   (timeline
     :key (str "track-lane-" i)
-    :border-top-color lane-border-top-color
+    ;; Lanes stack flush in a :gap 0 v-stack, so a lane that drew both edges
+    ;; would butt its 1 px top against the previous lane's 1 px bottom and
+    ;; read as a 2 px seam. Each lane owns only its bottom separator; the
+    ;; topmost visible lane adds the top edge back so the block still closes.
+    :border-top-color (if (first-visible-track? i) lane-border-top-color :transparent)
     :border-bottom-color lane-border-bottom-color
     :border-width lane-border-width
     :width 0 :flex 1
@@ -2019,6 +2029,10 @@
           (continuation-lane "arr-grid-continuation" 0 0))))
     (h-stack :key "arr-bottom-ruler-row" :width :fill :align :start
       (box :width header-width :height 1)
+      ;; Footer ruler: total height 1 cell, all of it header/ruler, so the
+      ;; lane's content rect below the ruler is zero cells tall. The timeline
+      ;; widget tolerates that degenerate content rect and simply draws the
+      ;; ruler; there are no items or grid rows to lay out underneath it.
       (continuation-lane "arr-bottom-ruler" 1 1))))
 
 ;; Arrangement-local keyboard commands belong to the arrangement mode, not

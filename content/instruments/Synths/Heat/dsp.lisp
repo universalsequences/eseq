@@ -54,6 +54,21 @@
   (write-history level value)
   value)
 
+; Execution window for a section that owns released state. It rises to exact
+; one immediately and falls to exact zero only after hold_ms, so a section can
+; be kept executing after its audible fade has finished and then be frozen at
+; a known-idle state rather than mid-release.
+(defmacro heat-run (target hold_ms)
+  (make-history ready)
+  (make-history level)
+  (def old (read-history level))
+  (def step (/ 1000 (* (max 1 hold_ms) samplerate)))
+  (def value (gswitch (eq (read-history ready) 0) target
+    (gswitch (gt target 0.5) 1 (max 0 (- old step)))))
+  (write-history ready 1)
+  (write-history level value)
+  value)
+
 ; Analytical source family, normalized peak amplitude. The two oscillators
 ; own separate phases and sub phases; no sampled reference waveforms are used.
 (defmacro heat-source (frequency wave duty sub_level sync_mode sync_semitones)
@@ -352,6 +367,35 @@
       (* lane2 (sin (* 0.7853981634 (+ 1 pan2))))))
 )
 
+; A unison copy is skipped while it is disabled, and block-gate freezes rather
+; than releases the state it skips. A copy frozen part-way through its release
+; resumes there: heat-envelope starts every attack from its previous value, so
+; raising unison_voices during a later note would begin that copy's attack from
+; the frozen level instead of from idle. Keep the copy executing, with its own
+; gate already low, for as long as its contours can still be sounding, and only
+; then freeze it -- at idle, which is indistinguishable from a copy that has
+; never run, so its next onset attacks from zero and latches its own tuning
+; error. The window is the slowest complete attack/decay/release the four
+; contours can be configured for, plus 5 ms covering the enable fade. It is
+; paid once per change of unison_voices, never in the steady disabled state
+; that the skip exists to make cheap.
+(def contour_hold_ms (+ 5
+  (max (max amp1_env_attack_ms amp2_env_attack_ms)
+    (max filter1_env_attack_ms filter2_env_attack_ms))
+  (max (max amp1_env_decay_ms amp2_env_decay_ms)
+    (max filter1_env_decay_ms filter2_env_decay_ms))
+  (max (max amp1_env_release_ms amp2_env_release_ms)
+    (max filter1_env_release_ms filter2_env_release_ms))))
+; Free-running loop contours ignore note-off and never return to idle, so a
+; copy configured that way must not be frozen at all.
+(defmacro heat-contour-loops (loop_mode free_run)
+  (* (gt free_run 0.5) (gt loop_mode 0.5) (lt loop_mode 2.5)))
+(def contour_never_idle
+  (max (max (heat-contour-loops amp1_env_loop amp1_env_free)
+      (heat-contour-loops amp2_env_loop amp2_env_free))
+    (max (heat-contour-loops filter1_env_loop filter1_env_free)
+      (heat-contour-loops filter2_env_loop filter2_env_free))))
+
 (def copies (clip (round unison_voices) 1 4))
 
 (def enabled0 (gt copies 0))
@@ -359,7 +403,8 @@
 (def (gate0 on0 trigger0 legato0 pitch0 velocity0)
   (heat-unison-onset gate note_on trigger legato played_octave velocity enabled0 (* 0 unison_delay_ms)))
 (def fade0 (heat-enable enabled0))
-(def (left0 right0) (block-gate fade0 (heat-voice gate0 on0 trigger0 velocity0 pitch0
+(def run0 (max (heat-run enabled0 contour_hold_ms) contour_never_idle))
+(def (left0 right0) (block-gate run0 (heat-voice gate0 on0 trigger0 velocity0 pitch0
   (+ tuning (/ (* position0 unison_detune_cents) 100)) expression (* position0 unison_spread)
   (mod osc1_semitones) (mod osc1_cents) (mod osc1_level_db) (mod osc1_pulse_duty)
   (mod osc1_sub_level) (mod osc1_sync_semitones) (mod osc1_to_filter1) (mod osc2_semitones)
@@ -376,7 +421,8 @@
 (def (gate1 on1 trigger1 legato1 pitch1 velocity1)
   (heat-unison-onset gate note_on trigger legato played_octave velocity enabled1 (* 1 unison_delay_ms)))
 (def fade1 (heat-enable enabled1))
-(def (left1 right1) (block-gate fade1 (heat-voice gate1 on1 trigger1 velocity1 pitch1
+(def run1 (max (heat-run enabled1 contour_hold_ms) contour_never_idle))
+(def (left1 right1) (block-gate run1 (heat-voice gate1 on1 trigger1 velocity1 pitch1
   (+ tuning (/ (* position1 unison_detune_cents) 100)) expression (* position1 unison_spread)
   (mod osc1_semitones) (mod osc1_cents) (mod osc1_level_db) (mod osc1_pulse_duty)
   (mod osc1_sub_level) (mod osc1_sync_semitones) (mod osc1_to_filter1) (mod osc2_semitones)
@@ -393,7 +439,8 @@
 (def (gate2 on2 trigger2 legato2 pitch2 velocity2)
   (heat-unison-onset gate note_on trigger legato played_octave velocity enabled2 (* 2 unison_delay_ms)))
 (def fade2 (heat-enable enabled2))
-(def (left2 right2) (block-gate fade2 (heat-voice gate2 on2 trigger2 velocity2 pitch2
+(def run2 (max (heat-run enabled2 contour_hold_ms) contour_never_idle))
+(def (left2 right2) (block-gate run2 (heat-voice gate2 on2 trigger2 velocity2 pitch2
   (+ tuning (/ (* position2 unison_detune_cents) 100)) expression (* position2 unison_spread)
   (mod osc1_semitones) (mod osc1_cents) (mod osc1_level_db) (mod osc1_pulse_duty)
   (mod osc1_sub_level) (mod osc1_sync_semitones) (mod osc1_to_filter1) (mod osc2_semitones)
@@ -410,7 +457,8 @@
 (def (gate3 on3 trigger3 legato3 pitch3 velocity3)
   (heat-unison-onset gate note_on trigger legato played_octave velocity enabled3 (* 3 unison_delay_ms)))
 (def fade3 (heat-enable enabled3))
-(def (left3 right3) (block-gate fade3 (heat-voice gate3 on3 trigger3 velocity3 pitch3
+(def run3 (max (heat-run enabled3 contour_hold_ms) contour_never_idle))
+(def (left3 right3) (block-gate run3 (heat-voice gate3 on3 trigger3 velocity3 pitch3
   (+ tuning (/ (* position3 unison_detune_cents) 100)) expression (* position3 unison_spread)
   (mod osc1_semitones) (mod osc1_cents) (mod osc1_level_db) (mod osc1_pulse_duty)
   (mod osc1_sub_level) (mod osc1_sync_semitones) (mod osc1_to_filter1) (mod osc2_semitones)
