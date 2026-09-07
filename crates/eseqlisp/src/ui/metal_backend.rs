@@ -6391,7 +6391,7 @@ fragment float4 live_spectrogram_frag(
             // ── Window ───────────────────────────────────────────────────────
             let event_loop = EventLoop::new().map_err(|_| BackendError::MetalError)?;
             let window = winit::window::WindowBuilder::new()
-                .with_title("eseqlisp")
+                .with_title("eseq")
                 .with_inner_size(self.initial_window_size)
                 .with_visible(self.initial_window_visible)
                 .build(&event_loop)
