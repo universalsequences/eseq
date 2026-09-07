@@ -1,8 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-readonly REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# rustc records canonical paths (notably /private/tmp rather than /tmp on
+# macOS). Remap that same root or packaged panic/debuginfo paths leak through.
+readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+readonly REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 readonly TOOLS_DIR="$REPO_ROOT/crates/sequencer/tools"
 readonly DGEN_TOOL="$TOOLS_DIR/DGenLisp-macos-arm64"
 readonly DGEN_TOOLCHAIN="$TOOLS_DIR/dgen-toolchain"
