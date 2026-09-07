@@ -229,7 +229,14 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         if mono {
             if kt.note_off {
                 match data.mono_held[kt.track].release(&kt) {
-                    MonoRelease::Buried => continue,
+                    MonoRelease::Buried => {
+                        // The key never owned the sounding voice, but its hold
+                        // record must not outlive the physical press.
+                        take_active_keyboard_note(
+                            &mut data.active_keyboard_notes, kt.track, kt.transpose, kt.source,
+                        );
+                        continue;
+                    }
                     MonoRelease::Resume(previous) => {
                         // Transfer ownership without sending a gate-off. The
                         // allocator and GatePitch apply the chosen trigger policy.

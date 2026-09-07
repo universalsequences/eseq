@@ -131,6 +131,10 @@ impl CustomEnginePool {
     ) -> Option<CustomVoiceAllocation> {
         self.age_counter += 1;
         let max_polyphony = max_polyphony.clamp(1, MAX_VOICES);
+        // Priority is a keyboard policy: a sequenced note has no held key to
+        // lose against, and a gate-off track never clears `active`, so a
+        // rejected step would otherwise stay silent for the rest of playback.
+        let priority = if origin.is_some() { priority } else { crate::sequencer::VoicePriority::Last };
         if !polyphonic {
             if let Some(idx) =
                 (0..self.num_voices).find(|&i| self.voices[i].assigned_route == Some(route_idx))

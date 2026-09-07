@@ -1807,22 +1807,43 @@ fn sampler_warp_repitch_mode_needs_no_analysis() {
 #[test]
 fn custom_voice_priority_preserves_higher_ranked_notes_and_source_identity() {
     use crate::sequencer::{LiveNoteOrigin, LiveNoteSource, VoicePriority};
-    let a = Some(LiveNoteOrigin { source: LiveNoteSource::Midi { port: 0, channel: 0, note: 60 }, generation: 1 });
-    let b = Some(LiveNoteOrigin { source: LiveNoteSource::Midi { port: 1, channel: 0, note: 60 }, generation: 2 });
+    let live = |port: usize, note: u8, generation: u64| Some(LiveNoteOrigin {
+        source: LiveNoteSource::Midi { port, channel: 0, note }, generation,
+    });
+    let (a, b) = (live(0, 60, 1), live(1, 60, 2));
     let mut pool = CustomEnginePool::new();
     for lid in 1..=6 { pool.add_voice(lid); }
     let first = pool.allocate_voice_with_priority(0, 0, 60.0, true, 2, VoicePriority::High, a).unwrap();
     let second = pool.allocate_voice_with_priority(0, 0, 60.0, true, 2, VoicePriority::High, b).unwrap();
     assert_ne!(first.logical_id, second.logical_id);
-    assert!(pool.allocate_voice_with_priority(0, 0, 55.0, true, 2, VoicePriority::High, None).is_none());
-    let higher = pool.allocate_voice_with_priority(0, 0, 67.0, true, 2, VoicePriority::High, None).unwrap();
+    assert!(pool.allocate_voice_with_priority(0, 0, 55.0, true, 2, VoicePriority::High, live(0, 55, 3)).is_none());
+    let higher = pool.allocate_voice_with_priority(0, 0, 67.0, true, 2, VoicePriority::High, live(0, 67, 4)).unwrap();
     assert!(higher.stole_active_voice);
     assert_eq!(pool.voices[..pool.num_voices].iter().filter(|v| v.active).count(), 2);
-    let lower = pool.allocate_voice_with_priority(0, 0, 50.0, true, 2, VoicePriority::Low, None).unwrap();
+    let lower = pool.allocate_voice_with_priority(0, 0, 50.0, true, 2, VoicePriority::Low, live(0, 50, 5)).unwrap();
     assert_eq!(lower.logical_id, higher.logical_id);
-    assert!(pool.allocate_voice_with_priority(0, 0, 70.0, true, 2, VoicePriority::Low, None).is_none());
+    assert!(pool.allocate_voice_with_priority(0, 0, 70.0, true, 2, VoicePriority::Low, live(0, 70, 6)).is_none());
     pool.release_voice_by_logical_id(lower.logical_id, 100);
-    assert!(pool.allocate_voice_with_priority(0, 0, 70.0, true, 2, VoicePriority::Low, None).is_some());
+    assert!(pool.allocate_voice_with_priority(0, 0, 70.0, true, 2, VoicePriority::Low, live(0, 70, 7)).is_some());
+}
+
+#[test]
+fn custom_voice_priority_never_rejects_sequenced_notes() {
+    use crate::sequencer::VoicePriority;
+    // A gate-off track never releases its voice, so a rejected step would stay
+    // silent for the rest of playback. Sequenced notes always steal (Last).
+    for (polyphonic, max) in [(false, 1), (true, 1), (true, 2)] {
+        let mut pool = CustomEnginePool::new();
+        for lid in 1..=4 { pool.add_voice(lid); }
+        for note in [60.0, 55.0, 72.0, 48.0] {
+            for priority in [VoicePriority::High, VoicePriority::Low] {
+                let allocation = pool
+                    .allocate_voice_with_priority(0, 0, note, polyphonic, max, priority, None)
+                    .expect("sequenced note allocates regardless of priority");
+                assert!(allocation.logical_id > 0);
+            }
+        }
+    }
 }
 
 #[test]
