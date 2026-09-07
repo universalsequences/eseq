@@ -222,6 +222,10 @@ struct TimelineView {
     item_label_font_size: f32,
     item_label_color: crate::backend::Color,
     loop_color: crate::backend::Color,
+    loop_visible: bool,
+    border_top_color: crate::backend::Color,
+    border_bottom_color: crate::backend::Color,
+    border_width: f32,
     sidebar_style: SidebarStyle,
     lane_scroll: f64,
     lane_height: Option<f32>,
@@ -481,6 +485,7 @@ impl WidgetDefinition for TimelineWidget {
             "playhead-time",
             "cursor-time",
             "background-color",
+            "border-width",
             "item-label-font-size",
             "item-label-color",
             // Shared arrangement time axis: scroll/zoom repaint every lane
@@ -1779,6 +1784,21 @@ fn build_primitives(
         }));
     }
 
+    // Timeline edge decoration is independent of lane/header geometry. Draw
+    // inside the assigned rect so borders neither shift the time axis nor clip.
+    let border_height = (view.border_width / viewport.cell_h).min(rect.height);
+    if border_height > 0.0 {
+        for (y, color) in [
+            (rect.row, view.border_top_color),
+            (rect.row + rect.height - border_height, view.border_bottom_color),
+        ] {
+            if color.a > 0.0 {
+                primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+                    x: rect.col, y, width: rect.width, height: border_height, color,
+                }));
+            }
+        }
+    }
     primitives
 }
 
@@ -2295,6 +2315,12 @@ impl TimelineView {
             item_label_font_size: get_num(props, "item-label-font-size", 10.5).max(1.0) as f32,
             item_label_color: resolve_named_color(props, "item-label-color", theme::BLACK()),
             loop_color: resolve_named_color(props, "loop-color", theme::BLUE()),
+            loop_visible: props.get("loop-visible").and_then(as_bool).unwrap_or(true),
+            border_top_color: resolve_named_color(props, "border-top-color",
+                crate::backend::Color { a: 0.0, ..theme::FG() }),
+            border_bottom_color: resolve_named_color(props, "border-bottom-color",
+                crate::backend::Color { a: 0.0, ..theme::FG() }),
+            border_width: get_num(props, "border-width", 1.0).max(0.0) as f32,
             sidebar_style: get_sidebar_style(props),
             lane_scroll: get_num(props, "lane-scroll", 0.0).max(0.0),
             lane_height: props
@@ -2521,7 +2547,7 @@ impl TimelineView {
     /// slide window; the ruler rows above the band must keep scrubbing).
     fn loop_band_rows(&self) -> Option<(f32, f32)> {
         let chrome = (self.header_height - self.header_bottom_gutter).max(0.0);
-        if chrome <= 0.2 {
+        if !self.loop_visible || chrome <= 0.2 {
             return None;
         }
         let y = self.rect.row + (chrome * 0.55).min(chrome - 0.18);
@@ -2531,6 +2557,9 @@ impl TimelineView {
     }
 
     fn loop_band_rect(&self) -> Option<(f32, f32)> {
+        if !self.loop_visible {
+            return None;
+        }
         let content_length = self.content_length?;
         if content_length <= 0.0 {
             return None;
@@ -3033,7 +3062,7 @@ impl TimelineView {
             return Some(HitRegion::Sidebar { lane });
         }
         if local_row < self.rect.row + self.header_height {
-            if self.content_length.is_some() {
+            if self.loop_visible && self.content_length.is_some() {
                 let content = self.content_rect();
                 let content_end = self.x_for_time(self.content_length?);
                 let edge_slop = 0.75;
@@ -4422,6 +4451,83 @@ fn list_value(items: Vec<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ruler_can_hide_loop_visuals_and_hit_targets() {
+        let rect = Rect { row: 0.0, col: 0.0, width: 64.0, height: 1.0 };
+        let mut props = HashMap::from([
+            ("header-height".into(), Value::Number(1.0)),
+            ("sidebar-width".into(), Value::Number(0.0)),
+            ("content-length".into(), Value::Number(16.0)),
+            ("view-duration".into(), Value::Number(32.0)),
+        ]);
+        let visible = TimelineView::from_props(&props, rect);
+        assert!(visible.loop_band_rect().is_some());
+        assert!(visible.loop_band_rows().is_some());
+        assert!(matches!(visible.hit_test(visible.x_for_time(16.0), 0.7),
+            Some(HitRegion::ContentLengthEnd)));
+        props.insert("loop-visible".into(), Value::Bool(false));
+        let hidden = TimelineView::from_props(&props, rect);
+        assert!(hidden.loop_band_rect().is_none());
+        assert!(hidden.loop_band_rows().is_none());
+        assert!(matches!(hidden.hit_test(hidden.x_for_time(16.0), 0.7),
+            Some(HitRegion::Header)));
+        assert_eq!(visible.metal_time_ruler_labels(), hidden.metal_time_ruler_labels());
+    }
+
+    #[test]
+    fn timeline_edge_borders_cover_lanes_and_rulers_without_changing_geometry() {
+        use std::sync::{Arc, atomic::AtomicU64};
+        let width = Value::ReactiveRef {
+            namespace: "TEST".into(), field: "border-width".into(), index: None,
+            kind: crate::vm::BindingKind::Float,
+            slot: Arc::new(AtomicU64::new(2.0_f64.to_bits())),
+        };
+        let widget = crate::widgets::build_widget("timeline", vec![
+            keyword(":border-width"), width.clone(),
+        ]);
+        let Value::Map(widget) = widget else { panic!("reactive border width rejected"); };
+        assert!(!widget.contains_key("__widget-diagnostic"));
+        let viewport = WidgetViewport {
+            cell_w: 10.0, cell_h: 20.0, vp_w: 1920.0, vp_h: 1080.0,
+            time_seconds: 0.0, focused_widget_id: None, focused_branch: false,
+            overlay_viewport_bottom: 12.0, scroll_top: 0.0, scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        for (header, height) in [(0.0, 3.0), (1.0, 1.0)] {
+            let rect = Rect { row: 2.0, col: 5.0, width: 64.0, height };
+            let mut node = LayoutNode {
+                widget_id: 987, stable_widget_id: None, subtree_root_id: None,
+                parent_subtree_root_id: None, stable_key: None,
+                widget_type: "timeline".into(), rect,
+                props: HashMap::from([
+                    ("header-height".into(), Value::Number(header)),
+                    ("sidebar-width".into(), Value::Number(0.0)),
+                ]),
+                children: vec![], focusable: false, animation: Default::default(),
+            };
+            let baseline = build_primitives(&node, viewport);
+            let content = TimelineView::from_props(&node.props, rect).content_rect();
+            node.props.insert("border-top-color".into(), keyword(":red"));
+            node.props.insert("border-bottom-color".into(), keyword(":blue"));
+            node.props.insert("border-width".into(), width.clone());
+            let bordered = build_primitives(&node, viewport);
+            assert_eq!(bordered.len(), baseline.len() + 2);
+            let next_content = TimelineView::from_props(&node.props, rect).content_rect();
+            assert_eq!((content.row, content.col, content.width, content.height),
+                (next_content.row, next_content.col, next_content.width, next_content.height));
+            for (primitive, y) in bordered[baseline.len()..].iter()
+                .zip([rect.row, rect.row + rect.height - 0.1]) {
+                let GpuPrimitive::Quad(border) = primitive else { panic!("edge quad"); };
+                assert_eq!(border.x, rect.col);
+                assert_eq!(border.width, rect.width);
+                assert!((border.y - y).abs() < 0.0001);
+                assert!((border.height - 0.1).abs() < 0.0001);
+            }
+            node.props.insert("border-width".into(), Value::Number(0.0));
+            assert_eq!(build_primitives(&node, viewport).len(), baseline.len());
+        }
+    }
 
     #[test]
     fn placement_with_reactive_activation_snaps_and_cancels_without_creating_takes() {

@@ -189,6 +189,11 @@
 (def cursor-gutter-height 1)
 (def scene-lane-height 4.6)
 (def track-lane-height 2.85)
+;; Timeline borders are drawn inside the widget, in physical pixels, without
+;; changing row pitch or the shared ruler/grid alignment.
+(def lane-border-top-color :mixer-strip-border)
+(def lane-border-bottom-color :mixer-strip-border)
+(def lane-border-width 1)
 ;; Vertical distance in CELLS between one track row's top and the next.
 ;; Track rows stack in a :gap 0 v-stack (see the buffer composition below), so
 ;; the pitch is exactly the lane height — no gap and no per-row chrome to add.
@@ -1699,6 +1704,9 @@
 (def scene-lane ()
   (timeline
     :key "scene-lane"
+    :border-top-color lane-border-top-color
+    :border-bottom-color lane-border-bottom-color
+    :border-width lane-border-width
     :width 0 :flex 1
     :height scene-lane-height
     :focusable true
@@ -1756,6 +1764,10 @@
 ;; real lanes, but cannot create scene clips or acquire track selection.
 (def continuation-lane (key height ruler-height)
   (timeline :key key :width 0 :flex 1 :height height
+    :loop-visible false
+    :border-top-color (if (> ruler-height 0) lane-border-top-color :transparent)
+    :border-bottom-color (if (> ruler-height 0) lane-border-bottom-color :transparent)
+    :border-width lane-border-width
     :sidebar-width 0 :header-height ruler-height
     :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
     :grid-density grid-density
@@ -1776,6 +1788,9 @@
 (def track-lane (i)
   (timeline
     :key (str "track-lane-" i)
+    :border-top-color lane-border-top-color
+    :border-bottom-color lane-border-bottom-color
+    :border-width lane-border-width
     :width 0 :flex 1
     :height track-lane-height
     ;; Vertical scrolling belongs to the enclosing track scroll container;
