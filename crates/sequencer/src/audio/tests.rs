@@ -489,6 +489,42 @@ fn published_rack_snapshot_observes_live_macro_defaults_and_plocks() {
 /// step). Before this, a fresh voice was stamped with pre-knob defaults
 /// while the voice sounding during the turn had the live push.
 #[test]
+fn frozen_rack_macro_rows_preserve_automation_and_follow_only_explicit_live_edits() {
+    let state = SequencerState::new(1, Vec::new());
+    state.set_rack_track_for_all_pattern_snapshots(0, rack_macro_test_rack());
+    let capture = |base, locked| {
+        let mut data = crate::sequencer::PatternSnapshot::new_default(1, &[])
+            .track_pattern_data(0).unwrap();
+        let mut rack = rack_macro_test_rack();
+        rack.macros[0].value = base;
+        rack.macros[0].plocks[3] = Some(locked);
+        data.rack_track = Some(rack);
+        crate::sequencer::SequencerSnapshot::capture_from_track_pattern_data(
+            &state, &[data], Vec::new(), Vec::new(), Vec::new(), Default::default(), Default::default(),
+        )
+    };
+    let first = capture(0.2, 0.3);
+    let second = capture(0.8, 0.9);
+    let gain = |snapshot: &crate::sequencer::SequencerSnapshot, step| {
+        let mut rack = snapshot.tracks[0].rack_track.clone().unwrap();
+        apply_rack_macros_at_step(&mut rack, step,
+            [None; crate::sequencer::RACK_MACRO_COUNT], [None; crate::sequencer::RACK_MACRO_COUNT]);
+        rack.slots[0].gain
+    };
+    assert_eq!(gain(&first, 0), 0.4);
+    assert_eq!(gain(&first, 3), 0.6);
+    assert_eq!(gain(&second, 0), 1.6);
+    assert_eq!(gain(&second, 3), 1.8);
+    state.set_live_rack_macro_default(0, crate::sequencer::RackMacroId::from_index(0).unwrap(), 0.7);
+    // Publishing/synchronizing another row isn't a controller edit and
+    // cannot replace the explicit knob position or either chunk's locks.
+    state.publish_scheduler_snapshot();
+    assert_eq!(gain(&first, 0), 1.4);
+    assert_eq!(gain(&first, 3), 0.6);
+    assert_eq!(gain(&second, 3), 1.8);
+}
+
+#[test]
 fn live_rack_note_applies_macros_at_their_current_knob_position() {
     let state = crate::sequencer::SequencerState::new(1, vec![]);
     let mut rack = rack_macro_test_rack();
@@ -608,6 +644,9 @@ fn rack_slot_instrument_plocks_resolve_only_locked_or_macro_driven_params() {
     )
     .expect("speed param");
     slot.set_plock(step, speed_idx, 2.0);
+    // Project/sound loading rebinds the descriptor. That can leave identity
+    // metadata on empty cells; identity alone must never count as a lock.
+    slot.sync_to_descriptor_with_modulator(&descriptor, 47, 0);
 
     let locked_only = resolve_rack_slot_instrument_plocks(&slot, step, |_| false);
     assert_eq!(

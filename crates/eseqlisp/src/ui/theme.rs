@@ -11,6 +11,24 @@ pub struct Theme {
     /// Display-only tint over authored track colors. Alpha is the blend weight:
     /// zero preserves project colors, one replaces them with the theme RGB.
     pub track_tint: Color,
+    /// Display-only tint over the p-lock variant / sound palette colors (both
+    /// share one hardcoded color set) and the sound-glyph accent hues. Same
+    /// alpha-as-weight semantics as `track_tint`.
+    pub variant_tint: Color,
+    /// Optional display palette for authored track colors and the p-lock
+    /// variant / sound palette set. Entries with zero alpha are unused. When
+    /// any entry is set, a color is snapped to the entry with the nearest hue
+    /// and blended toward it by that entry's alpha, before `track_tint` /
+    /// `variant_tint`. Lets a multi-hue theme recolor tracks without
+    /// flattening them to one hue the way a single tint does.
+    pub track_palette_0: Color,
+    pub track_palette_1: Color,
+    pub track_palette_2: Color,
+    pub track_palette_3: Color,
+    pub track_palette_4: Color,
+    pub track_palette_5: Color,
+    pub track_palette_6: Color,
+    pub track_palette_7: Color,
     pub bg: Color,
     pub fg: Color,
     pub fg_muted: Color,
@@ -217,6 +235,9 @@ pub struct Theme {
     pub mixer_volume_handle: Color,
     pub arrangement_loop: Color,
     pub arrangement_cursor: Color,
+    /// Fill of the piano-roll sidebar's white keys. Its own slot because a
+    /// light theme's `white` is ink, not paper.
+    pub piano_white_key: Color,
     pub piano_key_border: Color,
     pub piano_black_key: Color,
     pub piano_white_lane: Color,
@@ -539,6 +560,7 @@ theme_slots!(
     (mixer_volume_handle, MIXER_VOLUME_HANDLE, Color::rgba(0.78, 0.80, 0.83, 1.0)),
     (arrangement_loop, ARRANGEMENT_LOOP, Color::rgba(0.92, 0.72, 0.25, 1.0)),
     (arrangement_cursor, ARRANGEMENT_CURSOR, Color::rgba(0.32, 0.78, 0.94, 1.0)),
+    (piano_white_key, PIANO_WHITE_KEY, Color::rgba(0.93, 0.93, 0.95, 1.0)),
     (piano_key_border, PIANO_KEY_BORDER, Color::rgba(0.101960784, 0.101960784, 0.11372549, 1.0)),
     (piano_black_key, PIANO_BLACK_KEY, Color::rgba(0.019607843, 0.019607843, 0.023529412, 1.0)),
     (piano_white_lane, PIANO_WHITE_LANE, Color::rgba(0.08627451, 0.08627451, 0.094117647, 1.0)),
@@ -551,6 +573,15 @@ theme_slots!(
     (control_on_fg, CONTROL_ON_FG, Color::rgb(0.0, 0.0, 0.0)),
     (accent, ACCENT, Color::from_hex(0xc8, 0xff, 0x00)),
     (track_tint, TRACK_TINT, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (variant_tint, VARIANT_TINT, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (track_palette_0, TRACK_PALETTE_0, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (track_palette_1, TRACK_PALETTE_1, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (track_palette_2, TRACK_PALETTE_2, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (track_palette_3, TRACK_PALETTE_3, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (track_palette_4, TRACK_PALETTE_4, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (track_palette_5, TRACK_PALETTE_5, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (track_palette_6, TRACK_PALETTE_6, Color::rgba(0.0, 0.0, 0.0, 0.0)),
+    (track_palette_7, TRACK_PALETTE_7, Color::rgba(0.0, 0.0, 0.0, 0.0)),
     (bg, BG, Color::from_hex(0x0a, 0x0a, 0x0a)),
     (fg, FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
     (fg_muted, FG_MUTED, Color::from_hex(0x50, 0x50, 0x50)),
@@ -1311,6 +1342,37 @@ theme_slots!(
     (list_icon_lfo, LIST_ICON_LFO, Color::from_hex(0xe0, 0x70, 0xa8)),
     (list_icon_misc, LIST_ICON_MISC, Color::from_hex(0x8c, 0x91, 0x9e)),
 );
+
+/// Number of `:track-palette-N` slots a theme may set.
+pub const TRACK_PALETTE_SLOTS: usize = 8;
+
+/// The theme's track display palette, in slot order, including unset
+/// (zero-alpha) entries. Compared by the UI tick to detect a theme switch
+/// that changes how track colors display.
+pub fn track_palette() -> [Color; TRACK_PALETTE_SLOTS] {
+    let t = current();
+    [
+        t.track_palette_0,
+        t.track_palette_1,
+        t.track_palette_2,
+        t.track_palette_3,
+        t.track_palette_4,
+        t.track_palette_5,
+        t.track_palette_6,
+        t.track_palette_7,
+    ]
+}
+
+/// Everything that decides how an authored track color displays. A change
+/// here means the published track / group colors must be rebuilt.
+pub fn track_display_key() -> (Color, [Color; TRACK_PALETTE_SLOTS]) {
+    (TRACK_TINT(), track_palette())
+}
+
+/// Same for the p-lock variant / sound palette colors.
+pub fn variant_display_key() -> (Color, [Color; TRACK_PALETTE_SLOTS]) {
+    (VARIANT_TINT(), track_palette())
+}
 
 static ACTIVE_THEME: OnceLock<RwLock<Theme>> = OnceLock::new();
 

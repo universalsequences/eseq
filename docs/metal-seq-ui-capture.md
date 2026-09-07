@@ -43,7 +43,14 @@ mixer cable captures use real routing state. Self-routes and missing endpoints
 are rejected.
 
 Every track accepts an optional display `:name`, initial `:solo` boolean,
-`:midi-fx` list, and built-in `:audio-fx` list. `:num-steps` sets the initial
+`:midi-fx` list, and `:audio-fx` list (builtin or saved effect names). Builtin
+names take precedence; other names resolve through the normal saved-effect
+library and compile/load/retain path, including local custom UIs. The optional
+`spectral-tamer.lisp` and `spectral-tamer-mods.lisp` fixtures require that local
+effect to be installed; use widths of 2800 and 3200 respectively to show the
+whole sampler/effect strip.
+
+`:num-steps` sets the initial
 pattern length from 1 through the sequencer's maximum pattern length. A saved
 instrument goes through the same compile/load/init path as an instrument added
 in the app, so its real custom UI can be captured. Drum and layer racks accept

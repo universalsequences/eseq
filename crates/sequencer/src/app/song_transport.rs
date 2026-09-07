@@ -3205,6 +3205,30 @@ mod tests {
     }
 
     #[test]
+    fn scene_state_markers_recall_scene_identity_without_replacing_the_placed_pattern() {
+        let mut app = test_app();
+        app.arr_clip_create(0, 0.0, 16.0,
+            crate::sequencer::LaneSource::Pattern(PatternId(1)), 0.0).unwrap();
+        app.arr_scene_event_insert(0.0, 1).unwrap();
+        app.arr_scene_event_insert(8.0, 2).unwrap();
+        let clips = app.state.committed_arrangement().unwrap().track_lanes;
+        app.song_transport_play(false).expect("start recalls starting scene");
+        assert_eq!(app.state.current_scene_index(), 1);
+        assert_eq!(app.state.effective_track_pattern_id(0), Some(PatternId(1)));
+        let song = app.active_runtime_song.clone().unwrap();
+        let ordinal = song.rows.iter().position(|row| row.start_beat == 8.0).unwrap();
+        app.mirror_song_row_applied(&AudibleSongRowApplied {
+            row_id: song.rows[ordinal].id, row_ordinal: ordinal,
+            effective_beat: 8.0, effective_sample: 88_200, wrapped: false,
+        }).expect("next marker recalls scene state");
+        assert_eq!(app.state.current_scene_index(), 2);
+        assert_eq!(app.state.current_pattern_index(), 2);
+        assert_eq!(app.state.effective_track_pattern_id(0), Some(PatternId(1)));
+        assert_eq!(app.state.committed_arrangement().unwrap().track_lanes, clips);
+        app.song_transport_stop().unwrap();
+    }
+
+    #[test]
     fn scene_launch_latches_scene_identity_against_row_mirrors() {
         // Takes spec 10: a manual scene launch latches GLOBALLY — including
         // the scene identity. A later recorded/committed row passing through

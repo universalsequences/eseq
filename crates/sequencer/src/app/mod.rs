@@ -2175,6 +2175,20 @@ impl App {
                             slot.defaults[param_idx] = restored;
                         }
                     }
+                    // A scene saved before the effect grew params (Space Echo's
+                    // appended spring block) stores a shorter vector. Those
+                    // params take the descriptor default here, so a value set
+                    // in one scene does not leak into every scene that never
+                    // stored one.
+                    if !saved_defaults.is_empty() {
+                        if let Some(desc) = descriptors.get(slot_idx) {
+                            for param_idx in saved_defaults.len()..slot.defaults.len() {
+                                if let Some(param) = desc.params.get(param_idx) {
+                                    slot.defaults[param_idx] = param.default;
+                                }
+                            }
+                        }
+                    }
                 }
                 let Some(saved_plocks) = saved.effect_plocks.get(slot_idx) else {
                     slot.plocks = (0..MAX_STEPS)

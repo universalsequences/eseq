@@ -298,15 +298,7 @@ pub(super) fn slot_has_explicit_plock(
     step_idx: usize,
     param_idx: usize,
 ) -> bool {
-    let Some(raw_idx) = slot.node_param_idx(param_idx) else {
-        return false;
-    };
-    plock_identity_matches(
-        &slot.plock_param_ids,
-        step_idx,
-        param_idx,
-        crate::neural::ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw_idx),
-    )
+    slot.explicit_plock_value(step_idx, param_idx).is_some()
 }
 
 pub(super) fn snapshot_slot_param_index_by_node_idx(

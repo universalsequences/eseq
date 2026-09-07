@@ -1217,6 +1217,9 @@ pub(super) fn handle(
         }
         "set-rack-macro-value" => {
             if let Value::Map(ref map) = payload {
+                if try_record_take_rack_macro(ctx.shared, &mut editor, &mut app, map) {
+                    return;
+                }
                 if let (Some(track), Some(macro_idx), Some(value)) = (
                     map_usize(map, "track"),
                     map_usize(map, "id"),
@@ -1266,6 +1269,9 @@ pub(super) fn handle(
         }
         "set-rack-macro-plock" => {
             if let Value::Map(ref map) = payload {
+                if try_record_take_rack_macro(ctx.shared, &mut editor, &mut app, map) {
+                    return;
+                }
                 apply_rack_macro_host_command(
                     &name,
                     map,
@@ -2033,6 +2039,37 @@ pub(super) fn handle(
     }
 }
 
+fn try_record_take_rack_macro(
+    shared: &SharedHandles,
+    editor: &mut Editor,
+    app: &mut app::App,
+    map: &HashMap<String, Rc<RefCell<Value>>>,
+) -> bool {
+    let (Some(track), Some(macro_idx), Some(value)) = (
+        map_usize(map, "track"), map_usize(map, "id"), map_number(map, "value"),
+    ) else { return false };
+    if !shared.recording.load(Ordering::Relaxed) || !shared.state.is_playing()
+        || !shared.record_armed.lock().unwrap().get(track).copied().unwrap_or(false)
+    {
+        return false;
+    }
+    app.stamp_recording_kind_for_note();
+    if !app.take_recording_active() { return false; }
+    let result = sequencer::sequencer::RackMacroId::from_index(macro_idx)
+        .ok_or_else(|| "invalid rack macro".to_string())
+        .and_then(|id| app.take_record_rack_macro(track, id, value as f32, Instant::now()));
+    match result {
+        Ok(()) => sync_print_latch_display(
+            editor, app, track,
+            &[(PrintTarget::RackMacro { macro_idx }, (value as f32).clamp(0.0, 1.0))],
+        ),
+        Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+    }
+    // Never fall through into scene-pattern printing during a take, even
+    // if no record clock was available for this input.
+    true
+}
+
 fn try_latch_rack_slot_param_print(
     shared: &SharedHandles,
     editor: &mut Editor,
@@ -2355,6 +2392,54 @@ mod tests {
                 ("param-idx", PARAM as f64),
                 ("value", user_value),
             ])
+        }
+    }
+
+    #[test]
+    fn arrangement_ui_and_midi_macro_turns_bypass_pattern_printing() {
+        for midi in [false, true] {
+            let mut h = RackHarness::new(HashSet::from([STEP]));
+            h.app.set_arrangement_view_visible(true);
+            h.app.song_transport_mode = app::song_transport::SongTransportMode::SongPlayback;
+            h.state.transport.playing.store(true, Ordering::Relaxed);
+            h.shared.recording.store(true, Ordering::Relaxed);
+            h.shared.record_armed.lock().unwrap()[TRACK] = true;
+            // Hardware targets the armed rack even when UI focus is elsewhere.
+            h.shared.current_track.store(TRACK + 1, Ordering::Relaxed);
+            h.state.transport.record_clock.publish(0.0, Instant::now());
+            h.state.transport.record_clock.publish(0.0, Instant::now());
+            if midi {
+                let rt = h.editor.runtime_mut();
+                rt.register_native("seq-has-selection?", |_, _| Ok(Value::Bool(false)));
+                rt.register_native("seq-armed-tracks", |_, _| Ok(Value::List(vec![Rc::new(RefCell::new(Value::Number(TRACK as f64)))])));
+                rt.register_native("seq-track-is-rack?", |_, _| Ok(Value::Bool(true)));
+                rt.register_native("seq-rack-macro-value", |_, _| Ok(Value::Number(0.0)));
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/ui/midi.lisp");
+                rt.eval_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+                rt.eval_str("(eseq.midi/midi-map (eseq.midi/cc 14) (eseq.midi/rack-macro 0))").unwrap();
+                assert!(dispatch_midi_to_lisp(&mut h.editor, &sequencer::midi_input::MidiInputEvent {
+                    port: 0,
+                    message: sequencer::midi_input::MidiMessage::ControlChange {
+                        channel: 0, controller: 14, value: 127,
+                    },
+                }));
+                for command in h.editor.drain_host_commands() {
+                    if let HostCommand::Custom { name, payload } = command {
+                        h.dispatch(&name, payload);
+                    }
+                }
+            } else {
+                h.dispatch("set-rack-macro-plock", number_payload(&[
+                    ("track", TRACK as f64), ("id", 0.0), ("value", 1.0),
+                ]));
+            }
+            assert!(h.app.take_recording_active());
+            assert_eq!(h.state.take_rack_macro_override.values_for_track(TRACK)[0], Some(1.0));
+            assert!(!h.shared.step_print.lock().unwrap().armed());
+            let rack = h.state.pattern.rack_tracks.lock().unwrap()[TRACK].clone().unwrap();
+            assert_eq!(rack.macros[0].value, 0.0);
+            assert!(rack.macros[0].plocks.iter().all(Option::is_none));
+            assert_eq!(reactive_number(&h.editor, &rack_macro_value_field(TRACK, 0)), 1.0);
         }
     }
 

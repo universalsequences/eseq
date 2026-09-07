@@ -33,6 +33,16 @@ pub(crate) struct SoundPaletteFrameState {
     glyphs: GlyphFrames,
 }
 
+impl SoundPaletteFrameState {
+    /// Drop the published-row caches so the next sync republishes every color
+    /// field. Used when the theme's variant tint changes: the entries and clip
+    /// sounds are unchanged, only their displayed colors are.
+    pub(crate) fn invalidate_published_colors(&mut self) {
+        self.cached = None;
+        self.cached_clip_sounds = None;
+    }
+}
+
 /// Per-frame cache for cohort-relative glyph frames. The fingerprint includes
 /// the whole ordered cohort and reference patch, because either can change
 /// every tile's normalized deviation vector.
@@ -1244,7 +1254,7 @@ fn color_fields(map: &mut HashMap<String, Rc<RefCell<Value>>>, color: Option<u8>
         .filter(|idx| *idx < SOUND_PALETTE_RGB.len())
     {
         Some(idx) => {
-            let [r, g, b] = SOUND_PALETTE_RGB[idx];
+            let [r, g, b] = super::track_and_mixer::themed_variant_rgb(SOUND_PALETTE_RGB[idx]);
             map.insert(
                 "color".to_string(),
                 Rc::new(RefCell::new(Value::Number(idx as f64))),

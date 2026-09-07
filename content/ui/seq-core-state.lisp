@@ -20,6 +20,7 @@
         seq-has-selected-bus?
         samples-sidebar-visible
         mixer-panel-visible
+        mixer-visible-before-arrangement
         lower-panel-visible
         patch-macros-panel-visible
         param-mode
@@ -53,6 +54,10 @@
 
 (defstate samples-sidebar-visible true)
 (defstate mixer-panel-visible true)
+;; The arrangement view hides the mixer strip by default (it is most of the
+;; screen and the arrangement has its own track headers); this remembers the
+;; session-view mixer state so returning restores it.
+(defstate mixer-visible-before-arrangement true)
 (defstate lower-panel-visible true)
 (defstate patch-macros-panel-visible true)
 

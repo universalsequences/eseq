@@ -1402,6 +1402,17 @@ fn dg_pixelate(input: WidgetVaryings) -> f32 {
     return f32((u32(round(input.color_d.w)) >> 2) & 255u);
 }
 
+// Theme variant tint packed into color_a.w beside the play flag (see
+// pack_play_and_hue_tint): mixes every DG_HUES accent toward one theme color.
+fn dg_hue_tint(hue: vec3<f32>, input: WidgetVaryings) -> vec3<f32> {
+    var word: u32 = u32(round(input.color_a.w));
+    var weight: f32 = f32((word >> 1u) & 15u) / 15.0;
+    var tint: vec3<f32> = vec3<f32>(f32((word >> 5u) & 31u),
+                                    f32((word >> 10u) & 31u),
+                                    f32((word >> 15u) & 31u)) / 31.0;
+    return mix(hue, tint, vec3<f32>(weight));
+}
+
 fn dg_play_color(input: WidgetVaryings) -> vec3<f32> {
     var rgb: u32 = u32(round(input.corner_radius));
     return vec3<f32>(f32(rgb & 255u),
@@ -1650,7 +1661,8 @@ fn dg_play_triangle(p: vec2<f32>) -> f32 {
 fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32> {
     // Centered uv, +y upward, as required by the delta-glyph lattice.
     var p: vec2<f32> = vec2<f32>(input.uv.x * 2.0 - 1.0, 1.0 - input.uv.y * 2.0);
-    var play: bool = input.color_a.w > 0.5;
+    var playWord: u32 = u32(round(input.color_a.w));
+    var play: bool = (playWord & 1u) != 0u;
     // Padding is a fraction of the glyph's half-extent on every side. It and
     // opacity apply only while the play indicator is present; the triangle
     // remains full-size and fully opaque above the quieter identity glyph.
@@ -1688,7 +1700,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32> {
         var sdf: f32 = dg_piece_field(glyphP, input, record);
         var n: vec3<f32> = dg_normal_piece(glyphP, input, record);
 
-        var hue: vec3<f32> = DG_HUES[min((record >> 9) & 7u, 6u)];
+        var hue: vec3<f32> = dg_hue_tint(DG_HUES[min((record >> 9) & 7u, 6u)], input);
         var magnitude: f32 = f32((record >> 12) & 7u) / 7.0;
         // Sign rides hue temperature, not position: a positional offset large
         // enough to read is larger than the entire fusion budget (spec §6.2).

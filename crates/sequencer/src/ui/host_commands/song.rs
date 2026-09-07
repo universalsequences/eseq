@@ -16,6 +16,7 @@ pub(super) const COMMANDS: &[&str] = &[
     // scene changes by beat; clip ops address a clip by id, or by the
     // (track, beat) a timeline gesture drew on.
     "arrangement-scene-insert",
+    "arrangement-scene-patterns-place",
     "arrangement-scene-move",
     "arrangement-scene-set",
     "arrangement-scene-remove",
@@ -363,6 +364,12 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 "Set the scene change at beat {beat} to scene {}",
                 scene + 1
             ))
+        }
+        "arrangement-scene-patterns-place" => {
+            let map = payload_map(payload)?;
+            let beat = require_number(map, "beat")?;
+            app.arr_scene_patterns_place(beat)?;
+            Ok(format!("Placed scene patterns at beat {beat}"))
         }
         "arrangement-scene-remove" => {
             let map = payload_map(payload)?;

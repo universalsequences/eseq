@@ -35,7 +35,7 @@ pub struct PatternSnapshot {
 pub struct RackTrackSnapshot {
     pub slots: Vec<RackSlotSnapshot>,
     pub macros: Vec<RackMacro>,
-    pub(crate) runtime_macro_values: Option<Arc<RackMacroRuntimeValues>>,
+    pub(crate) runtime_macro_values: Option<RackMacroRuntimeView>,
     pub(crate) runtime_macro_track: usize,
 }
 
@@ -67,7 +67,15 @@ impl RackTrackSnapshot {
         values: Arc<RackMacroRuntimeValues>,
         track: usize,
     ) {
-        self.runtime_macro_values = Some(values);
+        self.runtime_macro_values = Some(RackMacroRuntimeView::Live(values));
+        self.runtime_macro_track = track;
+    }
+
+    pub(crate) fn attach_frozen_macro_values(&mut self, values: Arc<RackMacroRuntimeValues>, track: usize) {
+        let revisions = std::array::from_fn(|index| {
+            values.edited_defaults[track][index].revision.load(Ordering::Acquire)
+        });
+        self.runtime_macro_values = Some(RackMacroRuntimeView::Frozen { values, revisions });
         self.runtime_macro_track = track;
     }
 
@@ -105,16 +113,40 @@ impl RackTrackSnapshot {
     /// The macro's current knob position (no p-lock), from the runtime
     /// atomics the control thread updates on every turn.
     pub(crate) fn runtime_macro_default(&self, id: RackMacroId) -> Option<f32> {
-        self.runtime_macro_values
-            .as_ref()
-            .and_then(|values| values.default_value(self.runtime_macro_track, id))
+        match self.runtime_macro_values.as_ref()? {
+            RackMacroRuntimeView::Live(values) => values.default_value(self.runtime_macro_track, id),
+            RackMacroRuntimeView::Frozen { values, revisions } => {
+                let edited = &values.edited_defaults[self.runtime_macro_track][id.index()];
+                (edited.revision.load(Ordering::Acquire) != revisions[id.index()])
+                    .then(|| f32::from_bits(edited.value.load(Ordering::Relaxed)))
+            }
+        }
     }
 
     pub(crate) fn runtime_macro_value_at(&self, id: RackMacroId, step: usize) -> Option<f32> {
-        self.runtime_macro_values
-            .as_ref()
-            .and_then(|values| values.value_at(self.runtime_macro_track, id, step))
+        match self.runtime_macro_values.as_ref()? {
+            RackMacroRuntimeView::Live(values) => values.value_at(self.runtime_macro_track, id, step),
+            RackMacroRuntimeView::Frozen { .. } => self.macros.iter()
+                .find(|rack_macro| rack_macro.id == id)
+                .and_then(|rack_macro| rack_macro.plocks.get(step).copied().flatten())
+                .or_else(|| self.runtime_macro_default(id)),
+        }
     }
+}
+
+/// Live pattern views can read their mutable lock grid. Preflighted song
+/// rows must retain their own locks/defaults, but still hear explicit knob
+/// edits made after preflight. Merely preparing another row is not an edit.
+#[derive(Clone, Debug)]
+pub(crate) enum RackMacroRuntimeView {
+    Live(Arc<RackMacroRuntimeValues>),
+    Frozen { values: Arc<RackMacroRuntimeValues>, revisions: [u64; RACK_MACRO_COUNT] },
+}
+
+#[derive(Debug)]
+struct EditedMacroDefault {
+    value: AtomicU32,
+    revision: AtomicU64,
 }
 
 /// Pointer-rate rack macro values shared by immutable scheduler snapshots.
@@ -127,11 +159,17 @@ impl RackTrackSnapshot {
 pub(crate) struct RackMacroRuntimeValues {
     pub(super) defaults: Vec<[AtomicU32; RACK_MACRO_COUNT]>,
     pub(super) plocks: Vec<Box<[AtomicU64]>>,
+    edited_defaults: Vec<[EditedMacroDefault; RACK_MACRO_COUNT]>,
 }
 
 impl RackMacroRuntimeValues {
     pub(super) fn new() -> Self {
         Self {
+            edited_defaults: (0..MAX_TRACKS)
+                .map(|_| std::array::from_fn(|_| EditedMacroDefault {
+                    value: AtomicU32::new(0), revision: AtomicU64::new(0),
+                }))
+                .collect(),
             defaults: (0..MAX_TRACKS)
                 .map(|_| std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())))
                 .collect(),
@@ -157,6 +195,14 @@ impl RackMacroRuntimeValues {
     pub(super) fn set_default(&self, track: usize, id: RackMacroId, value: f32) {
         if let Some(defaults) = self.defaults.get(track) {
             defaults[id.index()].store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn set_live_default(&self, track: usize, id: RackMacroId, value: f32) {
+        self.set_default(track, id, value);
+        if let Some(edited) = self.edited_defaults.get(track).map(|row| &row[id.index()]) {
+            edited.value.store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+            edited.revision.fetch_add(1, Ordering::Release);
         }
     }
 

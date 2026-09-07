@@ -1209,14 +1209,16 @@ pub(super) fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
     })
 }
 
-/// Track meters are rendered by both track views, while bus meters are also
-/// rendered by mixer strips and drum-rack headers. Keep the shared bindings
-/// live while either consumer buffer is visible.
+/// Track meters are rendered by the sequencer and arrangement track headers
+/// (the arrangement reuses `eseq.sequencer/track-header`), while bus meters
+/// are also rendered by mixer strips and drum-rack headers. Keep the shared
+/// bindings live while any consumer buffer is visible.
 pub(super) fn track_and_bus_meter_bindings_visible(
     mixer_visible: bool,
     sequencer_visible: bool,
+    arrangement_visible: bool,
 ) -> bool {
-    mixer_visible || sequencer_visible
+    mixer_visible || sequencer_visible || arrangement_visible
 }
 
 /// `*patch-mixer*` (the reduced strip in the patch editor) renders the same

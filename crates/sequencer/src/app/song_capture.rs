@@ -211,6 +211,7 @@ impl App {
     /// (current scene plus current track overrides) as the baseline row.
     /// The committed song is untouched.
     pub(crate) fn begin_song_capture_take(&mut self, timeline_start_beat: f64) {
+        self.state.take_rack_macro_override.clear();
         self.song_capture_failed = false;
         self.song_capture_error = None;
         // A stale overflow left over from earlier song playback must not
@@ -257,6 +258,7 @@ impl App {
     /// Discard the staging take (Cancel, spec 7.4.8). The committed song is
     /// preserved by construction: the take never touched it.
     pub(crate) fn discard_song_capture_take(&mut self) {
+        self.state.take_rack_macro_override.clear();
         self.song_capture_take = None;
         // Pending take content lives in detached buffers (takes spec 8.5
         // Cancel): dropping it touches neither the pattern pool nor the song.
@@ -350,6 +352,7 @@ impl App {
         end_raw_beats: f64,
     ) -> Result<String, String> {
         let result = self.try_finish_song_capture_take(end_raw_beats);
+        self.state.take_rack_macro_override.clear();
         self.song_capture_take = None;
         if result.is_ok() {
             self.take_recording = None;

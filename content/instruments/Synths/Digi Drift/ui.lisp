@@ -4,16 +4,17 @@
 ;; (cut / res / drive); hp cutoff moved to a micro control beside keytrack.
 
 ;; Ableton Drift palette discipline: outside the dark oscillator column every
-;; knob is drift-knob (blue) and every section header is drift-head (yellow).
+;; knob is drift-knob (blue) and every section header is drift-head (dim).
 ;; Inside the dark column each source row owns one colour (osc1 / osc2 /
-;; noise) that tints its tab, knobs, fader and toggle.
+;; noise) that tints its tab, knobs, fader and toggle. The row colours are
+;; the theme's cyan / purple / magenta slots rather than the warm lego accents
+;; or the semantic :red, so a cool theme keeps them in its own family.
 (def drift-knob   () (eseq.effects.custom-ui-lego/ui-accent-blue))
-;(def drift-head   () (eseq.effects.custom-ui-lego/ui-accent-orange))
 (def drift-head   () :dim)
 (def drift-text   () :fg)
-(def drift-orange () (eseq.effects.custom-ui-lego/ui-accent-orange))
-(def drift-ice    () (eseq.effects.custom-ui-lego/ui-accent-cyan))
-(def drift-pink   () :red)
+(def drift-orange () :cyan)
+(def drift-ice    () :purple)
+(def drift-pink   () :magenta)
 
 (def drift-surf-warm () :mixer-control-bg)
 (def drift-surf-cool () :instrument-group-bg)

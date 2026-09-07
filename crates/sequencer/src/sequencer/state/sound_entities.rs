@@ -326,6 +326,9 @@ pub struct TrackPatternSeq {
     pub step_data: Vec<[f32; NUM_PARAMS]>,
     pub params: SeqParams,
     pub chord_snapshot: ChordSnapshot,
+    /// Macro automation belongs to this sequence, never to its shared Patch.
+    /// Indexed by stable RackMacroId, then step.
+    pub rack_macro_plocks: Vec<Vec<Option<f32>>>,
     pub timebase_plock_snapshot: [Option<u32>; MAX_STEPS],
     pub swing_plock_snapshot: [Option<u32>; MAX_STEPS],
     pub swing_resolution_plock_snapshot: [Option<u32>; MAX_STEPS],
@@ -369,12 +372,20 @@ impl TrackPatternData {
             track_send_plock_snapshot,
             instrument_type,
             instrument_run_mode,
-            rack_track,
+            mut rack_track,
             process_chain,
             project_process_lane_overrides,
             plock_variant_registry,
             key_lock_variant_registry,
         } = self;
+        let mut rack_macro_plocks = Vec::new();
+        if let Some(rack) = &mut rack_track {
+            rack_macro_plocks.resize_with(RACK_MACRO_COUNT, || vec![None; MAX_STEPS]);
+            for rack_macro in &mut rack.macros {
+                rack_macro_plocks[rack_macro.id.index()] =
+                    std::mem::replace(&mut rack_macro.plocks, vec![None; MAX_STEPS]);
+            }
+        }
         let seq = TrackPatternSeq {
             track_bits,
             neural_reset_bits,
@@ -392,6 +403,7 @@ impl TrackPatternData {
                 global_transpose: track_params.global_transpose,
             },
             chord_snapshot,
+            rack_macro_plocks,
             timebase_plock_snapshot,
             swing_plock_snapshot,
             swing_resolution_plock_snapshot,
@@ -437,6 +449,13 @@ impl TrackPatternData {
 
     /// Recompose the working form from stored halves.
     pub fn compose(seq: &TrackPatternSeq, patch: &Patch, mix: &Mix) -> TrackPatternData {
+        let mut rack_track = patch.rack_track.clone();
+        if let Some(rack) = &mut rack_track {
+            for rack_macro in &mut rack.macros {
+                rack_macro.plocks = seq.rack_macro_plocks.get(rack_macro.id.index())
+                    .cloned().unwrap_or_else(|| vec![None; MAX_STEPS]);
+            }
+        }
         TrackPatternData {
             track_bits: seq.track_bits,
             neural_reset_bits: seq.neural_reset_bits,
@@ -482,7 +501,7 @@ impl TrackPatternData {
             track_send_plock_snapshot: seq.track_send_plock_snapshot.clone(),
             instrument_type: patch.instrument_type,
             instrument_run_mode: patch.instrument_run_mode,
-            rack_track: patch.rack_track.clone(),
+            rack_track,
             process_chain: patch.process_chain.clone(),
             project_process_lane_overrides: seq.project_process_lane_overrides.clone(),
             plock_variant_registry: seq.plock_variant_registry.clone(),
@@ -518,6 +537,31 @@ mod tests {
         data.track_params.volume = volume;
         data.instrument_base_note_offset = base_note;
         data
+    }
+
+    #[test]
+    fn rack_macro_locks_are_sequence_local_while_macro_configuration_is_shared() {
+        let mut data = chunk_template(1.0, 0.0);
+        let mut rack = RackTrackSnapshot::new(Vec::new(), default_rack_macros());
+        rack.macros[0].value = 0.2;
+        rack.macros[0].plocks[0] = Some(0.3);
+        data.rack_track = Some(rack);
+        let mut pool = TrackPatternPool::default();
+        let first = pool.insert(data.clone());
+        data.rack_track.as_mut().unwrap().macros[0].plocks[0] = Some(0.8);
+        let second = pool.insert_with_refs(data, pool.refs(first).unwrap());
+        let mut macros = pool.rack_macros(first).unwrap();
+        macros[0].value = 0.5;
+        macros[0].plocks[0] = Some(0.6);
+        assert!(pool.set_rack_macros(first, macros));
+        let first_rack = pool.get(first).unwrap().rack_track.unwrap();
+        let second_rack = pool.get(second).unwrap().rack_track.unwrap();
+        assert_eq!(first_rack.macros[0].value, 0.5);
+        assert_eq!(second_rack.macros[0].value, 0.5);
+        assert_eq!(first_rack.macros[0].plocks[0], Some(0.6));
+        assert_eq!(second_rack.macros[0].plocks[0], Some(0.8));
+        assert!(pool.patch(first).unwrap().rack_track.as_ref().unwrap().macros[0]
+            .plocks.iter().all(Option::is_none));
     }
 
     /// §18.1 exit criterion: every scene cell, pool pattern, and take

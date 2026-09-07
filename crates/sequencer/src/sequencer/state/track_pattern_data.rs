@@ -71,6 +71,11 @@ impl TrackPatternData {
         self.swing_plock_snapshot = [None; MAX_STEPS];
         self.swing_resolution_plock_snapshot = [None; MAX_STEPS];
         self.track_send_plock_snapshot = vec![Vec::new(); MAX_STEPS];
+        if let Some(rack) = &mut self.rack_track {
+            for rack_macro in &mut rack.macros {
+                rack_macro.plocks.fill(None);
+            }
+        }
     }
 
     /// Copy one step's complete per-step content (activation, params,

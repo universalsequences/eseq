@@ -1251,17 +1251,18 @@ pub(crate) fn build_track_plock_variants_value_with_preview(
                     || preview_label.is_some_and(|label| label == entry.label),
             ))),
         );
+        let color = super::track_and_mixer::themed_variant_rgb(entry.color);
         map.insert(
             "color-r".to_string(),
-            Rc::new(RefCell::new(Value::Number(entry.color[0] as f64))),
+            Rc::new(RefCell::new(Value::Number(color[0] as f64))),
         );
         map.insert(
             "color-g".to_string(),
-            Rc::new(RefCell::new(Value::Number(entry.color[1] as f64))),
+            Rc::new(RefCell::new(Value::Number(color[1] as f64))),
         );
         map.insert(
             "color-b".to_string(),
-            Rc::new(RefCell::new(Value::Number(entry.color[2] as f64))),
+            Rc::new(RefCell::new(Value::Number(color[2] as f64))),
         );
         items.push(Rc::new(RefCell::new(Value::Map(map))));
     }
@@ -1432,7 +1433,7 @@ pub(crate) fn plock_variant_step_render_values(
             if let Some(assignment) = assignments.get(step).and_then(Clone::clone) {
                 PlockVariantStepRender {
                     kind: 2,
-                    color: assignment.color,
+                    color: super::track_and_mixer::themed_variant_rgb(assignment.color),
                 }
             } else if sequencer::plock_variants::live_track_has_seq_lock(
                 state.as_ref(),

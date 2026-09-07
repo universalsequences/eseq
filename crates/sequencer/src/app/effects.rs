@@ -3098,6 +3098,21 @@ impl App {
         }
     }
 
+    /// Install an authored effect through the same compile/load/retain path
+    /// used by project loading, with normal free-slot allocation.
+    pub fn add_saved_effect_sync(&mut self, track: usize, name: &str) -> Result<usize, String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        let chain = &self.state.pattern.effect_chains[track];
+        let slot_idx = (0..MAX_CUSTOM_FX)
+            .map(|offset| BUILTIN_SLOT_COUNT + offset)
+            .find(|idx| *idx < chain.len() && chain[*idx].node_id.load(Ordering::Relaxed) == 0)
+            .ok_or_else(|| "No free effect slots available".to_string())?;
+        self.load_saved_effect_to_slot_sync(track, slot_idx, name)?;
+        Ok(slot_idx)
+    }
+
     pub fn add_builtin_effect_sync(&mut self, track: usize, name: &str) -> Result<usize, String> {
         if track >= self.tracks.len() {
             return Err("Invalid track index".to_string());
@@ -4163,9 +4178,19 @@ impl App {
                 .get_mut(slot_idx)
                 .ok_or_else(|| format!("Bus effect slot {} out of range", slot_idx + 1))?;
             let stored_value = value.clamp(param.min, param.max);
-            if param_idx < slot.defaults.len() {
-                slot.defaults[param_idx] = stored_value;
-            }
+            let Some(default) = slot.defaults.get_mut(param_idx) else {
+                // The slot lags its descriptor (a saved layout that was never
+                // synced): refuse loudly rather than push a value the state
+                // will not remember.
+                return Err(format!(
+                    "Bus effect param {} is not stored in slot {} ({} of {} params)",
+                    param_idx + 1,
+                    slot_idx + 1,
+                    slot.defaults.len(),
+                    desc.params.len()
+                ));
+            };
+            *default = stored_value;
             (
                 slot.node_id,
                 slot.modulator_node_id,

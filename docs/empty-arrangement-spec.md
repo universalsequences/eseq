@@ -55,9 +55,9 @@ tiling from beat 0) by *synthesis in compile*, not by user-facing rules.
   compile-from-arrangement path. The absent-override → scene-cell fallback
   (song_playback.rs:118-127) is reachable only for rows not produced by
   compile.
-- Scene events stamp clips on insert/set/move (`stamp_scene_clips`,
-  arrangement.rs:726) and do **not** re-stamp on remove (arr_edit.rs:835);
-  removing an event leaves clips in place.
+- Scene markers recall state independently of clips (lane-model spec rev 3).
+  Insert/set/move/remove preserve clips; Place Scene Patterns explicitly
+  stamps the selected span.
 - The beat-0 protections being removed: remove-first rejection
   (arr_edit.rs:852-857), move-away-from-0 and move-onto-0 rejections
   (:767-780), insert-collision rejection (:730-738), and the unconditional
@@ -152,10 +152,8 @@ staging), but:
    Moving *onto* an occupied beat follows rule 3.
 3. **Insert/drop collision becomes replace.** Dropping a scene event at a
    beat where one already starts performs `arr_scene_event_set` on that
-   event — and therefore **re-stamps**: the dragged scene's effective
-   per-track patterns (its cells) are written as real clips across the
-   event's span, truncating what's there, exactly like any set. Dragging
-   "Scene 2" to the start of a botched arrangement does what it looks like.
+   event, preserving all track clips. Place Scene Patterns separately writes
+   the scene's linked patterns over its span in one undo entry.
 4. **Full-span region delete truly empties.** `clear_scene_lane_span`
    drops the beat-0 exemption; select-all + delete removes every scene
    event and every clip. `restore_scene_tail` behavior for *interior*

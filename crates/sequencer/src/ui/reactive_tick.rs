@@ -209,11 +209,31 @@ pub(crate) fn reactive_tick_and_render(
     );
 
     // Theme changes do not mutate the project or bump its UI epoch. Refresh
-    // both literal and bound track colors when the display tint changes.
-    let track_tint = eseqlisp::theme::TRACK_TINT();
+    // both literal and bound track colors when the display tint or palette changes.
+    let track_tint = eseqlisp::theme::track_display_key();
     if Some(track_tint) != ctx.frame.prev_track_tint {
         ctx.frame.prev_track_tint = Some(track_tint);
         sync_track_color_state(editor.runtime_mut(), app, &ctx.shared.state);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+    }
+    // Same for the p-lock variant / sound palette tint: the chips, step
+    // variant colors, key-lock variants and palette rows all publish tinted
+    // RGB, so republish them when the tint moves.
+    let variant_tint = eseqlisp::theme::variant_display_key();
+    if Some(variant_tint) != ctx.frame.prev_variant_tint {
+        ctx.frame.prev_variant_tint = Some(variant_tint);
+        let ct = ctx.shared.current_track.load(Ordering::Relaxed);
+        sync_track_params(
+            editor.runtime_mut(),
+            app,
+            &ctx.shared.state,
+            ct,
+            &ctx.shared.selected_steps,
+        );
+        ctx.frame.sound_palette.invalidate_published_colors();
+        ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
@@ -309,9 +329,13 @@ pub(crate) fn reactive_tick_and_render(
         let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
         let step_visible = editor_has_visible_buffer(&editor, "*step*");
         let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
+        let arrangement_visible = editor_has_visible_buffer(&editor, "*arrangement*");
         let master_meter_visible = transport_visible || mixer_visible;
-        let track_and_bus_meter_visible =
-            track_and_bus_meter_bindings_visible(mixer_visible, sequencer_visible);
+        let track_and_bus_meter_visible = track_and_bus_meter_bindings_visible(
+            mixer_visible,
+            sequencer_visible,
+            arrangement_visible,
+        );
         let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
             || editor_has_visible_buffer(&editor, "*piano-roll*");
         let previous_playhead = ctx.frame.prev_playhead;
@@ -796,7 +820,6 @@ pub(crate) fn reactive_tick_and_render(
         // change, and the lane surfaces derived from it diff by value.
         // The render-rate song position drives the transport readout and the
         // arrangement playhead, so it publishes while either is visible.
-        let arrangement_visible = editor_has_visible_buffer(&editor, "*arrangement*");
         // Clip selection is dormant while the timeline is off screen (takes
         // spec 16.6), so the binding needs the view state before it resolves.
         app.set_arrangement_view_visible(arrangement_visible);

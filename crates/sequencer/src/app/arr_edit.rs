@@ -746,44 +746,30 @@ impl App {
 
     // --- scene-lane ops (spec 8) ----------------------------------------
 
-    /// The span a scene event governs: from its own beat to the next event's,
-    /// else the arrangement end. This is the window an insert/set/move
-    /// re-stamps.
+    /// The state span governed by a scene marker, used only by explicit
+    /// pattern placement. Marker edits themselves never modify track lanes.
     fn scene_event_span(arrangement: &ProjectArrangement, index: usize) -> (f64, f64) {
         let start = arrangement.scene_lane[index].start_beat;
-        let end = arrangement
-            .scene_lane
-            .get(index + 1)
-            .map(|next| next.start_beat)
-            .unwrap_or(arrangement.end_beat)
-            .min(arrangement.end_beat);
+        let end = arrangement.scene_lane.get(index + 1)
+            .map(|next| next.start_beat).unwrap_or(arrangement.end_beat);
         (start, end)
     }
 
-    /// Insert a scene change at `beat`: it STAMPS the scene's cells as clips
-    /// across its whole span (spec 6.2/8), truncating whatever was there —
-    /// the Ableton truncation rule, one undo entry. A track whose cell in
-    /// that scene is empty gets no clip and is silent.
-    ///
-    /// Landing at or past the arrangement end auto-extends it
-    /// (empty-arrangement spec 5.7) — the ordering problem is the model's to
-    /// solve, not the user's. Landing on an occupied beat REPLACES that
-    /// event (spec 5.3): it becomes a set, which re-stamps the span with the
-    /// dropped scene's cells.
+    /// Insert or replace a scene-state marker, preserving all clips.
+    /// Markers at/past the end extend the arrangement to the next bar.
     pub fn arr_scene_event_insert(&mut self, beat: f64, scene: usize) -> Result<(), String> {
         let beat = finite_beat("Scene event beat", beat)?;
-        self.edit_arrangement("Insert scene event", move |arrangement, scenes| {
+        self.edit_arrangement("Insert scene event", move |arrangement, _scenes| {
             if beat >= arrangement.end_beat {
                 arrangement.end_beat = next_bar_end(beat);
             }
-            let position = match arrangement
+            match arrangement
                 .scene_lane
                 .iter()
                 .position(|event| event.start_beat == beat)
             {
                 Some(existing) => {
                     arrangement.scene_lane[existing].scene = scene;
-                    existing
                 }
                 None => {
                     let position = arrangement
@@ -798,27 +784,18 @@ impl App {
                             scene,
                         },
                     );
-                    position
                 }
-            };
-            let (start, end) = Self::scene_event_span(arrangement, position);
-            stamp_scene_clips(arrangement, scenes, start, end)
+            }
+            Ok(())
         })
     }
 
-    /// Move the scene change at `from_beat` to `to_beat`, re-stamping both the
-    /// span it vacates (now the predecessor's — or unscened, where stamping
-    /// writes nothing and the clips it stamped simply stay) and the one it
-    /// lands on.
-    ///
-    /// Any event may move, beat 0 included (empty-arrangement spec 5.2).
-    /// Landing at or past the end auto-extends it (spec 5.7); landing on
-    /// another event REPLACES it (spec 5.3): the moved marker's scene wins
-    /// and its old slot vacates.
+    /// Move a scene-state marker without editing clips. Landing on another
+    /// marker replaces it; moving beyond the end extends the arrangement.
     pub fn arr_scene_event_move(&mut self, from_beat: f64, to_beat: f64) -> Result<(), String> {
         let from_beat = finite_beat("Scene event beat", from_beat)?;
         let to_beat = finite_beat("Scene event beat", to_beat)?;
-        self.edit_arrangement("Move scene event", move |arrangement, scenes| {
+        self.edit_arrangement("Move scene event", move |arrangement, _scenes| {
             let index = Self::scene_event_index(arrangement, from_beat)?;
             if from_beat == to_beat {
                 return Ok(());
@@ -826,9 +803,6 @@ impl App {
             if to_beat >= arrangement.end_beat {
                 arrangement.end_beat = next_bar_end(to_beat);
             }
-            // The window the move vacates, resolved before the lane changes
-            // so the stretch is re-stamped with whatever governs it after.
-            let (vacated_start, vacated_end) = Self::scene_event_span(arrangement, index);
             let scene = arrangement.scene_lane[index].scene;
             match arrangement
                 .scene_lane
@@ -855,48 +829,33 @@ impl App {
                     });
                 }
             }
-            let moved = arrangement
-                .scene_lane
-                .iter()
-                .position(|event| event.start_beat == to_beat)
-                .expect("the moved event is in the lane");
-            let (moved_start, moved_end) = Self::scene_event_span(arrangement, moved);
-            stamp_scene_clips(
-                arrangement,
-                scenes,
-                vacated_start.min(moved_start),
-                vacated_end.max(moved_end),
-            )
+            Ok(())
         })
     }
 
-    /// Point the scene change at `beat` at a different scene, re-stamping its
-    /// whole span with the new scene's cells (spec 8: changing which scene an
-    /// event names replaces the clips it stamped).
+    /// Change the recalled scene state without modifying any clip.
     pub fn arr_scene_event_set(&mut self, beat: f64, scene: usize) -> Result<(), String> {
         let beat = finite_beat("Scene event beat", beat)?;
-        self.edit_arrangement("Set scene event", move |arrangement, scenes| {
+        self.edit_arrangement("Set scene event", move |arrangement, _scenes| {
             let index = Self::scene_event_index(arrangement, beat)?;
             arrangement.scene_lane[index].scene = scene;
+            Ok(())
+        })
+    }
+
+    /// Explicitly replace the clips under this marker with its scene's
+    /// linked patterns, up to the next marker or arrangement end. One undo
+    /// restores all replaced clips. Scene-state edits never call this.
+    pub fn arr_scene_patterns_place(&mut self, beat: f64) -> Result<(), String> {
+        let beat = finite_beat("Scene event beat", beat)?;
+        self.edit_arrangement("Place scene patterns", move |arrangement, scenes| {
+            let index = Self::scene_event_index(arrangement, beat)?;
             let (start, end) = Self::scene_event_span(arrangement, index);
             stamp_scene_clips(arrangement, scenes, start, end)
         })
     }
 
-    /// Remove the scene change at `beat`: the marker goes and **the clips
-    /// stay** (spec 8/14, locked).
-    ///
-    /// This is the one scene op that does NOT re-stamp, and the asymmetry is
-    /// deliberate. Insert/set/move all mean "launch this scene here", so
-    /// replacing the content under them is the intent. Remove means "clean up
-    /// this marker" — the user's original complaint was that deleting scene
-    /// changes to tidy the scene row destroyed the pattern changes riding
-    /// beneath them. Clips are the truth now, so a removal leaves the
-    /// predecessor's label spanning clips that a since-removed scene stamped.
-    /// That reads honestly: what plays is the clips.
-    ///
-    /// Any event may be removed, the first included (empty-arrangement spec
-    /// 5.1): its former span joins the unscened prefix.
+    /// Remove a scene-state marker, preserving all clips.
     pub fn arr_scene_event_remove(&mut self, beat: f64) -> Result<(), String> {
         let beat = finite_beat("Scene event beat", beat)?;
         self.edit_arrangement("Remove scene event", move |arrangement, _scenes| {
@@ -2096,31 +2055,35 @@ mod tests {
     #[test]
     fn scene_events_insert_move_set_and_remove() {
         let mut app = app_with_clips();
+        let clips = app.state.committed_arrangement().unwrap().track_lanes;
+        for (beat, scene) in [(8.0, 1), (8.0, 2)] {
+            assert_one_entry_and_undoable(&mut app, |app| {
+                app.arr_scene_event_insert(beat, scene).expect("insert/replace");
+            });
+            assert_eq!(app.state.committed_arrangement().unwrap().track_lanes, clips);
+        }
         assert_one_entry_and_undoable(&mut app, |app| {
-            app.arr_scene_event_insert(8.0, 1).expect("insert");
+            app.arr_scene_event_set(8.0, 1).expect("set");
         });
-        assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1)]);
-
-        app.arr_scene_event_set(8.0, 2).expect("set");
-        assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 2)]);
-
-        app.arr_scene_event_move(8.0, 20.0).expect("move");
-        assert_eq!(scene_lane(&app), vec![(0.0, 0), (20.0, 2)]);
-
-        app.arr_scene_event_remove(20.0).expect("remove");
-        assert_eq!(scene_lane(&app), vec![(0.0, 0)]);
+        assert_eq!(app.state.committed_arrangement().unwrap().track_lanes, clips);
+        assert_one_entry_and_undoable(&mut app, |app| {
+            app.arr_scene_event_move(8.0, 20.0).expect("move");
+        });
+        assert_eq!(scene_lane(&app), vec![(0.0, 0), (20.0, 1)]);
+        assert_eq!(app.state.committed_arrangement().unwrap().track_lanes, clips);
+        assert_one_entry_and_undoable(&mut app, |app| {
+            app.arr_scene_event_remove(20.0).expect("remove");
+        });
+        assert_eq!(app.state.committed_arrangement().unwrap().track_lanes, clips);
         assert_song_matches_arrangement(&app);
     }
 
-    /// The user-visible guarantee that started the lane pivot: removing a
-    /// scene change to tidy the scene row must NEVER destroy clips. Insert,
-    /// set, and move all mean "launch this scene here" and re-stamp; remove
-    /// means "clean up this marker" and touches nothing but the marker.
-    /// Removing the event at 0.0 is rejected, exactly as removing row zero was.
+    /// Removing scene state preserves even explicitly placed scene patterns.
     #[test]
     fn scene_event_remove_merges_into_the_predecessor_and_never_touches_clips() {
         let mut app = app_with_clips();
         app.arr_scene_event_insert(8.0, 1).expect("insert");
+        app.arr_scene_patterns_place(8.0).expect("explicit placement");
         // Scene 1's cell (P2) is stamped from the event to the song end,
         // truncating the clip that was there.
         assert_eq!(
@@ -2151,14 +2114,7 @@ mod tests {
         assert_eq!(song.rows[0].scene, None, "the rows are unscened");
     }
 
-    /// The user's gesture, end to end: "when i resize the end of a scene to
-    /// be shorter (and thus make the next scene launch happen sooner), the
-    /// resulting track clips it modifies ends up produces a jump in timing".
-    ///
-    /// Shortening a scene span IS moving the next scene event earlier, which
-    /// re-stamps. Because stamping free-runs against the global clock, the
-    /// clips it writes stay grid-locked: the boundary decides how much of the
-    /// pattern is heard, never when its steps fall.
+    /// Moving a scene boundary preserves both clip geometry and rhythm.
     #[test]
     fn shortening_a_scene_span_never_moves_the_rhythm_of_the_clips_below() {
         let mut app = test_app();
@@ -2177,12 +2133,12 @@ mod tests {
         // and deliberately off the 4-beat cycle.
         app.arr_scene_event_move(8.0, 5.0).expect("boundary moves");
         assert_eq!(scene_lane(&app), vec![(0.0, 0), (5.0, 1), (16.0, 2)]);
-        // 5 beats == 20 steps; 20 mod 16 == 4.
+        // Clip edges and source offsets are independent of this boundary.
         assert_eq!(
             lane(&app, 0),
             vec![
-                (0.0, 5.0, Some(1), 0.0),
-                (5.0, 16.0, Some(2), 4.0),
+                (0.0, 8.0, Some(1), 0.0),
+                (8.0, 16.0, Some(2), 0.0),
                 (16.0, 32.0, Some(3), 0.0),
             ]
         );
@@ -2203,21 +2159,24 @@ mod tests {
     }
 
     #[test]
-    fn scene_event_insert_onto_an_occupied_beat_replaces_and_restamps() {
-        // Empty-arrangement spec 5.3: dropping a scene onto an occupied beat
-        // is a set — the event repoints and the span re-stamps with the
-        // dropped scene's effective patterns.
+    fn scene_patterns_place_replaces_only_the_chosen_span_and_is_undoable() {
         let mut app = app_with_clips();
         app.arr_scene_event_insert(8.0, 1).expect("insert");
         assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1)]);
 
         app.arr_scene_event_insert(8.0, 2).expect("replace");
         assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 2)]);
+        let clips = app.state.committed_arrangement().unwrap().track_lanes;
+        app.arr_scene_event_insert(24.0, 0).expect("next marker");
+        assert_eq!(app.state.committed_arrangement().unwrap().track_lanes, clips);
+        assert_one_entry_and_undoable(&mut app, |app| {
+            app.arr_scene_patterns_place(8.0).expect("place patterns");
+        });
         // Scene 2's cell for track 0 is pool pattern 3, stamped over the
         // event's whole span.
         assert_eq!(
             lane(&app, 0),
-            vec![(0.0, 4.0, Some(1), 0.0), (8.0, 32.0, Some(3), 0.0)]
+            vec![(0.0, 4.0, Some(1), 0.0), (8.0, 24.0, Some(3), 0.0)]
         );
     }
 
@@ -2281,7 +2240,7 @@ mod tests {
         app.arr_set_end(16.0).expect("exactly the last clip end is fine");
 
         // The last scene change is the other floor: insert it, then clear
-        // every clip (including the ones it stamped) so only it can block.
+        // every clip so only the scene marker can block.
         app.arr_scene_event_insert(12.0, 1).expect("insert");
         loop {
             let ids: Vec<ClipId> = app
@@ -2338,6 +2297,7 @@ mod tests {
             app.arr_scene_event_move(0.0, 4.0).unwrap_err(),
             app.arr_scene_event_set(0.0, 1).unwrap_err(),
             app.arr_scene_event_remove(0.0).unwrap_err(),
+            app.arr_scene_patterns_place(0.0).unwrap_err(),
             app.arr_set_end(64.0).unwrap_err(),
             app.arr_set_loop(true).unwrap_err(),
         ];

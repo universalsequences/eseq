@@ -22,7 +22,13 @@ pub(super) struct ResolvedRackSlotParams {
 }
 
 pub(super) fn resolve_rack_slot_params(slot: &RackSlotSnapshot, step: usize) -> ResolvedRackSlotParams {
-    let value = |param: RackSlotParam| param.clamp(slot.param_value_at_step(param, step));
+    resolve_rack_slot_params_for_update(slot, Some(step))
+}
+
+fn resolve_rack_slot_params_for_update(slot: &RackSlotSnapshot, step: Option<usize>) -> ResolvedRackSlotParams {
+    let value = |param: RackSlotParam| param.clamp(
+        step.map_or_else(|| slot.param_default(param), |step| slot.param_value_at_step(param, step))
+    );
     let max_polyphony = value(RackSlotParam::MaxPolyphony)
         .round()
         .clamp(1.0, MAX_VOICES as f32) as usize;
@@ -606,10 +612,7 @@ pub(super) fn fire_live_keyboard_rack_note(
     transpose: f32,
     mut rack: RackTrackSnapshot,
 ) -> bool {
-    let print_values = data
-        .state
-        .rack_macro_print_override
-        .values_for_track(parent_track_idx);
+    let print_values = data.state.rack_macro_values_for_track(parent_track_idx);
     apply_rack_macros_live(&mut rack, print_values);
     let gate_mode = if data.state.pattern.track_params[parent_track_idx].is_gate_on() {
         1.0
@@ -1191,15 +1194,15 @@ fn macro_targets_slot_param(targets: &[crate::sequencer::RackMacroTarget], slot_
 /// one. `MUTED_BY_SOLO` is a cross-slot value (computed from every slot's
 /// solo), so when this is true every slot's panner needs it re-pushed, not
 /// only the slots that own a lock.
-pub(super) fn off_step_solo_state_changed(
+fn off_step_solo_state_changed(
     rack: &RackTrackSnapshot,
-    step: usize,
+    step: Option<usize>,
     targets: &[crate::sequencer::RackMacroTarget],
 ) -> bool {
     let solo_idx = RackSlotParam::Solo.index();
     let mute_idx = RackSlotParam::Mute.index();
     rack.slots.iter().any(|slot| {
-        slot.param_plocks.rows.get(step).is_some_and(|row| {
+        step.and_then(|step| slot.param_plocks.rows.get(step)).is_some_and(|row| {
             row.get(solo_idx).copied().flatten().is_some()
                 || row.get(mute_idx).copied().flatten().is_some()
         })
@@ -1250,9 +1253,17 @@ pub(super) fn resolve_rack_slot_instrument_plocks(
     step: usize,
     extra: impl Fn(usize) -> bool,
 ) -> ScheduledInstrumentParams {
+    resolve_rack_slot_instrument_updates(slot, Some(step), extra)
+}
+
+fn resolve_rack_slot_instrument_updates(
+    slot: &EffectSlotSnapshot,
+    step: Option<usize>,
+    extra: impl Fn(usize) -> bool,
+) -> ScheduledInstrumentParams {
     let mut params = ScheduledInstrumentParams::new();
     for param_idx in 0..slot.num_params as usize {
-        if !(slot_has_explicit_plock(slot, step, param_idx) || extra(param_idx)) {
+        if !(step.is_some_and(|step| slot_has_explicit_plock(slot, step, param_idx)) || extra(param_idx)) {
             continue;
         }
         let Some(raw_idx) = slot.node_param_idx(param_idx) else {
@@ -1275,7 +1286,10 @@ pub(super) fn resolve_rack_slot_instrument_plocks(
         } else {
             (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
         };
-        let value = resolved_slot_param_value(slot, step, param_idx, 0.0);
+        let value = step.map_or_else(
+            || slot.defaults.get(param_idx).copied().unwrap_or(0.0),
+            |step| resolved_slot_param_value(slot, step, param_idx, 0.0),
+        );
         if !value.is_finite() {
             continue;
         }
@@ -1295,7 +1309,7 @@ pub(super) fn resolve_rack_slot_instrument_plocks(
 unsafe fn dispatch_rack_slot_effect_plocks_at_step(
     lg: *mut LiveGraph,
     effect_slots: &[EffectSlotSnapshot],
-    step: usize,
+    step: Option<usize>,
     extra: impl Fn(usize, usize) -> bool,
 ) {
     for (effect_slot_idx, slot) in effect_slots.iter().enumerate() {
@@ -1303,7 +1317,7 @@ unsafe fn dispatch_rack_slot_effect_plocks_at_step(
             continue;
         }
         for param_idx in 0..(slot.num_params as usize).min(MAX_SLOT_PARAMS) {
-            if !(slot_has_explicit_plock(slot, step, param_idx) || extra(effect_slot_idx, param_idx))
+            if !(step.is_some_and(|step| slot_has_explicit_plock(slot, step, param_idx)) || extra(effect_slot_idx, param_idx))
             {
                 continue;
             }
@@ -1324,7 +1338,9 @@ unsafe fn dispatch_rack_slot_effect_plocks_at_step(
             } else {
                 (slot.node_id as u64, idx as u64)
             };
-            let value = resolved_slot_param_value(slot, step, param_idx, slot.defaults[param_idx]);
+            let value = step.map_or(slot.defaults[param_idx], |step| {
+                resolved_slot_param_value(slot, step, param_idx, slot.defaults[param_idx])
+            });
             if !value.is_finite() {
                 continue;
             }
@@ -1418,6 +1434,19 @@ fn dispatch_rack_slot_params_to_active_voices(
     }
 }
 
+/// Pending takes have no sequenced boundaries of their own yet. Consume
+/// their controller mailbox on the audio thread so held notes respond even
+/// on an empty arrangement lane. Live updates carry no pattern step:
+/// only the latched macro targets are sent, never source-pattern locks.
+pub(super) fn apply_take_rack_macro_updates(data: &mut AudioCallbackData) {
+    let mut tracks = data.state.take_rack_macro_override.take_changed_tracks();
+    while tracks != 0 {
+        let track = tracks.trailing_zeros() as usize;
+        tracks &= tracks - 1;
+        apply_rack_param_updates(data, track, None);
+    }
+}
+
 /// Apply an Instrument Rack's p-locks at an inactive `step` to whatever is
 /// sounding (`ScheduledEventKind::RackParams`). Macros p-locked at the step
 /// or held by the print latch are applied first (they may rewrite slot
@@ -1428,6 +1457,10 @@ pub(super) fn apply_rack_params_off_step(
     track_idx: usize,
     step: usize,
 ) {
+    apply_rack_param_updates(data, track_idx, Some(step));
+}
+
+fn apply_rack_param_updates(data: &mut AudioCallbackData, track_idx: usize, step: Option<usize>) {
     let Some(mut rack) = data
         .scheduler_snapshot
         .tracks
@@ -1436,32 +1469,52 @@ pub(super) fn apply_rack_params_off_step(
     else {
         return;
     };
-    let print_values = data
-        .state
-        .rack_macro_print_override
-        .values_for_track(track_idx);
-    let mask = off_step_macro_mask(&rack, step, &print_values);
-    apply_rack_macros_at_step_masked(
-        &mut rack,
-        step,
-        [None; crate::sequencer::RACK_MACRO_COUNT],
-        print_values,
-        mask,
-    );
-    let targets = off_step_macro_targets(&rack, &mask);
+    let print_values = data.state.rack_macro_values_for_track(track_idx);
+    let mask = apply_rack_macros_for_update(&mut rack, step, print_values);
+    dispatch_rack_param_updates(data, track_idx, &rack, step, &mask);
+}
+
+fn apply_rack_macros_for_update(
+    rack: &mut RackTrackSnapshot,
+    step: Option<usize>,
+    print_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+) -> [bool; crate::sequencer::RACK_MACRO_COUNT] {
+    if let Some(step) = step {
+        let mask = off_step_macro_mask(rack, step, &print_values);
+        apply_rack_macros_at_step_masked(
+            rack, step, [None; crate::sequencer::RACK_MACRO_COUNT], print_values, mask,
+        );
+        mask
+    } else {
+        let macros = rack.macros.clone();
+        for rack_macro in &macros {
+            if let Some(value) = print_values[rack_macro.id.index()] {
+                apply_rack_macro_mappings(rack, rack_macro, value, None);
+            }
+        }
+        print_values.map(|value| value.is_some())
+    }
+}
+
+fn dispatch_rack_param_updates(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    rack: &RackTrackSnapshot,
+    step: Option<usize>,
+    mask: &[bool; crate::sequencer::RACK_MACRO_COUNT],
+) {
+    let targets = off_step_macro_targets(rack, mask);
 
     let resolved_slot_params: Vec<ResolvedRackSlotParams> = rack
         .slots
         .iter()
-        .map(|slot| resolve_rack_slot_params(slot, step))
+        .map(|slot| resolve_rack_slot_params_for_update(slot, step))
         .collect();
     let has_solo = resolved_slot_params.iter().any(|params| params.solo);
     let solo_state_changed = off_step_solo_state_changed(&rack, step, &targets);
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
-        let slot_param_locked = slot
-            .param_plocks
-            .rows
-            .get(step)
+        let slot_param_locked = step
+            .and_then(|step| slot.param_plocks.rows.get(step))
             .is_some_and(|row| row.iter().any(Option::is_some));
         if let Some(slot_params) = resolved_slot_params.get(slot_idx).copied() {
             let muted_by_solo = has_solo && !slot_params.solo;
@@ -1502,7 +1555,7 @@ pub(super) fn apply_rack_params_off_step(
                 },
             );
         }
-        let params = resolve_rack_slot_instrument_plocks(&slot.instrument_slot, step, |param_idx| {
+        let params = resolve_rack_slot_instrument_updates(&slot.instrument_slot, step, |param_idx| {
             macro_targets_slot_instrument_param(&targets, slot_idx, param_idx)
         });
         dispatch_rack_slot_params_to_active_voices(data, track_idx, slot_idx, slot, &params);
@@ -1522,10 +1575,7 @@ pub(super) fn fire_rack_resolved(
     mut rack: RackTrackSnapshot,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) {
-    let print_values = data
-        .state
-        .rack_macro_print_override
-        .values_for_track(track_idx);
+    let print_values = data.state.rack_macro_values_for_track(track_idx);
     apply_rack_macros_at_step(&mut rack, step, rack_macro_values, print_values);
     let (track_pan, track_send, gate_mode) = {
         let tp = &data.state.pattern.track_params[track_idx];
@@ -1740,6 +1790,51 @@ mod off_step_solo_tests {
         }
     }
 
+    #[test]
+    fn take_macro_monitor_ignores_source_plocks_and_preserves_untouched_envelope() {
+        let descriptor = EffectDescriptor::builtin_filter();
+        let mut voice = slot();
+        voice.instrument_slot = EffectSlotSnapshot::new_default(&descriptor, 46);
+        voice.instrument_slot.set_plock(0, 0, 999.0);
+        voice.instrument_slot.set_plock(0, 1, 0.0);
+        voice.instrument_slot.sync_to_descriptor(&descriptor, 47);
+        let mut rack = RackTrackSnapshot::new(vec![voice], default_rack_macros());
+        for (id, param) in [(0, "cutoff"), (1, "envelope")] {
+            rack.macros[id].value = 0.9;
+            rack.macros[id].mappings.push(RackMacroMapping {
+                target: RackMacroTarget::SlotInstrumentParam {
+                    slot: 0, param: param.to_string(), param_index: id,
+                },
+                range_min: if id == 0 { 70.0 } else { 0.0 },
+                range_max: if id == 0 { 600.0 } else { 8.0 },
+                curve: RackMacroCurve::Linear,
+            });
+        }
+        let state = SequencerState::new(2, Vec::new());
+        let id = crate::sequencer::RackMacroId::from_index(0).unwrap();
+        state.take_rack_macro_override.set(0, id, 0.3);
+        state.take_rack_macro_override.set(1, id, 0.7);
+        state.rack_macro_print_override.clear(); // unrelated mouse-up
+        assert_eq!(state.take_rack_macro_override.take_changed_tracks(), 3);
+        assert_eq!(state.take_rack_macro_override.take_changed_tracks(), 0);
+        assert_eq!(state.rack_macro_values_for_track(1)[0], Some(0.7));
+        let values = state.rack_macro_values_for_track(0);
+        let mut onset = rack.clone();
+        apply_rack_macros_live(&mut onset, values);
+        assert_eq!(onset.slots[0].instrument_slot.defaults[1], 7.2);
+        let mask = apply_rack_macros_for_update(&mut rack, None, values);
+        let targets = off_step_macro_targets(&rack, &mask);
+        let params = resolve_rack_slot_instrument_updates(&rack.slots[0].instrument_slot, None, |param| {
+            macro_targets_slot_instrument_param(&targets, 0, param)
+        });
+        assert_eq!(params.len(), 1, "no envelope reset or source-pattern lock push");
+        assert_eq!(params[0].idx, descriptor.params[0].node_param_idx as u64);
+        assert_eq!(params[0].value, onset.slots[0].instrument_slot.defaults[0]);
+        state.take_rack_macro_override.clear();
+        assert!(state.rack_macro_values_for_track(0).iter().all(Option::is_none));
+        assert!(state.rack_macro_values_for_track(1).iter().all(Option::is_none));
+    }
+
     /// `MUTED_BY_SOLO` is cross-slot: a Solo p-lock on slot 1 at an inactive
     /// step must re-push it to slot 0 too, even though slot 0 owns no lock.
     /// A gain lock alone must not (slot 0's live gain/pan would be clobbered
@@ -1747,18 +1842,19 @@ mod off_step_solo_tests {
     #[test]
     fn off_step_solo_lock_on_one_slot_repushes_every_slot() {
         let mut rack = RackTrackSnapshot::new(vec![slot(), slot()], default_rack_macros());
-        assert!(!off_step_solo_state_changed(&rack, 4, &[]));
+        assert!(!off_step_solo_state_changed(&rack, Some(4), &[]));
 
         rack.slots[1].param_plocks.rows[4][RackSlotParam::Gain.index()] = Some(0.5);
-        assert!(!off_step_solo_state_changed(&rack, 4, &[]), "gain lock is slot-local");
+        assert!(!off_step_solo_state_changed(&rack, Some(4), &[]), "gain lock is slot-local");
 
         rack.slots[1].param_plocks.rows[4][RackSlotParam::Solo.index()] = Some(0.0);
-        assert!(off_step_solo_state_changed(&rack, 4, &[]), "solo lock (even off) is cross-slot");
-        assert!(!off_step_solo_state_changed(&rack, 5, &[]));
+        assert!(off_step_solo_state_changed(&rack, Some(4), &[]), "solo lock (even off) is cross-slot");
+        assert!(!off_step_solo_state_changed(&rack, Some(5), &[]));
 
         rack.slots[1].param_plocks.rows[4][RackSlotParam::Solo.index()] = None;
         rack.slots[1].param_plocks.rows[4][RackSlotParam::Mute.index()] = Some(1.0);
-        assert!(off_step_solo_state_changed(&rack, 4, &[]), "mute lock is cross-slot too");
+        assert!(off_step_solo_state_changed(&rack, Some(4), &[]), "mute lock is cross-slot too");
+        assert!(!off_step_solo_state_changed(&rack, None, &[]), "live updates ignore source locks");
 
         // A live macro driving a slot's solo counts the same way.
         let mapping = |param: &str| RackMacroMapping {
@@ -1771,7 +1867,7 @@ mod off_step_solo_tests {
             curve: RackMacroCurve::Linear,
         };
         let empty = RackTrackSnapshot::new(vec![slot(), slot()], default_rack_macros());
-        assert!(!off_step_solo_state_changed(&empty, 4, &[mapping("gain").target]));
-        assert!(off_step_solo_state_changed(&empty, 4, &[mapping("solo").target]));
+        assert!(!off_step_solo_state_changed(&empty, Some(4), &[mapping("gain").target]));
+        assert!(off_step_solo_state_changed(&empty, Some(4), &[mapping("solo").target]));
     }
 }

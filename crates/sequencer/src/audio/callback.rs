@@ -165,6 +165,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         }
     }
     sync_rack_voice_pools(data, num_tracks);
+    apply_take_rack_macro_updates(data);
     sync_free_patch_transport_routes(data, num_tracks);
 
     // Process keyboard triggers

@@ -183,6 +183,31 @@ impl TrackPatternPool {
         self.sounds.patches.get_mut(&sound.patch).map(Arc::make_mut)
     }
 
+    /// Compose only the rack macro controls, without cloning device grids.
+    pub fn rack_macros(&self, id: PatternId) -> Option<Vec<RackMacro>> {
+        let mut macros = self.patch(id)?.rack_track.as_ref()?.macros.clone();
+        let seq = self.seq(id)?;
+        for rack_macro in &mut macros {
+            rack_macro.plocks = seq.rack_macro_plocks.get(rack_macro.id.index())
+                .cloned().unwrap_or_else(|| vec![None; MAX_STEPS]);
+        }
+        Some(macros)
+    }
+
+    pub fn set_rack_macros(&mut self, id: PatternId, mut macros: Vec<RackMacro>) -> bool {
+        if self.patch(id).and_then(|patch| patch.rack_track.as_ref()).is_none() {
+            return false;
+        }
+        let mut plocks = vec![vec![None; MAX_STEPS]; RACK_MACRO_COUNT];
+        for rack_macro in &mut macros {
+            plocks[rack_macro.id.index()] =
+                std::mem::replace(&mut rack_macro.plocks, vec![None; MAX_STEPS]);
+        }
+        Arc::make_mut(self.patterns.get_mut(&id).unwrap()).seq.rack_macro_plocks = plocks;
+        self.patch_mut(id).unwrap().rack_track.as_mut().unwrap().macros = macros;
+        true
+    }
+
     /// Replace a pattern wholesale: the sequence half lands on the stored
     /// pattern, the device half writes through its refs (§18.1 step 3 —
     /// this is the write path that makes every save-back an entity write).

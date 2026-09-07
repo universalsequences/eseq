@@ -220,7 +220,7 @@
 ;; Fixed width for the composed seqv-track-header column so every lane's time
 ;; axis starts at the same x; the scene lane leads with a spacer of the same
 ;; width (spec 4.2: the per-track sidebar role is played by the header).
-(def header-width 27.4)
+(def header-width 29.0)
 
 (def event-num (event key fallback)
   (let ((value (get event key)))
@@ -1359,6 +1359,7 @@
 (defstate placement-choice nil)
 (defstate placement-choice-track -1)
 (defstate placement-menu nil)
+(defstate scene-menu nil)
 
 (def cancel-placement ()
   (let ((was-active (not (= placement nil))))
@@ -1491,10 +1492,9 @@
           (clear-lane-ghost i)))
       :delete-items
       (track-delete i (get event :ids))
-      ;; Clipboard (region spec 5.3): the widget emits these when a lane has
-      ;; keyboard focus; the ui/input.rs seam emits the same commands when it
-      ;; does not. Both converge on the region primitives, which read the
-      ;; Rust-owned region — a clip click already made that a one-clip region.
+      ;; Clipboard (region spec 5.3): focused lanes and the arrangement mode
+      ;; both converge on these region primitives, which read the Rust-owned
+      ;; region — a clip click already made that a one-clip region.
       :copy-items
       (seq-song-region-copy)
       :paste-items
@@ -1508,7 +1508,7 @@
 
 ;; ── Scene drag-and-drop (Ableton-style, replaces the draw tool) ────────────
 ;; The transport scene pills are drag sources (:drag-type "transport-scene");
-;; dropping one on any lane inserts a row launching that scene at the drop
+;; dropping one on any lane sets scene state, preserving clips, at the drop
 ;; beat, snapped to the bar grid. The drop event's :sx is the normalized
 ;; (-1..1) position within the lane, which maps straight onto the shared view
 ;; span because lanes have no sidebar.
@@ -1531,6 +1531,67 @@
             ;; the drop point (the translator only uses :end in that case).
             :end (+ start (* beats-per-bar 4))
             :scene scene))))))
+
+(def scene-choice-label (scene)
+  (str (+ scene 1) " · " (scene-name scene)))
+
+(def set-scene-at (beat scene)
+  (do
+    (set! scene-menu nil)
+    (host-command "arrangement-scene-insert" (dict :beat beat :scene scene))))
+
+(def starting-scene-control ()
+  (let ((first (if (= (len SEQ.scene-spans) 0) nil (nth SEQ.scene-spans 0)))
+        (choices (range 0 (len SEQ.scene-names))))
+    (h-stack :padding 0.6 :gap 0 :align :center
+      (dropdown :key "arr-starting-scene" :width 15 :height 1.15 :font-size 9
+        :bg-color :mixer-strip-bg :border-color :mixer-strip-selected-bg
+        :badge-color :transparent
+        :value (if (and first (= (get first :start-beat) 0))
+                 (str "Start: " (scene-choice-label (get first :scene)))
+                 "Set starting scene")
+        :options (map |scene| (scene-choice-label scene) choices)
+        :on-change (lambda (label)
+          (let ((matches (filter |scene| (= (scene-choice-label scene) label) choices)))
+            (if (= (len matches) 0) nil (set-scene-at 0 (nth matches 0)))))))))
+
+(def open-scene-menu (event)
+  (do
+    (cancel-placement)
+    (set! placement-menu nil)
+    (let ((spans (filter |span| (and (<= (get span :start-beat) (pointer-time event))
+                                    (> (get span :end-beat) (pointer-time event))) SEQ.scene-spans)))
+      (set! scene-menu (dict :time (drop-time event)
+        :span (if (= (len spans) 0) nil (nth spans 0))
+        :col (get event :col) :row (get event :row))))))
+
+(def scene-menu-choices (beat current prefix)
+  (each (range 0 (len SEQ.scene-names)) |scene|
+    (menu-item (scene-choice-label scene) :key (str prefix scene)
+      :checked (= scene current)
+      :on-select (lambda (event) (set-scene-at beat scene)))))
+
+(def scene-context-menu ()
+  (let ((span (get scene-menu :span)))
+    (context-menu :is-open (not (= scene-menu nil))
+      :anchor-col (or (get scene-menu :col) 0)
+      :anchor-row (or (get scene-menu :row) 0)
+      :on-close (lambda () (set! scene-menu nil))
+      (menu-item "Set Scene Here" :key "arr-set-scene"
+        (scene-menu-choices (get scene-menu :time) nil "arr-set-scene-"))
+      (if (= span nil) nil
+        (list
+          (menu-item "Change Scene" :key "arr-change-scene"
+            (scene-menu-choices (get span :start-beat) (get span :scene) "arr-change-scene-"))
+          (menu-separator)
+          (menu-item "Place Scene Patterns" :key "arr-place-scene-patterns"
+            :on-select (lambda (event)
+              (do (set! scene-menu nil)
+                (host-command "arrangement-scene-patterns-place" (dict :beat (get span :start-beat))))))
+          (menu-item "Remove Scene" :key "arr-remove-scene"
+            :on-select (lambda (event)
+              (do (set! scene-menu nil)
+                (host-command "arrangement-scene-remove" (dict :beat (get span :start-beat)))))))))))
 
 (def placement-toolbar ()
   (let ((track SEQ.current-track))
@@ -1572,6 +1633,7 @@
 
 (def open-placement-menu (i event)
   (do
+    (set! scene-menu nil)
     (cancel-placement)
     (set! placement-menu
       (let ((clips (filter |clip| (and (or (get clip :pattern-id) (get clip :take-id))
@@ -1664,6 +1726,7 @@
     :cursor-color cursor-color
     :drop-types (list "transport-scene")
     :on-drop (lambda (event) (drop-scene event))
+    :on-right-click (lambda (event) (open-scene-menu event))
     :items (scene-items)
     :selection selection
     :selection-rect (scene-region-rect)
@@ -1719,6 +1782,7 @@
     :cursor-color cursor-color
     :drop-types (list "transport-scene")
     :on-drop (lambda (event) (drop-scene event))
+    :on-right-click (lambda (event) (open-scene-menu event))
     :items '()
     :selection selection
     :selection-rect (scene-region-rect)
@@ -1899,6 +1963,28 @@
         (eseq.track-collapse/visible-track-indices)))
     (reactive-set "SEQV" "arr-content-length" (content-length))))
 
+(def new-track-drop-zone ()
+  ;; Sized explicitly: the enclosing scroll v-stack sizes to content, so a
+  ;; flex height would collapse to the label. Three lane heights reads as a
+  ;; real target rather than a sliver under the last track.
+  (box :key "arr-new-track-drop-zone"
+    :width :fill :height (* 3 track-lane-height)
+    :background-color :buffer-bg
+    :drop-hover-background-color :mixer-control-bg
+    :border-width 2
+    :border-color :mixer-strip-border
+    :drop-hover-border-color :mixer-strip-selected-border
+    :corner-radius 16
+    :padding 0.5
+    :align :center
+    :drop-types (list "sample" "instrument" "sound")
+    :drop-meta (dict :kind "new-sample-track")
+    :on-drop (lambda (event) (eseq.sequencer/drop-new-track event))
+    (label "Drop sounds here to add a track"
+      :font-size 9.5
+      :color :gray
+      :bg :transparent)))
+
 (effect-buffer "*arrangement*"
   (v-stack :padding 0.0 :gap 0.0
     ;; Every root-level read lives inside its own subtree: a whole-list read
@@ -1911,6 +1997,8 @@
         (box :width 0 :height 0 :bg :transparent)))
     ;; The "No song yet" banner is gone (empty-arrangement spec 8): the
     ;; arrangement always exists, so there is no mode to explain.
+    (subtree :key "arr-scene-context-menu"
+      (scene-context-menu))
     (subtree :key "arr-placement-context-menu"
       (placement-context-menu))
     (subtree :key "arr-error-banner"
@@ -1931,6 +2019,7 @@
             :width header-width :height scene-lane-height
             (v-stack :width :fill :align :start :gap 0
               (placement-toolbar)
+              (starting-scene-control)
               (if (= placement nil) (box :width 0 :height 0)
                 (h-stack :gap 0
                   (box :width 0.6)
@@ -1941,7 +2030,11 @@
       (v-stack :width :fill :gap 0.0
         (each (eseq.track-collapse/visible-track-indices) |i|
           (subtree :key (str "arr-track-" (nth SEQ.track-ids i))
-            (track-row i)))))
+            (track-row i)))
+        ;; New-track drop zone (the *sequencer* buffer's idiom): the mixer is
+        ;; hidden by default in this view, so without this there is no place
+        ;; to drop a sample / instrument / Sound to add a track.
+        (new-track-drop-zone)))
     
       (subtree :key "bottom-arr-ucene-row"
       (box :width :fill :height 1
@@ -1951,3 +2044,33 @@
             )
           (bottom-lane))))
     ))
+
+;; Arrangement-local keyboard commands belong to the arrangement mode, not
+;; the host event loop. Backspace/Delete are the exception: their priority
+;; between marquee regions, focused clips, and selected steps stays in Rust.
+(def arrangement-place-key ()
+  (do (begin-placement) true))
+
+(def arrangement-region-copy-key ()
+  (if (= SEQ.song-region nil) false
+    (do (seq-song-region-copy) true)))
+
+(def arrangement-region-paste-key ()
+  (do (seq-song-region-paste) true))
+
+(def arrangement-region-duplicate-key ()
+  (if (= SEQ.song-region nil) false
+    (do (seq-song-region-duplicate) true)))
+
+(define-mode "arrangement-mode" :read-only true :live-keys true)
+;; Super is the macOS primary modifier; Ctrl is the primary modifier elsewhere.
+;; Register both platform spellings so the authored UI remains portable.
+(mode-bind-key "arrangement-mode" "s-p" "arrangement-place-key")
+(mode-bind-key "arrangement-mode" "C-p" "arrangement-place-key")
+(mode-bind-key "arrangement-mode" "s-c" "arrangement-region-copy-key")
+(mode-bind-key "arrangement-mode" "C-S-c" "arrangement-region-copy-key")
+(mode-bind-key "arrangement-mode" "s-v" "arrangement-region-paste-key")
+(mode-bind-key "arrangement-mode" "C-S-v" "arrangement-region-paste-key")
+(mode-bind-key "arrangement-mode" "s-d" "arrangement-region-duplicate-key")
+(mode-bind-key "arrangement-mode" "C-d" "arrangement-region-duplicate-key")
+(set-buffer-mode-for "*arrangement*" "arrangement-mode")

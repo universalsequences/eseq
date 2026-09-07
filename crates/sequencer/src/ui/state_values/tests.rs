@@ -1112,6 +1112,8 @@ mod drift_waveform_tests;
             ("ui/themes/mac-osx-light-theme.lisp", "light"),
             ("ui/themes/mac-osx-midnight-50.lisp", "Midnight 50"),
             ("ui/themes/phosphor.lisp", "Phosphor"),
+            ("ui/themes/phosphor-blue.lisp", "Phosphor Blue"),
+            ("ui/themes/aura.lisp", "Aura"),
         ] {
             let src = read_factory_source(path)
                 .unwrap_or_else(|error| panic!("read {path}: {error}"));
@@ -1152,6 +1154,7 @@ mod drift_waveform_tests;
             "ui/themes/mac-osx-ember.lisp",
             "ui/themes/mac-osx-violet.lisp",
             "ui/themes/tahoe-terminal.lisp",
+            "ui/themes/aura.lisp",
         ] {
             let src = read_factory_source(path)
                 .unwrap_or_else(|error| panic!("read {path}: {error}"));
@@ -9133,8 +9136,11 @@ mod drift_waveform_tests;
             "(and (= (nth SEQ.track-colors 0) (nth SEQ.track-colors 1))
                   (= (nth SEQ.track-colors 0) (get (nth SEQ.groups 0) :color)))"
         ).unwrap(), Some(Value::Bool(true)));
-        // Every selectable theme must release the override, even when loaded
-        // directly (not just through the registry wrapper).
+        // Every selectable theme must set its own tint (never inherit
+        // Phosphor's), even when loaded directly (not just through the
+        // registry wrapper). Themes that release it restore the authored
+        // colors; themes with a deliberate partial tint still never touch
+        // project state (asserted after the loop).
         for entry in std::fs::read_dir(sequencer::app_paths::app_paths().ui_dir().join("themes")).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("lisp")
@@ -9145,14 +9151,107 @@ mod drift_waveform_tests;
             editor.refresh_runtime_side_effects();
             editor.runtime_mut().eval_str(&format!("(load {:?})", path.to_str().unwrap())).unwrap();
             editor.refresh_runtime_side_effects();
-            assert_eq!(eseqlisp::theme::TRACK_TINT().a, 0.0, "{}", path.display());
+            let loaded_tint = eseqlisp::theme::TRACK_TINT();
+            assert_ne!(loaded_tint, tint, "{} must declare its own :track-tint", path.display());
             sync_track_color_state(editor.runtime_mut(), &app, &state);
-            assert_eq!(build_track_colors(&app), original);
-            assert_eq!(build_groups_value(&app.groups), original_groups);
+            let has_palette = eseqlisp::theme::track_palette().iter().any(|c| c.a > 0.0);
+            if loaded_tint.a == 0.0 && !has_palette {
+                assert_eq!(build_track_colors(&app), original, "{}", path.display());
+                assert_eq!(build_groups_value(&app.groups), original_groups);
+            }
         }
         assert_eq!(app.track_colors, authored, "theme switching must not edit project colors");
         assert_eq!(app.groups[0].color, authored_group_color,
             "theme switching must not edit the saved group palette");
+    }
+
+    #[test]
+    fn aura_theme_snaps_track_colors_onto_its_palette_without_a_flat_tint() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let mut app = test_app_for_track_visual_state(state.clone());
+        // Magenta, green and blue authored tracks: three distinct hue families.
+        app.track_colors = vec![
+            sequencer::track_color::TrackColor::palette_color(8),
+            sequencer::track_color::TrackColor::palette_color(3),
+            sequencer::track_color::TrackColor::palette_color(5),
+        ];
+        let authored = app.track_colors.clone();
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive("SEQ", vec![], true);
+        editor
+            .runtime_mut()
+            .eval_str("(load \"ui/themes.lisp\") (seq-theme-aura)")
+            .expect("apply Aura through its public command");
+        editor.refresh_runtime_side_effects();
+
+        let (tint, palette) = eseqlisp::theme::track_display_key();
+        assert_eq!(tint.a, 0.0, "Aura recolors tracks via its palette, not a flat tint");
+        let set: Vec<_> = palette.iter().filter(|c| c.a > 0.0).collect();
+        assert_eq!(set.len(), 6, "Aura sets its six hues");
+        let variant_tint = eseqlisp::theme::VARIANT_TINT();
+        assert!(variant_tint.a < 0.25, "variant tint stays a faint wash over the palette snap");
+
+        sync_track_color_state(editor.runtime_mut(), &app, &state);
+        let displayed = value_list_maps_as_rgb(&reactive_field_value(
+            editor.runtime_mut(),
+            "SEQ",
+            "track-colors",
+        ));
+        assert_eq!(displayed.len(), 3);
+        for (i, rgb) in displayed.iter().enumerate() {
+            let a = authored[i];
+            assert_ne!(*rgb, [a.r, a.g, a.b], "track {i} must display recolored");
+        }
+        // Magenta track lands nearest Aura pink, green nearest mint, blue nearest sky.
+        let expect = |rgb: [f32; 3], target: [f32; 3]| {
+            let hue = |c: [f32; 3]| {
+                let (h, _, _) = palette_hsl(c);
+                h
+            };
+            let d = (hue(rgb) - hue(target)).abs();
+            assert!(d.min(360.0 - d) < 25.0, "displayed {rgb:?} not near palette {target:?}");
+        };
+        expect(displayed[0], [0.965, 0.580, 1.0]);
+        expect(displayed[1], [0.380, 1.0, 0.792]);
+        expect(displayed[2], [0.510, 0.886, 1.0]);
+        // Distinct authored hues stay distinct after the snap.
+        assert_ne!(displayed[0], displayed[1]);
+        assert_ne!(displayed[1], displayed[2]);
+        assert_eq!(app.track_colors, authored, "theme switching must not edit project colors");
+
+        // Palette snap also applies to the variant / sound palette set.
+        let snapped = super::track_and_mixer::themed_variant_rgb([0.909_803_9, 0.415_686_28, 0.415_686_28]);
+        assert_ne!(snapped, [0.909_803_9, 0.415_686_28, 0.415_686_28]);
+    }
+
+    fn palette_hsl([r, g, b]: [f32; 3]) -> (f32, f32, f32) {
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let d = max - min;
+        if d <= f32::EPSILON {
+            return (0.0, 0.0, max);
+        }
+        let h = if max == r {
+            60.0 * (((g - b) / d) % 6.0)
+        } else if max == g {
+            60.0 * ((b - r) / d + 2.0)
+        } else {
+            60.0 * ((r - g) / d + 4.0)
+        };
+        (h.rem_euclid(360.0), 1.0, (max + min) * 0.5)
+    }
+
+    fn value_list_maps_as_rgb(value: &Value) -> Vec<[f32; 3]> {
+        match value {
+            Value::List(items) => items
+                .iter()
+                .map(|item| {
+                    let rgb = number_list_values(&item.borrow());
+                    [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32]
+                })
+                .collect(),
+            other => panic!("expected list of colors, got {other:?}"),
+        }
     }
 
     #[test]
@@ -21109,6 +21208,92 @@ mod drift_waveform_tests;
     }
 
     #[test]
+    fn metal_seq_arrangement_view_hides_mixer_by_default_and_restores_on_return() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/mixer-panel-visible true)")
+            .expect("show mixer panel");
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.seq-panels/seq-open-arrangement)")
+            .expect("open arrangement view");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.seq-core-state/mixer-panel-visible")
+                .unwrap(),
+            Some(Value::Bool(false)),
+            "entering the arrangement should hide the mixer strip"
+        );
+        let arr_spec = editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.seq-layout/lower-panel-layout-spec "*fx*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height eseq.seq-step-tabs/lower-fx-layout-height)"#)
+            .expect("build arrangement layout spec")
+            .expect("layout spec");
+        assert!(
+            value_contains_string(&arr_spec, "*arrangement*")
+                && !value_contains_string(&arr_spec, "*mixer*"),
+            "arrangement layout should not carry the mixer: {arr_spec:?}"
+        );
+        let layout = editor.widget_layout().expect("arrangement layout");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/arr-new-track-drop-zone").is_some(),
+            "arrangement must expose a new-track drop zone while the mixer is hidden"
+        );
+
+        // The transport mixer button still brings the mixer back for this visit.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.seq-panels/seq-toggle-mixer-panel)")
+            .expect("show mixer in arrangement");
+        editor.refresh_runtime_side_effects();
+        let arr_mixer_spec = editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.seq-layout/lower-panel-layout-spec "*fx*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height eseq.seq-step-tabs/lower-fx-layout-height)"#)
+            .expect("build arrangement+mixer layout spec")
+            .expect("layout spec");
+        assert!(
+            value_contains_string(&arr_mixer_spec, "*arrangement*")
+                && value_contains_string(&arr_mixer_spec, "*mixer*"),
+            "mixer button should re-add the mixer under the arrangement: {arr_mixer_spec:?}"
+        );
+
+        // Returning to the session view restores the pre-arrangement mixer state
+        // (visible), regardless of what happened during the visit.
+        editor
+            .runtime_mut()
+            .eval_str("(do (eseq.seq-panels/seq-toggle-mixer-panel) (eseq.seq-panels/seq-show-sequencer-main))")
+            .expect("hide mixer then return to session");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.seq-core-state/mixer-panel-visible")
+                .unwrap(),
+            Some(Value::Bool(true)),
+            "returning to the session view should restore the remembered mixer state"
+        );
+
+        // A session that had the mixer hidden stays hidden across a round trip.
+        editor
+            .runtime_mut()
+            .eval_str("(do (eseq.seq-panels/seq-toggle-mixer-panel) (eseq.seq-panels/seq-toggle-arrangement) (eseq.seq-panels/seq-toggle-arrangement))")
+            .expect("round trip with mixer hidden");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.seq-core-state/mixer-panel-visible")
+                .unwrap(),
+            Some(Value::Bool(false))
+        );
+    }
+
+    #[test]
     fn metal_seq_mixer_panel_toggle_hides_and_restores_mixer_layout_spec() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -27507,6 +27692,82 @@ mod drift_waveform_tests;
     }
 
     #[test]
+    fn metal_seq_arrangement_scene_controls_dispatch_from_real_timeline_right_clicks() {
+        let mut editor = arrangement_region_editor(2, &[]);
+        editor.runtime_mut().eval_str(
+            "(do (reactive-set \"SEQ\" \"scene-names\" (list \"Verse\" \"Chorus\"))
+                 (reactive-set \"SEQ\" \"scene-spans\" (list)))"
+        ).unwrap();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        let selector = find_layout_node_by_stable_key_suffix(&layout, "/arr-starting-scene").unwrap();
+        assert_eq!(selector.widget_type, "dropdown");
+        assert!(selector.rect.width.is_finite() && selector.rect.width > 0.0);
+        assert!(selector.rect.height.is_finite() && selector.rect.height > 0.0);
+        let callback = selector.props.get("on-change").unwrap().clone();
+        let Value::List(options) = selector.props.get("options").unwrap() else { panic!("scene options"); };
+        let choice = options[1].borrow().clone();
+        editor.drain_host_commands();
+        editor.runtime_mut().invoke(callback, vec![choice]).unwrap();
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().any(|command| matches!(command,
+            eseqlisp::host::HostCommand::Custom { name, payload }
+                if name == "arrangement-scene-insert" && *payload == map_value([
+                    ("beat", Value::Number(0.0)), ("scene", Value::Number(1.0))]))));
+
+        let right_click = |editor: &mut eseqlisp::Editor| {
+            eseqlisp::widget_render::clear_overlay();
+            let layout = editor.widget_layout().unwrap();
+            let row = find_layout_node_by_stable_key_suffix(&layout, "/scene-lane").unwrap();
+            let lane = find_layout_node_by_widget_type(row, "timeline").unwrap();
+            let col = lane.rect.col + lane.rect.width * 0.125;
+            let row = lane.rect.row + lane.rect.height * 0.8;
+            for kind in [crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right),
+                         crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Right)] {
+                editor.handle_mouse_precise(crossterm::event::MouseEvent {
+                    kind, column: col as u16, row: row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                }, 0, 0, 96, 40, col, row);
+            }
+            editor.refresh_runtime_side_effects();
+        };
+        right_click(&mut editor);
+        let layout = editor.widget_layout().unwrap();
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/arr-change-scene").is_none());
+        editor.handle_key(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Right, crossterm::event::KeyModifiers::NONE));
+        let layout = editor.widget_layout().unwrap();
+        let choice = find_layout_node_by_stable_key_suffix(&layout, "/arr-set-scene-1").unwrap();
+        assert!(choice.rect.width.is_finite() && choice.rect.width > 0.0);
+        assert!(choice.rect.height.is_finite() && choice.rect.height > 0.0);
+        let callback = choice.props.get("on-select").unwrap().clone();
+        editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().any(|command| matches!(command,
+            eseqlisp::host::HostCommand::Custom { name, payload }
+                if name == "arrangement-scene-insert" && *payload == map_value([
+                    ("beat", Value::Number(8.0)), ("scene", Value::Number(1.0))]))));
+
+        editor.runtime_mut().set_reactive("SEQ", "scene-spans", test_list(vec![scene_span(0.0, 16.0, 0.0)]));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        right_click(&mut editor);
+        let layout = editor.widget_layout().unwrap();
+        for key in ["/arr-change-scene", "/arr-place-scene-patterns", "/arr-remove-scene"] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key).expect("scene span action");
+            assert!(node.rect.width.is_finite() && node.rect.width > 0.0);
+            assert!(node.rect.height.is_finite() && node.rect.height > 0.0);
+        }
+        let action = find_layout_node_by_stable_key_suffix(&layout, "/arr-place-scene-patterns").unwrap();
+        let callback = action.props.get("on-select").unwrap().clone();
+        editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().any(|command| matches!(command,
+            eseqlisp::host::HostCommand::Custom { name, payload }
+                if name == "arrangement-scene-patterns-place" && *payload == map_value([
+                    ("beat", Value::Number(0.0))]))));
+    }
+
+    #[test]
     fn metal_seq_arrangement_header_and_timeline_click_select_the_track() {
         let mut editor = arrangement_region_editor(2, &[]);
         let selected_tracks: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
@@ -27618,11 +27879,27 @@ mod drift_waveform_tests;
             assert!(node.rect.height.is_finite() && node.rect.height > 0.0);
         }
         let _ = editor.drain_host_commands();
-        editor.runtime_mut().eval_str("(eseq.arrangement/begin-placement)").unwrap();
+        for modifiers in [
+            crossterm::event::KeyModifiers::SUPER,
+            crossterm::event::KeyModifiers::CONTROL,
+        ] {
+            assert_eq!(
+                editor.active_mode_keybinding(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('p'),
+                    modifiers,
+                )),
+                Some("eseq.arrangement/arrangement-place-key"),
+            );
+        }
+        let place_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('p'),
+            eseqlisp::ui::platform::primary_shortcut_modifier(),
+        );
+        editor.handle_key(place_key);
         assert_eq!(editor.runtime_mut().eval_str("(eseq.arrangement/cancel-placement)").unwrap(),
             Some(Value::Bool(true)));
         assert!(editor.drain_host_commands().is_empty());
-        editor.runtime_mut().eval_str("(eseq.arrangement/begin-placement)").unwrap();
+        editor.handle_key(place_key);
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();
         let lane = find_layout_node_by_widget_type(
@@ -28269,9 +28546,8 @@ mod drift_waveform_tests;
     /// and copy/delete have a target (Ableton). The span travels with the
     /// Region spec 5.3: the widget's clipboard actions on ANY arrangement
     /// lane lower to the region commands, and the edit cursor mirrors into
-    /// Rust so the Cmd-V seam has a paste target. Both lanes converge on the
-    /// same three natives — the ui/input.rs seam emits the same commands when
-    /// no lane holds focus.
+    /// Rust so the arrangement mode's paste command has a target. Both lanes
+    /// converge on the same three natives.
     #[test]
     fn metal_seq_arrangement_clipboard_actions_lower_to_region_commands() {
         let mut editor = arrangement_region_editor(3, &[]);
@@ -28330,6 +28606,134 @@ mod drift_waveform_tests;
             *cursors.lock().unwrap(),
             vec![vec![8.0, 2.0]],
             "the edit cursor mirrors beat and track into Rust"
+        );
+    }
+
+    #[test]
+    fn metal_seq_arrangement_mode_owns_region_keyboard_commands() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        use eseqlisp::ui::platform::{
+            clipboard_shortcut_modifier_for, primary_shortcut_modifier,
+            CURRENT_SHORTCUT_PLATFORM,
+        };
+
+        let mut editor = arrangement_region_editor(3, &[]);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        for name in [
+            "seq-song-region-copy",
+            "seq-song-region-paste",
+            "seq-song-region-duplicate",
+            "seq-song-region-delete",
+        ] {
+            let calls = calls.clone();
+            editor.runtime_mut().register_native(name, move |_args, _ctx| {
+                calls.lock().unwrap().push(name);
+                Ok(Value::Bool(true))
+            });
+        }
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-region",
+            test_number_list(&[0.0, 2.0, 4.0, 8.0]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-bound-clip", Value::Nil);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.runtime_mut().eval_str(
+            "(do (def arrangement-step-delete-count (state 0))
+                 (def eseq.step-grid-interactions/delete-selected-steps ()
+                   (set! arrangement-step-delete-count (+ arrangement-step-delete-count 1))))"
+        ).expect("install selected-step delete probe");
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        state.pattern.patterns[0].set_step_active(0, true);
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([0])));
+        let step_clipboard = Arc::new(Mutex::new(None));
+        let primary = primary_shortcut_modifier();
+        assert_eq!(
+            editor.active_mode_keybinding(KeyEvent::new(
+                KeyCode::Backspace,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            None,
+            "priority-sensitive deletion must remain in the host dispatcher",
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("SEQ.song-bound-clip").unwrap(),
+            Some(Value::Nil),
+        );
+        let clipboard_modifier = clipboard_shortcut_modifier_for(CURRENT_SHORTCUT_PLATFORM);
+        let keys = [
+            KeyEvent::new(KeyCode::Char('c'), clipboard_modifier),
+            KeyEvent::new(KeyCode::Char('v'), clipboard_modifier),
+            KeyEvent::new(KeyCode::Char('d'), primary),
+        ];
+
+        for key in keys {
+            if !handle_metal_command_shortcut(
+                &mut editor,
+                &key,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ) {
+                editor.handle_key(key);
+            }
+        }
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                "seq-song-region-copy",
+                "seq-song-region-paste",
+                "seq-song-region-duplicate",
+            ],
+        );
+
+        let _ = editor.drain_host_commands();
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(
+                KeyCode::Backspace,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, .. }]
+                if name == "song-region-delete"
+        ));
+        assert!(
+            state.pattern.patterns[0].is_active(0),
+            "marquee deletion must take priority over selected-step deletion"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-region", Value::Nil);
+        editor.runtime_mut().run_reactive_cycle();
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(
+                KeyCode::Backspace,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("arrangement-step-delete-count").unwrap(),
+            Some(Value::Number(1.0)),
+            "without a marquee region, Backspace must reach selected-step deletion"
         );
     }
 
@@ -51843,6 +52247,110 @@ mod drift_waveform_tests;
             rendered_debug.contains("shd-delay-5") && !rendered_debug.contains("shd-delay-6"),
             "tap rows should follow the live taps value: {rendered:?}"
         );
+    }
+
+    // Local-library validation is opt-in: CI checkouts do not contain .local.
+    #[test]
+    #[ignore = "requires the local spectral-tamer effect and UI"]
+    fn local_spectral_tamer_ui_has_visible_modulatable_controls() {
+        let source_path = sequencer::lisp_host::effect_source_path("spectral-tamer");
+        let dsp = std::fs::read_to_string(&source_path).expect("local effect DSP");
+        let ui_path = source_path.with_file_name("ui.lisp");
+        let ui = std::fs::read_to_string(&ui_path).expect("local effect UI");
+        let compiled = sequencer::lisp_host::compile_and_load(&dsp, 48_000).expect("compile effect");
+        let mut desc = sequencer::effects::EffectDescriptor::from_lisp_manifest_with_asset_base(
+            "spectral-tamer", &compiled.manifest.params, source_path.parent(),
+            compiled.manifest.n_inputs, compiled.manifest.n_outputs,
+        );
+        sequencer::lisp_host::append_effect_host_modulation_controls(&mut desc, &compiled.manifest);
+        let names = ["amount", "attack", "release", "gate", "low-cut", "high-cut",
+            "tilt", "sidechain", "freeze", "delta", "input", "output"];
+        for name in names {
+            let idx = desc.params.iter().position(|p| p.name == name).unwrap();
+            for slot in 1..=4 {
+                assert!(desc.instrument_modulation_targets.iter().any(|t|
+                    t.base_param_idx == idx && t.modulator_slot == slot), "{name} slot {slot}");
+            }
+        }
+        let state = Arc::new(SequencerState::new(
+            1, vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let effects = build_effects_value(&state, 0, &[vec![desc.clone()]], &selected);
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().eval_str(&build_custom_audio_fx_ui_source_with_overlay(Some((
+            "spectral-tamer".to_string(), ui_path.display().to_string(), ui,
+        )))).expect("load custom UI");
+        let mut projection_app = test_app_for_track_visual_state(Arc::clone(&state));
+        projection_app.graph.effect_descriptors = vec![vec![desc.clone()]];
+        for idx in 0..desc.params.len() {
+            sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
+        }
+        editor.runtime_mut().set_reactive("SEQ", "effects", effects);
+        editor.runtime_mut().eval_str(r#"(set-layout (list :buf "*fx*" :hide-status true))"#).unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let id = editor.buffers.iter().find(|b| b.name == "*fx*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(300, 36);
+        for mod_slot in 0..=4 {
+            let depth_mode = mod_slot != 0;
+            editor.runtime_mut().eval_str(&format!(r#"
+                (set! eseq.effects.state/effect-mods-chain "audio")
+                (set! eseq.effects.state/effect-mods-track 0)
+                (set! eseq.effects.state/effect-mods-slot 0)
+                (set! eseq.effects.state/effect-mods-rack-slot -1)
+                (set! eseq.effects.state/effect-mods-bus -1)
+                (set! eseq.effects.state/effect-selected-mod-slot {})
+                (set! eseq.effects.state/effect-mods-open {})
+            "#, mod_slot.max(1), if depth_mode { "true" } else { "false" })).unwrap();
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().expect("effect layout");
+            assert_finite_layout_tree(&layout);
+            let panel = find_layout_node_by_debug_name(&layout, "spectral-tamer-panel").expect("custom panel");
+            assert_finite_nonzero_rect(panel, "custom panel");
+            assert_layout_inside(panel, &layout, "visible custom panel");
+            for name in names {
+                let row = find_layout_node_by_debug_name(panel, &format!("spectral-tamer-param-{name}"))
+                    .unwrap_or_else(|| panic!("missing control {name}"));
+                let binary = matches!(name, "sidechain" | "freeze" | "delta");
+                let widget_type = if binary && !depth_mode { "button" } else { "knob-number" };
+                let control = find_layout_node_by_widget_type(row, widget_type)
+                    .unwrap_or_else(|| panic!("missing {widget_type} for {name}, depth={depth_mode}"));
+                assert_finite_nonzero_rect(control, name);
+                assert_layout_inside(control, panel, name);
+                if !binary && !depth_mode {
+                    assert!(matches!(control.props.get("value"), Some(Value::ReactiveRef { .. })),
+                        "{name} must have a live parameter binding");
+                }
+                let base_idx = desc.params.iter().position(|p| p.name == name).unwrap();
+                let target_idx = if depth_mode {
+                    desc.instrument_modulation_targets.iter().find(|target|
+                        target.base_param_idx == base_idx && target.modulator_slot == mod_slot)
+                        .unwrap().depth_param_idx
+                } else { base_idx };
+                let (callback, args, expected_value) = if widget_type == "button" {
+                    (control.props["on-click"].clone(), vec![Value::Number(0.0); 3], 1.0)
+                } else {
+                    let p = &desc.params[target_idx];
+                    let value = (p.min + (p.max - p.min) * 0.75) as f64;
+                    (control.props["on-change"].clone(), vec![Value::Number(value)], value)
+                };
+                editor.drain_host_commands();
+                editor.runtime_mut().invoke(callback, args).expect("parameter callback");
+                let commands = editor.drain_host_commands();
+                let payload = commands.iter().find_map(|command| match command {
+                    eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }
+                        if name == "set-effect-param" => Some(payload),
+                    _ => None,
+                }).unwrap_or_else(|| panic!("{name} slot {mod_slot}: missing parameter command"));
+                assert_eq!(*payload["slot-idx"].borrow(), Value::Number(0.0));
+                assert_eq!(*payload["param-idx"].borrow(), Value::Number(target_idx as f64));
+                assert_eq!(*payload["value"].borrow(), Value::Number(expected_value));
+            }
+        }
     }
 
     #[test]

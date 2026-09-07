@@ -130,6 +130,7 @@
       :mixer-volume-handle            '(0.43 0.69 0.24 1.0)
       :arrangement-loop               '(0.43 0.69 0.24 1.0)
       :arrangement-cursor             '(0.66 0.94 0.40 1.0)
+      :piano-white-key              '(0.660 0.940 0.400 1.0)
       :piano-key-border               '(0.17 0.26 0.085 1.0)
       :piano-black-key                '(0.035 0.055 0.008 1.0)
       :piano-white-lane               '(0.06 0.09 0.018 1.0)
@@ -143,6 +144,17 @@
       :control-on-fg                      '(0.035 0.055 0.008)
       ;; Opaque tint replaces display colors; saved project colors are untouched.
       :track-tint                         '(0.520 0.880 0.250 1.0)
+      ;; P-lock variants, sound palette swatches and glyph accents: mostly
+      ;; phosphor, with a little of their own hue left so they stay tellable.
+      :variant-tint                       '(0.520 0.880 0.250 0.72)
+      :track-palette-0  '(0.0 0.0 0.0 0.0)
+      :track-palette-1  '(0.0 0.0 0.0 0.0)
+      :track-palette-2  '(0.0 0.0 0.0 0.0)
+      :track-palette-3  '(0.0 0.0 0.0 0.0)
+      :track-palette-4  '(0.0 0.0 0.0 0.0)
+      :track-palette-5  '(0.0 0.0 0.0 0.0)
+      :track-palette-6  '(0.0 0.0 0.0 0.0)
+      :track-palette-7  '(0.0 0.0 0.0 0.0)
       :accent                             '(0.520 0.880 0.250)
       :bg                                 '(0.035 0.055 0.008)
       :fg                                 '(0.550 0.760 0.320)

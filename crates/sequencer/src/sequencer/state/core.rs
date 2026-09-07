@@ -520,6 +520,65 @@ impl RackMacroPrintOverride {
     }
 }
 
+/// Take-local macro positions, independent of the single pointer print latch.
+/// Multiple armed racks can receive hardware CCs in one capture. The audio
+/// callback consumes the changed-track mailbox to update already sounding
+/// voices; note-ons read the persistent values until capture ends.
+pub struct TakeRackMacroOverride {
+    values: Vec<[AtomicU64; RACK_MACRO_COUNT]>,
+    changed_tracks: AtomicU64,
+}
+
+impl Default for TakeRackMacroOverride {
+    fn default() -> Self {
+        Self {
+            values: (0..MAX_TRACKS)
+                .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                .collect(),
+            changed_tracks: AtomicU64::new(0),
+        }
+    }
+}
+
+impl TakeRackMacroOverride {
+    pub fn set(&self, track: usize, id: RackMacroId, value: f32) {
+        let Some(values) = self.values.get(track) else { return };
+        values[id.index()].store(
+            (1_u64 << 32) | u64::from(value.clamp(0.0, 1.0).to_bits()),
+            Ordering::Release,
+        );
+        self.changed_tracks.fetch_or(1_u64 << track, Ordering::Release);
+    }
+
+    pub fn values_for_track(&self, track: usize) -> [Option<f32>; RACK_MACRO_COUNT] {
+        std::array::from_fn(|index| {
+            let value = self.values.get(track)?[index].load(Ordering::Acquire);
+            (value >> 32 != 0).then(|| f32::from_bits(value as u32))
+        })
+    }
+
+    pub fn take_changed_tracks(&self) -> u64 {
+        self.changed_tracks.swap(0, Ordering::AcqRel)
+    }
+
+    pub fn clear(&self) {
+        for track in &self.values {
+            for value in track {
+                value.store(0, Ordering::Release);
+            }
+        }
+        self.changed_tracks.store(0, Ordering::Release);
+    }
+}
+
+impl SequencerState {
+    pub fn rack_macro_values_for_track(&self, track: usize) -> [Option<f32>; RACK_MACRO_COUNT] {
+        let take = self.take_rack_macro_override.values_for_track(track);
+        let print = self.rack_macro_print_override.values_for_track(track);
+        std::array::from_fn(|index| take[index].or(print[index]))
+    }
+}
+
 pub struct SequencerState {
     pub pattern: PatternState,
     pub transport: TransportState,
@@ -532,6 +591,7 @@ pub struct SequencerState {
     /// Rack-macro analog of `device_print_override`: latched macro values the
     /// audio thread substitutes when applying rack macros at a trigger.
     pub rack_macro_print_override: RackMacroPrintOverride,
+    pub take_rack_macro_override: TakeRackMacroOverride,
     pub runtime: RuntimeBindingState,
     pub(super) scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     pub(super) scheduler_snapshot_version: AtomicU64,

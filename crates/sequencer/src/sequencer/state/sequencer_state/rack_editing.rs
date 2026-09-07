@@ -236,9 +236,18 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return;
         };
+        let mut rack_config = rack_track.clone();
+        let mut plocks = vec![vec![None; MAX_STEPS]; RACK_MACRO_COUNT];
+        for rack_macro in &mut rack_config.macros {
+            plocks[rack_macro.id.index()] =
+                std::mem::replace(&mut rack_macro.plocks, vec![None; MAX_STEPS]);
+        }
+        for stored in pool.patterns.values_mut().map(Arc::make_mut) {
+            stored.seq.rack_macro_plocks = plocks.clone();
+        }
         for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
             prepare_patch_for_rack(patch);
-            patch.rack_track = Some(rack_track.clone());
+            patch.rack_track = Some(rack_config.clone());
         }
     }
 
@@ -857,15 +866,10 @@ impl SequencerState {
         let pattern_id = scenes
             .effective_pattern_id(track)
             .expect("validated rack pattern");
-        let rack_macro = scenes
-            .track_pools
-            .get_mut(track)
-            .and_then(|pool| pool.patch_mut(pattern_id))
-            .and_then(|patch| patch.rack_track.as_mut())
-            .and_then(|rack| rack.macros.get_mut(index))
-            .expect("validated rack macro");
-        update(rack_macro);
-        true
+        let pool = &mut scenes.track_pools[track];
+        let mut macros = pool.rack_macros(pattern_id).expect("validated rack macros");
+        update(&mut macros[index]);
+        pool.set_rack_macros(pattern_id, macros)
     }
 
     /// Set one rack macro's parameter locks in both live and persisted views as
@@ -903,7 +907,7 @@ impl SequencerState {
     }
 
     pub fn set_live_rack_macro_default(&self, track: usize, id: RackMacroId, value: f32) {
-        self.rack_macro_runtime_values.set_default(track, id, value);
+        self.rack_macro_runtime_values.set_live_default(track, id, value);
     }
 
     pub(crate) fn rack_macro_runtime_values(&self) -> Arc<RackMacroRuntimeValues> {
@@ -933,10 +937,21 @@ impl SequencerState {
             .track_pools
             .get_mut(track)
         {
+            // Capture every sequence before changing shared configuration:
+            // a non-idempotent mapping edit must not accumulate once per
+            // chunk of a take sharing the same Patch.
+            let patterns = pool.patterns.keys().filter_map(|id| {
+                pool.rack_macros(*id).map(|macros| (*id, macros))
+            }).collect::<Vec<_>>();
             for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
                 if let Some(rack) = patch.rack_track.as_mut() {
                     update(&mut rack.macros);
+                    for rack_macro in &mut rack.macros { rack_macro.plocks.fill(None); }
                 }
+            }
+            for (id, mut macros) in patterns {
+                update(&mut macros);
+                pool.set_rack_macros(id, macros);
             }
         }
     }
@@ -1119,12 +1134,9 @@ impl SequencerState {
         let scenes = self.pattern.scenes.lock().unwrap();
         let pool = scenes.track_pools.get(track)
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
-        let patterns = pool.patterns.iter().map(|(pattern, stored)| {
-            pool.sounds
-                .patches
-                .get(&stored.sound.patch)
-                .and_then(|patch| patch.rack_track.as_ref())
-                .map(|rack| (*pattern, rack.macros.clone()))
+        let patterns = pool.patterns.keys().map(|pattern| {
+            pool.rack_macros(*pattern)
+                .map(|macros| (*pattern, macros))
                 .ok_or_else(|| format!("Track {} pattern {:?} has no rack", track + 1, pattern))
         }).collect::<Result<Vec<_>, String>>()?;
         Ok(RackMacroPatternStateSnapshot { live, patterns })
@@ -1144,10 +1156,9 @@ impl SequencerState {
             return Err(format!("Track {} rack macro pattern topology changed", track + 1));
         }
         for (pattern, macros) in &snapshot.patterns {
-            let rack = pool.patch_mut(*pattern)
-                .and_then(|patch| patch.rack_track.as_mut())
-                .ok_or_else(|| format!("Track {} pattern {:?} has no rack", track + 1, pattern))?;
-            rack.macros.clone_from(macros);
+            if !pool.set_rack_macros(*pattern, macros.clone()) {
+                return Err(format!("Track {} pattern {:?} has no rack", track + 1, pattern));
+            }
         }
         drop(scenes);
         let mut racks = self.pattern.rack_tracks.lock().unwrap();

@@ -1187,8 +1187,9 @@ pub fn lower_rows_to_arrangement<C: ArrangementContext>(
         }
     }
 
-    // The scene events stamp their cells first — that is what a scene event
-    // DOES (spec 6.2) — and the declared overrides then truncate on top.
+    // Declarative rows describe scene launches, so lowering materializes
+    // their cells first and declared overrides then truncate on top. Editing
+    // an existing arrangement scene marker does not use this launch path.
     stamp_scene_clips(&mut arrangement, ctx, 0.0, end_beat)?;
 
     // Track lanes: one run per contiguous stretch of a lane's launch state.

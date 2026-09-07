@@ -15,7 +15,9 @@
     (dict :name "mac-osx-ember" :command "seq-theme-mac-osx-ember" :file "@/ui/themes/mac-osx-ember.lisp")
     (dict :name "mac-osx-violet" :command "seq-theme-mac-osx-violet" :file "@/ui/themes/mac-osx-violet.lisp")
     (dict :name "tahoe-terminal" :command "seq-theme-tahoe-terminal" :file "@/ui/themes/tahoe-terminal.lisp")
-    (dict :name "phosphor" :command "seq-theme-phosphor" :file "@/ui/themes/phosphor.lisp")))
+    (dict :name "phosphor" :command "seq-theme-phosphor" :file "@/ui/themes/phosphor.lisp")
+    (dict :name "phosphor-blue" :command "seq-theme-phosphor-blue" :file "@/ui/themes/phosphor-blue.lisp")
+    (dict :name "aura" :command "seq-theme-aura" :file "@/ui/themes/aura.lisp")))
 
 (def seq-apply-theme-file (name file)
   (do
@@ -58,3 +60,9 @@
 
 (def seq-theme-phosphor ()
   (seq-apply-theme-file "phosphor" "@/ui/themes/phosphor.lisp"))
+
+(def seq-theme-phosphor-blue ()
+  (seq-apply-theme-file "phosphor-blue" "@/ui/themes/phosphor-blue.lisp"))
+
+(def seq-theme-aura ()
+  (seq-apply-theme-file "aura" "@/ui/themes/aura.lisp"))

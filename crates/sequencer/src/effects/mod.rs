@@ -1317,6 +1317,30 @@ mod tests {
     }
 
     #[test]
+    fn explicit_plock_value_requires_both_value_and_current_identity() {
+        let desc = EffectDescriptor::builtin_filter();
+        let mut slot = EffectSlotSnapshot::new_default(&desc, 42);
+        assert!(slot.set_plock(3, 0, 0.7));
+        slot.sync_to_descriptor(&desc, 43);
+
+        assert_eq!(slot.explicit_plock_value(3, 0), Some(0.7));
+        // Identity metadata on an empty cell must still resolve as a default,
+        // never as an off-step parameter change.
+        slot.plock_param_ids[3][1] = slot.param_node_id(1);
+        assert_eq!(slot.explicit_plock_value(3, 1), None);
+        assert_eq!(slot.explicit_plock_value(4, 0), None);
+        assert_eq!(slot.explicit_plock_value(usize::MAX, 0), None);
+        assert_eq!(slot.explicit_plock_value(3, usize::MAX), None);
+        assert_eq!(slot.resolved_param_value(3, 1, -1.0), slot.defaults[1]);
+
+        slot.plock_param_ids[3][0].as_mut().unwrap().logical_id = 42;
+        assert_eq!(slot.explicit_plock_value(3, 0), None, "stale node identity");
+        assert_eq!(slot.resolved_param_value(3, 0, -1.0), slot.defaults[0]);
+        slot.plock_param_ids[3][0] = None;
+        assert_eq!(slot.explicit_plock_value(3, 0), None, "missing identity");
+    }
+
+    #[test]
     fn empty_slot_apply_descriptor_preserves_dense_param_mappings() {
         let params: Vec<ParamDescriptor> = (0..150)
             .map(|idx| ParamDescriptor {
@@ -10663,17 +10687,16 @@ impl EffectSlotSnapshot {
         true
     }
 
-    pub fn resolved_param_value(&self, step: usize, param_idx: usize, fallback: f32) -> f32 {
-        let default = self.defaults.get(param_idx).copied().unwrap_or(fallback);
-        let Some(value) = self
+    /// A stored lock on the currently bound parameter. Identity metadata can
+    /// survive on empty cells after descriptor rebinding; it is not evidence
+    /// of a lock without an actual value.
+    pub fn explicit_plock_value(&self, step: usize, param_idx: usize) -> Option<f32> {
+        let value = self
             .plocks
             .get(step)
             .and_then(|row| row.get(param_idx))
             .copied()
-            .flatten()
-        else {
-            return default;
-        };
+            .flatten()?;
         let expected_id = self.param_node_id(param_idx);
         let stored_id = self
             .plock_param_ids
@@ -10681,11 +10704,12 @@ impl EffectSlotSnapshot {
             .and_then(|row| row.get(param_idx))
             .copied()
             .flatten();
-        if expected_id.is_some() && stored_id == expected_id {
-            value
-        } else {
-            default
-        }
+        (expected_id.is_some() && stored_id == expected_id).then_some(value)
+    }
+
+    pub fn resolved_param_value(&self, step: usize, param_idx: usize, fallback: f32) -> f32 {
+        self.explicit_plock_value(step, param_idx)
+            .unwrap_or_else(|| self.defaults.get(param_idx).copied().unwrap_or(fallback))
     }
 
     pub fn clear_plock(&mut self, step: usize, param_idx: usize) -> bool {

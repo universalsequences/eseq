@@ -542,13 +542,19 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
                 })?;
         }
         for effect in &spec.audio_fx {
-            app.add_builtin_effect_sync(track, effect)
-                .map_err(|error| {
-                    format!(
-                        "failed to add audio FX {effect:?} to track {}: {error}",
-                        track + 1
-                    )
-                })?;
+            let result = if sequencer::effects::EffectDescriptor::builtin_insert(effect).is_some()
+                || sequencer::effects::dgen_builtin::contains(effect)
+            {
+                app.add_builtin_effect_sync(track, effect)
+            } else {
+                app.add_saved_effect_sync(track, effect)
+            };
+            result.map_err(|error| {
+                format!(
+                    "failed to add audio FX {effect:?} to track {}: {error}",
+                    track + 1
+                )
+            })?;
         }
         for effect in &spec.rack_slot_audio_fx {
             if spec.kind != CaptureTrackKind::LayerRack || spec.samples.is_empty() {
@@ -1026,6 +1032,10 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         .runtime_mut()
         .eval_str("(capture-after-sync)")
         .map_err(|error| format!("capture-after-sync failed: {error:?}"))?;
+    // Flush the hook's side effects now: a theme it applied must be current
+    // before the palette / clip-sound colors below are published, since those
+    // rows carry the theme's variant tint baked into their RGB.
+    editor.refresh_runtime_side_effects();
     if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
         sync_macro_state(editor.runtime_mut(), &app);
         sync_song_state(

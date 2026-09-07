@@ -61,6 +61,11 @@ struct TimelineLane {
     label: Option<String>,
     sidebar_bg: Option<crate::backend::Color>,
     label_fg: Option<crate::backend::Color>,
+    /// Piano sidebar: this lane is a black key. Read from the `sidebar-bg`
+    /// keyword NAME (`:black`), not the resolved color — a light theme's
+    /// `:black` and `:white` are both ink, so color equality cannot tell the
+    /// two kinds of key apart.
+    black_key: bool,
 }
 
 #[derive(Clone)]
@@ -1136,9 +1141,9 @@ fn build_primitives(
             let lane = &view.lanes[lane_index];
             let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK());
             if view.sidebar_style == SidebarStyle::Piano {
-                let white_key = theme::WHITE();
+                let white_key = theme::PIANO_WHITE_KEY();
                 let border_color = theme::PIANO_KEY_BORDER();
-                let is_black_key = sidebar_bg == theme::BLACK();
+                let is_black_key = lane.black_key;
                 primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                     x: rect.col,
                     y: row_start,
@@ -1225,7 +1230,7 @@ fn build_primitives(
                         scale: 1.0,
                         fg: label_fg,
                         bg: if view.sidebar_style == SidebarStyle::Piano {
-                            theme::WHITE()
+                            theme::PIANO_WHITE_KEY()
                         } else {
                             sidebar_bg
                         },
@@ -1236,7 +1241,12 @@ fn build_primitives(
         let lane = &view.lanes[lane_index];
         let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK());
         let grid_color = view.background_color.unwrap_or_else(|| {
-            if sidebar_bg == theme::WHITE() {
+            let white_lane = if view.sidebar_style == SidebarStyle::Piano {
+                !lane.black_key
+            } else {
+                sidebar_bg == theme::WHITE()
+            };
+            if white_lane {
                 theme::PIANO_WHITE_LANE()
             } else {
                 theme::PIANO_BLACK_LANE()
@@ -4113,6 +4123,7 @@ fn get_lanes(props: &HashMap<String, Value>) -> Vec<TimelineLane> {
             label: None,
             sidebar_bg: None,
             label_fg: None,
+            black_key: false,
         }];
     };
     items
@@ -4123,6 +4134,10 @@ fn get_lanes(props: &HashMap<String, Value>) -> Vec<TimelineLane> {
                 label: map.get("label").and_then(as_string),
                 sidebar_bg: map.get("sidebar-bg").and_then(as_color),
                 label_fg: map.get("label-fg").and_then(as_color),
+                black_key: map
+                    .get("sidebar-bg")
+                    .and_then(as_string)
+                    .is_some_and(|name| name == "black"),
             })
         })
         .collect()

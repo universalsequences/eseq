@@ -5356,7 +5356,12 @@
         );
         slot.set_plock(step, 2, 0.25);
 
-        let snapshot = state.publish_scheduler_snapshot();
+        let mut snapshot = (*state.publish_scheduler_snapshot()).clone();
+        // Loaded/rebound slots may carry identity metadata on empty cells.
+        // In particular, the unlocked end point must not override slicing.
+        Arc::make_mut(&mut snapshot.tracks[track])
+            .instrument_slot
+            .sync_to_descriptor(&desc, 12);
         let params = resolve_sampler_params(&snapshot, track, step);
         assert_eq!(params.slice_mode, 1.0);
         assert_eq!(params.slice_sensitivity, 0.8);

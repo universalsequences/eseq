@@ -1,6 +1,6 @@
 # Arrangement Lane Model — Author in Lanes, Compile to Rows
 
-Status: draft (rev 2, 2026-07-25 — the scene *backdrop* is removed; see 6.2)
+Status: draft (rev 3, 2026-09-05 — scene state is independent of clip placement; see 6.2)
 Supersedes: the *authoring/storage* portions of docs/song-mode-spec.md §5
 (`ProjectSong` as the stored model, §5.6 row primitives). Playback (§7-§9),
 takes phase model (takes spec §7), and capture *semantics* (§7.4, takes spec
@@ -58,9 +58,9 @@ non-problem or a one-object edit.
 
 - **Arrangement** — the new stored authoring model (scene lane + track
   lanes + end/loop). Replaces stored `ProjectSong`.
-- **Scene event** — `(start_beat, scene)`: a marker plus the gesture that
-  **stamps** the scene's cells as real clips across its span. It governs
-  nothing at playback. Spans are derived (event → next event).
+- **Scene event** — `(start_beat, scene)`: recalls scene state, including
+  group/master effect and scene-keyed sequencer parameters, until the next
+  marker. Editing a marker never edits track clips.
 - **Clip** — a spanned object on one track lane: `[start_beat, end_beat)`,
   a source (pattern / take — never sourceless), and `offset_steps`.
 - **Stamp** — write a scene's cells onto every track lane over a span, as
@@ -158,11 +158,17 @@ That is the whole rule. **Everything audible is a visible clip** — one the
 user can select, move, or delete. A span with no clip is silent: deleting a
 clip is exactly "the clip stops playing", with nothing revealed underneath.
 
-Scene events resolve nothing. What a scene event does is **stamp**: placing
-one (or repointing or moving it) writes the scene's cells onto every track
-lane across its span as ordinary clips. A track whose cell in that scene is
-empty gets no clip and is silent there. Stamping truncates what it lands on,
-like every other clip write (§14).
+Scene events select global scene state; track playback comes entirely from
+clips. Inserting, changing, moving, and deleting a marker preserve every clip.
+**Place Scene Patterns** is an explicit action on a marker: it writes that
+scene's linked patterns from the marker to the next marker or arrangement end,
+truncating overlapping clips (§14). Empty scene cells clear that span on their
+tracks. The whole action is one undo entry.
+
+The header's starting-scene selector sets a marker at beat 0. The scene-lane
+context menu offers Set Scene Here, Change Scene, Place Scene Patterns, and
+Remove Scene. Scene drops set state only. Performed scene launches during
+arrangement recording still capture patterns as heard.
 
 #### 6.2.2 Stamping is anchored on the global timeline
 
@@ -170,9 +176,8 @@ A stamped clip carries the **free-run** offset `steps(start) mod L` (takes
 spec §7.2) — the phase the pattern would have if it had been looping since
 beat 0 — *not* a phase measured from the scene event. So source step 0 always
 falls on the same absolute beats, whatever the boundary does: **modifying
-scenes never changes the flow of rhythm of the clips below.** Dragging a
-boundary changes how *much* of a pattern you hear, never *when* its steps
-fall.
+scenes never changes the flow of rhythm of the clips below.** Marker edits
+preserve the clips outright; explicit pattern placement uses this phase rule.
 
 Anchoring on the event instead (tried first) restarted the pattern at step 0
 at the boundary, so shortening a scene onto a beat that is not a whole number
@@ -199,10 +204,9 @@ nothing* — the "backdrop". It shipped and was removed. Two reasons:
   "empty clip" occluding the backdrop: an object that renders as a gap and
   behaves as content. You could not look at a lane and know what it played.
 
-The cost of removing it is that a scene event materializes clips instead of
-being a cheap marker, and that removing a scene event re-stamps its merged
-span rather than leaving clips alone. That is the trade: bigger on disk,
-completely legible on screen.
+Explicit pattern placement and recording materialize clips; scene-state
+markers are independent. This keeps silent gaps silent without coupling
+parameter recall to pattern replacement.
 
 ## 7. Compile: `Arrangement → ProjectSong`
 
@@ -291,25 +295,15 @@ Clip ops (per track lane):
 
 Scene ops:
 
-The first three **stamp** (§6.2), each in one undo entry; remove does not:
+Each operation makes one undo entry and preserves track lanes:
 
-- `arr_scene_event_insert(beat, scene)` — stamps the new event's whole span.
-- `arr_scene_event_set(scene)` — re-stamps that event's span with the new
-  scene's cells.
-- `arr_scene_event_move(beat)` — re-stamps the span it vacates (now the
-  predecessor's) together with the one it lands on. Shortening a scene span
-  IS this operation, and §6.2.2 is what keeps it musically safe.
-- `arr_scene_event_remove(beat)` — **removes only the marker.** Its span
-  merges into the predecessor's label and **the clips stay** (removing the
-  event at 0.0 is rejected, like row 0 today).
+- `arr_scene_event_insert(beat, scene)` — insert or replace a marker.
+- `arr_scene_event_set(beat, scene)` — change an existing marker's scene.
+- `arr_scene_event_move(from, to)` — move a marker, replacing one at the destination.
+- `arr_scene_event_remove(beat)` — remove any marker, including beat 0.
 
-The asymmetry is deliberate. Insert/set/move all mean "launch this scene
-here", so replacing the content under them is the intent. Remove means "clean
-up this marker": the complaint that started the whole pivot was that deleting
-scene changes to tidy the scene row destroyed the pattern changes riding
-beneath them. Clips are the truth, so a removal leaves the predecessor's
-label spanning clips a since-removed scene stamped — which reads honestly,
-because what plays is the clips.
+`arr_scene_patterns_place(beat)` explicitly stamps the marker's span (§6.2).
+It preserves markers and replaces overlapping clips in one undo entry.
 
 Whole-arrangement ops: `arr_set_end`, `arr_set_loop`, `arr_replace`,
 `arr_clear` — direct ports of today's equivalents.
@@ -497,9 +491,8 @@ diffs are 3 (many tests to port — song_edit's 25, song_region's 22) and 4
 - A span with no clip is silent. There is no fallback of any kind.
 - A clip always has a source; `LaneSource::Empty` survives only as a
   *compiled override*, never as a stored clip.
-- A scene event stamps clips and decides nothing at playback. Insert, set,
-  and move re-stamp their span; **remove does not** — it deletes the marker
-  and never touches a clip (rev 1's guarantee, kept).
+- Scene events recall scene state. All marker edits preserve clips; only
+  explicit Place Scene Patterns and recorded launches stamp patterns.
 - Stamped clips free-run against the global clock (§6.2.2), so a scene edit
   can never shift the rhythm of the patterns below it.
 - `LaneSource::Empty` on a *write* op means silence, and silence is an

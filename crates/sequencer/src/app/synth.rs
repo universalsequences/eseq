@@ -1411,6 +1411,9 @@ impl App {
         id: crate::sequencer::RackMacroId,
         step: Option<usize>,
     ) -> Option<f32> {
+        if let Some(value) = self.state.take_rack_macro_override.values_for_track(track)[id.index()] {
+            return Some(value);
+        }
         let racks = self.state.pattern.rack_tracks.lock().unwrap();
         let rack_macro = racks
             .get(track)
@@ -1585,6 +1588,15 @@ impl App {
             return;
         };
         for (slot_idx, slot) in rack.slots.iter().enumerate() {
+            // Same ownership as ordinary instrument tracks: note-on stamps
+            // instrument-mode voices. A binding refresh must not overwrite
+            // their sounding macro/p-lock values with raw sound defaults.
+            if slot.instrument_type == InstrumentType::Sampler
+                || (slot.instrument_type == InstrumentType::Custom
+                    && slot.instrument_run_mode == crate::sequencer::CustomInstrumentRunMode::Instrument)
+            {
+                continue;
+            }
             for param_idx in 0..slot.instrument_slot.num_params as usize {
                 let value = slot
                     .instrument_slot

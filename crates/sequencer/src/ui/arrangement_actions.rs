@@ -163,7 +163,7 @@ pub(crate) fn arrangement_action_song_commands(
             }
         }
         // Create (double-click draw or scene drop): insert a scene change
-        // launching the chosen scene. A create beyond the committed song end
+        // recalling the chosen scene state without editing clips. A create beyond the committed song end
         // first extends the end to the gesture's :end (DAW convention:
         // dropping past the end grows the arrangement) — that gesture is two
         // primitives and therefore two undo entries.

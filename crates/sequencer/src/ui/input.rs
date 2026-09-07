@@ -1258,115 +1258,73 @@ fn handle_mode_clipboard_shortcut(
     {
         return false;
     }
+    invoke_active_mode_shortcut(editor, key, "clipboard")
+}
+
+fn invoke_active_mode_shortcut(
+    editor: &mut Editor,
+    key: &crossterm::event::KeyEvent,
+    kind: &str,
+) -> bool {
     let Some(handler) = editor.active_mode_keybinding(*key).map(str::to_string) else {
         return false;
     };
-    if let Err(error) = editor.runtime_mut().invoke_global(&handler, Vec::new()) {
-        editor.handle_host_event(HostEvent::Status(format!(
-            "Could not run clipboard shortcut: {error:?}"
-        )));
-    }
+    let handled = match editor.runtime_mut().invoke_global(&handler, Vec::new()) {
+        Ok(Some(Value::Bool(false))) => false,
+        Ok(_) => true,
+        Err(error) => {
+            editor.handle_host_event(HostEvent::Status(format!(
+                "Could not run {kind} shortcut: {error:?}"
+            )));
+            true
+        }
+    };
     editor.refresh_runtime_side_effects();
-    editor.mark_needs_redraw();
-    true
+    if handled {
+        editor.mark_needs_redraw();
+    }
+    handled
 }
 
-/// Arrangement (Arr tab) region clipboard seam (region spec 5.3).
-///
-/// The region and the edit cursor are Rust-owned but published as
-/// `SEQ.song-region` / `SEQ.song-bound-clip`, which is the single source of
-/// truth this reads — no second mirror to drift. The actual work happens in
-/// the region host commands, where the clipboard handle is in scope.
-fn arrangement_view_is_active(editor: &Editor) -> bool {
-    editor.active_buffer().name == "*arrangement*"
-}
-
-/// Whether a published `SEQ.*` value is set (non-nil).
-fn published_value_is_set(editor: &mut Editor, expr: &str) -> bool {
-    editor
-        .runtime_mut()
-        .eval_str(expr)
-        .ok()
-        .flatten()
-        .is_some_and(|value| !matches!(value, eseqlisp::vm::Value::Nil))
-}
-
-fn enqueue_region_command(editor: &mut Editor, name: &str) {
-    editor
-        .runtime_mut()
-        .enqueue_host_command(HostCommand::Custom {
-            name: name.to_string(),
-            payload: Value::Nil,
-        });
-}
-
-/// Platform-primary C / V / D, or Backspace, over the arrangement. Returns
-/// true when the key was consumed.
-///
-/// Backspace only takes the key for a MARQUEE region (region set, no clip
-/// selected). A clip click also sets a one-clip region (spec 4.1 as amended),
-/// and that case must keep falling through to the existing clip-delete path.
-fn handle_arrangement_region_shortcut(
+/// Arrangement Backspace/Delete must run before the app-wide selected-step
+/// fallback, but only for a marquee region. A selected clip deliberately falls
+/// through to the focused timeline, while no region falls through to step
+/// deletion. This priority-sensitive routing remains host-owned.
+fn handle_arrangement_region_delete_shortcut(
     editor: &mut Editor,
     key: &crossterm::event::KeyEvent,
-) -> bool {
-    handle_arrangement_region_shortcut_for(editor, key, CURRENT_SHORTCUT_PLATFORM)
-}
-
-fn handle_arrangement_region_shortcut_for(
-    editor: &mut Editor,
-    key: &crossterm::event::KeyEvent,
-    platform: ShortcutPlatform,
 ) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
 
-    if !arrangement_view_is_active(editor)
+    if editor.active_buffer().name != "*arrangement*"
         || editor.minibuffer_prompt().is_some()
         || editor.prompt_text().is_some()
         || focused_widget_captures_text_input(editor)
+        || !matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
+        || key.modifiers != KeyModifiers::NONE
     {
         return false;
     }
-    match (key.code, key.modifiers) {
-        (KeyCode::Char('c') | KeyCode::Char('C'), modifiers)
-            if modifiers == clipboard_shortcut_modifier_for(platform) =>
-        {
-            if !published_value_is_set(editor, "SEQ.song-region") {
-                return false;
-            }
-            enqueue_region_command(editor, "song-region-copy");
-            true
-        }
-        (KeyCode::Char('v') | KeyCode::Char('V'), modifiers)
-            if modifiers == clipboard_shortcut_modifier_for(platform) =>
-        {
-            // No payload: the command pastes at the mirrored arrangement
-            // cursor, floored to the clipboard's own grid. An empty clipboard
-            // reports on the status line rather than falling through to a
-            // shortcut that means nothing here.
-            enqueue_region_command(editor, "song-region-paste");
-            true
-        }
-        (KeyCode::Char('d') | KeyCode::Char('D'), modifiers)
-            if has_primary_shortcut_modifier_for(modifiers, platform) =>
-        {
-            if !published_value_is_set(editor, "SEQ.song-region") {
-                return false;
-            }
-            enqueue_region_command(editor, "song-region-duplicate");
-            true
-        }
-        (KeyCode::Backspace | KeyCode::Delete, KeyModifiers::NONE) => {
-            if !published_value_is_set(editor, "SEQ.song-region")
-                || published_value_is_set(editor, "SEQ.song-bound-clip")
-            {
-                return false;
-            }
-            enqueue_region_command(editor, "song-region-delete");
-            true
-        }
-        _ => false,
+    let value_is_set = |editor: &mut Editor, expr: &str| {
+        editor
+            .runtime_mut()
+            .eval_str(expr)
+            .ok()
+            .flatten()
+            .is_some_and(|value| !matches!(value, Value::Nil))
+    };
+    if !value_is_set(editor, "SEQ.song-region")
+        || value_is_set(editor, "SEQ.song-bound-clip")
+    {
+        return false;
     }
+    editor
+        .runtime_mut()
+        .enqueue_host_command(HostCommand::Custom {
+            name: "song-region-delete".to_string(),
+            payload: Value::Nil,
+        });
+    true
 }
 
 #[cfg(test)]
@@ -1489,7 +1447,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         return true;
     }
 
-    if handle_arrangement_region_shortcut(editor, key) {
+    if handle_arrangement_region_delete_shortcut(editor, key) {
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
         return true;
@@ -2605,8 +2563,6 @@ mod live_keyboard_tests {
         SequencerHistoryShortcut, SoftStepParamEdit, StepClipboardShortcut,
         UiInvalidationQueue, PROCESS_LANE_MODE_OFFSET, step_clipboard_shortcut_for,
     };
-    #[cfg(not(target_os = "macos"))]
-    use super::handle_arrangement_region_shortcut;
     use crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -3707,46 +3663,6 @@ mod live_keyboard_tests {
                 Some(StepClipboardShortcut::Copy),
             );
         }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn linux_arrangement_clipboard_requires_shift_but_duplicate_does_not() {
-        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-        editor.open_scratch_buffer("*arrangement*", "");
-        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
-        editor
-            .runtime_mut()
-            .eval_str("(def SEQ (dict :song-region '(0 1) :song-bound-clip nil))")
-            .expect("install arrangement region fixture");
-
-        for key in ['c', 'v'] {
-            assert!(!handle_arrangement_region_shortcut(
-                &mut editor,
-                &KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL),
-            ));
-        }
-
-        let clipboard_modifiers = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
-        for (key, expected) in [('c', "song-region-copy"), ('v', "song-region-paste")] {
-            assert!(handle_arrangement_region_shortcut(
-                &mut editor,
-                &KeyEvent::new(KeyCode::Char(key), clipboard_modifiers),
-            ));
-            assert!(matches!(
-                editor.drain_host_commands().as_slice(),
-                [HostCommand::Custom { name, .. }] if name == expected
-            ));
-        }
-
-        assert!(handle_arrangement_region_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
-        ));
-        assert!(matches!(
-            editor.drain_host_commands().as_slice(),
-            [HostCommand::Custom { name, .. }] if name == "song-region-duplicate"
-        ));
     }
 
     #[test]

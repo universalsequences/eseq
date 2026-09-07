@@ -16,7 +16,8 @@
 
 use crate::record_quantize::RecordQuantize;
 use crate::sequencer::{
-    PatternSnapshot, SoundRefs, StepParam, TakeId, TrackPatternData, MAX_STEPS,
+    PatternSnapshot, RackMacroId, SoundRefs, StepParam, TakeId, TrackPatternData,
+    MAX_STEPS, RACK_MACRO_COUNT,
 };
 
 use super::song_transport::SongTransportMode;
@@ -55,6 +56,51 @@ pub struct TakeRecordingSession {
     /// Shared with launch capture so notes and spliced rows use one domain.
     timeline_start_beat: f64,
     lanes: Vec<Option<PendingTakeLane>>,
+    /// Controller changes are staged independently of note release. A held
+    /// note has not minted its lane yet when its first knob turn arrives.
+    macro_changes: Vec<Vec<TakeMacroChange>>,
+}
+
+#[derive(Clone, Copy)]
+struct TakeMacroChange {
+    raw_beats: f64,
+    id: RackMacroId,
+    value: f32,
+}
+
+impl PendingTakeLane {
+    fn apply_macro_changes(&mut self, timeline_start_beat: f64, changes: &[TakeMacroChange]) {
+        if changes.is_empty() || self.template.rack_track.is_none() {
+            return;
+        }
+        let mut changes = changes.to_vec();
+        changes.sort_by(|a, b| a.raw_beats.total_cmp(&b.raw_beats));
+        let step_at = |change: &TakeMacroChange| {
+            ((timeline_start_beat + change.raw_beats - self.punch_in_beat) / self.step_beats)
+                .floor().max(0.0) as usize
+        };
+        let end = changes.iter().map(|change| step_at(change) + 1).max().unwrap_or(0);
+        self.max_end_steps = self.max_end_steps.max(end as f64);
+        let total_steps = self.max_end_steps.ceil() as usize;
+        while self.chunks.len() * MAX_STEPS < total_steps {
+            self.chunks.push(self.template.clone());
+        }
+        let mut values = [None; RACK_MACRO_COUNT];
+        let mut next = 0;
+        for step in 0..total_steps {
+            while next < changes.len() && step_at(&changes[next]) <= step {
+                let change = changes[next];
+                values[change.id.index()] = Some(change.value);
+                next += 1;
+            }
+            let rack = self.chunks[step / MAX_STEPS].rack_track.as_mut().unwrap();
+            for rack_macro in &mut rack.macros {
+                if let Some(value) = values[rack_macro.id.index()] {
+                    rack_macro.plocks[step % MAX_STEPS] = Some(value);
+                }
+            }
+        }
+    }
 }
 
 impl TakeRecordingSession {
@@ -62,6 +108,7 @@ impl TakeRecordingSession {
         Self {
             timeline_start_beat,
             lanes: (0..track_count).map(|_| None).collect(),
+            macro_changes: (0..track_count).map(|_| Vec::new()).collect(),
         }
     }
 
@@ -99,7 +146,10 @@ impl TakeRecordingSession {
             .enumerate()
             .filter_map(|(track, lane)| {
                 lane.filter(|lane| lane.max_end_steps > 0.0)
-                    .map(|lane| (track, lane))
+                    .map(|mut lane| {
+                        lane.apply_macro_changes(self.timeline_start_beat, &self.macro_changes[track]);
+                        (track, lane)
+                    })
             })
             .collect()
     }
@@ -257,6 +307,85 @@ mod tests {
             app.state.effective_track_pattern_id(0).is_some(),
             "the session cell resolves — it is inert-but-visible, not absent"
         );
+    }
+
+    #[test]
+    fn rack_macro_capture_is_take_local_and_survives_note_release_and_chunk_rollover() {
+        let (mut app, _) = capture_app();
+        let mut rack = crate::sequencer::RackTrackSnapshot::new(
+            Vec::new(), crate::sequencer::default_rack_macros(),
+        );
+        rack.macros[0].value = 0.2;
+        rack.macros[0].plocks[3] = Some(0.9);
+        rack.macros[1].plocks[5] = Some(0.8);
+        app.state.set_rack_track_for_all_pattern_snapshots(0, rack);
+        let id = RackMacroId::from_index(0).unwrap();
+        let step_beats = app.state.pattern.track_params[0].get_timebase().step_beats(MAX_STEPS);
+        // Controller changes arrive while the chord is still held, before
+        // note release creates the detached lane. The playhead may wrap many
+        // times; capture addresses take time, not the scene pattern cursor.
+        app.take_record_rack_macro_at_beats(0, id, 0.3, 4.0 * step_beats).unwrap();
+        app.take_record_rack_macro_at_beats(0, id, 0.4, 5.0 * step_beats).unwrap();
+        app.take_record_rack_macro_at_beats(0, id, 0.6, (MAX_STEPS + 4) as f64 * step_beats).unwrap();
+        for note in [0.0, 7.0] {
+            assert!(app.take_record_note_at_beats(
+                0, 2.0 * step_beats, note, (MAX_STEPS + 8) as f32, RecordQuantize::Off,
+            ));
+        }
+        let pending = app.take_recording.as_ref().unwrap().clone().into_pending();
+        let lane = &pending[0].1;
+        assert_eq!(lane.chunks[0].chord_snapshot.steps[0], vec![0.0, 7.0]);
+        let first = lane.chunks[0].rack_track.as_ref().unwrap();
+        let second = lane.chunks[1].rack_track.as_ref().unwrap();
+        assert_eq!(first.macros[0].plocks[0], None);
+        assert_eq!(first.macros[0].plocks[2], Some(0.3));
+        assert_eq!(first.macros[0].plocks[3], Some(0.4));
+        assert_eq!(first.macros[0].plocks[MAX_STEPS - 1], Some(0.4));
+        assert_eq!(second.macros[0].plocks[1], Some(0.4));
+        assert_eq!(second.macros[0].plocks[2], Some(0.6));
+        assert_eq!(second.macros[0].plocks[7], Some(0.6));
+        assert!(first.macros[1].plocks.iter().all(Option::is_none));
+        let source = app.state.pattern.rack_tracks.lock().unwrap()[0].clone().unwrap();
+        assert_eq!(source.macros[0].value, 0.2);
+        assert_eq!(source.macros[0].plocks[3], Some(0.9));
+        assert_eq!(source.macros[1].plocks[5], Some(0.8));
+        let committed = app.register_pending_takes(pending).unwrap();
+        let chunks = app.state.with_project_scenes(|scenes| {
+            let pool = &scenes.track_pools[0];
+            let take = scenes.take_pools[0].get(committed[0].take_id).unwrap();
+            take.chunks.iter().map(|id| pool.get(*id).unwrap()).collect::<Vec<_>>()
+        });
+        assert_eq!(chunks[1].rack_track.as_ref().unwrap().macros[0].plocks[2], Some(0.6));
+        app.discard_song_capture_take();
+        assert!(app.state.take_rack_macro_override.values_for_track(0).iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn rack_macro_take_commit_undo_redo_keeps_automation_off_the_shared_sound() {
+        let (mut app, _) = capture_app();
+        app.state.set_rack_track_for_all_pattern_snapshots(0,
+            crate::sequencer::RackTrackSnapshot::new(Vec::new(), crate::sequencer::default_rack_macros()));
+        let id = RackMacroId::from_index(0).unwrap();
+        app.take_record_rack_macro_at_beats(0, id, 0.7, 1.0).unwrap();
+        assert!(app.take_record_note_at_beats(0, 2.0, 0.0, 4.0, RecordQuantize::Off));
+        let depth = app.history.undo_len();
+        app.song_transport_mode = SongTransportMode::Stopped;
+        app.finish_song_capture_take(4.0).unwrap();
+        assert_eq!(app.history.undo_len(), depth + 1);
+        assert!(app.state.take_rack_macro_override.values_for_track(0).iter().all(Option::is_none));
+        let assert_automation = |app: &App| {
+            let takes = app.state.track_takes(0);
+            assert_eq!(takes.len(), 1);
+            let chunk = app.state.with_project_scenes(|scenes| scenes.track_pools[0].get(takes[0].chunks[0]).unwrap());
+            let rack = chunk.rack_track.unwrap();
+            assert_eq!(rack.macros[0].plocks[0], Some(0.7), "pre-note controller position is stamped at punch-in");
+            assert_eq!(rack.macros[0].value, 0.0, "the shared base was not recorded over");
+        };
+        assert_automation(&app);
+        undo(&mut app);
+        assert!(app.state.track_takes(0).is_empty());
+        redo(&mut app);
+        assert_automation(&app);
     }
 
     /// Track-sound spec §2.2.2 (symptom 8): in arrangement context the cell
@@ -1411,6 +1540,49 @@ impl App {
     pub fn take_recording_active(&self) -> bool {
         self.take_recording.is_some()
             && self.song_transport_mode == SongTransportMode::ArrangementCapture
+    }
+
+    /// Capture a rack macro without editing the source pattern or sound.
+    /// Macro positions latch for the rest of this take (hardware CCs have no
+    /// release event). Both UI and MIDI use this same record-clock path.
+    pub fn take_record_rack_macro(
+        &mut self,
+        track: usize,
+        id: RackMacroId,
+        value: f32,
+        time: std::time::Instant,
+    ) -> Result<(), String> {
+        let beats = self.state.record_beats_at_instant(time)
+            .ok_or_else(|| "rack macro capture has no record clock yet".to_string())?;
+        self.take_record_rack_macro_at_beats(track, id, value, beats)
+    }
+
+    pub fn take_record_rack_macro_at_beats(
+        &mut self,
+        track: usize,
+        id: RackMacroId,
+        value: f32,
+        raw_beats: f64,
+    ) -> Result<(), String> {
+        if !self.take_recording_active() || !value.is_finite() || !raw_beats.is_finite() {
+            return Err("rack macro capture requires an active take and finite values".to_string());
+        }
+        if self.state.pattern.rack_tracks.lock().unwrap().get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.macros.get(id.index())).is_none()
+        {
+            return Err("rack macro capture target does not exist".to_string());
+        }
+        let changes = self.take_recording.as_mut().unwrap().macro_changes.get_mut(track)
+            .ok_or_else(|| "rack macro capture track does not exist".to_string())?;
+        let value = value.clamp(0.0, 1.0);
+        if changes.iter().rev().find(|change| change.id == id)
+            .is_none_or(|change| change.value != value || raw_beats < change.raw_beats)
+        {
+            changes.push(TakeMacroChange { raw_beats, id, value });
+        }
+        self.state.take_rack_macro_override.set(track, id, value);
+        Ok(())
     }
 
     /// Record one performed note into `track`'s pending take (spec 8.3/8.4).

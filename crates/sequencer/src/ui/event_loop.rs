@@ -280,6 +280,7 @@ pub(crate) fn run_event_loop(
         prev_current_track_playhead_visible: false,
         prev_process_channel_values_version: shared.state.process_channel_values_version(),
         prev_track_tint: None,
+        prev_variant_tint: None,
         prev_ui_epoch: 0,
         prev_fx_epoch: 0,
         prev_fx_value_epoch: 0,

@@ -237,12 +237,27 @@
     (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
     (set! eseq.seq-step-tabs/remembered-step-panel-buffer "*sequencer*")
     (set! eseq.seq-step-tabs/step-panel-buffer "*sequencer*")
+    ;; Leaving the arrangement restores whatever mixer state the session view
+    ;; had before the arrangement hid it (see seq-open-arrangement).
+    (if (eseq.seq-step-tabs/seq-arrangement-view?)
+      (set! eseq.seq-core-state/mixer-panel-visible eseq.seq-core-state/mixer-visible-before-arrangement)
+      nil)
     (switch-main-view :session)))
 
 ;; Arrangement is an app view, not a sequencer tile tab. It owns a wider main
-;; layout without the step and track context panes.
+;; layout without the step and track context panes. Entering it hides the
+;; mixer strip by default: the arrangement carries its own track headers and
+;; a new-track drop zone, so the mixer is mostly cost there. The transport's
+;; mixer button (seq-toggle-mixer-panel) brings it back for this visit.
 (def seq-open-arrangement ()
-  (switch-main-view :arrangement))
+  (do
+    (if (not (eseq.seq-step-tabs/seq-arrangement-view?))
+      (do
+        (sync-step-panel-buffer-from-current-window)
+        (set! eseq.seq-core-state/mixer-visible-before-arrangement eseq.seq-core-state/mixer-panel-visible)
+        (set! eseq.seq-core-state/mixer-panel-visible false))
+      nil)
+    (switch-main-view :arrangement)))
 
 (def seq-toggle-arrangement ()
   (if (eseq.seq-step-tabs/seq-arrangement-view?)

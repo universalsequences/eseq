@@ -64,6 +64,20 @@ const TUNING_PROPS: [(&str, f32); 16] = [
     ("interior-width", 0.22),
 ];
 
+/// color_a.w: bit 0 is the play flag; bits 1..5 the theme variant-tint weight
+/// (16 levels) and bits 5..20 its RGB at 5 bits per channel. 20 bits stay an
+/// exact float, and a zero-weight tint leaves the word equal to the bare play
+/// flag. Decoded by `dg_hue_tint` in both shaders.
+fn pack_play_and_hue_tint(play: bool, tint: Color) -> f32 {
+    let q = |v: f32, levels: u32| ((v.clamp(0.0, 1.0) * levels as f32).round() as u32).min(levels);
+    let word = u32::from(play)
+        | (q(tint.a, 15) << 1)
+        | (q(tint.r, 31) << 5)
+        | (q(tint.g, 31) << 10)
+        | (q(tint.b, 31) << 15);
+    word as f32
+}
+
 fn tint_channel(props: &HashMap<String, Value>, name: &str, default: f32) -> f32 {
     match props.get(name) {
         Some(Value::Number(value)) => (*value as f32).clamp(0.0, 1.0),
@@ -253,7 +267,7 @@ impl WidgetDefinition for SoundGlyphWidget {
                     tint_channel(&node.props, "tint-r", 0.20),
                     tint_channel(&node.props, "tint-g", 0.34),
                     tint_channel(&node.props, "tint-b", 0.38),
-                    play as u8 as f32,
+                    pack_play_and_hue_tint(play, crate::theme::VARIANT_TINT()),
                 ],
                 color_b: tune[8..12].try_into().unwrap(),
                 color_c: tune[12..16].try_into().unwrap(),
@@ -317,6 +331,17 @@ bool dg_incompatible(WidgetVaryings in) { return (uint(round(in.color_d.w)) & 2u
 // Virtual pixel count across the glyph (bits 2..9 of the flag word); 0 = off.
 float dg_pixelate(WidgetVaryings in) {
     return float((uint(round(in.color_d.w)) >> 2) & 255u);
+}
+
+// Theme variant tint packed into color_a.w beside the play flag (see
+// pack_play_and_hue_tint): mixes every DG_HUES accent toward one theme color.
+float3 dg_hue_tint(float3 hue, WidgetVaryings in) {
+    uint word = uint(round(in.color_a.w));
+    float weight = float((word >> 1) & 15u) / 15.0;
+    float3 tint = float3(float((word >> 5) & 31u),
+                         float((word >> 10) & 31u),
+                         float((word >> 15) & 31u)) / 31.0;
+    return mix(hue, tint, weight);
 }
 
 float3 dg_play_color(WidgetVaryings in) {
@@ -555,7 +580,8 @@ float dg_play_triangle(float2 p) {
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
     // Centered uv, +y upward, as required by the delta-glyph lattice.
     float2 p = float2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
-    bool play = in.color_a.w > 0.5;
+    uint playWord = uint(round(in.color_a.w));
+    bool play = (playWord & 1u) != 0u;
     // Padding is a fraction of the glyph's half-extent on every side. It and
     // opacity apply only while the play indicator is present; the triangle
     // remains full-size and fully opaque above the quieter identity glyph.
@@ -593,7 +619,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
         float sdf = dg_piece_field(glyphP, in, record);
         float3 n = dg_normal_piece(glyphP, in, record);
 
-        float3 hue = DG_HUES[min((record >> 9) & 7u, 6u)];
+        float3 hue = dg_hue_tint(DG_HUES[min((record >> 9) & 7u, 6u)], in);
         float magnitude = float((record >> 12) & 7u) / 7.0;
         // Sign rides hue temperature, not position: a positional offset large
         // enough to read is larger than the entire fusion budget (spec §6.2).

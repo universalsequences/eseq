@@ -1302,10 +1302,17 @@
 
     #[test]
     fn sequencer_visibility_keeps_track_and_drum_rack_bus_meter_bindings_live_without_mixer() {
-        assert!(track_and_bus_meter_bindings_visible(true, false));
-        assert!(track_and_bus_meter_bindings_visible(false, true));
-        assert!(track_and_bus_meter_bindings_visible(true, true));
-        assert!(!track_and_bus_meter_bindings_visible(false, false));
+        assert!(track_and_bus_meter_bindings_visible(true, false, false));
+        assert!(track_and_bus_meter_bindings_visible(false, true, false));
+        assert!(track_and_bus_meter_bindings_visible(true, true, false));
+        assert!(!track_and_bus_meter_bindings_visible(false, false, false));
+    }
+
+    #[test]
+    fn arrangement_visibility_keeps_track_meter_bindings_live_without_mixer_or_sequencer() {
+        // The arrangement track rows reuse the sequencer track header, whose
+        // inline meter reads the shared track-peak bindings.
+        assert!(track_and_bus_meter_bindings_visible(false, false, true));
     }
 
     #[test]

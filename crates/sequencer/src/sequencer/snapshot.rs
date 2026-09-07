@@ -280,9 +280,11 @@ impl SequencerSnapshot {
                         .map(|baseline| (target.destination, baseline))
                 })
                 .collect();
-            state.sync_rack_macro_runtime_track(track_idx, track.rack_track.as_ref());
+            // Preflight can prepare many different take chunks for one
+            // track. Preparing a later chunk must not overwrite the earlier
+            // chunk's macro locks via the live pattern's shared atomics.
             if let Some(rack) = track.rack_track.as_mut() {
-                rack.attach_runtime_macro_values(state.rack_macro_runtime_values(), track_idx);
+                rack.attach_frozen_macro_values(state.rack_macro_runtime_values(), track_idx);
             }
         }
 

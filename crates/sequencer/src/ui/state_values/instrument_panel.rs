@@ -997,17 +997,18 @@ pub(crate) fn build_instrument_panel_value(
                 "count".to_string(),
                 Rc::new(RefCell::new(Value::Number(assignment.param_count as f64))),
             );
+            let color = super::track_and_mixer::themed_variant_rgb(assignment.color);
             map.insert(
                 "color-r".to_string(),
-                Rc::new(RefCell::new(Value::Number(assignment.color[0] as f64))),
+                Rc::new(RefCell::new(Value::Number(color[0] as f64))),
             );
             map.insert(
                 "color-g".to_string(),
-                Rc::new(RefCell::new(Value::Number(assignment.color[1] as f64))),
+                Rc::new(RefCell::new(Value::Number(color[1] as f64))),
             );
             map.insert(
                 "color-b".to_string(),
-                Rc::new(RefCell::new(Value::Number(assignment.color[2] as f64))),
+                Rc::new(RefCell::new(Value::Number(color[2] as f64))),
             );
             Some(Rc::new(RefCell::new(Value::Map(map))))
         })
@@ -1063,17 +1064,18 @@ pub(crate) fn build_instrument_panel_value(
             "count".to_string(),
             Rc::new(RefCell::new(Value::Number(entry.key.param_count() as f64))),
         );
+        let color = super::track_and_mixer::themed_variant_rgb(entry.color);
         map.insert(
             "color-r".to_string(),
-            Rc::new(RefCell::new(Value::Number(entry.color[0] as f64))),
+            Rc::new(RefCell::new(Value::Number(color[0] as f64))),
         );
         map.insert(
             "color-g".to_string(),
-            Rc::new(RefCell::new(Value::Number(entry.color[1] as f64))),
+            Rc::new(RefCell::new(Value::Number(color[1] as f64))),
         );
         map.insert(
             "color-b".to_string(),
-            Rc::new(RefCell::new(Value::Number(entry.color[2] as f64))),
+            Rc::new(RefCell::new(Value::Number(color[2] as f64))),
         );
         key_lock_variant_items.push(Rc::new(RefCell::new(Value::Map(map))));
     }

@@ -207,6 +207,27 @@ fn restore_saved_bus_effect_slot_runtime_ids(
     slot.modulator_node_id = live_modulator_node_id;
 }
 
+/// Restore a saved bus effect slot onto the freshly created live slot and sync
+/// it to the live descriptor, exactly like track effect slots on load
+/// (`project_track_effect_slot_into_synced_snapshot`).
+///
+/// A project saved before a builtin grew params (Space Echo's `tension`,
+/// `spring type` and `stereo width` were appended after its modulator block)
+/// carries a shorter slot. Without the sync the live slot kept that old
+/// `num_params`/`defaults` length, so `set_bus_effect_param` on any appended
+/// param wrote past the end of `defaults`, silently changing nothing in state
+/// and leaving the panel stuck on the old value.
+fn restore_saved_bus_effect_slot(
+    slot: &mut crate::effects::EffectSlotSnapshot,
+    saved_slot: crate::effects::EffectSlotSnapshot,
+    desc: &crate::effects::EffectDescriptor,
+) {
+    restore_saved_bus_effect_slot_runtime_ids(slot, saved_slot);
+    let node_id = slot.node_id;
+    let modulator_node_id = slot.modulator_node_id;
+    slot.sync_to_descriptor_with_modulator(desc, node_id, modulator_node_id);
+}
+
 fn slot_param_node_relative_idx(raw_idx: u32) -> Option<u32> {
     if raw_idx == u32::MAX {
         return None;
@@ -4098,12 +4119,13 @@ impl App {
             } else {
                 self.load_bus_effect_to_slot_sync(bus_idx, slot_idx, &name)?;
             }
-            if let Some(slot) = self
-                .buses
-                .get_mut(bus_idx)
-                .and_then(|bus| bus.effect_slots.get_mut(slot_idx))
-            {
-                restore_saved_bus_effect_slot_runtime_ids(slot, saved_slot);
+            if let Some(bus) = self.buses.get_mut(bus_idx) {
+                if let (Some(slot), Some(desc)) = (
+                    bus.effect_slots.get_mut(slot_idx),
+                    bus.effect_descriptors.get(slot_idx),
+                ) {
+                    restore_saved_bus_effect_slot(slot, saved_slot, desc);
+                }
             }
             self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
             // Restore a saved Convolution Reverb IR (the default was auto-loaded
@@ -5788,6 +5810,46 @@ mod tests {
         assert_eq!(live_slot.defaults[0], 0.0);
         assert_eq!(live_slot.defaults[1], 1.0);
         assert_eq!(live_slot.plocks[3][1], Some(0.0));
+    }
+
+    #[test]
+    fn bus_effect_project_restore_syncs_saved_slot_to_grown_descriptor() {
+        // A project saved before Space Echo grew `tension` / `spring type` /
+        // `stereo width` carries a slot that is three params short.
+        let desc = EffectDescriptor::builtin_space_echo();
+        let spring_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "spring type")
+            .expect("space echo exposes spring type");
+        let mut live_slot =
+            crate::effects::EffectSlotSnapshot::new_default_with_modulator(&desc, 101, 202);
+        let mut saved_slot =
+            crate::effects::EffectSlotSnapshot::new_default_with_modulator(&desc, 0, 0);
+        saved_slot.defaults[1] = 7.0;
+        saved_slot.plocks[3][2] = Some(0.25);
+        let saved_len = desc.params.len() - 3;
+        saved_slot.num_params = saved_len as u32;
+        saved_slot.defaults.truncate(saved_len);
+        saved_slot.param_node_indices.truncate(saved_len);
+        saved_slot.param_node_spans.truncate(saved_len);
+        for step in &mut saved_slot.plocks {
+            step.truncate(saved_len);
+        }
+        for step in &mut saved_slot.plock_param_ids {
+            step.truncate(saved_len);
+        }
+
+        restore_saved_bus_effect_slot(&mut live_slot, saved_slot, &desc);
+
+        assert_eq!(live_slot.node_id, 101);
+        assert_eq!(live_slot.modulator_node_id, 202);
+        assert_eq!(live_slot.num_params as usize, desc.params.len());
+        assert_eq!(live_slot.defaults.len(), desc.params.len());
+        assert_eq!(live_slot.defaults[1], 7.0);
+        assert_eq!(live_slot.plocks[3][2], Some(0.25));
+        assert_eq!(live_slot.defaults[spring_idx], desc.params[spring_idx].default);
+        assert_eq!(live_slot.param_node_indices.len(), desc.params.len());
     }
 
     #[test]
