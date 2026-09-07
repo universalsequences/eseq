@@ -49,11 +49,11 @@
       (subtree :key (str "heat-option-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
         (v-stack :width width :height height :gap 0.04
           (label title :v-align :center :height (- height 0.64) :font-size 7.6 :color :dim :bg :transparent)
-          (dropdown :width width :height 0.6 :font-size 7.6
+          (dropdown :width width :height 0.75 :font-size 7.6
             :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :value-index-offset (get p :min) :options options
             :text-color :dim :chevron-color :dim :badge-color :transparent
-            :bg-color :instrument-group-bg :border-color :instrument-control-bg :border-width 0.04
+            :bg-color :instrument-control-bg :border-color :buffer-bg :border-width 0.04
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -67,11 +67,12 @@
   (eseq.effects.custom-ui-lego/ui-lego-mode-tab-s section title 4.3 0.75 (heat-accent)))
 (def heat-switch (section name title)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
-        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+      (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)) 0.5)))
       (button title :width 4.3 :height 0.75 :font-size 8 :padding 0 :corner-radius 1
         :color (if on :black :dim)
         :background-color (if on (heat-accent) :instrument-control-bg)
+        :border-color :transparent
         :on-click (lambda (x y r)
           (do
             (if (number? section)
@@ -79,9 +80,7 @@
             (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p (if on 0 1))))))))
 (def heat-panel (section width height body)
   (box :width width :height height :padding 0.12
-    :background-color (if (= eseq.vanilla/custom-ui-selected-section section) :instrument-panel-bg :instrument-group-bg) :corner-radius 2
-    :border-width 0.04
-    :border-color (if (= eseq.vanilla/custom-ui-selected-section section) :dim :transparent)
+    :background-color (if (= eseq.vanilla/custom-ui-selected-section section) :instrument-panel-bg :instrument-group-bg) :corner-radius 8
     :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
     body))
 
@@ -245,7 +244,7 @@
     (heat-lfo-detail-row "lfo1" :cyan)
     (heat-lfo-detail-row "lfo2" :dim)))
 (def heat-noise-strip ()
-  (box :width 8 :height 4.4 :padding 0.12 :corner-radius 2
+  (box :width 8 :height 4.4 :padding 0.12 :corner-radius 8
     :background-color :instrument-group-bg :debug-name "heat-noise-strip"
     (v-stack :gap 0.02 :align :center
       (heat-switch false "noise_enabled" "Noise")
