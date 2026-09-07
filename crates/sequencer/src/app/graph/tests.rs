@@ -1632,7 +1632,7 @@
 
         app.start_new_project();
 
-        assert!(app.tracks.is_empty());
+        assert_eq!(app.graph.track_instrument_types, vec![InstrumentType::Empty]);
         // The old project's arrangement is gone; the new project starts on
         // the EMPTY arrangement (empty-arrangement spec 4.3), never on
         // "no arrangement".
@@ -1642,6 +1642,218 @@
             .expect("new projects start with the empty arrangement");
         assert!(arrangement.is_empty());
         assert!(app.state.committed_song().is_some());
+        graph.process_block();
+    }
+
+    fn assert_empty_track(app: &App, track: usize) {
+        assert_eq!(app.graph.track_instrument_types[track], InstrumentType::Empty);
+        assert_eq!(app.graph.track_engine_ids[track], None);
+        assert_eq!(app.graph.track_buffer_ids[track], -1);
+        assert!(app.graph.track_voice_lids[track].is_empty());
+        assert!(app.graph.track_synth_node_ids[track].is_empty());
+        assert!(app.graph.track_node_ids[track].sampler_ids.is_empty());
+        assert!(app.graph.instrument_descriptors[track].params.is_empty());
+        let snapshot = app.state.latest_scheduler_snapshot();
+        assert_eq!(snapshot.tracks[track].instrument_type, InstrumentType::Empty);
+        assert!(snapshot.tracks[track].instrument_descriptor.params.is_empty());
+        assert_eq!(app.state.runtime.voice_counts[track].load(Ordering::Acquire), 0);
+        assert_eq!(app.state.runtime.sampler_lids[track].load(Ordering::Acquire), 0);
+        assert_eq!(app.state.runtime.track_engine_ids[track].load(Ordering::Acquire), u32::MAX);
+        assert_eq!(app.state.runtime.instrument_type_flags[track].load(Ordering::Acquire),
+            InstrumentType::Empty.runtime_flag());
+        let slot = &app.state.pattern.instrument_slots[track];
+        assert_eq!(slot.node_id.load(Ordering::Acquire), 0);
+        assert_eq!(slot.modulator_node_id.load(Ordering::Acquire), 0);
+        for pattern in app.state.export_pattern_repository() {
+            assert_eq!(pattern.instrument_types[track], InstrumentType::Empty);
+            assert_eq!(pattern.track_sound_states[track].engine_id, None);
+            assert_eq!(pattern.instrument_slots[track].node_id, 0);
+        }
+    }
+
+    #[test]
+    fn empty_track_creation_edit_save_reopen_and_history() {
+        let engine = crate::audio::engine::init_headless_engine(44_100, 2).unwrap();
+        struct HeadlessGuard(LiveGraphPtr);
+        impl Drop for HeadlessGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    crate::audiograph::engine_stop_workers();
+                    crate::audiograph::destroy_live_graph(self.0.0);
+                }
+            }
+        }
+        let _guard = HeadlessGuard(engine.lg_ptr);
+        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let process_block = || {
+            let mut output = [0.0_f32; 1024];
+            unsafe { engine.lg_ptr.process_next_block(output.as_mut_ptr(), 512); }
+            assert!(output.iter().all(|sample| *sample == 0.0), "empty tracks must be silent");
+        };
+        app.start_new_project();
+        assert_empty_track(&app, 0);
+        let track = app.graph_controller().add_empty_track().unwrap();
+        let id = app.track_registry.id_at(track).unwrap();
+        app.commit_created_track(track, "Add empty track").unwrap();
+        assert_empty_track(&app, track);
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.tracks.len(), 1);
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.track_registry.id_at(track), Some(id));
+        assert_empty_track(&app, track);
+
+        app.state.pattern.patterns[track].set_step_active(7, true);
+        app.state.publish_scheduler_snapshot();
+        let name = format!("__test-empty-track-{}", std::process::id());
+        let project = app.capture_project(&name).unwrap();
+        assert!(matches!(project.tracks[track].kind, crate::project::ProjectTrackKind::Empty));
+        let path = crate::project::save_project(&name, &project).unwrap();
+        let _cleanup = TestProjectFile(path.clone());
+        app.queue_project_load_from_path(&name, &path).unwrap();
+        for _ in 0..100 {
+            if !app.has_pending_project_load() { break; }
+            app.advance_pending_project_load().unwrap();
+            process_block();
+        }
+        assert!(!app.has_pending_project_load());
+        assert_eq!(app.track_registry.id_at(track), Some(id));
+        assert_empty_track(&app, track);
+        assert!(app.state.pattern.patterns[track].is_active(7));
+        process_block();
+
+        app.delete_track_recorded(track).unwrap();
+        assert_eq!(app.track_registry.index_of(id), None);
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.track_registry.id_at(track), Some(id));
+        assert_empty_track(&app, track);
+        assert!(app.state.pattern.patterns[track].is_active(7));
+
+        // Exercise real DSP and routing, not just the test library's silent
+        // callback. Free patches run while the transport is playing.
+        app.state.transport.playing.store(true, Ordering::Release);
+        let source = "(def gate (in 1 @name gate)) (out (+ 0.1 (* 0.1 gate)) 1 @name audio)";
+        let compiled = lisp_host::compile_and_load_instrument(source, 44_100).unwrap();
+        app.swap_track_to_compiled_saved_instrument_sync(
+            track, "empty-track-signal", source, CustomInstrumentRunMode::FreePatch, compiled,
+        ).unwrap();
+        let render_peak = || {
+            let mut output = [0.0_f32; 1024];
+            unsafe { engine.lg_ptr.process_next_block(output.as_mut_ptr(), 512); }
+            assert!(output.iter().all(|sample| sample.is_finite()));
+            output.iter().fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+        };
+        for _ in 0..4 { render_peak(); }
+        let peak = render_peak();
+        assert!(peak > 0.01, "loaded device must reach the master output: peak={peak}");
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_empty_track(&app, track);
+        for _ in 0..4 { render_peak(); }
+        assert_eq!(render_peak(), 0.0, "undo must disconnect the device");
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        for _ in 0..4 { render_peak(); }
+        assert!(render_peak() > 0.01, "redo must restore playable routing");
+    }
+
+    #[test]
+    fn empty_track_device_load_undo_redo_preserves_identity_pattern_and_effects() {
+        let graph = TestLiveGraph::new("empty-track-device-history");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_empty_track().unwrap();
+        let id = app.track_registry.id_at(0).unwrap();
+        let pan_id = app.graph.track_node_ids[0].pan_id;
+        let effect = app.add_builtin_effect_sync(0, "compressor").unwrap();
+        let effect_node = app.state.pattern.effect_chains[0][effect].node_id.load(Ordering::Acquire);
+        app.state.pattern.patterns[0].set_step_active(7, true);
+        app.state.publish_scheduler_snapshot();
+
+        app.swap_track_to_compiled_saved_instrument_sync(
+            0, "empty-test-device", "(out 0)", CustomInstrumentRunMode::Instrument,
+            lisp_host::CompileResult {
+                manifest: test_instrument_manifest(),
+                lib: lisp_host::test_loaded_dgen_lib(),
+                lease: None,
+            },
+        ).unwrap();
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Custom);
+        assert!(app.graph.track_engine_ids[0].is_some());
+        graph.process_block();
+        for _ in 0..2 {
+            assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+            assert_empty_track(&app, 0);
+            graph.process_block();
+            assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+            assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Custom);
+            graph.process_block();
+        }
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_empty_track(&app, 0);
+
+        let buffer = crate::instruments::sampler::create_silent_buffer(graph.ptr.0).unwrap();
+        app.apply_recorded_instrument_binding_mutation(0, "Load sampler", |app| {
+            app.graph_controller().replace_unvoiced_track_with_sampler(0, buffer, 44_100, "sample")
+        }).unwrap();
+        assert_eq!(app.graph.track_node_ids[0].sampler_ids.len(), MAX_VOICES);
+        graph.process_block();
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_empty_track(&app, 0);
+        graph.process_block();
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
+        assert_eq!(app.graph.track_node_ids[0].sampler_ids.len(), MAX_VOICES);
+        assert_eq!(app.graph.track_node_ids[0].pan_id, pan_id);
+        assert_eq!(app.track_registry.id_at(0), Some(id));
+        assert!(app.state.pattern.patterns[0].is_active(7));
+        assert_eq!(app.state.pattern.effect_chains[0][effect].node_id.load(Ordering::Acquire), effect_node);
+        graph.process_block();
+    }
+
+    #[test]
+    fn empty_track_sound_container_undo_redo() {
+        let graph = TestLiveGraph::new("empty-track-sound-history");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_empty_track().unwrap();
+        let id = app.track_registry.id_at(0).unwrap();
+        let buffer = crate::instruments::sampler::create_silent_buffer(graph.ptr.0).unwrap();
+        let mut slot = topology_test_slot(InstrumentType::Sampler, None);
+        slot.sample_id = Some((buffer, "sample".to_string(), 44_100));
+        let rack = RackTrackSnapshot::new(vec![slot], crate::sequencer::default_rack_macros());
+        app.apply_recorded_instrument_binding_mutation(0, "Load Sound", |app| {
+            app.graph_controller().replace_track_instrument_container_with_rack(0, rack, "Sound")
+        }).unwrap();
+        for _ in 0..2 {
+            assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
+            assert_eq!(app.graph.track_node_ids[0].rack_slots.len(), 1);
+            graph.process_block();
+            assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+            assert_empty_track(&app, 0);
+            graph.process_block();
+            assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        }
+        assert_eq!(app.track_registry.id_at(0), Some(id));
+        graph.process_block();
+    }
+
+    #[test]
+    fn empty_track_failed_device_load_keeps_no_device() {
+        let graph = TestLiveGraph::new("empty-track-failed-load");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_empty_track().unwrap();
+        let pan_id = app.graph.track_node_ids[0].pan_id;
+        let buffer = crate::instruments::sampler::create_silent_buffer(graph.ptr.0).unwrap();
+        set_test_graph_build_failure_after(4);
+        let error = app.graph_controller()
+            .replace_unvoiced_track_with_sampler(0, buffer, 44_100, "sample").unwrap_err();
+        assert!(error.contains("injected graph node allocation failure"), "{error}");
+        assert_empty_track(&app, 0);
+        set_test_graph_build_failure_after(4);
+        let error = app.graph_controller().replace_track_with_custom_instrument(
+            0, "test", 0, &test_instrument_manifest(), &lisp_host::test_loaded_dgen_lib(),
+            CustomInstrumentRunMode::Instrument,
+        ).unwrap_err();
+        assert!(error.contains("injected graph node allocation failure"), "{error}");
+        assert_empty_track(&app, 0);
+        assert_eq!(app.graph.track_node_ids[0].pan_id, pan_id);
         graph.process_block();
     }
 
@@ -4646,7 +4858,7 @@
         set_test_graph_build_failure_after(4);
 
         let error = app.graph_controller()
-            .replace_rack_track_with_sampler(0, buffer_id, 48_000, "restored")
+            .replace_unvoiced_track_with_sampler(0, buffer_id, 48_000, "restored")
             .expect_err("injected sampler voice failure should abort conversion");
 
         assert!(error.contains("injected graph node allocation failure"));

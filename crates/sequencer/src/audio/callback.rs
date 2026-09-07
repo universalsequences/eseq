@@ -209,6 +209,9 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         let instrument_type = InstrumentType::from_runtime_flag(
             data.state.runtime.instrument_type_flags[kt.track].load(Ordering::Relaxed),
         );
+        if instrument_type == InstrumentType::Empty {
+            continue;
+        }
         let is_custom = instrument_type == InstrumentType::Custom;
         let track_polyphonic = data.state.pattern.track_params[kt.track].is_polyphonic();
         let track_max_polyphony = data.state.pattern.track_params[kt.track].get_max_polyphony();

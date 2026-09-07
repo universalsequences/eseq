@@ -1836,6 +1836,7 @@ impl App {
         track: usize,
     ) -> Result<TrackInstrumentState, String> {
         let source = match self.graph.track_instrument_types.get(track).copied() {
+            Some(crate::sequencer::InstrumentType::Empty) => TrackInstrumentSource::Empty,
             Some(crate::sequencer::InstrumentType::Custom) => {
                 let engine_id = self
                     .graph
@@ -3424,6 +3425,7 @@ impl App {
             return self.restore_rack_instrument_container_state(track, target);
         }
         let target_descriptor = match &target.source {
+            TrackInstrumentSource::Empty => crate::effects::EffectDescriptor::empty_custom_slot(),
             TrackInstrumentSource::Custom { engine_id } => {
                 let retained = self
                     .editor
@@ -3463,6 +3465,7 @@ impl App {
             }
         }
         match &target.source {
+            TrackInstrumentSource::Empty => self.graph_controller().clear_track_instrument(track)?,
             TrackInstrumentSource::Custom { engine_id } => {
                 let retained = self
                     .editor
@@ -3500,8 +3503,8 @@ impl App {
                 path,
             } => {
                 match self.graph.track_instrument_types.get(track).copied() {
-                    Some(crate::sequencer::InstrumentType::Rack) => {
-                        self.graph_controller().replace_rack_track_with_sampler(
+                    Some(crate::sequencer::InstrumentType::Empty | crate::sequencer::InstrumentType::Rack) => {
+                        self.graph_controller().replace_unvoiced_track_with_sampler(
                             track,
                             *buffer_id,
                             *sample_rate,
@@ -3581,6 +3584,7 @@ impl App {
         self.track_name_user_authored[track] = target.display_name_user_authored;
         let descriptor = self.graph.instrument_descriptors[track].clone();
         let (node_id, modulator_node_id) = match self.graph.track_instrument_types[track] {
+            crate::sequencer::InstrumentType::Empty => (None, None),
             crate::sequencer::InstrumentType::Custom => {
                 let engine_id = self.graph.track_engine_ids[track]
                     .ok_or_else(|| format!("Custom track {} lost its engine", track + 1))?;
@@ -3651,7 +3655,7 @@ impl App {
         }
         let track = match patch.state.source {
             TrackInstrumentSource::Modulator => self.graph_controller().add_modulator_track()?,
-            _ => self.graph_controller().add_blank_sampler_track()?,
+            _ => self.graph_controller().add_empty_track()?,
         };
         let allocated = self.track_registry.replace_at(track, patch.track)
             .map_err(|error| format!("Failed to restore stable track id: {error:?}"))?;
@@ -3828,7 +3832,7 @@ impl App {
         }
         let appended = match patch.instrument.source {
             TrackInstrumentSource::Modulator => self.graph_controller().add_modulator_track()?,
-            _ => self.graph_controller().add_blank_sampler_track()?,
+            _ => self.graph_controller().add_empty_track()?,
         };
         let allocated = self.track_registry.replace_at(appended, patch.track)
             .map_err(|error| format!("Failed to restore stable track id: {error:?}"))?;
@@ -3882,7 +3886,8 @@ impl App {
         if !matches!(
             self.graph.track_instrument_types.get(track),
             Some(
-                crate::sequencer::InstrumentType::Rack
+                crate::sequencer::InstrumentType::Empty
+                    | crate::sequencer::InstrumentType::Rack
                     | crate::sequencer::InstrumentType::Sampler
                     | crate::sequencer::InstrumentType::Custom
             )

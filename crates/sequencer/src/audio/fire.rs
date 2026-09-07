@@ -113,6 +113,9 @@ pub(super) fn fire_resolved(
         resolved,
         chord,
     );
+    if instrument_type == InstrumentType::Empty {
+        return;
+    }
     if instrument_type == InstrumentType::Rack {
         let rack = data
             .scheduler_snapshot
@@ -1012,7 +1015,11 @@ pub(super) fn dispatch_retrig_event(
     frame_offset: u32,
 ) {
     let track_idx = event.track_idx;
-    if track_idx >= data.state.active_track_count() {
+    if track_idx >= data.state.active_track_count()
+        || InstrumentType::from_runtime_flag(
+            data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Acquire),
+        ) == InstrumentType::Empty
+    {
         return;
     }
     if let RetrigTarget::Custom {

@@ -171,6 +171,7 @@ pub(crate) fn build_track_instrument_types(app: &app::App) -> Value {
         .iter()
         .map(|instrument_type| {
             let label = match instrument_type {
+                sequencer::sequencer::InstrumentType::Empty => "empty",
                 sequencer::sequencer::InstrumentType::Sampler => "sampler",
                 sequencer::sequencer::InstrumentType::Custom => "custom",
                 sequencer::sequencer::InstrumentType::Modulator => "modulator",

@@ -1024,6 +1024,10 @@ impl App {
 
         self.history.reset();
         self.device_registry.clear();
+        if let Err(error) = self.graph_controller().add_empty_track() {
+            self.editor.status_message = Some((format!("New project: {error}"), Instant::now()));
+            return;
+        }
 
         // Empty-arrangement spec 4.3: the arrangement always exists. The
         // teardown above cleared it to `None` (its lanes were indexed by the
@@ -1478,8 +1482,8 @@ impl App {
                     },
                 )
             }
-            ProjectTrackKind::Modulator => {
-                return Err("Modulator tracks cannot be saved as Sounds".to_string())
+            ProjectTrackKind::Empty | ProjectTrackKind::Modulator => {
+                return Err("Empty and modulator tracks cannot be saved as Sounds".to_string())
             }
         };
         let sound = crate::project::ProjectSoundPreset {
@@ -1541,7 +1545,7 @@ impl App {
         sound: crate::project::ProjectSoundPreset,
         fallback_name: &str,
     ) -> Result<usize, String> {
-        let track = self.graph_controller().add_blank_sampler_track()?;
+        let track = self.graph_controller().add_empty_track()?;
         if let Err(error) = self.load_container_preset_onto_track(track, sound, fallback_name) {
             let rollback = self.graph_controller().delete_track(track);
             return match rollback {
@@ -1609,7 +1613,8 @@ impl App {
                     slot.track_sound_state.engine_id = Some(prepared.engine_id);
                     slot.sample_id = None;
                 }
-                crate::project::ProjectInstrumentType::Modulator
+                crate::project::ProjectInstrumentType::Empty
+                | crate::project::ProjectInstrumentType::Modulator
                 | crate::project::ProjectInstrumentType::Rack => {
                     return Err(format!(
                         "Sound slot {} has unsupported instrument type",
@@ -2732,7 +2737,7 @@ impl App {
                                     instrument_name: Some(instrument_name),
                                 });
                             }
-                            InstrumentType::Modulator | InstrumentType::Rack => {
+                            InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {
                                 return Err(format!(
                                     "Rack track '{}' slot {} has unsupported instrument type",
                                     name,
@@ -2775,8 +2780,8 @@ impl App {
                             sample_path: path.to_string_lossy().to_string(),
                         },
                     })
-                } else if self.graph.track_instrument_types.get(track_idx)
-                    == Some(&InstrumentType::Modulator)
+                } else if matches!(self.graph.track_instrument_types.get(track_idx),
+                    Some(InstrumentType::Empty | InstrumentType::Modulator))
                 {
                     Ok(ProjectTrack {
                         id,
@@ -2787,7 +2792,11 @@ impl App {
                             .unwrap_or(false),
                         color,
                         collapsed,
-                        kind: ProjectTrackKind::Modulator,
+                        kind: if self.graph.track_instrument_types[track_idx] == InstrumentType::Empty {
+                            ProjectTrackKind::Empty
+                        } else {
+                            ProjectTrackKind::Modulator
+                        },
                     })
                 } else {
                     let instrument_name = self
@@ -3376,6 +3385,9 @@ impl App {
                     let saved_color = pending.project.tracks[track_idx].color();
                     let saved_collapsed = pending.project.tracks[track_idx].collapsed();
                     match &pending.project.tracks[track_idx].kind {
+                        ProjectTrackKind::Empty => {
+                            self.graph_controller().add_empty_track()?;
+                        }
                         ProjectTrackKind::Sampler { sample_path } => {
                             eprintln!(
                                 "project-load: add sampler track index={} path={}",
@@ -3528,7 +3540,8 @@ impl App {
                                             prepared_customs.len() - 1,
                                         ));
                                     }
-                                    crate::project::ProjectInstrumentType::Modulator
+                                    crate::project::ProjectInstrumentType::Empty
+                                    | crate::project::ProjectInstrumentType::Modulator
                                     | crate::project::ProjectInstrumentType::Rack => {
                                         return Err(format!(
                                             "Rack track {} slot {} has unsupported instrument type",
@@ -4376,7 +4389,7 @@ impl App {
                                 }
                             }
                         }
-                        InstrumentType::Modulator | InstrumentType::Rack => {}
+                        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
                     }
                     slot.effect_descriptors = graph_slot.effect_descriptors.clone();
                     slot.custom_effect_names = graph_slot.custom_effect_names.clone();

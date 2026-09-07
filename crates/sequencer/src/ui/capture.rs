@@ -130,6 +130,7 @@ fn absolute_path(cwd: &Path, path: PathBuf) -> PathBuf {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CaptureTrackKind {
+    Empty,
     Sampler,
     Instrument(String),
     Modulator,
@@ -317,6 +318,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         expression_name(items.get(1)).ok_or_else(|| "track is missing its kind".to_string())?;
     let mut cursor = 2;
     let kind = match kind_name {
+        "empty" => CaptureTrackKind::Empty,
         "sampler" => CaptureTrackKind::Sampler,
         "instrument" => {
             let name = expression_string(items.get(cursor))
@@ -500,6 +502,7 @@ fn expression_string_list(expression: &Expression, option: &str) -> Result<Vec<S
 fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Result<(), String> {
     for (spec_index, spec) in project.tracks.iter().enumerate() {
         let track = match &spec.kind {
+            CaptureTrackKind::Empty => app.graph_controller().add_empty_track(),
             CaptureTrackKind::Sampler => app.graph_controller().add_blank_sampler_track(),
             CaptureTrackKind::Instrument(name) => app.add_saved_instrument_track_sync(name),
             CaptureTrackKind::Modulator => app.graph_controller().add_modulator_track(),

@@ -595,7 +595,7 @@ impl GraphState {
                 .and_then(|engine| engine.as_ref())
                 .map(|engine| !engine.mod_output_channels.is_empty())
                 .unwrap_or(false),
-            Some(InstrumentType::Sampler) | Some(InstrumentType::Rack) | None => false,
+            Some(InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Rack) | None => false,
         }
     }
 }

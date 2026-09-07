@@ -700,7 +700,7 @@ impl App {
                     .get_instrument_descriptor(engine_id)
                     .cloned()
             }
-            InstrumentType::Rack => None,
+            InstrumentType::Empty | InstrumentType::Rack => None,
         }
     }
 
@@ -716,7 +716,7 @@ impl App {
                         .get_instrument_descriptor(engine_id)
                 })
             }
-            InstrumentType::Sampler | InstrumentType::Rack => None,
+            InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Rack => None,
         }
     }
 
@@ -1527,7 +1527,7 @@ impl App {
             InstrumentType::Custom | InstrumentType::Modulator => {
                 self.rack_slot_cached_instrument_descriptor(slot)?
             }
-            InstrumentType::Rack => return None,
+            InstrumentType::Empty | InstrumentType::Rack => return None,
         };
         let active_param_idx = descriptor
             .instrument_modulation_targets

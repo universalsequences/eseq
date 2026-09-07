@@ -40,6 +40,7 @@
         drop-sample-on-track
         drop-sound-on-track
         add-sampler-track
+        open-device-picker
         add-rack-track
         add-layer-rack-track
         audition
@@ -226,6 +227,14 @@
   (set! search-filter "")
   (set! selected-tags (list)))
 
+(def open-device-picker ()
+  (set! search-filter "")
+  (set! mode "audition")
+  (set! sbrowser-tab "instruments")
+  (if eseq.seq-core-state/samples-sidebar-visible
+    nil
+    (eseq.seq-panels/seq-toggle-samples-sidebar)))
+
 (def enter-create-track-mode ()
   (set! search-filter "")
   (set! mode "audition")
@@ -277,7 +286,7 @@
           (dict :track track :name name
             :preserve-track-selection preserve-track-selection))
         (status (str "Loading instrument swap: " name)))
-      (status "Saved instruments can replace sampler or custom instrument tracks"))))
+      (status "This track cannot load an instrument"))))
 
 (def swap-track-builtin-instrument (track name preserve-track-selection)
   ;; Only the sampler has an in-place conversion. A modulator rewrite would be a
@@ -524,9 +533,12 @@
     (if path
       (if (or (create-sampler-mode?) (= SEQ.num-tracks 0))
         (add-track item)
-        (if (= SEQ.sidebar-kind "sampler")
-          (audition item)
-          (status "Drop samples onto a sampler track or the new-track drop zone")))
+        (if (eseq.track-collapse/empty-instrument? SEQ.current-track)
+          (host-command "load-sample-into-track"
+            (dict :track SEQ.current-track :path path :preserve-browser-context true))
+          (if (= SEQ.sidebar-kind "sampler")
+            (audition item)
+            (status "Drop samples onto a sampler track or the new-track drop zone"))))
       (status "Choose a sample file, not a folder"))))
 
 (def choose-learn-target (item)

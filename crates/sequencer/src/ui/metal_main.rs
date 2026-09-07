@@ -133,8 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = eng.state.clone();
     let stream = eng._stream;
 
-    // 2. Create App. Start intentionally empty so the first action is choosing
-    // a sound instead of editing a canned pattern.
+    // 2. Start with an editable, device-less track rather than a canned sound.
     let master_recorder = eng.master_recorder.clone();
     let mut app = app::App::new(
         eng.state.clone(),
@@ -145,7 +144,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eng.keyboard_tx,
     );
 
-    let track_names: Vec<String> = Vec::new();
+    app.graph_controller().add_empty_track()?;
+    let track_names = app.tracks.clone();
 
     // Collect node IDs for param pushing to audiograph
     let track_pan_ids: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(

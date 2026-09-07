@@ -203,7 +203,7 @@ impl ProjectFile {
                         }
                     }
                 }
-                ProjectTrackKind::Sampler { .. } | ProjectTrackKind::Modulator => {}
+                ProjectTrackKind::Empty | ProjectTrackKind::Sampler { .. } | ProjectTrackKind::Modulator => {}
             }
         }
         Ok(())
@@ -563,7 +563,7 @@ impl ProjectFile {
                     slots.iter().map(|slot| slot.sample_path.clone()).collect()
                 }
                 ProjectTrackKind::Sampler { sample_path } => vec![Some(sample_path.clone())],
-                ProjectTrackKind::Custom { .. } | ProjectTrackKind::Modulator => Vec::new(),
+                ProjectTrackKind::Empty | ProjectTrackKind::Custom { .. } | ProjectTrackKind::Modulator => Vec::new(),
             })
             .collect();
         for pattern in &mut self.patterns {
@@ -1434,6 +1434,7 @@ pub struct ProjectTrack {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProjectTrackKind {
+    Empty,
     Sampler {
         sample_path: String,
     },
@@ -1771,6 +1772,7 @@ pub struct ProjectTrackSoundState {
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectInstrumentType {
+    Empty,
     Sampler,
     Custom,
     Modulator,
@@ -2259,6 +2261,7 @@ impl ProjectTrackSoundState {
 impl From<InstrumentType> for ProjectInstrumentType {
     fn from(value: InstrumentType) -> Self {
         match value {
+            InstrumentType::Empty => Self::Empty,
             InstrumentType::Sampler => Self::Sampler,
             InstrumentType::Custom => Self::Custom,
             InstrumentType::Modulator => Self::Modulator,
@@ -2270,6 +2273,7 @@ impl From<InstrumentType> for ProjectInstrumentType {
 impl From<ProjectInstrumentType> for InstrumentType {
     fn from(value: ProjectInstrumentType) -> Self {
         match value {
+            ProjectInstrumentType::Empty => InstrumentType::Empty,
             ProjectInstrumentType::Sampler => InstrumentType::Sampler,
             ProjectInstrumentType::Custom => InstrumentType::Custom,
             ProjectInstrumentType::Modulator => InstrumentType::Modulator,

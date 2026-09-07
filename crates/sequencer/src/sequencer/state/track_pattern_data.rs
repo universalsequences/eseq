@@ -200,6 +200,7 @@ pub struct InstrumentSlotResetSummary {
 }
 
 pub(super) enum InstrumentSourceReset {
+    Empty,
     Custom {
         engine_id: usize,
         run_mode: CustomInstrumentRunMode,
@@ -212,6 +213,7 @@ pub(super) enum InstrumentSourceReset {
 impl InstrumentSourceReset {
     pub(super) fn instrument_type(&self) -> InstrumentType {
         match self {
+            Self::Empty => InstrumentType::Empty,
             Self::Custom { .. } => InstrumentType::Custom,
             Self::Sampler { .. } => InstrumentType::Sampler,
         }
@@ -220,20 +222,20 @@ impl InstrumentSourceReset {
     pub(super) fn run_mode(&self) -> CustomInstrumentRunMode {
         match self {
             Self::Custom { run_mode, .. } => *run_mode,
-            Self::Sampler { .. } => CustomInstrumentRunMode::Instrument,
+            Self::Empty | Self::Sampler { .. } => CustomInstrumentRunMode::Instrument,
         }
     }
 
     pub(super) fn engine_id(&self) -> Option<usize> {
         match self {
             Self::Custom { engine_id, .. } => Some(*engine_id),
-            Self::Sampler { .. } => None,
+            Self::Empty | Self::Sampler { .. } => None,
         }
     }
 
     pub(super) fn sample_id(&self) -> (i32, String, u32) {
         match self {
-            Self::Custom { .. } => (-1, String::new(), 44_100),
+            Self::Empty | Self::Custom { .. } => (-1, String::new(), 44_100),
             Self::Sampler { sample_id } => sample_id.clone(),
         }
     }

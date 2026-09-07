@@ -125,6 +125,7 @@ pub(crate) fn sound_preset_icon(preset: &sequencer::project::ProjectSoundPreset)
     };
     match slots.as_slice() {
         [slot] => match slot.instrument_type {
+            ProjectInstrumentType::Empty => "",
             ProjectInstrumentType::Sampler => "waveform",
             ProjectInstrumentType::Modulator => "sine",
             ProjectInstrumentType::Custom | ProjectInstrumentType::Rack => "piano",
@@ -395,7 +396,9 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usiz
     rt.set_reactive(
         "SEQ",
         "sidebar-kind",
-        Value::String("instrument".to_string()),
+        Value::String(if app.graph.track_instrument_types.get(track)
+            == Some(&sequencer::sequencer::InstrumentType::Empty)
+        { "empty" } else { "instrument" }.to_string()),
     );
     rt.set_reactive(
         "SEQ",

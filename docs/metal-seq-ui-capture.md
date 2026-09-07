@@ -29,6 +29,7 @@ implementations.
 Supported track forms are:
 
 ```lisp
+(track :empty)
 (track :sampler)
 (track :instrument "saved/instrument-name")
 (track :modulator)

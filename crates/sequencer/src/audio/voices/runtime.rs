@@ -532,7 +532,7 @@ pub(in crate::audio) fn sync_rack_voice_pools(data: &mut AudioCallbackData, num_
                         );
                     }
                 }
-                InstrumentType::Modulator | InstrumentType::Rack => {}
+                InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
             }
         }
     }
@@ -1019,7 +1019,7 @@ fn last_voice_modulator_node(data: &AudioCallbackData, track: usize) -> u32 {
             }
             best_modulator
         }
-        InstrumentType::Rack => 0,
+        InstrumentType::Empty | InstrumentType::Rack => 0,
     }
 }
 
@@ -1080,7 +1080,7 @@ fn last_rack_slot_voice_modulator_node(
                 })
             })
             .unwrap_or(0),
-        InstrumentType::Rack => 0,
+        InstrumentType::Empty | InstrumentType::Rack => 0,
     }
 }
 
@@ -1099,6 +1099,7 @@ pub(in crate::audio) fn publish_active_voice_counts(data: &AudioCallbackData, nu
                             .count()
                     })
                     .unwrap_or(0),
+                InstrumentType::Empty => 0,
                 InstrumentType::Rack => data
                     .scheduler_snapshot
                     .tracks
@@ -1131,7 +1132,7 @@ pub(in crate::audio) fn publish_active_voice_counts(data: &AudioCallbackData, nu
                                             .count()
                                     })
                                     .unwrap_or(0),
-                                InstrumentType::Modulator | InstrumentType::Rack => 0,
+                                InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => 0,
                             })
                             .sum()
                     })
@@ -1254,6 +1255,9 @@ pub(in crate::audio) fn release_track_active_voices(
     let instrument_type = InstrumentType::from_runtime_flag(
         data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
     );
+    if instrument_type == InstrumentType::Empty {
+        return;
+    }
     if instrument_type == InstrumentType::Modulator {
         let lid = data.state.runtime.modulator_lids[track_idx].load(Ordering::Acquire);
         if lid != 0 {

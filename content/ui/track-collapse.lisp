@@ -5,6 +5,7 @@
 (export collapsed?
         visible-track-indices
         custom-instrument?
+        empty-instrument?
         replaceable-instrument?
         sound-replaceable?
         type-icon
@@ -32,19 +33,25 @@
     (< track (len SEQ.track-instrument-types))
     (= (nth SEQ.track-instrument-types track) "custom")))
 
+(def empty-instrument? (track)
+  (and (>= track 0)
+    (< track SEQ.num-tracks)
+    (< track (len SEQ.track-instrument-types))
+    (= (nth SEQ.track-instrument-types track) "empty")))
+
 (def replaceable-instrument? (track)
   (and (>= track 0)
     (< track SEQ.num-tracks)
     (< track (len SEQ.track-instrument-types))
     (let ((kind (nth SEQ.track-instrument-types track)))
-      (or (= kind "custom") (= kind "sampler") (= kind "rack")))))
+      (or (= kind "empty") (= kind "custom") (= kind "sampler") (= kind "rack")))))
 
 (def sound-replaceable? (track)
   (and (>= track 0)
     (< track SEQ.num-tracks)
     (< track (len SEQ.track-instrument-types))
     (let ((kind (nth SEQ.track-instrument-types track)))
-      (or (= kind "custom") (= kind "sampler") (= kind "rack")))))
+      (or (= kind "empty") (= kind "custom") (= kind "sampler") (= kind "rack")))))
 
 ;; Track identity icons intentionally share the same icon names as the sound
 ;; browser tabs. Keeping the mapping here prevents the mixer and sequencer from

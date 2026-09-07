@@ -230,7 +230,9 @@
 (def show-fx-for-track (track)
   (do
     (select-track-for-edit track)
-    (eseq.seq-panels/seq-show-fx-lower-panel)))
+    (if (eseq.track-collapse/empty-instrument? track)
+      (eseq.browser/open-device-picker)
+      (eseq.seq-panels/seq-show-fx-lower-panel))))
 
 (def track-expanded? (track-id)
   (reactive-get "SEQV" (expanded-track-field track-id)))
@@ -2303,6 +2305,7 @@
       :drop-types (list "sample" "instrument" "sound")
       :drop-meta (dict :kind "new-sample-track")
       :on-drop (lambda (event) (drop-new-track event))
+      :on-double-click (lambda (event) (host-command "add-track-empty" (dict)))
       (label ""
         :font-size 1
         :color :transparent

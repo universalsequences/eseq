@@ -170,6 +170,8 @@ impl TrackSendPLockData {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InstrumentType {
+    /// Editable track with no device, voice pool, or instrument engine.
+    Empty,
     Sampler,
     Custom,
     Modulator,
@@ -177,12 +179,13 @@ pub enum InstrumentType {
 }
 
 impl InstrumentType {
-    pub const COUNT: usize = 4;
-    pub const ALL: [Self; Self::COUNT] = [Self::Sampler, Self::Custom, Self::Modulator, Self::Rack];
-    pub const ADD_TRACK_TYPES: [Self; 3] = [Self::Sampler, Self::Custom, Self::Modulator];
+    pub const COUNT: usize = 5;
+    pub const ALL: [Self; Self::COUNT] = [Self::Sampler, Self::Custom, Self::Modulator, Self::Rack, Self::Empty];
+    pub const ADD_TRACK_TYPES: [Self; 4] = [Self::Empty, Self::Sampler, Self::Custom, Self::Modulator];
 
     pub fn label(&self) -> &'static str {
         match self {
+            InstrumentType::Empty => "Empty",
             InstrumentType::Sampler => "Sampler",
             InstrumentType::Custom => "Custom",
             InstrumentType::Modulator => "Modulator",
@@ -192,6 +195,7 @@ impl InstrumentType {
 
     pub fn runtime_flag(self) -> u32 {
         match self {
+            InstrumentType::Empty => 4,
             InstrumentType::Sampler => 0,
             InstrumentType::Custom => 1,
             InstrumentType::Modulator => 2,
@@ -204,6 +208,7 @@ impl InstrumentType {
             1 => InstrumentType::Custom,
             2 => InstrumentType::Modulator,
             3 => InstrumentType::Rack,
+            4 => InstrumentType::Empty,
             _ => InstrumentType::Sampler,
         }
     }

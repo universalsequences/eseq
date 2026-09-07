@@ -29729,6 +29729,60 @@ mod drift_waveform_tests;
     }
 
     #[test]
+    fn metal_seq_empty_track_double_click_chooses_device_without_changing_track() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive("SEQ", "track-instrument-types",
+            build_string_list(&["empty".to_string(), "sampler".to_string()]));
+        editor.runtime_mut().eval_str(
+            "(set! eseq.seq-core-state/samples-sidebar-visible false)"
+        ).unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor.buffers.iter().find(|buffer| buffer.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 30);
+        let layout = editor.widget_layout().unwrap();
+        for key in ["/select-0", "/track-name-label-0", "/step-cell-0-0"] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key).unwrap();
+            assert!(node.rect.col.is_finite() && node.rect.row.is_finite());
+            assert!(node.rect.width.is_finite() && node.rect.width > 0.0);
+            assert!(node.rect.height.is_finite() && node.rect.height > 0.0);
+            assert!(node.rect.col >= 0.0 && node.rect.row >= 0.0);
+            assert!(node.rect.col + node.rect.width <= 140.0);
+            assert!(node.rect.row + node.rect.height <= 30.0);
+        }
+        let select = find_layout_node_by_stable_key_suffix(&layout, "/select-0").unwrap();
+        let callback = select.props["on-double-click"].clone();
+        editor.drain_host_commands();
+        editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
+            Some(Value::String("instruments".to_string())));
+        assert_eq!(editor.runtime_mut().eval_str("eseq.seq-core-state/samples-sidebar-visible").unwrap(),
+            Some(Value::Bool(true)));
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().all(|command| matches!(command,
+            eseqlisp::host::HostCommand::Custom { name, .. } if name == "refresh-mixer-ui"
+        )), "opening the picker must only refresh the layout: {commands:?}");
+
+        editor.runtime_mut().eval_str("(eseq.browser/activate-instrument \"Synths/Digi Wave\")").unwrap();
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "swap-track-instrument");
+                let Value::Map(payload) = payload else { panic!("expected device load payload") };
+                assert_eq!(value_map_number(payload, "track"), Some(0.0));
+            }
+            other => panic!("expected device load, got {other:?}"),
+        }
+        let empty_zone = find_layout_node_by_stable_key_suffix(&layout, "/new-track-drop-zone").unwrap();
+        editor.runtime_mut().invoke(empty_zone.props["on-double-click"].clone(), vec![Value::Nil]).unwrap();
+        assert!(matches!(editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, .. }] if name == "add-track-empty"));
+    }
+
+    #[test]
     fn metal_seq_track_name_double_click_always_shows_lower_fx_mode() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let sequencer_id = editor

@@ -72,6 +72,28 @@ impl GraphController<'_> {
         Ok(idx)
     }
 
+    /// Register only the track shell: no sample buffer, voices, or engine.
+    pub fn add_empty_track(&mut self) -> Result<usize, String> {
+        let idx = self.app.state.active_track_count();
+        if idx >= MAX_TRACKS {
+            return Err("Maximum number of tracks reached".to_string());
+        }
+        self.force_reap_all_rack_teardowns();
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        let track_name = format!("Track {}", idx + 1);
+        let shell = self.create_track_shell(idx, &track_name)?;
+        self.finish_track_registration(TrackRegistration {
+            idx,
+            track_name,
+            shell,
+            voice_lids: Vec::new(),
+            instrument: InstrumentRegistration::Empty,
+        })?;
+        self.app.sampler_paths.push(None);
+        self.debug_assert_track_vectors_aligned();
+        Ok(idx)
+    }
+
     pub fn add_blank_sampler_track(&mut self) -> Result<usize, String> {
         let idx = self.app.state.active_track_count();
         if idx >= MAX_TRACKS {
@@ -110,6 +132,93 @@ impl GraphController<'_> {
         self.app.sampler_paths.push(None);
         self.debug_assert_track_vectors_aligned();
         Ok(idx)
+    }
+
+    /// Remove a playable device while retaining the track shell and identity.
+    /// Used by history when undoing the first device load on an empty track.
+    pub fn clear_track_instrument(&mut self, track: usize) -> Result<(), String> {
+        let previous_type = self.app.graph.track_instrument_types.get(track).copied()
+            .ok_or_else(|| format!("Invalid track index {}", track + 1))?;
+        if previous_type == InstrumentType::Empty {
+            return Ok(());
+        }
+        if previous_type == InstrumentType::Modulator {
+            return Err("A modulator track cannot be cleared as an instrument".to_string());
+        }
+        self.app.state.validate_instrument_source_reset_target(track)?;
+        let nodes = self.app.graph.track_node_ids[track].clone();
+        let engine_id = self.app.graph.track_engine_ids[track];
+        let old_engine_ids = if previous_type == InstrumentType::Rack {
+            self.rack_engine_ids_for_track(track)
+        } else {
+            engine_id.into_iter().collect()
+        };
+        let delete_commands = match previous_type {
+            InstrumentType::Sampler => sampler_voice_delete_command_count(&nodes),
+            InstrumentType::Custom => {
+                let engine_id = engine_id.ok_or_else(|| "Custom track has no engine".to_string())?;
+                let engine = self.app.graph.engine_node_ids.get(engine_id).and_then(Option::as_ref)
+                    .ok_or_else(|| "Custom track has no engine runtime".to_string())?;
+                engine_route_delete_command_count(engine, track)
+            }
+            InstrumentType::Rack => {
+                let racks = self.app.state.pattern.rack_tracks.lock().unwrap();
+                let rack = racks[track].as_ref()
+                    .ok_or_else(|| "Rack track has no rack state".to_string())?;
+                let effect_deletes: usize = rack.slots.iter().flat_map(|slot| &slot.effect_slots)
+                    .filter(|slot| slot.node_id != 0)
+                    .map(|slot| 1 + usize::from(slot.modulator_node_id != 0)).sum();
+                let mod_disconnects: usize = old_engine_ids.iter().filter_map(|id| {
+                    self.app.graph.engine_node_ids.get(*id).and_then(Option::as_ref)
+                }).filter(|engine| !engine.mod_output_channels.is_empty())
+                    .map(|engine| engine.synth_ids.len()).sum();
+                effect_deletes + mod_disconnects
+            }
+            InstrumentType::Empty | InstrumentType::Modulator => unreachable!("handled above"),
+        };
+        require_graph_edit_queue_capacity(self.app.graph.lg.0, delete_commands, "Clear instrument")?;
+        let batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        match previous_type {
+            InstrumentType::Sampler => self.delete_sampler_voice_nodes(&nodes),
+            InstrumentType::Custom => self.delete_engine_route_for_track(
+                engine_id.expect("custom engine validated before graph mutation"), track, track,
+            ),
+            InstrumentType::Rack => {
+                self.delete_rack_effect_chains(track, batch.serial)?;
+                self.retire_rack_slot_graph_generation(track);
+            }
+            InstrumentType::Empty | InstrumentType::Modulator => unreachable!("handled above"),
+        }
+        self.clear_sampler_runtime_pool(track);
+        let nodes = &mut self.app.graph.track_node_ids[track];
+        nodes.sampler_ids.clear();
+        nodes.sampler_gatepitch_ids.clear();
+        nodes.sampler_modulator_ids.clear();
+        nodes.rack_slots.clear();
+        nodes.rack_signature = None;
+        self.app.graph.track_voice_lids[track].clear();
+        self.app.graph.track_synth_node_ids[track].clear();
+        self.app.graph.track_gatepitch_node_ids[track].clear();
+        self.app.graph.track_engine_ids[track] = None;
+        self.app.graph.track_buffer_ids[track] = -1;
+        self.app.graph.track_sample_rates[track] = self.app.graph.sample_rate;
+        self.app.graph.track_instrument_types[track] = InstrumentType::Empty;
+        self.app.graph.track_instrument_run_modes[track] = CustomInstrumentRunMode::Instrument;
+        self.app.graph.instrument_descriptors[track] = EffectDescriptor::empty_custom_slot();
+        self.app.sampler_paths[track] = None;
+        self.app.state.reset_empty_slot_all_patterns(track)
+            .expect("empty reset target validated before graph mutation");
+        for engine_id in old_engine_ids {
+            if !self.engine_is_still_referenced(engine_id) {
+                lisp_host::set_dgen_engine_enabled_voices(engine_id, 0);
+            }
+        }
+        if let Some(track_id) = self.app.track_registry.id_at(track) {
+            self.app.device_registry.clear_rack_track(track_id);
+        }
+        self.app.publish_sampler_analysis_runtime(track);
+        self.finish_track_instrument_source_change(track);
+        Ok(())
     }
 
     pub fn add_modulator_track(&mut self) -> Result<usize, String> {
@@ -409,7 +518,7 @@ impl GraphController<'_> {
                 lib,
                 run_mode,
             ),
-            Some(InstrumentType::Sampler) => self.convert_sampler_track_to_custom_instrument(
+            Some(InstrumentType::Empty | InstrumentType::Sampler) => self.convert_sampler_or_empty_track_to_custom_instrument(
                 track,
                 instrument_name,
                 new_engine_id,
@@ -433,7 +542,7 @@ impl GraphController<'_> {
         }
     }
 
-    pub(super) fn convert_sampler_track_to_custom_instrument(
+    pub(super) fn convert_sampler_or_empty_track_to_custom_instrument(
         &mut self,
         track: usize,
         instrument_name: &str,
@@ -445,8 +554,9 @@ impl GraphController<'_> {
         if track >= self.app.tracks.len() {
             return Err(format!("Invalid track index {}", track + 1));
         }
-        if self.app.graph.track_instrument_types.get(track) != Some(&InstrumentType::Sampler) {
-            return Err(format!("Track {} is not a sampler track", track + 1));
+        let previous_type = self.app.graph.track_instrument_types[track];
+        if !matches!(previous_type, InstrumentType::Empty | InstrumentType::Sampler) {
+            return Err(format!("Track {} is not empty or a sampler", track + 1));
         }
         if self.app.graph.track_engine_ids.get(track) != Some(&None) {
             return Err(format!(
@@ -461,7 +571,7 @@ impl GraphController<'_> {
             .get(track)
             .cloned()
             .ok_or_else(|| format!("Track {} has no graph nodes", track + 1))?;
-        if track_nodes.sampler_ids.is_empty()
+        if (previous_type == InstrumentType::Sampler && track_nodes.sampler_ids.is_empty())
             || track_nodes.sampler_gatepitch_ids.len() != track_nodes.sampler_ids.len()
             || track_nodes.sampler_modulator_ids.len() != track_nodes.sampler_ids.len()
         {
@@ -1325,6 +1435,7 @@ impl GraphController<'_> {
             self.delete_rack_effect_chains(track, batch.serial)?;
         } else {
             match previous_type {
+                InstrumentType::Empty => {}
                 InstrumentType::Sampler => {
                     self.delete_sampler_voice_nodes(&old_nodes);
                     self.clear_sampler_runtime_pool(track);
@@ -1335,7 +1446,7 @@ impl GraphController<'_> {
                     }
                 }
                 _ => {
-                    return Err("Only sampler, custom, or rack tracks can load a Sound".to_string());
+                    return Err("Only empty, sampler, custom, or rack tracks can load a Sound".to_string());
                 }
             }
         }
@@ -1399,15 +1510,17 @@ impl GraphController<'_> {
         Ok(())
     }
 
-    pub fn replace_rack_track_with_sampler(
+    /// Install a sampler on a track without a flat voice pool (empty or rack).
+    pub fn replace_unvoiced_track_with_sampler(
         &mut self,
         track: usize,
         buffer_id: i32,
         sample_rate: u32,
         sample_name: &str,
     ) -> Result<InstrumentSlotResetSummary, String> {
-        if self.app.graph.track_instrument_types.get(track) != Some(&InstrumentType::Rack) {
-            return Err(format!("Track {} is not an instrument rack", track + 1));
+        let previous_type = self.app.graph.track_instrument_types.get(track).copied();
+        if !matches!(previous_type, Some(InstrumentType::Empty | InstrumentType::Rack)) {
+            return Err(format!("Track {} is not empty or an instrument rack", track + 1));
         }
         if buffer_id < 0 {
             return Err("Retained sampler buffer is invalid".to_string());
@@ -1440,8 +1553,10 @@ impl GraphController<'_> {
             track_nodes.mod_in_clip_ids,
             MAX_VOICES,
         )?;
-        self.delete_rack_effect_chains(track, batch.serial)?;
-        self.retire_rack_slot_graph_generation(track);
+        if previous_type == Some(InstrumentType::Rack) {
+            self.delete_rack_effect_chains(track, batch.serial)?;
+            self.retire_rack_slot_graph_generation(track);
+        }
         self.publish_sampler_voice_runtime(
             track,
             &voices.voice_lids,
