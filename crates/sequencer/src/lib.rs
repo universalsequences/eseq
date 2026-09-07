@@ -77,6 +77,7 @@ pub mod project;
 pub mod quantized_launch;
 pub mod record_quantize;
 pub mod recorder;
+pub mod bounce;
 pub mod runtime;
 // Path-compat re-exports: the runtime engines moved into `runtime/` but keep
 // their historical `crate::<name>::` / `sequencer::<name>::` paths.
