@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use super::{WidgetDefinition, WidgetEvent};
 use crate::layout::{
     Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
-    get_stable_widget_id,
+    get_stable_widget_id, prop_is_keyword,
 };
 use crate::vm::Value;
 
@@ -220,7 +220,7 @@ impl WidgetDefinition for ScrollWidget {
                 child,
                 Constraints {
                     max_width: child_max_width,
-                    max_height: f32::MAX,
+                    max_height: f32::INFINITY,
                     ..constraints
                 },
             )
@@ -260,7 +260,7 @@ impl WidgetDefinition for ScrollWidget {
                 min_width: 0.0,
                 max_width: area.width,
                 min_height: 0.0,
-                max_height: f32::MAX,
+                max_height: f32::INFINITY,
                 aspect: 1.0,
             },
         )
@@ -269,16 +269,24 @@ impl WidgetDefinition for ScrollWidget {
             height: area.height,
         });
 
+        // A fill child has the viewport as its minimum extent, not its maximum:
+        // short content can distribute spare space while long content still scrolls.
+        let content_height = if prop_is_keyword(child, "height", "fill") {
+            child_size.height.max(area.height)
+        } else {
+            child_size.height
+        };
+
         // Child is positioned at scroll container's origin with full content height.
         // The scroll offset is applied at render time, not here.
         let child_rect = Rect {
             row: area.row,
             col: area.col,
             width: area.width,
-            height: child_size.height,
+            height: content_height,
         };
 
-        let scroll_state = sync_layout_state(_node, child_size.height, area.height);
+        let scroll_state = sync_layout_state(_node, content_height, area.height);
         let child_layout_ctx = LayoutCtx::with_scroll(scroll_state.offset_y, area.height);
 
         vec![build_child(child, child_rect, child_layout_ctx)]

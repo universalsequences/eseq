@@ -3127,6 +3127,49 @@ mod tests {
         build_widget("grid", args)
     }
 
+    #[test]
+    fn scroll_fill_content_uses_viewport_minimum_and_preserves_overflow() {
+        for fill in [false, true] {
+            for viewport in [5.0, 30.0, 8.0] {
+                let child = build_widget("v-stack", vec![
+                    kw("height"), if fill { kw("fill") } else { Value::Nil },
+                    build_widget("box", vec![kw("height"), num(10.0)]),
+                    build_widget("box", vec![kw("height"), num(2.0), kw("flex"), num(1.0)]),
+                ]);
+                let tree = build_widget("scroll", vec![
+                    kw("__stable-widget-id"), num(99150.0),
+                    kw("width"), num(20.0), kw("height"), num(viewport), child,
+                ]);
+                crate::widget_render::scroll::set_scroll_state(99150,
+                    crate::widget_render::scroll::ScrollState {
+                        offset_y: 100.0,
+                        ..Default::default()
+                    });
+                let layout = LayoutEngine::new(80, 40, 1.0).layout(&tree).unwrap();
+                let content = &layout.children[0];
+                let expected = if fill { (viewport as f32).max(12.0) } else { 12.0 };
+                assert_f32_approx(content.rect.height, expected);
+                assert_f32_approx(content.children[1].rect.height, expected - 10.0);
+                let state = crate::widget_render::scroll::sync_node_state(&layout);
+                assert_f32_approx(state.content_height, expected);
+                assert_f32_approx(state.viewport_height, viewport as f32);
+                assert_f32_approx(state.offset_y, (expected - viewport as f32).max(0.0));
+
+                // Box fills finite measure constraints directly. An unbounded
+                // scroll measurement must not mistake f32::MAX for a viewport.
+                let box_tree = build_widget("scroll", vec![
+                    kw("width"), num(20.0), kw("height"), num(viewport),
+                    build_widget("box", vec![
+                        kw("height"), if fill { kw("fill") } else { Value::Nil },
+                        build_widget("box", vec![kw("height"), num(12.0)]),
+                    ]),
+                ]);
+                let box_layout = LayoutEngine::new(80, 40, 1.0).layout(&box_tree).unwrap();
+                assert_f32_approx(box_layout.children[0].rect.height, expected);
+            }
+        }
+    }
+
     fn scroll_with_tall_box(background: &str) -> Value {
         build_widget(
             "scroll",

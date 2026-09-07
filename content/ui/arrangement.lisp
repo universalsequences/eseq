@@ -1,9 +1,9 @@
 ;; ui/arrangement.lisp -- arrangement timeline view over song mode
 ;; (docs/arrangement-timeline-ui-spec.md). Renders to *arrangement* buffer;
 ;; loaded by ui/main.lisp. One timeline widget instance per lane: the scene
-;; lane (the only instance with a header/time ruler) plus one headerless,
-;; sidebar-less instance per visible track, all driven by the same shared
-;; time-axis state so every lane stays in sync by construction (spec 5).
+;; lane (with the primary time ruler) plus one headerless, sidebar-less
+;; instance per visible track. A trailing grid fills unused scroll space and
+;; a pinned footer mirrors the ruler. All share one time axis (spec 5).
 
 (module eseq.arrangement)
 
@@ -1691,8 +1691,8 @@
 
 ;; ── Lane instances (spec 4.1/4.2) ──────────────────────────────────────────
 
-;; The scene lane is the ONLY instance with a header/time ruler; it doubles
-;; as the arrangement's bar/beat ruler.
+;; The scene lane owns the primary bar/beat ruler and transport-start marker;
+;; the footer mirrors its time scale without duplicating scene editing.
 ;; Every lane is a flex child (:width 0 :flex 1) of its row: it absorbs
 ;; exactly the width remaining after the fixed header column, so no row can
 ;; overflow the pane and drag the buffer viewport into horizontal scrolling.
@@ -1752,60 +1752,25 @@
     :on-action |event| (scene-action event)))
 
 
-(def bottom-lane ()
-  (timeline
-    :key "scene-lane"
-    :width 0 :flex 1
-    :height 0
-    :focusable true
-    :sidebar-width 0
-    :header-height 1
-    :header-bottom-gutter cursor-gutter-height
+;; The footer and the unused track area share the same time transform as
+;; real lanes, but cannot create scene clips or acquire track selection.
+(def continuation-lane (key height ruler-height)
+  (timeline :key key :width 0 :flex 1 :height height
+    :sidebar-width 0 :header-height ruler-height
     :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
     :grid-density grid-density
     :background-color timeline-background-color
-    :title-bar-height clip-title-bar-height
-    :item-label-font-size clip-label-font-size
-    :item-label-color :scene-clip-fg
-    :item-corner-radius clip-corner-radius
-    :item-color :scene-clip-bg
-    :loop-color :arrangement-loop
-    :playhead-time (bind-seq "song-position-beats")
-    ;; The ruler always owns the transport-start triangle, while the
-    ;; track-specific cursor line remains in the lane the user clicked.
-    :cursor-time cursor-time
-    :cursor-marker-visible true
-    :cursor-marker-scale 1.6
-    :cursor-marker-width-scale 1.5
-    :cursor-marker-height-scale 0.7
-    :cursor-line-visible false
-    :cursor-color cursor-color
-    :drop-types (list "transport-scene")
-    :on-drop (lambda (event) (drop-scene event))
-    :on-right-click (lambda (event) (open-scene-menu event))
     :items '()
-    :selection selection
-    :selection-rect (scene-region-rect)
+    :playhead-time (bind-seq "song-position-beats")
     :view-start (bind "SEQV" "arr-view-start")
     :view-duration (bind "SEQV" "arr-view-duration")
+    :content-length (bind "SEQV" "arr-content-length")
     :zoom-min-duration min-view-duration
     :zoom-max-duration max-view-duration
-    ;:content-length (bind "SEQV" "arr-content-length")
-    ;:content-length-min (content-length-min)
-    :content-length-max 8192
-    :lane-scroll 0
-    :snap snap
-    :min-duration 1
-    :create-duration (* beats-per-bar 4)
-    :move-snap-mode :alignment-helper
-    :resize-snap :grid
-    ;; Region drags quantize to the zoom-adaptive grid, min down / max up
-    ;; (region spec 4.3), so "grab exactly 4 bars" is a sloppy drag.
-    :marquee-snap :grid
-    :snap-mode :floor
-    :resize-snap-mode :alignment-helper
+    :scroll-passthrough :vertical
     :scroll-mode :smooth
-    :on-action |event| (scene-action event)))
+    :on-action |event| (if (view-action? event) (view-action event) nil)))
+
 ;; Headerless, sidebar-less, single-lane track instance (spec 4.2). Lane
 ;; scrolling is inert; the outer buffer viewport owns vertical navigation.
 (def track-lane (i)
@@ -1964,9 +1929,8 @@
     (reactive-set "SEQV" "arr-content-length" (content-length))))
 
 (def new-track-drop-zone ()
-  ;; Sized explicitly: the enclosing scroll v-stack sizes to content, so a
-  ;; flex height would collapse to the label. Three lane heights reads as a
-  ;; real target rather than a sliver under the last track.
+  ;; Keep a useful minimum drop target; the adjacent grid absorbs the rest
+  ;; of the viewport through the enclosing flex row.
   (box :key "arr-new-track-drop-zone"
     :width :fill :height (* 3 track-lane-height)
     :background-color :buffer-bg
@@ -2027,23 +1991,20 @@
           (scene-lane))))
     (box :width :fill :height 0.1 :background-color :bg)
     (scroll :key "track-scroll" :width :fill :flex 1
-      (v-stack :width :fill :gap 0.0
+      (v-stack :width :fill :height :fill :gap 0.0
         (each (eseq.track-collapse/visible-track-indices) |i|
           (subtree :key (str "arr-track-" (nth SEQ.track-ids i))
             (track-row i)))
         ;; New-track drop zone (the *sequencer* buffer's idiom): the mixer is
         ;; hidden by default in this view, so without this there is no place
         ;; to drop a sample / instrument / Sound to add a track.
-        (new-track-drop-zone)))
-    
-      (subtree :key "bottom-arr-ucene-row"
-      (box :width :fill :height 1
-        (h-stack :width :fill :align :start
-          (box :key "bottom-scene-header-spacer"
-            :width header-width :height scene-lane-height
-            )
-          (bottom-lane))))
-    ))
+        (h-stack :key "arr-grid-continuation-row"
+          :width :fill :flex 1 :align :stretch
+          (box :width header-width (new-track-drop-zone))
+          (continuation-lane "arr-grid-continuation" 0 0))))
+    (h-stack :key "arr-bottom-ruler-row" :width :fill :align :start
+      (box :width header-width :height 1)
+      (continuation-lane "arr-bottom-ruler" 1 1))))
 
 ;; Arrangement-local keyboard commands belong to the arrangement mode, not
 ;; the host event loop. Backspace/Delete are the exception: their priority
