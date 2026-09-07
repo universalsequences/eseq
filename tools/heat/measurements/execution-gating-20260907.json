@@ -1,0 +1,173 @@
+{
+  "scope": "One host voice; 48 kHz; 12-voice compilation; native wall time",
+  "machine": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "baseline": {
+    "directory": "/private/tmp/heat-profile-20260907/full-host12",
+    "sha256": {
+      "patch.c": "fd4e34785be9f080e8cd16947a4ac49d1523441c14268a5e49891c0611a9c438",
+      "patch.json": "6799d7ec102072bba79638f2828989c9232590d5acd9fb5c58ac099d2a420ff6",
+      "patch.dylib": "ff2189c10db8caa13f988300a178e198dd287aa2d823c4ec9a6b776fe387e48a"
+    }
+  },
+  "candidate": {
+    "directory": "/private/tmp/heat-gating/published",
+    "sha256": {
+      "patch.c": "948cd83b5069be6a67242dad4167eaa9478739b9a5e242a7e4afdee0029540a4",
+      "patch.json": "16acf6c3a741692cd583280ca9fdc27aa6b1b2d0cbaf3d9628ee0e198050fe11",
+      "patch.dylib": "4d9dcb6ba646ed698be49a32550fc072a2951d310448f7873eb4e6e9eb06401f"
+    }
+  },
+  "comparisons": {
+    "default/128": {
+      "max_error": 0.0,
+      "peak": 0.04763409495353699,
+      "tail_peak": 0.0
+    },
+    "unison4/128": {
+      "max_error": 7.450580596923828e-09,
+      "peak": 0.044032059609889984,
+      "tail_peak": 0.0
+    },
+    "all-on/128": {
+      "max_error": 6.034970283508301e-07,
+      "peak": 0.19208590686321259,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-0.4/128": {
+      "max_error": 0.0,
+      "peak": 0.04446866363286972,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-0.6/128": {
+      "max_error": 0.0,
+      "peak": 0.04763409495353699,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-1.6/128": {
+      "max_error": 0.0,
+      "peak": 0.04908021539449692,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-2.6/128": {
+      "max_error": 0.0,
+      "peak": 0.04050492122769356,
+      "tail_peak": 0.0
+    },
+    "toggle/128": {
+      "tail_peak": 0.0
+    },
+    "default/512": {
+      "max_error": 0.0,
+      "peak": 0.04763409495353699,
+      "tail_peak": 0.0
+    },
+    "unison4/512": {
+      "max_error": 7.450580596923828e-09,
+      "peak": 0.044032059609889984,
+      "tail_peak": 0.0
+    },
+    "all-on/512": {
+      "max_error": 6.034970283508301e-07,
+      "peak": 0.19208590686321259,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-0.4/512": {
+      "max_error": 0.0,
+      "peak": 0.04446866363286972,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-0.6/512": {
+      "max_error": 0.0,
+      "peak": 0.04763409495353699,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-1.6/512": {
+      "max_error": 0.0,
+      "peak": 0.04908021539449692,
+      "tail_peak": 0.0
+    },
+    "fractional-wave-2.6/512": {
+      "max_error": 0.0,
+      "peak": 0.04050492122769356,
+      "tail_peak": 0.0
+    },
+    "toggle/512": {
+      "tail_peak": 0.0
+    },
+    "modulation-assign-remove/128": {
+      "max_error": 0.0,
+      "effect_peak": 0.120254747569561
+    },
+    "modulation-assign-remove/512": {
+      "max_error": 0.0,
+      "effect_peak": 0.10719817876815796
+    }
+  },
+  "timings": {
+    "128": {
+      "baseline_us": [
+        291.30133333333333,
+        292.61600000000004,
+        289.70933333333323,
+        281.37466666666666,
+        283.99600000000004,
+        279.78400000000005,
+        279.7519999999999,
+        280.148,
+        279.8226666666667
+      ],
+      "candidate_us": [
+        51.70266666666666,
+        51.076,
+        49.782666666666664,
+        49.76,
+        49.36666666666667,
+        49.137333333333345,
+        49.44533333333333,
+        49.28,
+        49.391999999999996
+      ],
+      "speedup": 5.690621292201489
+    },
+    "512": {
+      "baseline_us": [
+        1083.5614973262032,
+        1086.7860962566847,
+        1124.2299465240642,
+        1124.5454545454547,
+        1122.9251336898396,
+        1099.048128342246,
+        1084.5026737967917,
+        1080.577540106952,
+        1082.7005347593583
+      ],
+      "candidate_us": [
+        163.14973262032052,
+        163.86096256684493,
+        169.52941176470588,
+        172.06951871657756,
+        170.33155080213905,
+        169.3957219251334,
+        163.8823529411765,
+        164.6470588235294,
+        163.70053475935828
+      ],
+      "speedup": 6.600701549254606
+    }
+  },
+  "compiler_release": "dgenlisp-v0.1.11",
+  "installed_compiler_sha256": "956eb1aebc4cc6f5f163ec4ac2c3aeffb4a1484522eaef29f8735c8d568e048c",
+  "candidate_source_sha256": {
+    "content/instruments/Synths/Heat/dsp.lisp": "a9f0a4bf27e89e6b87f48ef84ceff1a9a6ddab231b3b6d7af38d154721b9ac10",
+    "content/defmacros/heat-linear-filter/macro.lisp": "4ba60319becb97355ff230383d2463baf05d01dd71c868a889a9721e4044794b",
+    "content/defmacros/heat-unison-onset/macro.lisp": "ce3704ab36875db8d96cfb6a085d18f772533f3be2a9874d69d88defd3a04994",
+    "content/defmacros/heat-soft-clip/macro.lisp": "950650ed8a64f9411e7f56e9720262bb41ae5c701f58c13e7fcd6ece9b04ea59",
+    "content/defmacros/heat-drive/macro.lisp": "73aa2e35aa16a7bdec70b03a17c1396d93c1ad1a77359767cb108b44bcf27763",
+    "content/defmacros/heat-envelope/macro.lisp": "fb4b8dc4de34404b1a95d2292fbee256c95b92cea915b24cebe0ec744baa49ea",
+    "content/defmacros/heat-pitch-envelope/macro.lisp": "9f10733b47da26a39e9f91c6f646f3c1a0290afb17f9cf93f34d5efa896945b7",
+    "content/defmacros/heat-glide/macro.lisp": "465850d8aff67f5cd8a7ab0506b1eff49901472e0f65954e0fb3ce9a3fa1f5c6",
+    "content/defmacros/heat-lfo/macro.lisp": "289d09fd4794937749f4ba70de3ef6415c8d211beafcc383e6b9beaf91a0f901",
+    "content/defmacros/heat-sync/macro.lisp": "ab7addaf09cb231902328ea5e5cc34c3221fabea4211b2259e59a2ac5687a021",
+    "content/defmacros/heat-formant-bank/macro.lisp": "1cdd5ff9e97095f1231bf8c3d4b4251481f354328fcf47fdfabdd60d70c2b018"
+  }
+}

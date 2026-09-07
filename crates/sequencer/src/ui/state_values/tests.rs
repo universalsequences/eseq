@@ -44574,7 +44574,7 @@ mod drift_waveform_tests;
     /// Heat's real instrument source, including the editable envelopes and the compact
     /// detail controls, must fit in the production instrument panel.
     #[test]
-    fn heat_development_ui_sections_have_visible_parameter_controls() {
+    fn heat_ui_sections_have_visible_parameter_controls() {
         fn find_param<'a>(node: &'a eseqlisp::layout::LayoutNode, suffix: &str)
             -> Option<&'a eseqlisp::layout::LayoutNode>
         {
@@ -44594,7 +44594,7 @@ mod drift_waveform_tests;
             }
             for child in &node.children { assert_controls_visible(child, panel); }
         }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/heat/instrument");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/instruments/Synths/Heat");
         let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
         let ui = std::fs::read_to_string(root.join("ui.lisp")).unwrap();
         let mut values = Vec::new();

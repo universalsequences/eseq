@@ -1942,6 +1942,59 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attribute_docs": [],
+        "attributes": [],
+        "category": "conditional",
+        "documentation": {
+          "port_docs": "curated-from-signature",
+          "source": "curated"
+        },
+        "implementation": {
+          "function": "evalBlockGate",
+          "source_file": "LispEvaluator.swift"
+        },
+        "input_count": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "inputs": [
+          {
+            "kind": "signal|float",
+            "name": "condition",
+            "required": true,
+            "summary": "Positive enables output; exclusive DSP freezes when every frame is non-positive."
+          },
+          {
+            "kind": "signal|tuple",
+            "name": "body",
+            "required": true,
+            "summary": "Scalar or tuple of scalar DSP values to gate."
+          }
+        ],
+        "name": "block-gate",
+        "output_count": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "outputs": [
+          {
+            "index": 0,
+            "kind": "same-as-inputs",
+            "name": "out",
+            "summary": "Operator result."
+          }
+        ],
+        "signatures": [
+          "(block-gate condition body)"
+        ],
+        "summary": "C scalar execution gate: mask a scalar or tuple and freeze exclusive DSP state during wholly disabled process calls."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": 3,
           "minimum": 2
         },

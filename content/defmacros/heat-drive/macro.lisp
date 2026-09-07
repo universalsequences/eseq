@@ -9,5 +9,5 @@
   (def positive_limit (selector (+ choice 1) 8 8 4 2 4 2 1.3))
   (def negative_limit (selector (+ choice 1) 8 8 4 2 8 8 8))
   (def ceiling (selector (+ (lt input 0) 1) positive_limit negative_limit))
-  (def driven (heat-soft-clip (* input gain) 1 ceiling))
+  (def driven (block-gate (gt choice 0) (heat-soft-clip (* input gain) 1 ceiling)))
   (selector (+ (gt choice 0) 1) input driven))

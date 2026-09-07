@@ -13,5 +13,5 @@
   ; svf's HP and notch enum order differs from Heat's menu order.
   (def svf-mode (selector (+ family 1) 0 1 3 2))
   (def first (svf input cutoff stage-q svf-mode))
-  (def second (svf first cutoff stage-q svf-mode))
+  (def second (block-gate double-stage (svf first cutoff stage-q svf-mode)))
   (selector (+ double-stage 1) first second))

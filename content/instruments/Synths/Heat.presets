@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "engine_name": "Heat Development",
-  "source_file": "tools/heat/instrument/dsp.lisp",
+  "engine_name": "Synths/Heat/",
+  "source_file": "instruments/Synths/Heat/dsp.lisp",
   "presets": [
     {
       "id": "Init",

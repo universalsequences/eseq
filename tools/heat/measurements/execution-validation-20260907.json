@@ -1,0 +1,449 @@
+{
+  "compiler_release": "dgenlisp-v0.1.11",
+  "installed_compiler_sha256": "956eb1aebc4cc6f5f163ec4ac2c3aeffb4a1484522eaef29f8735c8d568e048c",
+  "voice_checks": {
+    "scope": "Development voice integration; not reference sonic parity",
+    "source_sha256": {
+      "candidate_combined": "7aa0bd86754d9a28b1d34a666884b5f58e689b4a9a160f2fdb1f219d54da934b"
+    },
+    "cases": {
+      "44100-default": {
+        "passed": true,
+        "peak": 0.04753047600388527,
+        "rms": 0.01465838123112917
+      },
+      "44100-released": {
+        "passed": true,
+        "tail_peak": 0.0
+      },
+      "44100-serial-parallel-routing": {
+        "passed": true,
+        "max_error": 3.0946615936500166e-08
+      },
+      "44100-amp-mute": {
+        "passed": true
+      },
+      "44100-pressure-level": {
+        "passed": true,
+        "max_error": 7.450580596923828e-09
+      },
+      "44100-independent-legato-envelope-policy": {
+        "passed": true,
+        "held_max_error": 7.450580596923828e-09,
+        "retrigger_difference": 0.0010044537484645844
+      },
+      "44100-filter0-extremes": {
+        "passed": true,
+        "peak": 0.10438261926174164
+      },
+      "44100-filter1-extremes": {
+        "passed": true,
+        "peak": 0.39700847864151
+      },
+      "44100-filter2-extremes": {
+        "passed": true,
+        "peak": 0.1593608409166336
+      },
+      "44100-filter3-extremes": {
+        "passed": true,
+        "peak": 0.8580852150917053
+      },
+      "44100-filter4-extremes": {
+        "passed": true,
+        "peak": 0.09085379540920258
+      },
+      "44100-filter5-extremes": {
+        "passed": true,
+        "peak": 0.06615850329399109
+      },
+      "44100-filter6-extremes": {
+        "passed": true,
+        "peak": 0.1578047275543213
+      },
+      "44100-filter7-extremes": {
+        "passed": true,
+        "peak": 0.672142505645752
+      },
+      "48000-default": {
+        "passed": true,
+        "peak": 0.04763409495353699,
+        "rms": 0.014660065062344074
+      },
+      "48000-released": {
+        "passed": true,
+        "tail_peak": 0.0
+      },
+      "48000-serial-parallel-routing": {
+        "passed": true,
+        "max_error": 3.1035003900115044e-08
+      },
+      "48000-amp-mute": {
+        "passed": true
+      },
+      "48000-pressure-level": {
+        "passed": true,
+        "max_error": 7.450580596923828e-09
+      },
+      "48000-independent-legato-envelope-policy": {
+        "passed": true,
+        "held_max_error": 7.450580596923828e-09,
+        "retrigger_difference": 0.0010134130716323853
+      },
+      "48000-filter0-extremes": {
+        "passed": true,
+        "peak": 0.1637870967388153
+      },
+      "48000-filter1-extremes": {
+        "passed": true,
+        "peak": 0.6818879246711731
+      },
+      "48000-filter2-extremes": {
+        "passed": true,
+        "peak": 0.3679061830043793
+      },
+      "48000-filter3-extremes": {
+        "passed": true,
+        "peak": 1.0397430658340454
+      },
+      "48000-filter4-extremes": {
+        "passed": true,
+        "peak": 0.08923108130693436
+      },
+      "48000-filter5-extremes": {
+        "passed": true,
+        "peak": 0.06691814959049225
+      },
+      "48000-filter6-extremes": {
+        "passed": true,
+        "peak": 0.35866549611091614
+      },
+      "48000-filter7-extremes": {
+        "passed": true,
+        "peak": 0.8374603390693665
+      },
+      "preset-Init-complete": {
+        "passed": true,
+        "missing": [],
+        "unknown": []
+      },
+      "preset-Init-audio": {
+        "passed": true,
+        "peak": 0.04763409495353699
+      },
+      "preset-Warm Bass-complete": {
+        "passed": true,
+        "missing": [],
+        "unknown": []
+      },
+      "preset-Warm Bass-audio": {
+        "passed": true,
+        "peak": 0.10383396595716476
+      },
+      "preset-Open Pad-complete": {
+        "passed": true,
+        "missing": [],
+        "unknown": []
+      },
+      "preset-Open Pad-audio": {
+        "passed": true,
+        "peak": 0.06939955800771713
+      },
+      "preset-Moving Pulse-complete": {
+        "passed": true,
+        "missing": [],
+        "unknown": []
+      },
+      "preset-Moving Pulse-audio": {
+        "passed": true,
+        "peak": 0.06519220024347305
+      },
+      "preset-Pressure Bloom-complete": {
+        "passed": true,
+        "missing": [],
+        "unknown": []
+      },
+      "preset-Pressure Bloom-audio": {
+        "passed": true,
+        "peak": 0.07771788537502289
+      },
+      "preset-Sync Brass-complete": {
+        "passed": true,
+        "missing": [],
+        "unknown": []
+      },
+      "preset-Sync Brass-audio": {
+        "passed": true,
+        "peak": 0.050640787929296494
+      },
+      "preset-Wide Unison-complete": {
+        "passed": true,
+        "missing": [],
+        "unknown": []
+      },
+      "preset-Wide Unison-audio": {
+        "passed": true,
+        "peak": 0.037142809480428696
+      },
+      "preset-Gliding Bass-complete": {
+        "passed": true,
+        "missing": [],
+        "unknown": []
+      },
+      "preset-Gliding Bass-audio": {
+        "passed": true,
+        "peak": 0.06118613854050636
+      },
+      "preset-Wheel Lead-complete": {
+        "passed": true,
+        "missing": [],
+        "unknown": []
+      },
+      "preset-Wheel Lead-audio": {
+        "passed": true,
+        "peak": 0.04652980715036392
+      },
+      "96000-default": {
+        "passed": true,
+        "peak": 0.04691581428050995,
+        "rms": 0.014666810631752014
+      },
+      "96000-released": {
+        "passed": true,
+        "tail_peak": 0.0
+      },
+      "96000-serial-parallel-routing": {
+        "passed": true,
+        "max_error": 3.118891811482172e-08
+      },
+      "96000-amp-mute": {
+        "passed": true
+      },
+      "96000-pressure-level": {
+        "passed": true,
+        "max_error": 7.450580596923828e-09
+      },
+      "96000-independent-legato-envelope-policy": {
+        "passed": true,
+        "held_max_error": 7.450580596923828e-09,
+        "retrigger_difference": 0.0010135658085346222
+      },
+      "96000-filter0-extremes": {
+        "passed": true,
+        "peak": 0.3705877959728241
+      },
+      "96000-filter1-extremes": {
+        "passed": true,
+        "peak": 0.7157976627349854
+      },
+      "96000-filter2-extremes": {
+        "passed": true,
+        "peak": 0.6872943043708801
+      },
+      "96000-filter3-extremes": {
+        "passed": true,
+        "peak": 1.0677002668380737
+      },
+      "96000-filter4-extremes": {
+        "passed": true,
+        "peak": 0.09230642765760422
+      },
+      "96000-filter5-extremes": {
+        "passed": true,
+        "peak": 0.07854856550693512
+      },
+      "96000-filter6-extremes": {
+        "passed": true,
+        "peak": 0.6797472238540649
+      },
+      "96000-filter7-extremes": {
+        "passed": true,
+        "peak": 0.9132829308509827
+      }
+    },
+    "compiler_sha256": "087a4adeb4f286931ce2cd8cbeec54a7a26ca3ad25e3cc9ebb0e4656f57c8d17",
+    "preset_bank_sha256": "2d5ca83a07e3d48959dea8b169d9bc29135bd0445877bcc078aae9057a81acc9"
+  },
+  "unison_checks": {
+    "source_sha256": {
+      "content/defmacros/heat-unison-onset/macro.lisp": "ce3704ab36875db8d96cfb6a085d18f772533f3be2a9874d69d88defd3a04994"
+    },
+    "cases": [
+      {
+        "sample_rate": 44100,
+        "delay_ms": 0,
+        "onset": 0
+      },
+      {
+        "sample_rate": 44100,
+        "delay_ms": 7.5,
+        "onset": 331
+      },
+      {
+        "sample_rate": 44100,
+        "delay_ms": 100,
+        "onset": 4410
+      },
+      {
+        "sample_rate": 44100,
+        "delay_ms": 300,
+        "onset": 13230
+      },
+      {
+        "sample_rate": 48000,
+        "delay_ms": 0,
+        "onset": 0
+      },
+      {
+        "sample_rate": 48000,
+        "delay_ms": 7.5,
+        "onset": 360
+      },
+      {
+        "sample_rate": 48000,
+        "delay_ms": 100,
+        "onset": 4800
+      },
+      {
+        "sample_rate": 48000,
+        "delay_ms": 300,
+        "onset": 14400
+      },
+      {
+        "sample_rate": 96000,
+        "delay_ms": 0,
+        "onset": 0
+      },
+      {
+        "sample_rate": 96000,
+        "delay_ms": 7.5,
+        "onset": 720
+      },
+      {
+        "sample_rate": 96000,
+        "delay_ms": 100,
+        "onset": 9600
+      },
+      {
+        "sample_rate": 96000,
+        "delay_ms": 300,
+        "onset": 28800
+      },
+      {
+        "voices": 2,
+        "normalized_sum_error": 0.0,
+        "stereo_difference_rms": 0.018516818061470985
+      },
+      {
+        "voices": 3,
+        "normalized_sum_error": 3.725290298461914e-09,
+        "stereo_difference_rms": 0.0123445438221097
+      },
+      {
+        "voices": 4,
+        "normalized_sum_error": 0.0,
+        "stereo_difference_rms": 0.009889759123325348
+      }
+    ]
+  },
+  "production_probe_default": {
+    "effective_midi_note": 69.0,
+    "first_non_finite_frame": null,
+    "first_non_finite_state_slot": null,
+    "first_nonzero_frame": 1,
+    "first_samples": [
+      0.0,
+      -8.055261787376367e-06,
+      -7.532293238909915e-05,
+      -0.00026782011264003813,
+      -0.0006147345411591232,
+      -0.0011162488954141736,
+      -0.001751558855175972,
+      -0.0024865344166755676,
+      -0.0032805579248815775,
+      -0.004092236515134573,
+      -0.004883758258074522,
+      -0.005623893812298775,
+      -0.006289649289101362,
+      -0.00686675077304244,
+      -0.007349183317273855,
+      -0.007738029584288597,
+      -0.008039887063205242,
+      -0.008265088312327862,
+      -0.008425966836512089,
+      -0.008535323664546013,
+      -0.008605174720287323,
+      -0.008645894005894661,
+      -0.008665691129863262,
+      -0.008670443668961525,
+      -0.008663790300488472,
+      -0.008647418580949306,
+      -0.00862148404121399,
+      -0.0085850665345788,
+      -0.008536620065569878,
+      -0.008474343456327915,
+      -0.008396496996283531,
+      -0.00830160640180111
+    ],
+    "frames": 48000,
+    "instrument": "content/instruments/Synths/Heat",
+    "mean_abs": 0.009648649021983147,
+    "midi_note": 69.0,
+    "non_finite_samples": 0,
+    "non_finite_state_slots": 0,
+    "nonzero_frames": 35998,
+    "peak": 0.046400055289268494,
+    "preset": null,
+    "rms": 0.014527197927236557
+  },
+  "production_probe_toggles": {
+    "effective_midi_note": 69.0,
+    "first_non_finite_frame": null,
+    "first_non_finite_state_slot": null,
+    "first_nonzero_frame": 1,
+    "first_samples": [
+      0.0,
+      -8.055261787376367e-06,
+      -7.532293238909915e-05,
+      -0.00026782011264003813,
+      -0.0006147345411591232,
+      -0.0011162488954141736,
+      -0.001751558855175972,
+      -0.0024865344166755676,
+      -0.0032805579248815775,
+      -0.004092236515134573,
+      -0.004883758258074522,
+      -0.005623893812298775,
+      -0.006289649289101362,
+      -0.00686675077304244,
+      -0.007349183317273855,
+      -0.007738029584288597,
+      -0.008039887063205242,
+      -0.008265088312327862,
+      -0.008425966836512089,
+      -0.008535323664546013,
+      -0.008605174720287323,
+      -0.008645894005894661,
+      -0.008665691129863262,
+      -0.008670443668961525,
+      -0.008663790300488472,
+      -0.008647418580949306,
+      -0.00862148404121399,
+      -0.0085850665345788,
+      -0.008536620065569878,
+      -0.008474343456327915,
+      -0.008396496996283531,
+      -0.00830160640180111
+    ],
+    "frames": 96000,
+    "instrument": "content/instruments/Synths/Heat",
+    "mean_abs": 0.010966358706355095,
+    "midi_note": 69.0,
+    "non_finite_samples": 0,
+    "non_finite_state_slots": 0,
+    "nonzero_frames": 75924,
+    "peak": 0.06420550495386124,
+    "preset": null,
+    "rms": 0.016078302636742592
+  },
+  "notes": "Voice/unison checks used the local release binary from the same compiler commit before package signing; production probes used the downloaded signed distribution and existing target/debug/instrument_probe."
+}
