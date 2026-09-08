@@ -297,7 +297,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         .map(|runtime| runtime.midi_fx_descriptors())
         .unwrap_or_default();
 
-    while scheduled_until_sample < rendered.saturating_add(lookahead_target_samples) {
+    let horizon = rendered.saturating_add(lookahead_target_samples);
+    while scheduled_until_sample < horizon {
+        let max_chunk_frames = (horizon - scheduled_until_sample)
+            .min(scheduler_block_size as u64) as usize;
         // Song playback: clamp this chunk to the next row boundary and
         // schedule it from the current row's prebuilt snapshot. A boundary
         // inside a block therefore splits scheduling exactly at its sample:
@@ -305,7 +308,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // from the new row (docs/song-mode-spec.md 10.2). The snapshot switch
         // is an `Arc` handoff prepared at preflight — no mutexes, no pattern
         // cloning, no asset loading on this path (spec 9).
-        let mut chunk_frames = scheduler_block_size;
+        let mut chunk_frames = max_chunk_frames;
         let mut song_row_snapshot: Option<Arc<SequencerSnapshot>> = None;
         if song_playback.is_none() {
             // A song that just stopped must not leave stale per-lane phase
@@ -320,7 +323,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             let (frames, install) = session_launches.next_session_chunk(
                 clock.total_beats,
                 samples_per_quarter,
-                scheduler_block_size,
+                max_chunk_frames,
             );
             chunk_frames = frames;
             match install {
@@ -355,7 +358,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             match song.next_chunk(
                 scheduled_until_sample,
                 clock.total_beats,
-                scheduler_block_size,
+                max_chunk_frames,
                 state.song_playback(),
             ) {
                 crate::sequencer::SongChunkPlan::Ended => break,

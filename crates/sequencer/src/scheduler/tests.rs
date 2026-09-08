@@ -9925,3 +9925,105 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
         }
     });
 }
+
+    #[test]
+    fn scheduler_driver_matches_song_trace_without_wall_clock_pacing() {
+        run_with_scheduler_stack(|| {
+            let run = |live: bool, horizon_size: u64| {
+                let (state, override_id) = song_mode_fixture();
+                song_mode_commit(&state, vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 0.50037, 1, vec![(0, override_id.0)]),
+                    song_mode_row(2, 1.00314, 2, Vec::new()),
+                ], 2.00271, false);
+                state.transport.playing.store(true, Ordering::Relaxed);
+                let song = state.preflight_runtime_song().unwrap();
+                state.publish_scheduler_snapshot();
+                state.song_playback().send_command(crate::sequencer::SongPlaybackCommand::Start {
+                    song, start_beat: 0.0, open_ended: false,
+                }).unwrap();
+                let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+                let mut driver = super::worker::SchedulerDriver::new(
+                    state.clone(), 48_000, 512, queue.clone(),
+                );
+                let (_tx, rx) = std::sync::mpsc::channel();
+                let mut trace = Vec::new();
+                let end = (2.00271_f64 * 24_000.0).ceil() as u64;
+                let mut rendered = 0;
+                while rendered < end {
+                    let horizon = (rendered + horizon_size).min(end);
+                    let input = if live {
+                        super::worker::SchedulerInput::Live { keyboard: &rx, clock: &Instant::now }
+                    } else { super::worker::SchedulerInput::Offline };
+                    let advanced = driver.advance(rendered, horizon, input);
+                    assert_eq!(advanced.scheduled_until_sample, horizon);
+                    assert_eq!(advanced.queue_rejections, 0);
+                    trace.extend(observed_triggers(&queue));
+                    rendered = horizon;
+                }
+                assert!(trace.iter().all(|event| event.sample_time < end));
+                (trace, song_row_applied(&state.drain_song_playback_notices()))
+            };
+            let (expected, expected_rows) = run(true, 2048);
+            assert!(!expected.is_empty());
+            assert_eq!(expected_rows.len(), 3);
+            for horizon in [127, 512, 16_000] {
+                let (events, rows) = run(false, horizon);
+                assert_eq!(events, expected, "horizon={horizon}");
+                assert_eq!(rows, expected_rows, "horizon={horizon}");
+            }
+        });
+    }
+
+    #[test]
+    fn scheduler_driver_horizon_excludes_event_at_range_end() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            song_mode_commit(&state, vec![song_mode_row(0, 0.0, 0, Vec::new())], 4.0, false);
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let song = state.preflight_runtime_song().unwrap();
+            state.publish_scheduler_snapshot();
+            state.song_playback().send_command(crate::sequencer::SongPlaybackCommand::Start {
+                song, start_beat: 0.0, open_ended: false,
+            }).unwrap();
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver = super::worker::SchedulerDriver::new(state, 48_000, 512, queue.clone());
+            let advanced = driver.advance(0, 6000, super::worker::SchedulerInput::Offline);
+            assert_eq!(advanced.scheduled_until_sample, 6000);
+            let events = observed_triggers(&queue);
+            assert!(events.iter().any(|event| event.sample_time == 0));
+            assert!(events.iter().all(|event| event.sample_time < 6000));
+            // The next sample admits the boundary step exactly once.
+            let advanced = driver.advance(6000, 6001, super::worker::SchedulerInput::Offline);
+            assert_eq!(advanced.scheduled_until_sample, 6001);
+            let boundary = observed_triggers(&queue);
+            assert_eq!(boundary.len(), 2);
+            assert!(boundary.iter().all(|event| event.sample_time == 6000));
+        });
+    }
+
+    #[test]
+    fn scheduler_driver_preserves_live_roll_start_hold_with_an_injected_clock() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.toggle_step_and_clear_plocks(0, 0);
+            state.transport.roll_mode.store(true, Ordering::Relaxed);
+            state.toggle_play();
+            state.publish_scheduler_snapshot();
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver = super::worker::SchedulerDriver::new(state, 48_000, 512, queue.clone());
+            let (_tx, rx) = std::sync::mpsc::channel();
+            let start = Instant::now();
+            for elapsed in [0, 49, 50] {
+                let clock = || start + Duration::from_millis(elapsed);
+                let advanced = driver.advance(0, 512, super::worker::SchedulerInput::Live {
+                    keyboard: &rx, clock: &clock,
+                });
+                assert_eq!(advanced.scheduled_until_sample, if elapsed < 50 { 0 } else { 512 });
+                assert_eq!(advanced.queue_rejections, 0);
+            }
+            let events = observed_triggers(&queue);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].sample_time, 0);
+        });
+    }
