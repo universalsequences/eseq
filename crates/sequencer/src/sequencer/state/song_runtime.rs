@@ -389,11 +389,14 @@ pub struct SongPlaybackRuntime {
     row: usize,
     /// Song beat corresponding to the scheduler clock's beat zero: the start
     /// beat until the first loop wrap, `0.0` afterwards. The song beat at any
-    /// planning point is `clock_beat_offset + clock_beats`, so boundary
-    /// detection follows the production clock's own beat accumulation and a
-    /// pattern step coinciding with a row boundary is scheduled from the new
-    /// row at exactly the sample where the clock crosses the boundary beat.
+    /// planning point is `clock_beat_offset + clock_beats`. The integer
+    /// sample origin below owns boundary detection; this offset also maps
+    /// the row's authored phase anchors into the scheduler clock domain.
     clock_beat_offset: f64,
+    /// Rendered-sample origin for this pass (reset on a loop wrap). Boundary
+    /// decisions use integer distance from this origin, never accumulated
+    /// floating-point clock error or independently rounded row durations.
+    sample_origin: Option<u64>,
     /// Song-timeline beat anchoring the sounding row's lane offsets. Kept
     /// independently from `row` so an identity-compatible cursor remap can
     /// adopt the new layout without moving the phase anchor.
@@ -440,6 +443,7 @@ impl SongPlaybackRuntime {
             initial_row,
             row: initial_row,
             clock_beat_offset: start_beat,
+            sample_origin: None,
             row_anchor_beat,
             started: false,
             ended: false,
@@ -540,6 +544,7 @@ impl SongPlaybackRuntime {
     pub fn reset(&mut self) {
         self.row = self.initial_row;
         self.clock_beat_offset = self.start_beat;
+        self.sample_origin = None;
         self.row_anchor_beat = self.song.rows[self.initial_row].start_beat;
         self.pending_rebuild = None;
         self.transition_from = None;
@@ -599,10 +604,9 @@ impl SongPlaybackRuntime {
     /// that sample. Chunks never cross a row boundary or the song end;
     /// boundary crossings advance the current row, emit
     /// `AudibleSongRowApplied` notices, and (on loop) wrap back to song beat
-    /// zero. Boundaries are located by the clock's own beat accumulation and
-    /// map to samples without snapping to any musical grid (spec 8.2): the
-    /// row becomes effective at the exact sample where the clock reaches its
-    /// start beat.
+    /// zero. Each authored boundary maps independently to the first sample
+    /// at or after its beat, `ceil(beat * samples_per_quarter)`. Subtracting
+    /// integer positions avoids drift from rounding individual row lengths.
     pub fn next_chunk(
         &mut self,
         at_sample: u64,
@@ -615,6 +619,9 @@ impl SongPlaybackRuntime {
         }
         self.transition_from = None;
         let mut song_beat = self.clock_beat_offset + clock_beats;
+        self.sample_origin.get_or_insert_with(|| {
+            at_sample.saturating_sub((clock_beats * self.samples_per_quarter).round() as u64)
+        });
         if !self.started {
             self.started = true;
             let row = &self.song.rows[self.row];
@@ -635,9 +642,13 @@ impl SongPlaybackRuntime {
                 Some(next) => (next.start_beat, false),
                 None => (self.song.end_beat, true),
             };
-            let remaining_samples = (boundary_beat - song_beat) * self.samples_per_quarter;
-            if remaining_samples >= 1.0 {
-                let frames = block.min(remaining_samples.floor() as usize).max(1);
+            let origin = self.sample_origin.expect("sample origin initialized above");
+            let boundary_frame = (boundary_beat * self.samples_per_quarter).ceil() as u64;
+            let start_frame = (self.clock_beat_offset * self.samples_per_quarter).ceil() as u64;
+            let boundary_sample = origin.saturating_add(boundary_frame.saturating_sub(start_frame));
+            let remaining_samples = boundary_sample.saturating_sub(at_sample);
+            if remaining_samples > 0 {
+                let frames = (block as u64).min(remaining_samples) as usize;
                 return SongChunkPlan::Schedule {
                     frames,
                     row: self.row,
@@ -672,11 +683,12 @@ impl SongPlaybackRuntime {
                 // Guard against a degenerate sub-sample song hanging the
                 // wrap loop: a wrap must make forward progress.
                 if self.song.loop_enabled
-                    && self.song.end_beat * self.samples_per_quarter >= 1.0
+                    && (self.song.end_beat * self.samples_per_quarter).ceil() >= 1.0
                 {
                     // Wrap to song beat zero: the caller rewinds its clock to
                     // beat zero for the chunk starting at this sample.
                     self.clock_beat_offset = 0.0;
+                    self.sample_origin = Some(at_sample);
                     song_beat = 0.0;
                     self.row = self.song.row_index_at_beat(0.0).unwrap_or(0);
                     self.row_anchor_beat = self.song.rows[self.row].start_beat;

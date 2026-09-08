@@ -7509,6 +7509,42 @@
     /// Install a two-chunk take (256 + 40 = 296 steps, transposes 5/6) on
     /// track 0 and return its id. Chunks are MAX_STEPS-long 16th-timebase
     /// patterns, so one chunk spans 64 beats.
+    #[test]
+    fn song_sample_boundaries_and_events_are_independent_of_chunk_size() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            state.transport.bpm.store(137, Ordering::Relaxed);
+            let row_beats = [0.0, 0.50037, 1.00314];
+            let end_beat = 2.00271;
+            song_mode_commit(&state, row_beats.iter().enumerate().map(|(row, beat)| {
+                song_mode_row(row as u64, *beat, row, Vec::new())
+            }).collect(), end_beat, false);
+            let song = state.preflight_runtime_song().unwrap();
+            let samples_per_quarter = 48_000.0 * 60.0 / 137.0;
+            let expected_rows: Vec<_> = row_beats.iter().map(|beat| {
+                (beat * samples_per_quarter).ceil() as u64
+            }).collect();
+            let end_sample = (end_beat * samples_per_quarter).ceil() as u64;
+            let mut reference = None;
+            for block in [1, 127, 512, 16_000] {
+                let (events, notices) = drive_song_lookahead(&state, Arc::clone(&song), block, end_sample + 1);
+                let row_samples: Vec<_> = song_row_applied(&notices).iter()
+                    .map(|row| row.effective_sample).collect();
+                assert_eq!(row_samples, expected_rows, "block={block}");
+                assert!(notices.iter().any(|notice| matches!(notice,
+                    crate::sequencer::SongPlaybackNotice::Ended { end_sample: actual, .. }
+                    if *actual == end_sample)), "block={block}");
+                let trace: Vec<_> = events.iter().map(|event| {
+                    assert!(event.sample_time < end_sample);
+                    (event.sample_time, event.track, event.transpose.to_bits())
+                }).collect();
+                if let Some(reference) = reference.as_ref() {
+                    assert_eq!(&trace, reference, "block={block}");
+                } else { reference = Some(trace); }
+            }
+        });
+    }
+
     fn song_mode_install_take(state: &SequencerState) -> crate::sequencer::TakeId {
         state.with_scenes_mut(|scenes| {
             let mut chunk = scenes.track_pools[0]
@@ -8088,10 +8124,8 @@
                 .iter()
                 .find(|record| record.row_ordinal == 1)
                 .expect("row 1 applied");
-            assert!(
-                (36_008..=36_009).contains(&row1.effective_sample),
-                "unquantized boundary must keep its sub-block sample offset: {row1:?}"
-            );
+            assert_eq!(row1.effective_sample, 36_009,
+                "a boundary uses the first sample at or after its authored beat");
             assert!((row1.effective_beat - 1.50037).abs() < 1e-9);
             assert_ne!(row1.effective_sample % 16_000, 0, "must not snap to block edges");
             assert_ne!(row1.effective_sample % 6_000, 0, "must not snap to the step grid");
@@ -8106,17 +8140,15 @@
                 .filter(|event| event.sample_time < boundary)
                 .max_by_key(|event| event.sample_time)
                 .expect("step before the boundary");
-            assert!((35_999..=36_000).contains(&before.sample_time), "{before:?}");
+            assert_eq!(before.sample_time, 36_000, "{before:?}");
             assert_eq!(before.transpose, 1.0);
             let after = track0
                 .iter()
                 .filter(|event| event.sample_time >= boundary)
                 .min_by_key(|event| event.sample_time)
                 .expect("step after the boundary");
-            assert!(
-                (36_008..=36_009).contains(&after.sample_time),
-                "the anchored row's step 0 must fire at the boundary: {after:?}"
-            );
+            assert_eq!(after.sample_time, 36_009,
+                "the anchored row's step 0 must fire at the boundary: {after:?}");
             assert_eq!(after.transpose, 2.0);
         });
     }
@@ -9547,7 +9579,7 @@
         state.toggle_play();
         let snapshot = state.publish_scheduler_snapshot();
         let mut clock = SnapshotSequencerClock::new(48_000);
-        clock.total_beats = 0.9;
+        clock.seek_beats(0.9);
         clock.was_playing = true;
         let mut roll = RollState::new();
 
@@ -9572,7 +9604,7 @@
             .abs()
             < 1.0e-9);
 
-        clock.total_beats = 1.1;
+        clock.seek_beats(1.1);
         roll.apply_commands_with_clock(
             &[RollCommand::SetRate { rate: Timebase::Eighth }],
             &mut clock,
@@ -9582,7 +9614,7 @@
         assert_eq!(roll.window_start[1], Some(0.0));
 
         // A same-rate slow straight re-press is a no-op.
-        clock.total_beats = 0.2;
+        clock.seek_beats(0.2);
         roll.apply_commands_with_clock(
             &[RollCommand::SetRate { rate: Timebase::Eighth }],
             &mut clock,
@@ -9596,7 +9628,7 @@
             &mut clock,
             &snapshot,
         );
-        clock.total_beats = 0.7;
+        clock.seek_beats(0.7);
         roll.apply_commands_with_clock(
             &[RollCommand::SetRate { rate: Timebase::ThirtySecond }],
             &mut clock,
@@ -9615,7 +9647,7 @@
         state.toggle_play();
         let snapshot = state.publish_scheduler_snapshot();
         let mut clock = SnapshotSequencerClock::new(48_000);
-        clock.total_beats = 0.6;
+        clock.seek_beats(0.6);
         clock.was_playing = true;
         let mut roll = RollState::new();
         roll.apply_commands_with_clock(
