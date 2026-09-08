@@ -1988,6 +1988,7 @@ pub(super) fn enqueue_network_trigger<const QUEUE_CAP: usize>(
                         pattern_epoch,
                         sample_time: note_sample_time,
                         kind: ScheduledEventKind::NetworkTrigger {
+                            voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track(&snapshot.tracks[track_idx]),
                             track: track_idx,
                             source_neuron,
                             seed,
@@ -2026,6 +2027,7 @@ pub(super) fn enqueue_network_trigger<const QUEUE_CAP: usize>(
             pattern_epoch,
             sample_time,
             kind: ScheduledEventKind::NetworkTrigger {
+                voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track(&snapshot.tracks[track_idx]),
                 track: track_idx,
                 source_neuron,
                 seed,

@@ -272,6 +272,7 @@ pub(super) fn dispatch_scheduled_step(
     instrument_params: ScheduledInstrumentParams,
     instrument_tensor_params: ScheduledInstrumentTensorParams,
     sampler_params: ScheduledSamplerParams,
+    voice_policy: crate::scheduled_event::ScheduledVoicePolicy,
     instrument_fingerprint: u64,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) {
@@ -290,7 +291,8 @@ pub(super) fn dispatch_scheduled_step(
         instrument_params,
         instrument_tensor_params,
         instrument_fingerprint,
-        Some(sampler_params),
+        sampler_params,
+        voice_policy,
         rack_macro_values,
     );
 }
@@ -307,6 +309,7 @@ pub(super) fn dispatch_scheduled_network_step(
     instrument_params: ScheduledInstrumentParams,
     instrument_tensor_params: ScheduledInstrumentTensorParams,
     sampler_params: ScheduledSamplerParams,
+    voice_policy: crate::scheduled_event::ScheduledVoicePolicy,
     instrument_fingerprint: u64,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) {
@@ -325,7 +328,8 @@ pub(super) fn dispatch_scheduled_network_step(
         instrument_params,
         instrument_tensor_params,
         instrument_fingerprint,
-        Some(sampler_params),
+        sampler_params,
+        voice_policy,
         rack_macro_values,
     );
 }
@@ -346,6 +350,7 @@ pub(super) fn dispatch_scheduled_event(
             instrument_params,
             instrument_tensor_params,
             sampler_params,
+            voice_policy,
             instrument_fingerprint,
             rack_macro_values,
         } => {
@@ -361,6 +366,7 @@ pub(super) fn dispatch_scheduled_event(
                 instrument_params,
                 instrument_tensor_params,
                 sampler_params,
+                voice_policy,
                 instrument_fingerprint,
                 rack_macro_values,
             );
@@ -394,6 +400,7 @@ pub(super) fn dispatch_scheduled_event(
             instrument_params,
             instrument_tensor_params,
             sampler_params,
+            voice_policy,
             instrument_fingerprint,
             rack_macro_values,
             seed,
@@ -411,6 +418,7 @@ pub(super) fn dispatch_scheduled_event(
                 instrument_params,
                 instrument_tensor_params,
                 sampler_params,
+                voice_policy,
                 instrument_fingerprint,
                 rack_macro_values,
             );

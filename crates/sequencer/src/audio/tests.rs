@@ -1586,6 +1586,7 @@ fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
             pattern_epoch: 1,
             sample_time: 128,
             kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                 rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                 track,
                 step: 0,
@@ -1628,6 +1629,7 @@ fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
             pattern_epoch: 1,
             sample_time: 128,
             kind: ScheduledEventKind::NetworkTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                 rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
                 track,
                 source_neuron: 0,

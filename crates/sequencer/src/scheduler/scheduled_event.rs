@@ -191,9 +191,45 @@ pub struct StepEvent {
     pub source: EventSource,
 }
 
+/// Note allocation and gate behavior resolved from the same row as the note.
+/// These must not change when the UI mirrors a later scene while a note is
+/// still in lookahead. Mixer controls retain their independent live path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScheduledVoicePolicy {
+    pub gate: bool,
+    pub polyphonic: bool,
+    pub max_polyphony: usize,
+    pub mono_trigger: crate::sequencer::MonoTrigger,
+    pub voice_priority: crate::sequencer::VoicePriority,
+    pub base_note_offset: f32,
+}
+
+impl ScheduledVoicePolicy {
+    pub fn from_track(track: &crate::sequencer::SequencerTrackSnapshot) -> Self {
+        Self {
+            gate: track.params.gate,
+            polyphonic: track.params.polyphonic,
+            max_polyphony: track.params.max_polyphony,
+            mono_trigger: track.params.mono_trigger,
+            voice_priority: track.params.voice_priority,
+            base_note_offset: track.instrument_base_note_offset,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Default for ScheduledVoicePolicy {
+    fn default() -> Self {
+        Self { gate: true, polyphonic: false, max_polyphony: 6,
+            mono_trigger: crate::sequencer::MonoTrigger::Retrig,
+            voice_priority: crate::sequencer::VoicePriority::Last, base_note_offset: 0.0 }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScheduledEventKind {
     ResolvedTrigger {
+        voice_policy: ScheduledVoicePolicy,
         track: usize,
         step: usize,
         samples_per_step: f32,
@@ -207,6 +243,7 @@ pub enum ScheduledEventKind {
         rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
     },
     NetworkTrigger {
+        voice_policy: ScheduledVoicePolicy,
         track: usize,
         source_neuron: usize,
         seed: Option<(usize, usize)>,
@@ -431,6 +468,7 @@ mod tests {
                 pattern_epoch: 0,
                 sample_time: 10,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                     track: 0,
                     step: 1,
                     samples_per_step: 120.0,
@@ -475,6 +513,7 @@ mod tests {
                 pattern_epoch: 0,
                 sample_time: 11,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                     track: 0,
                     step: 2,
                     samples_per_step: 120.0,
@@ -514,6 +553,7 @@ mod tests {
                 pattern_epoch: 0,
                 sample_time: 10,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                     track: 0,
                     step: 1,
                     samples_per_step: 120.0,
@@ -559,6 +599,7 @@ mod tests {
                 pattern_epoch: 0,
                 sample_time: 11,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                     track: 0,
                     step: 2,
                     samples_per_step: 120.0,
@@ -602,6 +643,7 @@ mod tests {
                 pattern_epoch: 0,
                 sample_time: 1,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                     track: 0,
                     step: 0,
                     samples_per_step: 120.0,
@@ -639,6 +681,7 @@ mod tests {
             pattern_epoch: 0,
             sample_time: 2,
             kind: ScheduledEventKind::ResolvedTrigger {
+                voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                 track: 0,
                 step: 1,
                 samples_per_step: 120.0,

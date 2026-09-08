@@ -37,10 +37,8 @@ pub(super) fn mark_resolved_note_activity(
     samples_per_step: f64,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
+    base_note_offset: f32,
 ) {
-    let base_note_offset = f32::from_bits(
-        data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
-    );
     let start_sample = data.rendered_samples.load(Ordering::Acquire) + frame_offset as u64;
     let mark = |transpose: f32, duration_steps: f32| {
         let Some(note) = midi_note_from_transpose(transpose, base_note_offset) else {
@@ -90,7 +88,8 @@ pub(super) fn fire_resolved(
     instrument_params: ScheduledInstrumentParams,
     instrument_tensor_params: ScheduledInstrumentTensorParams,
     instrument_fingerprint: u64,
-    scheduled_sampler_params: Option<ScheduledSamplerParams>,
+    sampler_params: ScheduledSamplerParams,
+    voice_policy: crate::scheduled_event::ScheduledVoicePolicy,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) {
     if !track_accepts_scheduled_trigger(&data.state, track_idx) {
@@ -112,6 +111,7 @@ pub(super) fn fire_resolved(
         samples_per_step,
         resolved,
         chord,
+        voice_policy.base_note_offset,
     );
     if instrument_type == InstrumentType::Empty {
         return;
@@ -161,126 +161,12 @@ pub(super) fn fire_resolved(
     // own duration runs out, so hits butt together instead of overlapping.
     let hit_gate = retrig_hit_gate(total_gate, retrig_repeats, retrig_interval_samples);
 
-    let fallback_sampler_params = || {
-        let inst_slot = &data.state.pattern.instrument_slots[track_idx];
-        ScheduledSamplerParams {
-            attack_ms: inst_slot
-                .plocks
-                .get(step, 0)
-                .unwrap_or_else(|| inst_slot.defaults.get(0)),
-            release_ms: inst_slot
-                .plocks
-                .get(step, 1)
-                .unwrap_or_else(|| inst_slot.defaults.get(1)),
-            start_point: inst_slot
-                .plocks
-                .get(step, 2)
-                .unwrap_or_else(|| inst_slot.defaults.get(2)),
-            end_point: inst_slot
-                .plocks
-                .get(step, 3)
-                .unwrap_or_else(|| inst_slot.defaults.get(3)),
-            instrument_enabled: inst_slot
-                .plocks
-                .get(step, 4)
-                .unwrap_or_else(|| inst_slot.defaults.get(4)),
-            reverse: inst_slot
-                .plocks
-                .get(step, 5)
-                .unwrap_or_else(|| inst_slot.defaults.get(5)),
-            loop_mode: inst_slot
-                .plocks
-                .get(step, 6)
-                .unwrap_or_else(|| inst_slot.defaults.get(6)),
-            loop_xfade_ms: inst_slot
-                .plocks
-                .get(step, 7)
-                .unwrap_or_else(|| inst_slot.defaults.get(7)),
-            sr_hz: inst_slot
-                .plocks
-                .get(step, 8)
-                .unwrap_or_else(|| inst_slot.defaults.get(8)),
-            warp_enabled: inst_slot
-                .plocks
-                .get(step, 9)
-                .unwrap_or_else(|| inst_slot.defaults.get(9)),
-            warp_mode: inst_slot
-                .plocks
-                .get(step, 10)
-                .unwrap_or_else(|| inst_slot.defaults.get(10)),
-            sample_bpm: inst_slot
-                .plocks
-                .get(step, 11)
-                .unwrap_or_else(|| inst_slot.defaults.get(11)),
-            playback_speed: inst_slot
-                .plocks
-                .get(step, 12)
-                .unwrap_or_else(|| inst_slot.defaults.get(12)),
-            scrub: inst_slot
-                .plocks
-                .get(step, 13)
-                .unwrap_or_else(|| inst_slot.defaults.get(13)),
-            slice_mode: inst_slot
-                .plocks
-                .get(step, crate::instruments::sampler::SLOT_PARAM_SLICE_MODE)
-                .unwrap_or_else(|| {
-                    inst_slot
-                        .defaults
-                        .get(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE)
-                }),
-            slice_sensitivity: inst_slot
-                .plocks
-                .get(
-                    step,
-                    crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
-                )
-                .unwrap_or_else(|| {
-                    inst_slot
-                        .defaults
-                        .get(crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY)
-                }),
-            slice_base: inst_slot
-                .plocks
-                .get(step, crate::instruments::sampler::SLOT_PARAM_SLICE_BASE)
-                .unwrap_or_else(|| {
-                    inst_slot
-                        .defaults
-                        .get(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE)
-                }),
-            start_point_locked: inst_slot.plocks.get(step, 2).is_some(),
-            end_point_locked: inst_slot.plocks.get(step, 3).is_some(),
-            warp_preserve: live_slot_resolved_node_param_value(
-                inst_slot,
-                step,
-                crate::instruments::sampler::PARAM_WARP_PRESERVE,
-                crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32,
-            ),
-            warp_seg_loop_mode: live_slot_resolved_node_param_value(
-                inst_slot,
-                step,
-                crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE,
-                crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
-            ),
-            warp_seg_envelope: live_slot_resolved_node_param_value(
-                inst_slot,
-                step,
-                crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE,
-                crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
-            ),
-        }
-    };
-    let scheduled_source = scheduled_sampler_params.is_some();
-    let sampler_params = scheduled_sampler_params.unwrap_or_else(fallback_sampler_params);
     if crate::instruments::sampler::srange_debug_enabled() {
         eprintln!(
             "[srange] trigger dispatch track={} step={} source={} start={} end={}",
             track_idx,
             step,
-            if scheduled_source {
-                "scheduled"
-            } else {
-                "fallback"
-            },
+            "scheduled",
             sampler_params.start_point,
             sampler_params.end_point,
         );
@@ -289,7 +175,7 @@ pub(super) fn fire_resolved(
     let release_ms = sampler_params.release_ms;
     let attack_samples = attack_ms * data.sample_rate as f32 / 1000.0;
     let release_samples = release_ms * data.sample_rate as f32 / 1000.0;
-    let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
+    let gate_mode = if voice_policy.gate { 1.0 } else { 0.0 };
     let track_send = tp.get_send();
     let start_point = sampler_params.start_point;
     let end_point = sampler_params.end_point;
@@ -316,9 +202,7 @@ pub(super) fn fire_resolved(
         warp_ptr_hi,
     ) = sampler_warp_runtime(&data.state, track_idx, warp_enabled, warp_mode, sample_bpm);
     let velocity = resolved.velocity;
-    let base_note_offset = f32::from_bits(
-        data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
-    );
+    let base_note_offset = voice_policy.base_note_offset;
     let step_transpose = chord.step_transpose;
     let pan_lid = data.state.runtime.pan_lids[track_idx].load(Ordering::Acquire);
     if pan_lid != 0 {
@@ -366,9 +250,9 @@ pub(super) fn fire_resolved(
         return;
     }
 
-    // Sync polyphonic setting from track params
-    let track_polyphonic = tp.is_polyphonic();
-    let track_max_polyphony = tp.get_max_polyphony();
+    // Apply the allocation policy captured with this note.
+    let track_polyphonic = voice_policy.polyphonic;
+    let track_max_polyphony = voice_policy.max_polyphony;
     data.voice_pools[track_idx].polyphonic = track_polyphonic;
     let engine_id = if is_custom {
         track_engine_id(&data.state, track_idx)
@@ -417,14 +301,14 @@ pub(super) fn fire_resolved(
                         transpose,
                         track_polyphonic,
                         track_max_polyphony,
-                        data.state.pattern.track_params[track_idx].get_voice_priority(),
+                        voice_policy.voice_priority,
                         chord.live_origins[n],
                     ) else { continue; };
                     allocation
                 };
                 let legato = !free_patch && allocation.continues_mono_note(
                     track_idx, track_polyphonic, track_max_polyphony,
-                    data.state.pattern.track_params[track_idx].get_mono_trigger(),
+                    voice_policy.mono_trigger,
                 );
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
@@ -658,14 +542,14 @@ pub(super) fn fire_resolved(
                     transpose,
                     track_polyphonic,
                     track_max_polyphony,
-                    data.state.pattern.track_params[track_idx].get_voice_priority(),
+                    voice_policy.voice_priority,
                     chord.live_origins[0],
                 ) else { return; };
                 allocation
             };
             let legato = !free_patch && allocation.continues_mono_note(
                     track_idx, track_polyphonic, track_max_polyphony,
-                    data.state.pattern.track_params[track_idx].get_mono_trigger(),
+                    voice_policy.mono_trigger,
                 );
                 let voice_idx = allocation.voice_idx;
             data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);

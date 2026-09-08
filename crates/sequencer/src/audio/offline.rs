@@ -169,6 +169,35 @@ mod tests {
     }
 
     #[test]
+    fn queued_notes_keep_row_voice_policy_after_ui_state_changes() {
+        let engine = sampler_engine();
+        let params = &engine.state.pattern.track_params[0];
+        params.gate.store(true, Ordering::Relaxed);
+        params.polyphonic.store(false, Ordering::Relaxed);
+        engine.state.publish_scheduler_snapshot();
+        let mut session = OfflineAudioSession::new(&engine, 100_000).unwrap();
+        let advanced = session.scheduler.advance(0, 512, SchedulerInput::Offline);
+        assert_eq!(advanced.scheduled_until_sample, 512);
+        // Simulate the UI's row mirror overtaking an already queued note.
+        // Its gate and allocation policy must still come from its source row.
+        params.gate.store(false, Ordering::Relaxed);
+        params.polyphonic.store(true, Ordering::Relaxed);
+        engine.state.pattern.instrument_base_note_offsets[0]
+            .store(12.0_f32.to_bits(), Ordering::Relaxed);
+        let mut output = vec![0.0; 1024];
+        render_audio_block(&mut session.data, &mut output,
+            AudioOutputPurpose::Export { source_end_sample: 100_000 });
+        assert!(output.iter().any(|sample| *sample > 0.1));
+        assert!(!session.data.voice_pools[0].polyphonic);
+        assert!(session.data.countdown_events.iter().any(|event|
+            matches!(event.kind, CountdownEventKind::GateOff(_))), "source row's gate must be armed");
+        assert!(engine.state.active_notes(0).contains(&60));
+        assert!(!engine.state.active_notes(0).contains(&72));
+        drop(session);
+        unsafe { engine.destroy(); }
+    }
+
+    #[test]
     fn failed_or_discontinuous_sessions_cannot_resume() {
         let engine = sampler_engine();
         let mut session = OfflineAudioSession::new(&engine, 1000).unwrap();

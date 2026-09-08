@@ -80,6 +80,7 @@ pub(super) fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
                         pattern_epoch,
                         sample_time: note_sample_time,
                         kind: ScheduledEventKind::ResolvedTrigger {
+                            voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track(&snapshot.tracks[track_idx]),
                             track: track_idx,
                             step: step_idx,
                             samples_per_step,
@@ -117,6 +118,7 @@ pub(super) fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
             pattern_epoch,
             sample_time,
             kind: ScheduledEventKind::ResolvedTrigger {
+                voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track(&snapshot.tracks[track_idx]),
                 track: track_idx,
                 step: step_idx,
                 samples_per_step,

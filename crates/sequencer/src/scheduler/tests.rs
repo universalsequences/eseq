@@ -4694,6 +4694,8 @@
             vec![default_empty_effect_chain(), default_empty_effect_chain()],
         );
         state.pattern.track_params[1].set_fts_scale(1);
+        state.pattern.track_params[1].gate.store(false, Ordering::Relaxed);
+        state.pattern.instrument_base_note_offsets[1].store(12.0_f32.to_bits(), Ordering::Relaxed);
         let snapshot = state.publish_scheduler_snapshot();
         let queue = ScheduledEventQueue::<8>::new();
         let mut event = StepEvent {
@@ -4743,10 +4745,12 @@
         let scheduled = queue.pop().expect("network trigger");
         match scheduled.kind {
             ScheduledEventKind::NetworkTrigger {
-                track, resolved, ..
+                track, resolved, voice_policy, ..
             } => {
                 assert_eq!(track, 1);
                 assert_eq!(resolved.transpose, 4.0);
+                assert!(!voice_policy.gate);
+                assert_eq!(voice_policy.base_note_offset, 12.0);
             }
             other => panic!("expected network trigger, got {other:?}"),
         }
