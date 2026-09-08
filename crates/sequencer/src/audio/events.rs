@@ -755,8 +755,24 @@ pub(super) fn mute_group_winner_for_block_events(
         .unwrap_or(track)
 }
 
-pub(super) fn dispatch_block_events(data: &mut AudioCallbackData, block_start_sample: u64) {
+pub(super) fn dispatch_block_events_until(
+    data: &mut AudioCallbackData,
+    block_start_sample: u64,
+    source_end: Option<u64>,
+) {
+    let end_offset = source_end.filter(|end| *end >= block_start_sample
+        && *end - block_start_sample < data.current_callback_nframes as u64)
+        .map(|end| (end - block_start_sample) as u32);
     while !data.block_events.is_empty() {
+        if let Some(end) = source_end {
+            // Also filters retriggers created by an earlier event in THIS
+            // dispatch pass. A note at the exclusive end cannot participate
+            // in mute-group arbitration or create any further events.
+            data.block_events.retain(|event| {
+                matches!(event.kind, BlockEventKind::GateOff(_))
+                    || block_start_sample.saturating_add(event.frame_offset as u64) < end
+            });
+        }
         if data.block_events_need_sort {
             data.block_events.sort_unstable_by(|a, b| {
                 (b.frame_offset, block_event_priority(&b.kind), b.seq).cmp(&(
@@ -771,6 +787,10 @@ pub(super) fn dispatch_block_events(data: &mut AudioCallbackData, block_start_sa
         let Some(frame_offset) = data.block_events.last().map(|event| event.frame_offset) else {
             break;
         };
+        if let Some(end) = end_offset.filter(|end| frame_offset >= *end) {
+            release_range_gates(data, end, block_start_sample);
+            return;
+        }
         let mut group_start = data.block_events.len();
         while group_start > 0 && data.block_events[group_start - 1].frame_offset == frame_offset {
             group_start -= 1;
@@ -844,4 +864,40 @@ pub(super) fn dispatch_block_events(data: &mut AudioCallbackData, block_start_sa
             }
         }
     }
+    if let Some(end) = end_offset {
+        release_range_gates(data, end, block_start_sample);
+    }
+}
+
+/// End admission without invoking transport stop or resetting DSP. Pending
+/// gate releases identify gated sampler voices; ungated one-shots keep playing.
+fn release_range_gates(data: &mut AudioCallbackData, frame_offset: u32, block_start: u64) {
+    while let Some(event) = data.block_events.pop() {
+        if let BlockEventKind::GateOff(gate) = event.kind {
+            dispatch_gate_off_event(data, gate, frame_offset, block_start);
+        }
+    }
+    while let Some(event) = data.countdown_events.pop() {
+        if let CountdownEventKind::GateOff(gate) = event.kind {
+            dispatch_gate_off_event(data, gate, frame_offset, block_start);
+        }
+    }
+    // Custom voices may hold a gate without an automatic duration (including
+    // free-patch voices). Voices already released above are no longer active.
+    for engine_id in 0..data.custom_engine_pools.len() {
+        for voice_idx in 0..data.custom_engine_pools[engine_id].num_voices {
+            let voice = &data.custom_engine_pools[engine_id].voices[voice_idx];
+            if !voice.active || voice.logical_id == 0 { continue; }
+            let track_idx = voice.assigned_track.unwrap_or(0);
+            let free_patch = track_custom_run_mode(&data.state, track_idx)
+                == CustomInstrumentRunMode::FreePatch;
+            let gate = GateOffEvent {
+                track_idx,
+                logical_id: voice.logical_id,
+                target: GateOffTarget::Custom { engine_id, free_patch },
+            };
+            dispatch_gate_off_event(data, gate, frame_offset, block_start);
+        }
+    }
+    data.block_events_need_sort = false;
 }

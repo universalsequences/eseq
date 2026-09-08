@@ -34,23 +34,6 @@ pub fn build_output_stream(
         (block_size as f32 / sample_rate.max(1) as f32).to_bits(),
         Ordering::Release,
     );
-    // Initialize voice pools from state
-    let mut voice_pools: Vec<VoicePool> =
-        (0..MAX_SAMPLER_POOLS).map(|_| VoicePool::new()).collect();
-    let mut custom_engine_pools: Vec<CustomEnginePool> = (0..MAX_INSTRUMENT_ENGINES)
-        .map(|_| CustomEnginePool::new())
-        .collect();
-
-    // Pre-populate voice pools for any existing tracks
-    let num_tracks = state.active_track_count();
-    for t in 0..num_tracks {
-        sync_sampler_voice_pool(&state, t, &mut voice_pools[t]);
-
-        if let Some(engine_id) = track_engine_id(&state, t) {
-            sync_custom_engine_pool(&state, engine_id, &mut custom_engine_pools[engine_id]);
-        }
-    }
-
     let scheduled_events = Arc::new(ScheduledEventQueue::new());
     let rendered_samples = Arc::new(AtomicU64::new(0));
     let (audio_keyboard_tx, audio_keyboard_rx) = std::sync::mpsc::channel();
@@ -84,67 +67,11 @@ pub fn build_output_stream(
                 }
             });
     }
-    let initial_scheduler_snapshot_version = state.scheduler_snapshot_version();
-    let initial_scheduler_snapshot = state.latest_scheduler_snapshot();
-    let initial_num_tracks = initial_scheduler_snapshot.transport.num_tracks;
-    let initial_topology_epoch = initial_scheduler_snapshot.transport.topology_epoch;
-    let trace_audio = env_flag("TINYSEQ_AUDIO_TRACE", false);
-    crate::instruments::voice_modulator::set_process_stats_enabled(trace_audio);
-    if trace_audio {
-        eprintln!("audio-trace: enabled");
-    }
-
-    // Keep the large callback state behind one pointer before handing the
-    // closure through CPAL's generic stream builders. Passing it by value makes
-    // debug builds reserve a copy-sized stack slot at every generic layer.
-    let cb_data = Box::new(AudioCallbackData {
-        lg: LiveGraphPtr(lg),
-        state,
-        num_channels,
-        sample_rate: sample_rate as f64,
-        last_bpm: 0,
-        last_mod_reset_counter: 0,
-        voice_pools,
-        custom_engine_pools,
-        scheduler_snapshot: initial_scheduler_snapshot,
-        scheduler_snapshot_version: initial_scheduler_snapshot_version,
-        pressure: super::pressure::PressureState::new(),
-        mono_held: (0..MAX_TRACKS).map(|_| MonoHeldNotes::default()).collect(),
-        active_keyboard_notes: (0..MAX_TRACKS).map(|_| [None; MAX_VOICES]).collect(),
-        keyboard_rx: audio_keyboard_rx,
-        master_recorder,
-        accumulator_states: [crate::accumulator::AccumulatorRuntimeState::default(); MAX_TRACKS],
-        last_playing: false,
-        last_pattern: u32::MAX,
-        last_num_tracks: initial_num_tracks,
-        last_topology_epoch: initial_topology_epoch,
-        pending_topology_delete_track: None,
-        host_transport_clock: HostTransportClockRuntime::default(),
-        free_patch_transport_routes: [FreePatchTransportRouteState::default(); MAX_TRACKS],
-        rack_choke_last_trigger: [u64::MAX; MAX_TRACKS],
-        rack_choke_note_offs: Vec::with_capacity(MAX_VOICES * 2),
-        pending_accum_reset: [false; MAX_TRACKS],
-        scheduled_events: Arc::clone(&scheduled_events),
-        countdown_events: Vec::with_capacity(SCHEDULED_COUNTDOWN_CAPACITY),
-        block_events: Vec::with_capacity(SCHEDULED_BLOCK_SCRATCH_CAPACITY),
-        block_events_need_sort: false,
-        current_callback_nframes: block_size,
-        output_block_size: OutputBlockSizeVerifier::new(block_size),
-        callback_thread_initialized: false,
-        rendered_samples: Arc::clone(&rendered_samples),
-        bus_effect_runtime,
-        dropped_scheduled_events: 0,
-        late_scheduled_events: 0,
-        event_seq: 0,
-        trace_audio,
-        trace_callback_counter: 0,
-        trace_render_probe_blocks: 0,
-        trace_silent_active_callbacks: 0,
-        transport_beats: 0.0,
-        transport_was_playing: false,
-        metronome: MetronomeState::default(),
-        preview: preview::PreviewVoice::default(),
-    });
+    let cb_data = new_audio_callback_data(
+        lg, state, sample_rate, num_channels, block_size, master_recorder,
+        audio_keyboard_rx, bus_effect_runtime,
+        Arc::clone(&scheduled_events), Arc::clone(&rendered_samples),
+    );
     crate::scheduler::spawn_scheduler_thread(
         Arc::clone(&cb_data.state),
         sample_rate,

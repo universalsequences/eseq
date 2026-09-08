@@ -29,7 +29,23 @@ pub(super) fn enable_flush_denormals_to_zero() {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AudioOutputPurpose {
+    Playback,
+    Export { source_end_sample: u64 },
+}
+
 pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
+    render_audio_block(data, output, AudioOutputPurpose::Playback);
+}
+
+/// Shared musical execution. Export consumes the master before live recording,
+/// browser preview and metronome, and does not promote the calling thread to RT.
+pub(super) fn render_audio_block(
+    data: &mut AudioCallbackData,
+    output: &mut [f32],
+    purpose: AudioOutputPurpose,
+) {
     if !data.callback_thread_initialized {
         data.callback_thread_initialized = true;
         // FTZ/DAZ are per-thread MXCSR state and this thread executes graph
@@ -43,7 +59,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         // SCHED_OTHER while the workers run SCHED_FIFO inverts priorities in
         // the audio path.
         #[cfg(target_os = "linux")]
-        {
+        if purpose == AudioOutputPurpose::Playback {
             unsafe { promote_current_thread_rt() };
             // Direct FIFO promotion is final immediately. An rtkit request is
             // still pending here; its non-RT helper prints the achieved RR (or
@@ -700,7 +716,11 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let current_pattern_epoch = data.scheduler_snapshot.transport.pattern_epoch;
     collect_due_countdown_events(data, nframes, current_pattern_epoch);
     drain_scheduled_events_for_callback(data, block_start_sample, nframes, current_pattern_epoch);
-    dispatch_block_events(data, block_start_sample);
+    let source_end = match purpose {
+        AudioOutputPurpose::Playback => None,
+        AudioOutputPurpose::Export { source_end_sample } => Some(source_end_sample),
+    };
+    dispatch_block_events_until(data, block_start_sample, source_end);
 
     let custom_release_tail_samples =
         (CUSTOM_ENGINE_RELEASE_TAIL_SECONDS * data.sample_rate).round() as u64;
@@ -750,31 +770,33 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         .store(block_end_sample, Ordering::Release);
     data.state.set_audio_rendered_sample(block_end_sample);
 
-    data.master_recorder.capture(output);
+    if purpose == AudioOutputPurpose::Playback {
+        data.master_recorder.capture(output);
 
-    preview::mix_preview(
-        &mut data.preview,
-        output,
-        data.num_channels,
-        data.sample_rate,
-    );
-
-    if transport_playing
-        && data
-            .state
-            .transport
-            .metronome_enabled
-            .load(Ordering::Relaxed)
-    {
-        let bpm = data.state.transport.bpm.load(Ordering::Relaxed) as f64;
-        mix_metronome(
-            &mut data.metronome,
+        preview::mix_preview(
+            &mut data.preview,
             output,
             data.num_channels,
             data.sample_rate,
-            data.transport_beats,
-            bpm,
         );
+
+        if transport_playing
+            && data
+                .state
+                .transport
+                .metronome_enabled
+                .load(Ordering::Relaxed)
+        {
+            let bpm = data.state.transport.bpm.load(Ordering::Relaxed) as f64;
+            mix_metronome(
+                &mut data.metronome,
+                output,
+                data.num_channels,
+                data.sample_rate,
+                data.transport_beats,
+                bpm,
+            );
+        }
     }
     if transport_playing {
         let bpm = data.state.transport.bpm.load(Ordering::Relaxed) as f64;

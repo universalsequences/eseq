@@ -6,6 +6,9 @@
 //! authorizes replacement of the chosen destination path; absent that explicit
 //! authorization, publication is atomic and never clobbers a destination race.
 
+mod plan;
+pub use plan::{BouncePlan, BouncePhase, BounceProgress, render_to_wav};
+
 use std::fs::File;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
