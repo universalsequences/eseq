@@ -1,28 +1,79 @@
-;; Poseidon — Korg workstation character expressed through semantic theme
-;; colors, with PCM selectors, multi-stage envelopes, and dual LFO/MOD strips.
-
-;; Two accents, Ableton-style: every knob/fader/toggle is tri-knob (blue),
-;; every section header/tab is tri-head (yellow). Text stays neutral.
-(def tri-knob () (eseq.effects.custom-ui-lego/ui-accent-blue))
-(def tri-head () (eseq.effects.custom-ui-lego/ui-accent-cyan))
-(def tri-text () :fg)
-
-(def tri-surf-cool () :instrument-group-bg)
-(def tri-surf-dark () :instrument-control-bg)
-
-(def tri-bord-cool () :border-inactive)
-(def tri-bord-dark () :border-inactive)
-
-(def tri-panel-dense (section surface border stripe body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-dense-h) surface border stripe body))
-(def tri-panel-small (section surface border stripe body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-small-h) surface border stripe body))
-(def tri-panel-strip (section surface border stripe body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (* 2.5 (eseq.effects.custom-ui-lego/ui-lego-strip-w)) (eseq.effects.custom-ui-lego/ui-lego-full-h) surface border stripe body))
-
-(def tri-small-row (body)
-  (box :width :fill :height :fill :v-align :center body))
-
+;; Poseidon: persistent primary controls surround one scoped contextual display.
+(def tri-accent () (eseq.effects.custom-ui-lego/ui-accent-cyan))
+(def tri-ink () :black)
+;; One host-owned selection for source, filter, amp, LFO and voice detail.
+(def tri-section () eseq.vanilla/custom-ui-selected-section)
+(def tri-owner (name)
+  (if (string-starts-with? name "osc1_") 0
+    (if (string-starts-with? name "osc2_") 1
+    (if (or (string-starts-with? name "feg_") (= name "filter_mode") (= name "cutoff") (= name "resonance") (= name "drive") (= name "hp_freq") (= name "keytrack")) 2
+    (if (or (string-starts-with? name "aeg_") (= name "vel_to_amp") (= name "voice_pan") (= name "volume_db")) 3
+    (if (or (string-starts-with? name "lfo1_") (string-starts-with? name "ams1_")) 4
+    (if (or (string-starts-with? name "lfo2_") (string-starts-with? name "ams2_")) 5
+    6)))))))
+(def tri-knob (name title width height size decimals taper)
+  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s (tri-owner name) name title
+    width height size (tri-accent) decimals taper :widget-knob-track 9.0 8.0 :right))
+(def tri-panel (section width height body)
+  (box :width width :height height :padding 0.12 :corner-radius 2
+    :debug-name (str "tri-panel-" section)
+    :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)
+    :background-color (if (= (tri-section) section) :instrument-panel-bg :instrument-group-bg) body))
+(def tri-switch (name title width)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+    (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)) 0.5)))
+      (button title :debug-name (str "tri-switch-" name) :width width :height 0.75 :font-size 8 :padding 0 :corner-radius 1
+        :color (if on (tri-ink) :dim)
+        :background-color (if on (tri-accent) :instrument-control-bg)
+        :on-click (lambda (x y r)
+          (do
+            (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope (tri-owner name))
+            (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p (if on 0 1))))))))
+(def tri-num (name title width decimals ink)
+  (tri-readout (tri-owner name) name title false width 1.1 0.5 decimals
+    (if (= decimals 0) 1 0.01) ink))
+(def tri-option (name options width ink surface)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+    (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
+      (str "tri-option-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+      (subtree :key (str "tri-option-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+        (dropdown :width width :height 0.8 :font-size 8
+          :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
+          :value-index-offset (get p :min) :options options
+          :text-color ink :chevron-color ink :badge-color :transparent
+          :bg-color surface :border-color :transparent
+          :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+          :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+          :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+          :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+          :on-change (lambda (v)
+            (do
+              (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope (tri-owner name))
+              (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p
+                (+ (get p :min) (eseq.effects.param-controls/custom-ui-option-index options v))))))))))
+(def tri-readout (section name title labels width height label-height decimals step ink)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+    (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "tri-num-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+      (subtree :key (str "tri-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
+          (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
+        (v-stack :width width :height height :gap 0.06
+          (label title :v-align :center :height label-height :font-size 7.6 :color ink :bg :transparent)
+          (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
+            :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
+            :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+            :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
+            :text-align :left
+            :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
+              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) ink)
+            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+            :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+            :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+            :on-change (if (number? section)
+              (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)
+              (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))))
 (def tri-bank-file () "instruments/Synths/Poseidon/waves/bank.json")
 
 (def tri-set-options ()
@@ -46,71 +97,11 @@
   '("free" "sync"))
 
 
-;; Oscillator on/off as the builtin toggle widget, with a micro-style title.
-(def tri-osc-toggle (name title accent)
-  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
-      (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (if p
-      (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
-        (subtree :key (str "tri-osc-toggle-" name "-" (if on 1 0))
-          (v-stack :width 3.4 :height 1.18 :gap 0.16 :align :start
-            (label title :font-size 9.0 :width 3.4 :height 0.56 :color :dim :bg :transparent)
-            (toggle
-              :value on
-              :color accent
-              :off-color :instrument-control-bg
-              :knob-color :black
-              :off-knob-color :dim
-              :on-change (lambda (next-on)
-                (do
-                  (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope 0)
-                  (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p (if next-on 1 0))))))))
-      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
-
-;; Oscillator visibility is independent from the selected modulation section
-;; (both oscillators are section 0): a per-scope tab state, like core/wavetable.
-(defstate tri-selected-oscillators '())
-
-(def tri-selected-oscillator-for-scope (scope-name)
-  (let ((entry
-          (nth
-            (filter |item| (= (get item :scope) scope-name)
-              tri-selected-oscillators)
-            0)))
-    (if entry (get entry :oscillator) 0)))
-
-(def tri-selected-oscillator ()
-  (tri-selected-oscillator-for-scope (eseq.effects.custom-ui-runtime/custom-ui-scope-name)))
-
-(def tri-set-selected-oscillator-for-scope (scope-name oscillator)
-  (set! tri-selected-oscillators
-    (cons
-      (dict :scope scope-name :oscillator oscillator)
-      (filter |item| (not (= (get item :scope) scope-name))
-        tri-selected-oscillators))))
-
-(def tri-osc-tab-callback (oscillator)
-  (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (lambda (info)
-      (do
-        (tri-set-selected-oscillator-for-scope (get scope :name) oscillator)
-        (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope 0)))))
-
 (def tri-waves-per-set ()
   (let ((metadata (asset-metadata (tri-bank-file))))
     (let ((n (if metadata (get metadata :waves-per-set) nil)))
       (if n n 1))))
 
-;; Two oscillator panels' worth of height, one tabbed panel.
-(def tri-osc-h () (+ (eseq.effects.custom-ui-lego/ui-lego-dense-h) (eseq.effects.custom-ui-lego/ui-lego-dense-h) (eseq.effects.custom-ui-lego/ui-lego-gap)))
-(def tri-osc-w () (eseq.effects.custom-ui-lego/ui-lego-wide-col-w))
-(def tri-viewer-w () 14.4)
-(def tri-viewer-h () 4.6)
-
-;; Live PCM wave display for the visible oscillator. :wave binds the param's
-;; effective value (base + published modulation offset, as filter-table does)
-;; so the highlighted wave follows LFO / envelope / AMS modulation of the wave
-;; position, not just the knob. :set stays a plain value read.
 (def tri-viewer (set-name wave-name warp-name fold-name)
   (let ((pset (eseq.effects.custom-ui-runtime/custom-ui-current-param set-name))
       (pwave (eseq.effects.custom-ui-runtime/custom-ui-current-param wave-name))
@@ -124,106 +115,19 @@
         :wave (eseq.effects.param-controls/param-effective-value pwave)
         :warp (eseq.effects.param-controls/param-effective-value pwarp)
         :fold (eseq.effects.param-controls/param-effective-value pfold)
-        :wave-color (tri-knob)
-        :inactive-color :dim
-        :background-color :instrument-group-bg
+        :wave-color (tri-ink)
+        :inactive-color (rgba 0.0 0.10 0.16 0.45)
+        :background-color (tri-accent)
         :width (tri-viewer-w)
         :height (tri-viewer-h))
       (label "missing wavetable params" :font-size 8 :color :red :bg :transparent))))
 
-(def tri-osc1-content ()
-  (v-stack :width :fill :height :fill :gap 0.16 :align :start
-    (h-stack :gap 0.20 :align :end
-      (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc1_set" "pcm set" 9.0 (tri-set-options) (tri-text))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "osc1_octave" "oct" 2.6 0 false (tri-text))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "osc1_tune" "tune" 3.4 0 "ct" (tri-text))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "osc1_vel_wave" "vel>wav" 3.6 0 false (tri-text)))
-    (h-stack :width :fill :gap 0.40 :align :center
-      (tri-viewer "osc1_set" "osc1_wave" "osc1_warp" "osc1_fold")
-      (h-stack :gap 0.30 :align :center
-        (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 "osc1_wave" "wave" 3.4 3.6 3.2 (tri-knob) 0)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 "osc1_warp" "warp" 3.4 3.6 3.2 (tri-knob) 2)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 "osc1_fold" "fold" 3.4 3.6 3.2 (tri-knob) 2)
-        (eseq.effects.custom-ui-lego/ui-lego-fader-s 0 "osc1_gain_db" 2.3 1.95 (tri-knob) 1 false)))))
+(def tri-hp-enabled? ()
+  (let ((mode-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "filter_mode")))
+    (if mode-p
+      (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value mode-p)) 0.5)
+      true)))
 
-(def tri-osc2-content ()
-  (v-stack :width :fill :height :fill :gap 0.16 :align :start
-    (h-stack :gap 0.20 :align :end
-      (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc2_set" "pcm set" 9.0 (tri-set-options) (tri-text))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "osc2_octave" "oct" 2.6 0 false (tri-text))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "osc2_detune" "detune" 5.4 1 "st" (tri-text))
-      (tri-osc-toggle "osc2_on" "on" (tri-knob))
-      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "osc2_vel_wave" "vel>wav" 3.6 0 false (tri-text)))
-    (h-stack :width :fill :gap 0.40 :align :center
-      (tri-viewer "osc2_set" "osc2_wave" "osc2_warp" "osc2_fold")
-      (h-stack :gap 0.30 :align :center
-        (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 "osc2_wave" "wave" 3.4 3.6 3.2 (tri-knob) 0)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 "osc2_warp" "warp" 3.4 3.6 3.2 (tri-knob) 2)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 "osc2_fold" "fold" 3.4 3.6 3.2 (tri-knob) 2)
-        (eseq.effects.custom-ui-lego/ui-lego-fader-s 0 "osc2_gain_db" 2.3 1.95 (tri-knob) 1 false)))))
-
-(def tri-osc-block ()
-  (let ((show-2 (= (tri-selected-oscillator) 1))
-        (tab-width (/ (- (tri-osc-w) 1.0) 2.0)))
-    (eseq.effects.custom-ui-lego/ui-lego-panel-x-s 0 (tri-osc-w) (tri-osc-h) (tri-surf-cool) (tri-bord-cool) false
-      (v-stack :width :fill :height :fill :gap 0.0 :align :stretch
-        (h-stack :width :fill :height 1.02 :gap 0.0 :align :stretch
-          (eseq.effects.custom-ui-lego/ui-lego-underline-tab
-            "OSC 1" tab-width (not show-2) (tri-head)
-            (tri-osc-tab-callback 0) "tri-osc-tab-1")
-          (eseq.effects.custom-ui-lego/ui-lego-underline-tab
-            "OSC 2" tab-width show-2 (tri-head)
-            (tri-osc-tab-callback 1) "tri-osc-tab-2"))
-        (eseq.effects.custom-ui-lego/ui-detail-adsr-divider "tri-osc-tabs-divider")
-        (box :width :fill :flex 1 :padding 0.12
-          (if show-2 (tri-osc2-content) (tri-osc1-content)))))))
-
-(def tri-panel-small-wide (section surface border stripe body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (tri-osc-w) (eseq.effects.custom-ui-lego/ui-lego-small-h) surface border stripe body))
-
-(def tri-voice-block ()
-  (tri-panel-small-wide 0 (tri-surf-cool) (tri-bord-dark) false
-    (tri-small-row
-      (h-stack :gap 0.22 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "VOICE" 3.2 (tri-head))
-        (box :width 1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s 0 4.0 (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "glide_ms" "glide" 4.0 0 "ms" (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "spread" "sprd" 4.0 2 false (tri-text))))))
-
-(def tri-peg-block ()
-  (tri-panel-small 0 (tri-surf-cool) (tri-bord-dark) false
-    (tri-small-row
-      (h-stack :gap 0.22 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "P.EG" 2.8 (tri-head))
-        (box :width 1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "peg_amt_st" "amt" 6.0 1 "st" (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "peg_attack_ms" "atk" 6.0 0 "ms" (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "peg_decay_ms" "dec" 6.0 0 "ms" (tri-text))))))
-
-(def tri-env-detail ()
-  (eseq.effects.custom-ui-lego/ui-detail-adsr-tabs-s 2.4 (tri-head)
-    0 "AMP" "aeg_attack_ms" "aeg_decay_ms" "aeg_sustain" "aeg_release_ms"
-    1 "FLT" "feg_attack_ms" "feg_decay_ms" "feg_sustain" "feg_release_ms"))
-
-(def tri-stage-block ()
-  (tri-panel-small 0 (tri-surf-cool) (tri-bord-dark) false
-    (tri-small-row
-      (h-stack :gap 0.22 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "STAGE" 3.2 (tri-head))
-        (box :width 1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "aeg_break" "a.brk" 3.8 2 false (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "aeg_slope_ms" "a.slp" 5.0 0 "ms" (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "feg_break" "f.brk" 3.8 2 false (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "feg_slope_ms" "f.slp" 5.0 0 "ms" (tri-text))))))
-
-;; Filter response in place of the envelope plot while the FILTER panel
-;; (section 3, distinct from the F.EG / FLT-tab section 1) is selected. Band 0 is the resonant lowpass (cutoff /
-;; resonance, draggable); band 1 is the highpass (hp_freq only: no resonance,
-;; so its handle is y-locked at the midpoint). Bindings, not value reads, so a
-;; drag repaints only this widget (ported from digidrift ui.lisp).
-;; Band 0 is always the resonant lowpass; band 1 (highpass) only exists
-;; in LP12+HP mode, matching the DSP.
 (def tri-filter-bands (cut-p res-p hp-p)
   (let ((lp (dict :id 0 :type "lowpass"
                 :freq (eseq.effects.custom-ui-runtime/custom-ui-param-binding cut-p)
@@ -254,10 +158,8 @@
       (res-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "resonance"))
       (hp-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "hp_freq"))
       (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (eseq.effects.custom-ui-lego/ui-readout-panel-medium-s 3
-      (v-stack :width :fill :height :fill :gap 0.22 :align :stretch
         (if (and cut-p res-p hp-p)
-          (subtree :key (str "tri-filter-curve-" (if (tri-hp-enabled?) 1 0))
+          (subtree :key (str "tri-filter-curve-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" (if (tri-hp-enabled?) 1 0))
           (response-curve-editor
             :mode :filter
             :bands (tri-filter-bands cut-p res-p hp-p)
@@ -270,156 +172,173 @@
             :background-color :instrument-control-bg
             :corner-radius 5
             :grid-color :border-inactive
-            :stroke-color (tri-knob)
-            :stroke-width 4.5
-            :point-color (tri-head)
-            :width :fill
-            :height 5.5
+            :stroke-color (tri-accent)
+            :stroke-width 3
+            :point-color (tri-accent)
+            :width 35.2
+            :height 2.0 :debug-name "tri-filter-response"
             :on-action (lambda (event)
               (if (or (= (get event :type) :change-band)
                   (= (get event :type) :commit-band))
-                (do
-                  (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope 3)
-                  (if (= (get event :id) 1)
+                (if (= (get event :id) 1)
                     (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope hp-p (get event :freq))
                     (do
                       (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope cut-p (get event :freq))
-                      (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope res-p (get event :q)))))
+                      (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope res-p (get event :q))))
                 nil))))
-          (label "missing filter params" :font-size 8 :color :red :bg :transparent))))))
+          (label "missing filter params" :font-size 8 :color :red :bg :transparent))))
 
+(def tri-viewer-w () 35.2)
+(def tri-viewer-h () 5.0)
+(def tri-select-label (section title width)
+  (button title :debug-name (str "tri-select-" section) :width width :height 0.8 :font-size 8 :padding 0
+    :color (if (= (tri-section) section) (tri-ink) (tri-accent))
+    :background-color (if (= (tri-section) section) (tri-accent) :instrument-control-bg)
+    :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)))
+(def tri-osc-block (section prefix title)
+  (tri-panel section 25.5 3.65
+    (v-stack :gap 0.2
+      (h-stack :gap 0.4
+        (tri-select-label section title 5.2)
+        (tri-option (str prefix "_set") (tri-set-options) 14 :fg :instrument-control-bg)
+        (if (= section 1) (tri-switch "osc2_on" "On" 4.0) (box :width 0 :height 0)))
+      (h-stack :gap 0.8
+        (tri-knob (str prefix "_wave") "Wave" 7.6 2.2 3.0 0 "linear")
+        (if (= section 0)
+          (tri-knob "osc1_tune" "Tune ct" 7.6 2.2 3.0 0 "linear")
+          (tri-knob "osc2_detune" "Detune st" 7.6 2.2 3.0 1 "linear"))
+        (tri-knob (str prefix "_gain_db") "Gain dB" 7.6 2.2 3.0 1 "linear")))))
+(def tri-voice-block ()
+  (tri-panel 6 25.5 2.3
+    (v-stack :gap 0.1
+      (tri-select-label 6 "VOICE" 5.8)
+      (h-stack :gap 0.6
+        (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s 6 7.7 :fg)
+        (tri-num "glide_ms" "Glide ms" 7.7 0 :dim)
+        (tri-num "spread" "Spread" 7.7 2 :dim)))))
+(def tri-env-plot (section prefix height)
+  (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+    (adsr-editor :width 35.2 :height height :debug-name "tri-envelope"
+      :background-color :instrument-control-bg :curve-color (tri-accent) :point-color (tri-accent)
+      :attack (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_attack_ms") 2)
+      :decay (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_decay_ms") 150)
+      :sustain (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_sustain") 0.85)
+      :release (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_release_ms") 180)
+      :on-change (lambda (env)
+        (do
+          (eseq.effects.custom-ui-sections/custom-ui-set-active-adsr scope section (get env :active))
+          (eseq.effects.custom-ui-runtime/custom-ui-set-adsr-in-scope scope
+            (str prefix "_attack_ms") (str prefix "_decay_ms")
+            (str prefix "_sustain") (str prefix "_release_ms") env))))))
+
+(def tri-env-controls (prefix)
+  (h-stack :gap 0.6
+    (tri-num (str prefix "_attack_ms") "Attack ms" 8.3 0 (tri-ink))
+    (tri-num (str prefix "_decay_ms") "Decay ms" 8.3 0 (tri-ink))
+    (tri-num (str prefix "_sustain") "Sustain" 8.3 2 (tri-ink))
+    (tri-num (str prefix "_release_ms") "Release ms" 8.3 0 (tri-ink))))
+(def tri-stage-controls (prefix)
+  (h-stack :gap 0.6
+    (tri-num (str prefix "_break") "Break Level" 8.3 2 (tri-ink))
+    (tri-num (str prefix "_slope_ms") "Slope ms" 8.3 0 (tri-ink))))
+(def tri-osc-detail (prefix)
+  (v-stack :gap 0.3
+    (tri-viewer (str prefix "_set") (str prefix "_wave") (str prefix "_warp") (str prefix "_fold"))
+    (h-stack :gap 0.8
+      (tri-num (str prefix "_octave") "Octave" 8.1 0 (tri-ink))
+      (tri-num (str prefix "_vel_wave") "Vel→Wave" 8.1 0 (tri-ink))
+      (tri-num (str prefix "_warp") "Warp" 8.1 2 (tri-ink))
+      (tri-num (str prefix "_fold") "Fold" 8.1 2 (tri-ink)))))
+(def tri-filter-page ()
+  (v-stack :gap 0.15
+    (tri-filter-detail)
+    (tri-env-plot 2 "feg" 2.0)
+    (tri-env-controls "feg")
+    (h-stack :gap 0.5
+      (tri-num "feg_atk_lvl" "Attack Level" 8.3 2 (tri-ink))
+      (tri-num "feg_rel_lvl" "Release Level" 8.3 2 (tri-ink))
+      (tri-num "feg_int_oct" "Intensity oct" 8.3 1 (tri-ink))
+      (tri-num "feg_vel_oct" "Vel→Int oct" 8.3 1 (tri-ink)))
+    (h-stack :gap 0.5
+      (tri-num "feg_break" "Break Level" 8.3 2 (tri-ink))
+      (tri-num "feg_slope_ms" "Slope ms" 8.3 0 (tri-ink))
+      (tri-num "keytrack" "Keytrack" 8.3 2 (tri-ink))
+      (if (tri-hp-enabled?) (tri-num "hp_freq" "HP Hz" 8.3 0 (tri-ink))
+        (label "HP Off" :height 1.1 :width 8.3 :font-size 8 :color (tri-ink) :bg :transparent :v-align :center)))))
+(def tri-amp-page ()
+  (v-stack :gap 0.3
+    (tri-env-plot 3 "aeg" 4.0)
+    (tri-env-controls "aeg")
+    (tri-stage-controls "aeg")))
+(def tri-voice-page ()
+  (v-stack :gap 0.4
+    (label "PITCH ENVELOPE" :height 0.75 :v-align :center :font-size 8 :color (tri-ink) :bg :transparent)
+    (h-stack :gap 0.8
+      (tri-num "peg_amt_st" "Amount st" 10.8 1 (tri-ink))
+      (tri-num "peg_attack_ms" "Attack ms" 10.8 0 (tri-ink))
+      (tri-num "peg_decay_ms" "Decay ms" 10.8 0 (tri-ink)))))
+(def tri-lfo-preview (prefix)
+  (let ((wave (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_wave") 0)))
+    (subtree :key (str "tri-lfo-preview-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" prefix)
+      (lfo-curve :width 35.2 :height 3.8 :debug-name "tri-lfo-preview"
+        :shape (nth '(0 8 2 1 4) (round (reactive-value wave)))
+        :cycles 2 :curve-color (tri-accent) :fill-color :transparent :background-color :instrument-control-bg))))
+(def tri-lfo-page (prefix ams target target-title)
+  (v-stack :gap 0.3
+    (tri-lfo-preview prefix)
+    (h-stack :gap 0.6 :align :center
+      (tri-option (str prefix "_wave") (tri-lfo-wave-options) 8.3 :fg :instrument-control-bg)
+      (tri-option (str prefix "_keysync") (tri-sync-options) 8.3 :fg :instrument-control-bg)
+      (tri-num (str prefix "_fade_ms") "Fade ms" 8.3 0 (tri-ink)))
+    (h-stack :gap 0.6
+      (tri-num target target-title 11 2 (tri-ink))
+      (tri-num (str prefix "_to_cutoff") "Cutoff oct" 11 2 (tri-ink)))
+    (h-stack :gap 0.6 :align :center
+      (tri-option (str ams "_src") (tri-ams-src-options) 10.8 :fg :instrument-control-bg)
+      (tri-option (str ams "_dest") (tri-ams-dest-options) 10.8 :fg :instrument-control-bg)
+      (tri-num (str ams "_amt") "Mod Amount" 10.8 2 (tri-ink)))))
 (def tri-detail-column ()
-  (v-stack :width (eseq.effects.custom-ui-lego/ui-lego-col-w) :gap (eseq.effects.custom-ui-lego/ui-lego-gap)
-    (tri-peg-block)
-    (if (= eseq.vanilla/custom-ui-selected-section 3)
-      (tri-filter-detail)
-      (tri-env-detail))
-    (tri-stage-block)))
-
-;; filter_mode: 0 = "LP24 res" (no highpass in the DSP), 1 = "LP12+HP".
-;; Read reactively and keyed into a subtree so a mode flip rebuilds only
-;; the widgets that depend on it (same pattern as tri-osc-toggle).
-(def tri-hp-enabled? ()
-  (let ((mode-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "filter_mode")))
-    (if mode-p
-      (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value mode-p)) 0.5)
-      true)))
-
-;; The hp number picker, or an inert dimmed stand-in while LP24 hides it.
-(def tri-hp-field ()
-  (let ((hp-on (tri-hp-enabled?)))
-    (subtree :key (str "tri-hp-field-" (if hp-on 1 0))
-      (if hp-on
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "hp_freq" "hp" 6.0 0 "Hz" (tri-text))
-        ;; Ghosted twin of the micro-num field: same footprint and strip
-        ;; background, muted solid colours (label alpha is not honoured), and
-        ;; no widget underneath, so it neither edits nor drags.
-        (let ((hp-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "hp_freq")))
-          (let ((hp-val (if hp-p (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value hp-p)) 0)))
-            (v-stack :width 6.0 :height 1.0 :gap 0.06 :align :start
-              (label "hp" :font-size 9.0 :width 6.0 :height 0.68 :color (rgba 0.36 0.37 0.41 1) :bg :transparent)
-              (label (str " " (round hp-val) " Hz") :font-size 9.5 :width 6.0 :height 0.75
-                :color (rgba 0.36 0.37 0.41 1) :bg (rgba 0.11 0.12 0.14 1)))))))))
-
+  (let ((section (tri-section)))
+    (box :width 36 :height 9.8 :padding 0.35 :corner-radius 2
+      :background-color (tri-accent) :debug-name "tri-detail-display"
+      (v-stack :gap 0.3
+        (box :width 35.2 :height 0.7 :background-color (tri-ink)
+          (label (str "POSEIDON / " (nth '("OSCILLATOR 1" "OSCILLATOR 2" "FILTER" "AMPLITUDE" "LFO 1" "LFO 2" "VOICE") section))
+            :width 35.2 :height 0.7 :h-align :center :v-align :center :font-size 8 :color (tri-accent) :bg :transparent))
+        (if (= section 0) (tri-osc-detail "osc1")
+          (if (= section 1) (tri-osc-detail "osc2")
+          (if (= section 2) (tri-filter-page)
+          (if (= section 3) (tri-amp-page)
+          (if (= section 4) (tri-lfo-page "lfo1" "ams1" "lfo1_to_pitch" "Pitch ct")
+          (if (= section 5) (tri-lfo-page "lfo2" "ams2" "lfo2_to_amp" "Amp")
+          (tri-voice-page)))))))))))
 (def tri-filter-block ()
-  (tri-panel-dense 3 (tri-surf-cool) (tri-bord-cool) false
-    (h-stack :width :fill :height :fill :gap 0.30 :align :center
-      (v-stack :width 9.4 :gap 0.18 :align :start
-        (h-stack :gap 0.22 :align :start
-          (eseq.effects.custom-ui-lego/ui-lego-header-s 3 "FILTER" 4.2 (tri-head))
-          (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 3 "filter_mode" "mode" 4.6 (tri-fmode-options) (tri-text)))
-        (h-stack :gap 0.20 :align :start
-          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "keytrack" "key" 3.3 2 false (tri-text))
-          (tri-hp-field)))
-      (h-stack :gap 0.10 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-log-knob-full-s 3 "cutoff" "cut" 4.2 (tri-knob) 0)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 3 "resonance" "res" 4.2 (tri-knob) 2)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 3 "drive" "drive" 4.2 (tri-knob) 2)))))
-
-(def tri-feg-block ()
-  (tri-panel-dense 1 (tri-surf-cool) (tri-bord-cool) false
-    (h-stack :width :fill :height :fill :gap 0.30 :align :center
-      (v-stack :width 9.4 :gap 0.18 :align :start
-        (h-stack :gap 0.22 :align :start
-          (eseq.effects.custom-ui-lego/ui-lego-header-s 1 "F.EG" 2.8 (tri-head))
-          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "feg_atk_lvl" "atk lv" 5.0 2 false (tri-text)))
-        (h-stack :gap 0.20 :align :start
-          (box :width 2.8)
-          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 1 "feg_rel_lvl" "rel lv" 5.0 2 false (tri-text))))
-      (h-stack :gap 0.10 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 1 "feg_int_oct" "int" 4.2 (tri-knob) 1)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-full-s 1 "feg_vel_oct" "vel>int" 4.2 (tri-knob) 1)))))
-
+  (tri-panel 2 23.5 4.85
+    (v-stack :gap 0.3
+      (h-stack :gap 0.6
+        (tri-select-label 2 "FILTER" 6)
+        (tri-option "filter_mode" (tri-fmode-options) 15 :fg :instrument-control-bg))
+      (h-stack :gap 0.6
+        (tri-knob "cutoff" "Cutoff Hz" 7.3 3.0 3.8 0 "log")
+        (tri-knob "resonance" "Resonance" 7.3 3.0 3.8 2 "linear")
+        (tri-knob "drive" "Drive" 7.3 3.0 3.8 2 "linear")))))
 (def tri-amp-block ()
-  (tri-panel-small 0 (tri-surf-cool) (tri-bord-dark) false
-    (tri-small-row
-      (h-stack :gap 0.22 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "AMP" 2.4 (tri-head))
-        (box :width 1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "vel_to_amp" "vel" 6.0 2 false (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "voice_pan" "pan" 6.0 2 false (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "volume_db" "vol" 6.0 1 "dB" (tri-text))))))
-
-(def tri-lfo1-strip ()
-  (tri-panel-strip 2 (tri-surf-cool) (tri-bord-cool) false
-    (v-stack :width :fill :gap 0.08 :align :left
-      (box :height 0.2)
-      (h-stack :gap 0.16 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 2 "LFO1" 5.6 (tri-head))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo1_wave" "wave" 5.6 (tri-lfo-wave-options) (tri-text)))
-      (h-stack :gap 0.16 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo1_rate_hz" "rate" 5.6 2 "Hz" (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo1_fade_ms" "fade" 5.6 0 "ms" (tri-text)))
-      (h-stack :gap 0.16 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo1_keysync" "key" 5.6 (tri-sync-options) (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo1_to_pitch" "pitch" 5.6 0 "ct" (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo1_to_cutoff" "cutoff" 5.6 2 "oct" (tri-text))
-        )
-      (box :height 1)
-      (eseq.effects.custom-ui-lego/ui-lego-header-s 2 "MOD A" 5.6 (tri-head))
-      (h-stack :gap 0.16 :align :baseline
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "ams1_src" "src" 5.6 (tri-ams-src-options) (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "ams1_dest" "dest" 5.6 (tri-ams-dest-options) (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "ams1_amt" "amt" 5.6 2 false (tri-text))
-        )
-      )
-    )
-  )
-
-(def tri-lfo2-strip ()
-  (tri-panel-strip 2 (tri-surf-cool) (tri-bord-cool) false
-    (v-stack :width :fill :gap 0.08 :align :left
-      (box :height 0.2)
-      (h-stack :gap 0.16 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 2 "LFO2" 5.6 (tri-head))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo2_wave" "wave" 5.6 (tri-lfo-wave-options) (tri-text)))
-      (h-stack :gap 0.16 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo2_rate_hz" "rate" 5.6 2 "Hz" (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo2_fade_ms" "fade" 5.6 0 "ms" (tri-text)))
-      (h-stack :gap 0.16 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo2_keysync" "key" 5.6 (tri-sync-options) (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo2_to_amp" "amp" 5.6 2 false (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo2_to_cutoff" "cutoff" 5.6 2 "oct" (tri-text))
-        )
-      (box :height 1)
-      (eseq.effects.custom-ui-lego/ui-lego-header-s 2 "MOD B" 5.6 (tri-head))        
-      (h-stack :gap 0.16 :align :baseline
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "ams2_src" "src" 5.6 (tri-ams-src-options) (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "ams2_dest" "dest" 5.6 (tri-ams-dest-options) (tri-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "ams2_amt" "amt" 5.6 2 false (tri-text))
-        )
-      )))
-
+  (tri-panel 3 23.5 4.85
+    (v-stack :gap 0.3
+      (tri-select-label 3 "AMP" 6)
+      (h-stack :gap 0.6
+        (tri-knob "vel_to_amp" "Velocity" 7.3 3.0 3.8 2 "linear")
+        (tri-knob "voice_pan" "Pan" 7.3 3.0 3.8 2 "linear")
+        (tri-knob "volume_db" "Vol dB" 7.3 3.0 3.8 1 "linear")))))
+(def tri-lfo-strip (section prefix title)
+  (tri-panel section 9.5 4.85
+    (v-stack :gap 0.4 :align :center
+      (tri-select-label section title 7.8)
+      (tri-knob (str prefix "_rate_hz") "Rate Hz" 8.5 3.0 3.8 2 "log"))))
 (defsynth-ui
-  (h-stack :width :fill :gap 0.05 :align :stretch
-    (v-stack :width (tri-osc-w) :gap (eseq.effects.custom-ui-lego/ui-lego-gap)
-      (tri-osc-block)
-      (tri-voice-block))
+  (h-stack :gap 0.15 :align :start
+    (v-stack :gap 0.1
+      (tri-osc-block 0 "osc1" "OSC 1") (tri-osc-block 1 "osc2" "OSC 2") (tri-voice-block))
     (tri-detail-column)
-    (eseq.effects.custom-ui-lego/ui-lego-column
-      (tri-filter-block)
-      (tri-feg-block)
-      (tri-amp-block))
-    (h-stack :width 14.7 :gap 0.05 :align :stretch
-      (tri-lfo1-strip)
-      (tri-lfo2-strip))))
+    (v-stack :gap 0.1 (tri-filter-block) (tri-amp-block))
+    (v-stack :gap 0.1 (tri-lfo-strip 4 "lfo1" "LFO 1") (tri-lfo-strip 5 "lfo2" "LFO 2"))))

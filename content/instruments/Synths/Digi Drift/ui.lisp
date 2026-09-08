@@ -1,63 +1,47 @@
-;; Factory Drift — warm analog character expressed through semantic theme
-;; colors, with source tabs, vertical gain faders, and accent-striped panels.
-;; Oscillator gains drive the filter naturally; cutoff, resonance, and high-pass
-;; remain directly accessible in the filter panel.
-
-;; Ableton Drift palette discipline: outside the dark oscillator column every
-;; knob is drift-knob (blue) and every section header is drift-head (dim).
-;; Inside the dark column each source row owns one colour (osc1 / osc2 /
-;; noise) that tints its tab, knobs, fader and toggle. The row colours are
-;; the theme's cyan / purple / magenta slots rather than the warm lego accents
-;; or the semantic :red, so a cool theme keeps them in its own family.
-(def drift-knob   () (eseq.effects.custom-ui-lego/ui-accent-blue))
-(def drift-head   () :dim)
-(def drift-text   () :fg)
-(def drift-orange () :cyan)
-(def drift-ice    () :purple)
-(def drift-pink   () :magenta)
-
-(def drift-surf-warm () :mixer-control-bg)
-(def drift-surf-cool () :instrument-group-bg)
-(def drift-surf-dark () :instrument-control-bg)
-
-(def drift-bord-warm () :border-inactive)
-(def drift-bord-cool () :border-inactive)
-(def drift-bord-dark () :border-inactive)
-
-;; The dark oscillator column stacks three equal rows (osc1 / osc2 / noise)
-;; in the same height the other columns use, so its knobs are a touch
-;; shorter than the 3.36 full-height cells elsewhere.
-;; Osc rows are 3.2 tall; the lighter noise row is 2.6 so the three rows
-;; read as balanced rather than one sparse row matching two dense ones.
-(def drift-row-knob-h () 3.2)
-(def drift-noise-knob-h () 2.6)
-(def drift-row-knob (name title accent decimals)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 name title 4.2 (drift-row-knob-h) (drift-row-knob-h) accent decimals))
-(def drift-noise-knob (name title accent decimals)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 0 name title 4.2 (drift-noise-knob-h) (drift-noise-knob-h) accent decimals))
-
-(def drift-panel-dense (section surface border stripe body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-dense-h) surface border stripe body))
-(def drift-panel-small (section surface border stripe body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-small-h) surface border stripe body))
-;; Full-height filter column: three oversized knobs wide (20 cells, not the
-;; standard 24). Filter knobs are ~1.5x the regular 4.2 x 3.36 cells.
-(def drift-filter-col-w () 20.0)
-(def drift-filter-knob-w () 6.0)
-(def drift-filter-knob-h () 4.9)
-(def drift-filter-knob (name title decimals)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 3 name title (drift-filter-knob-w) (drift-filter-knob-h) (drift-filter-knob-h) (drift-knob) decimals))
-(def drift-filter-log-knob (name title decimals)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-taper-sized-s 3 name title (drift-filter-knob-w) (drift-filter-knob-h) (drift-filter-knob-h) (drift-knob) decimals "log"))
-(def drift-panel-column (section surface border stripe body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (drift-filter-col-w)
-    (+ (* 2 (eseq.effects.custom-ui-lego/ui-lego-dense-h)) (eseq.effects.custom-ui-lego/ui-lego-small-h) (* 2 (eseq.effects.custom-ui-lego/ui-lego-gap)))
-    surface border stripe body))
-
-;; small panels: one 1.18-high control row, vertically centered in the panel
-(def drift-small-row (body)
-  (box :width :fill :height :fill :v-align :center body))
-
+;; Digi Drift: paired sources surround a themed envelope/cycle display.
+;; UI-only layout; all parameters keep the host's scoped modulation/p-lock routes.
+(def drift-accent () :control-on-bg)
+(def drift-ink () :control-on-fg)
+(def drift-section () (if (= eseq.vanilla/custom-ui-selected-section 1) 1 0))
+(def drift-knob (name title width height size decimals taper)
+  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s (drift-section) name title
+    width height size (drift-accent) decimals taper :widget-knob-track 9.0 8.0 :right))
+(def drift-panel (width height body)
+  (box :width width :height height :padding 0.12 :corner-radius 2
+    :background-color :instrument-group-bg body))
+(def drift-label (title width)
+  (box :width width :height 0.75 :background-color (drift-accent)
+    (label title :width width :height 0.75 :h-align :center :font-size 8 :color (drift-ink) :bg :transparent :v-align :center)))
+(def drift-switch (name title width)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+    (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)) 0.5)))
+      (button title :debug-name (str "drift-switch-" name) :width width :height 0.75 :font-size 8 :padding 0 :corner-radius 1
+        :color (if on (drift-ink) :dim)
+        :background-color (if on (drift-accent) :instrument-control-bg)
+        :on-click (lambda (x y r)
+          (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p (if on 0 1)))))))
+(def drift-num (name title width decimals ink)
+  (drift-readout (drift-section) name title false width 1.1 0.5 decimals
+    (if (= decimals 0) 1 0.01) ink))
+(def drift-option (name options width ink surface)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+    (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
+      (str "drift-option-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+      (subtree :key (str "drift-option-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+        (dropdown :width width :height 0.8 :font-size 8
+          :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
+          :value-index-offset (get p :min) :options options
+          :text-color ink :chevron-color ink :badge-color :transparent
+          :bg-color surface :border-color :transparent
+          :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+          :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+          :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+          :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+          :on-change (lambda (v)
+            (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p
+              (+ (get p :min) (eseq.effects.param-controls/custom-ui-option-index options v)))))))))
 (def drift-wave1-options ()
   '("sine" "tri" "shark" "sat" "saw" "pulse" "rect"))
 
@@ -86,79 +70,47 @@
   '("free" "trig"))
 
 
-;; Ableton-style filter send: a ">" chip after each source's gain knob that
-;; lights in the row colour when the source feeds the filter, dark when dry.
-(def drift-route-chip (name height accent)
-  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
-        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (if p
-      (let ((filt (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
-        (subtree :key (str "drift-route-chip-" name "-" (if filt 1 0))
-          (button ">" :width 2.1 :height height
-            :font-size 11.0
-            :color (if filt :black :dim)
-            :background-color (if filt accent :mixer-control-bg)
-            :corner-radius 3
-            :h-align :center :v-align :center
-            :on-click (lambda (x y r)
-              (do
-                (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope 0)
-                (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p (if filt 0 1)))))))
-      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
-
-;; Oscillator source tab that IS the on/off switch: the solid "1" / "2" block
-;; carries the row colour while the oscillator is on and goes dark when off.
-(def drift-osc-tab (name text accent)
-  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
-      (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (if p
-      (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) 0.5)))
-        (subtree :key (str "drift-osc-tab-" name "-" (if on 1 0))
-          (box :width 2.1 :height 1.5 :v-align :end
-            (button text :width 2.3 :height 1.5
-              :font-size 8.8
-              :color (if on :black :dim)
-              :background-color (if on accent :mixer-control-bg)
-              :corner-radius 3
-              :h-align :center :v-align :center
-              :on-click (lambda (x y r)
-                (do
-                  (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope 0)
-                  (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p (if on 0 1))))))))
-      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
-
-;; Shape mod (osc1_shape_src/amt), voice_pan and spread stay in the DSP but
-;; are not exposed here: shape is @mod and has a MOD-matrix destination, so
-;; the dedicated slot only duplicated that.
-(def drift-osc1-block ()
-  (h-stack :width :fill :height :fill :gap 0.30 :align :center
-    (v-stack :width 7.0 :gap 0.18 :align :start
-      (h-stack :gap 0.20 :align :end
-        (box :width 1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc1_wave" "wave" 4.8 (drift-wave1-options) (drift-orange))))
-    (h-stack :gap 0.10 :align :center
-      (drift-row-knob "osc1_octave" "octave" (drift-orange) 0)
-      (drift-row-knob "osc1_shape" "shape" (drift-orange) 2)
-      (drift-osc-tab "osc1_on" "1" (drift-orange))
-      (drift-row-knob "osc1_gain_db" "gain" (drift-orange) 1))
-    (drift-route-chip "osc1_route" 1.5 (drift-orange))))
-
-(def drift-osc2-block ()
-  (h-stack :width :fill :height :fill :gap 0.30 :align :center
-    (v-stack :width 7.0 :gap 0.18 :align :start
-      (h-stack :gap 0.20 :align :end
-        (box :width 1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc2_wave" "wave" 4.4 (drift-wave2-options) (drift-ice))))
-    (h-stack :gap 0.10 :align :center
-      (drift-row-knob "osc2_octave" "octave" (drift-ice) 0)
-      (drift-row-knob "osc2_detune" "det" (drift-ice) 1)
-      (drift-osc-tab "osc2_on" "2" (drift-ice))
-      (drift-row-knob "osc2_gain_db" "gain" (drift-ice) 1))
-    (drift-route-chip "osc2_route" 1.5 (drift-ice))))
-
-;; Bindings go straight to Rust: oscillator samples depend on these values,
-;; never on ui_epoch. This phase-aligned source diagram includes host mod
-;; offsets, not the synth's internal per-voice matrix or filter/output stages.
+(def drift-readout (section name title labels width height label-height decimals step ink)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+    (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "drift-num-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+      (subtree :key (str "drift-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
+          (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
+        (v-stack :width width :height height :gap 0.06
+          (label title :v-align :center :height label-height :font-size 7.6 :color ink :bg :transparent)
+          (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
+            :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
+            :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+            :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
+            :text-align :left
+            :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
+              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) ink)
+            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+            :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+            :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+            :on-change (if (number? section)
+              (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)
+              (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))))
+;; Single-line readouts for the filter header/footer: no compressed label rows.
+(def drift-inline-num (name title width decimals)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+    (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
+      (str "drift-inline-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+      (subtree :key (str "drift-inline-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
+          (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
+        (h-stack :width width :height 0.8 :gap 0.25 :align :center
+          (label title :width 2.8 :height 0.8 :font-size 7.6 :color :dim :bg :transparent :v-align :center)
+          (number-picker :width (- width 3.05) :height 0.75 :noui true :decimals decimals :font-size 8
+            :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
+            :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+            :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
+            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p)
+            :text-align :left
+            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+            :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+            :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+            :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s (drift-section) p)))))))
 (def drift-preview-binding (name)
   (eseq.effects.custom-ui-runtime/custom-ui-param-binding
     (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
@@ -167,8 +119,8 @@
     (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
 
 (def drift-source-preview ()
-  (drift-waveform :width 15.5 :height 2.6
-    :background-color (drift-surf-dark) :wave-color (drift-knob)
+  (drift-waveform :width 14.0 :height 2.3
+    :background-color :instrument-control-bg :wave-color (drift-accent)
     :osc1-wave (drift-preview-binding "osc1_wave")
     :osc1-shape (drift-preview-binding "osc1_shape")
     :osc1-shape-mod (drift-preview-mod "osc1_shape")
@@ -186,61 +138,11 @@
     :noise-gain-db (drift-preview-binding "noise_gain_db")
     :noise-gain-db-mod (drift-preview-mod "noise_gain_db")))
 
-(def drift-source-block ()
-  (h-stack :width :fill :height :fill :gap 0.30 :align :center
-    (drift-source-preview)
-    (box :width 2.3 :height 1.5 :v-align :end
-      (eseq.effects.custom-ui-lego/ui-lego-tab-s 0 "N" 2.3 1.5 (drift-pink) :black))
-    (h-stack :gap 0.10 :align :start
-      (drift-noise-knob "noise_gain_db" "noise" (drift-pink) 0))
-    (drift-route-chip "noise_route" 1.6 (drift-pink))))
-
-
-(def drift-cyc-block ()
-  (drift-panel-small 0 (drift-surf-cool) (drift-bord-dark) false
-    (drift-small-row
-      (h-stack :gap 0.22 :align :end
-        (v-stack
-          (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "CYC" 2.4 (drift-head))
-          (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "env2_mode" "mode" 5.0 (drift-env2-mode-options) (drift-text))
-          )
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "cyc_rate_hz" "rate" 4.7 1 "Hz" (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "cyc_tilt" "tilt" 4.7 2 false (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "cyc_hold" "hold" 4.7 2 false (drift-text))))))
-
-(def drift-env-detail ()
-  (eseq.effects.custom-ui-lego/ui-detail-adsr-tabs-s 1.3 (drift-head)
-    0 "1" "env1_attack" "env1_decay" "env1_sustain" "env1_release"
-    1 "2" "env2_attack" "env2_decay" "env2_sustain" "env2_release"))
-
-(def drift-global-block ()
-  (drift-panel-small 0 (drift-surf-cool) (drift-bord-dark) false
-    (drift-small-row
-      (h-stack :gap 0.22 :align :end
-        (box :height 1.8 :v-align :start
-          (h-stack
-            (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "GLB" 2.4 (drift-head))
-            (v-stack
-              (box :height 0.15)
-              (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s 0 3.0 (drift-text))
-              )
-            ))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "glide_ms" "glide" 5.0 0 "ms" (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "volume_db" "vol" 5.0 1 "dB" (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "vel_to_vol" "vel" 5.0 2 false (drift-text))))))
-
-;; Filter response in place of the envelope plot while the filter column
-;; (section 3) is selected. Band 0 is the resonant lowpass (lp_freq / lp_res,
-;; draggable); band 1 is the highpass (hp_freq only: no resonance, so its
-;; handle is y-locked at the midpoint). Bindings, not value
-;; reads, so a drag repaints only this widget (see core/wavetable ui.lisp).
-(def drift-filter-detail ()
+(def drift-filter-curve ()
   (let ((cut-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "lp_freq"))
       (res-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "lp_res"))
       (hp-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "hp_freq"))
       (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (eseq.effects.custom-ui-lego/ui-readout-panel-medium-s 3
-      (v-stack :width :fill :height :fill :gap 0.22 :align :stretch
         (if (and cut-p res-p hp-p)
           (response-curve-editor
             :mode :filter
@@ -275,151 +177,157 @@
             :background-color :instrument-control-bg
             :corner-radius 5
             :grid-color :border-inactive
-            :stroke-color (drift-knob)
-            :stroke-width 4.5
-            :point-color (drift-head)
-            :width :fill
-            :height 5.5
+            :stroke-color (drift-accent)
+            :stroke-width 3
+            :point-color (drift-accent)
+            :width 29.4
+            :height 2.0 :debug-name "drift-filter-response"
             :on-action (lambda (event)
               (if (or (= (get event :type) :change-band)
                   (= (get event :type) :commit-band))
-                (do
-                  (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope 3)
-                  (if (= (get event :id) 1)
+                (if (= (get event :id) 1)
                     (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope hp-p (get event :freq))
                     (do
                       (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope cut-p (get event :freq))
-                      (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope res-p (get event :q)))))
+                      (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope res-p (get event :q))))
                 nil)))
-          (label "missing filter params" :font-size 8 :color :red :bg :transparent))))))
+          (label "missing filter params" :font-size 8 :color :red :bg :transparent))))
 
-(def drift-detail-column ()
-  (v-stack :width (eseq.effects.custom-ui-lego/ui-lego-col-w) :gap (eseq.effects.custom-ui-lego/ui-lego-gap)
-    (drift-cyc-block)
-    (if (= eseq.vanilla/custom-ui-selected-section 3)
-      (drift-filter-detail)
-      (drift-env-detail))
-    (drift-global-block)))
-
-;; Filter column, directly right of the oscillators (VCO -> Filter): the
-;; filter itself on top, its modulation routing below, one full-height panel.
-(def drift-filter-column ()
-  (drift-panel-column 3 (drift-surf-cool) (drift-bord-cool) false
-    (box :width :fill :height :fill :v-align :start
-      (v-stack :width :fill :gap 0.01 :align :start
-        (h-stack :gap 0.22 :align :end
-          (v-stack
-            (eseq.effects.custom-ui-lego/ui-lego-header-s 3 "FILTER" 3.6 (drift-head))
-            (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 3 "filter_type" "type" 4.4 (drift-ftype-options) (drift-text))
-            )
-          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "keytrack" "key" 5.0 2 false (drift-text)))
-        (h-stack :gap 0.10 :align :start
-          (drift-filter-log-knob "lp_freq" "cut" 0)
-          (drift-filter-knob "lp_res" "res" 2)
-          (drift-filter-log-knob "hp_freq" "hp" 0))
-        (h-stack :gap 0.22 :align :end
-          (v-stack
-            (eseq.effects.custom-ui-lego/ui-lego-header-s 3 "FMOD" 3.0 (drift-head))
-            (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 3 "lp_mod1_src" "src1" 5.2 (drift-src-options) (drift-text))
-            )
-          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "lp_mod1_amt" "amt1" 3.3 1 false (drift-text))
-          (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 3 "lp_mod2_src" "src2" 5.2 (drift-src-options) (drift-text))
-          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "lp_mod2_amt" "amt2" 3.3 1 false (drift-text)))))))
-
-;; Pitch modulation as its own full-height column: wide source dropdowns
-;; up top, amount/drift knobs (a size between the regular and filter knobs).
-(def drift-pitch-col-w () 16.0)
-(def drift-pitch-knob (name title decimals)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-sized-s 1 name title 4.8 4.9 4.9 (drift-knob) decimals))
-
-(def drift-pitch-column ()
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s 1 (* 1.05 (drift-pitch-col-w))
-    (+ (* 2.0 (eseq.effects.custom-ui-lego/ui-lego-dense-h)) (eseq.effects.custom-ui-lego/ui-lego-small-h) (* 2 (eseq.effects.custom-ui-lego/ui-lego-gap)))
-    (drift-surf-cool) (drift-bord-cool) false
-    (box :width :fill :height :fill :v-align :start
-      (v-stack :width :fill :gap 0.3 :align :start
-        (h-stack :gap 0.22 :align :end
-          (eseq.effects.custom-ui-lego/ui-lego-header-s 1 "PITCH" 3.2 (drift-head))
-          )
-        (h-stack :gap 0.10 :align :start
-          (v-stack
-            (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 1 "pitch_mod1_src" "src1" 5.4 (drift-src-options) (drift-text))
-            (drift-pitch-knob "pitch_mod1_amt" "amt1" 1)
-            )
-          (v-stack
-            (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 1 "pitch_mod2_src" "src2" 5.4 (drift-src-options) (drift-text))
-            (drift-pitch-knob "pitch_mod2_amt" "amt2" 1)
-            )
-          (v-stack
-            (box :height 1.1)
-            (drift-pitch-knob "drift" "drift" 2))))))
-  )
-
-;; LFO and MOD share one column as two tall rows, with dropdowns wide
-;; enough for their longest option ("env2", "o1 gain", "lp frq").
-(def drift-mod-col-w () 22.0)
-(def drift-mod-row-h ()
-  (/ (- (+ (* 2 (eseq.effects.custom-ui-lego/ui-lego-dense-h)) (eseq.effects.custom-ui-lego/ui-lego-small-h) (* 2 (eseq.effects.custom-ui-lego/ui-lego-gap)))
-        (eseq.effects.custom-ui-lego/ui-lego-gap))
-     2))
-(def drift-mod-panel (body)
-  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s 2 (drift-mod-col-w) (drift-mod-row-h) (drift-surf-cool) (drift-bord-cool) false
-    (box :width :fill :height :fill :v-align :start body)))
-
-(def drift-lfo-block ()
-  (drift-mod-panel
-    (v-stack :width :fill :gap 0.40 :align :start
-      (eseq.effects.custom-ui-lego/ui-lego-header-s 2 "LFO" 2.6 (drift-head))
-      (h-stack :gap 0.22 :align :end
-        (box :width 2.0)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo_wave" "wave" 5.0 (drift-lfo-wave-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo_mode" "mode" 4.6 (drift-lfo-mode-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo_retrig" "retrig" 4.6 (drift-retrig-options) (drift-text)))
-      (h-stack :gap 0.22 :align :end
-        (box :width 2.6 :height 0.1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo_rate_hz" "rate" 5.0 2 "Hz" (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo_ratio" "ratio" 4.6 2 false (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo_amount" "amt" 4.6 2 false (drift-text))))))
-
-(def drift-matrix-block ()
-  (drift-mod-panel
-    (v-stack :width :fill :gap 0.00 :align :start
-        (eseq.effects.custom-ui-lego/ui-lego-header-s 2 "MOD" 2.6 (drift-head))
-      (h-stack :gap 0.22 :align :end
-        (box :width 2.6 :height 0.1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm1_src" "src1" 5.2 (drift-src-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm1_dest" "dst1" 6.0 (drift-dest-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "mm1_amt" "amt1" 6.0 2 false (drift-text)))
-      (h-stack :gap 0.22 :align :end
-        (box :width 2.6 :height 0.1)
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm2_src" "src2" 5.2 (drift-src-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "mm2_dest" "dst2" 6.0 (drift-dest-options) (drift-text))
-        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "mm2_amt" "amt2" 6.0 2 false (drift-text))))))
-
+(def drift-osc-row (prefix title options second second-title decimals)
+  (drift-panel 25 3.5
+    (v-stack :gap 0.15
+      (h-stack :gap 0.4
+        (drift-switch (str prefix "_on") title 4.5)
+        (drift-option (str prefix "_wave") options 7 :fg :instrument-control-bg)
+        (drift-switch (str prefix "_route") "To Filter" 6.5))
+      (h-stack :gap 1.4
+        (drift-knob (str prefix "_octave") "Octave" 6.2 2.3 3.1 0 "linear")
+        (drift-knob second second-title 6.2 2.3 3.1 decimals "linear")
+        (drift-knob (str prefix "_gain_db") "Gain dB" 6.2 2.3 3.1 1 "linear")))))
+(def drift-sources ()
+  (v-stack :gap 0.1
+    (drift-osc-row "osc1" "Osc1" (drift-wave1-options) "osc1_shape" "Shape" 2)
+    (drift-osc-row "osc2" "Osc2" (drift-wave2-options) "osc2_detune" "Detune" 1)
+    (drift-panel 25 2.6
+      (h-stack :gap 0.35 :align :center
+        (drift-source-preview)
+        (drift-knob "noise_gain_db" "Noise dB" 5.2 2.3 2.8 0 "linear")
+        (drift-switch "noise_route" "To Filt" 4.1)))))
+(def drift-env-plot (section prefix)
+  (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+    (adsr-editor :width 33.2 :height 2.4 :debug-name "drift-envelope"
+      :background-color :instrument-control-bg :curve-color (drift-accent)
+      :point-color (drift-accent) :grid-color :border-inactive
+      :attack (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_attack") 4)
+      :decay (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_decay") 350)
+      :sustain (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_sustain") 0.75)
+      :release (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_release") 250)
+      :on-change (lambda (env)
+        (do
+          (eseq.effects.custom-ui-sections/custom-ui-set-active-adsr scope section (get env :active))
+          (eseq.effects.custom-ui-runtime/custom-ui-set-adsr-in-scope scope
+            (str prefix "_attack") (str prefix "_decay")
+            (str prefix "_sustain") (str prefix "_release") env))))))
+(def drift-screen-tab (section title)
+  (button title :width 5.2 :height 0.75 :font-size 8 :padding 0
+    :color (if (= (drift-section) section) (drift-ink) (drift-accent))
+    :background-color (if (= (drift-section) section) (drift-accent) :instrument-control-bg)
+    :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)))
+(def drift-matrix-row (prefix)
+  (h-stack :gap 0.5 :align :center
+    (drift-option (str prefix "_src") (drift-src-options) 7.0 :fg :instrument-control-bg)
+    (label "→" :width 1.5 :height 0.8 :color (drift-ink) :bg :transparent)
+    (drift-option (str prefix "_dest") (drift-dest-options) 13 :fg :instrument-control-bg)
+    (drift-num (str prefix "_amt") "Amount" 9.5 2 (drift-ink))))
+(def drift-display ()
+  (let ((section (drift-section))
+        (prefix (if (= (drift-section) 1) "env2" "env1")))
+    (box :width 34 :height 9.8 :padding 0.35 :corner-radius 2
+      :debug-name "drift-detail-display" :background-color (drift-accent)
+      (v-stack :gap 0.12
+        (h-stack :gap 0.15
+          (box :width 22.5 :height 0.75 :background-color :instrument-control-bg
+            (label "DIGI DRIFT / ENVELOPE" :height 0.75 :font-size 8 :color (drift-accent) :bg :transparent :v-align :center))
+          (drift-screen-tab 0 "ENV 1") (drift-screen-tab 1 "ENV 2"))
+        (drift-env-plot section prefix)
+        (h-stack :gap 0.8
+          (drift-num (str prefix "_attack") "Attack ms" 7.6 0 (drift-ink))
+          (drift-num (str prefix "_decay") "Decay ms" 7.6 0 (drift-ink))
+          (drift-num (str prefix "_sustain") "Sustain" 7.6 2 (drift-ink))
+          (drift-num (str prefix "_release") "Release ms" 7.6 0 (drift-ink)))
+        (box :width 33.2 :height 0.03 :background-color (drift-ink))
+        (h-stack :gap 0.8 :align :end
+          (h-stack :width 9.8 :height 1.1 :gap 0.3 :align :center
+            (label "Cycle" :width 3.3 :height 0.8 :font-size 7.6 :color (drift-ink) :bg :transparent :v-align :center)
+            (drift-option "env2_mode" (drift-env2-mode-options) 6.2 :fg :instrument-control-bg))
+          (drift-num "cyc_rate_hz" "Rate Hz" 7.0 2 (drift-ink))
+          (drift-num "cyc_tilt" "Tilt" 7.0 2 (drift-ink))
+          (drift-num "cyc_hold" "Hold" 7.0 2 (drift-ink)))
+        (box :width 33.2 :height 0.03 :background-color (drift-ink))
+        (drift-matrix-row "mm1")
+        (drift-matrix-row "mm2")))))
+(def drift-filter-panel ()
+  (drift-panel 29.8 5.4
+    (v-stack :gap 0.1
+      (h-stack :gap 0.5 :align :center
+        (drift-label "FILTER" 5.4)
+        (drift-option "filter_type" (drift-ftype-options) 8 :fg :instrument-control-bg)
+        (drift-inline-num "keytrack" "Key" 6 2))
+      (h-stack :gap 1.8
+        (drift-knob "lp_freq" "Cutoff Hz" 8.3 2.15 3.0 0 "log")
+        (drift-knob "lp_res" "Resonance" 8.3 2.15 3.0 2 "linear")
+        (drift-knob "hp_freq" "HP Hz" 8.3 2.15 3.0 0 "log"))
+      (drift-filter-curve))))
+(def drift-lfo-preview ()
+  (let ((wave (drift-preview-binding "lfo_wave")))
+    (subtree :key (str "drift-lfo-preview-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name))
+      (lfo-curve :width 8.2 :height 2.0 :debug-name "drift-lfo-preview"
+        :shape (nth '(1 0 3 8 2 4 5) (round (reactive-value wave)))
+        :cycles 1.5 :curve-color (drift-accent) :fill-color :transparent
+        :background-color :instrument-control-bg))))
+(def drift-lfo-panel ()
+  (drift-panel 29.8 3.15
+    (v-stack :gap 0.08
+      (h-stack :gap 0.6
+        (drift-label "LFO" 4.6)
+        (drift-option "lfo_wave" (drift-lfo-wave-options) 7 :fg :instrument-control-bg)
+        (drift-option "lfo_mode" (drift-lfo-mode-options) 7 :fg :instrument-control-bg)
+        (drift-option "lfo_retrig" (drift-retrig-options) 7 :fg :instrument-control-bg))
+      (h-stack :gap 0.6
+        (drift-lfo-preview)
+        (drift-knob "lfo_rate_hz" "Rate Hz" 6.3 1.7 2.2 2 "log")
+        (drift-knob "lfo_ratio" "Ratio" 6.3 1.7 2.2 2 "linear")
+        (drift-knob "lfo_amount" "Amount" 6.3 1.7 2.2 2 "linear")))))
+(def drift-filter-mod ()
+  (drift-panel 29.8 1.05
+    (h-stack :gap 0.4 :align :center
+      (drift-option "lp_mod1_src" (drift-src-options) 6.8 :fg :instrument-control-bg)
+      (drift-inline-num "lp_mod1_amt" "Amt1" 6.8 1)
+      (drift-option "lp_mod2_src" (drift-src-options) 6.8 :fg :instrument-control-bg)
+      (drift-inline-num "lp_mod2_amt" "Amt2" 6.8 1))))
+(def drift-pitch-panel ()
+  (drift-panel 12.4 9.8
+    (v-stack :gap 0.18 :align :center
+      (drift-label "PITCH" 5.2)
+      (h-stack :gap 0.3
+        (drift-option "pitch_mod1_src" (drift-src-options) 5.8 :fg :instrument-control-bg)
+        (drift-option "pitch_mod2_src" (drift-src-options) 5.8 :fg :instrument-control-bg))
+      (h-stack :gap 0.3
+        (drift-knob "pitch_mod1_amt" "Amount 1" 5.8 2.0 2.8 1 "linear")
+        (drift-knob "pitch_mod2_amt" "Amount 2" 5.8 2.0 2.8 1 "linear"))
+      (h-stack :gap 0.3
+        (drift-knob "drift" "Drift" 5.8 2.2 3.0 2 "linear")
+        (drift-knob "volume_db" "Vol dB" 5.8 2.2 3.0 1 "linear"))
+      (h-stack :gap 0.3
+        (drift-num "glide_ms" "Glide ms" 5.8 0 :dim)
+        (drift-num "vel_to_vol" "Velocity" 5.8 2 :dim))
+      (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s (drift-section) 5.8 :fg))))
 (defsynth-ui
-  (h-stack :width :fill :gap 0.10 :align :stretch
-    ;(eseq.effects.custom-ui-lego/ui-lego-column
-    (box :padding 0.1 :corner-radius 11 :background-color  :mixer-control-bg
-      ;; Three knob rows in the column height: row padding and gaps stay
-      ;; minimal so the column does not grow past the other columns.
-      (v-stack :gap 0.06 :width :fill
-        (box :padding 0.04
-          (drift-osc1-block)
-          )
-        (box :width 26 :height 0.05 :background-color :mixer-strip-selected-bg)
-        (box :padding 0.04
-          (drift-osc2-block)
-          )
-        (box :width 26 :height 0.05 :background-color :mixer-strip-selected-bg)
-        (box :padding 0.04
-          (drift-source-block)
-          )
-        )
-      )
-    ; )
-    (drift-filter-column)
-    (drift-detail-column)
-    (drift-pitch-column)
-    (v-stack :width (drift-mod-col-w) :gap (eseq.effects.custom-ui-lego/ui-lego-gap)
-      (drift-lfo-block)
-      (drift-matrix-block))))
+  (h-stack :gap 0.15 :align :start
+    (drift-sources)
+    (drift-display)
+    (v-stack :gap 0.1
+      (drift-filter-panel)
+      (drift-lfo-panel)
+      (drift-filter-mod))
+    (drift-pitch-panel)))

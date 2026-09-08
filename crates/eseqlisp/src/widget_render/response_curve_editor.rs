@@ -65,6 +65,8 @@ struct ResponseBand {
     q: f32,
     q_min: f32,
     q_max: f32,
+    /// Input taper only; does not change the Q used to draw the response.
+    logarithmic_q: bool,
     enabled: bool,
     selected: bool,
     /// The band has no vertical parameter (e.g. a highpass with no
@@ -83,6 +85,22 @@ struct ResponseBand {
 }
 
 impl ResponseBand {
+    fn q_position(&self) -> f32 {
+        if self.logarithmic_q {
+            ((self.q / self.q_min).ln() / (self.q_max / self.q_min).ln()).clamp(0.0, 1.0)
+        } else {
+            q_to_t(self.q, self.q_min, self.q_max)
+        }
+    }
+
+    fn q_at_position(&self, t: f32) -> f32 {
+        if self.logarithmic_q {
+            self.q_min * (self.q_max / self.q_min).powf(t.clamp(0.0, 1.0))
+        } else {
+            q_from_t(t, self.q_min, self.q_max)
+        }
+    }
+
     fn display_q(&self) -> f32 {
         let shaped = self.q.max(0.0).powf(self.q_curve_power.max(0.001));
         (self.q_curve_offset + self.q_curve_scale * shaped).max(0.001)
@@ -171,6 +189,7 @@ fn prop_bands(props: &HashMap<String, Value>) -> Vec<ResponseBand> {
                 q: map_num(&map, "q", 1.0).clamp(band_q_min, band_q_max),
                 q_min: band_q_min,
                 q_max: band_q_max,
+                logarithmic_q: map_string(&map, "q-taper", "linear") == "log",
                 enabled: map_bool(&map, "enabled", true),
                 selected: map_bool(&map, "selected", false),
                 lock_y: map_bool(&map, "lock-y", false),
@@ -267,7 +286,7 @@ fn band_y_t(band: &ResponseBand, filter_mode: bool) -> f32 {
     if band.lock_y {
         0.5
     } else if filter_mode {
-        q_to_t(band.q, band.q_min, band.q_max)
+        band.q_position()
     } else {
         gain_to_t(band.gain, band.gain_min, band.gain_max)
     }
@@ -351,7 +370,7 @@ fn changed_band_values(
     } else if filter_mode {
         (
             band.gain,
-            q_from_t(y_t, band.q_min, band.q_max).clamp(band.q_min, band.q_max),
+            band.q_at_position(y_t).clamp(band.q_min, band.q_max),
         )
     } else {
         (
@@ -409,7 +428,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
         let height = get_prop_num(node, "height")
             .map(f64_to_f32)
             .unwrap_or(5.0)
-            .max(2.5);
+            .max(1.5);
         Some(Size { width, height })
     }
 
@@ -978,6 +997,36 @@ mod tests {
             let rel = (roundtrip - freq).abs() / freq;
             assert!(rel < 0.0001, "freq={freq} roundtrip={roundtrip}");
         }
+    }
+
+    #[test]
+    fn logarithmic_filter_q_drag_round_trips_practical_resonance() {
+        let mut node = test_node("filter");
+        let mut value = band_value(2, 1000.0, 0.0, 1.0, true);
+        let Value::Map(ref mut map) = value else { unreachable!() };
+        for (key, value) in [
+            ("q-min", Value::Number(0.1)),
+            ("q-max", Value::Number(100.0)),
+            ("q-taper", Value::Keyword("log".to_string())),
+        ] {
+            map.insert(key.to_string(), Rc::new(RefCell::new(value)));
+        }
+        node.props.insert("bands".to_string(), Value::List(vec![Rc::new(RefCell::new(value))]));
+        let mut band = prop_bands(&node.props).remove(0);
+        let (x, y) = plot_point(node.rect, 0.5, 0.5);
+        let (_, _, middle_q) = changed_band_values(&node, &band, x, y);
+        assert!((middle_q - 10.0_f32.sqrt()).abs() < 0.001);
+        for q in [0.1, 0.707, 1.0, 4.0, 8.0, 100.0] {
+            band.q = q;
+            let (x, y) = plot_point(node.rect, 0.5, band_y_t(&band, true));
+            let (_, _, result) = changed_band_values(&node, &band, x, y);
+            assert!((result - q).abs() / q < 0.0001, "q={q}, result={result}");
+            assert!((band.display_q() - q).abs() < 0.0001);
+        }
+        band.q = 1.0;
+        let low = band.q_position();
+        band.q = 8.0;
+        assert!(band.q_position() - low > 0.3);
     }
 
     #[test]

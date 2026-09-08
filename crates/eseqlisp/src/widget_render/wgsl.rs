@@ -982,6 +982,7 @@ fn lc_shape(shape: i32, x: f32, pw: f32) -> f32 {
     } else if (shape == 3) {
         return phase * 2.0 - 1.0;
     }
+    if (shape == 8) { return 1.0 - phase * 2.0; }
     if (shape == 4) { return lc_random(floor(x)); }
     if (shape == 5) { return mix(lc_random(floor(x) - 1.0), lc_random(floor(x)), clamp(phase / 0.4, 0.0, 1.0)); }
     if (shape == 6) {
@@ -999,7 +1000,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 {
     var uv: vec2<f32> = input.uv;
     var aspect: f32 = max(input.aspect, 0.0001);
-    var shape: i32 = i32(round(clamp(input.uniform_a.x, 0.0, 7.0)));
+    var shape: i32 = i32(round(clamp(input.uniform_a.x, 0.0, 8.0)));
     var pw: f32 = input.uniform_a.y;
     var offset: f32 = input.uniform_a.z;
     var markerPhase: f32 = input.uniform_a.w;
