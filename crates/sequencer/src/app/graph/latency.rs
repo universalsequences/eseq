@@ -65,6 +65,26 @@ pub struct LatencyPlan {
     pub mix_latency: u32,
 }
 
+impl LatencyPlan {
+    pub(crate) fn validate_bounce(&self) -> Result<(), String> {
+        if RACK_SLOT_JOIN_UNCOMPENSATED
+            && self.rack_slot_pads.iter().flatten().any(|pad| *pad != 0)
+        {
+            return Err("Export requires intra-rack delay compensation that is not installed".into());
+        }
+        let max = crate::effects::pdc_delay::PDC_MAX_DELAY_SAMPLES as u32 - 1;
+        if self.track_primary_pads.iter().copied()
+            .chain(self.send_pads.iter().flatten().map(|(_, pad)| *pad))
+            .chain(self.bus_pads.iter().map(|(_, pad)| *pad))
+            .chain(self.rack_slot_pads.iter().flatten().copied())
+            .any(|pad| pad > max)
+        {
+            return Err(format!("Export delay compensation exceeds the supported {max}-frame pad"));
+        }
+        Ok(())
+    }
+}
+
 pub fn compute_latency_plan(topology: &LatencyTopology) -> LatencyPlan {
     // Per-track totals: rack base (max slot chain) + track chain.
     let rack_bases: Vec<u32> = topology
@@ -199,6 +219,52 @@ fn slot_is_active(
 }
 
 impl App {
+    /// Install and acknowledge the initial compensation without consuming
+    /// frame zero. The returned integer latency is suitable for BouncePlan.
+    ///
+    /// # Safety
+    /// Call only on the isolated worker's graph with exclusive render ownership;
+    /// this must never run concurrently with a live audio callback.
+    pub(crate) unsafe fn prepare_bounce_latency(&mut self) -> Result<LatencyPlan, String> {
+        let lg = self.graph.lg.0;
+        if lg.is_null() {
+            return Err("Export has no prepared audio graph".into());
+        }
+        let plan = compute_latency_plan(&self.latency_topology());
+        plan.validate_bounce()?;
+        for (track, pad) in plan.track_primary_pads.iter().enumerate() {
+            let nodes = self.graph.track_node_ids.get(track)
+                .ok_or_else(|| format!("Export track {track} has no graph nodes"))?;
+            if *pad > 0 && nodes.pdc_id <= 0 {
+                return Err(format!("Export track {track} has no delay compensation node"));
+            }
+            for (destination, pad) in &plan.send_pads[track] {
+                if *pad > 0 && !nodes.bus_send_ids.iter()
+                    .any(|send| send.destination == *destination && send.pdc_id > 0)
+                {
+                    return Err(format!("Export track {track} send to {destination:?} has no delay compensation node"));
+                }
+            }
+        }
+        for (bus, pad) in &plan.bus_pads {
+            if *pad > 0 && !self.graph.bus_node_ids.iter()
+                .any(|nodes| nodes.id == *bus && nodes.pdc_id > 0)
+            {
+                return Err(format!("Export bus {bus:?} has no delay compensation node"));
+            }
+        }
+        self.refresh_latency_compensation();
+        if !crate::audiograph::prepare_graph_for_render(lg) {
+            return Err("Export graph could not apply its initial delay compensation".into());
+        }
+        let submissions = crate::audiograph::graph_control_submission_failures(lg);
+        let deliveries = crate::audiograph::graph_edit_delivery_failures(lg);
+        if submissions != 0 || deliveries != 0 {
+            return Err(format!("Export graph initialization failed: {submissions} rejected submissions, {deliveries} failed edits"));
+        }
+        Ok(plan)
+    }
+
     /// Snapshot the current latency topology from project + graph state.
     pub(super) fn latency_topology(&self) -> LatencyTopology {
         let live_buses: Vec<(BusId, u32)> = self
@@ -426,6 +492,31 @@ mod tests {
     }
 
     #[test]
+    fn bounce_rejects_uninstalled_rack_pads_and_oversize_compensation() {
+        let mut topology = LatencyTopology {
+            tracks: vec![TrackLatencyInput {
+                rack_slot_latencies: vec![0, 300], output: TrackOutput::Mix,
+                ..Default::default()
+            }], buses: Vec::new(),
+        };
+        assert!(compute_latency_plan(&topology).validate_bounce().unwrap_err().contains("intra-rack"));
+        topology.tracks[0].rack_slot_latencies = vec![300, 300];
+        assert!(compute_latency_plan(&topology).validate_bounce().is_ok());
+        let too_large = crate::effects::pdc_delay::PDC_MAX_DELAY_SAMPLES as u32;
+        topology.tracks = vec![track(too_large, TrackOutput::Mix, &[])];
+        assert!(compute_latency_plan(&topology).validate_bounce().is_ok(),
+            "total serial latency is not limited by the size of an alignment pad");
+        topology.tracks.push(track(0, TrackOutput::Mix, &[]));
+        assert!(compute_latency_plan(&topology).validate_bounce().unwrap_err().contains("supported"));
+        let mut plan = LatencyPlan::default();
+        plan.send_pads = vec![vec![(BusId(1), too_large)]];
+        assert!(plan.validate_bounce().is_err());
+        plan.send_pads.clear();
+        plan.bus_pads = vec![(BusId(1), too_large)];
+        assert!(plan.validate_bounce().is_err());
+    }
+
+    #[test]
     fn zero_latency_graph_needs_no_pads() {
         let plan = compute_latency_plan(&LatencyTopology {
             tracks: vec![
@@ -634,6 +725,90 @@ mod tests {
             assert!(crate::audiograph::prepare_graph_for_render(graph.lg));
         }
         assert_eq!(spikes(&graph.render_channel0(2)), vec![(0, 1.0)]);
+    }
+
+    #[test]
+    fn bounce_trims_installed_pdc_once_and_keeps_exact_tail_length() {
+        let graph = EngineGraph::new("bounce-pdc-interval");
+        let latency = compute_latency_plan(&LatencyTopology {
+            tracks: vec![track(300, TrackOutput::Mix, &[]), track(0, TrackOutput::Mix, &[])],
+            buses: Vec::new(),
+        });
+        latency.validate_bounce().unwrap();
+        let source = graph.add_impulse();
+        let effect = add_pdc_node(graph.lg, "latency-effect");
+        let pad = add_pdc_node(graph.lg, "compensated-dry");
+        unsafe {
+            connect_stereo_pair(graph.lg, source, effect);
+            connect_stereo_pair(graph.lg, source, pad);
+            connect_stereo_pair(graph.lg, effect, 0);
+            connect_stereo_pair(graph.lg, pad, 0);
+        }
+        graph.set_pdc_delay(effect, 300.0);
+        graph.set_pdc_delay(pad, latency.track_primary_pads[1] as f32);
+        assert!(unsafe { crate::audiograph::prepare_graph_for_render(graph.lg) });
+        let plan = crate::bounce::BouncePlan::new(44_100, EngineGraph::BLOCK, 120,
+            0.03, None, latency.mix_latency, 0.004).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compensated.wav");
+        crate::bounce::render_to_wav(&plan, &path, crate::bounce::Publication::CreateNew,
+            &crate::bounce::BounceCancellation::default(), |_, output| {
+                unsafe { crate::audiograph::process_next_block(graph.lg, output.as_mut_ptr(), EngineGraph::BLOCK as i32); }
+                Ok(())
+            }, |_| {}).unwrap();
+        let reader = hound::WavReader::open(path).unwrap();
+        assert_eq!(reader.duration(), 662 + 177);
+        let samples: Vec<f32> = reader.into_samples::<f32>().map(Result::unwrap).collect();
+        assert_eq!(&samples[..2], &[2.0, 2.0]);
+        assert!(samples[2..].iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn bounce_preparation_installs_real_app_pads_and_rejects_missing_nodes() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr.0;
+        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        app.add_builtin_effect_sync(0, crate::effects::filter_table::NAME).unwrap();
+        let plan = unsafe { app.prepare_bounce_latency() }.unwrap();
+        assert!(plan.mix_latency > 0);
+        assert_eq!(plan.track_primary_pads[1], plan.mix_latency);
+        assert!(app.graph.applied_latency_pads.contains(&(app.graph.track_node_ids[1].pdc_id, plan.mix_latency)));
+        let saved = app.graph.track_node_ids[1].pdc_id;
+        app.graph.track_node_ids[1].pdc_id = 0;
+        assert!(unsafe { app.prepare_bounce_latency() }.unwrap_err().contains("no delay compensation node"));
+        app.graph.track_node_ids[1].pdc_id = saved;
+        unsafe {
+            crate::audiograph::engine_stop_workers();
+            crate::audiograph::destroy_live_graph(lg);
+        }
+    }
+
+    #[test]
+    fn queued_disconnect_accepts_absent_links_but_rejects_invalid_ports() {
+        let graph = EngineGraph::new("disconnect-result");
+        let first = graph.add_impulse();
+        let second = graph.add_impulse();
+        unsafe {
+            connect_stereo_pair(graph.lg, first, 0);
+            connect_stereo_pair(graph.lg, second, 0);
+            assert!(crate::audiograph::prepare_graph_for_render(graph.lg));
+            for _ in 0..2 {
+                assert!(crate::audiograph::graph_disconnect(graph.lg, first, 0, 0, 0));
+                assert!(crate::audiograph::graph_disconnect(graph.lg, first, 1, 0, 1));
+                assert!(crate::audiograph::prepare_graph_for_render(graph.lg));
+            }
+            assert_eq!(crate::audiograph::graph_edit_delivery_failures(graph.lg), 0);
+        }
+        assert_eq!(spikes(&graph.render_channel0(1)), vec![(0, 1.0)],
+            "the other summing branch must survive repeated disconnects");
+        unsafe {
+            assert!(crate::audiograph::graph_disconnect(graph.lg, second, 5, 0, 0));
+            assert!(!crate::audiograph::prepare_graph_for_render(graph.lg));
+            assert_eq!(crate::audiograph::graph_edit_delivery_failures(graph.lg), 1);
+        }
     }
 
     /// End-to-end through the real C engine: an impulse split into two
