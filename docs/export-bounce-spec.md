@@ -2,7 +2,8 @@
 
 Status: implementation contract for **eseq-45bn**. A standalone saved-project
 export command is available as of 2026-09-08; see [usage](export-bounce.md).
-The in-app export flow and live source snapshot integration remain unfinished.
+A command-driven modal now wraps saved-project export; retained live source
+snapshot integration remains unfinished.
 Timing contract revised 2026-09-07: preserve playback timing, with sample-accurate
 notes/gates and block-boundary ordinary DSP updates.
 Related: [song mode](song-mode-spec.md) and
@@ -197,25 +198,21 @@ live generative performance with Wav; export is a new arrangement performance.
 
 ## 6. UI and file contract
 
-Add **Export Audio…** to the arrangement's actions and the application command
-palette, separate from Wav. Dialog fields: destination, Entire arrangement /
-Selected range (disabled without a valid selection), read-only beat bounds and
-sample rate, tail seconds, and format. Show estimated file duration, the
-new-performance warning above, and that selection preparation starts at zero.
+User-revised entry (2026-09-08): **M-x export-song** opens a Lisp modal.
+Do not add a toolbar button or dropdown menu; a future actions menu is a separate
+issue. The current modal wraps saved-project export and identifies the source
+explicitly. It offers an editable filename, entire arrangement or explicit beat
+bounds (zero-based), sample rate, and tail seconds. Output is stereo **WAV,
+32-bit IEEE float**, defaulting to 48 kHz and a 10-second tail. Each alternate
+rate initializes the isolated graph at that rate without changing the live device.
+Integer formats and dither remain deferred.
 
-V1 defaults: stereo interleaved **WAV, 32-bit IEEE float**, current project engine
-sample rate frozen when the job starts. Display the actual Hz; do not silently
-resample or change the device. Alternate rates and integer depths are deferred
-until independently initialized DSP/resampling and dither policies are tested.
-Float export preserves finite over-unity samples; report peak/overload, but do
-not normalize or clamp. This intentionally differs from today's Wav writer.
-
-Suggest `<sanitized-project-name>-bounce-<UTC timestamp>.wav` in the recordings
-directory on first use; remember the last explicitly chosen export directory.
-Use `Untitled` for unnamed projects, prevent path separators in suggested names,
-and require explicit overwrite confirmation. Validate WAV size before starting:
-v1 rejects jobs exceeding the writer's RIFF limits with a useful error; RF64 is
-not silently substituted.
+Suggest `<project-name> (1).wav`, incrementing to an available name in the app's
+recordings directory. Reject path separators in typed names. The modal rejects
+existing destinations; the standalone command retains its explicit `--replace`
+option. Completion offers Finder reveal on macOS or folder open on Linux.
+Validate RIFF size before rendering; RF64 is not silently substituted.
+Float output preserves finite over-unity samples without normalization or clamp.
 
 Stream to a uniquely created sibling temporary file with bounded memory. Offline
 writing may backpressure rendering. Finalize the header, close successfully, then
@@ -224,13 +221,16 @@ file created while the job ran). Disk-full, writer/graph/generator failures and
 cancellation remove the temporary file and preserve any existing destination.
 Success means a finalized file, never a partial WAV or dropped blocks.
 
-Export requires stopped playback and inactive live recording. Do not stop an
-active Wav take on the user's behalf. During export, prevent playback, recording,
-project replacement and authoring edits; keep progress/cancel responsive. On all
-exit paths restore the previous UI selection/playhead and editing availability;
-leave transport stopped and project/history unchanged. Progress phases are
-Preparing, Prefix, Rendering, Tail, Finalizing; cancellation is checked between
-bounded work units, including compilation/load work.
+The saved-project modal copies saved arrangement data into its private job and
+runs the same executable in worker mode before live engine initialization. It
+never stops live transport or recording and does not mutate project/history.
+Only one export job runs at a time; reopening the command shows its progress.
+Closing the modal does not cancel the job; cancellation is a separate action.
+Progress, completion, cancellation and errors travel as atomically replaced
+structured status documents, independently of human-readable worker logs.
+
+Capturing the current unsaved project with retained draft DSP sources remains a
+separate integration gate. Do not label the saved-project path as live capture.
 
 ## 7. Implementation gates and checks
 

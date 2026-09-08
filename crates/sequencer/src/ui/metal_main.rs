@@ -100,6 +100,9 @@ use reactive_sync::*;
 mod tests;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("export-worker") {
+        return sequencer::bounce::command::run(std::env::args().skip(2));
+    }
     let capture_args = capture::CaptureArgs::parse_env()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let app_paths = sequencer::app_paths::init()?;

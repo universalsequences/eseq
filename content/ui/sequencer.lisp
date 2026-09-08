@@ -26,6 +26,7 @@
 
 ;; Drag-and-drop sample import modal (zero footprint while closed).
 (import eseq.sample-import)
+(import eseq.export-song)
 
 (export track-selected-binding
         expanded-track-ids
@@ -2289,6 +2290,8 @@
   (v-stack :width :fill :fill-content-style true :padding 0.00 :gap 0.0
     ;; Sample import modal: opened by Rust after a file drop; renders as a
     ;; centered overlay (modal spec) with zero footprint here while closed.
+    (subtree :key "seq-export-song"
+      (eseq.export-song/panel))
     (subtree :key "seq-sample-import"
       (eseq.sample-import/panel))
     (each (eseq.drum-rack-v2/grid-render-items) |item|

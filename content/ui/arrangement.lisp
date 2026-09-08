@@ -24,6 +24,7 @@
 (import eseq.track-collapse)
 (import eseq.sound-palette)
 (import eseq.sample-import)
+(import eseq.export-song)
 
 (export view-start
         view-duration
@@ -1999,6 +2000,8 @@
       (eseq.sound-palette/panel))
     ;; Sample import modal: same mount as *sequencer* (the two buffers never
     ;; share a tile); Rust activates whichever tile shows it before opening.
+    (subtree :key "arr-export-song"
+      (eseq.export-song/panel))
     (subtree :key "arr-sample-import"
       (eseq.sample-import/panel))
     (subtree :key "arr-scene-row"

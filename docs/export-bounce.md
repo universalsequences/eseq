@@ -1,6 +1,22 @@
 # Export an arrangement
 
-Save the project first, then run from the repository root:
+Save the project, then run **M-x export-song** in the app. The command opens a
+modal with an editable filename, whole-arrangement or explicit beat range,
+sample rate, and tail duration. The Lisp entry is
+`(eseq.export-song/export-song)`.
+
+Exports go to the app's recordings directory (`.local/recordings` in a checkout).
+The suggested name is `Project (1).wav`, then the next available number.
+Existing files are never replaced by the dialog. Progress and cancellation stay
+available during export; completion offers **Show in Finder** on macOS or
+**Open folder** on Linux. Reopening the command during a job shows that job.
+No toolbar button or actions menu is added.
+
+The dialog exports the **saved project**, just like the command below. It copies
+saved arrangement data into the job when export begins; later project saves do
+not change that job. Unsaved live edits are not included.
+
+You can also run from the repository root:
 
 ```sh
 cargo run --release -p sequencer --bin eseq_export -- \
@@ -11,7 +27,7 @@ cargo run --release -p sequencer --bin eseq_export -- \
 Replace the project and output paths as needed. The command opens a saved project
 in its own process without opening an audio device. It writes the arrangement's
 stereo master mix as 32-bit float WAV, at 48 kHz with a 10-second tail by default.
-The in-app export button is not implemented yet.
+
 
 Options:
 
