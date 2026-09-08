@@ -221,6 +221,45 @@ mod tests {
 
         assert_eq!(resolve_color(&props, false), theme::YELLOW());
     }
+    #[test]
+    fn wrapped_gpu_lines_match_measured_proportional_width_and_height() {
+        struct Font;
+        impl crate::layout::TextMeasurer for Font {
+            fn measure_text_px(&self, text: &str, _: f32) -> f32 { text.chars().count() as f32 * 4.0 }
+            fn line_height_px(&self, _: f32) -> f32 { 10.0 }
+        }
+        let props: HashMap<String, Value> = [
+            ("text".into(), Value::String("wide letters".into())),
+            ("wrap".into(), Value::Bool(true)),
+            ("width".into(), Value::Number(4.0)),
+            ("font-size".into(), Value::Number(10.0)),
+            ("bg".into(), Value::Keyword("transparent".into())),
+        ].into_iter().collect();
+        let value = Value::Map(props.iter().map(|(key, value)|
+            (key.clone(), std::rc::Rc::new(std::cell::RefCell::new(value.clone())))).collect());
+        let ctx = MeasureCtx { text_measurer: Some(&Font), cell_w: 10.0, cell_h: 20.0, inherited_font_size: 10.0 };
+        let size = LABEL_WIDGET.measure(&value, &[], Constraints {
+            min_width: 0.0, max_width: 4.0, min_height: 0.0, max_height: 100.0, aspect: 0.5,
+        }, &ctx, &mut |_, _| None).unwrap();
+        assert_eq!(size.height, 1.0, "two half-cell font lines");
+        let node = crate::layout::LayoutNode {
+            widget_id: 1, stable_widget_id: None, subtree_root_id: None,
+            parent_subtree_root_id: None, stable_key: None, widget_type: "label".into(),
+            rect: Rect { col: 0.0, row: 0.0, width: size.width, height: size.height },
+            props, children: vec![], focusable: false, animation: Default::default(),
+        };
+        super::super::set_render_text_measurer(std::rc::Rc::new(Font));
+        let primitives = LABEL_WIDGET.build_primitives("label", &node, super::super::WidgetViewport {
+            cell_w: 10.0, cell_h: 20.0, vp_w: 1000.0, vp_h: 800.0,
+            time_seconds: 0.0, focused_widget_id: None, focused_branch: false,
+            overlay_viewport_bottom: 40.0, scroll_top: 0.0, scroll_left: 0.0, inherited_hover: false,
+        });
+        let lines: Vec<_> = primitives.iter().filter_map(|p| match p {
+            GpuPrimitive::ProportionalText(t) => Some((t.text.as_str(), t.row)), _ => None,
+        }).collect();
+        assert_eq!(lines, vec![("wide", 0.0), ("letters", 0.5)]);
+    }
+
 }
 
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
@@ -408,14 +447,27 @@ impl WidgetDefinition for LabelWidget {
                 color: bg,
             }));
         }
-        let lines = if wrap_enabled(&node.props) {
-            wrap_text_by_columns(text, node.rect.width.floor().max(1.0) as usize)
+        let (lines, line_height) = if wrap_enabled(&node.props) {
+            // Use the same font metrics and wrapping as measure(). Monospace
+            // column counts or a one-cell advance can clip proportional lines.
+            super::with_render_text_measurer(|measurer| {
+                let ctx = MeasureCtx {
+                    text_measurer: Some(measurer),
+                    cell_w: viewport.cell_w,
+                    cell_h: viewport.cell_h,
+                    inherited_font_size: font_size,
+                };
+                (measure_wrapped_text_lines(text, node.rect.width, font_size, &ctx),
+                    measurer.line_height_px(font_size) / viewport.cell_h)
+            }).unwrap_or_else(|| (
+                wrap_text_by_columns(text, node.rect.width.floor().max(1.0) as usize), 1.0,
+            ))
         } else {
-            vec![text.clone()]
+            (vec![text.clone()], 1.0)
         };
         let start_row = label_text_row(&node.props, node.rect);
         for (line_idx, line) in lines.into_iter().enumerate() {
-            let row = start_row + line_idx as f32;
+            let row = start_row + line_idx as f32 * line_height;
             if row >= node.rect.row + node.rect.height {
                 break;
             }
