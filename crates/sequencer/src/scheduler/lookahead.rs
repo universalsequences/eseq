@@ -119,14 +119,15 @@ pub(super) fn build_scheduler_scratch_runtime(
     state: Arc<SequencerState>,
     user_source: &str,
     debug_accum: bool,
-) -> Option<lisp_host::ScratchControlRuntime> {
+) -> (Option<lisp_host::ScratchControlRuntime>, Vec<String>) {
+    let mut errors = Vec::new();
     let midi_fx_source = lisp_host::load_midi_fx_library_source();
     let process_source = lisp_host::load_process_library_source();
     if midi_fx_source.trim().is_empty()
         && process_source.trim().is_empty()
         && user_source.trim().is_empty()
     {
-        return None;
+        return (None, errors);
     }
 
     let mut runtime = lisp_host::scheduler_scratch_runtime_with_fallbacks(state, 0, 0);
@@ -143,6 +144,7 @@ pub(super) fn build_scheduler_scratch_runtime(
                 }
             }
             Err(err) => {
+                errors.push(format!("builtin MIDI FX: {err}"));
                 if debug_accum || debug_routing_enabled() {
                     let status = runtime.take_status_message();
                     eprintln!(
@@ -169,6 +171,7 @@ pub(super) fn build_scheduler_scratch_runtime(
                 }
             }
             Err(err) => {
+                errors.push(format!("builtin processes: {err}"));
                 if debug_accum || debug_routing_enabled() {
                     let status = runtime.take_status_message();
                     eprintln!(
@@ -196,6 +199,7 @@ pub(super) fn build_scheduler_scratch_runtime(
                 }
             }
             Err(err) => {
+                errors.push(format!("project scratch: {err}"));
                 if debug_accum || debug_routing_enabled() {
                     let status = runtime.take_status_message();
                     eprintln!(
@@ -209,7 +213,7 @@ pub(super) fn build_scheduler_scratch_runtime(
         }
     }
 
-    keep_runtime.then_some(runtime)
+    (keep_runtime.then_some(runtime), errors)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

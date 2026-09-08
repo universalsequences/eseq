@@ -2375,7 +2375,7 @@
                (jak "package-import" :16 . . - . -> 0)"#,
             false,
         )
-        .expect("imported Jaki sequencer should keep the scheduler runtime alive");
+        .0.expect("imported Jaki sequencer should keep the scheduler runtime alive");
 
         assert!(
             runtime
@@ -2394,7 +2394,7 @@
             r#"(def-sequencer "graph-scratch" :shape (line 1))"#,
             false,
         )
-        .expect("builtin MIDI FX should keep scheduler runtime alive");
+        .0.expect("builtin MIDI FX should keep scheduler runtime alive");
         let names = runtime.midi_fx_names();
         assert!(
             names.iter().any(|name| name == "arp"),
@@ -9761,7 +9761,7 @@ fn scratch_generator_follows_a_mid_playback_scene_switch() {
 "#;
         let scratch_runtime =
             super::lookahead::build_scheduler_scratch_runtime(Arc::clone(&state), source, false)
-                .expect("scratch runtime for the generator source");
+                .0.expect("scratch runtime for the generator source");
         let generator_defs = scratch_runtime.sequencer_defs();
         let mut scratch_runtime = Some(scratch_runtime);
 

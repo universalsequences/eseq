@@ -84,6 +84,7 @@ pub(crate) struct SchedulerDriver {
     scratch_runtime: Option<lisp_host::ScratchControlRuntime>,
     debug_accum: bool,
     debug_graph: bool,
+    runtime_errors: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -133,9 +134,14 @@ impl SchedulerDriver {
             published_sequencers_version: u64::MAX,
             published_process_authoring_version: u64::MAX,
             scratch_runtime: None,
+            runtime_errors: Vec::new(),
             debug_accum: std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some(),
             debug_graph: std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some(),
         }
+    }
+
+    pub(crate) fn take_runtime_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.runtime_errors)
     }
 
     fn poll_after(&self, millis: u64) -> SchedulerAdvance {
@@ -156,6 +162,7 @@ impl SchedulerDriver {
         horizon: u64,
         input: SchedulerInput<'_>,
     ) -> SchedulerAdvance {
+        self.runtime_errors.clear();
         let state = &self.state;
         let queue = &self.queue;
         let sample_rate = self.sample_rate;
@@ -224,6 +231,7 @@ impl SchedulerDriver {
                             }
                         }
                         Err(error) => {
+                            self.runtime_errors.push(format!("song start: {error}"));
                             state.song_playback().push_notice(
                                 crate::sequencer::SongPlaybackNotice::StartFailed {
                                     error,
@@ -272,8 +280,10 @@ impl SchedulerDriver {
                     user_source.len()
                 );
             }
-            self.scratch_runtime =
+            let (runtime, errors) =
                 build_scheduler_scratch_runtime(Arc::clone(state), &user_source, debug_accum);
+            self.scratch_runtime = runtime;
+            self.runtime_errors.extend(errors);
             if debug_accum {
                 if let Some(runtime) = self.scratch_runtime.as_ref() {
                     for track_idx in 0..state.active_track_count().min(MAX_TRACKS) {
@@ -301,7 +311,7 @@ impl SchedulerDriver {
             let published_process_authoring = state.published_process_authoring();
             if !published.is_empty() || !published_process_authoring.is_empty() {
                 let runtime = self.scratch_runtime.get_or_insert_with(|| {
-                    build_scheduler_scratch_runtime(Arc::clone(state), "", debug_accum)
+                    build_scheduler_scratch_runtime(Arc::clone(state), "", debug_accum).0
                         .unwrap_or_else(|| {
                             lisp_host::scheduler_scratch_runtime_with_fallbacks(
                                 Arc::clone(state),
@@ -321,6 +331,7 @@ impl SchedulerDriver {
                         seq.tick_source.clone(),
                         &seq.requires,
                     ) {
+                        self.runtime_errors.push(format!("sequencer {:?} ({}): {error}", seq.name, seq.id));
                         eprintln!(
                             "failed to register published sequencer {:?} ({}): {error}",
                             seq.name, seq.id

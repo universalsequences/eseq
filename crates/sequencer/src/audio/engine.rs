@@ -39,6 +39,7 @@ pub struct HeadlessEngine {
     pub buses: AudioBuses,
     pub sample_rate: u32,
     pub channels: u16,
+    pub block_size: usize,
     pub master_recorder: Arc<MasterRecorder>,
     pub keyboard_tx: std::sync::mpsc::Sender<crate::sequencer::LiveInputEvent>,
 }
@@ -131,6 +132,7 @@ pub fn init_headless_engine(
         buses: parts.buses,
         sample_rate: parts.sample_rate,
         channels: parts.channels,
+        block_size: parts.block_size,
         master_recorder: parts.master_recorder,
         keyboard_tx: parts.keyboard_tx,
     })

@@ -52,6 +52,7 @@ mod render;
 mod rtkit;
 mod state;
 mod session;
+pub(crate) mod offline;
 mod stream;
 mod voices;
 

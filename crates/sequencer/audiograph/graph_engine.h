@@ -104,6 +104,7 @@ typedef struct LiveGraph {
   // Delivery failures are graph-local so strict offline drivers can reject a
   // partial render without depending on logs or another graph's counters.
   _Atomic uint64_t block_event_delivery_failures;
+  _Atomic uint64_t control_submission_failures;
 
   int dac_node_id;
   int num_channels;
@@ -247,6 +248,7 @@ void engine_record_rtkit_callback_result(pid_t tid);
 #endif
 bool push_block_event(LiveGraph *lg, GraphBlockEvent event);
 uint64_t graph_block_event_delivery_failures(const LiveGraph *lg);
+uint64_t graph_control_submission_failures(const LiveGraph *lg);
 
 // ===================== Live Graph Operations =====================
 

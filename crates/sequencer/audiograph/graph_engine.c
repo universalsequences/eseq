@@ -443,6 +443,11 @@ static bool block_event_target_is_valid(LiveGraph *lg,
   return true;
 }
 
+uint64_t graph_control_submission_failures(const LiveGraph *lg) {
+  return lg ? atomic_load_explicit(&lg->control_submission_failures,
+                                   memory_order_acquire) : 0;
+}
+
 uint64_t graph_block_event_delivery_failures(const LiveGraph *lg) {
   return lg ? atomic_load_explicit(&lg->block_event_delivery_failures,
                                    memory_order_acquire) : 0;
