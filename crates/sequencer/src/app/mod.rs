@@ -53,6 +53,7 @@ pub mod sound_palette;
 pub mod take_edit;
 pub mod take_recording;
 pub mod song_transport;
+pub(crate) mod bounce_prepare;
 mod synth;
 
 pub use browser::BrowserNode;

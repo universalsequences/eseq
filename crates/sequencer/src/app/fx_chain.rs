@@ -135,6 +135,21 @@ impl FxChainLeaseStore {
         self.sources.get(&locator)?.get(slot_idx)?.as_ref()
     }
 
+    /// Active sources paired with their exclusive loaded-compile lease.
+    /// Track indices are returned in host slot coordinates, just like source().
+    pub fn retained_sources(&self) -> impl Iterator<Item = (FxChainLocator, usize, &RetainedEffectSource, Option<&DylibLease>)> {
+        self.sources.iter().flat_map(move |(&locator, sources)| {
+            sources.iter().enumerate().filter_map(move |(index, source)| {
+                let source = source.as_ref()?;
+                let lease = self.rows.get(&locator).and_then(|row| row.get(index)).and_then(Option::as_ref);
+                let slot = index + if matches!(locator, FxChainLocator::Track(_)) {
+                    crate::effects::BUILTIN_SLOT_COUNT
+                } else { 0 };
+                Some((locator, slot, source, lease))
+            })
+        })
+    }
+
     pub fn set_source(
         &mut self,
         locator: FxChainLocator,
