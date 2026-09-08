@@ -638,7 +638,7 @@ impl Default for DylibCacheManager {
 }
 
 /// The file bytes used by a loaded compile, for isolated export preparation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CompiledAsset {
     pub path: PathBuf,
     pub sha256: String,

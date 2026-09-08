@@ -2,28 +2,28 @@
 
 use super::{App, EngineRegistry};
 use super::fx_chain::{FxChainLeaseStore, FxChainLocator, RetainedEffectSource};
-use crate::bounce::{assets::FrozenDgenSource, BounceCancellation};
+use crate::bounce::{assets::DgenSourceSnapshot, BounceCancellation};
 use crate::lisp_host::DylibLease;
 use crate::sequencer::{InstrumentType, RuntimeSong};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
-pub(crate) struct FrozenInstrumentSource {
+pub(crate) struct CapturedInstrumentSource {
     pub name: String,
-    pub code: FrozenDgenSource,
+    pub code: DgenSourceSnapshot,
 }
 
-pub(super) struct FrozenEffectSource {
+pub(super) struct CapturedEffectSource {
     pub locator: FxChainLocator,
     pub slot: usize,
     pub name: String,
-    pub code: FrozenDgenSource,
+    pub code: DgenSourceSnapshot,
 }
 
 impl App {
     pub(super) fn capture_bounce_loaded_effect_sources(
         &self, cancel: &BounceCancellation,
-    ) -> io::Result<Vec<FrozenEffectSource>> {
+    ) -> io::Result<Vec<CapturedEffectSource>> {
         capture_loaded_effect_sources(&self.editor.effect_chain_leases, cancel)
     }
 
@@ -31,7 +31,7 @@ impl App {
         &self,
         song: &RuntimeSong,
         cancel: &BounceCancellation,
-    ) -> io::Result<BTreeMap<usize, FrozenInstrumentSource>> {
+    ) -> io::Result<BTreeMap<usize, CapturedInstrumentSource>> {
         capture_instrument_sources(
             &self.editor.engine_registry, &self.editor.instrument_lib_leases, song, cancel,
         )
@@ -40,7 +40,7 @@ impl App {
 
 fn capture_loaded_effect_sources(
     store: &FxChainLeaseStore, cancel: &BounceCancellation,
-) -> io::Result<Vec<FrozenEffectSource>> {
+) -> io::Result<Vec<CapturedEffectSource>> {
     cancel.check()?;
     let mut captured = Vec::new();
     for (locator, slot, source, lease) in store.retained_sources() {
@@ -48,8 +48,8 @@ fn capture_loaded_effect_sources(
         let lease = lease.ok_or_else(|| io::Error::other(format!(
             "Effect {name} at {locator:?} slot {slot} has no retained compile asset inventory",
         )))?;
-        let code = FrozenDgenSource::capture(source, asset_base.as_deref(), lease, cancel)?;
-        captured.push(FrozenEffectSource { locator, slot, name: name.clone(), code });
+        let code = DgenSourceSnapshot::capture(source, asset_base.as_deref(), lease, cancel)?;
+        captured.push(CapturedEffectSource { locator, slot, name: name.clone(), code });
     }
     Ok(captured)
 }
@@ -59,7 +59,7 @@ fn capture_instrument_sources(
     leases: &[Option<DylibLease>],
     song: &RuntimeSong,
     cancel: &BounceCancellation,
-) -> io::Result<BTreeMap<usize, FrozenInstrumentSource>> {
+) -> io::Result<BTreeMap<usize, CapturedInstrumentSource>> {
     cancel.check()?;
     let mut engines = BTreeSet::new();
     for row in &song.rows {
@@ -94,10 +94,10 @@ fn capture_instrument_sources(
         // The registry's exact source and manifest belong to the loaded
         // engine. Never re-read a saved instrument by name: drafts and
         // unsaved replacements need not exist in the library at all.
-        let code = FrozenDgenSource::capture(
+        let code = DgenSourceSnapshot::capture(
             &engine.source, engine.manifest.asset_base.as_deref(), lease, cancel,
         )?;
-        sources.insert(engine_id, FrozenInstrumentSource { name: engine.name.clone(), code });
+        sources.insert(engine_id, CapturedInstrumentSource { name: engine.name.clone(), code });
     }
     Ok(sources)
 }
@@ -131,7 +131,8 @@ mod tests {
         assert_eq!(frozen[0].locator, locator);
         assert_eq!(frozen[0].slot, slot);
         assert_eq!(frozen[0].name, "unsaved-effect-draft");
-        let refs = crate::lisp_host::dylib_cache::asset_references(&frozen[0].code.source).unwrap();
+        let code = frozen[0].code.freeze(&BounceCancellation::default()).unwrap();
+        let refs = crate::lisp_host::dylib_cache::asset_references(&code.source).unwrap();
         std::fs::remove_file(original.path().join("wave.json")).unwrap();
         assert_eq!(std::fs::read(&refs[0]).unwrap(), b"[0.5]");
         assert_eq!(store.source(locator, slot), Some(&RetainedEffectSource::Compiled {
@@ -177,8 +178,9 @@ mod tests {
             &BounceCancellation::default()).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[&engine_id].name, "unsaved-export-draft");
+        let code = sources[&engine_id].code.freeze(&BounceCancellation::default()).unwrap();
         std::fs::remove_file(original.path().join("wave.json")).unwrap();
-        let refs = crate::lisp_host::dylib_cache::asset_references(&sources[&engine_id].code.source).unwrap();
+        let refs = crate::lisp_host::dylib_cache::asset_references(&code.source).unwrap();
         assert_eq!(std::fs::read(&refs[0]).unwrap(), b"[0.25]");
         drop(loaded.lib);
         drop(leases);
