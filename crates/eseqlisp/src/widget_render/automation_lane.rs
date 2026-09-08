@@ -379,7 +379,7 @@ impl WidgetDefinition for AutomationLaneWidget {
         let base = base_color(&node.props);
         let cell_h = viewport.cell_h.max(1.0);
         let hairline_h = (super::ui_design_px(1.0) / cell_h).min(rect.height * 0.25);
-        let bar_h = (super::ui_design_px(2.0) / cell_h).min(rect.height * 0.25);
+        let bar_h = (super::ui_design_px(3.5) / cell_h).min(rect.height * 0.25);
         let right = rect.col + rect.width;
         let axis = value_rect(rect, cell_h);
 
@@ -407,7 +407,7 @@ impl WidgetDefinition for AutomationLaneWidget {
             }));
         }
 
-        let dot_px = super::ui_design_px(get_f32_prop(&node.props, "dot-size", 3.5)).max(1.0);
+        let dot_px = super::ui_design_px(get_f32_prop(&node.props, "dot-size", 5.5)).max(1.0);
         let mut dots = Vec::new();
         for point in lane_points(&node.props) {
             let x0 = x_for_time(rect, view_start, view_duration, point.start);

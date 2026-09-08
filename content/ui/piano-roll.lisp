@@ -610,36 +610,48 @@
       (host-command "clear-track-plock-entry" (automation-entry-payload step))
       :finish nil)))
 
+;; Lane header: mirrors the clip panel's column (dim caption, white value)
+;; so the picker reads as part of the panel rather than a floating control.
+(def automation-header ()
+  (box :width (+ clip-panel-width 5) :height automation-height
+    :background-color :mixer-strip-bg
+    (v-stack :gap 0 :height :fill :width :fill
+      (box :width :fill :height 0.08 :background-color :mixer-strip-border)
+      (box :padding 1 :height :fill :width :fill
+        :v-align :center
+        (h-stack :gap 0.5 :align :center :width :fill
+          (box :width 4.6 :height 1.0
+            (label "Lane" :font-size 10 :color :dim :bg :transparent))
+          (dropdown
+            :key "automation-param"
+            :value (automation-selected-label)
+            :options (automation-param-options)
+            :on-change (lambda (v) (select-automation-param v))
+            :background-color :buffer-bg
+            :width 19 :height 1.3 :font-size 10))))))
+
 (def automation-row ()
   (h-stack :width :fill :gap 0.0 :height automation-height
-    (box :width (+ clip-panel-width 5) :height automation-height
-      :background-color :mixer-strip-bg
-      :v-align :center
-      (h-stack :gap 0.3 :align :center
-        (box :width 0.5)
-        (dropdown
-          :key "automation-param"
-          :value (automation-selected-label)
-          :options (automation-param-options)
-          :on-change (lambda (v) (select-automation-param v))
-          :width 14.8 :height 1.45 :font-size 10)))
+    (automation-header)
     (box :height automation-height :flex 1 :width 0
-      (automation-lane
-        :key "automation-lane"
-        :width :fill
-        :height automation-height
-        :points (get (automation) :points)
-        :min (get (automation) :min)
-        :max (get (automation) :max)
-        :default (get (automation) :default)
-        :increment (get (automation) :increment)
-        :view-start piano-roll-view-start
-        :view-duration piano-roll-view-duration
-        :color (current-track-color)
-        :base-color (list 0.55 0.55 0.55)
-        :background :buffer-bg
-        :on-change (lambda (kind step value)
-          (automation-action kind step value))))))
+      (v-stack :gap 0 :height :fill :width :fill
+        (box :width :fill :height 0.08 :background-color :mixer-strip-border)
+        (automation-lane
+          :key "automation-lane"
+          :width :fill
+          :height (- automation-height 0.08)
+          :points (get (automation) :points)
+          :min (get (automation) :min)
+          :max (get (automation) :max)
+          :default (get (automation) :default)
+          :increment (get (automation) :increment)
+          :view-start piano-roll-view-start
+          :view-duration piano-roll-view-duration
+          :color (current-track-color)
+          :base-color (list 0.55 0.55 0.55)
+          :background :buffer-bg
+          :on-change (lambda (kind step value)
+            (automation-action kind step value)))))))
 
 (def buffer-content ()
   (if (and (piano-roll-arrangement-mode?) (= SEQ.focus-clip-start nil))
