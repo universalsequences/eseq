@@ -585,6 +585,7 @@
       nil
       (do
         (set! eseq.vanilla/piano-roll-automation-param (get row :key))
+        (set! automation-edit-value nil)
         (host-command "piano-roll-automation-refresh" (dict))))))
 
 (def automation-entry-payload (step)
@@ -604,11 +605,49 @@
     nil
     (match kind
       :set
-      (host-command "set-track-plock-entry"
-        (merge (automation-entry-payload step) :value value))
+      (do
+        (set! automation-edit-value value)
+        (host-command "set-track-plock-entry"
+          (merge (automation-entry-payload step) :value value)))
       :clear
-      (host-command "clear-track-plock-entry" (automation-entry-payload step))
+      (do
+        (set! automation-edit-value nil)
+        (host-command "clear-track-plock-entry" (automation-entry-payload step)))
       :finish nil)))
+
+;; Value readout of the point under edit (the last :set), cleared when the
+;; lane changes parameter. Ableton shows the hovered point's value beside
+;; the axis; a drag is the moment the number matters most here.
+(defstate automation-edit-value nil)
+
+(def format-lane-value (v)
+  (if (= v nil)
+    ""
+    (let ((rounded (/ (round (* v 100)) 100)))
+      (if (= rounded (round rounded))
+        (str (round rounded))
+        (str rounded)))))
+
+;; Range axis in the sidebar strip left of the lane: max at the top, min at
+;; the bottom, the edited value between them in white.
+(def automation-axis ()
+  (box :width 5 :height (- automation-height 0.08)
+    (v-stack :gap 0 :height (- automation-height 0.08) :width :fill :align :end
+      (box :width :fill :height 1.0 :h-align :right :v-align :top
+        (label (format-lane-value (get (automation) :max))
+          :key "automation-axis-max"
+          :width 4.4 :h-align :right
+          :font-size 8 :color :dim :bg :transparent))
+      (box :width :fill :height 1.0 :h-align :right :v-align :center
+        (label (format-lane-value automation-edit-value)
+          :key "automation-axis-value"
+          :width 4.4 :h-align :right
+          :font-size 10 :color :white :bg :transparent))
+      (box :width :fill :height 1.0 :h-align :right :v-align :bottom
+        (label (format-lane-value (get (automation) :min))
+          :key "automation-axis-min"
+          :width 4.4 :h-align :right
+          :font-size 8 :color :dim :bg :transparent)))))
 
 ;; Lane header: mirrors the clip panel's column (dim caption, white value)
 ;; so the picker reads as part of the panel rather than a floating control.
@@ -617,18 +656,20 @@
     :background-color :mixer-strip-bg
     (v-stack :gap 0 :height :fill :width :fill
       (box :width :fill :height 0.08 :background-color :mixer-strip-border)
-      (box :padding 1 :height :fill :width :fill
-        :v-align :center
-        (h-stack :gap 0.5 :align :center :width :fill
-          (box :width 4.6 :height 1.0
-            (label "Lane" :font-size 10 :color :dim :bg :transparent))
-          (dropdown
-            :key "automation-param"
-            :value (automation-selected-label)
-            :options (automation-param-options)
-            :on-change (lambda (v) (select-automation-param v))
-            :background-color :buffer-bg
-            :width 19 :height 1.3 :font-size 10))))))
+      (h-stack :gap 0 :height (- automation-height 0.08) :width :fill
+        (box :padding 1 :height (- automation-height 0.08) :width clip-panel-width
+          :v-align :center
+          (h-stack :gap 0.5 :align :center :width :fill
+            (box :width 4.6 :height 1.0
+              (label "Lane" :font-size 10 :color :dim :bg :transparent))
+            (dropdown
+              :key "automation-param"
+              :value (automation-selected-label)
+              :options (automation-param-options)
+              :on-change (lambda (v) (select-automation-param v))
+              :background-color :buffer-bg
+              :width 17 :height 1.3 :font-size 10)))
+        (automation-axis)))))
 
 (def automation-row ()
   (h-stack :width :fill :gap 0.0 :height automation-height
