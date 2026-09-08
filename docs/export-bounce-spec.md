@@ -2,6 +2,8 @@
 
 Status: design decision for **eseq-45bn.1**, under **eseq-45bn**. This document
 specifies future implementation; it does not claim an exporter exists today.
+Timing contract revised 2026-09-07: preserve playback timing, with sample-accurate
+notes/gates and block-boundary ordinary DSP updates.
 Related: [song mode](song-mode-spec.md) and
 [takes and additive arrangement recording](takes-and-additive-arrangement-recording-spec.md).
 
@@ -39,7 +41,7 @@ Paths below are relative to the repository root.
 | `crates/sequencer/src/audio/render.rs`: `render_chunk` | Reuse graph/DSP rendering; an instrument-only probe is not a song renderer. |
 | `crates/sequencer/src/scheduler/lookahead.rs`: `schedule_playing_lookahead` | Reuse the production lookahead pass, including graph/neural propagation, processes and MIDI FX; do not write a second note scheduler. |
 | `crates/sequencer/src/scheduler/worker.rs`: rendered-sample frontier, sleeps, wall-clock roll-start hold | Extract driver-independent advancement. Offline scheduling must finish the required horizon before rendering, without sleeps or racing a worker. Disable live roll/input handling. |
-| `crates/sequencer/src/ui/event_loop.rs`: `drain_due_mixer_controls` | Musical mute/solo changes currently drained by UI frames must become sample-timed render-session commands shared by playback and bounce. Running a hidden UI loop is not a solution. |
+| `crates/sequencer/src/ui/event_loop.rs`: `drain_due_mixer_controls` | Musical mute/solo changes currently drained by UI frames must become block-boundary render-session commands shared by playback and bounce. Running a hidden UI loop is not a solution. |
 | `crates/sequencer/src/sequencer/state/song_runtime.rs`: `SongPlaybackRuntime`, `RuntimeSong::end_beat` | Use the preflighted arrangement and its row/clip boundaries; force a finite, non-looping pass, not open-ended capture. |
 | `crates/sequencer/src/recorder.rs`: `MasterRecorder`, `save_recording_wav` | Current capture grows an in-memory vector under a try-lock and counts dropped blocks; the float writer clamps to unity. Neither is the export sink contract. Leave Wav behavior alone and implement bounded streaming export. |
 | `crates/sequencer/src/app/graph/latency.rs`: `LatencyPlan` | Use the installed graph's compensation, not an estimated device/block delay. See section 4. |
@@ -51,13 +53,39 @@ by playback, without editing the active project or sharing its mutable DSP/VM
 instances. Compile/load failures, missing assets and generator errors fail
 preflight or the job; never export a silently incomplete mix.
 
-For each block: resolve song transitions and schedule the complete horizon;
-apply ordered musical controls and events at their frame offsets; render the
-same graph; consume the requested master frames; advance the cursor. Graph
-publication/parameter changes must be acknowledged before affected frames render.
-Keep production block semantics and split at required boundaries; do not assume
-arbitrary DSP block sizes are equivalent. Queue capacity is bounded: chunk work
-or fail explicitly, never discard events. UI progress/cancel uses messages only.
+For each fixed-size graph block: apply due prepared row/mixer updates, resolve
+song transitions and schedule the complete required horizon, dispatch note/gate
+events at their frame offsets, render the same graph, consume the requested
+master frames, and advance the cursor. Graph publications must be acknowledged
+before their designated block renders. Queue capacity is bounded: chunk work or
+fail explicitly, never discard events. UI progress/cancel uses messages only.
+
+### Timing contract shared with playback
+
+- Notes, gate releases and other existing sample-accurate voice events retain
+  their frame offsets. Song note scheduling still switches row snapshots at
+  the exact musical boundary; parameter timing does not move those notes.
+- Ordinary DGen/effect parameters use the existing block-boundary application
+  path, including its ordering/coalescing of parameter locks within a block.
+  Bounce does not require a new sample-accurate DGen parameter system.
+- Row graph state and sequenced mixer holds must be applied independently of
+  UI frames. A row/control edge at source frame f takes effect at the first
+  graph-block start at or after f: Q(f) = ceil(f / K) * K, where K is the
+  production graph block size and the session origin is frame zero. At one
+  boundary, consume edges in source-time order, with releases before engages
+  at equal source times; the final ordinary parameter value governs that block.
+  A hold wholly between block starts can therefore coalesce to no audible hold.
+- Prepare required assets, bindings and graph publications off the audio thread.
+  The UI mirrors applied musical state; its redraw cadence is not a clock.
+- Keep the production graph block size for every render, including the last
+  block. Trim only the exported sample interval. Do not split spectral kernels
+  at arbitrary row, parameter, range or file-end boundaries: existing generated
+  convolution depends on hop-compatible blocks. Fixed-block processing is an
+  intentional supported contract, not a prerequisite compiler defect to fix.
+
+Parity checks compare these timing classes using the same block size and origin.
+Sub-block parameter interpolation, sample-accurate ordinary effect automation,
+and a general DGen parameter-event ABI are outside v1 scope.
 
 ## 3. Range, initial state and transport end
 
@@ -85,7 +113,10 @@ invoke a generic transport stop that clears voices or resets effect buffers.
 Continue DSP and time-dependent effect modulation through the tail at the final
 tempo; hold the final authored parameter/mixer values. This is a defined
 end-of-range release, not playback of the next arrangement section. A note-on
-exactly at B is excluded. An already sounding one-shot may decay into the tail.
+exactly at B is excluded. Ordinary row/control updates whose effective block
+boundary is at or after E are not applied during the tail. An already sounding
+one-shot may decay into the tail. The graph still renders complete blocks; gate
+release at E uses its existing sample-offset event mechanism.
 
 ## 4. PDC and tails: the exact file interval
 
@@ -132,7 +163,8 @@ that alone proves neither all reset paths nor other runtimes deterministic.
 The required equivalence is the shared musical execution semantics from a fresh
 beat-zero start: same song transitions, event routing, p-locks, controls, end
 release and PDC for the same inputs/state. For a fixed deterministic fixture,
-playback and offline drivers must produce identical event/control frame traces
+playback and offline drivers must produce identical note/gate frame traces and
+ordinary DSP/control block-boundary traces
 and audio within a declared numerical tolerance. CPU architecture, compiler,
 SIMD and parallel reduction order preclude a blanket cross-platform bit guarantee.
 
@@ -196,9 +228,13 @@ this documentation change has added tests. Use headless, Linux-runnable fixtures
 and exact nextest selections, not whole-project/UI playback as the primary oracle.
 
 - Shared render-session driver: deterministic song with row changes, takes,
-  sends, MIDI FX, graph/neural seed propagation, processes and sample-timed mixer
-  controls. Compare offline and production-driver traces at sub-block boundaries;
+  sends, MIDI FX, graph/neural seed propagation, processes and block-boundary
+  mixer controls. Compare exact note/gate offsets and ordinary DSP/control block
+  boundaries between offline and production drivers;
   stress event capacity and graph publication. No audio device or UI frame drain.
+- Fixed blocks: preserve convolution output across non-block-aligned row changes,
+  ranges and file ends; assert every DSP call receives K frames. Check ordered
+  control coalescing, short holds and UI-independent row application.
 - Boundaries: beat-zero impulse, last admitted event, event exactly at B,
   non-block-aligned E, fractional beat lengths, loops disabled, empty/invalid
   ranges. Assert exact frame counts, prefix-equivalent selection and gate release.
