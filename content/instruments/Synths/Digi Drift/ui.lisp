@@ -1,7 +1,7 @@
 ;; Factory Drift — warm analog character expressed through semantic theme
 ;; colors, with source tabs, vertical gain faders, and accent-striped panels.
-;; vs core/drift: the filter panel exposes the new filter_drive knob
-;; (cut / res / drive); hp cutoff moved to a micro control beside keytrack.
+;; Oscillator gains drive the filter naturally; cutoff, resonance, and high-pass
+;; remain directly accessible in the filter panel.
 
 ;; Ableton Drift palette discipline: outside the dark oscillator column every
 ;; knob is drift-knob (blue) and every section header is drift-head (dim).
@@ -312,12 +312,11 @@
             (eseq.effects.custom-ui-lego/ui-lego-header-s 3 "FILTER" 3.6 (drift-head))
             (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 3 "filter_type" "type" 4.4 (drift-ftype-options) (drift-text))
             )
-          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "keytrack" "key" 5.0 2 false (drift-text))
-          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "hp_freq" "hp" 5.0 0 "Hz" (drift-text)))
+          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "keytrack" "key" 5.0 2 false (drift-text)))
         (h-stack :gap 0.10 :align :start
           (drift-filter-log-knob "lp_freq" "cut" 0)
           (drift-filter-knob "lp_res" "res" 2)
-          (drift-filter-knob "filter_drive" "drive" 2))
+          (drift-filter-log-knob "hp_freq" "hp" 0))
         (h-stack :gap 0.22 :align :end
           (v-stack
             (eseq.effects.custom-ui-lego/ui-lego-header-s 3 "FMOD" 3.0 (drift-head))

@@ -45031,7 +45031,7 @@ mod drift_waveform_tests;
                 "mm2_amt",
                 "volume_db",
                 "lp_freq",
-                "filter_drive",
+                "lp_res",
                 "hp_freq",
                 "drift",
             ],

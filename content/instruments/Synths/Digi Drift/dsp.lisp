@@ -11,12 +11,10 @@
 ;     (mod p) passed as a macro argument resolves at top level and renders
 ;     inline as p~ in the patcher.
 ;
-; Filter rework vs core/drift: the always-on tanh stages are gone. A single
-; explicit filter_drive param crossfades the filter path from fully linear
-; (clean resonance, no mud) into a normalized saturation stage (the woolly
-; compressed sound, now dialed in on purpose). Type I is a 12 dB SVF with
-; resonance-compensated input; Type II is the builtin 24 dB ladder, whose
-; native drive input carries the same knob.
+; Filters calibrated from native Drift measurements (tools/drift).
+; Native-rate emulation: Type I nonlinear SVF, Type II Sallen-Key cascade.
+; Oscillator gains set the input drive; output volume follows saturation.
+; No oversampling or exact native-circuit equivalence is claimed.
 
 (def gate (in 1 @name gate))
 (def pitch (in 2 @name pitch))
@@ -39,8 +37,7 @@
 (param noise_gain_db @default -60 @min -60 @max 12 @unit dB @mod true @mod-mode additive @mod-depth-min -24 @mod-depth-max 24 @mod-unit dB)
 (param lp_freq @default 2500 @min 20 @max 18000 @unit Hz @mod true @mod-mode additive @mod-depth-min -8000 @mod-depth-max 8000 @mod-unit Hz)
 (param lp_res @default 0.2 @min 0 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
-(param filter_drive @default 0 @min 0 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
-(param hp_freq @default 20 @min 10 @max 10000 @unit Hz @mod true @mod-mode additive @mod-depth-min -5000 @mod-depth-max 5000 @mod-unit Hz)
+(param hp_freq @default 20 @min 20 @max 10000 @unit Hz @mod true @mod-mode additive @mod-depth-min -5000 @mod-depth-max 5000 @mod-unit Hz)
 (param lfo_amount @default 1 @min 0 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
 (param drift @default 0.3 @min 0 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
 (param volume_db @default -12 @min -36 @max 6 @unit dB @mod true @mod-mode additive @mod-depth-min -24 @mod-depth-max 24 @mod-unit dB)
@@ -84,18 +81,125 @@
   (write-history sm_hist v)
   v)
 
-; The shared drive stage: crossfade from pure linear (amount 0, transparent)
-; into peak-normalized tanh saturation (amount 1, compressed + harmonics).
-(defmacro drive-stage (x amount)
-  (def g (+ 1.0 (* amount 7.0)))
-  (def shaped (/ (tanh (* x g)) (tanh g)))
-  (mix x shaped amount))
+; Solve a*u - b - r*S(u) = 0 for a > r >= 0, threshold > 0,
+; curve > 0. S is odd, linear through threshold, then approaches
+; threshold + 1/curve with slope 1/(1+curve*excess)^2.
+; The equation is strictly increasing, so its real root is unique.
+(defmacro drift-feedback-root (a b r threshold curve)
+  (def slope (- a r))
+  (def magnitude (abs b))
+  (def excess (max (- magnitude (* slope threshold)) 0))
+  (def quadratic (* a curve))
+  (def middle (- slope (* curve excess)))
+  (def discriminant (sqrt (+ (* middle middle) (* 4 quadratic excess))))
+  ; Use the cancellation-free quadratic form on each side of middle=0.
+  ; The guarded denominator belongs to the inactive branch when cancellation
+  ; rounds it to zero; DGen may evaluate both gswitch inputs.
+  (def curved-excess (gswitch (gte middle 0)
+    (/ (* 2 excess) (max (+ middle discriminant) 1e-20))
+    (/ (- discriminant middle) (* 2 quadratic))))
+  (def root-magnitude (gswitch (gt excess 0)
+    (+ threshold curved-excess) (/ magnitude slope)))
+  (* (gswitch (lt b 0) -1 1) root-magnitude))
 
-; Gentle post-filter limiter, faded in with the same drive amount so the
-; resonant peak only gets squashed when the player asks for it.
-(defmacro soft-limit (x amount)
-  (def shaped (/ (tanh (* x 1.5)) (tanh 1.5)))
-  (mix x shaped amount))
+(defmacro drift-knee (x threshold curve)
+  (def magnitude (abs x))
+  (def excess (max (- magnitude threshold) 0))
+  (* (gswitch (lt x 0) -1 1)
+     (+ (min magnitude threshold) (/ excess (+ 1 (* curve excess))))))
+
+(defmacro drift-type1-step (x g resonance s1 s2
+                                    pre-th pre-curve post-th post-curve
+                                    fb-th fb-curve bias fb-bias low-mix)
+  (def pre (- (drift-knee (+ x bias) pre-th pre-curve)
+              (drift-knee bias pre-th pre-curve)))
+  (def k (/ 1 .423))
+  (def c (- 0 low-mix))
+  (def offset (* fb-th fb-bias))
+  (def scale (+ 1 (* c g)))
+  (def a (+ 1 (* g k) (* g g) (* g g k resonance c)))
+  (def shift (+ (* c s2) offset))
+  (def b (- (+ s1 (* g pre))
+             (+ (* g s2) (* g k resonance offset) (* g k resonance c s2))))
+  (def root-b (+ (* b scale) (* a shift)))
+  (def root-r (* g k resonance scale))
+  (def root (drift-feedback-root a root-b root-r fb-th fb-curve))
+  ; In the linear region, solve directly for bp to avoid subtracting the
+  ; feedback bias from an almost equal root at very low signal levels.
+  (def linear-bp (/ (+ s1 (* g (- pre s2)))
+                    (+ 1 (* g k (- 1 resonance)) (* g g))))
+  (def bp (gswitch (lte (abs root-b) (* (- a root-r) fb-th))
+            linear-bp (/ (- root shift) scale)))
+  (def lp (+ s2 (* g bp)))
+  (tuple (drift-knee (* lp 1.541) post-th post-curve)
+         (- (* 2 bp) s1) (- (* 2 lp) s2)))
+
+; Measured 12 dB response with asymmetric input saturation and nonlinear
+; feedback. Q=.423/(1-resonance) in the small-signal limit. The low-pass
+; contribution inside the feedback shaper changes how loud notes damp resonance.
+(defmacro drift-type1 (x cutoff resonance)
+  (make-history band_state)
+  (make-history low_state)
+  (def g (tan (/ (* pi cutoff) samplerate)))
+  (def (y next_band next_low)
+    (drift-type1-step x g resonance
+      (read-history band_state) (read-history low_state)
+      .4597608481 51.28837662 .2855820088 .4684337539
+      .2377988585 .4106747694 .1626344034 .6038363968 .3779898126))
+  (write-history band_state next_band)
+  (write-history low_state next_low)
+  y)
+
+; Trapezoidal Sallen-Key section with an implicitly solved feedback limiter.
+; For this resonance law k<2.03, so (1+g)^2-g*k is positive for every g>0.
+; No iterative solve or feedback-state clamp is needed.
+(defmacro drift-sallen-key (x g k threshold curve bias)
+  (make-history state1)
+  (make-history state2)
+  (def s1 (read-history state1))
+  (def s2 (read-history state2))
+  (def a (* (+ 1 g) (+ 1 g)))
+  (def r (* g k))
+  (def b (+ (* (+ 1 g) s2) (* g s1) (* g g x)))
+  (def offset (* threshold bias))
+  (def root-b (+ b (* (- a r) offset)))
+  (def u (drift-feedback-root a root-b r threshold curve))
+  (def lp (gswitch (lte (abs root-b) (* (- a r) threshold))
+            (/ b (- a r)) (- u offset)))
+  (def feedback (- (drift-knee (+ lp offset) threshold curve) offset))
+  (def v1 (/ (+ s1 (* g x) (* k feedback)) (+ 1 g)))
+  (write-history state1 (- (* 2 (- v1 (* k feedback))) s1))
+  (write-history state2 (- (* 2 lp) s2))
+  lp)
+
+; The low-frequency Type-II reference differs from Type I by four gentle
+; DC-blocking poles. Keep these separate from the adjustable high-pass.
+(defmacro drift-dc-block (x)
+  (make-history state)
+  (def s (read-history state))
+  (def g (tan (/ (* pi 1.6) samplerate)))
+  (def v (* (- x s) (/ g (+ 1 g))))
+  (def low (+ v s))
+  (write-history state (+ low v))
+  (- x low))
+
+; Four-pole approximation of the measured Type-II response: two Sallen-Key
+; sections, with the high-Q section first and a distinct soft feedback limiter
+; in each. This captures MS2-style resonance, not the full native OTA circuit.
+(defmacro drift-type2 (x cutoff resonance)
+  (def r2 (* resonance resonance))
+  (def k1 (/ (+ (* 4.1256140047 resonance) (* 1.8359078001 r2))
+             (+ 1 (* 3.2117741295 resonance))))
+  (def k2 (/ (- (* 8.0522398087 resonance) (* .06219915383 r2))
+             (+ 1 (* 2.9532898642 resonance))))
+  (def g1 (tan (/ (* pi cutoff 1.0219682037) samplerate)))
+  (def g2 (tan (/ (* pi cutoff 1.0226839218) samplerate)))
+  (def pre (- (drift-knee (+ x .1550136067) .4581724596 199.9745374)
+              .1550136067))
+  (def first (drift-sallen-key pre g2 k2 .2707240824 5.680632221 .07640951001))
+  (def second (drift-sallen-key first g1 k1 .1027683762 8.333819518 .07640951001))
+  (def shaped (drift-knee (* second 1.2966450151) 1.082975062 36.82033997))
+  (drift-dc-block (drift-dc-block (drift-dc-block (drift-dc-block shaped)))))
 
 ; Mod source selector: 0=env1 1=env2 2=lfo 3=key 4=vel.
 (defmacro pick-source (idx e1 e2 lf ky vl)
@@ -283,7 +387,8 @@
     (polyblep_pulse ph 0.5 freq)))
 
 ; Mixer: on/off + dB gain staging (with matrix offsets) and per-source
-; routing into the filter or around it. -> (to_filter dry)
+; routing into the filter or around it. Native oscillator-unit scaling is .4.
+; -> (to_filter dry)
 (defmacro source-mixer (o1 o2 gain1_db gain2_db nz_db mm_g1 mm_g2 mm_nz)
   (param osc1_on @default 1 @min 0 @max 1)
   (param osc2_on @default 1 @min 0 @max 1)
@@ -294,20 +399,19 @@
   (def g2 (* (gte osc2_on 0.5) (db-amp (clip (+ gain2_db (* mm_g2 24)) -36 12))))
   (def nz_db_c (clip (+ nz_db (* mm_nz 24)) -60 12))
   (def gn (* (gt nz_db_c -59.5) (db-amp nz_db_c)))
-  (def s1 (* o1 g1))
-  (def s2 (* o2 g2))
-  (def sn (* (noise) gn))
+  (def s1 (* .4 o1 g1))
+  (def s2 (* .4 o2 g2))
+  (def sn (* .4 (noise) gn))
   (def r1 (gte osc1_route 0.5))
   (def r2 (gte osc2_route 0.5))
   (def rn (gte noise_route 0.5))
   (tuple (+ (* s1 r1) (* s2 r2) (* sn rn))
          (+ (* s1 (- 1 r1)) (* s2 (- 1 r2)) (* sn (- 1 rn)))))
 
-; Filter block: keytracked/modulated cutoff, pre high-pass, then Type I
-; (12 dB SVF, resonance-compensated input through the drive stage) or
-; Type II (24 dB ladder, native drive).
+; Keytracked/modulated cutoff, oscillator-level-driven low-pass, then the
+; measured resonant high-pass. Coefficients use the host sample rate.
 (defmacro drift-filter (x base_hz e1 e2 lf ky vl
-                        freq_hz res_base drive hp_hz
+                        freq_hz res_base hp_hz
                         mm_freq mm_res mm_hp drift_oct)
   (param filter_type @default 0 @min 0 @max 1)
   (param keytrack @default 0.3 @min 0 @max 1)
@@ -322,29 +426,27 @@
   (def cut (clip (* freq_hz
                     (pow (/ (max base_hz 8.0) 261.63) keytrack)
                     (semi-ratio (* oct_mod 12)))
-                 20 16000))
-  (def hp_cut (clip (* hp_hz (semi-ratio (* mm_hp 72))) 10 12000))
-  (def hp_out (svf x hp_cut 0.6 2))
+                 20 (min 16000 (* samplerate .36))))
+  (def hp_cut (clip (* hp_hz (semi-ratio (* mm_hp 72)))
+                    20 (min 12000 (* samplerate .36))))
   (def res (clip (+ res_base mm_res) 0 1))
-  (def drv (clip drive 0 1))
-  (def comp (/ 1.0 (+ 1.0 (* res res 2.0))))
-  (def driven (drive-stage (* hp_out comp) drv))
-  (def lp_i (soft-limit (svf driven cut (+ 0.5 (* res 8.0)) 0) drv))
-  (def lp_ii (ladder hp_out cut res (+ 1.0 (* drv 3.0))))
-  (gswitch (gte filter_type 0.5) lp_ii lp_i))
+  (def lp_i (drift-type1 x cut res))
+  (def lp_ii (drift-type2 x cut res))
+  (def lowpass (gswitch (gte filter_type 0.5) lp_ii lp_i))
+  (svf lowpass hp_cut 1.469 2))
 
 ; Amp envelope, velocity, volume (with matrix offset), per-voice pan spread,
-; soft-limited stereo out. -> (left right)
+; pre-envelope summing saturation, then linear stereo gain. -> (left right)
 (defmacro output-stage (filt dry env vel vol_db mm_vol pan_rnd)
   (param vel_to_vol @default 0.35 @min 0 @max 1)
   (param voice_pan @default 0 @min -1 @max 1)
   (param spread @default 0.2 @min 0 @max 1)
   (def vel_gain (+ (- 1 vel_to_vol) (* vel vel_to_vol)))
   (def vol (db-amp (clip (+ vol_db (* mm_vol 24)) -36 6)))
-  (def amp (* (+ filt dry) env vel_gain vol))
+  (def amp (* (clip (+ filt dry) -.875 .875) env vel_gain vol))
   (def pan (clip (+ voice_pan (* pan_rnd spread)) -1 1))
-  (tuple (tanh (* amp (clip (- 1 (* pan 0.5)) 0 1.5)))
-         (tanh (* amp (clip (+ 1 (* pan 0.5)) 0 1.5)))))
+  (tuple (* amp (clip (- 1 (* pan 0.5)) 0 1.5))
+         (* amp (clip (+ 1 (* pan 0.5)) 0 1.5))))
 
 ; ======================================================================
 ; voice: section nodes only
@@ -378,7 +480,7 @@
                    mm_o1_gain mm_o2_gain mm_nz_gain))
 
 (def lp_out (drift-filter to_filter base_pitch env1 env2 lfo key_val velocity
-                          (mod lp_freq) (mod lp_res) (mod filter_drive)
+                          (mod lp_freq) (mod lp_res)
                           (mod hp_freq)
                           mm_lp_freq mm_lp_res mm_hp_freq drift_filt_oct))
 
