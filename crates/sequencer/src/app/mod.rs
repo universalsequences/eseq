@@ -1055,7 +1055,7 @@ struct RecordingHistoryTransaction {
     changed: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DeviceIdentityRegistry {
     next_id: u64,
     audio_effects: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::EffectInstanceId>,

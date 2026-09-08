@@ -27,6 +27,15 @@ use super::{
     App, BusChannelState, InputMode, ProjectSampleAsset, Region, SidebarMode, SidebarTab,
 };
 
+struct ProjectCapture {
+    bank: Vec<PatternSnapshot>,
+    bus_pattern_bank: Vec<Vec<BusPatternSnapshot>>,
+    scenes_for_takes: crate::sequencer::ProjectScenes,
+    tracks: Vec<ProjectTrack>,
+    custom_effects: Vec<Vec<Option<String>>>,
+    device_instances: crate::project::ProjectDeviceInstances,
+}
+
 pub(super) fn resolve_live_macro_target(
     state: &crate::sequencer::SequencerState,
     effect_descriptors: &[Vec<EffectDescriptor>],
@@ -2199,13 +2208,6 @@ impl App {
 
     pub(super) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
         let num_tracks = self.tracks.len();
-        let current_pattern = self.state.current_scene_index();
-        let current_track = if num_tracks == 0 {
-            0
-        } else {
-            self.ui.cursor_track.min(num_tracks - 1)
-        };
-
         self.state.save_current_pattern_snapshot(
             num_tracks,
             &self.graph.track_buffer_ids,
@@ -2227,9 +2229,54 @@ impl App {
         let bus_pattern_bank = self
             .state
             .export_bus_pattern_repository(&default_bus_snapshot);
-        let tracks = self.capture_project_tracks()?;
+        let tracks = self.capture_project_tracks(true)?;
         let custom_effects = self.capture_custom_effects();
-        let device_instances = self.capture_project_device_instances(&tracks, &custom_effects)?;
+        let mut identities = self.device_registry.clone();
+        let device_instances = self.capture_project_device_instances(&tracks, &custom_effects, &mut identities)?;
+        self.device_registry = identities;
+        self.state.prune_unreferenced_sounds();
+        let scenes_for_takes = self.state.capture_project_scenes();
+        self.serialize_project_snapshot(project_name, ProjectCapture {
+            bank, bus_pattern_bank, scenes_for_takes, tracks, custom_effects, device_instances,
+        })
+    }
+
+    /// Structural authoring snapshot for the export bundle. Retained DSP code
+    /// and sampler source captures accompany it; draft names are identifiers,
+    /// not instructions to reopen an instrument from the user's library.
+    pub(crate) fn capture_bounce_project(&self, project_name: &str) -> Result<ProjectFile, String> {
+        let mut scenes_for_takes = self.state.capture_project_scenes_with_current_pattern(
+            self.tracks.len(), &self.graph.track_buffer_ids, &self.graph.track_sample_rates,
+            &self.tracks, &self.graph.track_instrument_types,
+        )?;
+        let current_bus = self.capture_bus_pattern_snapshot();
+        for scene in &mut scenes_for_takes.scenes {
+            if scene.bus_patterns.is_empty() { scene.bus_patterns = current_bus.clone(); }
+        }
+        if let Some(scene) = scenes_for_takes.scenes.get_mut(scenes_for_takes.current_scene) {
+            scene.bus_patterns = current_bus;
+        }
+        let bank = scenes_for_takes.snapshots();
+        let bus_pattern_bank = scenes_for_takes.scenes.iter()
+            .map(|scene| scene.bus_patterns.clone()).collect();
+        let tracks = self.capture_project_tracks(false)?;
+        let custom_effects = self.capture_custom_effects();
+        let mut identities = self.device_registry.clone();
+        let device_instances = self.capture_project_device_instances(&tracks, &custom_effects, &mut identities)?;
+        self.serialize_project_snapshot(project_name, ProjectCapture {
+            bank, bus_pattern_bank, scenes_for_takes, tracks, custom_effects, device_instances,
+        })
+    }
+
+    fn serialize_project_snapshot(&self, project_name: &str, capture: ProjectCapture) -> Result<ProjectFile, String> {
+        let ProjectCapture { bank, bus_pattern_bank, scenes_for_takes, tracks, custom_effects, device_instances } = capture;
+        let num_tracks = self.tracks.len();
+        let current_pattern = self.state.current_scene_index();
+        let current_track = if num_tracks == 0 {
+            0
+        } else {
+            self.ui.cursor_track.min(num_tracks - 1)
+        };
         let patterns = bank
             .iter()
             .enumerate()
@@ -2278,17 +2325,6 @@ impl App {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        // §17.4 prune-on-save: drop orphaned entities from the LIVE pools
-        // before capturing. This is the one seam the spec sanctions, and it
-        // is safe here because nothing holds Patch/Mix ids into the live
-        // pools from outside `ProjectScenes` — undo lane snapshots clone
-        // pools wholesale, so history entries stay self-consistent.
-        self.state.prune_unreferenced_sounds();
-        // Takes spec 6.1/11.1: record per-scene cell presence (the dense
-        // `patterns` bank cannot encode a bare lane) and serialize each
-        // track's take pool with its chunk patterns inline — chunks are in
-        // no scene cell, so the pattern bank never carries them.
-        let scenes_for_takes = self.state.capture_project_scenes();
         let scene_banks = scenes_for_takes
             .banks
             .iter()
@@ -2481,12 +2517,10 @@ impl App {
                         mix: crate::sequencer::MixId(refs.mix),
                     })
                 });
-                let Some(data) = data else {
-                    // Dangling refs (always-resolves invariant violated): the
-                    // content is already unrecoverable; keep the save usable.
-                    debug_assert!(false, "bare cell refs do not resolve on track {track}");
-                    continue;
-                };
+                let data = data.ok_or_else(|| format!(
+                    "Track {} sound references patch {} and mix {} that cannot be resolved",
+                    track + 1, refs.patch, refs.mix,
+                ))?;
                 let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
                 snapshot.set_track_pattern_data(track, data);
                 let mut sample_paths = vec![None; num_tracks];
@@ -2619,7 +2653,7 @@ impl App {
                     .state
                     .committed_arrangement()
                     .unwrap_or_else(|| self.empty_arrangement()),
-                &self.state.capture_project_scenes(),
+                &scenes_for_takes,
             )?),
             macros: self
                 .macro_engine
@@ -2642,7 +2676,7 @@ impl App {
         })
     }
 
-    fn capture_project_tracks(&self) -> Result<Vec<ProjectTrack>, String> {
+    fn capture_project_tracks(&self, qualify_instrument_names: bool) -> Result<Vec<ProjectTrack>, String> {
         self.tracks
             .iter()
             .enumerate()
@@ -2720,16 +2754,13 @@ impl App {
                                             engine_id
                                         )
                                     })?;
-                                let instrument_name = crate::lisp_host::qualify_instrument_id(
-                                    &instrument_name,
-                                )
-                                .map_err(|error| {
-                                    format!(
-                                        "Could not qualify instrument for rack track '{}' slot {}: {error}",
-                                        name,
-                                        slot_idx + 1
-                                    )
-                                })?;
+                                let instrument_name = if qualify_instrument_names {
+                                    crate::lisp_host::qualify_instrument_id(&instrument_name)
+                                        .map_err(|error| format!(
+                                            "Could not qualify instrument for rack track '{}' slot {}: {error}",
+                                            name, slot_idx + 1,
+                                        ))?
+                                } else { instrument_name };
                                 slots.push(crate::project::ProjectRackTrackSlot {
                                     instrument_type: crate::project::ProjectInstrumentType::Custom,
                                     sample_path: None,
@@ -2807,12 +2838,11 @@ impl App {
                         .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
                         .map(|engine| engine.name.clone())
                         .unwrap_or_else(|| name.clone());
-                    let instrument_name = crate::lisp_host::qualify_instrument_id(
-                        &instrument_name,
-                    )
-                    .map_err(|error| {
-                        format!("Could not qualify instrument for track '{}': {error}", name)
-                    })?;
+                    let instrument_name = if qualify_instrument_names {
+                        crate::lisp_host::qualify_instrument_id(&instrument_name).map_err(|error| {
+                            format!("Could not qualify instrument for track '{}': {error}", name)
+                        })?
+                    } else { instrument_name };
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),
@@ -2861,20 +2891,21 @@ impl App {
     }
 
     fn capture_project_device_instances(
-        &mut self,
+        &self,
         tracks: &[ProjectTrack],
         custom_effects: &[Vec<Option<String>>],
+        identities: &mut super::DeviceIdentityRegistry,
     ) -> Result<crate::project::ProjectDeviceInstances, String> {
         let mut result = crate::project::ProjectDeviceInstances::default();
         for (track, project_track) in tracks.iter().enumerate() {
             let sources = custom_effects.get(track).cloned().unwrap_or_default();
             let active_sources = sources.into_iter().take_while(Option::is_some)
                 .flatten().collect::<Vec<_>>();
-            let ids = self.device_registry.audio_effect_chain(
+            let ids = identities.audio_effect_chain(
                 project_track.id,
                 (0..active_sources.len()).map(|offset| BUILTIN_SLOT_COUNT + offset),
             );
-            self.device_registry.bind_audio_effect_chain(
+            identities.bind_audio_effect_chain(
                 project_track.id,
                 BUILTIN_SLOT_COUNT,
                 &ids,
@@ -2892,8 +2923,8 @@ impl App {
             let midi_names = self.state.pattern.track_params.get(track)
                 .map(|params| params.midi_fx_chain())
                 .unwrap_or_default();
-            let midi_ids = self.device_registry.midi_effect_chain(project_track.id, midi_names.len());
-            self.device_registry.bind_midi_effect_chain(project_track.id, &midi_ids)?;
+            let midi_ids = identities.midi_effect_chain(project_track.id, midi_names.len());
+            identities.bind_midi_effect_chain(project_track.id, &midi_ids)?;
             result.midi_effects.push(crate::project::ProjectMidiEffectChain {
                 track_id: project_track.id.0,
                 instances: midi_ids.into_iter().zip(midi_names).map(|(id, name)| {
@@ -2905,9 +2936,9 @@ impl App {
             let names = bus.custom_effect_names.iter().take_while(|name| name.is_some())
                 .filter_map(|name| name.clone()).collect::<Vec<_>>();
             let ids = (0..names.len()).map(|slot| {
-                self.device_registry.bus_audio_effect(bus.id, slot)
+                identities.bus_audio_effect(bus.id, slot)
             }).collect::<Vec<_>>();
-            self.device_registry.bind_bus_audio_effect_chain(bus.id, &ids)?;
+            identities.bind_bus_audio_effect_chain(bus.id, &ids)?;
             result.bus_effects.push(crate::project::ProjectBusEffectChain {
                 bus_id: bus.id.0,
                 instances: ids.into_iter().zip(names).map(|(id, name)| {
@@ -2922,13 +2953,13 @@ impl App {
         for (track, rack) in racks.into_iter().enumerate() {
             let (Some(project_track), Some(rack)) = (tracks.get(track), rack) else { continue };
             for (slot_index, slot) in rack.slots.into_iter().enumerate() {
-                let rack_slot_id = self.device_registry.rack_slot(project_track.id, slot_index);
+                let rack_slot_id = identities.rack_slot(project_track.id, slot_index);
                 let names = slot.custom_effect_names.into_iter().take_while(Option::is_some)
                     .flatten().collect::<Vec<_>>();
                 let ids = (0..names.len()).map(|effect_slot| {
-                    self.device_registry.rack_audio_effect(rack_slot_id, effect_slot)
+                    identities.rack_audio_effect(rack_slot_id, effect_slot)
                 }).collect::<Vec<_>>();
-                self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
+                identities.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
                 result.rack_effects.push(crate::project::ProjectRackEffectChain {
                     track_id: project_track.id.0,
                     slot_index,
@@ -5113,6 +5144,89 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounce_project_snapshot_keeps_live_repository_and_device_ids_unchanged() {
+        use crate::sequencer::StepParam;
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr.0;
+        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        app.graph_controller().add_empty_track().unwrap();
+        app.state.pattern.step_data[0].set(0, StepParam::Transpose, 7.0);
+        app.state.pattern.track_params[0].set_midi_fx_chain(vec!["arp".into()]);
+        app.state.transport.master_volume.store(0.37_f32.to_bits(), Ordering::Relaxed);
+        let before = app.state.capture_project_scenes();
+        let version = app.state.scheduler_snapshot_version();
+        let epoch = app.state.transport.pattern_epoch.load(Ordering::Relaxed);
+        let next_device_id = app.device_registry.next_id;
+        let midi_ids = app.device_registry.midi_effects.clone();
+        let snapshot = app.capture_bounce_project("export-snapshot").unwrap();
+        assert_eq!(snapshot.patterns[0].step_data[0][0][StepParam::Transpose.index()], 7.0);
+        assert_eq!(snapshot.master_volume, 0.37);
+        assert_eq!(snapshot.device_instances.midi_effects[0].instances.len(), 1);
+        assert_eq!(app.device_registry.next_id, next_device_id);
+        assert_eq!(app.device_registry.midi_effects, midi_ids);
+        assert_eq!(app.state.scheduler_snapshot_version(), version);
+        assert_eq!(app.state.transport.pattern_epoch.load(Ordering::Relaxed), epoch);
+        let after = app.state.capture_project_scenes();
+        assert_eq!(after.snapshots()[0].step_data, before.snapshots()[0].step_data);
+        assert_eq!(after.scenes[0].bus_patterns.len(), before.scenes[0].bus_patterns.len());
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(encoded, serde_json::to_value(app.capture_bounce_project("export-snapshot").unwrap()).unwrap());
+        let restored: ProjectFile = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.patterns[0].step_data[0][0][StepParam::Transpose.index()], 7.0);
+        app.state.pattern.step_data[0].set(0, StepParam::Transpose, 12.0);
+        assert_eq!(snapshot.patterns[0].step_data[0][0][StepParam::Transpose.index()], 7.0);
+        let mut broken = before.clone();
+        broken.scenes[0].cell_sounds[0].patch = crate::sequencer::PatchId(u64::MAX - 1);
+        let error = app.serialize_project_snapshot("broken", ProjectCapture {
+            bank: before.snapshots(), bus_pattern_bank: vec![Vec::new()], scenes_for_takes: broken,
+            tracks: snapshot.tracks.clone(), custom_effects: snapshot.custom_effects.clone(),
+            device_instances: snapshot.device_instances.clone(),
+        }).err().unwrap();
+        assert!(error.contains("cannot be resolved"), "{error}");
+        let saved = app.capture_project("normal-save").unwrap();
+        assert_eq!(saved.patterns[0].step_data[0][0][StepParam::Transpose.index()], 12.0);
+        assert_eq!(app.state.export_pattern_repository()[0].step_data[0][0][StepParam::Transpose.index()], 12.0);
+        assert!(app.device_registry.next_id > next_device_id,
+            "normal save still publishes newly assigned device identities");
+        unsafe {
+            crate::audiograph::engine_stop_workers();
+            crate::audiograph::destroy_live_graph(lg);
+        }
+    }
+
+    #[test]
+    fn bounce_project_keeps_draft_instrument_names_without_library_lookup() {
+        use crate::lisp_host::dylib_cache::{DylibCacheManager, DGenCompileKind, DGenSourceOrigin};
+        let cache = tempfile::tempdir().unwrap();
+        let manager = DylibCacheManager::new(cache.path().to_path_buf());
+        let source = "(out 0.25 1 @name out)";
+        let loaded = manager.acquire(DGenCompileKind::Instrument, DGenSourceOrigin::Draft,
+            source, 48_000, None).unwrap();
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr.0;
+        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        app.graph_controller().add_empty_track().unwrap();
+        let name = "unsaved-bounce-snapshot-test-draft";
+        let id = app.editor.engine_registry.upsert(super::super::EngineDescriptor {
+            name: name.into(), source: source.into(), manifest: loaded.manifest.clone(),
+            lib_index: 0, shared_runtime: true,
+        });
+        app.graph.track_instrument_types[0] = InstrumentType::Custom;
+        app.graph.track_engine_ids[0] = Some(id);
+        let snapshot = app.capture_bounce_project("draft-export").unwrap();
+        assert!(matches!(&snapshot.tracks[0].kind,
+            ProjectTrackKind::Custom { instrument_name } if instrument_name == name));
+        assert!(app.capture_project_tracks(true).is_err(), "a normal save still requires a library source");
+        unsafe {
+            crate::audiograph::engine_stop_workers();
+            crate::audiograph::destroy_live_graph(lg);
+        }
+        drop(loaded);
+    }
 
     /// Bead eseq-jo7.21: a project switch used to leave the outgoing
     /// project's jaki sequencers, process instances and channels registered,

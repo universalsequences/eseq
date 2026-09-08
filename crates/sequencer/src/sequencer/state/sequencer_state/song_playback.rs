@@ -410,6 +410,19 @@ impl SequencerState {
     ) -> Result<Arc<RuntimeSong>, String> {
         let song = self.committed_song()
             .ok_or_else(|| "The project has no committed song".to_string())?;
+        let scenes = self.capture_project_scenes_with_current_pattern(
+            num_tracks, buffer_ids, sample_rates, names, instrument_types,
+        )?;
+        let staged = stage_runtime_song_rows(&song, &scenes)?;
+        self.materialize_runtime_song(&song, staged)
+    }
+
+    /// Read-only counterpart of saving the current authoring pattern. The
+    /// copied repository includes the same borrowed/latched-lane save masks.
+    pub(crate) fn capture_project_scenes_with_current_pattern(
+        &self, num_tracks: usize, buffer_ids: &[i32], sample_rates: &[u32],
+        names: &[String], instrument_types: &[InstrumentType],
+    ) -> Result<ProjectScenes, String> {
         let snapshot = self.capture_current_pattern_snapshot(
             num_tracks, buffer_ids, sample_rates, names, instrument_types,
         );
@@ -420,8 +433,7 @@ impl SequencerState {
         ) {
             return Err("Could not capture the current scene for song preflight".to_string());
         }
-        let staged = stage_runtime_song_rows(&song, &scenes)?;
-        self.materialize_runtime_song(&song, staged)
+        Ok(scenes)
     }
 
     fn materialize_runtime_song(
