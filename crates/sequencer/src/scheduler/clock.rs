@@ -120,16 +120,28 @@ impl SnapshotSequencerClock {
         }
     }
 
-    /// Forget one track's step-dedup memory: the next derived step fires
-    /// even if its index matches the last one derived. Used at song row
-    /// boundaries where the lane's SOURCE changes — a new clip is a fresh
-    /// trigger domain, and without this a silenced lane whose clock wrapped
-    /// into step 0 just before the boundary (fractional captured row
-    /// starts make this common) swallows the new clip's downbeat.
-    pub(super) fn reset_track_step_memory(&mut self, track: usize) {
-        if let Some(clock) = self.track_clocks.get_mut(track) {
-            clock.last_local_step = u32::MAX;
-        }
+    /// Adopt a changed source after installing its clip anchor. A fractional
+    /// offset can enter an already sounding step; that is not a new onset.
+    /// Still allow an onset whose first representable sample is this frame,
+    /// even when the outgoing source last played the same step index.
+    pub(super) fn adopt_track_source(&mut self, track: usize, snapshot: &SequencerSnapshot) {
+        self.precompute_boundaries(snapshot, track);
+        let ns = snapshot.tracks[track].params.num_steps;
+        let clock = &mut self.track_clocks[track];
+        let local_beats = Self::anchored_local_beats(clock, self.total_beats, ns);
+        let position = local_beats.rem_euclid(clock.cycle_beats);
+        clock.last_local_step = Self::derive_local_step(clock, position, ns)
+            .filter(|step| {
+                let onset_beat = clock.anchor_beat - Self::offset_beats(clock, ns)
+                    + (local_beats / clock.cycle_beats).floor() * clock.cycle_beats
+                    + clock.boundaries[*step];
+                let onset_frame = ((onset_beat - self.tempo_origin_beats)
+                    * self.sample_rate * 60.0 / snapshot.transport.bpm as f64).ceil();
+                onset_frame < self.tempo_frames as f64
+            })
+            .map(|step| step as u32)
+            .unwrap_or(u32::MAX);
+        clock.last_read_position = f64::NAN;
     }
 
     /// Clear one track's anchor (manual-override latch, takes spec 10): the

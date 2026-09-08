@@ -8107,6 +8107,68 @@
     }
 
     #[test]
+    fn song_recorded_launch_does_not_retrigger_the_partial_step() {
+        run_with_scheduler_stack(|| {
+            for (bpm, delta) in [120, 137].into_iter().flat_map(|bpm| {
+                [-0.001, -0.00001, 0.0, 0.00001, 0.001].map(|delta| (bpm, delta))
+            }) {
+                let (state, pattern) = song_mode_fixture();
+                state.transport.bpm.store(bpm, Ordering::Relaxed);
+                let samples_per_beat = 48_000.0 * 60.0 / bpm as f64;
+                let beat = 4.0 + delta;
+                let mut incoming = song_mode_row(1, beat, 1, vec![(0, pattern.0)]);
+                // Recorded launches retain the free-running pattern phase.
+                incoming.overrides[0].offset_steps = (beat * 4.0) % 16.0;
+                song_mode_commit(&state, vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()), incoming,
+                ], 5.0, false);
+                let song = state.preflight_runtime_song().unwrap();
+                for block in [127, 512, 16_000] {
+                    let (events, _) = drive_song_lookahead(&state, Arc::clone(&song), block, (5.0 * samples_per_beat).ceil() as u64);
+                    let hits: Vec<_> = events.iter().filter(|event| event.track == 0)
+                        .map(|event| event.sample_time).collect();
+                    assert_eq!(hits, (0..20).map(|step| (step as f64 * 0.25 * samples_per_beat).ceil() as u64).collect::<Vec<_>>(),
+                        "bpm={bpm} delta={delta} block={block}: recorded launch must preserve the step grid");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn song_near_bar_launch_emits_one_incoming_step_zero() {
+        run_with_scheduler_stack(|| {
+            for bpm in [120, 137] {
+                for delta in [-0.001, -0.00001, 0.0, 0.00001, 0.001] {
+                    let (state, _) = song_mode_fixture();
+                    state.transport.bpm.store(bpm, Ordering::Relaxed);
+                    let boundary_beat = 4.0 + delta;
+                    song_mode_commit(&state, vec![
+                        song_mode_row(0, 0.0, 0, Vec::new()),
+                        song_mode_row(1, boundary_beat, 1, Vec::new()),
+                    ], 5.0, false);
+                    let song = state.preflight_runtime_song().unwrap();
+                    let samples_per_beat = 48_000.0 * 60.0 / bpm as f64;
+                    let boundary = (boundary_beat * samples_per_beat).ceil() as u64;
+                    for block in [127, 512, 16_000] {
+                        let (events, _) = drive_song_lookahead(
+                            &state, Arc::clone(&song), block,
+                            (5.0 * samples_per_beat).ceil() as u64,
+                        );
+                        let near: Vec<_> = events.iter().filter(|event| {
+                            event.track == 0 && event.sample_time >= boundary
+                                && event.sample_time < boundary + 100
+                        }).collect();
+                        assert_eq!(near.len(), 1,
+                            "bpm={bpm} delta={delta} block={block}: {near:?}");
+                        assert_eq!(near[0].sample_time, boundary);
+                        assert_eq!(near[0].transpose, 2.0);
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
     fn song_unquantized_row_boundary_keeps_sample_offset() {
         run_with_scheduler_stack(|| {
             let (state, _) = song_mode_fixture();
