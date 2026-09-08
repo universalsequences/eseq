@@ -443,6 +443,11 @@ static bool block_event_target_is_valid(LiveGraph *lg,
   return true;
 }
 
+uint64_t graph_block_event_delivery_failures(const LiveGraph *lg) {
+  return lg ? atomic_load_explicit(&lg->block_event_delivery_failures,
+                                   memory_order_acquire) : 0;
+}
+
 static int drain_block_events_for_callback(LiveGraph *lg, int nframes) {
   if (!lg || !lg->block_events || !lg->block_event_scratch ||
       !lg->block_event_sort_scratch) {
@@ -455,6 +460,7 @@ static int drain_block_events_for_callback(LiveGraph *lg, int nframes) {
     if (event.aux_count > GBE_AUX_CAP)
       event.aux_count = GBE_AUX_CAP;
     if (event.frame_offset >= (uint32_t)nframes) {
+      atomic_fetch_add_explicit(&lg->block_event_delivery_failures, 1, memory_order_relaxed);
       uint64_t dropped = atomic_fetch_add_explicit(
                              &g_block_event_drop_invalid_count, 1,
                              memory_order_acq_rel) +
@@ -468,6 +474,7 @@ static int drain_block_events_for_callback(LiveGraph *lg, int nframes) {
       continue;
     }
     if (!block_event_target_is_valid(lg, &event)) {
+      atomic_fetch_add_explicit(&lg->block_event_delivery_failures, 1, memory_order_relaxed);
       uint64_t dropped = atomic_fetch_add_explicit(
                              &g_block_event_drop_stale_count, 1,
                              memory_order_acq_rel) +
@@ -483,6 +490,7 @@ static int drain_block_events_for_callback(LiveGraph *lg, int nframes) {
 
     RTNode *node = &lg->nodes[(int)event.logical_id];
     if (!node->vtable.schedule_event) {
+      atomic_fetch_add_explicit(&lg->block_event_delivery_failures, 1, memory_order_relaxed);
       uint64_t dropped = atomic_fetch_add_explicit(
                              &g_block_event_drop_unsupported_count, 1,
                              memory_order_acq_rel) +
@@ -497,6 +505,7 @@ static int drain_block_events_for_callback(LiveGraph *lg, int nframes) {
     }
 
     if (count >= lg->block_event_scratch_capacity) {
+      atomic_fetch_add_explicit(&lg->block_event_delivery_failures, 1, memory_order_relaxed);
       uint64_t dropped = atomic_fetch_add_explicit(
                              &g_block_event_drop_invalid_count, 1,
                              memory_order_acq_rel) +
@@ -561,6 +570,7 @@ static int deliver_block_events_for_slice(LiveGraph *lg, int start_index,
           atomic_fetch_add_explicit(&g_block_event_apply_count, 1,
                                     memory_order_acq_rel);
         } else {
+          atomic_fetch_add_explicit(&lg->block_event_delivery_failures, 1, memory_order_relaxed);
           uint64_t rejected = atomic_fetch_add_explicit(
                                   &g_block_event_schedule_reject_count, 1,
                                   memory_order_acq_rel) +
@@ -572,7 +582,11 @@ static int deliver_block_events_for_slice(LiveGraph *lg, int start_index,
                     event.kind, (unsigned long long)rejected);
           }
         }
+      } else {
+        atomic_fetch_add_explicit(&lg->block_event_delivery_failures, 1, memory_order_relaxed);
       }
+    } else {
+      atomic_fetch_add_explicit(&lg->block_event_delivery_failures, 1, memory_order_relaxed);
     }
     index++;
   }

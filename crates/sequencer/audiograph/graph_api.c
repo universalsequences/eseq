@@ -83,6 +83,7 @@ LiveGraph *create_live_graph(int initial_capacity, int block_size,
       calloc((size_t)lg->block_event_scratch_capacity, sizeof(GraphBlockEvent));
   lg->block_event_scratch_count = 0;
   atomic_init(&lg->block_event_serial, 1);
+  atomic_init(&lg->block_event_delivery_failures, 0);
 
   lg->graphEditQueue = calloc(1, sizeof(GraphEditQueue));
   geq_init(lg->graphEditQueue, 8192 * 16);
