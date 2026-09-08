@@ -15788,6 +15788,7 @@ mod drift_waveform_tests;
             true,
         );
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
+        editor.runtime_mut().register_reactive("EXPORT", vec![], true);
         for step in 0..16 {
             editor.runtime_mut().set_reactive(
                 "SEQ",
@@ -54713,4 +54714,41 @@ mod drift_waveform_tests;
             (track_count - 2) * step_count,
             "only the loose tracks keep their step grids while the rack is collapsed"
         );
+    }
+    #[test]
+    fn metal_seq_export_song_modal_has_usable_settings_and_job_states() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(160, 60);
+        assert!(find_layout_node_by_stable_key_suffix(&editor.widget_layout().unwrap(), "/export-name").is_none());
+        let fixture = include_str!("../../../ui/capture-fixtures/export-song.lisp");
+        let setup = &fixture[fixture.find("(def capture-after-sync").unwrap()..];
+        editor.runtime_mut().eval_str(setup).unwrap();
+        editor.runtime_mut().eval_str("(capture-after-sync)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(160, 60);
+        let layout = editor.widget_layout().unwrap();
+        assert_finite_layout_tree(&layout);
+        for key in ["/export-name", "/export-range", "/export-start", "/export-end", "/export-rate", "/export-tail", "/export-submit"] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key).unwrap_or_else(|| panic!("missing {key}"));
+            assert!(node.rect.width > 0.0 && node.rect.height > 0.0, "{key}: {:?}", node.rect);
+        }
+        editor.runtime_mut().eval_str("(eseq.export-song/export-song)").unwrap();
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, .. } if name == "export-song-open")));
+        editor.runtime_mut().set_reactive("EXPORT", "export-busy", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-cancel").is_some());
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-submit").is_none());
+        editor.runtime_mut().set_reactive("EXPORT", "export-busy", Value::Bool(false));
+        editor.runtime_mut().set_reactive("EXPORT", "export-done", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        let reveal = find_layout_node_by_stable_key_suffix(&layout, "/export-reveal").unwrap();
+        assert!(reveal.rect.width > 0.0 && reveal.rect.height > 0.0);
     }
