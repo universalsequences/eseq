@@ -21,7 +21,44 @@ fn message(editor: &mut Editor, text: String) {
     editor
         .runtime_mut()
         .set_reactive("EXPORT", "export-message", Value::String(text));
+    refresh(editor);
+}
+
+fn refresh(editor: &mut Editor) {
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
     editor.mark_needs_redraw();
+}
+
+/// Publish one complete job transition and refresh the already-open modal.
+/// This must not rely on transport/UI epochs or another user gesture.
+pub(crate) fn publish_job_status(editor: &mut Editor, status: &WorkerStatus, running: bool) {
+    let text = match status {
+        WorkerStatus::Preparing => "Preparing export…".into(),
+        WorkerStatus::Rendering { percent } => format!("Exporting audio — {percent}%"),
+        WorkerStatus::Completed { tail_warning, .. } => if *tail_warning {
+            "Export complete. Audio remains at the end; consider a longer tail."
+        } else {
+            "Export complete."
+        }
+        .into(),
+        WorkerStatus::Cancelled => "Export cancelled.".into(),
+        WorkerStatus::Failed { message } => format!("Export failed: {message}"),
+    };
+    let percent = match status {
+        WorkerStatus::Rendering { percent } => *percent as f64,
+        WorkerStatus::Completed { .. } => 100.0,
+        _ => -1.0,
+    };
+    let rt = editor.runtime_mut();
+    rt.set_reactive("EXPORT", "export-busy", Value::Bool(running));
+    rt.set_reactive(
+        "EXPORT",
+        "export-done",
+        Value::Bool(!running && matches!(status, WorkerStatus::Completed { .. })),
+    );
+    rt.set_reactive("EXPORT", "export-percent", Value::Number(percent));
+    message(editor, text);
 }
 
 pub(super) fn handle(
@@ -67,6 +104,7 @@ pub(super) fn handle(
                         ("export-busy", Value::Bool(false)),
                         ("export-done", Value::Bool(false)),
                         ("export-message", Value::String(String::new())),
+                        ("export-percent", Value::Number(-1.0)),
                         (
                             "export-reveal-label",
                             Value::String(
@@ -138,16 +176,19 @@ pub(super) fn handle(
                     },
                 )
                 .map_err(|e| e.to_string())?;
-                editor.runtime_mut().set_reactive("EXPORT", "export-output-name",
-                    Value::String(job.destination.file_name().unwrap().to_string_lossy().into_owned()));
+                editor.runtime_mut().set_reactive(
+                    "EXPORT",
+                    "export-output-name",
+                    Value::String(
+                        job.destination
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                );
                 JOB.with(|value| *value.borrow_mut() = Some(job));
-                editor
-                    .runtime_mut()
-                    .set_reactive("EXPORT", "export-busy", Value::Bool(true));
-                editor
-                    .runtime_mut()
-                    .set_reactive("EXPORT", "export-done", Value::Bool(false));
-                message(editor, "Preparing export…".into());
+                publish_job_status(editor, &WorkerStatus::Preparing, true);
             }
             "export-song-cancel" => {
                 JOB.with(|job| job.borrow().as_ref().map(ExportJob::cancel).transpose())
@@ -190,8 +231,7 @@ pub(super) fn handle(
         message(editor, error.clone());
         editor.show_transient_message(error);
     }
-    editor.refresh_runtime_side_effects();
-    editor.mark_needs_redraw();
+    refresh(editor);
 }
 
 pub(crate) fn poll(editor: &mut Editor) {
@@ -220,27 +260,6 @@ pub(crate) fn poll(editor: &mut Editor) {
         if before == job.status && job.running() {
             return;
         }
-        let text = match &job.status {
-            WorkerStatus::Preparing => "Preparing export…".into(),
-            WorkerStatus::Rendering { percent } => format!("Exporting {percent}%"),
-            WorkerStatus::Completed { tail_warning, .. } => if *tail_warning {
-                "Export complete. Audio remains at the end; consider a longer tail."
-            } else {
-                "Export complete."
-            }
-            .into(),
-            WorkerStatus::Cancelled => "Export cancelled.".into(),
-            WorkerStatus::Failed { message } => format!("Export failed: {message}"),
-        };
-        editor
-            .runtime_mut()
-            .set_reactive("EXPORT", "export-busy", Value::Bool(job.running()));
-        editor.runtime_mut().set_reactive(
-            "EXPORT",
-            "export-done",
-            Value::Bool(!job.running() && matches!(job.status, WorkerStatus::Completed { .. })),
-        );
-        message(editor, text);
-        editor.refresh_runtime_side_effects();
+        publish_job_status(editor, &job.status, job.running());
     });
 }

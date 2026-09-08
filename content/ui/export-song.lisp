@@ -61,10 +61,18 @@
       (label "Export song" :font-size 18 :color :white :bg :transparent)
       (box :flex 1 :bg :transparent)
       (button "×" :key "export-close" :on-click |x y r| (close)))
+    (if (not (= EXPORT.export-message ""))
+      (label EXPORT.export-message :width :fill :wrap true :key "export-status" :font-size 16 :color :white :bg :transparent)
+      (box :width 0 :height 0))
+    (if (and EXPORT.export-busy (< EXPORT.export-percent 0))
+      (label "Loading instruments and samples…" :key "export-preparing" :font-size 11 :color :dim :bg :transparent)
+      (box :width 0 :height 0))
     (scroll :key "export-settings-scroll" :width :fill :flex 1
       (v-stack :width :fill :gap 0.35
         (label (str "Saved project: " EXPORT.export-project) :font-size 12 :color :white :bg :transparent)
-        (label "Save your changes before exporting." :font-size 10 :color :dim :bg :transparent)
+        (if (or EXPORT.export-busy EXPORT.export-done)
+          (box :width 0 :height 0)
+          (label "Exports the last saved version of this project." :key "export-save-note" :font-size 10 :color :dim :bg :transparent))
         (if (or EXPORT.export-busy EXPORT.export-done)
           (label EXPORT.export-output-name :font-size 13 :color :white :bg :transparent)
           (settings))
@@ -72,7 +80,6 @@
           (label "Recordings folder" :font-size 10 :color :dim :bg :transparent)
           (label EXPORT.export-folder :width :fill :wrap true :font-size 9 :color :dim :bg :transparent))
       ))
-    (label EXPORT.export-message :width :fill :wrap true :key "export-status" :font-size 11 :color :white :bg :transparent)
     (h-stack :width :fill :gap 0.5
       (box :flex 1 :bg :transparent)
       (if EXPORT.export-busy

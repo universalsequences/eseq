@@ -54943,17 +54943,29 @@ mod drift_waveform_tests;
         editor.runtime_mut().eval_str("(eseq.export-song/export-song)").unwrap();
         assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
             HostCommand::Custom { name, .. } if name == "export-song-open")));
-        editor.runtime_mut().set_reactive("EXPORT", "export-busy", Value::Bool(true));
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
+        use sequencer::bounce::job::WorkerStatus;
+        // Exercise the same publisher used by Start and worker polling. No
+        // test-only reactive cycle, reopening or resize may make it repaint.
+        crate::host_commands::export::publish_job_status(&mut editor, &WorkerStatus::Preparing, true);
         let layout = editor.widget_layout().unwrap();
         assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-cancel").is_some());
         assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-submit").is_none());
-        editor.runtime_mut().set_reactive("EXPORT", "export-busy", Value::Bool(false));
-        editor.runtime_mut().set_reactive("EXPORT", "export-done", Value::Bool(true));
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-save-note").is_none());
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-preparing").is_some());
+        let status = find_layout_node_by_stable_key_suffix(&layout, "/export-status").unwrap();
+        assert!(status.rect.width > 0.0 && status.rect.height > 0.0);
+        let preparing_text = status.props.get("text").cloned();
+        crate::host_commands::export::publish_job_status(&mut editor, &WorkerStatus::Rendering { percent: 37 }, true);
+        let layout = editor.widget_layout().unwrap();
+        let status = find_layout_node_by_stable_key_suffix(&layout, "/export-status").unwrap();
+        assert_ne!(status.props.get("text").cloned(), preparing_text);
+        assert!(matches!(status.props.get("text"), Some(Value::String(text)) if text.contains("37%")));
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-preparing").is_none());
+        crate::host_commands::export::publish_job_status(&mut editor, &WorkerStatus::Completed { frames: 24000, tail_warning: false }, false);
         let layout = editor.widget_layout().unwrap();
         let reveal = find_layout_node_by_stable_key_suffix(&layout, "/export-reveal").unwrap();
         assert!(reveal.rect.width > 0.0 && reveal.rect.height > 0.0);
     }
+
+#[path = "clap_ui_tests.rs"]
+mod clap_ui_tests;

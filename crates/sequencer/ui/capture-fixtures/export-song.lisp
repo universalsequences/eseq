@@ -7,6 +7,7 @@
   (reactive-set "EXPORT" "export-project" "Night Drive")
   (reactive-set "EXPORT" "export-folder" "recordings")
   (reactive-set "EXPORT" "export-end" 64)
+  (reactive-set "EXPORT" "export-percent" -1)
   (reactive-set "EXPORT" "export-busy" false)
   (reactive-set "EXPORT" "export-done" false)
   (reactive-set "EXPORT" "export-message" "")
