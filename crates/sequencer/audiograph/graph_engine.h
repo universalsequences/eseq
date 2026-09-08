@@ -105,6 +105,7 @@ typedef struct LiveGraph {
   // partial render without depending on logs or another graph's counters.
   _Atomic uint64_t block_event_delivery_failures;
   _Atomic uint64_t control_submission_failures;
+  _Atomic uint64_t graph_edit_delivery_failures;
 
   int dac_node_id;
   int num_channels;
@@ -249,6 +250,10 @@ void engine_record_rtkit_callback_result(pid_t tid);
 bool push_block_event(LiveGraph *lg, GraphBlockEvent event);
 uint64_t graph_block_event_delivery_failures(const LiveGraph *lg);
 uint64_t graph_control_submission_failures(const LiveGraph *lg);
+uint64_t graph_edit_delivery_failures(const LiveGraph *lg);
+// Exclusive render ownership required, as for process_next_block. Applies
+// committed edits and ordinary parameters without advancing any DSP state.
+bool prepare_graph_for_render(LiveGraph *lg);
 
 // ===================== Live Graph Operations =====================
 

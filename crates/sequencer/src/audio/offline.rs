@@ -24,6 +24,9 @@ impl<'a> OfflineAudioSession<'a> {
         if engine.channels != 2 || source_end == 0 || !snapshot.transport.playing {
             return Err(io::Error::other("Offline rendering requires a stereo playing session and a nonempty source range"));
         }
+        if !unsafe { prepare_graph_for_render(engine.lg_ptr.0) } {
+            return Err(io::Error::other("Offline graph preparation failed or an edit batch is still open"));
+        }
         let queue = Arc::new(ScheduledEventQueue::new());
         let (_tx, rx) = std::sync::mpsc::channel();
         let data = new_audio_callback_data(
@@ -46,15 +49,16 @@ impl<'a> OfflineAudioSession<'a> {
     }
 
     fn check_delivery(&self) -> io::Result<()> {
-        let (submission, delivery) = unsafe {
+        let (submission, delivery, edits) = unsafe {
             (graph_control_submission_failures(self.data.lg.0),
-             graph_block_event_delivery_failures(self.data.lg.0))
+             graph_block_event_delivery_failures(self.data.lg.0),
+             graph_edit_delivery_failures(self.data.lg.0))
         };
-        if submission != 0 || delivery != 0 || self.data.dropped_scheduled_events != 0
+        if submission != 0 || delivery != 0 || edits != 0 || self.data.dropped_scheduled_events != 0
             || self.data.late_scheduled_events != 0
         {
             return Err(io::Error::other(format!(
-                "Incomplete audio event delivery: {submission} graph submissions, {delivery} graph deliveries, {} dropped and {} late scheduled events",
+                "Incomplete audio event delivery: {submission} graph submissions, {delivery} graph deliveries, {edits} failed graph edits, {} dropped and {} late scheduled events",
                 self.data.dropped_scheduled_events, self.data.late_scheduled_events,
             )));
         }
@@ -251,6 +255,45 @@ mod tests {
         let error = (0..100).find_map(|block| session.render_block(block * 512, &mut output).err())
             .expect("the clocked process must report its failed invocation");
         assert!(error.to_string().contains("process run"), "{error}");
+        drop(session);
+        unsafe { engine.destroy(); }
+    }
+
+    #[test]
+    fn queued_graph_edit_failure_aborts_render() {
+        let engine = sampler_engine();
+        let mut session = OfflineAudioSession::new(&engine, 1000).unwrap();
+        assert!(unsafe { graph::graph_connect(engine.lg_ptr.0, 999_999, 0, 0, 0) },
+            "submission succeeds; the target is validated when applied");
+        let error = session.render_block(0, &mut vec![0.0; 1024]).unwrap_err();
+        assert!(error.to_string().contains("1 failed graph edits"), "{error}");
+        drop(session);
+        unsafe { engine.destroy(); }
+    }
+
+    #[test]
+    fn invalid_initial_graph_is_rejected_before_session_starts() {
+        let engine = sampler_engine();
+        assert!(unsafe { graph::graph_connect(engine.lg_ptr.0, 999_999, 0, 0, 0) });
+        let error = OfflineAudioSession::new(&engine, 1000).err().unwrap();
+        assert!(error.to_string().contains("graph preparation failed"), "{error}");
+        unsafe { engine.destroy(); }
+    }
+
+    #[test]
+    fn graph_edit_submission_overflow_is_fatal_before_delivery() {
+        let engine = sampler_engine();
+        let mut session = OfflineAudioSession::new(&engine, 1000).unwrap();
+        let available = unsafe { graph::graph_edit_queue_available(engine.lg_ptr.0) };
+        for _ in 0..available {
+            assert!(unsafe { graph::graph_connect(engine.lg_ptr.0, 0, 0, 0, 0) });
+        }
+        assert!(!unsafe { graph::graph_connect(engine.lg_ptr.0, 0, 0, 0, 0) });
+        assert_eq!(unsafe { graph::graph_control_submission_failures(engine.lg_ptr.0) }, 1);
+        let error = session.render_block(0, &mut vec![0.0; 1024]).unwrap_err();
+        assert!(error.to_string().contains("1 graph submissions"), "{error}");
+        assert_eq!(unsafe { graph::graph_edit_delivery_failures(engine.lg_ptr.0) }, 0,
+            "the incomplete edit queue must never be applied");
         drop(session);
         unsafe { engine.destroy(); }
     }

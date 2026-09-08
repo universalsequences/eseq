@@ -255,8 +255,12 @@ extern "C" {
     /// Monotonic graph-local count of events rejected during render delivery.
     /// Queue submission failures are reported separately by `push_block_event`.
     pub fn graph_block_event_delivery_failures(lg: *const LiveGraph) -> u64;
-    /// Monotonic graph-local count of full parameter or block-event queues.
+    /// Monotonic graph-local count of full parameter, block-event, or edit queues.
     pub fn graph_control_submission_failures(lg: *const LiveGraph) -> u64;
+    pub fn graph_edit_delivery_failures(lg: *const LiveGraph) -> u64;
+    /// Requires exclusive render ownership. Applies queued initialization
+    /// without rendering, advancing DSP state, or consuming timed events.
+    pub fn prepare_graph_for_render(lg: *mut LiveGraph) -> bool;
 
     // Disconnect
     pub fn graph_disconnect(

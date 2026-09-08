@@ -448,6 +448,11 @@ uint64_t graph_control_submission_failures(const LiveGraph *lg) {
                                    memory_order_acquire) : 0;
 }
 
+uint64_t graph_edit_delivery_failures(const LiveGraph *lg) {
+  return lg ? atomic_load_explicit(&lg->graph_edit_delivery_failures,
+                                   memory_order_acquire) : 0;
+}
+
 uint64_t graph_block_event_delivery_failures(const LiveGraph *lg) {
   return lg ? atomic_load_explicit(&lg->block_event_delivery_failures,
                                    memory_order_acquire) : 0;
@@ -2347,6 +2352,16 @@ int find_live_output(LiveGraph *lg) {
 }
 
 // ===================== Live Engine Implementation =====================
+bool prepare_graph_for_render(LiveGraph *lg) {
+  if (!lg || atomic_load_explicit(&lg->edit_batch_depth, memory_order_acquire) != 0)
+    return false;
+  bool ok = apply_graph_edits(lg->graphEditQueue, lg);
+  if (lg->sched.dirty)
+    rebuild_invalid_io_caches(lg, lg->block_size);
+  apply_params(lg);
+  return ok;
+}
+
 void process_next_block(LiveGraph *lg, float *output_buffer, int nframes) {
   if (!lg || !output_buffer || nframes <= 0) {
     // Clear output buffer if invalid input

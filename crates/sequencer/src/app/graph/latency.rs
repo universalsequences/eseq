@@ -616,6 +616,26 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn graph_preparation_acknowledges_initialization_without_advancing_dsp() {
+        let graph = EngineGraph::new("prepare-without-render");
+        let serial;
+        unsafe {
+            crate::audiograph::begin_graph_edit_batch(graph.lg);
+            serial = crate::audiograph::graph_edit_current_batch_serial(graph.lg);
+            let impulse = graph.add_impulse();
+            connect_stereo_pair(graph.lg, impulse, 0);
+            assert!(!crate::audiograph::prepare_graph_for_render(graph.lg),
+                "an open batch must not be applied");
+            crate::audiograph::end_graph_edit_batch(graph.lg);
+            assert!(crate::audiograph::graph_edit_applied_batch_serial(graph.lg) < serial);
+            assert!(crate::audiograph::prepare_graph_for_render(graph.lg));
+            assert!(crate::audiograph::graph_edit_applied_batch_serial(graph.lg) >= serial);
+            assert!(crate::audiograph::prepare_graph_for_render(graph.lg));
+        }
+        assert_eq!(spikes(&graph.render_channel0(2)), vec![(0, 1.0)]);
+    }
+
     /// End-to-end through the real C engine: an impulse split into two
     /// parallel branches, one carrying a latency-300 "effect" (a PDC node
     /// standing in for any fixed-latency processor), summed at the DAC.

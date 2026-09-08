@@ -2,6 +2,14 @@
 #include "graph_edit.h"
 #include "graph_nodes.h"
 
+static bool submit_graph_edit(LiveGraph *lg, const GraphEditCmd *cmd) {
+  if (geq_push(lg->graphEditQueue, cmd))
+    return true;
+  atomic_fetch_add_explicit(&lg->control_submission_failures, 1,
+                            memory_order_relaxed);
+  return false;
+}
+
 static bool using_inline_in_cache(const RTNode *node) {
   return node->cached_inPtrs == (float **)node->cached_inInline;
 }
@@ -84,6 +92,8 @@ LiveGraph *create_live_graph(int initial_capacity, int block_size,
   lg->block_event_scratch_count = 0;
   atomic_init(&lg->block_event_serial, 1);
   atomic_init(&lg->block_event_delivery_failures, 0);
+  atomic_init(&lg->control_submission_failures, 0);
+  atomic_init(&lg->graph_edit_delivery_failures, 0);
 
   lg->graphEditQueue = calloc(1, sizeof(GraphEditQueue));
   geq_init(lg->graphEditQueue, 8192 * 16);
@@ -392,7 +402,7 @@ int add_node(LiveGraph *lg, NodeVTable vtable, size_t state_size,
           .initial_state_size = initial_state_size}};
 
   // Queue the command
-  if (!geq_push(lg->graphEditQueue, &cmd)) {
+  if (!submit_graph_edit(lg, &cmd)) {
     // Queue full - consider this a failure
     if (initial_state_copy) {
       free(initial_state_copy);
@@ -493,7 +503,7 @@ int create_buffer(LiveGraph *lg, int size, int channel_count,
                                           .source_data = source_copy,
                                           .source_data_size = source_size}};
 
-  if (!geq_push(lg->graphEditQueue, &cmd)) {
+  if (!submit_graph_edit(lg, &cmd)) {
     if (source_copy)
       free(source_copy);
     return -1;
@@ -523,7 +533,7 @@ int hot_swap_buffer(LiveGraph *lg, int buffer_id, const float *source_data,
                                            .source_data = source_copy,
                                            .source_data_size = source_size}};
 
-  if (!geq_push(lg->graphEditQueue, &cmd)) {
+  if (!submit_graph_edit(lg, &cmd)) {
     free(source_copy);
     return false;
   }
@@ -551,7 +561,7 @@ bool write_node_state(LiveGraph *lg, int node_id, size_t dest_offset,
                                              .source_data = source_copy,
                                              .source_count = count}};
 
-  if (!geq_push(lg->graphEditQueue, &cmd)) {
+  if (!submit_graph_edit(lg, &cmd)) {
     free(source_copy);
     return false;
   }
@@ -575,7 +585,7 @@ bool delete_node(LiveGraph *lg, int node_id) {
                       .batch_serial = current_batch_serial(lg),
                       .u.remove_node = {.node_id = node_id}};
 
-  return geq_push(lg->graphEditQueue, &cmd);
+  return submit_graph_edit(lg, &cmd);
 }
 
 bool graph_connect(LiveGraph *lg, int src_node, int src_port, int dst_node,
@@ -592,7 +602,7 @@ bool graph_connect(LiveGraph *lg, int src_node, int src_port, int dst_node,
                                     .dst_id = dst_node,
                                     .dst_port = dst_port}};
 
-  return geq_push(lg->graphEditQueue, &cmd);
+  return submit_graph_edit(lg, &cmd);
 }
 
 bool graph_disconnect(LiveGraph *lg, int src_node, int src_port, int dst_node,
@@ -604,7 +614,7 @@ bool graph_disconnect(LiveGraph *lg, int src_node, int src_port, int dst_node,
                                        .dst_id = dst_node,
                                        .dst_port = dst_port}};
 
-  return geq_push(lg->graphEditQueue, &cmd);
+  return submit_graph_edit(lg, &cmd);
 }
 
 bool hot_swap_node(LiveGraph *lg, int node_id, NodeVTable vt, size_t state_size,
@@ -640,7 +650,7 @@ bool hot_swap_node(LiveGraph *lg, int node_id, NodeVTable vt, size_t state_size,
                           }
 
   };
-  if (!geq_push(lg->graphEditQueue, &cmd)) {
+  if (!submit_graph_edit(lg, &cmd)) {
     // Queue push failed - clean up copied memory
     if (initial_state_copy) {
       free(initial_state_copy);
@@ -677,7 +687,7 @@ bool replace_keep_edges(LiveGraph *lg, int node_id, NodeVTable vt,
                           .initial_state_size = initial_state_size,
 
                       }};
-  if (!geq_push(lg->graphEditQueue, &cmd)) {
+  if (!submit_graph_edit(lg, &cmd)) {
     // Queue push failed - clean up copied memory
     if (initial_state_copy) {
       free(initial_state_copy);
@@ -711,7 +721,7 @@ bool add_node_to_watchlist(LiveGraph *lg, int node_id) {
   GraphEditCmd cmd = {.op = GE_ADD_WATCH,
                       .batch_serial = current_batch_serial(lg),
                       .u.add_watch = {.node_id = node_id}};
-  return geq_push(lg->graphEditQueue, &cmd);
+  return submit_graph_edit(lg, &cmd);
 }
 
 bool remove_node_from_watchlist(LiveGraph *lg, int node_id) {
@@ -720,7 +730,7 @@ bool remove_node_from_watchlist(LiveGraph *lg, int node_id) {
   GraphEditCmd cmd = {.op = GE_REMOVE_WATCH,
                       .batch_serial = current_batch_serial(lg),
                       .u.remove_watch = {.node_id = node_id}};
-  return geq_push(lg->graphEditQueue, &cmd);
+  return submit_graph_edit(lg, &cmd);
 }
 
 void *get_node_state(LiveGraph *lg, int node_id, size_t *state_size) {

@@ -582,6 +582,7 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
 
   if (reserved_node_id >= lg->node_capacity &&
       !grow_node_capacity(lg, reserved_node_id)) {
+    atomic_fetch_add_explicit(&lg->graph_edit_delivery_failures, 1, memory_order_relaxed);
     return false;
   }
 
@@ -697,6 +698,7 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
     }
     }
     if (!ok) {
+      atomic_fetch_add_explicit(&lg->graph_edit_delivery_failures, 1, memory_order_relaxed);
       all_ok = false;
     }
     if (topology_changed) {
