@@ -141,6 +141,9 @@ impl SchedulerDriver {
     }
 
     pub(crate) fn take_runtime_errors(&mut self) -> Vec<String> {
+        if let Some(error) = self.scratch_runtime.as_mut().and_then(|runtime| runtime.take_invocation_error()) {
+            self.runtime_errors.push(error);
+        }
         std::mem::take(&mut self.runtime_errors)
     }
 
@@ -163,6 +166,7 @@ impl SchedulerDriver {
         input: SchedulerInput<'_>,
     ) -> SchedulerAdvance {
         self.runtime_errors.clear();
+        if let Some(runtime) = self.scratch_runtime.as_mut() { runtime.take_invocation_error(); }
         let state = &self.state;
         let queue = &self.queue;
         let sample_rate = self.sample_rate;

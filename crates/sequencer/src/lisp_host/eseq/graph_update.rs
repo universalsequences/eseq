@@ -90,6 +90,17 @@ impl ScratchControlRuntime {
         manifest: &crate::graph::GraphManifest,
         eval: &crate::graph::NodeEval,
     ) -> Result<crate::graph::NodeFire, String> {
+        let result = self.invoke_graph_update_inner(
+            manifest, eval,
+        );
+        self.record_invocation_result("graph update", result)
+    }
+
+    fn invoke_graph_update_inner(
+        &mut self,
+        manifest: &crate::graph::GraphManifest,
+        eval: &crate::graph::NodeEval,
+    ) -> Result<crate::graph::NodeFire, String> {
         let params = eval.params.clone();
         let Some(source) = manifest.node.update_source.as_deref() else {
             let threshold = params.get("threshold").copied().unwrap_or(1.0);

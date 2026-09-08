@@ -237,6 +237,25 @@ mod tests {
     }
 
     #[test]
+    fn offline_process_error_cannot_be_silently_rendered() {
+        let engine = sampler_engine();
+        engine.state.set_scratch_source(r#"
+            (def-process broken-export-process
+              :every (beats 1)
+              :run (unbound-export-process-function))
+            (def broken-instance (broken-export-process))
+            (start broken-instance)
+        "#);
+        let mut session = OfflineAudioSession::new(&engine, 50_000).unwrap();
+        let mut output = vec![0.0; 1024];
+        let error = (0..100).find_map(|block| session.render_block(block * 512, &mut output).err())
+            .expect("the clocked process must report its failed invocation");
+        assert!(error.to_string().contains("process run"), "{error}");
+        drop(session);
+        unsafe { engine.destroy(); }
+    }
+
+    #[test]
     fn graph_submission_overflow_is_fatal_even_when_caller_ignores_return_value() {
         let engine = sampler_engine();
         let mut session = OfflineAudioSession::new(&engine, 1000).unwrap();
