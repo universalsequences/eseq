@@ -50,6 +50,9 @@ pub struct RuntimeSongRow {
     /// lanes. Consumed with the row's `start_beat` as the per-lane phase
     /// anchor by the scheduler clock.
     pub lane_offsets: Vec<f64>,
+    /// Source buffer identities for the resolved row devices. Export resolves
+    /// these through the app's sample path registry before creating its graph.
+    pub sample_ids: Vec<(i32, String, u32)>,
     /// Complete scheduler snapshot for this row, materialized outside the
     /// audio callback. Swapping to it at a boundary is allocation-free.
     pub scheduler_snapshot: Arc<SequencerSnapshot>,

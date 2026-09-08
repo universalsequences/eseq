@@ -462,6 +462,7 @@ impl SequencerState {
                 resolved_pattern_ids: staging.resolved_pattern_ids,
                 resolved_sources: staging.resolved_sources,
                 lane_offsets: staging.lane_offsets,
+                sample_ids: staging.track_data.iter().map(|track| track.sample_id.clone()).collect(),
                 scheduler_snapshot: Arc::new(snapshot),
             });
         }

@@ -9944,11 +9944,13 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             assert_eq!(original.rows[0].scheduler_snapshot.tracks[0].steps[0]
                 .params[StepParam::Transpose.index()], 1.0);
             let frozen = state.preflight_runtime_song_with_current_pattern(
-                2, &[-1, -1], &[48_000, 48_000], &[String::new(), String::new()],
+                2, &[41, 42], &[44_100, 48_000], &["first".into(), "second".into()],
                 &[crate::sequencer::InstrumentType::Sampler; 2],
             ).unwrap();
             assert_eq!(frozen.rows[0].scheduler_snapshot.tracks[0].steps[0]
                 .params[StepParam::Transpose.index()], 11.0);
+            assert_eq!(frozen.rows[0].sample_ids[0], (41, "first".into(), 44_100));
+            assert_eq!(frozen.rows[0].sample_ids[1], (42, "second".into(), 48_000));
             assert_eq!(state.scheduler_snapshot_version(), version);
             assert_eq!(state.transport.pattern_epoch.load(Ordering::Relaxed), epoch);
             assert_eq!(state.committed_song_revision(), revision);

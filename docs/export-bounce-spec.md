@@ -53,6 +53,16 @@ by playback, without editing the active project or sharing its mutable DSP/VM
 instances. Compile/load failures, missing assets and generator errors fail
 preflight or the job; never export a silently incomplete mix.
 
+Sampler files are reopened during export preparation, using playback's WAV
+decoder, channel conversion, and leading-silence trimming. Their contents may
+differ from the buffers already loaded in the live project; this is accepted.
+Resolve the captured sample references against the originating project's paths,
+then load each distinct file once into the worker's graph. Those prepared
+buffers remain fixed throughout the render, including across row changes.
+Missing or unreadable referenced files fail preparation; an authored blank
+sampler remains blank. Exact preservation of live sampler PCM is not required.
+This exception does not change compiled instrument/effect asset verification.
+
 For each fixed-size graph block: apply due prepared row/mixer updates, resolve
 song transitions and schedule the complete required horizon, dispatch note/gate
 events at their frame offsets, render the same graph, consume the requested

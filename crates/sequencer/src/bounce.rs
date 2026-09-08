@@ -8,6 +8,7 @@
 
 mod plan;
 pub(crate) mod assets;
+pub(crate) mod samples;
 pub use plan::{BouncePlan, BouncePhase, BounceProgress, render_to_wav};
 
 use std::fs::File;

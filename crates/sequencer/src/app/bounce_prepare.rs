@@ -21,6 +21,12 @@ pub(super) struct CapturedEffectSource {
 }
 
 impl App {
+    pub(crate) fn capture_bounce_sampler_sources(
+        &self, song: &RuntimeSong, cancel: &BounceCancellation,
+    ) -> io::Result<crate::bounce::samples::SamplerSourceSnapshot> {
+        capture_sampler_sources(song, cancel, |buffer, name| self.sample_path_for_buffer(buffer, name))
+    }
+
     pub(super) fn capture_bounce_loaded_effect_sources(
         &self, cancel: &BounceCancellation,
     ) -> io::Result<Vec<CapturedEffectSource>> {
@@ -36,6 +42,35 @@ impl App {
             &self.editor.engine_registry, &self.editor.instrument_lib_leases, song, cancel,
         )
     }
+}
+
+fn capture_sampler_sources(
+    song: &RuntimeSong, cancel: &BounceCancellation,
+    mut resolve: impl FnMut(i32, &str) -> Option<std::path::PathBuf>,
+) -> io::Result<crate::bounce::samples::SamplerSourceSnapshot> {
+    let mut sources = Vec::new();
+    for row in &song.rows {
+        cancel.check()?;
+        for (track_idx, track) in row.scheduler_snapshot.tracks.iter().enumerate() {
+            if track.instrument_type == InstrumentType::Sampler {
+                let (buffer, name, _) = row.sample_ids.get(track_idx).ok_or_else(|| {
+                    io::Error::other(format!("Song row {} track {} has no sample binding",
+                        row.id.0, track_idx + 1))
+                })?;
+                sources.push((*buffer, resolve(*buffer, name)));
+            }
+            if let Some(rack) = track.rack_track.as_ref().filter(|_| track.instrument_type == InstrumentType::Rack) {
+                for slot in &rack.slots {
+                    if slot.instrument_type == InstrumentType::Sampler {
+                        if let Some((buffer, name, _)) = &slot.sample_id {
+                            sources.push((*buffer, resolve(*buffer, name)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    crate::bounce::samples::SamplerSourceSnapshot::capture(sources, cancel)
 }
 
 fn capture_loaded_effect_sources(
@@ -110,6 +145,59 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn sampler_capture_resolves_each_rows_device_and_rack_sample() {
+        use crate::sequencer::{RackSlotSnapshot, RackTrackSnapshot};
+        let state = SequencerState::new(2, (0..2).map(|_| default_empty_effect_chain()).collect());
+        let mut snapshot = (*state.latest_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut snapshot.tracks[0]).instrument_type = InstrumentType::Sampler;
+        let track = Arc::make_mut(&mut snapshot.tracks[1]);
+        track.instrument_type = InstrumentType::Rack;
+        track.rack_track = Some(RackTrackSnapshot::new(vec![RackSlotSnapshot {
+            instrument_type: InstrumentType::Sampler,
+            instrument_run_mode: track.instrument_run_mode,
+            instrument_base_note_offset: 0.0, choke_group: None, gain: 1.0, pan: 0.0,
+            mute: false, solo: false, max_polyphony: 1, param_plocks: Default::default(),
+            instrument_slot: track.instrument_slot.clone(), effect_slots: Vec::new(),
+            effect_descriptors: Vec::new(), custom_effect_names: Vec::new(),
+            track_sound_state: Default::default(), sample_id: Some((99, "rack".into(), 48_000)),
+        }], Vec::new()));
+        let song = RuntimeSong {
+            rows: (0..2).map(|index| RuntimeSongRow {
+                id: SongRowId(index), start_beat: index as f64, scene: Some(index as usize),
+                overrides: Vec::new(), resolved_pattern_ids: Vec::new(),
+                resolved_sources: Vec::new(), lane_offsets: vec![0.0; 2],
+                sample_ids: vec![(41 + index as i32, "track".into(), 48_000), (-1, String::new(), 48_000)],
+                scheduler_snapshot: Arc::new(snapshot.clone()),
+            }).collect(), end_beat: 2.0, loop_enabled: false,
+        };
+        let mut resolved = Vec::new();
+        let capture = capture_sampler_sources(&song, &BounceCancellation::default(), |buffer, _| {
+            resolved.push(buffer);
+            None
+        }).unwrap();
+        assert_eq!(resolved, vec![41, 99, 42, 99]);
+        let engine = crate::audio::engine::init_headless_engine(44_100, 2).unwrap();
+        let assets = capture.prepare(&engine, &BounceCancellation::default()).unwrap();
+        let rebound = assets.rebind_song(&song).unwrap();
+        for (index, row) in rebound.rows.iter().enumerate() {
+            let source_buffer = 41 + index as i32;
+            assert_eq!(row.sample_ids[0].0, assets.sample(source_buffer).unwrap().buffer_id);
+            assert_eq!(row.sample_ids[0].2, 44_100);
+            let slot = &row.scheduler_snapshot.tracks[1].rack_track.as_ref().unwrap().slots[0];
+            assert_eq!(slot.sample_id.as_ref().unwrap().0, assets.sample(99).unwrap().buffer_id);
+            assert_eq!(slot.sample_id.as_ref().unwrap().2, 44_100);
+            assert_eq!(song.rows[index].sample_ids[0].0, source_buffer);
+            assert_eq!(song.rows[index].sample_ids[0].2, 48_000);
+            let original_slot = &song.rows[index].scheduler_snapshot.tracks[1]
+                .rack_track.as_ref().unwrap().slots[0];
+            assert_eq!(original_slot.sample_id.as_ref().unwrap().0, 99);
+            assert_eq!(original_slot.sample_id.as_ref().unwrap().2, 48_000);
+        }
+        drop(assets);
+        unsafe { engine.destroy(); }
+    }
+
+    #[test]
     fn effect_capture_preserves_draft_source_and_host_slot_identity() {
         let original = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
@@ -170,6 +258,7 @@ mod tests {
                 id: SongRowId(index), start_beat: index as f64, scene: Some(0),
                 overrides: Vec::new(), resolved_pattern_ids: Vec::new(),
                 resolved_sources: Vec::new(), lane_offsets: vec![0.0],
+                sample_ids: vec![(-1, String::new(), 48_000)],
                 scheduler_snapshot: Arc::clone(&snapshot),
             }).collect(), end_beat: 2.0, loop_enabled: false,
         };
