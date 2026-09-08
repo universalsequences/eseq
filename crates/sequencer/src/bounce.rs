@@ -7,6 +7,7 @@
 //! authorization, publication is atomic and never clobbers a destination race.
 
 mod plan;
+pub(crate) mod assets;
 pub use plan::{BouncePlan, BouncePhase, BounceProgress, render_to_wav};
 
 use std::fs::File;

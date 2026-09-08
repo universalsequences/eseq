@@ -637,7 +637,26 @@ impl Default for DylibCacheManager {
     }
 }
 
+/// The file bytes used by a loaded compile, for isolated export preparation.
+#[derive(Clone, Debug)]
+pub(crate) struct CompiledAsset {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
 impl DylibLease {
+    pub(crate) fn compiled_assets(&self) -> Result<Vec<CompiledAsset>, String> {
+        let path = self.artifact_dir.join("metadata.json");
+        let metadata: CacheMetadata = serde_json::from_slice(
+            &std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?,
+        ).map_err(|error| format!("read compiled asset metadata: {error}"))?;
+        metadata.assets.into_iter().map(|asset| {
+            let sha256 = asset.sha256.filter(|_| asset.exists)
+                .ok_or_else(|| format!("Loaded compile has no asset fingerprint for {}", asset.path))?;
+            Ok(CompiledAsset { path: PathBuf::from(asset.path), sha256 })
+        }).collect()
+    }
+
     pub fn artifact_dir(&self) -> &Path {
         &self.artifact_dir
     }
@@ -1290,14 +1309,26 @@ fn rewrite_library_asset_references_with_paths(
     paths: &crate::app_paths::AppPaths,
 ) -> Result<String, String> {
     let base = effective_asset_base_with_paths(asset_base, paths);
+    rewrite_asset_references(source, |reference| {
+        let (resolved, origin) =
+            resolve_asset_reference_with_paths(reference, Some(&base), paths)?;
+        Ok((origin == AssetOrigin::Library).then_some(resolved))
+    })
+}
+
+/// Rewrite asset literals only; comments, other strings, and all surrounding
+/// source bytes remain intact. The callback may retain an authored spelling.
+pub(crate) fn rewrite_asset_references(
+    source: &str,
+    mut resolve: impl FnMut(&str) -> Result<Option<PathBuf>, String>,
+) -> Result<String, String> {
     let mut replacements = Vec::new();
     for (reference, start, end) in asset_reference_tokens(source)? {
-        let (resolved, origin) =
-            resolve_asset_reference_with_paths(&reference, Some(&base), paths)?;
-        if origin != AssetOrigin::Library {
-            continue;
+        if let Some(resolved) = resolve(&reference)? {
+            let path = resolved.to_str()
+                .ok_or_else(|| format!("DGenLisp asset path is not UTF-8: {}", resolved.display()))?;
+            replacements.push((start, end, lisp_string(path)));
         }
-        replacements.push((start, end, lisp_string(&resolved.to_string_lossy())));
     }
     if replacements.is_empty() {
         return Ok(source.to_string());
