@@ -1265,6 +1265,7 @@ impl App {
             built_patterns: Vec::new(),
             built_bus_patterns: Vec::new(),
             fallback_samples: 0,
+            strict_samples: false,
             phase: super::PendingProjectLoadPhase::ClearExisting,
         });
         Ok(())
@@ -1312,6 +1313,12 @@ impl App {
         };
         sample_assets.insert(canonical_path, asset.clone());
         Ok(asset)
+    }
+
+    pub(crate) fn queue_bounce_project(&mut self, name: &str, project: ProjectFile) -> Result<(), String> {
+        self.queue_loaded_project(name, project)?;
+        self.editor.pending_project_load.as_mut().unwrap().strict_samples = true;
+        Ok(())
     }
 
     pub fn advance_pending_project_load(&mut self) -> Result<(), String> {
@@ -3771,9 +3778,9 @@ impl App {
                     pending.phase = super::PendingProjectLoadPhase::Finalize;
                 } else {
                     let (snapshot, bus_patterns, fallback_count) = self
-                        .project_pattern_into_snapshot(
+                        .project_pattern_into_snapshot_with_policy(
                             pending.project.patterns[pattern_idx].clone(),
-                            &mut pending.sample_assets,
+                            &mut pending.sample_assets, pending.strict_samples,
                         )?;
                     pending.built_patterns.push(snapshot);
                     pending.built_bus_patterns.push(bus_patterns);
@@ -3877,9 +3884,9 @@ impl App {
                 let mut chunk_data = Vec::with_capacity(take.chunks.len());
                 for chunk in take.chunks {
                     let (snapshot, _, fallback_count) =
-                        self.project_pattern_into_snapshot(
+                        self.project_pattern_into_snapshot_with_policy(
                             chunk,
-                            &mut pending.sample_assets,
+                            &mut pending.sample_assets, pending.strict_samples,
                         )?;
                     let data = snapshot.track_pattern_data(track).ok_or_else(|| {
                         format!(
@@ -3908,7 +3915,9 @@ impl App {
             let mut carriers = Vec::with_capacity(sounds.orphan_sounds.len());
             for carrier in sounds.orphan_sounds {
                 let (snapshot, _, fallback_count) = self
-                    .project_pattern_into_snapshot(carrier.data, &mut pending.sample_assets)?;
+                    .project_pattern_into_snapshot_with_policy(
+                        carrier.data, &mut pending.sample_assets, pending.strict_samples,
+                    )?;
                 let data = snapshot.track_pattern_data(track).ok_or_else(|| {
                     format!(
                         "Sound carrier is missing lane data for track {}",
@@ -4442,6 +4451,15 @@ impl App {
         pattern: ProjectPattern,
         sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
     ) -> Result<(PatternSnapshot, Vec<BusPatternSnapshot>, usize), String> {
+        self.project_pattern_into_snapshot_with_policy(pattern, sample_assets, false)
+    }
+
+    fn project_pattern_into_snapshot_with_policy(
+        &mut self,
+        pattern: ProjectPattern,
+        sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
+        strict_samples: bool,
+    ) -> Result<(PatternSnapshot, Vec<BusPatternSnapshot>, usize), String> {
         let num_tracks = self.tracks.len();
         let mut sample_ids = Vec::with_capacity(num_tracks);
         let mut fallback_count = 0;
@@ -4451,7 +4469,7 @@ impl App {
                     .sample_paths
                     .get(track_idx)
                     .and_then(|path| path.as_ref())
-                    .map(PathBuf::from);
+                    .map(|path| crate::app_paths::resolve_sample_ref(Path::new(path)));
                 let saved_name = pattern
                     .sample_names
                     .get(track_idx)
@@ -4466,6 +4484,11 @@ impl App {
                     continue;
                 }
 
+                if strict_samples && saved_path.as_ref().is_none_or(|path| !path.is_file()) {
+                    return Err(format!("Export cannot reopen sample for track {}: {}",
+                        track_idx + 1, saved_path.as_ref().map(|path| path.display().to_string())
+                            .unwrap_or_else(|| format!("missing path for '{saved_name}'"))));
+                }
                 let resolved_path = saved_path
                     .as_ref()
                     .filter(|path| path.exists())

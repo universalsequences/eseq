@@ -7,6 +7,7 @@
 //! authorization, publication is atomic and never clobbers a destination race.
 
 mod plan;
+pub mod worker;
 pub(crate) mod assets;
 pub(crate) mod samples;
 pub use plan::{BouncePlan, BouncePhase, BounceProgress, render_to_wav};
@@ -49,6 +50,7 @@ impl BounceSummary {
 pub struct BounceCancellation(AtomicBool);
 
 impl BounceCancellation {
+    pub const fn new() -> Self { Self(AtomicBool::new(false)) }
     pub fn cancel(&self) { self.0.store(true, Ordering::Release); }
     pub fn check(&self) -> io::Result<()> {
         if self.0.load(Ordering::Acquire) {

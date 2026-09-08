@@ -66,13 +66,23 @@ impl<'a> OfflineAudioSession<'a> {
     }
 
     pub(crate) fn render_block(&mut self, start: u64, output: &mut [f32]) -> io::Result<()> {
+        self.render_block_with_controls(start, output, |_| Ok(()))
+    }
+
+    pub(crate) fn render_block_with_controls(
+        &mut self, start: u64, output: &mut [f32],
+        controls: impl FnOnce(u64) -> io::Result<()>,
+    ) -> io::Result<()> {
         if self.failed { return Err(io::Error::other("Offline render session has already failed")); }
-        let result = self.render_next(start, output);
+        let result = self.render_next(start, output, controls);
         self.failed = result.is_err();
         result
     }
 
-    fn render_next(&mut self, start: u64, output: &mut [f32]) -> io::Result<()> {
+    fn render_next(
+        &mut self, start: u64, output: &mut [f32],
+        controls: impl FnOnce(u64) -> io::Result<()>,
+    ) -> io::Result<()> {
         if start != self.data.rendered_samples.load(Ordering::Acquire)
             || output.len() != self.engine.block_size * 2
         {
@@ -106,6 +116,9 @@ impl<'a> OfflineAudioSession<'a> {
                 )));
             }
         }
+        // Normal controls use the same complete-block application boundary
+        // as playback. The scheduler has produced source-time notices first.
+        controls(start)?;
         self.check_delivery()?;
         render_audio_block(&mut self.data, output,
             AudioOutputPurpose::Export { source_end_sample: self.source_end });

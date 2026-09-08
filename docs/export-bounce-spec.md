@@ -1,7 +1,8 @@
 # Arrangement bounce specification
 
-Status: design decision for **eseq-45bn.1**, under **eseq-45bn**. This document
-specifies future implementation; it does not claim an exporter exists today.
+Status: implementation contract for **eseq-45bn**. A standalone saved-project
+export command is available as of 2026-09-08; see [usage](export-bounce.md).
+The in-app export flow and live source snapshot integration remain unfinished.
 Timing contract revised 2026-09-07: preserve playback timing, with sample-accurate
 notes/gates and block-boundary ordinary DSP updates.
 Related: [song mode](song-mode-spec.md) and

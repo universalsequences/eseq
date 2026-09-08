@@ -66,6 +66,23 @@ pub struct LatencyPlan {
 }
 
 impl LatencyPlan {
+    /// Zero-gain sends can enter/leave the planner without changing any delay.
+    /// Compare effective compensation, not the presence of zero-valued entries.
+    pub(crate) fn same_compensation(&self, other: &Self) -> bool {
+        fn sends(plan: &LatencyPlan) -> Vec<(usize, BusId, u32)> {
+            let mut result: Vec<_> = plan.send_pads.iter().enumerate()
+                .flat_map(|(track, pads)| pads.iter().filter(|(_, pad)| *pad != 0)
+                    .map(move |(bus, pad)| (track, *bus, *pad))).collect();
+            result.sort_by_key(|(track, bus, pad)| (*track, bus.0, *pad));
+            result
+        }
+        self.mix_latency == other.mix_latency
+            && self.track_primary_pads == other.track_primary_pads
+            && self.bus_pads == other.bus_pads
+            && self.rack_slot_pads == other.rack_slot_pads
+            && sends(self) == sends(other)
+    }
+
     pub(crate) fn validate_bounce(&self) -> Result<(), String> {
         if RACK_SLOT_JOIN_UNCOMPENSATED
             && self.rack_slot_pads.iter().flatten().any(|pad| *pad != 0)
@@ -230,7 +247,20 @@ impl App {
         if lg.is_null() {
             return Err("Export has no prepared audio graph".into());
         }
-        let plan = compute_latency_plan(&self.latency_topology());
+        let mut plan = compute_latency_plan(&self.latency_topology());
+        // Master inserts follow the compensated join, so their latency belongs
+        // in the export trim without adding it to any upstream branch pad.
+        if let Some(master) = self.buses.iter().find(|bus| bus.id == BusId::MIX) {
+            let master_latency = chain_latency(master.effect_slots.iter()
+                .zip(&master.effect_descriptors).map(|(slot, desc)| {
+                    let active = slot_is_active(slot.node_id as i32, desc, |idx| {
+                        slot.defaults.get(idx).copied().unwrap_or(1.0)
+                    });
+                    (active, desc, slot.node_id as i32)
+                }));
+            plan.mix_latency = plan.mix_latency.checked_add(master_latency)
+                .ok_or_else(|| "Export latency exceeds the supported sample clock".to_string())?;
+        }
         plan.validate_bounce()?;
         for (track, pad) in plan.track_primary_pads.iter().enumerate() {
             let nodes = self.graph.track_node_ids.get(track)
@@ -489,6 +519,20 @@ mod tests {
             output,
             sends: sends.to_vec(),
         }
+    }
+
+    #[test]
+    fn bounce_compensation_ignores_only_zero_delay_send_membership() {
+        let mut a = LatencyPlan::default();
+        a.send_pads = vec![vec![(BusId(1), 0)]];
+        let mut b = a.clone();
+        b.send_pads[0].clear();
+        assert!(a.same_compensation(&b));
+        a.send_pads[0][0].1 = 12;
+        assert!(!a.same_compensation(&b));
+        b = a.clone();
+        b.mix_latency += 1;
+        assert!(!a.same_compensation(&b));
     }
 
     #[test]
@@ -780,6 +824,12 @@ mod tests {
         app.graph.track_node_ids[1].pdc_id = 0;
         assert!(unsafe { app.prepare_bounce_latency() }.unwrap_err().contains("no delay compensation node"));
         app.graph.track_node_ids[1].pdc_id = saved;
+        let master = app.buses.iter().position(|bus| bus.id == BusId::MIX).unwrap();
+        app.add_builtin_bus_effect_sync(master, crate::effects::filter_table::NAME).unwrap();
+        let with_master = unsafe { app.prepare_bounce_latency() }.unwrap();
+        assert_eq!(with_master.mix_latency, plan.mix_latency * 2);
+        assert_eq!(with_master.track_primary_pads, plan.track_primary_pads,
+            "master latency belongs in the trim, not in upstream branch pads");
         unsafe {
             crate::audiograph::engine_stop_workers();
             crate::audiograph::destroy_live_graph(lg);

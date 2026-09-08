@@ -759,7 +759,7 @@ pub(super) fn render_audio_block(
         );
         data.trace_render_probe_blocks -= 1;
     }
-    if render_elapsed.as_millis() >= 10 {
+    if purpose == AudioOutputPurpose::Playback && render_elapsed.as_millis() >= 10 {
         eprintln!(
             "audio: slow render_chunk; nframes={nframes} elapsed_ms={} countdown_len={} block_start_sample={block_start_sample}",
             render_elapsed.as_millis(),

@@ -255,6 +255,7 @@ struct PendingProjectLoad {
     built_patterns: Vec<crate::sequencer::PatternSnapshot>,
     built_bus_patterns: Vec<Vec<BusPatternSnapshot>>,
     fallback_samples: usize,
+    strict_samples: bool,
     phase: PendingProjectLoadPhase,
 }
 
@@ -707,6 +708,7 @@ pub struct BusSendNodeIds {
 }
 
 /// Audio bus node IDs, passed to App::new to reduce parameter count.
+#[derive(Clone)]
 pub struct AudioBuses {
     pub bus_l_id: i32,
     pub bus_r_id: i32,

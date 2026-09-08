@@ -480,7 +480,7 @@ impl AnalysisCache {
 #[derive(Clone)]
 pub struct AnalysisService {
     cache: AnalysisCache,
-    tx: Sender<AnalysisJob>,
+    tx: Option<Sender<AnalysisJob>>,
 }
 
 impl AnalysisService {
@@ -492,22 +492,44 @@ impl AnalysisService {
             .name("sample-analysis-worker".to_string())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
-                    let sample_len_frames = job.samples.len() as u32;
-                    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                        analyze(&job.samples, job.sample_rate, job.buffer_id)
-                    }));
-                    match result {
-                        Ok(Ok(result)) => worker_cache.insert_ready(
-                            result,
-                            sample_len_frames,
-                            job.sample_rate,
-                        ),
-                        Ok(Err(error)) => worker_cache.insert_failed(job.buffer_id, error),
-                        Err(_) => worker_cache.insert_failed(job.buffer_id, "analysis panicked"),
-                    }
+                    Self::analyze_job(&worker_cache, job);
                 }
             });
-        Self { cache, tx }
+        Self { cache, tx: Some(tx) }
+    }
+
+    /// Complete analysis during loading for offline consumers that cannot
+    /// depend on UI ticks or background worker timing.
+    pub fn synchronous() -> Self {
+        Self { cache: AnalysisCache::new(), tx: None }
+    }
+
+    fn analyze_job(cache: &AnalysisCache, job: AnalysisJob) {
+        let sample_len_frames = job.samples.len() as u32;
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            analyze(&job.samples, job.sample_rate, job.buffer_id)
+        }));
+        match result {
+            Ok(Ok(result)) => cache.insert_ready(
+                result,
+                sample_len_frames,
+                job.sample_rate,
+            ),
+            Ok(Err(error)) => cache.insert_failed(job.buffer_id, error),
+            Err(_) => cache.insert_failed(job.buffer_id, "analysis panicked"),
+        }
+    }
+
+    /// Require a settled, successful preparation batch before offline playback.
+    pub fn require_complete(&self) -> Result<(), String> {
+        for (buffer, entry) in self.cache.inner.read().unwrap().iter() {
+            match entry.as_ref() {
+                AnalysisEntry::Ready(_) => {}
+                AnalysisEntry::Pending => return Err(format!("Sample {buffer} analysis is pending")),
+                AnalysisEntry::Failed(error) => return Err(format!("Sample {buffer} analysis failed: {error}")),
+            }
+        }
+        Ok(())
     }
 
     pub fn cache(&self) -> &AnalysisCache {
@@ -516,7 +538,11 @@ impl AnalysisService {
 
     pub fn submit(&self, job: AnalysisJob) {
         self.cache.insert_pending(job.buffer_id);
-        if let Err(error) = self.tx.send(job) {
+        let Some(tx) = &self.tx else {
+            Self::analyze_job(&self.cache, job);
+            return;
+        };
+        if let Err(error) = tx.send(job) {
             self.cache
                 .insert_failed(error.0.buffer_id, "analysis worker is not available");
         }
@@ -641,6 +667,20 @@ fn estimate_downbeat(onsets: &[u32], bpm: f32, sr: u32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn synchronous_analysis_is_ready_before_submit_returns_and_reports_failure() {
+        let service = super::AnalysisService::synchronous();
+        service.submit(super::AnalysisJob {
+            buffer_id: 7, samples: std::sync::Arc::new(vec![0.25; 4096]), sample_rate: 48_000,
+        });
+        service.require_complete().unwrap();
+        assert!(service.cache().table(7).is_some());
+        service.submit(super::AnalysisJob {
+            buffer_id: 8, samples: std::sync::Arc::new(Vec::new()), sample_rate: 48_000,
+        });
+        assert!(service.require_complete().unwrap_err().contains("Sample 8 analysis failed"));
+    }
+
     use super::*;
 
     #[test]
