@@ -263,7 +263,7 @@ pub(super) fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDesc
 /// `has_any` is an O(1) gate for the whole p-lock table the closure reads: when
 /// the table holds no p-lock at all the walk can only return `None`, so skip it
 /// rather than scanning every step (this runs per parameter on the meter poll).
-pub(super) fn held_plock_value(
+pub(crate) fn held_plock_value(
     state: &SequencerState,
     track: usize,
     step: usize,

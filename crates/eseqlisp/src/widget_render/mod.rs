@@ -56,6 +56,7 @@ pub mod wavetable_viewer;
 pub(crate) mod wgsl;
 pub mod wrap;
 pub mod xy_pad;
+pub mod automation_lane;
 
 pub use focus_decoration::{FocusCornerStyle, FocusDecoration};
 
@@ -1303,6 +1304,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &tree::TREE_WIDGET,
     &tree::TREE_ROW_BG_WIDGET,
     &xy_pad::XY_PAD_WIDGET,
+    &automation_lane::AUTOMATION_LANE_WIDGET,
 ];
 
 pub fn widget_definition(widget_type: &str) -> Option<&'static dyn WidgetDefinition> {

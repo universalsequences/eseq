@@ -14806,6 +14806,149 @@ mod drift_waveform_tests;
         );
     }
 
+    // Bead eseq-2k9p.21: the piano-roll automation lane publishes one point
+    // per triggered step for the selected parameter — its lock, or the gray
+    // base value in force without one — plus the picker rows (step params
+    // always, device params only once they carry a lock somewhere).
+    #[test]
+    fn piano_roll_automation_publishes_step_params_and_device_locks() {
+        use super::super::piano_roll::{
+            build_piano_roll_automation_params_value, build_piano_roll_automation_value,
+            PianoRollLanes,
+        };
+        let instrument = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = instrument
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let effect = sequencer::effects::EffectDescriptor::builtin_filter();
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![vec![sequencer::effects::EffectSlotState::new(&effect, 0)]],
+        ));
+        state.pattern.track_params[0].set_num_steps(16);
+        state.pattern.instrument_slots[0].apply_descriptor(&instrument, 0);
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            state.clone(),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app.graph.instrument_descriptors = vec![instrument.clone()];
+        app.graph.effect_descriptors = vec![vec![effect.clone()]];
+
+        state.pattern.patterns[0].set_step_active(0, true);
+        state.pattern.patterns[0].set_step_active(4, true);
+        state.pattern.step_data[0].set(4, StepParam::Velocity, 0.5);
+        state.pattern.step_data[0].set(4, StepParam::Duration, 2.0);
+
+        let lanes = PianoRollLanes::live(&state, 0);
+
+        let params = value_list_maps(&build_piano_roll_automation_params_value(&app, &state, 0));
+        assert!(
+            params
+                .iter()
+                .all(|row| value_map_string(row, "target").as_deref() == Some("step-param")),
+            "no device lock yet, so only step params are offered: {params:?}"
+        );
+        assert_eq!(
+            value_map_string(&params[1], "key").as_deref(),
+            Some("step-param:1"),
+            "velocity is the default lane key"
+        );
+
+        let lane = build_piano_roll_automation_value(&app, &state, &lanes, "step-param:1");
+        let Value::Map(lane_map) = &lane else {
+            panic!("lane is a map")
+        };
+        assert_eq!(value_map_string(&lane_map, "label").as_deref(), Some("Velocity"));
+        assert_eq!(value_map_number(&lane_map, "max"), Some(1.0));
+        let points = value_list_maps(&lane_map["points"].borrow().clone());
+        assert_eq!(points.len(), 2, "one point per triggered step: {points:?}");
+        assert_eq!(value_map_number(&points[0], "step"), Some(0.0));
+        assert_eq!(
+            value_map_number(&points[0], "value"),
+            Some(StepParam::Velocity.default_value() as f64)
+        );
+        assert_eq!(
+            value_map_bool(&points[0], "locked"),
+            Some(true),
+            "step params always draw in the track color"
+        );
+        assert_eq!(value_map_number(&points[1], "value"), Some(0.5));
+        assert_eq!(value_map_number(&points[1], "start"), Some(4.0));
+        assert_eq!(
+            value_map_number(&points[1], "end"),
+            Some(6.0),
+            "the bar spans the note's duration"
+        );
+
+        // A device lock on step 4: step 0 shows the gray base value, step 4
+        // the lock, and an off-step lock on 9 holds as a bare point.
+        state.pattern.instrument_slots[0].set_plock(4, cutoff_idx, 900.0);
+        state.pattern.instrument_slots[0].set_plock(9, cutoff_idx, 300.0);
+        let params = value_list_maps(&build_piano_roll_automation_params_value(&app, &state, 0));
+        let cutoff_row = params
+            .iter()
+            .find(|row| value_map_string(row, "key").as_deref() == Some(&format!("instrument:{cutoff_idx}")))
+            .expect("locked cutoff joins the picker");
+        assert_eq!(value_map_string(cutoff_row, "label").as_deref(), Some("cutoff"));
+
+        let lane = build_piano_roll_automation_value(
+            &app,
+            &state,
+            &lanes,
+            &format!("instrument:{cutoff_idx}"),
+        );
+        let Value::Map(lane_map) = &lane else {
+            panic!("lane is a map")
+        };
+        assert_eq!(value_map_number(&lane_map, "param-idx"), Some(cutoff_idx as f64));
+        let points = value_list_maps(&lane_map["points"].borrow().clone());
+        assert_eq!(points.len(), 3, "{points:?}");
+        let cutoff = &instrument.params[cutoff_idx];
+        assert_eq!(
+            value_map_bool(&points[0], "locked"),
+            Some(false),
+            "step 0 carries no lock: base value drawn gray"
+        );
+        assert_eq!(
+            value_map_number(&points[0], "value"),
+            Some(cutoff.stored_to_user(state.pattern.instrument_slots[0].defaults.get(cutoff_idx)) as f64)
+        );
+        assert_eq!(value_map_bool(&points[1], "locked"), Some(true));
+        assert_eq!(
+            value_map_number(&points[1], "value"),
+            Some(cutoff.stored_to_user(900.0) as f64)
+        );
+        assert_eq!(value_map_number(&points[2], "step"), Some(9.0));
+        assert_eq!(value_map_bool(&points[2], "active"), Some(false));
+
+        // A stale key (lock cleared) falls back to velocity instead of a
+        // blank lane.
+        state.pattern.instrument_slots[0].plocks.clear_param(4, cutoff_idx);
+        state.pattern.instrument_slots[0].plocks.clear_param(9, cutoff_idx);
+        let lane = build_piano_roll_automation_value(&app, &state, &lanes, "instrument:9999");
+        let Value::Map(lane_map) = &lane else {
+            panic!("lane is a map")
+        };
+        assert_eq!(value_map_string(&lane_map, "key").as_deref(), Some("step-param:1"));
+    }
+
     #[test]
     fn track_plock_any_rows_cover_rack_slot_effect_params() {
         let app = test_app_with_rack_panel_and_slot_fx();
@@ -15536,6 +15679,8 @@ mod drift_waveform_tests;
                     test_list(vec![Value::Map(test_instrument_map())]),
                 ),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
+                ("piano-roll-automation-params", Value::List(vec![])),
+                ("piano-roll-automation", Value::Nil),
                 ("piano-roll-items", Value::List(vec![])),
                 ("piano-roll-selection", Value::List(vec![])),
                 ("sidebar-kind", Value::String("sampler".to_string())),
@@ -51104,6 +51249,8 @@ mod drift_waveform_tests;
                 ("focus-live", Value::Bool(true)),
                 ("piano-roll-playhead", Value::Number(-1.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
+                ("piano-roll-automation-params", Value::List(vec![])),
+                ("piano-roll-automation", Value::Nil),
                 ("piano-roll-items", Value::List(vec![])),
                 ("piano-roll-selection", Value::List(vec![])),
             ],
@@ -51196,10 +51343,9 @@ mod drift_waveform_tests;
                 .runtime_mut()
                 .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read empty piano roll lane scroll"),
-            // The "No song yet" banner is gone (empty-arrangement spec 8),
-            // so the lower pane is one banner-height taller and C4 centers
-            // one lane row earlier.
-            Some(Value::Number(39.0)),
+            // The automation lane (eseq-2k9p.21) takes 3.5 cells off the
+            // note grid, so C4 centers over fewer visible lanes.
+            Some(Value::Number(42.5)),
             "empty piano roll should center C4 at the default lower-pane height"
         );
         assert_eq!(
@@ -51207,14 +51353,14 @@ mod drift_waveform_tests;
                 .runtime_mut()
                 .eval_str("(eseq.piano-roll/piano-roll-max-lane-scroll)")
                 .expect("read default piano roll max lane scroll"),
-            // Also one banner-height taller (empty-arrangement spec 8).
-            Some(Value::Number(78.0)),
+            // 7 more lanes are hidden behind the automation row (eseq-2k9p.21).
+            Some(Value::Number(85.0)),
             "default lower-pane height should allow scrolling below C4"
         );
         editor
             .runtime_mut()
             .eval_str(
-                "(eseq.piano-roll/piano-roll-action (dict :type :scroll-view :lane-scroll 78 :delta-lanes 0))",
+                "(eseq.piano-roll/piano-roll-action (dict :type :scroll-view :lane-scroll 85 :delta-lanes 0))",
             )
             .expect("scroll piano roll to low lanes");
         assert_eq!(
@@ -51222,7 +51368,7 @@ mod drift_waveform_tests;
                 .runtime_mut()
                 .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read low piano roll lane scroll"),
-            Some(Value::Number(78.0))
+            Some(Value::Number(85.0))
         );
         editor
             .runtime_mut()
@@ -51358,9 +51504,9 @@ mod drift_waveform_tests;
                 .runtime_mut()
                 .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read fitted piano roll lane scroll"),
-            // One lane row earlier since the "No song yet" banner's removal
-            // made the lower pane taller (empty-arrangement spec 8).
-            Some(Value::Number(31.0))
+            // The automation lane (eseq-2k9p.21) takes 3.5 cells off the
+            // note grid, so the fit centers over fewer visible lanes.
+            Some(Value::Number(34.5))
         );
     }
 
@@ -51377,6 +51523,8 @@ mod drift_waveform_tests;
                 ("track-colors", test_track_colors()),
                 ("tp-num-steps", Value::Number(16.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
+                ("piano-roll-automation-params", Value::List(vec![])),
+                ("piano-roll-automation", Value::Nil),
                 ("piano-roll-items", Value::List(vec![])),
                 ("piano-roll-selection", Value::List(vec![])),
             ],
@@ -51427,9 +51575,9 @@ mod drift_waveform_tests;
             runtime
                 .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read fitted lane scroll after sync"),
-            // One lane row earlier since the "No song yet" banner's removal
-            // made the lower pane taller (empty-arrangement spec 8).
-            Some(Value::Number(39.0))
+            // The automation lane (eseq-2k9p.21) takes 3.5 cells off the note
+            // grid, so the fit centers over fewer visible lanes.
+            Some(Value::Number(42.5))
         );
     }
 

@@ -67,6 +67,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "scroll",
     "tree",
     "xy-pad",
+    "automation-lane",
 ];
 
 pub fn is_builtin_widget_name(name: &str) -> bool {
