@@ -5013,7 +5013,7 @@
             [crate::project::ProjectTrack {
                 kind: crate::project::ProjectTrackKind::Sampler { sample_path: restored_path },
                 ..
-            }] if restored_path == &sample_path.to_string_lossy()
+            }] if restored_path.as_deref() == Some(sample_path.to_string_lossy().as_ref())
         ));
         graph.process_block();
     }

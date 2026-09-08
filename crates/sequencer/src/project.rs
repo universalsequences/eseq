@@ -562,7 +562,7 @@ impl ProjectFile {
                 ProjectTrackKind::Rack { slots, .. } => {
                     slots.iter().map(|slot| slot.sample_path.clone()).collect()
                 }
-                ProjectTrackKind::Sampler { sample_path } => vec![Some(sample_path.clone())],
+                ProjectTrackKind::Sampler { sample_path } => vec![sample_path.clone()],
                 ProjectTrackKind::Empty | ProjectTrackKind::Custom { .. } | ProjectTrackKind::Modulator => Vec::new(),
             })
             .collect();
@@ -1436,7 +1436,8 @@ pub struct ProjectTrack {
 pub enum ProjectTrackKind {
     Empty,
     Sampler {
-        sample_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sample_path: Option<String>,
     },
     Custom {
         instrument_name: String,
@@ -3764,7 +3765,7 @@ mod tests {
                     color: Some(TrackColor::new(0.98, 0.56, 0.20)),
                     collapsed: false,
                     kind: ProjectTrackKind::Sampler {
-                        sample_path: "samples/drums/kick.wav".to_string(),
+                        sample_path: Some("samples/drums/kick.wav".to_string()),
                     },
                 },
             ],

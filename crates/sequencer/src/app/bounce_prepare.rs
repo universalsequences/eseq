@@ -24,7 +24,9 @@ impl App {
     pub(crate) fn capture_bounce_sampler_sources(
         &self, song: &RuntimeSong, cancel: &BounceCancellation,
     ) -> io::Result<crate::bounce::samples::SamplerSourceSnapshot> {
-        capture_sampler_sources(song, cancel, |buffer, name| self.sample_path_for_buffer(buffer, name))
+        capture_sampler_sources(song, cancel, |buffer, name| {
+            self.capture_sampler_source_path(buffer, name).map_err(io::Error::other)
+        })
     }
 
     pub(super) fn capture_bounce_loaded_effect_sources(
@@ -46,7 +48,7 @@ impl App {
 
 fn capture_sampler_sources(
     song: &RuntimeSong, cancel: &BounceCancellation,
-    mut resolve: impl FnMut(i32, &str) -> Option<std::path::PathBuf>,
+    mut resolve: impl FnMut(i32, &str) -> io::Result<Option<std::path::PathBuf>>,
 ) -> io::Result<crate::bounce::samples::SamplerSourceSnapshot> {
     let mut sources = Vec::new();
     for row in &song.rows {
@@ -57,13 +59,13 @@ fn capture_sampler_sources(
                     io::Error::other(format!("Song row {} track {} has no sample binding",
                         row.id.0, track_idx + 1))
                 })?;
-                sources.push((*buffer, resolve(*buffer, name)));
+                sources.push((*buffer, resolve(*buffer, name)?));
             }
             if let Some(rack) = track.rack_track.as_ref().filter(|_| track.instrument_type == InstrumentType::Rack) {
                 for slot in &rack.slots {
                     if slot.instrument_type == InstrumentType::Sampler {
                         if let Some((buffer, name, _)) = &slot.sample_id {
-                            sources.push((*buffer, resolve(*buffer, name)));
+                            sources.push((*buffer, resolve(*buffer, name)?));
                         }
                     }
                 }
@@ -173,7 +175,7 @@ mod tests {
         let mut resolved = Vec::new();
         let capture = capture_sampler_sources(&song, &BounceCancellation::default(), |buffer, _| {
             resolved.push(buffer);
-            None
+            Ok(None)
         }).unwrap();
         assert_eq!(resolved, vec![41, 99, 42, 99]);
         let engine = crate::audio::engine::init_headless_engine(44_100, 2).unwrap();

@@ -1274,6 +1274,14 @@ impl App {
         self.editor.pending_project_load.is_some()
     }
 
+    fn create_blank_project_sample(&mut self) -> Result<ProjectSampleAsset, String> {
+        Ok(ProjectSampleAsset {
+            buffer_id: self.create_blank_sampler_buffer()?,
+            sample_rate: self.graph.sample_rate,
+            decoded_name: String::new(),
+        })
+    }
+
     fn load_project_sample_asset(
         &mut self,
         sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
@@ -1394,7 +1402,7 @@ impl App {
                 let sample_name = pattern.sample_names.get(track).cloned();
                 let slot_source = crate::project::ProjectRackTrackSlot {
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
-                    sample_path: Some(sample_path.clone()),
+                    sample_path: sample_path.clone(),
                     sample_name: sample_name.clone(),
                     instrument_name: None,
                 };
@@ -1417,7 +1425,7 @@ impl App {
                     effect_slots: pattern.effect_slots[track].clone(),
                     custom_effects: project.custom_effects[track].clone(),
                     track_sound_state: pattern.track_sound_states[track].clone(),
-                    sample_path: Some(sample_path),
+                    sample_path,
                     sample_name,
                 };
                 (
@@ -1584,31 +1592,31 @@ impl App {
         for (slot_idx, (source, slot)) in source_slots.iter().zip(&mut rack.slots).enumerate() {
             match source.instrument_type {
                 crate::project::ProjectInstrumentType::Sampler => {
-                    let sample_path = source
-                        .sample_path
-                        .as_deref()
-                        .ok_or_else(|| format!("Sound slot {} has no sample path", slot_idx + 1))?;
-                    let loaded =
-                        crate::instruments::sampler::load_wav_buffer(self.graph.lg.0, Path::new(sample_path))
-                            .map_err(|error| {
-                                format!(
-                                    "Failed to load Sound sample '{}' for slot {}: {error}",
-                                    sample_path,
-                                    slot_idx + 1
-                                )
-                            })?;
-                    self.submit_sample_analysis(&loaded);
-                    let sample_name = source
-                        .sample_name
-                        .clone()
-                        .unwrap_or_else(|| loaded.name.clone());
-                    self.register_loaded_sample_path(
-                        &sample_name,
-                        loaded.buffer_id,
-                        PathBuf::from(sample_path),
-                    );
+                    let asset = if let Some(sample_path) = source.sample_path.as_deref() {
+                        let loaded = crate::instruments::sampler::load_wav_buffer(
+                            self.graph.lg.0, Path::new(sample_path),
+                        ).map_err(|error| format!(
+                            "Failed to load Sound sample '{}' for slot {}: {error}",
+                            sample_path, slot_idx + 1,
+                        ))?;
+                        self.submit_sample_analysis(&loaded);
+                        ProjectSampleAsset {
+                            buffer_id: loaded.buffer_id,
+                            sample_rate: loaded.sample_rate,
+                            decoded_name: loaded.name,
+                        }
+                    } else {
+                        self.create_blank_project_sample()?
+                    };
+                    let sample_name = source.sample_name.clone()
+                        .unwrap_or_else(|| asset.decoded_name.clone());
+                    if let Some(sample_path) = &source.sample_path {
+                        self.register_loaded_sample_path(
+                            &sample_name, asset.buffer_id, PathBuf::from(sample_path),
+                        );
+                    }
                     slot.instrument_type = InstrumentType::Sampler;
-                    slot.sample_id = Some((loaded.buffer_id, sample_name, loaded.sample_rate));
+                    slot.sample_id = Some((asset.buffer_id, sample_name, asset.sample_rate));
                     slot.track_sound_state.engine_id = None;
                 }
                 crate::project::ProjectInstrumentType::Custom => {
@@ -2295,20 +2303,14 @@ impl App {
                         .copied()
                         .unwrap_or(InstrumentType::Sampler)
                         == InstrumentType::Sampler
-                        && !sample_name.is_empty()
                     {
-                        self.resolve_sample_path_for_snapshot(
-                            pattern_idx,
-                            track_idx,
-                            sample_buffer_id,
-                            &sample_name,
-                        )?
+                        self.capture_sampler_source_path(sample_buffer_id, &sample_name)?
                         .map(|path| path.to_string_lossy().to_string())
                     } else {
                         None
                     };
+                    sample_names.push(if sample_path.is_some() { sample_name } else { String::new() });
                     sample_paths.push(sample_path);
-                    sample_names.push(sample_name);
                 }
                 Ok(ProjectPattern::from_snapshot(
                     snapshot,
@@ -2383,20 +2385,12 @@ impl App {
                         .copied()
                         .unwrap_or(InstrumentType::Sampler)
                         == InstrumentType::Sampler
-                        && !sample_name.is_empty()
                     {
-                        // `usize::MAX` bypasses the current-scene live-path
-                        // shortcut; chunks resolve through the registries.
                         sample_paths[track] = self
-                            .resolve_sample_path_for_snapshot(
-                                usize::MAX,
-                                track,
-                                buffer_id,
-                                &sample_name,
-                            )?
+                            .capture_sampler_source_path(buffer_id, &sample_name)?
                             .map(|path| path.to_string_lossy().to_string());
                     }
-                    sample_names[track] = sample_name;
+                    sample_names[track] = if sample_paths[track].is_some() { sample_name } else { String::new() };
                     chunks.push(ProjectPattern::from_snapshot(
                         &snapshot,
                         sample_paths,
@@ -2532,18 +2526,12 @@ impl App {
                     .copied()
                     .unwrap_or(InstrumentType::Sampler)
                     == InstrumentType::Sampler
-                    && !sample_name.is_empty()
                 {
                     sample_paths[track] = self
-                        .resolve_sample_path_for_snapshot(
-                            usize::MAX,
-                            track,
-                            buffer_id,
-                            &sample_name,
-                        )?
+                        .capture_sampler_source_path(buffer_id, &sample_name)?
                         .map(|path| path.to_string_lossy().to_string());
                 }
-                sample_names[track] = sample_name;
+                sample_names[track] = if sample_paths[track].is_some() { sample_name } else { String::new() };
                 orphan_sounds.push(crate::project::ProjectOrphanSound {
                     patch: refs.patch,
                     mix: refs.mix,
@@ -2714,21 +2702,12 @@ impl App {
                                     .as_ref()
                                     .map(|(_, name, _)| name.clone())
                                     .unwrap_or_default();
-                                let path = self
-                                    .sample_path_registry
-                                    .get(&sample_name)
-                                    .cloned()
-                                    .or_else(|| self.resolve_sample_path_by_name(&sample_name))
-                                    .ok_or_else(|| {
-                                        format!(
-                                            "Couldn't resolve sample path for rack track '{}' slot {}",
-                                            name,
-                                            slot_idx + 1
-                                        )
-                                    })?;
+                                let path = slot.sample_id.as_ref()
+                                    .map(|(id, name, _)| self.capture_sampler_source_path(*id, name))
+                                    .transpose()?.flatten();
                                 slots.push(crate::project::ProjectRackTrackSlot {
                                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
-                                    sample_path: Some(path.to_string_lossy().to_string()),
+                                    sample_path: path.map(|path| path.to_string_lossy().to_string()),
                                     sample_name: (!sample_name.is_empty()).then_some(sample_name),
                                     instrument_name: None,
                                 });
@@ -2792,12 +2771,9 @@ impl App {
                         },
                     })
                 } else if self.is_sampler_track(track_idx) {
-                    let path = self
-                        .sampler_path_for_track(track_idx)
-                        .or_else(|| self.resolve_sample_path_by_name(name));
-                    let Some(path) = path else {
-                        return Err(format!("Couldn't resolve sample path for '{}'", name));
-                    };
+                    let path = self.capture_sampler_source_path(
+                        self.graph.track_buffer_ids[track_idx], name,
+                    )?;
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),
@@ -2808,7 +2784,7 @@ impl App {
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Sampler {
-                            sample_path: path.to_string_lossy().to_string(),
+                            sample_path: path.map(|path| path.to_string_lossy().to_string()),
                         },
                     })
                 } else if matches!(self.graph.track_instrument_types.get(track_idx),
@@ -3127,34 +3103,6 @@ impl App {
         Ok(())
     }
 
-    fn resolve_sample_path_for_snapshot(
-        &self,
-        pattern_idx: usize,
-        track_idx: usize,
-        buffer_id: i32,
-        sample_name: &str,
-    ) -> Result<Option<PathBuf>, String> {
-        if self.state.current_scene_index() == pattern_idx {
-            if let Some(path) = self.sampler_path_for_track(track_idx) {
-                return Ok(Some(path));
-            }
-        }
-        if let Some(path) = self.sample_buffer_path_registry.get(&buffer_id) {
-            return Ok(Some(path.clone()));
-        }
-        if let Some(path) = self.sample_path_registry.get(sample_name) {
-            return Ok(Some(path.clone()));
-        }
-        let resolved = self.resolve_sample_path_by_name(sample_name);
-        if resolved.is_none() {
-            return Err(format!(
-                "Couldn't resolve sample path for '{}'",
-                sample_name
-            ));
-        }
-        Ok(resolved)
-    }
-
     pub fn resolve_sample_path_by_name(&self, sample_name: &str) -> Option<PathBuf> {
         fn walk(dir: &Path, sample_name: &str) -> Option<PathBuf> {
             let entries = std::fs::read_dir(dir).ok()?;
@@ -3419,7 +3367,10 @@ impl App {
                         ProjectTrackKind::Empty => {
                             self.graph_controller().add_empty_track()?;
                         }
-                        ProjectTrackKind::Sampler { sample_path } => {
+                        ProjectTrackKind::Sampler { sample_path: None } => {
+                            self.graph_controller().add_blank_sampler_track()?;
+                        }
+                        ProjectTrackKind::Sampler { sample_path: Some(sample_path) } => {
                             eprintln!(
                                 "project-load: add sampler track index={} path={}",
                                 track_idx, sample_path
@@ -3508,28 +3459,17 @@ impl App {
                                             .or_else(|| {
                                                 saved_pattern_slot
                                                     .and_then(|slot| slot.sample_path.as_ref())
-                                            })
-                                            .ok_or_else(|| {
-                                                format!(
-                                                    "Rack track {} slot {} is a sampler but has no sample_path",
-                                                    track_idx + 1,
-                                                    slot_idx + 1
-                                                )
-                                            })?;
-                                        let asset = self
-                                            .load_project_sample_asset(
-                                                &mut pending.sample_assets,
-                                                Path::new(sample_path),
-                                            )
-                                            .map_err(|error| {
-                                                format!(
-                                                    "Failed to load rack sample '{}' for track {} slot {}: {}",
-                                                    sample_path,
-                                                    track_idx + 1,
-                                                    slot_idx + 1,
-                                                    error
-                                                )
-                                            })?;
+                                            });
+                                        let asset = if let Some(sample_path) = sample_path {
+                                            self.load_project_sample_asset(
+                                                &mut pending.sample_assets, Path::new(sample_path),
+                                            ).map_err(|error| format!(
+                                                "Failed to load rack sample '{}' for track {} slot {}: {error}",
+                                                sample_path, track_idx + 1, slot_idx + 1,
+                                            ))?
+                                        } else {
+                                            self.create_blank_project_sample()?
+                                        };
                                         let sample_name = slot
                                             .sample_name
                                             .clone()
@@ -3538,11 +3478,11 @@ impl App {
                                                     .and_then(|slot| slot.sample_name.clone())
                                             })
                                             .unwrap_or_else(|| asset.decoded_name.clone());
-                                        self.register_loaded_sample_path(
-                                            &sample_name,
-                                            asset.buffer_id,
-                                            PathBuf::from(sample_path),
-                                        );
+                                        if let Some(sample_path) = sample_path {
+                                            self.register_loaded_sample_path(
+                                                &sample_name, asset.buffer_id, PathBuf::from(sample_path),
+                                            );
+                                        }
                                         prepared_sources.push(PreparedRackSlotSource::Sampler(
                                             RackSamplerBuildSpec {
                                                 buffer_id: asset.buffer_id,
@@ -5146,6 +5086,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blank_sampler_project_and_sound_roundtrip_preserves_unassigned_sources() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        assert!(app.capture_sampler_source_path(i32::MAX, "unregistered").is_err());
+        app.register_sample_path(&app.tracks[0].clone(), PathBuf::from("/unrelated-same-name.wav"));
+        assert_eq!(app.capture_sampler_source_path(app.graph.track_buffer_ids[0], &app.tracks[0]).unwrap(), None);
+        assert!(app.sampler_path_for_track(0).is_none());
+        app.sample_path_registry.clear();
+        let rack = app.graph_controller().add_empty_layer_rack_track().unwrap();
+        let buffer = app.create_blank_sampler_buffer().unwrap();
+        app.graph_controller().add_sampler_slot_to_rack_buffer(rack, buffer, 48_000, "").unwrap();
+        app.state.pattern.patterns[0].set_step_active(7, true);
+        let snapshot = app.capture_bounce_project("blank-samplers").unwrap();
+        assert!(matches!(snapshot.tracks[0].kind, ProjectTrackKind::Sampler { sample_path: None }));
+        assert!(snapshot.patterns[0].sample_paths[0].is_none());
+        assert!(snapshot.patterns[0].sample_names[0].is_empty());
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        assert!(encoded["tracks"][0].get("sample_path").is_none());
+        let restored: ProjectFile = serde_json::from_value(encoded).unwrap();
+        app.queue_loaded_project("blank-samplers", restored).unwrap();
+        for _ in 0..100 {
+            if !app.has_pending_project_load() { break; }
+            app.advance_pending_project_load().unwrap();
+            unsafe { crate::audiograph::prepare_graph_for_render(lg.0); }
+        }
+        assert!(!app.has_pending_project_load());
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
+        assert!(app.sampler_path_for_track(0).is_none());
+        assert!(app.state.pattern.patterns[0].is_active(7));
+        let saved = app.capture_project("blank-samplers").unwrap();
+        assert!(matches!(saved.tracks[0].kind, ProjectTrackKind::Sampler { sample_path: None }));
+        let ProjectTrackKind::Rack { slots, .. } = &saved.tracks[rack].kind else { panic!("missing rack") };
+        assert!(slots[0].sample_path.is_none());
+        for track in [0, rack] {
+            let sound = app.capture_track_as_container_preset(
+                track, "Blank sampler", Vec::new(), String::new(),
+            ).unwrap();
+            let added = app.add_track_from_sound_preset(sound, "Blank sampler").unwrap();
+            assert_eq!(app.graph.track_instrument_types[added], InstrumentType::Rack);
+        }
+        let mut output = [0.0_f32; 1024];
+        unsafe { lg.process_next_block(output.as_mut_ptr(), 512); }
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        // An explicit missing file must not be reinterpreted as a blank sampler.
+        let mut missing = saved;
+        missing.tracks[0].kind = ProjectTrackKind::Sampler {
+            sample_path: Some("/missing-eseq-sampler-roundtrip.wav".into()),
+        };
+        app.queue_loaded_project("missing-sample", missing).unwrap();
+        app.advance_pending_project_load().unwrap();
+        assert!(app.advance_pending_project_load().unwrap_err().contains("Failed to resolve sample"));
+        unsafe {
+            crate::audiograph::engine_stop_workers();
+            crate::audiograph::destroy_live_graph(lg.0);
+        }
+    }
+
+    #[test]
     fn bounce_project_snapshot_keeps_live_repository_and_device_ids_unchanged() {
         use crate::sequencer::StepParam;
         let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
@@ -5870,7 +5871,7 @@ mod tests {
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Sampler {
-                    sample_path: "samples/kick.wav".to_string(),
+                    sample_path: Some("samples/kick.wav".to_string()),
                 },
             }],
             custom_effects: vec![custom_effects],

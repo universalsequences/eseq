@@ -102,7 +102,7 @@ impl GraphController<'_> {
         self.force_reap_all_rack_teardowns();
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
-        let buffer_id = crate::instruments::sampler::create_silent_buffer(self.app.graph.lg.0)?;
+        let buffer_id = self.app.create_blank_sampler_buffer()?;
         let sample_rate = self.app.graph.sample_rate;
         let track_name = format!("Sampler {}", idx + 1);
         let shell = self.create_track_shell(idx, &track_name)?;
