@@ -676,9 +676,7 @@
 (def origin-chip (origin)
   (let ((name (get origin :name))
       (selected (get origin :selected)))
-    (button (if (= name "user") "Yours"
-        (if (= name "factory") "Factory"
-          (if (string-starts-with? name "pkg:") (substring name 4 (len name)) name)))
+    (button (get origin :label)
       :variant :ghost
       :background-color (if selected 
         :mixer-strip-selected-bg

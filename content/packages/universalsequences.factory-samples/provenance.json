@@ -1,0 +1,1130 @@
+{
+  "sources": {
+    "808": {
+      "repository": "tidalcycles/sounds-tr808-fischer",
+      "revision": "85fbecf1bec32553395625ea659e2a56dfd7c0e1",
+      "license": "CC0-1.0",
+      "author": "Michael Fischer"
+    },
+    "piano": {
+      "repository": "felixroos/dough-samples",
+      "revision": "9eacfc86ec4393e68a463ff52b01c19cfaa77f38",
+      "license": "CC-BY-3.0",
+      "author": "Alexander Holm"
+    },
+    "vcsl": {
+      "repository": "sgossner/VCSL",
+      "revision": "c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e",
+      "license": "CC0-1.0",
+      "author": "Versilian Studios LLC"
+    }
+  },
+  "files": [
+    {
+      "path": "samples/808/BD0000.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/bd8/BD0000.WAV",
+      "source": "808",
+      "title": "808 Kick BD0000",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "kick"
+      ],
+      "sha256": "7bdb70b44c216ffd4b4188d49a868532f462c180fab1f087b0e75b5a9f40fa07",
+      "bytes": 22096
+    },
+    {
+      "path": "samples/808/BD0050.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/bd8/BD0050.WAV",
+      "source": "808",
+      "title": "808 Kick BD0050",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "kick"
+      ],
+      "sha256": "7f25e10c782f4a99c57ca346743a912e9104a414a3a22d06595329b3370d4362",
+      "bytes": 132346
+    },
+    {
+      "path": "samples/808/BD2550.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/bd8/BD2550.WAV",
+      "source": "808",
+      "title": "808 Kick BD2550",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "kick"
+      ],
+      "sha256": "7cbfb54d75ced8060a28e5989e03cbc79d60d350d161da2228d4d53872f7d562",
+      "bytes": 132346
+    },
+    {
+      "path": "samples/808/BD5000.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/bd8/BD5000.WAV",
+      "source": "808",
+      "title": "808 Kick BD5000",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "kick"
+      ],
+      "sha256": "1797f9240b5eb02b0c5e97e65ea22c85545cd99903e2789f0f860ee7da369085",
+      "bytes": 22096
+    },
+    {
+      "path": "samples/808/BD5050.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/bd8/BD5050.WAV",
+      "source": "808",
+      "title": "808 Kick BD5050",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "kick"
+      ],
+      "sha256": "2ca93cd7a3b19f6ec7fe26fefe51b89de69b7be7a87047ffc8ecd396064a8504",
+      "bytes": 132346
+    },
+    {
+      "path": "samples/808/BD5075.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/bd8/BD5075.WAV",
+      "source": "808",
+      "title": "808 Kick BD5075",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "kick"
+      ],
+      "sha256": "9ed0c14f09d091b78aa962bb0184813c02e6657857c86ff33c14b2f9daab6558",
+      "bytes": 176446
+    },
+    {
+      "path": "samples/808/BD7550.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/bd8/BD7550.WAV",
+      "source": "808",
+      "title": "808 Kick BD7550",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "kick"
+      ],
+      "sha256": "44dc338b85c2605c6b75465d1d208f4cf58e440a25118fcac64033590a59ca0a",
+      "bytes": 132346
+    },
+    {
+      "path": "samples/808/CB.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/cb8/CB.WAV",
+      "source": "808",
+      "title": "808 Cowbell CB",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "cowbell"
+      ],
+      "sha256": "1468cbd6c75a1f23b50a15968796c256c74893a35aa3824c6663db82c271f28d",
+      "bytes": 132346
+    },
+    {
+      "path": "samples/808/CH.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/ch8/CH.WAV",
+      "source": "808",
+      "title": "808 Closed Hat CH",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "closed hat"
+      ],
+      "sha256": "c9f30ff2b4d73b03f41960e504e03c54e9a59697af666fe4d155bab9cd1ccae6",
+      "bytes": 22094
+    },
+    {
+      "path": "samples/808/CL.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/cl8/CL.WAV",
+      "source": "808",
+      "title": "808 Claves CL",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "claves"
+      ],
+      "sha256": "4f5b72674791ce133a2ad3bd40c9a0e628bad9062eb8f04de27f59dcc8ce5d46",
+      "bytes": 22094
+    },
+    {
+      "path": "samples/808/CP.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/cp8/CP.WAV",
+      "source": "808",
+      "title": "808 Clap CP",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "clap"
+      ],
+      "sha256": "376429bb81cb48d1f392a11cd066c32ffb7883d445b2488704ea52e46bb08286",
+      "bytes": 176446
+    },
+    {
+      "path": "samples/808/CY0000.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/cy8/CY0000.WAV",
+      "source": "808",
+      "title": "808 Cymbal CY0000",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "cymbal"
+      ],
+      "sha256": "02f21af068c08f2024fe279fa935329801dee05954c11f07ece1a83bb9c32d6b",
+      "bytes": 132346
+    },
+    {
+      "path": "samples/808/CY0050.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/cy8/CY0050.WAV",
+      "source": "808",
+      "title": "808 Cymbal CY0050",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "cymbal"
+      ],
+      "sha256": "f356c7741b0c8afa158d94d2492473a45d05597e11629fe8e5d463ec2df30fdb",
+      "bytes": 220546
+    },
+    {
+      "path": "samples/808/CY2550.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/cy8/CY2550.WAV",
+      "source": "808",
+      "title": "808 Cymbal CY2550",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "cymbal"
+      ],
+      "sha256": "8006625720c2ec1246bd25c345e2e43f9be59396b07af909f6729e971133b941",
+      "bytes": 220546
+    },
+    {
+      "path": "samples/808/CY5000.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/cy8/CY5000.WAV",
+      "source": "808",
+      "title": "808 Cymbal CY5000",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "cymbal"
+      ],
+      "sha256": "c9c98fb276990086f76d029ad9aebeb1b6911fd11855b04bef9dc35dbd612ea1",
+      "bytes": 132346
+    },
+    {
+      "path": "samples/808/CY5050.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/cy8/CY5050.WAV",
+      "source": "808",
+      "title": "808 Cymbal CY5050",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "cymbal"
+      ],
+      "sha256": "3aad28641774c1e7a5502f40ec76d1b219192631547e308ce74c6d4a1c5e70a0",
+      "bytes": 220546
+    },
+    {
+      "path": "samples/808/CY5075.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/cy8/CY5075.WAV",
+      "source": "808",
+      "title": "808 Cymbal CY5075",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "cymbal"
+      ],
+      "sha256": "d1806c3878815fcc3816dcef4ab870c67eb67bf27f2dd140f5c25178749525be",
+      "bytes": 308746
+    },
+    {
+      "path": "samples/808/CY7550.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/cy8/CY7550.WAV",
+      "source": "808",
+      "title": "808 Cymbal CY7550",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "cymbal"
+      ],
+      "sha256": "ce99385f835cf38f1be8c73e71c9ee57d2451e3901e0ffffaa0a48b5cb23d33c",
+      "bytes": 220546
+    },
+    {
+      "path": "samples/808/HC50.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/hc8/HC50.WAV",
+      "source": "808",
+      "title": "808 High Conga HC50",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "high conga"
+      ],
+      "sha256": "ee4354b1fb79126e455a5343161f5c1e78165874df8a74dece78cbb5b6964af9",
+      "bytes": 44146
+    },
+    {
+      "path": "samples/808/HT50.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/ht8/HT50.WAV",
+      "source": "808",
+      "title": "808 High Tom HT50",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "high tom"
+      ],
+      "sha256": "7e0b9eddd95379298aacbf1520929f586191788d9e0841ad752d84bdde910d88",
+      "bytes": 88246
+    },
+    {
+      "path": "samples/808/LC50.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/lc8/LC50.WAV",
+      "source": "808",
+      "title": "808 Low Conga LC50",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "low conga"
+      ],
+      "sha256": "6591f57bbbdb891819a0ce6ce5b3bfd12d24da9f7f413243ef37b2593d1a7393",
+      "bytes": 44146
+    },
+    {
+      "path": "samples/808/LT50.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/lt8/LT50.WAV",
+      "source": "808",
+      "title": "808 Low Tom LT50",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "low tom"
+      ],
+      "sha256": "d3720682985a9621c4a67749dfd5336fa4f25564ef7ea2e633ac8ff5fdd64eda",
+      "bytes": 88246
+    },
+    {
+      "path": "samples/808/MA.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/ma8/MA.WAV",
+      "source": "808",
+      "title": "808 Maracas MA",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "maracas"
+      ],
+      "sha256": "7b17cc2973fe55233c6ece7b341adb4d04a44b12527582102591c8981a586451",
+      "bytes": 22094
+    },
+    {
+      "path": "samples/808/MC50.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/mc8/MC50.WAV",
+      "source": "808",
+      "title": "808 Mid Conga MC50",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "mid conga"
+      ],
+      "sha256": "8175efe26c67f5af926bdf376b1bde75f495451140a2ebc132e74644b31cae1b",
+      "bytes": 44146
+    },
+    {
+      "path": "samples/808/MT50.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/mt8/MT50.WAV",
+      "source": "808",
+      "title": "808 Mid Tom MT50",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "mid tom"
+      ],
+      "sha256": "81bbc63110a21c5d1ff28572734f2969f96db9a2ca7e304e52b4f808de905927",
+      "bytes": 88246
+    },
+    {
+      "path": "samples/808/OH50.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/oh8/OH50.WAV",
+      "source": "808",
+      "title": "808 Open Hat OH50",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "open hat"
+      ],
+      "sha256": "84ae3220fab2396380fb6ba6032bcec7c55a6d3f621d30a13c11fdeaa099aff7",
+      "bytes": 44146
+    },
+    {
+      "path": "samples/808/RS.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/rs8/RS.WAV",
+      "source": "808",
+      "title": "808 Rimshot RS",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "rimshot"
+      ],
+      "sha256": "20d5cd385c0f8c3a24bbfe78c2e2747776841ede6185bc0fe93f97f0b455b89c",
+      "bytes": 22096
+    },
+    {
+      "path": "samples/808/SD0000.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/sd8/SD0000.WAV",
+      "source": "808",
+      "title": "808 Snare SD0000",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "snare"
+      ],
+      "sha256": "06a671f38ccfa6825fb80597e3423c96d873ec8ee8dc96232f8f53d83fd4650f",
+      "bytes": 22094
+    },
+    {
+      "path": "samples/808/SD0050.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/sd8/SD0050.WAV",
+      "source": "808",
+      "title": "808 Snare SD0050",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "snare"
+      ],
+      "sha256": "667eca1430ac5f692544613ad72bfc82e9f4ba3be461d96c16cc437156d0943e",
+      "bytes": 44146
+    },
+    {
+      "path": "samples/808/SD2550.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/sd8/SD2550.WAV",
+      "source": "808",
+      "title": "808 Snare SD2550",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "snare"
+      ],
+      "sha256": "31692bc1795641de8410fd5aee0eb98c7876100631be4f351a3b87e700acad60",
+      "bytes": 44146
+    },
+    {
+      "path": "samples/808/SD5000.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/sd8/SD5000.WAV",
+      "source": "808",
+      "title": "808 Snare SD5000",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "snare"
+      ],
+      "sha256": "8a6c2425b6d65f4a0790d46a356b9b291e92b84ff810853fda549c1cbbb0d375",
+      "bytes": 22096
+    },
+    {
+      "path": "samples/808/SD5050.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/sd8/SD5050.WAV",
+      "source": "808",
+      "title": "808 Snare SD5050",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "snare"
+      ],
+      "sha256": "6dcbf8acd5cee6d6b7955d26c6b57d8ca413f1ae1c7caafaaec780d83f08d712",
+      "bytes": 44146
+    },
+    {
+      "path": "samples/808/SD5075.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/sd8/SD5075.WAV",
+      "source": "808",
+      "title": "808 Snare SD5075",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "snare"
+      ],
+      "sha256": "90573488de690a12adecf18c9967950c4bb0da11aa9b14becffeeea723dab251",
+      "bytes": 44146
+    },
+    {
+      "path": "samples/808/SD7550.WAV",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/sd8/SD7550.WAV",
+      "source": "808",
+      "title": "808 Snare SD7550",
+      "tags": [
+        "drums",
+        "electronic",
+        "808",
+        "snare"
+      ],
+      "sha256": "df1bbf736f5c0099d0f6d78305a5930353ff5e77a012fedafb7da6c99e68168f",
+      "bytes": 44146
+    },
+    {
+      "path": "samples/piano/A0v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/A0v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano A0 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "A0"
+      ],
+      "sha256": "0e7869511bd3342a63fcb7df2fa1e9c4ab656d93a32d6dc472adbf98e10364d3",
+      "bytes": 317747
+    },
+    {
+      "path": "samples/piano/A1v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/A1v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano A1 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "A1"
+      ],
+      "sha256": "ed415a636cd1ac0f461f55ab3997be6fa1f9877728077a91b89b1114e4339ae2",
+      "bytes": 307723
+    },
+    {
+      "path": "samples/piano/A2v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/A2v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano A2 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "A2"
+      ],
+      "sha256": "ea3b12700be31a2d7fa1db672ced04802368f75f08162ce3afd20ee2c56b6b1e",
+      "bytes": 239448
+    },
+    {
+      "path": "samples/piano/A3v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/A3v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano A3 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "A3"
+      ],
+      "sha256": "298d319fca1ca6934ea5b07d7100002f8dfdbf8cf36fa068c8df8b5a9eb49c13",
+      "bytes": 231394
+    },
+    {
+      "path": "samples/piano/A4v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/A4v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano A4 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "A4"
+      ],
+      "sha256": "c5270f435ab7100e6fa4a363d985b7a41ab1c20ea0d12dd8fc1106e7e753cd7c",
+      "bytes": 173442
+    },
+    {
+      "path": "samples/piano/A5v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/A5v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano A5 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "A5"
+      ],
+      "sha256": "4d8c5386a638ec0fd1f70081bf4b51cae2b8f6acf7ffc849052c37bb49da142c",
+      "bytes": 135673
+    },
+    {
+      "path": "samples/piano/A6v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/A6v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano A6 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "A6"
+      ],
+      "sha256": "1b9106440f720f7120c7ef723e4b8c95bb887e4b3d3d57d6f84bf56d34ec9535",
+      "bytes": 73955
+    },
+    {
+      "path": "samples/piano/A7v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/A7v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano A7 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "A7"
+      ],
+      "sha256": "08d8de462746153691f3ce4b3d822633713a324960f8861a172d46ffbe1bb02a",
+      "bytes": 44296
+    },
+    {
+      "path": "samples/piano/C1v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/C1v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano C1 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "C1"
+      ],
+      "sha256": "eca440cecae64d3665235abc0001a1d2ec9e2717ef772268755115ba80acb785",
+      "bytes": 288101
+    },
+    {
+      "path": "samples/piano/C2v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/C2v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano C2 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "C2"
+      ],
+      "sha256": "41664af78045c416e98c990d0bab0b6c26c61da63e2a7d62d6dd4dafc5a82167",
+      "bytes": 314035
+    },
+    {
+      "path": "samples/piano/C3v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/C3v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano C3 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "C3"
+      ],
+      "sha256": "790bf54430365989ae14fad704264a46bce4baedced5298d6d700a1d3c7600c6",
+      "bytes": 212578
+    },
+    {
+      "path": "samples/piano/C4v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/C4v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano C4 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "C4"
+      ],
+      "sha256": "497464f6d8e0455c6b72b35bf7fed1bbd14a382b90bb389c3c88ebf9ffc8a566",
+      "bytes": 219187
+    },
+    {
+      "path": "samples/piano/C5v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/C5v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano C5 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "C5"
+      ],
+      "sha256": "9748a6d4668a571291983c3dbe3907cb3597a17f33cdb63672f25043c685b028",
+      "bytes": 172477
+    },
+    {
+      "path": "samples/piano/C6v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/C6v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano C6 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "C6"
+      ],
+      "sha256": "583f570482c22e94fe37df0e31cadb005ba9f9ce742cc465311ba06c235d994d",
+      "bytes": 95919
+    },
+    {
+      "path": "samples/piano/C7v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/C7v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano C7 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "C7"
+      ],
+      "sha256": "86faf0061f6aa4e47c8b50a656650bc3a274dbd3281668fcdd7bdebec9eaf9ec",
+      "bytes": 48513
+    },
+    {
+      "path": "samples/piano/C8v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/C8v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano C8 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "C8"
+      ],
+      "sha256": "e1ecc25a213df0fe9493de7ffb101678a5d974fbbee84f0cf21e05fa9e7e40fc",
+      "bytes": 56836
+    },
+    {
+      "path": "samples/piano/Ds1v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Ds1v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano D#1 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "D#1"
+      ],
+      "sha256": "2675110d0f94adfafdd66a0c6d273c6897ccfc0f7419762e9c61590e01a9a690",
+      "bytes": 345891
+    },
+    {
+      "path": "samples/piano/Ds2v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Ds2v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano D#2 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "D#2"
+      ],
+      "sha256": "acd6c32d9a88675c1ae326f14727aae0a3667cc70f9ef7a39b6bc5c1a3a0342c",
+      "bytes": 317075
+    },
+    {
+      "path": "samples/piano/Ds3v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Ds3v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano D#3 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "D#3"
+      ],
+      "sha256": "dcca048dc25de903f86efddfac6b4320597deb4f300cea70f215dd1d900cdca6",
+      "bytes": 225299
+    },
+    {
+      "path": "samples/piano/Ds4v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Ds4v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano D#4 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "D#4"
+      ],
+      "sha256": "423aeb40f9719f32892eb313236b56e39a363e13616fccc7f721ab0427eb9150",
+      "bytes": 197277
+    },
+    {
+      "path": "samples/piano/Ds5v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Ds5v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano D#5 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "D#5"
+      ],
+      "sha256": "88ed771278770d796255976303d3645252f2b4299cf865df51d8e9ad44df84d1",
+      "bytes": 142556
+    },
+    {
+      "path": "samples/piano/Ds6v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Ds6v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano D#6 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "D#6"
+      ],
+      "sha256": "fecea39137ab19a7a45a5fe97e9b338eddbab7bd9bb15746cf185f49ddcfa4e9",
+      "bytes": 104470
+    },
+    {
+      "path": "samples/piano/Ds7v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Ds7v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano D#7 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "D#7"
+      ],
+      "sha256": "93af8aeafe102ac69c7ccfc447589a118392b4eb37d3a03cecc222cab8842d44",
+      "bytes": 57956
+    },
+    {
+      "path": "samples/piano/Fs1v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Fs1v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano F#1 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "F#1"
+      ],
+      "sha256": "9e908e308a21501ca3cd936d22922a83041674a1076528a137a31135d1b0d1a1",
+      "bytes": 304678
+    },
+    {
+      "path": "samples/piano/Fs2v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Fs2v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano F#2 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "F#2"
+      ],
+      "sha256": "710685dd1a82b0dfa849c0056b50f4e6836c818c393e582b3c07ff17ddcacd04",
+      "bytes": 292012
+    },
+    {
+      "path": "samples/piano/Fs3v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Fs3v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano F#3 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "F#3"
+      ],
+      "sha256": "e632f2dc532a3158693c026b93698c8ed6c6fc03c9854bb75c887542cef118da",
+      "bytes": 227534
+    },
+    {
+      "path": "samples/piano/Fs4v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Fs4v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano F#4 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "F#4"
+      ],
+      "sha256": "eefc4e8bc71867c06dbb5c926bff50ccde942d19ee885e958ec110186cf631b1",
+      "bytes": 176999
+    },
+    {
+      "path": "samples/piano/Fs5v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Fs5v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano F#5 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "F#5"
+      ],
+      "sha256": "7a0830da67ed80a322f9bd3718ef0050c8ba8a4588f7f33599b1719ad0fbdb67",
+      "bytes": 130413
+    },
+    {
+      "path": "samples/piano/Fs6v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Fs6v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano F#6 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "F#6"
+      ],
+      "sha256": "f6dd2f92614e9e07f10e0928f31ec887f6f5540952a2991b478d824ad3ffb087",
+      "bytes": 83193
+    },
+    {
+      "path": "samples/piano/Fs7v8.mp3",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/piano/Fs7v8.mp3",
+      "source": "piano",
+      "title": "Salamander Piano F#7 v8",
+      "tags": [
+        "piano",
+        "acoustic",
+        "salamander",
+        "F#7"
+      ],
+      "sha256": "47ded87b96753c7f763b2f70ee777fd406fb369e0e29d957375a07e8c91bbcc6",
+      "bytes": 84955
+    },
+    {
+      "path": "samples/vcsl/BDrumNew_hit_v3_rr1_Sum.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Bass%20Drum%201/BDrumNew_hit_v3_rr1_Sum.wav",
+      "source": "vcsl",
+      "title": "VCSL Bass Drum Soft",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "kick"
+      ],
+      "sha256": "a2d8829e8b2b59e8afb12fa396b01758827059339c2a84ad066d17b36c82d1ff",
+      "bytes": 367124
+    },
+    {
+      "path": "samples/vcsl/BDrumNew_hit_v7_rr1_Sum.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Bass%20Drum%201/BDrumNew_hit_v7_rr1_Sum.wav",
+      "source": "vcsl",
+      "title": "VCSL Bass Drum Hard",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "kick"
+      ],
+      "sha256": "7024054e68261d2cca0ee58fdf9d6f23b54370792d04aa2c1ccf41acc090bd2b",
+      "bytes": 1105152
+    },
+    {
+      "path": "samples/vcsl/Snare2_HitSN_v3_rr1_Mid.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Snare%20Drum%2C%20Modern%201/Snare2_HitSN_v3_rr1_Mid.wav",
+      "source": "vcsl",
+      "title": "VCSL Snare Soft",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "snare"
+      ],
+      "sha256": "3d71765aa0d1e13260abeb003720aef0841432df601883177bf70e97d9af6c99",
+      "bytes": 305304
+    },
+    {
+      "path": "samples/vcsl/Snare2_HitSN_v7_rr1_Mid.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Snare%20Drum%2C%20Modern%201/Snare2_HitSN_v7_rr1_Mid.wav",
+      "source": "vcsl",
+      "title": "VCSL Snare Hard",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "snare"
+      ],
+      "sha256": "e63d9ebb2d1f85456d7554448b52330031051bc45db36f5fe08ef5f5149421e6",
+      "bytes": 271480
+    },
+    {
+      "path": "samples/vcsl/HiHat_HitC_v2_rr1_Mid.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Idiophones/Struck%20Idiophones/Hi-Hat%20Cymbal/HiHat_HitC_v2_rr1_Mid.wav",
+      "source": "vcsl",
+      "title": "VCSL Closed Hat Soft",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "closed hat"
+      ],
+      "sha256": "e1fb54c9a030800038abcebbed1c056fb74bdeec627315f3cd5fd893c6e6b031",
+      "bytes": 247272
+    },
+    {
+      "path": "samples/vcsl/HiHat_HitC_v4_rr1_Mid.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Idiophones/Struck%20Idiophones/Hi-Hat%20Cymbal/HiHat_HitC_v4_rr1_Mid.wav",
+      "source": "vcsl",
+      "title": "VCSL Closed Hat Hard",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "closed hat"
+      ],
+      "sha256": "ccaf3b3a353c22d7aac00c261229c42a1ef083285069f4c76dbafba454b46edd",
+      "bytes": 266280
+    },
+    {
+      "path": "samples/vcsl/HiHat_HitO_rr1_Mid.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Idiophones/Struck%20Idiophones/Hi-Hat%20Cymbal/HiHat_HitO_rr1_Mid.wav",
+      "source": "vcsl",
+      "title": "VCSL Open Hat",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "open hat"
+      ],
+      "sha256": "fa492ec14cc6924b43ad5fcf9e9a0f406d926998835bde2eb5847cd15ad25be7",
+      "bytes": 1026612
+    },
+    {
+      "path": "samples/vcsl/Tamb1_Hit_v2_rr1_Mid.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Idiophones/Struck%20Idiophones/Tambourine%201/Tamb1_Hit_v2_rr1_Mid.wav",
+      "source": "vcsl",
+      "title": "VCSL Tambourine Hit",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "tambourine"
+      ],
+      "sha256": "885ebf1d70f8e888f576682e4e4112b92b69649162f392c83b3379c91a09cf41",
+      "bytes": 293256
+    },
+    {
+      "path": "samples/vcsl/Tamb1_Shake_rr1_Mid.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Idiophones/Struck%20Idiophones/Tambourine%201/Tamb1_Shake_rr1_Mid.wav",
+      "source": "vcsl",
+      "title": "VCSL Tambourine Shake",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "tambourine"
+      ],
+      "sha256": "5876b66d1e8009b3ee884ff3bf52fbc420b44f9ddffffe830b4074d3dfc09924",
+      "bytes": 258948
+    },
+    {
+      "path": "samples/vcsl/Claves1_Hit_v2_rr1_Mid.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Idiophones/Struck%20Idiophones/Claves/Claves1_Hit_v2_rr1_Mid.wav",
+      "source": "vcsl",
+      "title": "VCSL Claves",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "claves"
+      ],
+      "sha256": "bcabe27330761309eb4b4f6207e6e3b4be59815df86449ac05bfb9b81f19efc9",
+      "bytes": 191812
+    },
+    {
+      "path": "samples/vcsl/LShaker_Shake1U_rr1_Mid.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Idiophones/Struck%20Idiophones/Shaker%2C%20Large/LShaker_Shake1U_rr1_Mid.wav",
+      "source": "vcsl",
+      "title": "VCSL Shaker",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "shaker"
+      ],
+      "sha256": "f6bbd4b897a18af5d567cf7925d402a8b854a8f31c1cf3c706f91bf96815b7c7",
+      "bytes": 270700
+    },
+    {
+      "path": "samples/vcsl/cymbal_crash1_mf1.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Idiophones/Struck%20Idiophones/Clash%20Cymbals%201/cymbal_crash1_mf1.wav",
+      "source": "vcsl",
+      "title": "VCSL Crash Cymbal",
+      "tags": [
+        "drums",
+        "acoustic",
+        "vcsl",
+        "cymbal"
+      ],
+      "sha256": "3b4a6ed42627eedca39f6480e9825dedeaab538197fc734f85be13ba655aa6aa",
+      "bytes": 1495666
+    },
+    {
+      "path": "licenses/808-README.md",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/README.md",
+      "source": "808",
+      "sha256": "9fd714352f477768fc6120d2225c9f1fb2a452e88ba337c9f8d896c6927682e1",
+      "bytes": 8221
+    },
+    {
+      "path": "licenses/808-LICENSE",
+      "url": "https://raw.githubusercontent.com/tidalcycles/sounds-tr808-fischer/85fbecf1bec32553395625ea659e2a56dfd7c0e1/LICENSE",
+      "source": "808",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+      "bytes": 7048
+    },
+    {
+      "path": "licenses/piano-README.md",
+      "url": "https://raw.githubusercontent.com/felixroos/dough-samples/9eacfc86ec4393e68a463ff52b01c19cfaa77f38/README.md",
+      "source": "piano",
+      "sha256": "2eebf57fc046ca03e0b2fef609b04e2bb912bf1f1ff02888dc1ff750a665cf70",
+      "bytes": 2684
+    },
+    {
+      "path": "licenses/vcsl-README.md",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/README.md",
+      "source": "vcsl",
+      "sha256": "6f7214a188f106c917d6503748485413c3e47cf56bce69f82beb9d16aa0894a9",
+      "bytes": 4365
+    },
+    {
+      "path": "licenses/vcsl-LICENSE",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/LICENSE",
+      "source": "vcsl",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+      "bytes": 7048
+    },
+    {
+      "path": "licenses/salamander-LICENSE",
+      "url": "https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/3382bf9496bba2486f5ab0de55a264d1dfc38404/LICENSE",
+      "source": "piano",
+      "sha256": "e6bc9e9c474700b708f568bac9e5a8a9bcb2b1dad53442f5ba449fcb848b8e76",
+      "bytes": 19467
+    }
+  ]
+}

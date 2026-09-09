@@ -99,7 +99,15 @@
     (label (str "Version " about-version) :key "about-version" :font-size 12 :color :white :bg :transparent)
     (label "Live sequencer and sound design." :font-size 11 :color :dim :bg :transparent)
     (label "https://github.com/universalsequences/eseq" :font-size 10 :color :dim :bg :transparent)
-    (box :flex 1 :bg :transparent)
+    (scroll :key "about-credit-scroll" :width :fill :flex 1
+      (v-stack :key "about-sample-credits" :width :fill :gap 0.3
+        (label "Salamander Grand Piano V3 — Alexander Holm" :font-size 11 :color :white :bg :transparent)
+        (label "CC BY 3.0 · Velocity-8 MP3 selection" :font-size 10 :color :dim :bg :transparent)
+        (label "MP3 conversion via Strudel / dough-samples" :font-size 10 :color :dim :bg :transparent)
+        (label "https://creativecommons.org/licenses/by/3.0/" :font-size 10 :color :dim :bg :transparent)
+        (label "https://archive.org/details/SalamanderGrandPianoV3" :font-size 10 :color :dim :bg :transparent)
+        (label "TR-808 — Michael Fischer · TidalCycles · CC0" :font-size 11 :color :white :bg :transparent)
+        (label "VCSL — Versilian Studios LLC · CC0" :font-size 11 :color :white :bg :transparent)))
     (h-stack :width :fill :gap 0.5
       (box :flex 1 :bg :transparent)
       (button "OK" :key "about-ok" :variant :primary :on-click |x y r| (close-about)))))
@@ -113,6 +121,6 @@
         :width-px 560 :height-px 300
       (box :debug-name "unsaved-prompt-panel" :width :fill :height :fill :padding 0.6 :bg :transparent
         (if unsaved-prompt-open? (unsaved-prompt-body) (box :width 0 :height 0 :bg :transparent))))
-    (modal :is-open about-open? :on-close (lambda () (close-about)) :width-px 480 :height-px 340
+    (modal :is-open about-open? :on-close (lambda () (close-about)) :width-px 720 :height-px 600
       (box :debug-name "about-panel" :width :fill :height :fill :padding 0.6 :bg :transparent
         (if about-open? (about-body) (box :width 0 :height 0 :bg :transparent))))))

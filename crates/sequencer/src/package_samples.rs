@@ -12,6 +12,9 @@ use crate::sample_manifest::{
     read_manifest, verify_payload, verify_source_asset, SampleManifestLine,
 };
 
+/// Stable identity of the sample package bundled with eseq.
+pub const FACTORY_SAMPLES_ORIGIN: &str = "pkg:universalsequences.factory-samples";
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PackageSampleIngestReport {
     pub ingested_origins: Vec<String>,
@@ -31,6 +34,15 @@ pub fn reconcile_installed_package_samples(
     db: &mut SampleDb,
 ) -> Result<PackageSampleIngestReport, String> {
     let (catalog, package_errors) = PackageCatalog::scan_reporting(packages_dir);
+    reconcile_package_catalog_samples(catalog, package_errors, sample_dir, db)
+}
+
+fn reconcile_package_catalog_samples(
+    catalog: PackageCatalog,
+    package_errors: Vec<eseqlisp::package::PackageError>,
+    sample_dir: &Path,
+    db: &mut SampleDb,
+) -> Result<PackageSampleIngestReport, String> {
     let mut report = PackageSampleIngestReport {
         errors: package_errors.into_iter().map(|error| error.to_string()).collect(),
         ..PackageSampleIngestReport::default()
@@ -108,7 +120,14 @@ pub fn reconcile_app_package_samples(
     let db_path = paths.sample_db_path();
     let mut db = SampleDb::open(&db_path)
         .map_err(|error| format!("failed to open {}: {error}", db_path.display()))?;
-    reconcile_installed_package_samples(&paths.packages_dir(), &paths.samples_dir(), &mut db)
+    // Match module resolution: user packages shadow factory packages, and
+    // dependencies resolve across both tiers. Reconcile the combined catalog
+    // once so neither tier's sweep removes the other tier's sample claims.
+    let (catalog, errors) = PackageCatalog::scan_layered_reporting(&[
+        paths.packages_dir(),
+        paths.factory_packages_dir(),
+    ]);
+    reconcile_package_catalog_samples(catalog, errors, &paths.samples_dir(), &mut db)
 }
 
 pub fn ingest_package_samples(
@@ -330,6 +349,33 @@ mod tests {
         };
         write_manifest(&manifest_path, &lines).unwrap();
         hash
+    }
+
+    #[test]
+    fn app_reconcile_retains_factory_and_user_package_samples_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let paths = crate::app_paths::AppPaths::release(
+            root.join("MacOS"), root.join("Resources"), root.join("Support"),
+            root.join("Caches"), root.join("Lisp"),
+        );
+        paths.ensure_user_tier().unwrap();
+        let hash = make_package(&paths.factory_packages_dir().join("one"), "test/one");
+        let user = paths.packages_dir().join("two");
+        make_package(&user, "test/two");
+        let report = reconcile_app_package_samples(&paths).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.ingested_origins, vec!["pkg:test.one", "pkg:test.two"]);
+        let unchanged = reconcile_app_package_samples(&paths).unwrap();
+        assert_eq!(unchanged.unchanged_origins, vec!["pkg:test.one", "pkg:test.two"]);
+        assert!(unchanged.removed_origins.is_empty());
+        fs::remove_dir_all(user).unwrap();
+        let removed = reconcile_app_package_samples(&paths).unwrap();
+        assert_eq!(removed.removed_origins, vec!["pkg:test.two"]);
+        let db = SampleDb::open(&paths.sample_db_path()).unwrap();
+        assert!(db.query(&[], &[], None, false, &["pkg:test.one"]).unwrap()
+            .iter().any(|sample| sample.hash == hash));
+        assert!(paths.samples_dir().join(format!("{hash}.wav")).is_file());
     }
 
     #[test]

@@ -46,6 +46,7 @@ if [[ ! -x "$DGEN_TOOL" ]]; then
   fail "DGenLisp compiler not found at $DGEN_TOOL. Run ./scripts/fetch_dgenlisp.sh --target macos-arm64 before packaging."
 fi
 [[ -d "$CONTENT_DIR" ]] || fail "factory content not found at $CONTENT_DIR"
+python3 "$REPO_ROOT/scripts/factory_samples.py"
 [[ -f "$ICON" ]] || fail "app icon not found at $ICON"
 [[ -f "$UI_FONT" ]] || fail "application font not found at $UI_FONT"
 [[ -f "$UI_FONT_LICENSE" ]] || fail "application font license not found at $UI_FONT_LICENSE"

@@ -1,0 +1,5 @@
+{
+  "name": "universalsequences/factory-samples",
+  "version": "1.0.0",
+  "entry": "universalsequences.factory-samples.library"
+}

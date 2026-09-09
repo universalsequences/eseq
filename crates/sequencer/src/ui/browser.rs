@@ -126,6 +126,14 @@ pub(crate) fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNod
     items
 }
 
+fn sample_origin_label(origin: &str) -> &str {
+    match origin {
+        "user" => "Yours",
+        "factory" | sequencer::package_samples::FACTORY_SAMPLES_ORIGIN => "Factory",
+        _ => origin.strip_prefix("pkg:").unwrap_or(origin),
+    }
+}
+
 pub(crate) fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
     Value::List(
         items
@@ -153,11 +161,7 @@ pub(crate) fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
                     let mut badges = item
                         .origins
                         .iter()
-                        .map(|origin| match origin.as_str() {
-                            "user" => "Yours".to_string(),
-                            "factory" => "Factory".to_string(),
-                            _ => origin.strip_prefix("pkg:").unwrap_or(origin).to_string(),
-                        })
+                        .map(|origin| sample_origin_label(origin).to_string())
                         .collect::<Vec<_>>();
                     if !item.available {
                         badges.push("Unavailable".to_string());
@@ -262,7 +266,12 @@ pub(crate) fn build_sample_browser_value_with_origins_from_db(
     }
     Ok(map_value([
         ("tags", tag_facets_to_value(&tags)),
-        ("origins", tag_facets_to_value(&origins)),
+        ("origins", list_value(origins.iter().map(|origin| map_value([
+            ("name", Value::String(origin.name.clone())),
+            ("label", Value::String(sample_origin_label(&origin.name).to_string())),
+            ("count", Value::Number(origin.count as f64)),
+            ("selected", Value::Bool(origin.selected)),
+        ])))),
         ("items", items),
     ]))
 }

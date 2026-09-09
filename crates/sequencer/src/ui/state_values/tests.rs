@@ -2908,11 +2908,13 @@ mod drift_waveform_tests;
                 test_list(vec![
                     map_value([
                         ("name", Value::String("user".to_string())),
+                        ("label", Value::String("Yours".to_string())),
                         ("count", Value::Number(2.0)),
                         ("selected", Value::Bool(false)),
                     ]),
                     map_value([
                         ("name", Value::String("pkg:acid.tools".to_string())),
+                        ("label", Value::String("acid.tools".to_string())),
                         ("count", Value::Number(1.0)),
                         ("selected", Value::Bool(false)),
                     ]),
@@ -55546,3 +55548,6 @@ mod mnm_ui_tests;
 
 #[path = "manual_ui_tests.rs"]
 mod manual_ui_tests;
+
+#[path = "about_ui_tests.rs"]
+mod about_ui_tests;
