@@ -21,6 +21,7 @@
 (load "@/ui/effects/custom-ui-sections.lisp")
 (load "@/ui/effects/custom-ui-controls.lisp")
 (load "@/ui/effects/custom-ui-lego.lisp")
+(load "@/ui/effects/mnm-surface.lisp")
 (load "@/ui/effects/custom-effect-ui.lisp")
 (load "@/ui/effects/panel-bodies.lisp")
 (load "@/ui/effects/sampler-panel.lisp")

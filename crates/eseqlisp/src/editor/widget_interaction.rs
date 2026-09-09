@@ -223,6 +223,7 @@ fn nearest_widget_gesture_node(
     local_col: f32,
     local_row: f32,
     modifiers: KeyModifiers,
+    cell_dims: (f32, f32),
 ) -> Option<(LayoutNode, Option<Value>)> {
     let mut path = Vec::new();
     if !path_to_widget_id(layout, hit_node.widget_id, &mut path) {
@@ -242,7 +243,7 @@ fn nearest_widget_gesture_node(
         if node.widget_id != hit_node.widget_id && hit_node_handles_pointer && !is_pointer_capture {
             return None;
         }
-        let gesture_data = begin_widget_gesture_data(&node, local_col, local_row, modifiers);
+        let gesture_data = begin_widget_gesture_data(&node, local_col, local_row, modifiers, cell_dims.0, cell_dims.1);
         if gesture_data.is_some() {
             Some((node.clone(), gesture_data))
         } else if widget_render::widget_captures_drag(&node.widget_type) {
@@ -1408,7 +1409,7 @@ impl Editor {
             });
         crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
         let gesture_node = self.runtime.current_layout.as_ref().and_then(|layout| {
-            nearest_widget_gesture_node(layout, &hit_node, scrolled_col, scrolled_row, modifiers)
+            nearest_widget_gesture_node(layout, &hit_node, scrolled_col, scrolled_row, modifiers, self.runtime.layout_cell_dims())
         });
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         if let Some((node, gesture_data)) = gesture_node {
@@ -2476,7 +2477,7 @@ mod pointer_capture_tests {
         let root = test_node(1, "v-stack", HashMap::new(), vec![capture]);
 
         let Some((gesture_node, gesture_data)) =
-            nearest_widget_gesture_node(&root, &hit, 1.0, 1.0, KeyModifiers::empty())
+            nearest_widget_gesture_node(&root, &hit, 1.0, 1.0, KeyModifiers::empty(), (10.0, 20.0))
         else {
             panic!("capture wrapper should create a gesture");
         };

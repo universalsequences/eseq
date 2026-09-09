@@ -378,9 +378,15 @@ pub fn sdf_widget_hit_test(
     local_row: f32,
     pixel_aspect: f32,
 ) -> i32 {
+    sdf_widget_hit_region(node, local_col, local_row, pixel_aspect).0
+}
+
+fn sdf_widget_hit_region(
+    node: &LayoutNode, local_col: f32, local_row: f32, pixel_aspect: f32,
+) -> (i32, Option<String>) {
     let def = match sdf_widget_def(&node.widget_type) {
         Some(d) => d,
-        None => return -1,
+        None => return (-1, None),
     };
     let (x, y) = crate::lang::sdf_hit::layout_to_sdf_coords(
         local_col,
@@ -394,40 +400,41 @@ pub fn sdf_widget_hit_test(
     vars.insert("aspect".to_string(), aspect);
     vars.insert("width".to_string(), aspect.max(1.0));
     vars.insert("height".to_string(), (1.0 / aspect.max(0.0001)).max(1.0));
-    crate::lang::sdf_hit::sdf_hit_test_with_vars(&def.sdf_expr, x, y, &vars)
+    crate::lang::sdf_hit::sdf_hit_region_with_vars(&def.sdf_expr, x, y, &vars)
 }
 
-/// Map mouse events to widget events for SDF widgets.
+/// Resolve the handle once, at pointer-down. The editor owns its lifetime.
+pub fn sdf_begin_gesture(node: &LayoutNode, col: f32, row: f32, cell_w: f32, cell_h: f32) -> Value {
+    let aspect = node.rect.width * cell_w / (node.rect.height * cell_h).max(0.0001);
+    let (index, name) = sdf_widget_hit_region(node, col - node.rect.col, row - node.rect.row, aspect);
+    name.map(Value::Keyword).unwrap_or(Value::Number(index as f64))
+}
+
+/// Carry pixel-correct hit geometry and the captured region to the callback.
 pub fn sdf_map_mouse_event(
-    _node: &LayoutNode,
+    node: &LayoutNode,
     mouse_kind: crossterm::event::MouseEventKind,
     local_col: f32,
     local_row: f32,
+    gesture: Option<&Value>,
+    cell_w: f32,
+    cell_h: f32,
 ) -> super::MouseEventOutcome {
     use crossterm::event::{MouseButton, MouseEventKind};
-    match mouse_kind {
-        MouseEventKind::Down(MouseButton::Left) => super::MouseEventOutcome::Dispatch(
-            super::WidgetEvent::PointerDown(super::PointerEvent {
-                local_col,
-                local_row,
-            }),
-        ),
-        MouseEventKind::Drag(MouseButton::Left) => super::MouseEventOutcome::Dispatch(
-            super::WidgetEvent::PointerDrag(super::PointerDragEvent {
-                start_local_col: local_col,
-                start_local_row: local_row,
-                local_col,
-                local_row,
-            }),
-        ),
-        MouseEventKind::Up(MouseButton::Left) => {
-            super::MouseEventOutcome::Dispatch(super::WidgetEvent::PointerUp(super::PointerEvent {
-                local_col,
-                local_row,
-            }))
-        }
-        _ => super::MouseEventOutcome::Ignore,
-    }
+    let phase = match mouse_kind {
+        MouseEventKind::Down(MouseButton::Left) => "down",
+        MouseEventKind::Drag(MouseButton::Left) => "drag",
+        MouseEventKind::Up(MouseButton::Left) => "up",
+        _ => return super::MouseEventOutcome::Ignore,
+    };
+    let region = gesture.cloned().unwrap_or_else(||
+        sdf_begin_gesture(node, local_col, local_row, cell_w, cell_h));
+    let sx = (local_col - node.rect.col) / node.rect.width * 2.0 - 1.0;
+    let sy = (local_row - node.rect.row) / node.rect.height * 2.0 - 1.0;
+    super::MouseEventOutcome::Dispatch(super::WidgetEvent::Custom(Value::List(
+        vec![Value::Keyword(phase.into()), Value::Number(sx as f64), Value::Number(sy as f64), region]
+            .into_iter().map(|v| Rc::new(RefCell::new(v))).collect(),
+    )))
 }
 
 /// Dispatch SDF widget pointer events to Lisp callbacks (:on-click, :on-drag, :on-mouse-up).
@@ -437,6 +444,22 @@ pub fn sdf_handle_event(
     event: &super::WidgetEvent,
 ) -> Option<super::EventOutput> {
     sdf_widget_def(&node.widget_type)?;
+
+    if let super::WidgetEvent::Custom(Value::List(values)) = event {
+        let phase = values.first()?.borrow();
+        let names: &[&str] = match &*phase {
+            Value::Keyword(s) if s == "down" => &["on-mouse-down", "on-click"],
+            Value::Keyword(s) if s == "drag" => &["on-drag"],
+            Value::Keyword(s) if s == "up" => &["on-mouse-up"],
+            _ => return None,
+        };
+        let callback = names.iter().find_map(|name| node.props.get(*name))?.clone();
+        if matches!(callback, Value::Nil | Value::Bool(false)) { return None; }
+        return Some(super::EventOutput {
+            callback,
+            args: values.iter().skip(1).map(|v| v.borrow().clone()).collect(),
+        });
+    }
 
     let (local_col, local_row, prop_names): (f32, f32, &[&str]) = match event {
         super::WidgetEvent::PointerDown(pe) => {
@@ -519,18 +542,18 @@ pub fn sdf_widget_registry_generation() -> u64 {
     SDF_WIDGET_REGISTRY_GENERATION.load(Ordering::Relaxed)
 }
 
-/// Measure an SDF widget — returns the fixed size from defwidget :measure.
+/// Instance dimensions override the intrinsic size declared by defwidget.
 pub fn sdf_widget_measure(
     widget_type: &str,
-    _node: &Value,
+    node: &Value,
     _children: &[Value],
     _constraints: Constraints,
     _ctx: &MeasureCtx<'_>,
 ) -> Option<Size> {
     let def = sdf_widget_def(widget_type)?;
     Some(Size {
-        width: def.width,
-        height: def.height,
+        width: crate::layout::get_prop_num(node, "width").map(|v| v as f32).unwrap_or(def.width).max(0.0),
+        height: crate::layout::get_prop_num(node, "height").map(|v| v as f32).unwrap_or(def.height).max(0.0),
     })
 }
 
@@ -969,6 +992,23 @@ mod tests {
     }
 
     #[test]
+    fn instance_dimensions_override_intrinsic_size() {
+        let mut runtime = crate::runtime::Runtime::new();
+        runtime.eval_str("(defwidget sdf-instance-size :width 12 :height 4 :shader (sdf/circle 0.5))").unwrap();
+        let constraints = Constraints { min_width: 0.0, max_width: 100.0, min_height: 0.0, max_height: 100.0, aspect: 1.0 };
+        let ctx = MeasureCtx { cell_w: 1.0, cell_h: 1.0, text_measurer: None, inherited_font_size: 14.0 };
+        for (source, width, height) in [
+            ("(sdf-instance-size)", 12.0, 4.0),
+            ("(sdf-instance-size :width 8 :height 1.5)", 8.0, 1.5),
+            ("(sdf-instance-size :height 2)", 12.0, 2.0),
+        ] {
+            let node = runtime.eval_str(source).unwrap().unwrap();
+            let size = sdf_widget_measure("sdf-instance-size", &node, &[], constraints, &ctx).unwrap();
+            assert_eq!(size, Size { width, height });
+        }
+    }
+
+    #[test]
     fn sdf_input_color_uses_selected_color_only_while_selected() {
         let mut props = HashMap::from([
             ("color".to_string(), Value::Keyword("red".to_string())),
@@ -1125,6 +1165,30 @@ mod tests {
         });
 
         assert_eq!(sdf_widget_hit_test(&node, 1.4, 0.7, 1.0), 0);
+    }
+
+    #[test]
+    fn sdf_drag_preserves_named_region_with_pixel_correct_hit_testing() {
+        let mut runtime = crate::Runtime::new();
+        runtime.eval_str("(defwidget sdf-drag-regression :state (offset) :bindable (offset) :shader (sdf/region :handle (sdf/translate offset 0 (sdf/circle 0.05)) :accent (sdf/translate offset 0 (sdf/circle 0.2))))").unwrap();
+        let mut node = LayoutNode {
+            widget_id: 999, stable_widget_id: None, subtree_root_id: None,
+            parent_subtree_root_id: None, stable_key: None,
+            widget_type: "sdf-drag-regression".into(),
+            rect: Rect { row: 2.0, col: 3.0, width: 8.0, height: 2.0 },
+            props: HashMap::from([("offset".into(), Value::Number(1.0)), ("on-drag".into(), Value::Bool(true))]),
+            children: Vec::new(), focusable: false, animation: Default::default(),
+        };
+        // Cell dimensions make the pixel aspect 2, not the layout aspect 4.
+        let captured = sdf_begin_gesture(&node, 9.0, 3.0, 10.0, 20.0);
+        assert_eq!(captured, Value::Keyword("handle".into()));
+        node.props.insert("offset".into(), Value::Number(-1.0));
+        let outcome = sdf_map_mouse_event(&node,
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            20.0, 8.0, Some(&captured), 10.0, 20.0);
+        let super::super::MouseEventOutcome::Dispatch(event) = outcome else { panic!("dispatch"); };
+        let output = sdf_handle_event(&node, &event).unwrap();
+        assert_eq!(output.args[2], captured);
     }
 
     #[test]
