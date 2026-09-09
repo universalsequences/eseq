@@ -3,6 +3,9 @@ use crate::parser::Expression;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReactiveChunkKind { Derived, View, Observer }
+
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub ops: Vec<OpCode>,
@@ -104,6 +107,7 @@ pub enum OpCode {
     PushSymbol(usize),       // push Value::Symbol from strings pool (quoted symbol)
     InitDerived(u32, usize), // node id, chunk idx
     InitEffect(u32, usize),  // node id, chunk idx
+    InitObserver(u32, usize), // nonvisual reactive effect
     InitNamedEffect(u32, usize, usize), // node id, chunk idx, target buffer name string idx
     InitState(u32),          // node id
     LoadDerived(u32),        // load derived node cached value
@@ -1212,7 +1216,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         node_id: u32,
         body: &[Expression],
-        is_effect: bool,
+        kind: ReactiveChunkKind,
     ) -> Result<usize, CompilerError> {
         let (chunk_idx, previous_chunk_idx) = self.new_chunk(Chunk {
             ops: vec![],
@@ -1225,14 +1229,14 @@ impl<'a> Compiler<'a> {
             source_module: None,
         });
 
-        if is_effect {
+        if kind != ReactiveChunkKind::Derived {
             self.emit(OpCode::EffectBegin(node_id));
         } else {
             self.emit(OpCode::DerivedBegin(node_id));
         }
         self.compile_block(body)?;
-        if is_effect {
-            self.emit(OpCode::EmitTree);
+        if kind != ReactiveChunkKind::Derived {
+            self.emit(if kind == ReactiveChunkKind::View { OpCode::EmitTree } else { OpCode::Pop });
             self.emit(OpCode::EffectEnd(node_id));
             self.emit(OpCode::PushNil);
         } else {
@@ -1251,7 +1255,7 @@ impl<'a> Compiler<'a> {
         body: &[Expression],
     ) -> Result<(), CompilerError> {
         let node_id = self.alloc_node_id();
-        let chunk_idx = self.compile_reactive_chunk(node_id, body, false)?;
+        let chunk_idx = self.compile_reactive_chunk(node_id, body, ReactiveChunkKind::Derived)?;
         self.derived_bindings.insert(name.to_string(), node_id);
         self.emit(OpCode::InitDerived(node_id, chunk_idx));
         self.emit_symbol_store_for_definition(name);
@@ -1742,7 +1746,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_inline_derived(&mut self, body: &[Expression]) -> Result<(), CompilerError> {
         let node_id = self.alloc_node_id();
-        let chunk_idx = self.compile_reactive_chunk(node_id, body, false)?;
+        let chunk_idx = self.compile_reactive_chunk(node_id, body, ReactiveChunkKind::Derived)?;
         self.emit(OpCode::InitDerived(node_id, chunk_idx));
         self.emit(OpCode::LoadDerived(node_id));
         Ok(())
@@ -1750,8 +1754,15 @@ impl<'a> Compiler<'a> {
 
     fn compile_effect_form(&mut self, body: &[Expression]) -> Result<(), CompilerError> {
         let node_id = self.alloc_node_id();
-        let chunk_idx = self.compile_reactive_chunk(node_id, body, true)?;
+        let chunk_idx = self.compile_reactive_chunk(node_id, body, ReactiveChunkKind::View)?;
         self.emit(OpCode::InitEffect(node_id, chunk_idx));
+        Ok(())
+    }
+
+    fn compile_observer_form(&mut self, body: &[Expression]) -> Result<(), CompilerError> {
+        let node_id = self.alloc_node_id();
+        let chunk_idx = self.compile_reactive_chunk(node_id, body, ReactiveChunkKind::Observer)?;
+        self.emit(OpCode::InitObserver(node_id, chunk_idx));
         Ok(())
     }
 
@@ -1764,7 +1775,7 @@ impl<'a> Compiler<'a> {
             _ => return Err(CompilerError::InvalidArg),
         };
         let node_id = self.alloc_node_id();
-        let chunk_idx = self.compile_reactive_chunk(node_id, &body[1..], true)?;
+        let chunk_idx = self.compile_reactive_chunk(node_id, &body[1..], ReactiveChunkKind::View)?;
         let target_idx = self.use_string_constant(target);
         self.emit(OpCode::InitNamedEffect(node_id, chunk_idx, target_idx));
         Ok(())
@@ -3061,6 +3072,9 @@ impl<'a> Compiler<'a> {
             }
             if s == "setopt" && list.len() == 3 {
                 return self.compile_set_statement(&list[1], &list[2]);
+            }
+            if s == "observe" {
+                return self.compile_observer_form(&list[1..]);
             }
             if s == "effect" {
                 return self.compile_effect_form(&list[1..]);

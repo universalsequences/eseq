@@ -178,7 +178,10 @@ pub(crate) fn run_event_loop(
     mut track_names: Vec<String>,
     lisp_hot_reload_enabled: bool,
     shared: SharedHandles,
+    menu_state: application_menu::SharedMenuState,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let mut native_menu = native_menu::NativeMenu::attach(menu_state.clone(), &mut editor, &backend);
     // 5. Metal event loop
     let idle_frame_interval = Duration::from_secs_f64(1.0 / 30.0);
     let animation_frame_interval = Duration::from_secs_f64(1.0 / 60.0);
@@ -344,6 +347,7 @@ pub(crate) fn run_event_loop(
         std::collections::HashSet::new();
 
     loop {
+        application_menu::sync_context(&menu_state, &mut editor);
         let mut pointer_released_this_loop = false;
         for result in app.drain_due_pattern_launches() {
             match result {
@@ -1378,6 +1382,17 @@ pub(crate) fn run_event_loop(
             pull_named_scratch_buffer_into_project(&editor, &mut app);
         }
 
+        // Input may have closed a prompt or changed focus this pass. Resolve
+        // menu predicates before delivering actions, including search results.
+        // Install native menus only after polling the backend: the first poll
+        // finishes AppKit launch, when winit installs its default menu. An
+        // earlier installation would be replaced without a Lisp revision change.
+        application_menu::sync_context(&menu_state, &mut editor);
+        #[cfg(target_os = "macos")]
+        native_menu.sync(&mut editor);
+        #[cfg(target_os = "macos")]
+        native_menu.drain(&mut editor);
+
         // 1b. Drain host commands (sample browser etc.)
         let host_commands_started = Instant::now();
         let drained_host_commands = editor.drain_host_commands();
@@ -1407,6 +1422,12 @@ pub(crate) fn run_event_loop(
                     continue;
                 }
                 HostCommand::Custom { name, payload } => {
+                    if name == "native-menu-activate" {
+                        if let Value::String(id) = &payload {
+                            application_menu::activate(&menu_state, &mut editor, id);
+                        }
+                        continue;
+                    }
                     let _ = current_track_for_app(&mut app, &shared.current_track);
                     match handle_macro_host_command(
                         &name,
@@ -2615,6 +2636,8 @@ pub(crate) fn run_event_loop(
         }
     }
 
+    #[cfg(target_os = "macos")]
+    drop(native_menu);
     let _ = backend.teardown();
     Ok(())
 }

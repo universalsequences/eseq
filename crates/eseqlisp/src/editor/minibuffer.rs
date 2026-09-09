@@ -11,6 +11,28 @@ impl Editor {
         };
 
         match mode {
+            MinibufferMode::CommandChoices { title, mut input, entries, mut selected } => {
+                let labels: Vec<String> = entries.iter().map(|(label, _)| label.clone()).collect();
+                let filtered = filter_candidates(&labels, &input);
+                match key.code {
+                    KeyCode::Esc => { self.minibuffer = None; return true; }
+                    KeyCode::Enter => {
+                        if let Some(label) = filtered.get(selected) {
+                            if let Some((_, command)) = entries.iter().find(|(name, _)| name == label) {
+                                self.runtime.enqueue_host_command(command.clone());
+                            }
+                        }
+                        return true;
+                    }
+                    KeyCode::Tab | KeyCode::Down => { if !filtered.is_empty() { selected = (selected + 1) % filtered.len(); } }
+                    KeyCode::Up => { if !filtered.is_empty() { selected = (selected + filtered.len() - 1) % filtered.len(); } }
+                    KeyCode::Backspace => { input.pop(); selected = 0; }
+                    KeyCode::Char(c) if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT => { input.push(c); selected = 0; }
+                    _ => {}
+                }
+                self.minibuffer_input = Some(MinibufferMode::CommandChoices { title, input, entries, selected });
+            }
+
             MinibufferMode::Mx {
                 mut input,
                 candidates,
@@ -271,6 +293,13 @@ impl Editor {
 
     pub fn minibuffer_prompt(&self) -> Option<String> {
         match &self.minibuffer_input {
+            Some(MinibufferMode::CommandChoices { title, input, entries, selected }) => {
+                let labels: Vec<String> = entries.iter().map(|(label, _)| label.clone()).collect();
+                let filtered = filter_candidates(&labels, input);
+                let hint = filtered.get(*selected).map(String::as_str).unwrap_or("No matching commands");
+                Some(format!("{title}: {input}  [{hint}]"))
+            }
+
             Some(MinibufferMode::Mx {
                 input,
                 candidates,

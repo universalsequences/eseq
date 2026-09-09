@@ -1926,6 +1926,7 @@
         let auto_follow_override_until = Arc::new(Mutex::new(None));
 
         let RuntimeInit {
+            menu_state: _,
             runtime,
             accumulator_names,
             midi_fx_names: _,
@@ -2881,6 +2882,7 @@
         let piano_roll_focus = super::new_shared_piano_roll_focus();
 
         let RuntimeInit {
+            menu_state: _,
             runtime,
             accumulator_names,
             midi_fx_names: _,
@@ -14450,6 +14452,7 @@
         let active_delete_target_version = Arc::new(AtomicUsize::new(0));
         let auto_follow_override_until = Arc::new(Mutex::new(None));
         let RuntimeInit {
+            menu_state: _,
             runtime,
             accumulator_names,
             midi_fx_names: _,

@@ -41,6 +41,11 @@ pipewire = "0.10"
 # the Metal backend does not exist.
 eseqlisp = { path = "../eseqlisp", features = ["wgpu"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.19.3", default-features = false }
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+
 [lib]
 name = "sequencer"
 path = "src/lib.rs"

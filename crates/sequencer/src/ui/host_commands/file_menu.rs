@@ -10,13 +10,13 @@ pub(super) const COMMANDS: &[&str] = &[
 
 /// The Save / Save As / About modals are mounted in the step-panel buffers,
 /// and a modal only receives pointer input through the active tile.
-fn activate_dialog_tile(editor: &mut Editor) {
+pub(super) fn activate_dialog_tile(editor: &mut Editor) {
     if !editor.switch_active_tile_to_buffer_named("*arrangement*") {
         editor.switch_active_tile_to_buffer_named("*sequencer*");
     }
 }
 
-fn lisp_string(text: &str) -> String {
+pub(super) fn lisp_string(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 

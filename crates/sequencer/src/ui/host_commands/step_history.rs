@@ -2564,4 +2564,24 @@ mod tests {
             "the selection sweep is also a single history entry"
         );
     }
+    #[test]
+    fn menu_pattern_operations_preserve_chords_and_move_complete_steps() {
+        let mut harness = Harness::new();
+        harness.state.set_step_param(0, 0, StepParam::Transpose, 0.0);
+        harness.state.pattern.patterns[0].set_step_active(0, true);
+        harness.state.pattern.chord_data[0].add_note_with_timing(0, 0.0, 2.0, 0.1);
+        harness.state.pattern.chord_data[0].add_note_with_timing(0, 7.0, 1.0, 0.2);
+        harness.dispatch("menu-pattern-transpose", map_value([("semitones", Value::Number(12.0))]));
+        let transposed = harness.state.capture_step_snapshot(0, 0);
+        assert_eq!(transposed.chord, vec![12.0, 19.0]);
+        assert_eq!(transposed.chord_durations, vec![2.0, 1.0]);
+        assert_eq!(transposed.chord_delays, vec![0.1, 0.2]);
+        harness.dispatch("menu-pattern-transform", map_value([("operation", Value::String("right".into()))]));
+        assert_eq!(harness.state.capture_step_snapshot(0, 1).chord, transposed.chord);
+        harness.dispatch("menu-pattern-transform", map_value([("operation", Value::String("clear".into()))]));
+        let cleared = harness.state.capture_step_snapshot(0, 1);
+        assert!(!cleared.active);
+        assert!(cleared.chord.is_empty());
+    }
+
 }

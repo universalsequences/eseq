@@ -465,9 +465,36 @@ fn is_toggle_mods_view_shortcut(key: &crossterm::event::KeyEvent) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PatternLengthShortcut {
+pub(crate) enum PatternLengthShortcut {
     Double,
     Halve,
+}
+
+/// Shared by keyboard shortcuts and application menu commands.
+pub(crate) fn resize_selected_pattern(editor: &mut Editor, shortcut: PatternLengthShortcut) -> bool {
+    let command = if metal_has_selected_bus(editor) {
+        let Some(bus) = metal_selected_drum_rack_bus(editor) else {
+            return false;
+        };
+        let operation = match shortcut {
+            PatternLengthShortcut::Double => "double",
+            PatternLengthShortcut::Halve => "halve",
+        };
+        format!("(seq-resize-drum-rack-patterns {bus} :{operation})")
+    } else {
+        match shortcut {
+            PatternLengthShortcut::Double => {
+                "(eseq.seq-grid-mode/double-track-pattern)".to_string()
+            }
+            PatternLengthShortcut::Halve => {
+                "(eseq.seq-grid-mode/halve-track-pattern)".to_string()
+            }
+        }
+    };
+    let _ = editor.runtime_mut().eval_str(&command);
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+    true
 }
 
 fn pattern_length_shortcut(key: &crossterm::event::KeyEvent) -> Option<PatternLengthShortcut> {
@@ -1526,29 +1553,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && !focused_widget_captures_text_input(editor)
     {
         if let Some(shortcut) = pattern_length_shortcut(key) {
-            let command = if metal_has_selected_bus(editor) {
-                let Some(bus) = metal_selected_drum_rack_bus(editor) else {
-                    return false;
-                };
-                let operation = match shortcut {
-                    PatternLengthShortcut::Double => "double",
-                    PatternLengthShortcut::Halve => "halve",
-                };
-                format!("(seq-resize-drum-rack-patterns {bus} :{operation})")
-            } else {
-                match shortcut {
-                    PatternLengthShortcut::Double => {
-                        "(eseq.seq-grid-mode/double-track-pattern)".to_string()
-                    }
-                    PatternLengthShortcut::Halve => {
-                        "(eseq.seq-grid-mode/halve-track-pattern)".to_string()
-                    }
-                }
-            };
-            let _ = editor.runtime_mut().eval_str(&command);
-            editor.refresh_runtime_side_effects();
-            editor.mark_needs_redraw();
-            return true;
+            return resize_selected_pattern(editor, shortcut);
         }
 
         match (key.code, key.modifiers) {
@@ -1670,6 +1675,20 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
     }
 
     if let Some(shortcut) = step_clipboard_shortcut_for(key, CURRENT_SHORTCUT_PLATFORM) {
+        return perform_step_clipboard_action(editor, shortcut, state, current_track, selected_steps, step_clipboard);
+    }
+
+    false
+}
+
+pub(crate) fn perform_step_clipboard_action(
+    editor: &mut Editor,
+    shortcut: StepClipboardShortcut,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    step_clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
+) -> bool {
         match shortcut {
             StepClipboardShortcut::Copy => {
                 let track = current_track.load(Ordering::Relaxed);
@@ -1725,13 +1744,10 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 return true;
             }
         }
-    }
-
-    false
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StepClipboardShortcut {
+pub(crate) enum StepClipboardShortcut {
     Copy,
     Paste,
 }

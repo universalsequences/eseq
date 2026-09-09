@@ -4121,6 +4121,7 @@ impl Runtime {
         for pending in trees {
             affected_buffers.insert(effect_target_label(pending.target()));
             let targets_active_buffer = match pending.target() {
+                EffectTarget::Observer => false,
                 EffectTarget::BufferId(id) => *id == current_buffer_id,
                 EffectTarget::BufferName(name) => *name == current_buffer_name,
             };
@@ -4491,6 +4492,7 @@ fn collect_shader_widget_ids(node: &LayoutNode) -> Vec<u64> {
 
 fn effect_target_label(target: &EffectTarget) -> String {
     match target {
+        EffectTarget::Observer => "observer".to_string(),
         EffectTarget::BufferId(Some(id)) => format!("buf#{id}"),
         EffectTarget::BufferId(None) => "active-buffer".to_string(),
         EffectTarget::BufferName(name) => name.clone(),
@@ -4561,5 +4563,39 @@ mod theme_shader_recompile_tests {
 
         // Guarded by theme generation: a second pass is a no-op.
         assert!(!super::recompile_theme_dependent_sdf_shaders());
+    }
+}
+
+#[cfg(test)]
+mod observer_tests {
+    use super::*;
+
+    #[test]
+    fn observer_tracks_changes_without_emitting_or_overwriting_widget_trees() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let writes = seen.clone();
+        let mut runtime = Runtime::new();
+        runtime.register_native("observer-sink", move |args, _| {
+            writes.borrow_mut().push(args[0].clone());
+            Ok(Value::Nil)
+        });
+        runtime.eval_str(r#"
+            (defstate observer-input 1)
+            (effect-buffer "*view*" (box :width 10 :height 2))
+        "#).unwrap();
+        assert!(!runtime.take_pending_buffer_widget_trees().is_empty());
+        runtime.eval_str(r#"
+            (observe
+              (observer-sink observer-input)
+              (box :width 99 :height 99))
+        "#).unwrap();
+        assert_eq!(seen.borrow().len(), 1);
+        assert!(runtime.take_pending_buffer_widget_trees().is_empty());
+        runtime.set_hidden_effect_buffer_names(["*view*".to_string()].into_iter().collect());
+        runtime.eval_str("(set! observer-input 2)").unwrap();
+        runtime.run_reactive_cycle();
+        assert_eq!(seen.borrow().len(), 2);
+        assert!(matches!(seen.borrow()[1], Value::Number(2.0)));
+        assert!(runtime.take_pending_buffer_widget_trees().is_empty());
     }
 }

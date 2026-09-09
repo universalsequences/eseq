@@ -1221,6 +1221,7 @@ impl App {
 
         self.save_project_named(&save_name)?;
         self.current_project_name = Some(save_name.clone());
+        if let Err(error) = crate::recent_projects::record(&save_name) { eprintln!("Could not update recent projects: {error}"); }
         Ok(save_name)
     }
 
@@ -4183,6 +4184,7 @@ impl App {
         }
 
         self.current_project_name = Some(pending.name.clone());
+        if let Err(error) = crate::recent_projects::record(&pending.name) { eprintln!("Could not update recent projects: {error}"); }
         let evaluated_scratch = scratch
             .evaluated_buffer
             .unwrap_or_else(|| scratch.buffer.clone());

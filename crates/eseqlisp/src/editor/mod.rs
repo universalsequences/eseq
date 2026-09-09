@@ -409,6 +409,12 @@ struct SavePrompt {
 
 #[derive(Debug, Clone)]
 enum MinibufferMode {
+    CommandChoices {
+        title: String,
+        input: String,
+        entries: Vec<(String, HostCommand)>,
+        selected: usize,
+    },
     Mx {
         input: String,
         candidates: Vec<String>,
@@ -8704,6 +8710,7 @@ impl Editor {
                 PendingUiUpdate::FullTree(pending) => {
                     self.flush_active_subtree_replacements(&mut active_subtree_replacements);
                     let buffer_idx = match pending.target {
+                        EffectTarget::Observer => continue,
                         EffectTarget::BufferId(Some(id)) => {
                             let Some(idx) = self.buffers.iter().position(|buffer| buffer.id == id)
                             else {
@@ -8816,6 +8823,7 @@ impl Editor {
                     ..
                 } => {
                     let buffer_idx = match target {
+                        EffectTarget::Observer => continue,
                         EffectTarget::BufferId(Some(id)) => {
                             let Some(idx) = self.buffers.iter().position(|buffer| buffer.id == id)
                             else {

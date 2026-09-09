@@ -43,7 +43,8 @@
         piano-roll-request-fit-for-track
         piano-roll-request-fit
         piano-roll-apply-pending-fit
-        piano-roll-action)
+        piano-roll-action
+        piano-roll-select-all)
 
 ;; `cool-off-follow` belongs to the converted eseq.seq-core-state. It is
 ;; referenced BARE on purpose: it is an event-time call, so the base-name
@@ -330,6 +331,22 @@
     (if (native-action? event)
       (set! piano-roll-status (seq-piano-roll-action event))
       (set! piano-roll-status "piano roll"))))
+
+
+;; Cmd+A: select every NOTE of the focused content, not the step grid. A
+;; note is a (step, voice) item id, so a three-note chord is three ids on one
+;; step and a later Backspace keeps the voices that were not selected — the
+;; same :delete-items path a marquee uses. Goes straight to the native so no
+;; cursor moves. Returns false when there is nothing to select.
+(def piano-roll-select-all ()
+  (let ((ids (map (lambda (item) (get item :id)) SEQ.piano-roll-items)))
+    (if (= (len ids) 0)
+      false
+      (do
+        (set! selection-rect nil)
+        (set! piano-roll-status
+          (seq-piano-roll-action (dict :type :select :ids ids)))
+        true))))
 
 (def piano-roll-timeline ()
   (box :height :fill :flex 1 :width 0

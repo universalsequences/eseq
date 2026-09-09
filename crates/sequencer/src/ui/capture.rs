@@ -954,6 +954,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let auto_follow_override_until = Arc::new(Mutex::new(None::<Instant>));
 
     let RuntimeInit {
+        menu_state,
         runtime,
         accumulator_names,
         midi_fx_names: _,
@@ -1080,6 +1081,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     editor.refresh_runtime_side_effects();
     editor.clear_minibuffer_message();
 
+    application_menu::sync_context(&menu_state, &mut editor);
     let mut backend = create_capture_backend(&mut editor, args.width, args.height)?;
     let (cell_width, cell_height) = backend.cell_dimensions();
     let columns = ((args.width as f32 / cell_width).floor() as usize).clamp(1, u16::MAX as usize);

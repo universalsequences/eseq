@@ -4,7 +4,7 @@
 ;; modal only receives pointer input through the active tile. Mounted by both
 ;; step-panel buffers (`*sequencer*` and `*arrangement*`), like export-song.
 (module eseq.file-dialogs)
-(export panel open-save close-save save-open? save-draft commit-save
+(export open-confirm panel open-save close-save save-open? save-draft commit-save
         open-unsaved-prompt close-unsaved-prompt unsaved-prompt-open?
         unsaved-prompt-save unsaved-prompt-discard
         open-about close-about about-open?)
@@ -112,8 +112,27 @@
       (box :flex 1 :bg :transparent)
       (button "OK" :key "about-ok" :variant :primary :on-click |x y r| (close-about)))))
 
+(defstate confirm-open? false)
+(defstate confirm-message "")
+(defstate confirm-action nil)
+(def open-confirm (message action)
+  (set! confirm-message message)
+  (set! confirm-action action)
+  (set! confirm-open? true))
+(def close-confirm () (set! confirm-open? false) (set! confirm-action nil))
+(def accept-confirm ()
+  (let ((action confirm-action))
+    (close-confirm)
+    (if action (action) nil)))
+
 (def panel ()
   (v-stack :width 0 :height 0 :bg :transparent
+    (modal :is-open confirm-open? :on-close close-confirm :width-px 520 :height-px 220
+      (v-stack :width :fill :height :fill :padding 1 :gap 1
+        (label confirm-message :key "menu-confirm-message" :font-size 14 :bg :transparent)
+        (h-stack :gap 1
+          (button "Cancel" :key "menu-confirm-cancel" :on-click (lambda (event) (close-confirm)))
+          (button "Continue" :key "menu-confirm-accept" :on-click (lambda (event) (accept-confirm))))))
     (modal :is-open save-open? :on-close (lambda () (close-save)) :width-px 520 :height-px 380
       (box :debug-name "project-save-panel" :width :fill :height :fill :padding 0.6 :bg :transparent
         (if save-open? (save-body) (box :width 0 :height 0 :bg :transparent))))

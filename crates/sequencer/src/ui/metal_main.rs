@@ -1,3 +1,4 @@
+mod application_menu;
 mod arrangement_actions;
 mod browser;
 mod capture;
@@ -9,6 +10,8 @@ mod input;
 mod lisp_hot_reload;
 mod live_audio_analyzer;
 mod natives;
+#[cfg(target_os = "macos")]
+mod native_menu;
 mod piano_roll;
 mod patch_learn;
 mod profile;
@@ -207,6 +210,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let held_notes: Arc<Mutex<Vec<HeldKeyboardNote>>> = Arc::new(Mutex::new(Vec::new()));
 
     let RuntimeInit {
+        menu_state,
         runtime,
         accumulator_names,
         midi_fx_names: _,
@@ -298,6 +302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         track_names,
         lisp_hot_reload_enabled,
         shared,
+        menu_state,
     )?;
 
     drop(stream);

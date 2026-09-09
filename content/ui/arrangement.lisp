@@ -61,7 +61,9 @@
         lane-region-rect
         track-drag-kind
         track-action
-        drop-scene)
+        drop-scene
+        select-all-clips
+        clip-span-all-tracks)
 
 (defstate view-start 0)
 (defstate view-duration 64)
@@ -966,6 +968,43 @@
 ;; Any other selection gesture drops the region: the two are mutually
 ;; exclusive (spec 4.1). Clip selection additionally clears it Rust-side, so
 ;; this is really about the in-flight ghost and the scene-row path.
+
+;; Cmd+A (Ableton): select EVERY clip on EVERY track as one region — the
+;; visible-track span over [first clip start, last clip end). A region is the
+;; thing copy/duplicate/delete already act on, so this needs no new verb. It
+;; is a track-lane sweep, not a scene-lane one: scene events are not clips.
+;; Returns false when the song holds no clips so the caller can say so.
+(def clip-span-all-tracks ()
+  (let ((hi (reduce |acc lane|
+              (reduce |lane-acc clip| (max lane-acc (get clip :end-beat)) acc lane)
+              -1 SEQ.song-lanes)))
+    (if (< hi 0)
+      nil
+      ;; Seeded with `hi`, so the min is a real clip start, never the seed.
+      (let ((lo (reduce |acc lane|
+                  (reduce |lane-acc clip| (min lane-acc (get clip :start-beat)) acc lane)
+                  hi SEQ.song-lanes)))
+        (dict :start (max 0 lo) :end hi)))))
+
+(def select-all-clips ()
+  (let ((span (clip-span-all-tracks))
+        (visible (eseq.track-collapse/visible-track-indices)))
+    (if (or (= span nil) (= (len visible) 0))
+      false
+      (do
+        (set! selection '())
+        (set! selection-rect nil)
+        (set! track-selection '())
+        (set! selected-track -1)
+        (publish-selection -1 -1)
+        (region-commit
+          (dict :track-a (nth visible 0)
+                :track-b (nth visible (- (len visible) 1))
+                :start (get span :start)
+                :end (get span :end)
+                :scene-lane false))
+        true))))
+
 (def region-clear ()
   (do
     (set! region-ghost nil)

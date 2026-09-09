@@ -58,6 +58,8 @@
 ;; hub with no effect-buffer, and ui/main.lisp reaches it through this import
 ;; before the transport body runs.
 (import eseq.scene-banks)
+(import eseq.menus :as menus)
+(import eseq.application-menus)
 
 (export transport-stop
         seq-set-scene-launch-quantize
@@ -909,21 +911,26 @@
       :key "transpose-apply-all-banks"
       :on-select (lambda (event) (apply-transpose-menu "all-banks")))))
 
-;; ── File menu ──
-;; The toolbar's File dropdown. It replaces native menus so the same command
-;; set works with no menu bar. Save/Save As/About go through host commands
-;; because their modals are mounted in the step-panel buffers, and Rust must
-;; activate that tile before opening one.
-
+;; One command catalog feeds the native macOS menu and the toolbar fallback.
+;; Native availability is published only after the application installs a menu;
+;; headless captures and other platforms retain the toolbar menus.
 (defstate file-menu-open false)
 (defstate file-menu-col 0)
 (defstate file-menu-row 0)
+(defstate application-menu-open "")
 
 (def open-file-menu (event)
-  (do
-    (set! file-menu-col (get event :col))
-    (set! file-menu-row (get event :row))
-    (set! file-menu-open true)))
+  (open-application-menu "File" event))
+
+(def open-application-menu (name event)
+  (set! file-menu-col (get event :col))
+  (set! file-menu-row (get event :row))
+  (set! application-menu-open name)
+  (set! file-menu-open (= name "File")))
+
+(def close-application-menu ()
+  (set! application-menu-open "")
+  (set! file-menu-open false))
 
 (def file-menu-save ()
   (host-command "project-save-open" (dict :mode "save")))
@@ -938,27 +945,42 @@
       nil)
     (eseq.browser/open-project-browser)))
 
-(def file-context-menu ()
-  (context-menu :is-open file-menu-open
+(def application-menu-names ()
+  (map (lambda (menu) (get menu :id))
+    (filter (lambda (menu) (not (get menu :native-only))) (menus/current-menus))))
+
+(def application-menu (id)
+  (let ((matches (filter (lambda (menu) (= (get menu :id) id)) (menus/current-menus))))
+    (if (> (len matches) 0) (nth matches 0) nil)))
+
+(def application-menu-items (id) (get (application-menu id) :items))
+(def run-menu-action (name id) (menus/activate id))
+
+(def application-menu-row (item)
+  (if item
+    (menu-item (get item :label) :key (get item :id)
+      :disabled (not (get item :enabled))
+      :checked (get item :checked)
+      :shortcut (menus/shortcut-label (get item :shortcut))
+      :on-select (lambda (event) (menus/activate (get item :id)))
+      (if (get item :items) (map application-menu-row (get item :items)) (list)))
+    (menu-separator)))
+
+(def application-context-menu (name)
+  (context-menu :is-open (= application-menu-open name)
     :anchor-col file-menu-col :anchor-row file-menu-row
-    :on-close (lambda () (set! file-menu-open false))
-    (menu-item "New Project" :key "file-menu-new-project"
-      :on-select (lambda (event) (host-command "project-new-request" (dict))))
-    (menu-separator)
-    (menu-item "Save" :key "file-menu-save"
-      :on-select (lambda (event) (file-menu-save)))
-    (menu-item "Save As…" :key "file-menu-save-as"
-      :on-select (lambda (event) (file-menu-save-as)))
-    (menu-item "Open Project…" :key "file-menu-open-project"
-      :on-select (lambda (event) (file-menu-open-project)))
-    (menu-separator)
-    (menu-item "Export Audio…" :key "file-menu-export"
-      :on-select (lambda (event) (eseq.export-song/export-song)))
-    (menu-separator)
-    (menu-item "Help" :key "file-menu-help"
-      :on-select (lambda (event) (host-command "open-help" (dict))))
-    (menu-item "About eseq" :key "file-menu-about"
-      :on-select (lambda (event) (host-command "about-open" (dict))))))
+    :on-close (lambda () (close-application-menu))
+    (map application-menu-row (application-menu-items name))))
+
+(def file-context-menu () (application-context-menu "File"))
+
+(def application-menu-button (name)
+  (box :height 1.4 :padding 0.35 :corner-radius 12
+    :background-color (if (= application-menu-open name) :mixer-strip-selected-bg :mixer-strip-bg)
+    :style transport-icon-style
+    :on-click (lambda (event) (if (get (application-menu name) :enabled) (open-application-menu name event) nil))
+    (v-stack :align :center :height :fill
+      (label (get (application-menu name) :label) :font-size 11 :color :white :bg :transparent))))
 
 ;; ── Transport layout ──
 
@@ -986,15 +1008,15 @@
     (box :width 2)
     ;; A plain box, not an SDF icon: SDF widgets call `:on-click` with bare
     ;; |x y r| args, while a box passes the event map the menu anchors on.
-    (subtree :key "transport-file-menu-button"
-      (box :height 1.4 :padding 0.35 :corner-radius 12
-        :width 4
-        :background-color (if file-menu-open :mixer-strip-selected-bg :mixer-strip-bg)
-        :style transport-icon-style
-        :on-click (lambda (event) (open-file-menu event))
-        (v-stack :align :center :height :fill
-          (label "File" :font-size 11 :color :white :bg :transparent))))
-    
+    (subtree :key "transport-application-menus"
+      (if (native-menu-installed?)
+        (box :width 0 :height 0)
+        (h-stack :gap 0.2 :align :center
+          (map (lambda (name)
+            (subtree :key (str "transport-" name "-menu-button")
+              (application-menu-button name)))
+            (application-menu-names)))))
+
     ;; Transport buttons in a shared rounded-rect container
     (box :background-color :mixer-strip-bg :corner-radius 72 :padding 0.015 :height 1.4
       (h-stack :gap 0.2 :align :center
@@ -1267,8 +1289,8 @@
     
     (subtree :key "transport-transpose-context-menu"
       (transpose-context-menu))
-    (subtree :key "transport-file-context-menu"
-      (file-context-menu))
+    (subtree :key "transport-context-menus"
+      (h-stack :gap 0 (map application-context-menu (application-menu-names))))
     
     ;; Session and arrangement are app views, not tabs in the main buffer.
     ;; This spacer keeps the view pair against the transport's right edge.

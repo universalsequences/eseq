@@ -250,6 +250,8 @@ pub enum ReactiveNode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EffectTarget {
+    /// A nonvisual observer: always live, never bound to a widget buffer.
+    Observer,
     BufferId(Option<BufferId>),
     BufferName(String),
 }
@@ -341,6 +343,7 @@ impl ReactiveExecTiming {
             .map(|id| format!("owner:buf#{id}"))
             .unwrap_or_else(|| "owner:none".to_string());
         let target = match &self.target {
+            EffectTarget::Observer => "target:observer".to_string(),
             EffectTarget::BufferId(Some(id)) => format!("target:buf#{id}"),
             EffectTarget::BufferId(None) => "target:active-buffer".to_string(),
             EffectTarget::BufferName(name) => format!("target:{name}"),
@@ -4365,7 +4368,7 @@ impl VM {
             | OpCode::LoadReactive(_, _) | OpCode::LoadReactiveNth(_, _)
             | OpCode::LoadReactiveLen(_, _) => Some("reactive state read"),
             OpCode::Eval => Some("eval"),
-            OpCode::InitDerived(_, _) | OpCode::InitEffect(_, _)
+            OpCode::InitDerived(_, _) | OpCode::InitEffect(_, _) | OpCode::InitObserver(_, _)
             | OpCode::InitNamedEffect(_, _, _) | OpCode::InitState(_) => {
                 Some("reactive definition")
             }
@@ -5976,6 +5979,7 @@ impl VM {
 
     fn effect_target_profile_name(target: &EffectTarget) -> String {
         match target {
+            EffectTarget::Observer => "observer".to_string(),
             EffectTarget::BufferId(Some(id)) => format!("buf#{id}"),
             EffectTarget::BufferId(None) => "active-buffer".to_string(),
             EffectTarget::BufferName(name) => name.clone(),
@@ -6480,6 +6484,7 @@ impl VM {
     fn reactive_node_label(&self, node_id: NodeId) -> Option<String> {
         match self.dag.nodes.get(&node_id) {
             Some(ReactiveNode::Effect { target, .. }) => Some(match target {
+                EffectTarget::Observer => "observer".to_string(),
                 EffectTarget::BufferId(Some(id)) => format!("buf#{id}"),
                 EffectTarget::BufferId(None) => "active-buffer".to_string(),
                 EffectTarget::BufferName(name) => name.clone(),
@@ -7768,7 +7773,11 @@ impl VM {
                     stack.push(Rc::new(RefCell::new(Value::NodeRef(node_id))));
                     frames.last_mut().unwrap().pc += 1;
                 }
-                OpCode::InitEffect(node_id, chunk_idx) => {
+                OpCode::InitEffect(node_id, chunk_idx) | OpCode::InitObserver(node_id, chunk_idx) => {
+                    let previous_target = self.current_effect_target.clone();
+                    if matches!(op, OpCode::InitObserver(_, _)) {
+                        self.current_effect_target = EffectTarget::Observer;
+                    }
                     self.upsert_top_level_effect_node(
                         node_id,
                         chunk_idx,
@@ -7795,6 +7804,7 @@ impl VM {
                     self.current_effect_reactive_reads = previous_reactive_reads;
                     self.current_effect_symbol_reads = previous_symbol_reads;
                     self.current_chunk = current_chunk;
+                    self.current_effect_target = previous_target;
                     let _ = result?;
                     stack.push(Rc::new(RefCell::new(Value::Nil)));
                     frames.last_mut().unwrap().pc += 1;

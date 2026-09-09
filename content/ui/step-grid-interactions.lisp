@@ -65,7 +65,9 @@
         seq-set-step-param-from-step
         seq-set-process-lane-from-step
         select-all-steps
+        seq-global-select-all
         seq-global-select-all-steps
+        select-all-context
         seq-global-toggle-record
         delete-selected-steps
         duration-slider-position
@@ -401,14 +403,55 @@
     (eseq.seq-core-state/cool-off-follow)
     (seq-select-all-steps)))
 
-(def seq-global-select-all-steps ()
-  (if (and
-        (or (buffer-read-only?) (= (current-buffer-name) "*transport*"))
-        (not (= (current-buffer-name) "*piano-roll*")))
-    (select-all-steps)
+(def buffer-visible? (name)
+  (> (len (filter (lambda (n) (= n name)) (visible-buffer-list))) 0))
+
+;; What Cmd+A should select (bead eseq-vmg8). The ACTIVE buffer decides when
+;; it is itself a selection surface; otherwise (the *fx* panel, *transport*,
+;; a browser) the VISIBLE surface decides, so a Cmd+A typed while the device
+;; panel is active still selects the clips you can see in the arrangement,
+;; and never a step grid that is not on screen. Arrangement outranks the
+;; piano roll because the two can share the screen while the roll is a
+;; secondary panel; the step grid is the fallback.
+(def select-all-context ()
+  (let ((buf (current-buffer-name)))
+    (if (= buf "*arrangement*")
+      :arrangement
+      (if (= buf "*piano-roll*")
+        :piano-roll
+        (if (or (= buf "*sequencer*") (= buf "*metal*"))
+          :steps
+          (if (buffer-visible? "*arrangement*")
+            :arrangement
+            (if (buffer-visible? "*piano-roll*")
+              :piano-roll
+              :steps)))))))
+
+;; Selecting on one surface drops the step selection: otherwise the next
+;; Backspace still routes to step deletion and erases steps you cannot see.
+(def drop-step-selection ()
+  (if (seq-has-selection?) (seq-clear-selection) nil))
+
+;; Gated like seq-global-toggle-record: a UI-only or read-only buffer wants
+;; the surface select-all; an editable text buffer keeps the editor's own.
+(def seq-global-select-all ()
+  (if (or (buffer-read-only?) (= (view-mode) "ui") (= (current-buffer-name) "*transport*"))
+    (let ((context (select-all-context)))
+      (do
+        (if (= context :arrangement)
+          (do (drop-step-selection) (eseq.arrangement/select-all-clips))
+          (if (= context :piano-roll)
+            (do (drop-step-selection) (eseq.piano-roll/piano-roll-select-all))
+            (if (= (current-buffer-name) "*sequencer*")
+              (eseq.sequencer/select-all-current-track-steps)
+              (select-all-steps))))
+        true))
     false))
 
-(bind-key "C-a" "seq-global-select-all-steps")
+;; Kept as the historical name: user lisp may rebind or call it.
+(def seq-global-select-all-steps () (seq-global-select-all))
+
+(bind-key "C-a" "seq-global-select-all")
 
 (def seq-global-toggle-record ()
   (if (or (buffer-read-only?) (= (view-mode) "ui"))

@@ -15574,6 +15574,7 @@ mod drift_waveform_tests;
         crate::natives::register_factory_path_native(editor.runtime_mut());
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         register_agent_test_natives(editor.runtime_mut());
+        let menu_state = crate::application_menu::register_natives(editor.runtime_mut());
         register_full_grid_test_natives(&mut editor);
         // Transport owns a real defscene value, so full-UI fixtures need the
         // same scene authoring natives as the application.
@@ -15955,6 +15956,7 @@ mod drift_waveform_tests;
             editor.widget_layout().is_some(),
             "full grid test fixture should activate a sequencer widget layout"
         );
+        crate::application_menu::sync_context(&menu_state, &mut editor);
         editor
     }
 
@@ -29756,7 +29758,7 @@ mod drift_waveform_tests;
         let fx_button = find_layout_node_by_stable_key(&layout, "transport-fx-panel-button")
             .expect("FX panel button");
         let save_button =
-            find_layout_node_by_stable_key(&layout, "transport-file-menu-button").expect("file menu button");
+            find_layout_node_by_stable_key(&layout, "transport-File-menu-button").expect("file menu button");
         assert_finite_nonzero_rect(samples_button, "samples sidebar button");
         assert_finite_nonzero_rect(mixer_button, "mixer panel button");
         assert_finite_nonzero_rect(fx_button, "FX panel button");
@@ -55385,7 +55387,7 @@ mod drift_waveform_tests;
         assert!(find_layout_node_by_stable_key_suffix(&layout, "/file-menu-save").is_none());
         // Click the File button with a real pointer event: the menu anchors on
         // the click's :col/:row, which only a box-style `:on-click` delivers.
-        let file_button = find_layout_node_by_stable_key(&layout, "transport-file-menu-button")
+        let file_button = find_layout_node_by_stable_key(&layout, "transport-File-menu-button")
             .expect("file menu button");
         let click_col = file_button.rect.col + file_button.rect.width * 0.5;
         let click_row = file_button.rect.row + file_button.rect.height * 0.5;
@@ -55580,3 +55582,6 @@ mod manual_ui_tests;
 
 #[path = "about_ui_tests.rs"]
 mod about_ui_tests;
+
+#[path = "application_menu_tests.rs"]
+mod application_menu_tests;

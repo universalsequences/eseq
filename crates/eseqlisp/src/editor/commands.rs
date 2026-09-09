@@ -3,6 +3,60 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::Editor;
 
 impl Editor {
+    /// Menu entry point for logical editing actions. Widgets currently expose
+    /// their editing protocol through key_event; dispatch directly there, never
+    /// through user keymaps or OS event injection. An owning widget may decline
+    /// an action without letting it modify an unrelated text/track selection.
+    pub fn perform_edit_action(&mut self, action: &str) -> bool {
+        let primary = crate::ui::platform::primary_clipboard_key_modifiers().next().unwrap();
+        let code = match action {
+            "cut" => KeyCode::Char('x'), "copy" => KeyCode::Char('c'),
+            "paste" => KeyCode::Char('v'), "select-all" => KeyCode::Char('a'),
+            "delete" => KeyCode::Delete, _ => return false,
+        };
+        if self.focused_widget_id().is_some() {
+            let handled = self.handle_focused_widget_key(KeyEvent::new(code,
+                if action == "delete" { KeyModifiers::NONE } else { primary }));
+            if !handled && action == "cut"
+                && self.handle_focused_widget_key(KeyEvent::new(KeyCode::Char('c'), primary)) {
+                self.handle_focused_widget_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+            }
+            return true;
+        }
+        if self.active_buffer().view_mode == crate::editor::ViewMode::UiOnly { return false; }
+        match action {
+            "copy" => { self.copy_active_region_to_clipboard(); },
+            "paste" => self.run_command("paste-from-clipboard"),
+            "cut" | "delete" => {
+                if !self.guard_read_only() && (action != "cut" || self.copy_active_region_to_clipboard()) {
+                    self.record_undo_snapshot();
+                    self.delete_active_region();
+                }
+            }
+            "select-all" => {
+                self.mark = Some(super::Mark { buffer_id: self.active_buffer().id, cursor: (0, 0) });
+                // Region ends are exclusive; the normal buffer-end motion
+                // stops on the last character for Vim navigation.
+                let buffer = self.active_buffer_mut();
+                let row = buffer.lines.len().saturating_sub(1);
+                let column = buffer.lines.get(row).map(|line| line.chars().count()).unwrap_or(0);
+                buffer.cursor = (row, column);
+            }
+            _ => {}
+        }
+        self.mark_needs_redraw();
+        true
+    }
+
+    pub fn open_command_choices(&mut self, title: String, entries: Vec<(String, crate::host::HostCommand)>) {
+        self.completion = None;
+        self.minibuffer = None;
+        self.minibuffer_input = Some(super::MinibufferMode::CommandChoices {
+            title, entries, input: String::new(), selected: 0,
+        });
+        self.mark_needs_redraw();
+    }
+
     pub(super) fn bind_defaults(&mut self) {
         let binds: &[(KeyCode, KeyModifiers, &str)] = &[
             (KeyCode::Char('q'), KeyModifiers::CONTROL, "quit"),
@@ -348,4 +402,17 @@ pub(super) fn key_str(key: KeyEvent) -> String {
         _ => format!("{:?}", key.code),
     };
     format!("{prefix}{key_name}")
+}
+
+#[cfg(test)]
+mod menu_edit_tests {
+    use super::*;
+    #[test]
+    fn logical_select_all_and_delete_edit_the_active_text_buffer() {
+        let mut editor = Editor::new(crate::Runtime::new(), crate::EditorConfig::default());
+        editor.active_buffer_mut().insert_str("one\ntwo");
+        assert!(editor.perform_edit_action("select-all"));
+        assert!(editor.perform_edit_action("delete"));
+        assert!(editor.active_buffer().lines.len() == 1 && editor.active_buffer().lines[0].is_empty());
+    }
 }

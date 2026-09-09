@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) struct RuntimeInit {
+    pub(crate) menu_state: application_menu::SharedMenuState,
     pub(crate) runtime: Runtime,
     /// The UI VM's process/jaki authoring registry, handed to `App` so a
     /// project switch can reset it (bead eseq-jo7.21).
@@ -2524,6 +2525,7 @@ pub(crate) fn init_runtime(
     lg_raw: *mut sequencer::audiograph::LiveGraph,
 ) -> RuntimeInit {
     let mut runtime = Runtime::new();
+    let menu_state = application_menu::register_natives(&mut runtime);
     register_factory_path_native(&mut runtime);
     sequencer::lisp_host::register_neural_authoring_natives_with_selection(
         &mut runtime,
@@ -6707,6 +6709,7 @@ pub(crate) fn init_runtime(
     document_metal_seq_natives(&mut runtime);
 
     RuntimeInit {
+        menu_state,
         runtime,
         accumulator_names,
         midi_fx_names,
