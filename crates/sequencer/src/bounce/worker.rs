@@ -4,6 +4,9 @@
 use super::*;
 use super::session::PreparedExport;
 
+#[cfg(test)]
+mod musical_tests;
+
 #[derive(Clone, Debug)]
 pub struct ExportOptions {
     pub project: PathBuf,
