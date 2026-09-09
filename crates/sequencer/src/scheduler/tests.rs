@@ -10127,3 +10127,47 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             assert_eq!(events[0].sample_time, 0);
         });
     }
+
+    #[test]
+    fn snapshot_clock_bar_and_playhead_boundaries_are_chunk_invariant() {
+        for chunk in [1, 127, 512, 5760, 92160] {
+            let state = SequencerState::new(0, vec![]);
+            state.transport.bpm.store(125, Ordering::Relaxed);
+            state.toggle_play();
+            let snapshot = state.latest_scheduler_snapshot();
+            let mut clock = SnapshotSequencerClock::new(48_000);
+            // At this tempo every bar is exactly 180 production-size chunks.
+            for bar in 0..3 {
+                state.transport.pending_mod_resync.store(true, Ordering::Relaxed);
+                let end = (bar + 1) * 92160;
+                let mut frame = bar * 92160 + usize::from(bar > 0);
+                while frame < end {
+                    let frames = chunk.min(end - frame);
+                    clock.process_chunk(frames, &snapshot, &state);
+                    frame += frames;
+                }
+                assert_eq!(state.transport.mod_reset_counter.load(Ordering::Relaxed), bar as u32);
+                clock.process_chunk(1, &snapshot, &state);
+                assert_eq!(state.transport.mod_reset_counter.load(Ordering::Relaxed), bar as u32 + 1,
+                    "bar boundary lost for chunk size {chunk}");
+                assert_eq!(state.transport.playhead.load(Ordering::Relaxed), (bar as u32 + 1) * 16);
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_clock_seek_does_not_resync_but_next_bar_does() {
+        let state = SequencerState::new(0, vec![]);
+        state.transport.bpm.store(125, Ordering::Relaxed);
+        state.toggle_play();
+        let snapshot = state.latest_scheduler_snapshot();
+        let mut clock = SnapshotSequencerClock::new(48_000);
+        clock.process_chunk(1, &snapshot, &state);
+        state.transport.pending_mod_resync.store(true, Ordering::Relaxed);
+        clock.seek_beats(8.0);
+        clock.process_chunk(92160, &snapshot, &state);
+        assert_eq!(state.transport.mod_reset_counter.load(Ordering::Relaxed), 0);
+        clock.process_chunk(1, &snapshot, &state);
+        assert_eq!(state.transport.mod_reset_counter.load(Ordering::Relaxed), 1);
+        assert_eq!(state.transport.playhead.load(Ordering::Relaxed), 48);
+    }

@@ -55,6 +55,8 @@ pub(super) struct SnapshotSequencerClock {
     tempo_origin_beats: f64,
     tempo_frames: u64,
     tempo_bpm: u32,
+    last_global_16th: u32,
+    last_bar: u32,
 }
 
 impl SnapshotSequencerClock {
@@ -78,6 +80,8 @@ impl SnapshotSequencerClock {
             tempo_origin_beats: 0.0,
             tempo_frames: 0,
             tempo_bpm: 0,
+            last_global_16th: 0,
+            last_bar: 0,
         }
     }
 
@@ -99,6 +103,8 @@ impl SnapshotSequencerClock {
         self.total_beats = beat;
         self.tempo_origin_beats = beat;
         self.tempo_frames = 0;
+        self.last_global_16th = (beat / 0.25) as u32;
+        self.last_bar = (beat / 4.0) as u32;
     }
 
     /// Install the active song row's per-lane phase anchors (takes spec
@@ -422,7 +428,8 @@ impl SnapshotSequencerClock {
             }
         }
         if self.tempo_bpm != snapshot.transport.bpm {
-            self.seek_beats(self.total_beats);
+            self.tempo_origin_beats = self.total_beats;
+            self.tempo_frames = 0;
             self.tempo_bpm = snapshot.transport.bpm;
         }
 
@@ -442,21 +449,21 @@ impl SnapshotSequencerClock {
         }
 
         let mut triggers = Vec::new();
-        let mut last_global_16th = (self.total_beats / 0.25) as u32;
-        let mut last_bar = (self.total_beats / 4.0) as u32;
+        // These indices describe the last evaluated sample, not the next
+        // sample at total_beats. Keep them across chunk boundaries.
         for offset in 0..nframes {
             let global_16th = (self.total_beats / 0.25) as u32;
-            if global_16th != last_global_16th {
+            if offset == 0 || global_16th != self.last_global_16th {
                 state
                     .transport
                     .playhead
                     .store(global_16th, Ordering::Relaxed);
-                last_global_16th = global_16th;
+                self.last_global_16th = global_16th;
             }
 
             let bar = (self.total_beats / 4.0) as u32;
-            if bar != last_bar {
-                last_bar = bar;
+            if bar != self.last_bar {
+                self.last_bar = bar;
                 if state
                     .transport
                     .pending_mod_resync
