@@ -237,6 +237,7 @@ pub(super) struct AudioCallbackData {
     pub(super) scheduler_snapshot_version: u64,
     pub(super) pressure: super::pressure::PressureState,
     pub(super) mono_held: Vec<MonoHeldNotes>,
+    pub(super) legato_holds: SequencedLegatoHolds,
     pub(super) active_keyboard_notes: Vec<[Option<ActiveKeyboardNote>; MAX_VOICES]>,
     pub(super) keyboard_rx: std::sync::mpsc::Receiver<crate::sequencer::LiveInputEvent>,
     pub(super) master_recorder: Arc<MasterRecorder>,

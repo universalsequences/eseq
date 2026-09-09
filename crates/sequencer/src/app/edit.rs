@@ -13441,6 +13441,35 @@ mod tests {
     }
 
     #[test]
+    fn set_track_mono_trigger_reaches_the_published_scheduler_snapshot() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        app.state.publish_scheduler_snapshot();
+        assert_eq!(
+            app.state.latest_scheduler_snapshot().tracks[0].params.mono_trigger,
+            crate::sequencer::MonoTrigger::Retrig
+        );
+        try_apply_command(
+            &mut app,
+            AppCommand::SetTrackMonoTrigger { track: 0, mode: crate::sequencer::MonoTrigger::Legato },
+        )
+        .unwrap();
+        assert_eq!(
+            app.state.pattern.track_params[0].get_mono_trigger(),
+            crate::sequencer::MonoTrigger::Legato
+        );
+        // Sequenced note-ons read ScheduledVoicePolicy from this snapshot, so
+        // the dropdown must republish or playback keeps retriggering.
+        assert_eq!(
+            app.state.latest_scheduler_snapshot().tracks[0].params.mono_trigger,
+            crate::sequencer::MonoTrigger::Legato,
+            "scheduler snapshot must observe the new trigger mode"
+        );
+    }
+
+    #[test]
     fn slice3_track_command_families_obey_the_round_trip_law() {
         let mut app = test_app(SequencerState::new(
             1,

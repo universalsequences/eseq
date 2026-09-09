@@ -241,9 +241,19 @@ pub(super) fn render_audio_block(
         } else {
             data.pressure.press_generation(kt.track, kt.source, kt.generation);
         }
-        let mono = is_custom && (!track_polyphonic || track_max_polyphony == 1)
-            && track_custom_run_mode(&data.state, kt.track) != CustomInstrumentRunMode::FreePatch
-            && live_key_release_cuts_voice(&data.state, kt.track);
+        // A rack whose slots are all mono Custom instruments holds keys like a
+        // mono Custom track; otherwise a released older key would gate off the
+        // voice the newest key is sounding and force a retrigger.
+        let rack_mono = instrument_type == InstrumentType::Rack
+            && data
+                .scheduler_snapshot
+                .tracks
+                .get(kt.track)
+                .and_then(|track| track.rack_track.as_ref())
+                .is_some_and(rack_live_keys_play_mono);
+        let custom_mono = is_custom && (!track_polyphonic || track_max_polyphony == 1)
+            && track_custom_run_mode(&data.state, kt.track) != CustomInstrumentRunMode::FreePatch;
+        let mono = (custom_mono || rack_mono) && live_key_release_cuts_voice(&data.state, kt.track);
         let mut resumed_hold = false;
         let mut held_transpose = None;
         if mono {
@@ -405,6 +415,7 @@ pub(super) fn render_audio_block(
                     &mut data.block_events,
                     voice_lid,
                 );
+                data.legato_holds.clear_lid(voice_lid);
                 unsafe {
                     route_custom_voice_to_consumer(
                         data.lg.0,

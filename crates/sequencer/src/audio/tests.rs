@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::{
     apply_rack_macros_at_step, apply_rack_macros_live, clear_active_keyboard_note_by_lid,
-    off_step_macro_mask,
+    off_step_macro_mask, rack_live_keys_play_mono,
     off_step_macro_targets, resolve_rack_slot_instrument_plocks,
     collect_rack_choke_group_track_releases, collect_rack_choke_group_voice_releases,
     for_each_custom_voice_route_update, free_patch_transport_route_cache_is_fresh,
@@ -1988,6 +1988,77 @@ fn custom_engine_pool_tracks_polyphony_per_rack_route_consumer() {
             .count(),
         2
     );
+}
+
+#[test]
+fn mono_rack_slot_overlapping_note_continues_as_legato_per_slot() {
+    use crate::sequencer::MonoTrigger;
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=4 {
+        pool.add_voice(lid);
+    }
+    let mono_route = crate::sequencer::rack_slot_pool_index(0, 0).expect("mono rack route");
+    let poly_route = crate::sequencer::rack_slot_pool_index(0, 1).expect("poly rack route");
+
+    // Mono slot (max_polyphony 1): the second overlapping note reuses the
+    // still-gated route voice, which is exactly the legato condition.
+    let first = pool.allocate_voice(0, mono_route, 0.0, false, 1);
+    assert!(!first.continues_mono_note(mono_route, false, 1, MonoTrigger::Legato));
+    let second = pool.allocate_voice(0, mono_route, 4.0, false, 1);
+    assert_eq!(second.logical_id, first.logical_id);
+    assert!(second.continues_mono_note(mono_route, false, 1, MonoTrigger::Legato));
+    assert!(!second.continues_mono_note(mono_route, false, 1, MonoTrigger::Retrig));
+
+    // A sibling slot with polyphony never legatos, even with the flag on.
+    let p0 = pool.allocate_voice(0, poly_route, 7.0, true, 2);
+    let p1 = pool.allocate_voice(0, poly_route, 11.0, true, 2);
+    assert_ne!(p0.logical_id, p1.logical_id);
+    assert!(!p1.continues_mono_note(poly_route, true, 2, MonoTrigger::Legato));
+
+    // After the mono voice has been gated off, the next note is a full retrigger.
+    let idx = second.voice_idx;
+    pool.voices[idx].active = false;
+    pool.voices[idx].release_started_sample = Some(0);
+    let third = pool.allocate_voice(0, mono_route, 2.0, false, 1);
+    assert_eq!(third.logical_id, first.logical_id);
+    assert!(!third.continues_mono_note(mono_route, false, 1, MonoTrigger::Legato));
+}
+
+#[test]
+fn rack_live_keys_play_mono_only_when_every_slot_is_a_mono_custom_instrument() {
+    let mono_custom = || {
+        let mut slot = rack_routing_test_slot();
+        slot.instrument_type = InstrumentType::Custom;
+        slot.max_polyphony = 1;
+        slot
+    };
+    let macros = default_rack_macros();
+
+    assert!(!rack_live_keys_play_mono(&RackTrackSnapshot::new(vec![], macros.clone())));
+    assert!(rack_live_keys_play_mono(&RackTrackSnapshot::new(
+        vec![mono_custom(), mono_custom()],
+        macros.clone()
+    )));
+
+    let mut poly = mono_custom();
+    poly.max_polyphony = 4;
+    assert!(!rack_live_keys_play_mono(&RackTrackSnapshot::new(
+        vec![mono_custom(), poly],
+        macros.clone()
+    )));
+
+    let mut free_patch = mono_custom();
+    free_patch.instrument_run_mode = CustomInstrumentRunMode::FreePatch;
+    assert!(!rack_live_keys_play_mono(&RackTrackSnapshot::new(
+        vec![mono_custom(), free_patch],
+        macros.clone()
+    )));
+
+    // A sampler layer owns one voice per key, which the held stack would strand.
+    assert!(!rack_live_keys_play_mono(&RackTrackSnapshot::new(
+        vec![mono_custom(), rack_routing_test_slot()],
+        macros
+    )));
 }
 
 #[test]

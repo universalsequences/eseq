@@ -622,10 +622,15 @@ fn sync_track_param_fields(
         None => (tp.is_polyphonic(), tp.get_max_polyphony()),
     };
     rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp_poly));
-    rt.set_reactive("SEQ", "tp-supports-mono-trigger", Value::Bool(
-        app.graph.track_instrument_types.get(track)
-            == Some(&sequencer::sequencer::InstrumentType::Custom),
-    ));
+    // Rack tracks: every slot's note-on path (fire_rack_slot_note /
+    // fire_live_keyboard_rack_note) reads the parent track's mono trigger and
+    // voice priority, with "mono" decided per slot by its max_polyphony. So a
+    // rack slot at 1 voice gets legato from this same track-level control.
+    rt.set_reactive("SEQ", "tp-supports-mono-trigger", Value::Bool(matches!(
+        app.graph.track_instrument_types.get(track),
+        Some(sequencer::sequencer::InstrumentType::Custom)
+            | Some(sequencer::sequencer::InstrumentType::Rack)
+    )));
     rt.set_reactive("SEQ", "tp-voice-priority", Value::String(
         match tp.get_voice_priority() {
             sequencer::sequencer::VoicePriority::Last => "Last",

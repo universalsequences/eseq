@@ -58,6 +58,7 @@ pub(super) fn new_audio_callback_data(
         scheduler_snapshot_version: initial_scheduler_snapshot_version,
         pressure: super::pressure::PressureState::new(),
         mono_held: (0..MAX_TRACKS).map(|_| MonoHeldNotes::default()).collect(),
+        legato_holds: SequencedLegatoHolds::default(),
         active_keyboard_notes: (0..MAX_TRACKS).map(|_| [None; MAX_VOICES]).collect(),
         keyboard_rx,
         master_recorder,
@@ -98,6 +99,77 @@ pub(super) fn new_audio_callback_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legato_gate_off_resumes_displaced_sequenced_note_on_live_graph() {
+        use crate::audiograph as graph;
+        use crate::effects::gatepitch as gp;
+        let engine = engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr.0;
+        let name = std::ffi::CString::new("legato_gatepitch").unwrap();
+        let gp_id = unsafe {
+            graph::add_node(
+                lg, gp::gatepitch_vtable(),
+                gp::GATEPITCH_STATE_SIZE * std::mem::size_of::<f32>(),
+                name.as_ptr(), 0, gp::OUTPUT_COUNT as i32, std::ptr::null(), 0,
+            )
+        };
+        assert!(gp_id >= 0);
+        let lid = gp_id as u64;
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut data = new_audio_callback_data(
+            lg, Arc::clone(&engine.state), 48_000, 2, 512,
+            Arc::clone(&engine.master_recorder), rx,
+            Arc::clone(&engine.buses.bus_effect_runtime),
+            Arc::new(ScheduledEventQueue::new()), Arc::new(AtomicU64::new(0)),
+        );
+        let mut output = vec![0.0; 1024];
+        unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
+        let mut pool = CustomEnginePool::new();
+        pool.add_voice(lid);
+        // Note A (mono voice, gate 4096) then a legato takeover B (gate 100).
+        let a = pool.allocate_voice(0, 0, 0.0, false, 1);
+        assert!(!a.stole_active_voice);
+        let b = pool.allocate_voice(0, 0, 4.0, false, 1);
+        assert!(b.stole_active_voice && b.logical_id == lid);
+        let engine_id = data.custom_engine_pools.len();
+        data.custom_engine_pools.push(pool);
+        let target = GateOffTarget::Custom { engine_id, free_patch: false };
+        unsafe { send_custom_note_on(lg, lid, 6, 0, 110.0, 0.8, false); }
+        schedule_gate_off_event(&mut data, 0, lid, 6, 4096.0, target);
+        record_sequenced_legato_note(&mut data, 0, lid, target, 110.0, 0.8, false, 6, 4096.0);
+        unsafe { send_custom_note_on(lg, lid, 20, 1, 220.0, 0.9, true); }
+        schedule_gate_off_event(&mut data, 0, lid, 20, 100.0, target);
+        record_sequenced_legato_note(&mut data, 0, lid, target, 220.0, 0.9, true, 20, 100.0);
+
+        // B's gate-off fires at frame 120 of this block: A must be resumed,
+        // the voice stays active, and A's gate-off is re-armed for the rest
+        // of its duration (4102 - 120 = 3982 samples from frame 120).
+        dispatch_block_events_until(&mut data, 512, None);
+        assert!(data.custom_engine_pools[engine_id].voices[0].active, "voice must stay gated");
+        let rearmed: Vec<f64> = data.countdown_events.iter().filter_map(|event| match event.kind {
+            CountdownEventKind::GateOff(gate) if gate.logical_id == lid => Some(event.remaining_samples),
+            _ => None,
+        }).collect();
+        assert_eq!(rearmed, vec![4102.0 - 512.0], "A owns the gate for its remaining duration");
+        assert_eq!(unsafe { graph::graph_block_event_delivery_failures(lg) }, 0);
+
+        // Run the clock forward: A's gate-off closes the voice and nothing is
+        // left to resume.
+        let mut block_start = 512;
+        for _ in 0..9 {
+            unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
+            collect_due_countdown_events(&mut data, 512, 0);
+            dispatch_block_events_until(&mut data, block_start, None);
+            block_start += 512;
+        }
+        assert!(!data.custom_engine_pools[engine_id].voices[0].active, "A's own gate-off closes the voice");
+        assert!(data.legato_holds.is_empty());
+        assert!(data.countdown_events.is_empty());
+        assert_eq!(unsafe { graph::graph_block_event_delivery_failures(lg) }, 0);
+        drop(data);
+        unsafe { engine.destroy(); }
+    }
 
     #[test]
     fn range_end_releases_gated_sampler_at_exact_frame_and_preserves_one_shot() {

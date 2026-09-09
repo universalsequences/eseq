@@ -176,6 +176,34 @@ pub(super) fn schedule_gate_off_event(
     );
 }
 
+/// Record a gated sequenced custom note-on for legato fallback
+/// (`SequencedLegatoHolds`). Call right after `schedule_gate_off_event` with
+/// the same frame offset and gate length.
+pub(super) fn record_sequenced_legato_note(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    logical_id: u64,
+    target: GateOffTarget,
+    pitch_hz: f32,
+    velocity: f32,
+    legato: bool,
+    source_frame_offset: u32,
+    gate_samples: f64,
+) {
+    data.legato_holds.note_on(
+        SequencedLegatoHold {
+            logical_id,
+            track_idx,
+            target,
+            pitch_hz,
+            velocity,
+            remaining_samples: 0.0,
+        },
+        legato,
+        source_frame_offset as f64 + gate_samples.max(0.0),
+    );
+}
+
 /// Arm a step's retrig burst. Always cancels the track's pending burst first,
 /// which is the Machinedrum "until the next trig on this track" rule.
 /// `repeats == u32::MAX` is the infinite (RTRG 127) case.
@@ -226,6 +254,46 @@ pub(super) fn dispatch_gate_off_event(
         } => {
             if engine_id >= data.custom_engine_pools.len() {
                 return;
+            }
+            if !free_patch {
+                if let Some(resume) =
+                    data.legato_holds.resume_on_gate_off(event.logical_id, frame_offset)
+                {
+                    // The note this one displaced is still inside its own
+                    // duration: fall back to it without retriggering, the way
+                    // the live held-note stack does, and let it own the gate.
+                    if data.trace_audio {
+                        eprintln!(
+                            "audio-trace: gate-off lid={} resumes displaced note pitch={} for {} samples",
+                            event.logical_id, resume.pitch_hz,
+                            resume.remaining_samples - frame_offset as f64,
+                        );
+                    }
+                    let seq = next_block_event_sequence(data);
+                    unsafe {
+                        send_custom_note_on(
+                            data.lg.0,
+                            event.logical_id,
+                            frame_offset,
+                            seq,
+                            resume.pitch_hz,
+                            resume.velocity,
+                            true,
+                        );
+                    }
+                    schedule_gate_off_event(
+                        data,
+                        resume.track_idx,
+                        event.logical_id,
+                        frame_offset,
+                        resume.remaining_samples - frame_offset as f64,
+                        resume.target,
+                    );
+                    return;
+                }
+            }
+            if data.trace_audio {
+                eprintln!("audio-trace: gate-off lid={} closes voice", event.logical_id);
             }
             if free_patch {
                 data.custom_engine_pools[engine_id]
@@ -667,6 +735,7 @@ pub(super) fn collect_due_countdown_events(
     current_pattern_epoch: u64,
 ) {
     let block_len = nframes as f64;
+    data.legato_holds.advance(nframes);
     let mut i = 0usize;
     while i < data.countdown_events.len() {
         let stale = match data.countdown_events[i].kind {
@@ -734,6 +803,7 @@ pub(super) fn collect_due_countdown_events(
 
 pub(super) fn clear_countdown_events(data: &mut AudioCallbackData) {
     data.countdown_events.clear();
+    data.legato_holds.clear();
     data.block_events.clear();
     data.block_events_need_sort = false;
 }

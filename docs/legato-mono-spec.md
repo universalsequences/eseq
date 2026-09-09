@@ -177,7 +177,28 @@ though note-ons keep retriggering.
   disable the control for sampler and rack tracks (`SEQ.tp-is-rack` precedent
   in the poly button).
 
-### Phase 6 (later) — rack tracks, glide
+### Phase 3b — sequenced fallback to the displaced note (BUILT 2026-09-09)
+
+Phase 3 let the new note own the gate, so a recorded "hold A, tap B" phrase
+gated the voice off when B ended even though A's duration was still running.
+`audio/voices/legato.rs` (`SequencedLegatoHolds`) is the sequenced counterpart
+of the live held-note stack: every gated sequenced custom note-on is recorded
+with its block-relative gate end (advanced in `collect_due_countdown_events`
+alongside the countdown queue); a legato takeover stacks on the displaced
+note instead of forgetting it; and `dispatch_gate_off_event` resumes the newest
+displaced note still inside its gate with a legato NOTE_ON plus a gate-off for
+its remaining duration. A retrigger note-on or a live key on the voice clears
+that voice's stack; transport reset clears all of them.
+
+### Phase 6 — rack tracks (BUILT 2026-09-09), glide
+
+Racks use the *track-level* `trig` control (`tp-supports-mono-trigger` now
+includes Rack); a slot is mono when its own `max_polyphony` is 1. Live keys
+run through `mono_held` only when every slot is a gated Custom slot at one
+voice (`rack_live_keys_play_mono`): a sampler or free-patch layer owns a voice
+per key that the buried-key rule would strand, so mixed racks stay per-key.
+
+### Phase 6 (later) — glide
 
 - Racks: mono is per-slot (`RackSlotSnapshot::max_polyphony`); legato would be a
   per-slot flag threaded through the rack note-on path (`audio.rs:6348`).

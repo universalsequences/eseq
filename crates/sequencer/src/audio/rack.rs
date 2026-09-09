@@ -605,6 +605,23 @@ pub(super) fn rack_sampler_warp_runtime(
     (1.0, warp_mode, ratio, sample_bpm, project_bpm, 0.0, 0.0)
 }
 
+/// Whether live keys on this rack should run through the per-track mono
+/// held-note stack (`AudioCallbackData::mono_held`), like a mono Custom track.
+///
+/// Rack polyphony is per slot, and the held stack is per track, so the rack
+/// only qualifies when every slot is a gated Custom instrument at one voice.
+/// A sampler or free-patch slot allocates its own voice per key; the stack's
+/// "buried key releases nothing" rule would leave that voice hanging, so any
+/// such slot keeps the rack on the plain per-key path.
+pub(super) fn rack_live_keys_play_mono(rack: &RackTrackSnapshot) -> bool {
+    !rack.slots.is_empty()
+        && rack.slots.iter().all(|slot| {
+            slot.instrument_type == InstrumentType::Custom
+                && slot.instrument_run_mode != CustomInstrumentRunMode::FreePatch
+                && slot.max_polyphony <= 1
+        })
+}
+
 pub(super) fn fire_live_keyboard_rack_note(
     data: &mut AudioCallbackData,
     parent_track_idx: usize,
@@ -621,6 +638,13 @@ pub(super) fn fire_live_keyboard_rack_note(
     };
     let mut active_voices = [ActiveKeyboardVoice::default(); MAX_RACK_SLOTS];
     let mut active_voice_count = 0;
+    // The held-note stack already chose which key sounds, so the allocator
+    // must not apply priority a second time (it could reject the note).
+    let voice_priority = if rack_live_keys_play_mono(&rack) {
+        crate::sequencer::VoicePriority::Last
+    } else {
+        data.state.pattern.track_params[parent_track_idx].get_voice_priority()
+    };
 
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
         if let Some(choke_group) = slot.choke_group {
@@ -789,7 +813,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                         transpose,
                         slot.max_polyphony > 1,
                         slot.max_polyphony,
-                        data.state.pattern.track_params[parent_track_idx].get_voice_priority(),
+                        voice_priority,
                         trigger.origin(),
                     ) else { continue; };
                     allocation
@@ -829,6 +853,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                     &mut data.block_events,
                     voice_lid,
                 );
+                data.legato_holds.clear_lid(voice_lid);
                 unsafe {
                     route_custom_voice_to_consumer(
                         data.lg.0,
@@ -1093,6 +1118,12 @@ pub(super) fn fire_rack_slot_note(
                 return;
             }
             let pitch_hz = custom_pitch_hz(transpose, slot_params.base_note_offset);
+            if data.trace_audio {
+                eprintln!(
+                    "audio-trace: scheduled rack note-on track={parent_track_idx} slot={slot_idx} engine={engine_id} voice={voice_idx} lid={lid} max_poly={} stolen={} legato={legato}",
+                    slot_params.max_polyphony, allocation.stole_active_voice,
+                );
+            }
             cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
             unsafe {
                 if !legato && (allocation.stole_active_voice || slot_params.max_polyphony <= 1 || free_patch) {
@@ -1127,17 +1158,21 @@ pub(super) fn fire_rack_slot_note(
                 super::pressure::dispatch_voice_expression(data, engine_id, voice_idx, frame_offset);
             }
             if gate_mode > 0.5 {
+                let target = GateOffTarget::Custom { engine_id, free_patch };
                 schedule_gate_off_event(
                     data,
                     parent_track_idx,
                     lid,
                     frame_offset,
                     gate_samples as f64,
-                    GateOffTarget::Custom {
-                        engine_id,
-                        free_patch,
-                    },
+                    target,
                 );
+                record_sequenced_legato_note(
+                    data, parent_track_idx, lid, target, pitch_hz, velocity, legato,
+                    frame_offset, gate_samples as f64,
+                );
+            } else {
+                data.legato_holds.clear_lid(lid);
             }
         }
         InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}

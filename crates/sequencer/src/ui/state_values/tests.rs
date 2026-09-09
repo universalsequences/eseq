@@ -12270,6 +12270,35 @@ mod drift_waveform_tests;
     }
 
     #[test]
+    fn rack_track_surfaces_mono_trigger_control_from_parent_track_params() {
+        // Rack slot note-ons resolve legato from the parent track's trigger
+        // mode (fire_rack_slot_note / fire_live_keyboard_rack_note), so the
+        // track panel must offer that control on rack tracks too.
+        let app = test_app_with_rack_panel();
+        app.state.pattern.track_params[0]
+            .set_mono_trigger(sequencer::sequencer::MonoTrigger::Legato);
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], false);
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+
+        sync_track_params(&mut runtime, &app, &app.state, 0, &selected);
+
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", "tp-is-rack"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", "tp-supports-mono-trigger"),
+            Some(&Value::Bool(true)),
+            "rack tracks should expose the trigger/priority dropdowns"
+        );
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", "tp-mono-trigger"),
+            Some(&Value::String("legato".to_string()))
+        );
+    }
+
+    #[test]
     fn rack_instrument_panel_value_lists_layer_slots() {
         let app = test_app_with_rack_panel();
         let selected = Arc::new(Mutex::new(HashSet::new()));

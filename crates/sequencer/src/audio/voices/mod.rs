@@ -3,10 +3,12 @@
 //! `pool` contains the compact allocator used by sampler and graph-node voices.
 //! `runtime` adds custom-engine routing, release tails, and topology sync.
 
+mod legato;
 mod mono;
 mod pool;
 mod runtime;
 
+pub(super) use legato::{SequencedLegatoHold, SequencedLegatoHolds};
 pub(super) use mono::{MonoHeldNotes, MonoRelease};
 pub(super) use pool::VoicePool;
 pub use pool::MAX_VOICES;

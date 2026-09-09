@@ -324,7 +324,7 @@ pub(super) fn fire_resolved(
                 if data.trace_audio {
                     let enabled = data.custom_engine_pools[engine_id].enabled_voice_count;
                     eprintln!(
-                        "audio-trace: scheduled custom note-on track={track_idx} engine={engine_id} voice={voice_idx} lid={lid} synth={synth_id} mod={modulator_id} chord_note={n} enabled_voices={enabled} poly={track_polyphonic} stolen={}",
+                        "audio-trace: scheduled custom note-on track={track_idx} engine={engine_id} voice={voice_idx} lid={lid} synth={synth_id} mod={modulator_id} chord_note={n} enabled_voices={enabled} poly={track_polyphonic} stolen={} legato={legato}",
                         allocation.stole_active_voice,
                     );
                     data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
@@ -416,17 +416,21 @@ pub(super) fn fire_resolved(
                     retrig_custom_count += 1;
                 }
                 if gate_mode > 0.5 {
+                    let target = GateOffTarget::Custom { engine_id, free_patch };
                     schedule_gate_off_event(
                         data,
                         track_idx,
                         lid,
                         frame_offset,
                         note_total_gate as f64,
-                        GateOffTarget::Custom {
-                            engine_id,
-                            free_patch,
-                        },
+                        target,
                     );
+                    record_sequenced_legato_note(
+                        data, track_idx, lid, target, pitch_hz, velocity, legato,
+                        frame_offset, note_total_gate as f64,
+                    );
+                } else {
+                    data.legato_holds.clear_lid(lid);
                 }
             } else {
                 let selector_transpose = transpose;
@@ -564,7 +568,7 @@ pub(super) fn fire_resolved(
             if data.trace_audio {
                 let enabled = data.custom_engine_pools[engine_id].enabled_voice_count;
                 eprintln!(
-                    "audio-trace: scheduled custom note-on track={track_idx} engine={engine_id} voice={voice_idx} lid={lid} synth={synth_id} mod={modulator_id} enabled_voices={enabled} poly={track_polyphonic} stolen={}",
+                    "audio-trace: scheduled custom note-on track={track_idx} engine={engine_id} voice={voice_idx} lid={lid} synth={synth_id} mod={modulator_id} enabled_voices={enabled} poly={track_polyphonic} stolen={} legato={legato}",
                     allocation.stole_active_voice,
                 );
                 data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
@@ -655,17 +659,21 @@ pub(super) fn fire_resolved(
                 retrig_custom_count += 1;
             }
             if gate_mode > 0.5 {
+                let target = GateOffTarget::Custom { engine_id, free_patch };
                 schedule_gate_off_event(
                     data,
                     track_idx,
                     lid,
                     frame_offset,
                     total_gate as f64,
-                    GateOffTarget::Custom {
-                        engine_id,
-                        free_patch,
-                    },
+                    target,
                 );
+                record_sequenced_legato_note(
+                    data, track_idx, lid, target, pitch_hz, velocity, legato,
+                    frame_offset, total_gate as f64,
+                );
+            } else {
+                data.legato_holds.clear_lid(lid);
             }
         } else {
             let selector_transpose = transpose;
