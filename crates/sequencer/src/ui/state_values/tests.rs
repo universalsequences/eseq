@@ -54961,10 +54961,32 @@ mod drift_waveform_tests;
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();
         assert!(find_layout_node_by_stable_key_suffix(&layout, "/file-menu-save").is_none());
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.transport/open-file-menu (dict :col 5 :row 1))")
-            .unwrap();
+        // Click the File button with a real pointer event: the menu anchors on
+        // the click's :col/:row, which only a box-style `:on-click` delivers.
+        let file_button = find_layout_node_by_stable_key(&layout, "transport-file-menu-button")
+            .expect("file menu button");
+        let click_col = file_button.rect.col + file_button.rect.width * 0.5;
+        let click_row = file_button.rect.row + file_button.rect.height * 0.5;
+        let (cols, rows) = (layout.rect.width as u16, layout.rect.height as u16 + 4);
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind,
+                    column: click_col as u16,
+                    row: click_row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                cols,
+                rows,
+                click_col,
+                click_row,
+            );
+        }
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();

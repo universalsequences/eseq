@@ -981,11 +981,15 @@
         :active (if eseq.seq-core-state/lower-panel-visible 1 0)))
     
     (box :width 2)
+    ;; A plain box, not an SDF icon: SDF widgets call `:on-click` with bare
+    ;; |x y r| args, while a box passes the event map the menu anchors on.
     (subtree :key "transport-file-menu-button"
-      (save-icon
-        :on-click (lambda (event) (open-file-menu event))
+      (box :height 1.4 :padding 0.35 :corner-radius 8
+        :background-color (if file-menu-open :mixer-strip-selected-bg :mixer-strip-bg)
         :style transport-icon-style
-        :active (if file-menu-open 1 0)))
+        :on-click (lambda (event) (open-file-menu event))
+        (v-stack :align :center :height :fill
+          (label "File" :font-size 11 :color :white :bg :transparent))))
     
     ;; Transport buttons in a shared rounded-rect container
     (box :background-color :mixer-strip-bg :corner-radius 72 :padding 0.015 :height 1.4
