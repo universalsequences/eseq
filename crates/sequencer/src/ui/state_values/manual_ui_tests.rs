@@ -67,9 +67,69 @@ fn current_node(editor: &mut eseqlisp::Editor) -> String {
     }
 }
 
+// Renderer/navigation contracts use fixed sample pages, not editorial copy.
+// The separate authored-page smoke test below exercises the real manual.
+fn install_manual_test_pages(editor: &mut eseqlisp::Editor) {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/manual");
+    let mut body = "(eseq.manual/missing-page node)".to_string();
+    for name in ["index", "concepts", "sequencer-tour", "mixer", "customization"] {
+        body = format!(
+            "(if (= node {}) (parse-manual-page {}) {})",
+            serde_json::to_string(name).unwrap(),
+            serde_json::to_string(&directory.join(format!("{name}.md"))).unwrap(),
+            body,
+        );
+    }
+    eval(editor, &format!("(def eseq.manual/load-page (node) {body})"));
+}
+
+#[test]
+fn manual_authored_pages_have_visible_content() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    editor.drain_host_commands();
+    eval(&mut editor, "(eseq.manual/open-manual)");
+    eval(
+        &mut editor,
+        r#"(set-layout (list :buf "*manual*" :hide-status true :min-width 25))"#,
+    );
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/manual");
+    let mut pages = std::fs::read_dir(directory).unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect::<Vec<_>>();
+    pages.sort();
+    assert!(!pages.is_empty(), "authored manual must have pages");
+    for path in pages {
+        let node = path.file_stem().unwrap().to_str().unwrap();
+        eval(&mut editor, &format!(
+            "(eseq.manual/open-node {})", serde_json::to_string(node).unwrap(),
+        ));
+        let layout = manual_layout(&mut editor);
+        let content = find_layout_node_by_debug_name(&layout, "manual-page")
+            .expect("manual content container");
+        assert_finite_nonzero_rect(content, node);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let page = eseqlisp::manual::parse_manual_source(&source);
+        let title = page.title().expect("authored page title");
+        assert_eq!(
+            eval(&mut editor, "(eseq.manual/page-title eseq.manual/manual-page)"),
+            Value::String(title.to_string()),
+            "{node} must load its authored content, not a missing-page fallback",
+        );
+        let mut headings = Vec::new();
+        labels_containing(content, title, &mut headings);
+        let heading = headings.iter().find(|label|
+            label.props.get("text") == Some(&Value::String(title.to_string()))
+        ).expect("authored heading renders");
+        assert_finite_nonzero_rect(heading, node);
+    }
+}
+
 #[test]
 fn manual_opens_on_the_index_menu_and_remembers_the_source_buffer() {
     let mut editor = full_grid_editor_for_scroll_tests();
+    install_manual_test_pages(&mut editor);
     editor.drain_host_commands();
     eval(&mut editor, "(switch-to-buffer \"*mixer*\")");
     editor.refresh_runtime_side_effects();
@@ -125,6 +185,7 @@ fn manual_opens_on_the_index_menu_and_remembers_the_source_buffer() {
 #[test]
 fn manual_navigation_follows_menu_order_and_history() {
     let mut editor = full_grid_editor_for_scroll_tests();
+    install_manual_test_pages(&mut editor);
     editor.drain_host_commands();
     eval(&mut editor, "(eseq.manual/open-manual)");
     eval(
@@ -185,6 +246,7 @@ fn manual_navigation_follows_menu_order_and_history() {
 #[test]
 fn manual_action_links_evaluate_only_on_click() {
     let mut editor = full_grid_editor_for_scroll_tests();
+    install_manual_test_pages(&mut editor);
     editor.drain_host_commands();
     eval(&mut editor, "(eseq.manual/open-manual)");
     eval(&mut editor, "(eseq.manual/open-node \"mixer\")");
@@ -248,6 +310,7 @@ fn click(editor: &mut eseqlisp::Editor, col: f32, row: f32) {
 #[test]
 fn manual_menu_entry_click_navigates() {
     let mut editor = full_grid_editor_for_scroll_tests();
+    install_manual_test_pages(&mut editor);
     editor.drain_host_commands();
     eval(&mut editor, "(eseq.manual/open-manual)");
     eval(
