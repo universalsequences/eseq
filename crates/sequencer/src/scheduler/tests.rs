@@ -9993,40 +9993,6 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
 }
 
     #[test]
-    fn song_preflight_captures_unsaved_notes_without_mutating_live_repository() {
-        run_with_scheduler_stack(|| {
-            let (state, _) = song_mode_fixture();
-            song_mode_commit(&state, vec![song_mode_row(0, 0.0, 0, Vec::new())], 1.0, false);
-            state.pattern.step_data[0].set(0, StepParam::Transpose, 11.0);
-            state.publish_scheduler_snapshot();
-            let version = state.scheduler_snapshot_version();
-            let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
-            let revision = state.committed_song_revision();
-            let original = state.preflight_runtime_song().unwrap();
-            assert_eq!(original.rows[0].scheduler_snapshot.tracks[0].steps[0]
-                .params[StepParam::Transpose.index()], 1.0);
-            let frozen = state.preflight_runtime_song_with_current_pattern(
-                2, &[41, 42], &[44_100, 48_000], &["first".into(), "second".into()],
-                &[crate::sequencer::InstrumentType::Sampler; 2],
-            ).unwrap();
-            assert_eq!(frozen.rows[0].scheduler_snapshot.tracks[0].steps[0]
-                .params[StepParam::Transpose.index()], 11.0);
-            assert_eq!(frozen.rows[0].sample_ids[0], (41, "first".into(), 44_100));
-            assert_eq!(frozen.rows[0].sample_ids[1], (42, "second".into(), 48_000));
-            assert_eq!(state.scheduler_snapshot_version(), version);
-            assert_eq!(state.transport.pattern_epoch.load(Ordering::Relaxed), epoch);
-            assert_eq!(state.committed_song_revision(), revision);
-            assert_eq!(state.current_scene_index(), 0);
-            let unchanged = state.preflight_runtime_song().unwrap();
-            assert_eq!(unchanged.rows[0].scheduler_snapshot.tracks[0].steps[0]
-                .params[StepParam::Transpose.index()], 1.0);
-            state.pattern.step_data[0].set(0, StepParam::Transpose, 33.0);
-            assert_eq!(frozen.rows[0].scheduler_snapshot.tracks[0].steps[0]
-                .params[StepParam::Transpose.index()], 11.0);
-        });
-    }
-
-    #[test]
     fn scheduler_driver_matches_song_trace_without_wall_clock_pacing() {
         run_with_scheduler_stack(|| {
             let run = |live: bool, horizon_size: u64| {

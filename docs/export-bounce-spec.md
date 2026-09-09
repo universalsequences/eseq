@@ -2,8 +2,8 @@
 
 Status: implementation contract for **eseq-45bn**. A standalone saved-project
 export command is available as of 2026-09-08; see [usage](export-bounce.md).
-A command-driven modal now wraps saved-project export; retained live source
-snapshot integration remains unfinished.
+A command-driven modal wraps saved-project export. Live-source capture is a future
+integration gate; disconnected snapshot/rebinding scaffolding has been removed.
 Timing contract revised 2026-09-07: preserve playback timing, with sample-accurate
 notes/gates and block-boundary ordinary DSP updates.
 Related: [song mode](song-mode-spec.md) and
@@ -228,6 +228,14 @@ Only one export job runs at a time; reopening the command shows its progress.
 Closing the modal does not cancel the job; cancellation is a separate action.
 Progress, completion, cancellation and errors travel as atomically replaced
 structured status documents, independently of human-readable worker logs.
+
+The saved-project worker constructs a `PreparedExport` only after loading, sample
+analysis, song preflight and latency preparation succeed. It owns the App and
+headless engine, keeping their teardown order explicit. The UI and CLI share
+project/range validation. Export errors distinguish validation, preparation,
+rendering, writing and publication; worker status carries the stage and diagnostic.
+Project loading still uses App and its existing loader; this is not an independent
+project preparation library.
 
 Capturing the current unsaved project with retained draft DSP sources remains a
 separate integration gate. Do not label the saved-project path as live capture.

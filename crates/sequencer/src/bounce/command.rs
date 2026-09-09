@@ -121,10 +121,11 @@ pub fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::er
                 frames: summary.frames,
                 tail_warning: summary.tail_may_be_truncated(),
             },
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+            Err(error) if error.is_cancelled() => {
                 super::job::WorkerStatus::Cancelled
             }
             Err(error) => super::job::WorkerStatus::Failed {
+                stage: Some(error.stage()),
                 message: error.to_string(),
             },
         };

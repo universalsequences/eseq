@@ -43,7 +43,7 @@ pub(crate) fn publish_job_status(editor: &mut Editor, status: &WorkerStatus, run
         }
         .into(),
         WorkerStatus::Cancelled => "Export cancelled.".into(),
-        WorkerStatus::Failed { message } => format!("Export failed: {message}"),
+        WorkerStatus::Failed { message, .. } => format!("Export failed: {message}"),
     };
     let percent = match status {
         WorkerStatus::Rendering { percent } => *percent as f64,

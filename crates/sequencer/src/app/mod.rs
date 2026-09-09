@@ -40,6 +40,7 @@ mod effect_params;
 mod effects;
 mod fx_chain;
 mod graph;
+pub(crate) use graph::latency::LatencyPlan;
 mod hooks;
 pub mod mixer_controls;
 mod params;
@@ -53,7 +54,6 @@ pub mod sound_palette;
 pub mod take_edit;
 pub mod take_recording;
 pub mod song_transport;
-pub(crate) mod bounce_prepare;
 mod synth;
 
 pub use browser::BrowserNode;

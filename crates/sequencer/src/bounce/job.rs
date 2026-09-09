@@ -13,7 +13,7 @@ pub enum WorkerStatus {
     Rendering { percent: u64 },
     Completed { frames: u64, tail_warning: bool },
     Cancelled,
-    Failed { message: String },
+    Failed { stage: Option<super::ExportStage>, message: String },
 }
 
 pub(crate) fn write_status(path: &Path, status: &WorkerStatus) -> io::Result<()> {
@@ -84,21 +84,7 @@ impl ExportJob {
                 "A recording with this name already exists. Choose another name.",
             ));
         }
-        let project = crate::project::load_project_from_path(&options.project)?;
-        let end = project
-            .arrangement
-            .as_ref()
-            .ok_or_else(|| io::Error::other("Saved project has no arrangement"))?
-            .end_beat;
-        super::BouncePlan::new(
-            options.sample_rate,
-            512,
-            project.bpm,
-            end,
-            options.selection,
-            0,
-            options.tail_seconds,
-        )?;
+        let project = options.load_project()?;
         let directory = tempfile::tempdir()?;
         let input = directory.path().join("project.json");
         serde_json::to_writer(File::create(&input)?, &project)?;
@@ -175,10 +161,12 @@ impl ExportJob {
                     | WorkerStatus::Failed { .. }
             ) {
                 self.status = WorkerStatus::Failed {
+                    stage: None,
                     message: format!("Export worker exited ({exit}) without a result"),
                 };
             } else if !exit.success() && matches!(self.status, WorkerStatus::Completed { .. }) {
                 self.status = WorkerStatus::Failed {
+                    stage: None,
                     message: format!("Export worker failed after writing audio ({exit})"),
                 };
             }
@@ -221,6 +209,19 @@ mod tests {
             assert!(destination(dir.path(), name).is_err());
         }
     }
+    #[test]
+    fn failure_status_preserves_stage_and_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        let status = WorkerStatus::Failed {
+            stage: Some(super::super::ExportStage::Preparation),
+            message: "missing convolution IR".into(),
+        };
+        write_status(&path, &status).unwrap();
+        let restored: WorkerStatus = serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        assert_eq!(restored, status);
+    }
+
     #[cfg(unix)]
     #[test]
     fn process_job_cancels_and_reaps_without_publishing_output() {

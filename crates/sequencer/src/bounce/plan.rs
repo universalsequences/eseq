@@ -90,24 +90,24 @@ pub fn render_to_wav(
     cancel: &BounceCancellation,
     mut render_block: impl FnMut(u64, &mut [f32]) -> io::Result<()>,
     mut progress: impl FnMut(BounceProgress),
-) -> io::Result<BounceSummary> {
-    cancel.check()?;
-    let mut writer = BounceWriter::create(destination, publication, plan.sample_rate, plan.file_frames, cancel)?;
+) -> Result<BounceSummary, ExportError> {
+    cancel.check().map_err(ExportError::rendering)?;
+    let mut writer = BounceWriter::create(destination, publication, plan.sample_rate, plan.file_frames, cancel).map_err(ExportError::writing)?;
     let mut block = vec![0.0; plan.block_frames * 2];
     let mut rendered = 0;
     let mut written = 0;
     while rendered < plan.render_end {
-        cancel.check()?;
-        render_block(rendered, &mut block)?;
-        cancel.check()?;
+        cancel.check().map_err(ExportError::rendering)?;
+        render_block(rendered, &mut block).map_err(ExportError::rendering)?;
+        cancel.check().map_err(ExportError::rendering)?;
         let block_end = (rendered + plan.block_frames as u64).min(plan.render_end);
         let valid_samples = (block_end - rendered) as usize * 2;
         if let Some(index) = block[..valid_samples].iter().position(|sample| !sample.is_finite()) {
-            return Err(invalid(format!("Non-finite export audio at source frame {}", rendered + index as u64 / 2)));
+            return Err(ExportError::rendering(invalid(format!("Non-finite export audio at source frame {}", rendered + index as u64 / 2))));
         }
         let from = rendered.max(plan.write_start);
         if from < block_end {
-            writer.write(&block[(from - rendered) as usize * 2..valid_samples], cancel)?;
+            writer.write(&block[(from - rendered) as usize * 2..valid_samples], cancel).map_err(ExportError::writing)?;
             written += block_end - from;
         }
         rendered = block_end;
@@ -124,7 +124,7 @@ pub fn render_to_wav(
         rendered_frames: rendered, total_render_frames: plan.render_end,
         written_frames: written, total_file_frames: plan.file_frames,
     });
-    writer.finish(cancel)
+    writer.finish(cancel).map_err(ExportError::publication)
 }
 
 #[cfg(test)]
@@ -180,10 +180,33 @@ mod tests {
                     Ok(())
                 }, |_| {});
             let error = result.unwrap_err();
+            assert_eq!(error.stage(), ExportStage::Rendering);
+            assert_eq!(error.is_cancelled(), failure == 2);
             if failure == 1 { assert!(error.to_string().contains("source frame 3")); }
             assert_eq!(std::fs::read(&path).unwrap(), b"original");
             assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         }
+    }
+
+    #[test]
+    fn output_failures_identify_writing_and_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = BouncePlan::new(1000, 128, 60, 1.0, None, 0, 0.0).unwrap();
+        let cancel = BounceCancellation::default();
+        let error = render_to_wav(&plan, &dir.path().join("missing/song.wav"),
+            Publication::CreateNew, &cancel, |_, _| panic!("must not render"), |_| {}).unwrap_err();
+        assert_eq!(error.stage(), ExportStage::Writing);
+        let path = dir.path().join("song.wav");
+        let error = render_to_wav(&plan, &path, Publication::CreateNew, &cancel,
+            |_, block| { block.fill(0.0); Ok(()) }, |update| {
+                if update.phase == BouncePhase::Finalizing {
+                    std::fs::write(&path, b"concurrent recording").unwrap();
+                }
+            }).unwrap_err();
+        assert_eq!(error.stage(), ExportStage::Publication);
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"concurrent recording");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

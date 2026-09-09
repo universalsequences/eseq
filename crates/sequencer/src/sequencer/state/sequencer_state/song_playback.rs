@@ -396,46 +396,6 @@ impl SequencerState {
         self.materialize_runtime_song(&song, staged)
     }
 
-    /// Preflight unsaved authoring state without changing the live repository,
-    /// scene selection, overrides, or publication epochs. The same masked
-    /// save rules apply on a copy, so borrowed and latched lanes cannot write
-    /// into an unrelated scene cell while an export is being prepared.
-    pub fn preflight_runtime_song_with_current_pattern(
-        &self,
-        num_tracks: usize,
-        buffer_ids: &[i32],
-        sample_rates: &[u32],
-        names: &[String],
-        instrument_types: &[InstrumentType],
-    ) -> Result<Arc<RuntimeSong>, String> {
-        let song = self.committed_song()
-            .ok_or_else(|| "The project has no committed song".to_string())?;
-        let scenes = self.capture_project_scenes_with_current_pattern(
-            num_tracks, buffer_ids, sample_rates, names, instrument_types,
-        )?;
-        let staged = stage_runtime_song_rows(&song, &scenes)?;
-        self.materialize_runtime_song(&song, staged)
-    }
-
-    /// Read-only counterpart of saving the current authoring pattern. The
-    /// copied repository includes the same borrowed/latched-lane save masks.
-    pub(crate) fn capture_project_scenes_with_current_pattern(
-        &self, num_tracks: usize, buffer_ids: &[i32], sample_rates: &[u32],
-        names: &[String], instrument_types: &[InstrumentType],
-    ) -> Result<ProjectScenes, String> {
-        let snapshot = self.capture_current_pattern_snapshot(
-            num_tracks, buffer_ids, sample_rates, names, instrument_types,
-        );
-        let masks = self.masked_save_masks();
-        let mut scenes = self.pattern.scenes.lock().unwrap().clone();
-        if !scenes.save_scene_snapshot_masked(
-            scenes.current_scene, snapshot, masks.0, masks.1, masks.2,
-        ) {
-            return Err("Could not capture the current scene for song preflight".to_string());
-        }
-        Ok(scenes)
-    }
-
     fn materialize_runtime_song(
         &self, song: &ProjectSong, staged: Vec<RowStaging>,
     ) -> Result<Arc<RuntimeSong>, String> {
@@ -474,7 +434,6 @@ impl SequencerState {
                 resolved_pattern_ids: staging.resolved_pattern_ids,
                 resolved_sources: staging.resolved_sources,
                 lane_offsets: staging.lane_offsets,
-                sample_ids: staging.track_data.iter().map(|track| track.sample_id.clone()).collect(),
                 scheduler_snapshot: Arc::new(snapshot),
             });
         }

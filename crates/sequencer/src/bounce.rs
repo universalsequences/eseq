@@ -10,8 +10,9 @@ mod plan;
 pub mod worker;
 pub mod command;
 pub mod job;
-pub(crate) mod assets;
-pub(crate) mod samples;
+mod error;
+mod session;
+pub use error::{ExportError, ExportStage};
 pub use plan::{BouncePlan, BouncePhase, BounceProgress, render_to_wav};
 
 use std::fs::File;

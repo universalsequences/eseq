@@ -48,7 +48,10 @@ This command reads saved project data and current instrument/effect libraries
 and sample files on disk. Save edits before exporting. It does not capture unsaved
 live instrument code, live overrides, or the current DSP state. Reopened sample
 files may differ from buffers already loaded in the app. Missing referenced
-samples fail export; explicitly blank sampler sources remain blank.
+samples and effect assets fail export; explicitly blank sampler sources remain blank.
+Failures identify the stage: validation, preparation, rendering, writing or
+publication. Loading, analysis and song/latency preparation complete before the
+worker creates the temporary output file.
 
 The worker requires fixed processing latency and compensation throughout the
 arrangement. Unsupported topology or compensation changes fail without publishing

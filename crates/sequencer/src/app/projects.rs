@@ -2221,7 +2221,7 @@ impl App {
         crate::project::save_sound_preset(preset_name, &sound).map_err(|error| error.to_string())
     }
 
-    pub(super) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
+    pub(crate) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
         let num_tracks = self.tracks.len();
         self.state.save_current_pattern_snapshot(
             num_tracks,
@@ -2244,40 +2244,13 @@ impl App {
         let bus_pattern_bank = self
             .state
             .export_bus_pattern_repository(&default_bus_snapshot);
-        let tracks = self.capture_project_tracks(true)?;
+        let tracks = self.capture_project_tracks()?;
         let custom_effects = self.capture_custom_effects();
         let mut identities = self.device_registry.clone();
         let device_instances = self.capture_project_device_instances(&tracks, &custom_effects, &mut identities)?;
         self.device_registry = identities;
         self.state.prune_unreferenced_sounds();
         let scenes_for_takes = self.state.capture_project_scenes();
-        self.serialize_project_snapshot(project_name, ProjectCapture {
-            bank, bus_pattern_bank, scenes_for_takes, tracks, custom_effects, device_instances,
-        })
-    }
-
-    /// Structural authoring snapshot for the export bundle. Retained DSP code
-    /// and sampler source captures accompany it; draft names are identifiers,
-    /// not instructions to reopen an instrument from the user's library.
-    pub(crate) fn capture_bounce_project(&self, project_name: &str) -> Result<ProjectFile, String> {
-        let mut scenes_for_takes = self.state.capture_project_scenes_with_current_pattern(
-            self.tracks.len(), &self.graph.track_buffer_ids, &self.graph.track_sample_rates,
-            &self.tracks, &self.graph.track_instrument_types,
-        )?;
-        let current_bus = self.capture_bus_pattern_snapshot();
-        for scene in &mut scenes_for_takes.scenes {
-            if scene.bus_patterns.is_empty() { scene.bus_patterns = current_bus.clone(); }
-        }
-        if let Some(scene) = scenes_for_takes.scenes.get_mut(scenes_for_takes.current_scene) {
-            scene.bus_patterns = current_bus;
-        }
-        let bank = scenes_for_takes.snapshots();
-        let bus_pattern_bank = scenes_for_takes.scenes.iter()
-            .map(|scene| scene.bus_patterns.clone()).collect();
-        let tracks = self.capture_project_tracks(false)?;
-        let custom_effects = self.capture_custom_effects();
-        let mut identities = self.device_registry.clone();
-        let device_instances = self.capture_project_device_instances(&tracks, &custom_effects, &mut identities)?;
         self.serialize_project_snapshot(project_name, ProjectCapture {
             bank, bus_pattern_bank, scenes_for_takes, tracks, custom_effects, device_instances,
         })
@@ -2671,7 +2644,7 @@ impl App {
         })
     }
 
-    fn capture_project_tracks(&self, qualify_instrument_names: bool) -> Result<Vec<ProjectTrack>, String> {
+    fn capture_project_tracks(&self) -> Result<Vec<ProjectTrack>, String> {
         self.tracks
             .iter()
             .enumerate()
@@ -2740,13 +2713,12 @@ impl App {
                                             engine_id
                                         )
                                     })?;
-                                let instrument_name = if qualify_instrument_names {
+                                let instrument_name =
                                     crate::lisp_host::qualify_instrument_id(&instrument_name)
                                         .map_err(|error| format!(
                                             "Could not qualify instrument for rack track '{}' slot {}: {error}",
                                             name, slot_idx + 1,
-                                        ))?
-                                } else { instrument_name };
+                                        ))?;
                                 slots.push(crate::project::ProjectRackTrackSlot {
                                     instrument_type: crate::project::ProjectInstrumentType::Custom,
                                     sample_path: None,
@@ -2821,11 +2793,10 @@ impl App {
                         .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
                         .map(|engine| engine.name.clone())
                         .unwrap_or_else(|| name.clone());
-                    let instrument_name = if qualify_instrument_names {
+                    let instrument_name =
                         crate::lisp_host::qualify_instrument_id(&instrument_name).map_err(|error| {
                             format!("Could not qualify instrument for track '{}': {error}", name)
-                        })?
-                    } else { instrument_name };
+                        })?;
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),
@@ -5105,7 +5076,7 @@ mod tests {
         let buffer = app.create_blank_sampler_buffer().unwrap();
         app.graph_controller().add_sampler_slot_to_rack_buffer(rack, buffer, 48_000, "").unwrap();
         app.state.pattern.patterns[0].set_step_active(7, true);
-        let snapshot = app.capture_bounce_project("blank-samplers").unwrap();
+        let snapshot = app.capture_project("blank-samplers").unwrap();
         assert!(matches!(snapshot.tracks[0].kind, ProjectTrackKind::Sampler { sample_path: None }));
         assert!(snapshot.patterns[0].sample_paths[0].is_none());
         assert!(snapshot.patterns[0].sample_names[0].is_empty());
@@ -5148,89 +5119,6 @@ mod tests {
             crate::audiograph::engine_stop_workers();
             crate::audiograph::destroy_live_graph(lg.0);
         }
-    }
-
-    #[test]
-    fn bounce_project_snapshot_keeps_live_repository_and_device_ids_unchanged() {
-        use crate::sequencer::StepParam;
-        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
-        let lg = engine.lg_ptr.0;
-        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
-            engine.buses, engine.master_recorder, engine.keyboard_tx);
-        app.graph_controller().add_empty_track().unwrap();
-        app.state.pattern.step_data[0].set(0, StepParam::Transpose, 7.0);
-        app.state.pattern.track_params[0].set_midi_fx_chain(vec!["arp".into()]);
-        app.state.transport.master_volume.store(0.37_f32.to_bits(), Ordering::Relaxed);
-        let before = app.state.capture_project_scenes();
-        let version = app.state.scheduler_snapshot_version();
-        let epoch = app.state.transport.pattern_epoch.load(Ordering::Relaxed);
-        let next_device_id = app.device_registry.next_id;
-        let midi_ids = app.device_registry.midi_effects.clone();
-        let snapshot = app.capture_bounce_project("export-snapshot").unwrap();
-        assert_eq!(snapshot.patterns[0].step_data[0][0][StepParam::Transpose.index()], 7.0);
-        assert_eq!(snapshot.master_volume, 0.37);
-        assert_eq!(snapshot.device_instances.midi_effects[0].instances.len(), 1);
-        assert_eq!(app.device_registry.next_id, next_device_id);
-        assert_eq!(app.device_registry.midi_effects, midi_ids);
-        assert_eq!(app.state.scheduler_snapshot_version(), version);
-        assert_eq!(app.state.transport.pattern_epoch.load(Ordering::Relaxed), epoch);
-        let after = app.state.capture_project_scenes();
-        assert_eq!(after.snapshots()[0].step_data, before.snapshots()[0].step_data);
-        assert_eq!(after.scenes[0].bus_patterns.len(), before.scenes[0].bus_patterns.len());
-        let encoded = serde_json::to_value(&snapshot).unwrap();
-        assert_eq!(encoded, serde_json::to_value(app.capture_bounce_project("export-snapshot").unwrap()).unwrap());
-        let restored: ProjectFile = serde_json::from_value(encoded).unwrap();
-        assert_eq!(restored.patterns[0].step_data[0][0][StepParam::Transpose.index()], 7.0);
-        app.state.pattern.step_data[0].set(0, StepParam::Transpose, 12.0);
-        assert_eq!(snapshot.patterns[0].step_data[0][0][StepParam::Transpose.index()], 7.0);
-        let mut broken = before.clone();
-        broken.scenes[0].cell_sounds[0].patch = crate::sequencer::PatchId(u64::MAX - 1);
-        let error = app.serialize_project_snapshot("broken", ProjectCapture {
-            bank: before.snapshots(), bus_pattern_bank: vec![Vec::new()], scenes_for_takes: broken,
-            tracks: snapshot.tracks.clone(), custom_effects: snapshot.custom_effects.clone(),
-            device_instances: snapshot.device_instances.clone(),
-        }).err().unwrap();
-        assert!(error.contains("cannot be resolved"), "{error}");
-        let saved = app.capture_project("normal-save").unwrap();
-        assert_eq!(saved.patterns[0].step_data[0][0][StepParam::Transpose.index()], 12.0);
-        assert_eq!(app.state.export_pattern_repository()[0].step_data[0][0][StepParam::Transpose.index()], 12.0);
-        assert!(app.device_registry.next_id > next_device_id,
-            "normal save still publishes newly assigned device identities");
-        unsafe {
-            crate::audiograph::engine_stop_workers();
-            crate::audiograph::destroy_live_graph(lg);
-        }
-    }
-
-    #[test]
-    fn bounce_project_keeps_draft_instrument_names_without_library_lookup() {
-        use crate::lisp_host::dylib_cache::{DylibCacheManager, DGenCompileKind, DGenSourceOrigin};
-        let cache = tempfile::tempdir().unwrap();
-        let manager = DylibCacheManager::new(cache.path().to_path_buf());
-        let source = "(out 0.25 1 @name out)";
-        let loaded = manager.acquire(DGenCompileKind::Instrument, DGenSourceOrigin::Draft,
-            source, 48_000, None).unwrap();
-        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
-        let lg = engine.lg_ptr.0;
-        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
-            engine.buses, engine.master_recorder, engine.keyboard_tx);
-        app.graph_controller().add_empty_track().unwrap();
-        let name = "unsaved-bounce-snapshot-test-draft";
-        let id = app.editor.engine_registry.upsert(super::super::EngineDescriptor {
-            name: name.into(), source: source.into(), manifest: loaded.manifest.clone(),
-            lib_index: 0, shared_runtime: true,
-        });
-        app.graph.track_instrument_types[0] = InstrumentType::Custom;
-        app.graph.track_engine_ids[0] = Some(id);
-        let snapshot = app.capture_bounce_project("draft-export").unwrap();
-        assert!(matches!(&snapshot.tracks[0].kind,
-            ProjectTrackKind::Custom { instrument_name } if instrument_name == name));
-        assert!(app.capture_project_tracks(true).is_err(), "a normal save still requires a library source");
-        unsafe {
-            crate::audiograph::engine_stop_workers();
-            crate::audiograph::destroy_live_graph(lg);
-        }
-        drop(loaded);
     }
 
     /// Bead eseq-jo7.21: a project switch used to leave the outgoing

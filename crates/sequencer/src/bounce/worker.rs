@@ -2,11 +2,7 @@
 //! graph engine is process-global and must never share the interactive engine.
 
 use super::*;
-use crate::app::App;
-use crate::audio::{engine, offline::OfflineAudioSession};
-use crate::sequencer::{AudibleSongRowApplied, SongPlaybackNotice};
-use std::collections::VecDeque;
-use std::sync::Arc;
+use super::session::PreparedExport;
 
 #[derive(Clone, Debug)]
 pub struct ExportOptions {
@@ -19,7 +15,7 @@ pub struct ExportOptions {
     pub cancel_path: Option<PathBuf>,
 }
 
-fn check_cancel_file(options: &ExportOptions, cancel: &BounceCancellation) -> io::Result<()> {
+pub(super) fn check_cancel_file(options: &ExportOptions, cancel: &BounceCancellation) -> io::Result<()> {
     if let Some(path) = &options.cancel_path {
         if path.try_exists()? {
             cancel.cancel();
@@ -28,164 +24,109 @@ fn check_cancel_file(options: &ExportOptions, cancel: &BounceCancellation) -> io
     cancel.check()
 }
 
-/// Own graph teardown even when loading, preparation or rendering fails.
-struct WorkerEngine(engine::HeadlessEngine);
-impl Drop for WorkerEngine {
-    fn drop(&mut self) {
-        unsafe {
-            self.0.destroy();
-        }
+impl ExportOptions {
+    /// The UI and CLI validate the same saved data before constructing a graph.
+    pub(crate) fn load_project(&self) -> io::Result<crate::project::ProjectFile> {
+        let project = crate::project::load_project_from_path(&self.project)?;
+        let end = project.arrangement.as_ref()
+            .ok_or_else(|| invalid("Project has no arrangement"))?.end_beat;
+        BouncePlan::new(self.sample_rate, crate::audio::engine::ENGINE_BLOCK_FRAMES,
+            project.bpm, end, self.selection, 0, self.tail_seconds)?;
+        Ok(project)
     }
 }
 
-/// The calling executable must enter this before creating any live engine.
-/// The input file is the authoritative project for this standalone command.
+/// Run only in a dedicated process, before any live engine is constructed.
+/// The input saved project and the on-disk libraries are authoritative.
 pub fn export_project(
-    options: &ExportOptions,
-    cancel: &BounceCancellation,
-    mut progress: impl FnMut(BounceProgress),
-) -> io::Result<BounceSummary> {
-    cancel.check()?;
-    let project = crate::project::load_project_from_path(&options.project)?;
-    // Reject invalid clocks/ranges before graph construction or compilation.
-    let end_beat = project
-        .arrangement
-        .as_ref()
-        .ok_or_else(|| invalid("Project has no arrangement"))?
-        .end_beat;
-    BouncePlan::new(
-        options.sample_rate,
-        512,
-        project.bpm,
-        end_beat,
-        options.selection,
-        0,
-        options.tail_seconds,
-    )?;
-    let name = project.name.clone();
-    let engine = WorkerEngine(
-        engine::init_headless_engine(options.sample_rate, 2)
-            .map_err(|error| io::Error::other(error.to_string()))?,
-    );
-    let engine = &engine.0;
-    let mut app = App::new(
-        Arc::clone(&engine.state),
-        engine.lg_ptr,
-        engine.sample_rate,
-        engine.buses.clone(),
-        Arc::clone(&engine.master_recorder),
-        engine.keyboard_tx.clone(),
-    );
-    app.sample_analysis = crate::analysis::AnalysisService::synchronous();
-    app.queue_bounce_project(&name, project)
-        .map_err(io::Error::other)?;
-    while app.has_pending_project_load() {
-        check_cancel_file(options, cancel)?;
-        app.advance_pending_project_load()
-            .map_err(io::Error::other)?;
-        if !unsafe { crate::audiograph::prepare_graph_for_render(engine.lg_ptr.0) } {
-            return Err(io::Error::other("Project graph preparation failed"));
-        }
-    }
-    let end_beat = engine
-        .state
-        .committed_arrangement()
-        .ok_or_else(|| invalid("Project has no arrangement"))?
-        .end_beat;
-    app.sample_analysis.require_complete().map_err(io::Error::other)?;
-    app.publish_all_sampler_analysis_runtime();
-    app.start_bounce_playback().map_err(io::Error::other)?;
-    let latency = unsafe { app.prepare_bounce_latency() }.map_err(io::Error::other)?;
-    let plan = BouncePlan::new(
-        engine.sample_rate,
-        engine.block_size,
-        engine.state.latest_scheduler_snapshot().transport.bpm,
-        end_beat,
-        options.selection,
-        latency.mix_latency,
-        options.tail_seconds,
-    )?;
-    let source_end = plan.source_range().end;
-    let mut renderer = OfflineAudioSession::new(engine, source_end)?;
-    let mut rows = VecDeque::<AudibleSongRowApplied>::new();
-    render_to_wav(
-        &plan,
-        &options.destination,
-        if options.replace {
-            Publication::ReplaceConfirmed
-        } else {
-            Publication::CreateNew
-        },
-        cancel,
-        |start, output| {
-            check_cancel_file(options, cancel)?;
-            renderer.render_block_with_controls(start, output, |frame| {
-                for notice in engine.state.drain_song_playback_notices() {
-                    match notice {
-                        SongPlaybackNotice::RowApplied(row) => rows.push_back(row),
-                        SongPlaybackNotice::StartFailed { error } => return Err(io::Error::other(error)),
-                        // The render owner releases gates at E and preserves the tail;
-                        // the interactive transport-stop operation resets too much.
-                        SongPlaybackNotice::Ended { .. } => {}
-                    }
-                }
-                if engine.state.song_playback().take_notice_overflow() {
-                    return Err(io::Error::other("Export lost a song control transition"));
-                }
-                let control_frame = frame.min(source_end - 1);
-                while rows.front().is_some_and(|row| row.effective_sample <= control_frame) {
-                    let row = rows.pop_front().unwrap();
-                    let outcome = app.drain_due_mixer_controls(row.effective_sample);
-                    if !outcome.errors.is_empty() { return Err(io::Error::other(outcome.errors.join("; "))); }
-                    app.mirror_song_row_applied(&row).map_err(io::Error::other)?;
-                }
-                let outcome = app.drain_due_mixer_controls(control_frame);
-                if !outcome.errors.is_empty() { return Err(io::Error::other(outcome.errors.join("; "))); }
-                let installed = unsafe { app.prepare_bounce_latency() }.map_err(io::Error::other)?;
-                if !installed.same_compensation(&latency) {
-                    return Err(io::Error::other(format!(
-                        "Arrangement changes processing latency or nonzero compensation at sample {frame}; export requires fixed delay compensation",
-                    )));
-                }
-                Ok(())
-            })
-        },
-        |update| progress(update),
-    )
+    options: &ExportOptions, cancel: &BounceCancellation,
+    progress: impl FnMut(BounceProgress),
+) -> Result<BounceSummary, ExportError> {
+    check_cancel_file(options, cancel).map_err(ExportError::validation)?;
+    let project = options.load_project().map_err(ExportError::validation)?;
+    let session = PreparedExport::prepare(options, project, cancel)
+        .map_err(ExportError::preparation)?;
+    session.render(options, cancel, progress)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
+    use crate::audio::engine;
+    use crate::bounce::session::WorkerEngine;
+    use std::sync::Arc;
+
+    #[test]
+    fn invalid_saved_project_fails_validation_without_touching_destination() {
+        let folder = tempfile::tempdir().unwrap();
+        let project = folder.path().join("invalid.json");
+        let destination = folder.path().join("export.wav");
+        std::fs::write(&project, b"not JSON").unwrap();
+        std::fs::write(&destination, b"original").unwrap();
+        let options = ExportOptions {
+            project, destination: destination.clone(), sample_rate: 48_000,
+            tail_seconds: 0.0, selection: None, replace: true, cancel_path: None,
+        };
+        let error = export_project(&options, &BounceCancellation::default(),
+            |_| panic!("invalid input must not render")).unwrap_err();
+        assert_eq!(error.stage(), ExportStage::Validation);
+        assert_eq!(std::fs::read(destination).unwrap(), b"original");
+    }
 
     #[test]
     fn missing_effect_asset_fails_export_without_replacing_destination() {
         let folder = tempfile::tempdir().unwrap();
-        let missing = format!("__missing-export-ir-{}__", std::process::id());
-        let project_path = folder.path().join("project.json");
-        {
-            let fixture = WorkerEngine(engine::init_headless_engine(48_000, 2).unwrap());
-            let engine = &fixture.0;
-            let mut app = App::new(Arc::clone(&engine.state), engine.lg_ptr, engine.sample_rate,
-                engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
-            app.graph_controller().add_blank_sampler_track().unwrap();
-            let slot = app.add_builtin_effect_sync(0, "Convolution Reverb").unwrap();
-            app.state.set_committed_arrangement(Some(
-                crate::sequencer::ProjectArrangement::new(1, 0.25),
-            )).unwrap();
-            let mut project = app.capture_bounce_project("missing-ir").unwrap();
-            project.patterns[0].effect_slots[0][slot - crate::effects::BUILTIN_SLOT_COUNT].ir = Some(missing.clone());
-            serde_json::to_writer(File::create(&project_path).unwrap(), &project).unwrap();
+        let sample_path = folder.path().join("source.wav");
+        let mut sample = hound::WavWriter::create(&sample_path, hound::WavSpec {
+            channels: 1, sample_rate: 48_000, bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        }).unwrap();
+        sample.write_sample(0.25_f32).unwrap();
+        sample.finalize().unwrap();
+        for target in ["track", "bus", "rack"] {
+            let missing = format!("__missing-export-{target}-ir-{}__", std::process::id());
+            let project_path = folder.path().join("project.json");
+            {
+                let fixture = WorkerEngine(engine::init_headless_engine(48_000, 2).unwrap());
+                let engine = &fixture.0;
+                let mut app = App::new(Arc::clone(&engine.state), engine.lg_ptr, engine.sample_rate,
+                    engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
+                app.graph_controller().add_blank_sampler_track().unwrap();
+                let (slot, track_count) = match target {
+                    "track" => (app.add_builtin_effect_sync(0, "Convolution Reverb").unwrap(), 1),
+                    "bus" => (app.add_builtin_bus_effect_sync(0, "Convolution Reverb").unwrap(), 1),
+                    "rack" => {
+                        let rack = app.graph_controller().add_empty_layer_rack_track().unwrap();
+                        app.graph_controller().add_sampler_slot_to_rack(rack, &sample_path).unwrap();
+                        (app.add_builtin_rack_slot_effect_sync(rack, 0, "Convolution Reverb").unwrap(), 2)
+                    }
+                    _ => unreachable!(),
+                };
+                app.state.set_committed_arrangement(Some(
+                    crate::sequencer::ProjectArrangement::new(track_count, 0.25),
+                )).unwrap();
+                let mut project = app.capture_project("missing-ir").unwrap();
+                let effect = match target {
+                    "track" => &mut project.patterns[0].effect_slots[0][slot - crate::effects::BUILTIN_SLOT_COUNT],
+                    "bus" => &mut project.buses[0].effect_slots[slot],
+                    "rack" => &mut project.patterns[0].rack_tracks[1].as_mut().unwrap().slots[0].effect_slots[slot],
+                    _ => unreachable!(),
+                };
+                effect.ir = Some(missing.clone());
+                serde_json::to_writer(File::create(&project_path).unwrap(), &project).unwrap();
+            }
+            let destination = folder.path().join("export.wav");
+            std::fs::write(&destination, b"existing recording").unwrap();
+            let options = ExportOptions {
+                project: project_path, destination: destination.clone(), sample_rate: 48_000,
+                tail_seconds: 0.0, selection: None, replace: true, cancel_path: None,
+            };
+            let error = export_project(&options, &BounceCancellation::default(), |_| {}).unwrap_err();
+            assert_eq!(error.stage(), ExportStage::Preparation);
+            assert!(error.to_string().contains(&missing), "{error}");
+            assert_eq!(std::fs::read(destination).unwrap(), b"existing recording");
         }
-        let destination = folder.path().join("export.wav");
-        std::fs::write(&destination, b"existing recording").unwrap();
-        let options = ExportOptions {
-            project: project_path, destination: destination.clone(), sample_rate: 48_000,
-            tail_seconds: 0.0, selection: None, replace: true, cancel_path: None,
-        };
-        let error = export_project(&options, &BounceCancellation::default(), |_| {}).unwrap_err();
-        assert!(error.to_string().contains(&missing), "{error}");
-        assert_eq!(std::fs::read(destination).unwrap(), b"existing recording");
     }
 
     #[test]
@@ -233,7 +174,7 @@ mod tests {
             app.state
                 .set_committed_arrangement(Some(arrangement))
                 .unwrap();
-            let project = app.capture_bounce_project("export-fixture").unwrap();
+            let project = app.capture_project("export-fixture").unwrap();
             serde_json::to_writer(File::create(&project_path).unwrap(), &project).unwrap();
         }
         let destination = folder.path().join("export.wav");
@@ -275,7 +216,8 @@ mod tests {
         };
         let cancel = BounceCancellation::default();
         let error = export_project(&replace, &cancel, |_| cancel.cancel()).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(error.is_cancelled());
+        assert_eq!(error.stage(), ExportStage::Rendering);
         assert_eq!(
             std::fs::read(&destination).unwrap(),
             b"existing destination"
@@ -291,6 +233,7 @@ mod tests {
         );
         serde_json::to_writer(File::create(&options.project).unwrap(), &missing).unwrap();
         let error = export_project(&replace, &BounceCancellation::default(), |_| {}).unwrap_err();
+        assert_eq!(error.stage(), ExportStage::Preparation);
         assert!(
             error.to_string().contains("cannot reopen sample"),
             "{error}"

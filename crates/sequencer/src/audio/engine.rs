@@ -8,6 +8,9 @@ in an `Engine` (with a CPAL stream, via `audio::build_output_stream`) or a
 down workers and the graph after the stream is dropped.
 */
 
+/// Fixed graph block size shared by live playback and offline preparation.
+pub(crate) const ENGINE_BLOCK_FRAMES: usize = 512;
+
 use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 
@@ -143,7 +146,7 @@ fn init_engine_parts(
     channels: u16,
     worker_count: i32,
 ) -> Result<EngineParts, Box<dyn std::error::Error>> {
-    let block_size: usize = 512;
+    let block_size = ENGINE_BLOCK_FRAMES;
 
     // Initialize audiograph engine
     unsafe {
