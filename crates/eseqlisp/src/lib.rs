@@ -84,6 +84,7 @@ pub mod editor;
 pub mod host;
 pub mod hot_reload;
 pub mod live_audio;
+pub mod manual;
 pub mod mode;
 pub mod module_alias_migration;
 pub mod module_export_migration;

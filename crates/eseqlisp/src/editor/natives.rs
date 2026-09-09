@@ -343,6 +343,7 @@ fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabS
 }
 
 pub(super) fn register_editor_natives(runtime: &mut Runtime) {
+    crate::manual::register_manual_natives(runtime);
     runtime.register_native_with_docs(
         "bind-key",
         "(bind-key key handler)",

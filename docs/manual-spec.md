@@ -1,6 +1,6 @@
 # Manual Format — markdown subset, link conventions, `docs/manual/` layout
 
-Status: rev 1, 2026-08-28. Spec bead: `eseq-ug3m.1`. Parent epic:
+Status: rev 2, 2026-09-09 (rev 1 2026-08-28). Spec bead: `eseq-ug3m.1`. Parent epic:
 `eseq-ug3m` (in-app manual + web export, Info-style).
 
 One markdown-subset source tree in `docs/manual/` is rendered three ways:
@@ -177,9 +177,18 @@ exact list shapes may be refined by `.2`/`.3` together:
 - Inline content is a list of `span` / `b` / `em` / `code` / `link` /
   `action-link` nodes. `link` = `(link label target)`; `action-link`
   carries the raw form text from §3.1.
-- Plain-text runs must be **splittable per word** (multiple `span`s or
-  a renderer-side split — decided with `.3`) so word wrapping isn't
-  ragged around styled fragments.
+- Plain-text runs must be **splittable per word** so word wrapping isn't
+  ragged around styled fragments. Decided in `.2`: the parser emits one
+  `span` per plain-text run (spaces included) and the **renderer splits
+  spans on whitespace**; the AST stays compact and the exporter gets
+  whole runs.
+- Style runs (`b`/`em`) must contain something other than whitespace,
+  otherwise the markers are literal text. Menu descriptions are the
+  entry's remaining inline text flattened to plain text, with a leading
+  `—`/`–`/`-`/`:` separator trimmed.
+- Besides `(parse-manual-page path)` there is `(parse-manual-source
+  markdown)` for text that never touches disk (generated `ref-*` nodes,
+  §5).
 - **Malformed input never fails the parse.** Anything unrecognized
   falls back to literal paragraph text; the parser is total.
 
