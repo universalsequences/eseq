@@ -4,10 +4,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "project-save-open",
     "project-new-request",
     "open-help",
+    "open-url",
     "about-open",
 ];
-
-const HELP_URL: &str = "https://github.com/universalsequences/eseq#readme";
 
 /// The Save / Save As / About modals are mounted in the step-panel buffers,
 /// and a modal only receives pointer input through the active tile.
@@ -91,7 +90,25 @@ pub(super) fn handle(
                     .eval_str("(eseq.file-dialogs/open-unsaved-prompt)")
                     .map_err(|e| format!("{e:?}"))?;
             }
-            "open-help" => open_url(HELP_URL)?,
+            "open-help" => {
+                // The File menu lives in the transport strip; open the manual
+                // in the main panel tile rather than replacing the transport.
+                activate_dialog_tile(editor);
+                editor
+                    .runtime_mut()
+                    .eval_str("(eseq.manual/open-manual)")
+                    .map_err(|e| format!("{e:?}"))?;
+            }
+            "open-url" => {
+                let url = match payload {
+                    Value::Map(ref map) => map_string(map, "url").unwrap_or_default(),
+                    _ => String::new(),
+                };
+                if !(url.starts_with("https://") || url.starts_with("http://")) {
+                    return Err(format!("open-url: refusing non-http(s) target {url:?}"));
+                }
+                open_url(&url)?;
+            }
             "about-open" => {
                 activate_dialog_tile(editor);
                 editor

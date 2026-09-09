@@ -302,3 +302,48 @@ fn natives_parse_source_and_file() {
         "unreadable file must error"
     );
 }
+
+#[test]
+fn wrap_runs_glue_words_without_whitespace_between_fragments() {
+    let inlines = parse_inline("Steps in the [step buffer](step-buffer), with `p locks`.**A**b");
+    let groups = wrap_runs(&inlines);
+    let flat: Vec<Vec<(&str, &str, Option<&str>)>> = groups
+        .iter()
+        .map(|g| {
+            g.iter()
+                .map(|f| (f.kind, f.text.as_str(), f.target.as_deref()))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            vec![("span", "Steps", None)],
+            vec![("span", "in", None)],
+            vec![("span", "the", None)],
+            vec![("link", "step", Some("step-buffer"))],
+            vec![("link", "buffer", Some("step-buffer")), ("span", ",", None)],
+            vec![("span", "with", None)],
+            vec![
+                ("code", "p locks", None),
+                ("span", ".", None),
+                ("b", "A", None),
+                ("span", "b", None),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn wrap_runs_native_round_trips_the_ast() {
+    let mut runtime = Runtime::new();
+    crate::manual::register_manual_natives(&mut runtime);
+    let value = runtime
+        .eval_str("(manual-wrap-runs (rest (nth (parse-manual-source \"a [b c](d) e\") 1)))")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        printed(&value),
+        "(((span \"a\")) ((link \"b\" \"d\")) ((link \"c\" \"d\")) ((span \"e\")))"
+    );
+}

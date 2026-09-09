@@ -30,6 +30,7 @@
 (import eseq.packages)
 (import eseq.transport)
 (import eseq.agent)
+(import eseq.manual)
 
 ;; Deliberately command-only for now: Patch Learn has no button in the patch
 ;; editor. Invoke this while the instrument patcher buffer is active.
@@ -41,7 +42,9 @@
   (do
     (seq-clear-selection)))
 
-(bind-key "C-p" "seq-toggle-play")
+;; Ctrl+P used to toggle play here, which shadowed the arrangement's
+;; platform-primary "place" chord on Linux (Cmd+P / Ctrl+P). Space toggles
+;; play; the chord now belongs to the arrangement mode alone.
 (bind-key "ESC" "seq-clear-ui-selection")
 
 ;; Code editor: compile + hot-swap the current dsp code buffer. The host

@@ -14813,6 +14813,57 @@ mod drift_waveform_tests;
     // base value in force without one — plus the picker rows (step params
     // always, device params only once they carry a lock somewhere).
     #[test]
+    fn piano_roll_take_automation_edits_chunk_with_undo() {
+        use super::super::piano_roll::{
+            build_piano_roll_automation_value, PianoRollFocusSpec, PianoRollLanes,
+        };
+        use sequencer::sequencer::{ProjectArrangement, MAX_STEPS};
+        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
+        let mut app = test_app_for_track_visual_state(state.clone());
+        app.arr_replace(ProjectArrangement::new(1, 128.0)).unwrap();
+        app.set_arrangement_view_visible(true);
+        let (take, _) = app.arr_empty_take_clip_create(0, 0.0, 128.0).unwrap();
+        let before = StepParam::Velocity.default_value();
+        let chunks = state.track_take(0, take).unwrap().chunks;
+        let lanes = PianoRollLanes::new(&state, 0, PianoRollFocusSpec::Take(take));
+        let lane = build_piano_roll_automation_value(&app, &state, &lanes, "step-param:1");
+        let Value::Map(lane) = lane else { panic!("lane map") };
+        assert_eq!(value_map_bool(&lane, "editable"), Some(true));
+        let payload = |kind: &str, value| map_value([
+            ("track", Value::Number(0.0)),
+            ("action", map_value([
+                ("type", Value::Keyword(kind.into())),
+                ("step", Value::Number(MAX_STEPS as f64)),
+                ("param-idx", Value::Number(StepParam::Velocity.index() as f64)),
+                ("value", Value::Number(value)),
+            ])),
+        ]);
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let moving = Arc::new(Mutex::new(None));
+        let mut gesture = None;
+        for value in [0.5, 0.25] {
+            super::super::history_commands::apply_piano_roll_gesture_update(
+                &mut app, &selection, &moving, &mut gesture,
+                &payload("update-automation-step-param", value),
+            ).unwrap();
+        }
+        super::super::history_commands::finish_piano_roll_gesture(
+            &mut app, &moving, &mut gesture,
+            &payload("finish-automation-step-param", 0.25),
+        ).unwrap();
+        let velocity = |pattern| state.with_pool_pattern(0, pattern, |data| {
+            data.step_data[0][StepParam::Velocity.index()]
+        }).unwrap();
+        assert_eq!(velocity(chunks[0]), before);
+        assert_eq!(velocity(chunks[1]), 0.25);
+        assert_eq!(state.pattern.step_data[0].get(0, StepParam::Velocity), before);
+        app::edit::undo(&mut app);
+        assert_eq!(velocity(chunks[1]), before);
+        app::edit::redo(&mut app);
+        assert_eq!(velocity(chunks[1]), 0.25);
+    }
+
+    #[test]
     fn piano_roll_automation_publishes_step_params_and_device_locks() {
         use super::super::piano_roll::{
             build_piano_roll_automation_params_value, build_piano_roll_automation_value,
@@ -16012,6 +16063,152 @@ mod drift_waveform_tests;
     }
 
     /// eseq-mods.12 acceptance: with import's compile-time half (spec §4)
+    /// A user package installs a tracker tab with one `(import …)`: the
+    /// module builds a *tracker* effect-buffer, registers it through the
+    /// exported step-tab registry, selects it, and its major mode drives the
+    /// factory step natives from the keyboard. No factory def is overridden.
+    #[test]
+    fn tracker_package_import_installs_a_main_panel_tab_and_edits_steps_by_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use eseqlisp::vm::format_lisp_value;
+
+        let main_source = read_ui_source("main.lisp").expect("read main");
+        let mut editor = full_grid_editor_with_post_factory_source(&main_source, None, None, None);
+        let (roots, package_errors) = sequencer::app_paths::app_paths().module_load_roots();
+        assert!(package_errors.is_empty(), "package scan errors: {package_errors:?}");
+        editor.runtime_mut().set_scoped_module_load_path(roots);
+
+        // Stub the step-write natives the package calls, recording every call.
+        let calls: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        for name in ["seq-toggle-track-step", "seq-set-track", "seq-set-step-param"] {
+            let log = Rc::clone(&calls);
+            editor.runtime_mut().register_native(name, move |args, _ctx| {
+                let rendered: Vec<String> = args.iter().map(format_lisp_value).collect();
+                log.borrow_mut().push(format!("{name} {}", rendered.join(" ")));
+                Ok(Value::Bool(true))
+            });
+        }
+
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor.runtime_mut().eval_source_transactional(
+            None,
+            "(import alez.tracker.ui)",
+            overlays,
+        );
+        assert!(report.success, "tracker import failed: {:?}", report.diagnostics);
+        editor.process_lisp_reload_report(report);
+
+        let tabs = editor
+            .runtime_mut()
+            .eval_str("(eseq.seq-step-tabs/seq-main-step-tabs)")
+            .expect("read step tabs")
+            .expect("step tab list");
+        let tabs = format_lisp_value(&tabs);
+        assert!(tabs.contains("Tracker") && tabs.contains("*tracker*"), "tabs: {tabs}");
+        let visible = editor
+            .runtime_mut()
+            .eval_str("(eseq.seq-step-tabs/seq-visible-main-panel-buffer)")
+            .expect("read visible buffer")
+            .expect("visible buffer");
+        assert!(matches!(&visible, Value::String(name) if name == "*tracker*"), "{visible:?}");
+
+        let tracker_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*tracker*")
+            .expect("tracker buffer")
+            .id;
+        editor.set_active_buffer(tracker_id);
+        let layout = {
+            let tree = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*tracker*")
+                .and_then(|buffer| buffer.widget_tree.as_ref())
+                .expect("tracker widget tree");
+            eseqlisp::layout::LayoutEngine::new(120, 80, 1.0)
+                .layout(tree)
+                .expect("tracker layout")
+        };
+        assert!(find_layout_node_by_text(&layout, "bd02").is_some(), "track header column");
+        assert!(find_layout_node_by_text(&layout, "--- ..").is_some(), "empty step cell");
+        assert!(find_layout_node_by_text(&layout, "0F").is_some(), "hex row numbers");
+
+        // Keyboard: DOWN moves the cursor to row 1, RET toggles it, `a` enters
+        // C of the current octave (transpose 0) and activates the step.
+        let press = |editor: &mut eseqlisp::Editor, code: KeyCode| {
+            editor.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        };
+        press(&mut editor, KeyCode::Down);
+        press(&mut editor, KeyCode::Enter);
+        press(&mut editor, KeyCode::Char('a'));
+        let calls = calls.borrow().clone();
+        assert_eq!(
+            calls,
+            vec![
+                "seq-toggle-track-step 0 1".to_string(),
+                "seq-toggle-track-step 0 1".to_string(),
+                "seq-set-step-param 1 :transpose 0".to_string(),
+            ],
+            "step natives driven by the tracker keys"
+        );
+        // The keys must also have re-rendered the buffer: the cursor box now
+        // sits on row 2 with the cursor background.
+        fn find_layout_node_by_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if matches!(node.props.get("key"), Some(Value::String(value)) if value == key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_layout_node_by_key(child, key))
+        }
+        let layout = {
+            let tree = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*tracker*")
+                .and_then(|buffer| buffer.widget_tree.as_ref())
+                .expect("tracker widget tree");
+            eseqlisp::layout::LayoutEngine::new(120, 80, 1.0)
+                .layout(tree)
+                .expect("tracker layout")
+        };
+        let cursor_cell = find_layout_node_by_key(&layout, "tracker-cell-0-2").expect("cursor cell");
+        assert!(
+            matches!(cursor_cell.props.get("background-color"), Some(Value::Keyword(k)) if k == "blue"),
+            "cursor cell must re-render under the cursor: {:?}",
+            cursor_cell.props.get("background-color")
+        );
+        let cursor_row = editor
+            .runtime_mut()
+            .eval_str("alez.tracker.ui/cursor-row")
+            .expect("read cursor row")
+            .expect("cursor row");
+        assert!(matches!(cursor_row, Value::Number(row) if row == 2.0), "{cursor_row:?}");
+
+        // Note names follow the C4 = transpose 0 convention.
+        let names = editor
+            .runtime_mut()
+            .eval_str("(list (alez.tracker.ui/note-name 0) (alez.tracker.ui/note-name -13) (alez.tracker.ui/hex2 127))")
+            .expect("format helpers")
+            .expect("formatted");
+        assert_eq!(format_lisp_value(&names), "(\"C-4\" \"B-2\" \"7F\")");
+
+        editor
+            .runtime_mut()
+            .eval_str("(alez.tracker.ui/hide)")
+            .expect("hide tracker");
+        let tabs = editor
+            .runtime_mut()
+            .eval_str("(eseq.seq-step-tabs/seq-main-step-tabs)")
+            .expect("read step tabs")
+            .expect("step tab list");
+        assert!(!format_lisp_value(&tabs).contains("*tracker*"), "hide must unregister the tab");
+    }
+
     /// the distro root's import block is order-free. Reversing every
     /// `(import …)` line in ui/main.lisp — render roots included — must
     /// boot the same UI: same buffers, same widget trees, and the
@@ -17145,6 +17342,170 @@ mod drift_waveform_tests;
             "mixer perf fixture should render every track pattern cell"
         );
         editor
+    }
+
+    /// Cmd+A picks its target by surface (bead eseq-vmg8): the arrangement
+    /// while it is active OR merely visible behind the *fx* panel, the piano
+    /// roll while it is active, and the step grid otherwise. Selecting on
+    /// another surface drops the step selection so Backspace cannot delete
+    /// steps that are not on screen.
+    #[test]
+    fn metal_seq_arrangement_select_all_spans_every_clip_on_every_track() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let span = editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (reactive-set "SEQ" "song-lanes"
+                    (list
+                      (list (dict :clip-id 1 :start-beat 4 :end-beat 8))
+                      (list)
+                      (list (dict :clip-id 2 :start-beat 2 :end-beat 6)
+                            (dict :clip-id 3 :start-beat 12 :end-beat 20))))
+                  (let ((span (eseq.arrangement/clip-span-all-tracks)))
+                    (list (get span :start) (get span :end))))
+                "#,
+            )
+            .expect("compute the all-clips span");
+        assert_eq!(format!("{span:?}"), "Some((2 20))");
+
+        let empty = editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (reactive-set "SEQ" "song-lanes" (list (list) (list)))
+                  (list (eseq.arrangement/clip-span-all-tracks)
+                        (eseq.arrangement/select-all-clips)))
+                "#,
+            )
+            .expect("empty song");
+        assert_eq!(format!("{empty:?}"), "Some((nil false))");
+    }
+
+    #[test]
+    fn metal_seq_arrangement_cmd_d_reaches_region_duplicate() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (def dup-count (state 0))
+                  (def eseq.arrangement/arrangement-region-duplicate-key ()
+                    (do (set! dup-count (+ dup-count 1)) true))
+                  (set-window-buffer "*arrangement*"))
+                "#,
+            )
+            .expect("stub duplicate + open arrangement");
+        editor.refresh_runtime_side_effects();
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::SUPER));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(
+            editor.runtime_mut().eval_str("dup-count").unwrap(),
+            Some(Value::Number(2.0)),
+            "Super+D and Ctrl+D both reach the arrangement duplicate handler"
+        );
+    }
+
+    #[test]
+    fn metal_seq_cmd_a_dispatches_on_active_or_visible_surface() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (def select-log (state '()))
+                  (def eseq.step-grid-interactions/select-all-steps ()
+                    (set! select-log (append select-log (list :steps))))
+                  (def eseq.arrangement/select-all-clips ()
+                    (set! select-log (append select-log (list :clips))))
+                  (def eseq.piano-roll/piano-roll-select-all ()
+                    (set! select-log (append select-log (list :notes))))
+                "#,
+            )
+            .expect("install select-all test hooks");
+        editor.refresh_runtime_side_effects();
+        let log = |editor: &mut Editor| {
+            editor
+                .runtime_mut()
+                .eval_str("(map (lambda (k) (str k)) select-log)")
+                .unwrap()
+        };
+        let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+        // Active arrangement.
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*arrangement*")"#)
+            .expect("switch to arrangement");
+        editor.refresh_runtime_side_effects();
+        editor.handle_key(ctrl_a);
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.step-grid-interactions/select-all-context)").unwrap(),
+            Some(Value::Keyword("arrangement".into()))
+        );
+
+        // *fx* active while the arrangement is still visible in another tile.
+        editor
+            .runtime_mut()
+            .eval_str(r#"(do (split-window-below "*fx*") (other-window))"#)
+            .expect("show fx beside the arrangement");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor.runtime_mut().eval_str("(current-buffer-name)").unwrap(),
+            Some(Value::String("*fx*".into()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.step-grid-interactions/select-all-context)").unwrap(),
+            Some(Value::Keyword("arrangement".into())),
+            "fx active + arrangement visible still targets the clips; visible = {:?}",
+            editor.runtime_mut().eval_str("(visible-buffer-list)").unwrap()
+        );
+        editor.handle_key(ctrl_a);
+        let entries = format!("{:?}", log(&mut editor));
+        assert_eq!(entries.matches("clips").count(), 2, "{entries}");
+
+        // Active piano roll.
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
+            .expect("switch to piano roll");
+        editor.refresh_runtime_side_effects();
+        editor.handle_key(ctrl_a);
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.step-grid-interactions/select-all-context)").unwrap(),
+            Some(Value::Keyword("piano-roll".into()))
+        );
+
+        // Active step grid.
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*sequencer*")"#)
+            .expect("switch to sequencer");
+        editor.refresh_runtime_side_effects();
+        // The *sequencer* buffer's own mode keymap owns C-a there (a
+        // pre-existing path); this exercises the dispatcher the host branch
+        // forwards to.
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.step-grid-interactions/select-all-context)").unwrap(),
+            Some(Value::Keyword("steps".into()))
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.step-grid-interactions/seq-global-select-all)")
+            .expect("dispatch select-all in the step grid");
+
+        let entries = log(&mut editor);
+        let entries = format!("{entries:?}");
+        assert!(entries.contains("clips"), "arrangement Cmd+A selects clips: {entries}");
+        assert!(entries.contains("notes"), "piano roll Cmd+A selects notes: {entries}");
+        assert!(entries.contains("steps"), "step grid Cmd+A selects steps: {entries}");
     }
 
     #[test]
@@ -51515,6 +51876,36 @@ mod drift_waveform_tests;
             .expect("piano roll buffer")
             .id;
         editor.set_active_buffer(piano_buffer_id);
+        editor.runtime_mut().set_reactive("SEQ", "piano-roll-automation", map_value([
+            ("editable", Value::Bool(true)),
+            ("target", Value::String("step-param".into())),
+            ("param-idx", Value::Number(1.0)),
+            ("min", Value::Number(0.0)),
+            ("max", Value::Number(1.0)),
+        ]));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.runtime_mut().eval_str(
+            "(eseq.piano-roll/automation-action :set 0 0.25)"
+        ).unwrap();
+        editor.refresh_runtime_side_effects();
+        let readout_layout = editor.widget_layout().unwrap();
+        fn find_readout(node: &eseqlisp::layout::LayoutNode) -> Option<&eseqlisp::layout::LayoutNode> {
+            if node.props.get("key") == Some(&Value::String("automation-axis-value".into())) {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_readout)
+        }
+        let readout = find_readout(&readout_layout).expect("automation value label");
+        assert_eq!(readout.props.get("text"), Some(&Value::String("0.25".into())));
+        assert!(readout.rect.width.is_finite() && readout.rect.width > 0.0);
+        assert!(readout.rect.height.is_finite() && readout.rect.height > 0.0);
+        editor.runtime_mut().eval_str(
+            "(eseq.piano-roll/automation-action :finish 0 0.25)"
+        ).unwrap();
+        editor.refresh_runtime_side_effects();
+        let released_layout = editor.widget_layout().unwrap();
+        let readout = find_readout(&released_layout).expect("automation value label");
+        assert_eq!(readout.props.get("text"), Some(&Value::String(String::new())));
         let layout = editor
             .widget_layout()
             .expect("piano roll should have a widget layout");
@@ -55152,3 +55543,6 @@ mod digi_fm_ui_tests;
 
 #[path = "mnm_ui_tests.rs"]
 mod mnm_ui_tests;
+
+#[path = "manual_ui_tests.rs"]
+mod manual_ui_tests;

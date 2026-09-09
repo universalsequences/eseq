@@ -479,6 +479,18 @@ impl AppPaths {
     pub fn ui_dir(&self) -> PathBuf {
         self.factory_root().join("ui")
     }
+
+    /// The manual's markdown nodes (`docs/manual-spec.md` §5). Authored under
+    /// `docs/manual/` in the workspace; `dist/macos/build.sh` copies that
+    /// tree into the bundle next to the factory content.
+    pub fn manual_dir(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { workspace_root, .. } => workspace_root.join("docs/manual"),
+            AppPaths::Release {
+                contents_resources, ..
+            } => contents_resources.join("manual"),
+        }
+    }
     pub fn defmacros_dir(&self) -> PathBuf {
         self.factory_root().join("defmacros")
     }

@@ -12,6 +12,29 @@ pub(crate) struct RuntimeInit {
 }
 
 pub(super) fn register_factory_path_native(runtime: &mut Runtime) {
+    runtime.register_native_with_docs(
+        "seq-manual-path",
+        "(seq-manual-path [relative])",
+        "Absolute path of the manual directory, or of one file under it.",
+        |args, _ctx| {
+            let dir = sequencer::app_paths::app_paths().manual_dir();
+            let path = match args.first() {
+                None | Some(Value::Nil) => dir,
+                Some(Value::String(relative)) => {
+                    let relative = std::path::Path::new(relative);
+                    if relative
+                        .components()
+                        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                    {
+                        return Err("seq-manual-path requires a normalized relative path".to_string());
+                    }
+                    dir.join(relative)
+                }
+                _ => return Err("seq-manual-path expects an optional relative path string".to_string()),
+            };
+            Ok(Value::String(path.to_string_lossy().into_owned()))
+        },
+    );
     runtime.register_native("seq-factory-path", |args, _ctx| {
         let Some(Value::String(relative)) = args.first() else {
             return Err("seq-factory-path expects one relative path string".to_string());

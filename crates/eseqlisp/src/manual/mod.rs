@@ -12,6 +12,7 @@
 
 mod inline;
 mod parse;
+mod runs;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -21,6 +22,7 @@ use crate::vm::Value;
 
 pub use inline::Inline;
 pub use parse::parse_manual_source;
+pub use runs::{wrap_runs, Fragment};
 
 /// One block-level node of a page.
 #[derive(Debug, Clone, PartialEq)]
@@ -128,6 +130,53 @@ pub fn page_to_value(page: &Page) -> Value {
     list(std::iter::once(sym("page")).chain(page.blocks.iter().map(block_to_value)))
 }
 
+fn string_at(items: &[Rc<RefCell<Value>>], index: usize) -> Option<String> {
+    match &*items.get(index)?.borrow() {
+        Value::String(text) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// Read one `(span …)`/`(b …)`/`(em …)`/`(code …)`/`(link …)`/`(action-link …)`
+/// value back into an [`Inline`]. Unknown shapes become empty text.
+fn inline_from_value(value: &Value) -> Inline {
+    let Value::List(items) = value else {
+        return Inline::Text(String::new());
+    };
+    let head = match items.first().map(|cell| cell.borrow().clone()) {
+        Some(Value::Symbol(head)) => head,
+        _ => return Inline::Text(String::new()),
+    };
+    let text = string_at(items, 1).unwrap_or_default();
+    match head.as_str() {
+        "b" => Inline::Bold(text),
+        "em" => Inline::Em(text),
+        "code" => Inline::Code(text),
+        "link" => Inline::Link {
+            label: text,
+            target: string_at(items, 2).unwrap_or_default(),
+        },
+        "action-link" => Inline::Action {
+            label: text,
+            form: string_at(items, 2).unwrap_or_default(),
+        },
+        _ => Inline::Text(text),
+    }
+}
+
+/// `((kind text [target]) …)` per group.
+fn runs_to_value(groups: &[Vec<Fragment>]) -> Value {
+    list(groups.iter().map(|group| {
+        list(group.iter().map(|frag| {
+            let mut items = vec![sym(frag.kind), string(&frag.text)];
+            if let Some(target) = &frag.target {
+                items.push(string(target));
+            }
+            list(items)
+        }))
+    }))
+}
+
 /// Parse a manual page from a file on disk.
 pub fn parse_manual_file(path: &str) -> Result<Page, String> {
     let source = std::fs::read_to_string(path)
@@ -145,6 +194,22 @@ pub(crate) fn register_manual_natives(runtime: &mut Runtime) {
                 return Err("parse-manual-page expects a path string".to_string());
             };
             parse_manual_file(path).map(|page| page_to_value(&page))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "manual-wrap-runs",
+        "(manual-wrap-runs inlines)",
+        "Split a paragraph's inline nodes (the tail of a p/li form) on whitespace into groups of glued word fragments ((kind text [target]) …) for a wrap container.",
+        |args, _ctx| {
+            let inlines: Vec<Inline> = match args.first() {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .map(|cell| inline_from_value(&cell.borrow()))
+                    .collect(),
+                _ => return Err("manual-wrap-runs expects a list of inline nodes".to_string()),
+            };
+            Ok(runs_to_value(&wrap_runs(&inlines)))
         },
     );
 

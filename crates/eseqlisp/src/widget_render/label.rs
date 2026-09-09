@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
 use super::{
-    CellBuffer, GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive,
-    WidgetDefinition, get_f32_prop, resolve_named_color, styled_cell,
+    CellBuffer, EventOutput, GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive,
+    MouseEventOutcome, WidgetDefinition, WidgetEvent, get_f32_prop, resolve_named_color,
+    styled_cell,
 };
+use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 use crate::backend::Color;
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, MeasureCtx, Rect, Size, f64_to_f32, get_map, get_prop_num,
@@ -44,6 +46,42 @@ fn resolve_h_align(props: &HashMap<String, Value>) -> f32 {
             1.0
         }
         _ => 0.0,
+    }
+}
+
+fn underline_enabled(props: &HashMap<String, Value>) -> bool {
+    matches!(props.get("underline"), Some(Value::Bool(true)))
+}
+
+/// A one-pixel rule under one rendered line, in cell space, matching the
+/// line's horizontal alignment and measured width. `row` is the line's top.
+fn underline_rect(
+    line: &str,
+    row: f32,
+    col: f32,
+    align_width: f32,
+    h_align: f32,
+    font_size: f32,
+    viewport: super::WidgetViewport,
+) -> Rect {
+    let cell_w = viewport.cell_w.max(1.0);
+    let cell_h = viewport.cell_h.max(1.0);
+    let (text_px, cap_height_px) = super::with_render_text_measurer(|measurer| {
+        (
+            measurer.measure_text_px(line, font_size),
+            measurer.cap_height_px(font_size),
+        )
+    })
+    .unwrap_or((line.chars().count() as f32 * cell_w, cell_h * 0.7));
+    let baseline_px = crate::ui::glyph_atlas::centered_text_baseline_px(cell_h, cap_height_px, 1.0);
+    let slack_px = (align_width * cell_w - text_px).max(0.0);
+    Rect {
+        col: col + slack_px * h_align / cell_w,
+        // Two pixels below the baseline clears descender-free glyphs without
+        // colliding with the next wrapped line.
+        row: row + (baseline_px + 2.0) / cell_h,
+        width: text_px / cell_w,
+        height: 1.0 / cell_h,
     }
 }
 
@@ -260,6 +298,56 @@ mod tests {
         assert_eq!(lines, vec![("wide", 0.0), ("letters", 0.5)]);
     }
 
+    #[test]
+    fn underline_draws_one_pixel_rule_per_line_matching_text_width() {
+        struct Font;
+        impl crate::layout::TextMeasurer for Font {
+            fn measure_text_px(&self, text: &str, _: f32) -> f32 { text.chars().count() as f32 * 4.0 }
+            fn line_height_px(&self, _: f32) -> f32 { 10.0 }
+        }
+        let props: HashMap<String, Value> = [
+            ("text".into(), Value::String("wide letters".into())),
+            ("wrap".into(), Value::Bool(true)),
+            ("underline".into(), Value::Bool(true)),
+            ("h-align".into(), Value::Keyword("right".into())),
+            ("font-size".into(), Value::Number(10.0)),
+            ("bg".into(), Value::Keyword("transparent".into())),
+        ].into_iter().collect();
+        let node = crate::layout::LayoutNode {
+            widget_id: 1, stable_widget_id: None, subtree_root_id: None,
+            parent_subtree_root_id: None, stable_key: None, widget_type: "label".into(),
+            rect: Rect { col: 1.0, row: 0.0, width: 4.0, height: 1.0 },
+            props, children: vec![], focusable: false, animation: Default::default(),
+        };
+        super::super::set_render_text_measurer(std::rc::Rc::new(Font));
+        let viewport = super::super::WidgetViewport {
+            cell_w: 10.0, cell_h: 20.0, vp_w: 1000.0, vp_h: 800.0,
+            time_seconds: 0.0, focused_widget_id: None, focused_branch: false,
+            overlay_viewport_bottom: 40.0, scroll_top: 0.0, scroll_left: 0.0, inherited_hover: false,
+        };
+        let primitives = LABEL_WIDGET.build_primitives("label", &node, viewport);
+        let rules: Vec<Rect> = primitives.iter().filter_map(|p| match p {
+            GpuPrimitive::Rect(r) => Some(r.rect), _ => None,
+        }).collect();
+        assert_eq!(rules.len(), 2, "one rule per wrapped line, no bg rect");
+        // "wide" is 16px in a 40px box, right-aligned: starts 24px in.
+        assert!((rules[0].col - (1.0 + 2.4)).abs() < 1e-4, "{:?}", rules[0]);
+        assert!((rules[0].width - 1.6).abs() < 1e-4);
+        assert!((rules[0].height - 0.05).abs() < 1e-4, "one pixel in a 20px cell");
+        // The backend centres each line's baseline in one mono cell from the
+        // line's top: (20 + 7) / 2 + 2 = 15.5px = 0.775 cells; line 2 sits
+        // half a cell (one 10px font line) lower.
+        assert!((rules[0].row - 0.775).abs() < 1e-4, "under line 1: {:?}", rules[0]);
+        assert!((rules[1].row - 1.275).abs() < 1e-4, "under line 2: {:?}", rules[1]);
+        let text_fg = primitives.iter().find_map(|p| match p {
+            GpuPrimitive::ProportionalText(t) => Some(t.fg), _ => None,
+        }).unwrap();
+        let rule_color = primitives.iter().find_map(|p| match p {
+            GpuPrimitive::Rect(r) => Some(r.color), _ => None,
+        }).unwrap();
+        assert_eq!(rule_color, text_fg, "underline takes the text colour (incl. hover)");
+    }
+
 }
 
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
@@ -327,7 +415,7 @@ impl WidgetDefinition for LabelWidget {
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "text", "color", "active", "active-color", "hover-color", "bg", "font-size",
-            "width", "height", "wrap", "h-align", "v-align",
+            "width", "height", "wrap", "h-align", "v-align", "underline", "on-click",
         ]
     }
 
@@ -413,6 +501,101 @@ impl WidgetDefinition for LabelWidget {
         tui_render(props, rect, buf);
     }
 
+    // A label with `:on-click` / `:on-right-click` / `:on-double-click` is a
+    // link: dispatch the same one-argument pointer event a `box` does, so
+    // handlers are written `(lambda (event) …)`. Without these, the generic
+    // pointer-target check made a clickable label swallow the click and do
+    // nothing.
+    fn mouse_event(
+        &self,
+        node: &crate::layout::LayoutNode,
+        mouse_kind: MouseEventKind,
+        local_col: f32,
+        local_row: f32,
+        _drag_start: Option<(f32, f32)>,
+        _gesture: Option<&Value>,
+        modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
+    ) -> MouseEventOutcome {
+        let dispatch = |phase: &str| {
+            MouseEventOutcome::Dispatch(WidgetEvent::Custom(super::pointer_event_info(
+                phase, modifiers, node, local_col, local_row,
+            )))
+        };
+        match mouse_kind {
+            MouseEventKind::Down(MouseButton::Right)
+                if node.props.contains_key("on-right-click") =>
+            {
+                dispatch("right-click")
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && node.props.contains_key("on-right-click")
+                {
+                    dispatch("right-click")
+                } else if node.props.contains_key("on-click") {
+                    dispatch("click")
+                } else {
+                    MouseEventOutcome::Ignore
+                }
+            }
+            _ => MouseEventOutcome::Ignore,
+        }
+    }
+
+    fn double_click_event(
+        &self,
+        node: &crate::layout::LayoutNode,
+        local_col: f32,
+        local_row: f32,
+    ) -> Option<WidgetEvent> {
+        node.props.contains_key("on-double-click").then(|| {
+            WidgetEvent::Custom(super::pointer_event_info(
+                "double-click",
+                KeyModifiers::empty(),
+                node,
+                local_col,
+                local_row,
+            ))
+        })
+    }
+
+    fn handle_event(
+        &self,
+        node: &crate::layout::LayoutNode,
+        event: WidgetEvent,
+    ) -> Option<EventOutput> {
+        let (callback_name, arg) = match event {
+            WidgetEvent::Activate(modifiers) => (
+                "on-click",
+                super::pointer_event_info("click", modifiers, node, node.rect.col, node.rect.row),
+            ),
+            WidgetEvent::Custom(value) => {
+                let phase = match &value {
+                    Value::Map(map) => map.get("phase").and_then(|v| match &*v.borrow() {
+                        Value::String(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                }?;
+                let callback_name = match phase.as_str() {
+                    "click" => "on-click",
+                    "right-click" => "on-right-click",
+                    "double-click" => "on-double-click",
+                    _ => return None,
+                };
+                (callback_name, value)
+            }
+            _ => return None,
+        };
+        let callback = node.props.get(callback_name)?.clone();
+        Some(EventOutput {
+            callback,
+            args: vec![arg],
+        })
+    }
+
     fn build_primitives(
         &self,
         _widget_type: &str,
@@ -466,17 +649,33 @@ impl WidgetDefinition for LabelWidget {
             (vec![text.clone()], 1.0)
         };
         let start_row = label_text_row(&node.props, node.rect);
+        let h_align = resolve_h_align(&node.props);
+        let underline = underline_enabled(&node.props);
         for (line_idx, line) in lines.into_iter().enumerate() {
             let row = start_row + line_idx as f32 * line_height;
             if row >= node.rect.row + node.rect.height {
                 break;
+            }
+            if underline && !line.trim().is_empty() {
+                prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
+                    rect: underline_rect(
+                        &line,
+                        row,
+                        node.rect.col,
+                        node.rect.width,
+                        h_align,
+                        font_size,
+                        viewport,
+                    ),
+                    color: fg,
+                }));
             }
             prims.push(GpuPrimitive::ProportionalText(
                 GpuProportionalTextPrimitive {
                     row,
                     col: node.rect.col,
                     align_width: node.rect.width,
-                    h_align: resolve_h_align(&node.props),
+                    h_align,
                     text: line,
                     font_size,
                     scale: 1.0,

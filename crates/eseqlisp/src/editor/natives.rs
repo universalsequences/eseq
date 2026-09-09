@@ -579,8 +579,8 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
 
     runtime.register_native_with_docs(
         "define-mode",
-        "(define-mode name :read-only bool :live-keys bool :on-enter fn-name :on-key fn-name)",
-        "Register a named major mode. :live-keys opts the mode into host live-keyboard shortcuts.",
+        "(define-mode name :read-only bool :live-keys bool :on-enter fn-name :on-key fn-name :inherit parent-mode)",
+        "Register a named major mode. :live-keys opts the mode into host live-keyboard shortcuts; :inherit names a parent mode whose keymap, on-key handler and live-keys opt-in apply after this mode's own.",
         |args, ctx| {
             let Some(Value::String(name)) = args.first() else {
                 return Err("define-mode expects a name string".to_string());
@@ -589,6 +589,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             let mut live_keys = false;
             let mut on_enter: Option<String> = None;
             let mut on_key: Option<String> = None;
+            let mut inherit: Option<String> = None;
             let mut i = 1;
             while i < args.len() {
                 match args.get(i) {
@@ -612,10 +613,16 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         }
                         i += 2;
                     }
+                    Some(Value::Keyword(k)) if k == "inherit" => {
+                        if let Some(Value::String(parent)) = args.get(i + 1) {
+                            inherit = Some(parent.clone());
+                        }
+                        i += 2;
+                    }
                     _ => i += 1,
                 }
             }
-            ctx.define_mode(name.clone(), read_only, live_keys, on_enter, on_key);
+            ctx.define_mode(name.clone(), read_only, live_keys, on_enter, on_key, inherit);
             Ok(Value::Bool(true))
         },
     );
@@ -1553,6 +1560,27 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     // ── String utilities ─────────────────────────────────────────────────────
+
+    runtime.register_native_with_docs(
+        "string-split",
+        "(string-split s separator)",
+        "Split a string on a separator string into a list of strings; empty pieces are kept.",
+        |args, _ctx| {
+            let (Some(Value::String(text)), Some(Value::String(separator))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("string-split expects (string string)".to_string());
+            };
+            if separator.is_empty() {
+                return Err("string-split separator must not be empty".to_string());
+            }
+            Ok(Value::List(
+                text.split(separator.as_str())
+                    .map(|piece| Rc::new(RefCell::new(Value::String(piece.to_string()))))
+                    .collect(),
+            ))
+        },
+    );
 
     runtime.register_native_with_docs(
         "substring",

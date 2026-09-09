@@ -160,6 +160,7 @@ ditto "$ESEQ_CLI" "$MACOS/eseq"
 ditto "$DGEN_TOOL" "$MACOS/DGenLisp-macos-arm64"
 ditto "$DGEN_TOOLCHAIN" "$RESOURCES/dgen-toolchain"
 ditto "$CONTENT_DIR" "$RESOURCES"
+ditto "$REPO_ROOT/docs/manual" "$RESOURCES/manual"
 ditto "$ICON" "$RESOURCES/AppIcon.icns"
 ditto "$FONT_DIR" "$RESOURCES/fonts"
 
