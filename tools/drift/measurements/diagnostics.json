@@ -1,0 +1,542 @@
+{
+  "methodology": "Test component hypotheses against native captures, without changing synth DSP.\n\nClipping is fitted on the first ascending note only. All other windows are\nholdouts. Pitch normalization comes from a separate solo-oscillator capture,\nnot a per-note fit to the loud output. This is a diagnostic, not a synth model.\n",
+  "training_ceiling": 0.21878745698230243,
+  "training_tanh_ceiling": 0.27141658030304516,
+  "independent_pitch_normalization": {
+    "36": 1.0,
+    "48": 0.9858098691514474,
+    "60": 0.9744790420388117,
+    "72": 0.966425825127718,
+    "84": 0.9637714617383544
+  },
+  "clipping": [
+    {
+      "order": "ascending",
+      "position": 0,
+      "note": 36,
+      "training_window": true,
+      "fixed_clip_relative_error": 0.0006109158912222678,
+      "normalized_clip_relative_error": 0.0006109158912222678,
+      "fixed_tanh_relative_error": 0.08607703325435109,
+      "diagnostic_individual_ceiling": 0.21878745698230243
+    },
+    {
+      "order": "ascending",
+      "position": 1,
+      "note": 48,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.011832305479747354,
+      "normalized_clip_relative_error": 0.0007988375105517792,
+      "fixed_tanh_relative_error": 0.09382515735076982,
+      "diagnostic_individual_ceiling": 0.21567966611109796
+    },
+    {
+      "order": "ascending",
+      "position": 2,
+      "note": 60,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.021446930979899963,
+      "normalized_clip_relative_error": 0.0017145515554198476,
+      "fixed_tanh_relative_error": 0.09296009513138884,
+      "diagnostic_individual_ceiling": 0.21319785134640024
+    },
+    {
+      "order": "ascending",
+      "position": 3,
+      "note": 72,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.02847356016212781,
+      "normalized_clip_relative_error": 0.00462751804290665,
+      "fixed_tanh_relative_error": 0.09433520603297114,
+      "diagnostic_individual_ceiling": 0.21144442057958923
+    },
+    {
+      "order": "ascending",
+      "position": 4,
+      "note": 84,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.032693966055028445,
+      "normalized_clip_relative_error": 0.01302588715713149,
+      "fixed_tanh_relative_error": 0.09356354556141136,
+      "diagnostic_individual_ceiling": 0.21089468155889418
+    },
+    {
+      "order": "descending",
+      "position": 0,
+      "note": 84,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.032694173125818335,
+      "normalized_clip_relative_error": 0.013026463651644244,
+      "fixed_tanh_relative_error": 0.09356404457780823,
+      "diagnostic_individual_ceiling": 0.21089603188232017
+    },
+    {
+      "order": "descending",
+      "position": 1,
+      "note": 72,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.028473018008769238,
+      "normalized_clip_relative_error": 0.004626011022874325,
+      "fixed_tanh_relative_error": 0.09433508813173286,
+      "diagnostic_individual_ceiling": 0.21144528935690052
+    },
+    {
+      "order": "descending",
+      "position": 2,
+      "note": 60,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.02144679069362018,
+      "normalized_clip_relative_error": 0.001706941642078601,
+      "fixed_tanh_relative_error": 0.0929559673573463,
+      "diagnostic_individual_ceiling": 0.21319800211949821
+    },
+    {
+      "order": "descending",
+      "position": 3,
+      "note": 48,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.011831768680015268,
+      "normalized_clip_relative_error": 0.0007936140705403694,
+      "fixed_tanh_relative_error": 0.09383561783924321,
+      "diagnostic_individual_ceiling": 0.21567975527669436
+    },
+    {
+      "order": "descending",
+      "position": 4,
+      "note": 36,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.0005987866428838882,
+      "normalized_clip_relative_error": 0.0005987866428838882,
+      "fixed_tanh_relative_error": 0.0860673380767831,
+      "diagnostic_individual_ceiling": 0.21878745684623938
+    },
+    {
+      "order": "low-repeat",
+      "position": 0,
+      "note": 36,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.000579624893604165,
+      "normalized_clip_relative_error": 0.000579624893604165,
+      "fixed_tanh_relative_error": 0.08606814439820054,
+      "diagnostic_individual_ceiling": 0.21878749743551543
+    },
+    {
+      "order": "low-repeat",
+      "position": 1,
+      "note": 36,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.0005969198143833572,
+      "normalized_clip_relative_error": 0.0005969198143833572,
+      "fixed_tanh_relative_error": 0.08608069790474725,
+      "diagnostic_individual_ceiling": 0.21878739622256047
+    },
+    {
+      "order": "low-repeat",
+      "position": 2,
+      "note": 36,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.0006107614517801388,
+      "normalized_clip_relative_error": 0.0006107614517801388,
+      "fixed_tanh_relative_error": 0.08606975805477884,
+      "diagnostic_individual_ceiling": 0.21878747972194654
+    },
+    {
+      "order": "low-repeat",
+      "position": 3,
+      "note": 36,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.0006099879391793514,
+      "normalized_clip_relative_error": 0.0006099879391793514,
+      "fixed_tanh_relative_error": 0.0860954113134565,
+      "diagnostic_individual_ceiling": 0.21878757301770813
+    },
+    {
+      "order": "low-repeat",
+      "position": 4,
+      "note": 36,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.0006261106320581043,
+      "normalized_clip_relative_error": 0.0006261106320581043,
+      "fixed_tanh_relative_error": 0.08606470115624695,
+      "diagnostic_individual_ceiling": 0.21878741067358792
+    },
+    {
+      "order": "high-repeat",
+      "position": 0,
+      "note": 84,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.03269568808263252,
+      "normalized_clip_relative_error": 0.013027539431244831,
+      "fixed_tanh_relative_error": 0.09355782282481793,
+      "diagnostic_individual_ceiling": 0.21089618333097304
+    },
+    {
+      "order": "high-repeat",
+      "position": 1,
+      "note": 84,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.032694056618441956,
+      "normalized_clip_relative_error": 0.013025993911235925,
+      "fixed_tanh_relative_error": 0.09355971900110119,
+      "diagnostic_individual_ceiling": 0.21089557674950776
+    },
+    {
+      "order": "high-repeat",
+      "position": 2,
+      "note": 84,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.032694976003456895,
+      "normalized_clip_relative_error": 0.0130269214025416,
+      "fixed_tanh_relative_error": 0.09356157250884337,
+      "diagnostic_individual_ceiling": 0.210896559654611
+    },
+    {
+      "order": "high-repeat",
+      "position": 3,
+      "note": 84,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.03269469893748378,
+      "normalized_clip_relative_error": 0.013026141743923728,
+      "fixed_tanh_relative_error": 0.09356140054135478,
+      "diagnostic_individual_ceiling": 0.21089562216833047
+    },
+    {
+      "order": "high-repeat",
+      "position": 4,
+      "note": 84,
+      "training_window": false,
+      "fixed_clip_relative_error": 0.03269353287876351,
+      "normalized_clip_relative_error": 0.01302602326392051,
+      "fixed_tanh_relative_error": 0.0935592216676049,
+      "diagnostic_individual_ceiling": 0.21089612910577513
+    }
+  ],
+  "quiet_comparisons": {
+    "note": 36,
+    "minimum_local_snr_db": 30,
+    "cases": [
+      {
+        "type": 1,
+        "cutoff": 250,
+        "resonance": 0,
+        "retained_harmonics": [],
+        "rms_difference_db": null,
+        "max_difference_db": null
+      },
+      {
+        "type": 1,
+        "cutoff": 250,
+        "resonance": 0.5,
+        "retained_harmonics": [],
+        "rms_difference_db": null,
+        "max_difference_db": null
+      },
+      {
+        "type": 1,
+        "cutoff": 250,
+        "resonance": 0.8,
+        "retained_harmonics": [],
+        "rms_difference_db": null,
+        "max_difference_db": null
+      },
+      {
+        "type": 1,
+        "cutoff": 250,
+        "resonance": 0.95,
+        "retained_harmonics": [],
+        "rms_difference_db": null,
+        "max_difference_db": null
+      },
+      {
+        "type": 1,
+        "cutoff": 1000,
+        "resonance": 0,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.15777830860076492,
+        "max_difference_db": 0.15777830860076492
+      },
+      {
+        "type": 1,
+        "cutoff": 1000,
+        "resonance": 0.5,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.021289051554913563,
+        "max_difference_db": 0.021289051554913563
+      },
+      {
+        "type": 1,
+        "cutoff": 1000,
+        "resonance": 0.8,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.022135528425702766,
+        "max_difference_db": 0.022135528425702766
+      },
+      {
+        "type": 1,
+        "cutoff": 1000,
+        "resonance": 0.95,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.025902118744464353,
+        "max_difference_db": 0.025902118744464353
+      },
+      {
+        "type": 1,
+        "cutoff": 4000,
+        "resonance": 0,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06389128070520744,
+        "max_difference_db": 0.06389128070520744
+      },
+      {
+        "type": 1,
+        "cutoff": 4000,
+        "resonance": 0.5,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.07699559138751066,
+        "max_difference_db": 0.07699559138751066
+      },
+      {
+        "type": 1,
+        "cutoff": 4000,
+        "resonance": 0.8,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.09557143488891562,
+        "max_difference_db": 0.09557143488891562
+      },
+      {
+        "type": 1,
+        "cutoff": 4000,
+        "resonance": 0.95,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.11456460650919009,
+        "max_difference_db": 0.11456460650919009
+      },
+      {
+        "type": 2,
+        "cutoff": 250,
+        "resonance": 0,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06669490742137185,
+        "max_difference_db": 0.06669490742137185
+      },
+      {
+        "type": 2,
+        "cutoff": 250,
+        "resonance": 0.5,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.07051389905319816,
+        "max_difference_db": 0.07051389905319816
+      },
+      {
+        "type": 2,
+        "cutoff": 250,
+        "resonance": 0.8,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06614160571785943,
+        "max_difference_db": 0.06614160571785943
+      },
+      {
+        "type": 2,
+        "cutoff": 250,
+        "resonance": 0.95,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06835148447962247,
+        "max_difference_db": 0.06835148447962247
+      },
+      {
+        "type": 2,
+        "cutoff": 1000,
+        "resonance": 0,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06567158090508851,
+        "max_difference_db": 0.06567158090508851
+      },
+      {
+        "type": 2,
+        "cutoff": 1000,
+        "resonance": 0.5,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06714061668126758,
+        "max_difference_db": 0.06714061668126758
+      },
+      {
+        "type": 2,
+        "cutoff": 1000,
+        "resonance": 0.8,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06459200614529426,
+        "max_difference_db": 0.06459200614529426
+      },
+      {
+        "type": 2,
+        "cutoff": 1000,
+        "resonance": 0.95,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06566634134916782,
+        "max_difference_db": 0.06566634134916782
+      },
+      {
+        "type": 2,
+        "cutoff": 4000,
+        "resonance": 0,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06442965659862576,
+        "max_difference_db": 0.06442965659862576
+      },
+      {
+        "type": 2,
+        "cutoff": 4000,
+        "resonance": 0.5,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06807618964356976,
+        "max_difference_db": 0.06807618964356976
+      },
+      {
+        "type": 2,
+        "cutoff": 4000,
+        "resonance": 0.8,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.0704000561739968,
+        "max_difference_db": 0.0704000561739968
+      },
+      {
+        "type": 2,
+        "cutoff": 4000,
+        "resonance": 0.95,
+        "retained_harmonics": [
+          1
+        ],
+        "rms_difference_db": 0.06896642975204115,
+        "max_difference_db": 0.06896642975204115
+      }
+    ]
+  },
+  "dither_control": [
+    {
+      "case": "bypass-saw--60",
+      "triangular_setting_rms": 6.294043371852231e-05,
+      "no_dither_setting_rms": 6.225086423803062e-05,
+      "repeat_difference_rms": 3.71760810027092e-05
+    },
+    {
+      "case": "linear-t1-f1000-r0--60",
+      "triangular_setting_rms": 9.038565104989148e-05,
+      "no_dither_setting_rms": 8.929714440343751e-05,
+      "repeat_difference_rms": 3.772972451915398e-05
+    },
+    {
+      "case": "linear-t2-f1000-r0--60",
+      "triangular_setting_rms": 7.24407383150607e-05,
+      "no_dither_setting_rms": 7.243751458991655e-05,
+      "repeat_difference_rms": 6.782039229560883e-07
+    }
+  ],
+  "capture_sha256": {
+    "ordering/ascending--6": "e661ef596a9ba705e178d4c6b234b24d8a224668c6b348b5eb3ac08347c26bb4",
+    "ordering/ascending-p6": "61af4b70c2aad9e3b848a7fb98c67e7725970b068b82dc63346530b86e3f6642",
+    "ordering/descending--6": "7ac64c2769b773442e16781c58219783409b004b5c62ee12aeb08cbff0d8b9b3",
+    "ordering/descending-p6": "61e8b7b12afdf2f26b0c552ac5f5d605eded4d1b5d2568a5367411040ebcee35",
+    "ordering/low-repeat--6": "d34c25252b1f90da3a94be8c24ad598172e8cbac9e21960e08cc5ce20c9680ce",
+    "ordering/low-repeat-p6": "59aef315e9ef8857b1723bdf4f89447d374969867b963134a11fcd32a94a7e7f",
+    "ordering/high-repeat--6": "fb5a9c0fa0ecb20da9dc48ec5cd4a6d5a1360bfedfcd2b27c9546881c53df119",
+    "ordering/high-repeat-p6": "413600e6fec64bcdb291f35bdcf913bed53d524e49c4fd0e72d5953c31f9c392",
+    "linear-clean/bypass-saw--48": "0e189d54e2590ba887791027909996aa60873f96336ab6b963053b337e5cf2f8",
+    "linear-clean/bypass-saw--60": "993068b50b39241f53e0a4732995fb1b2a3f4027ae662ae59aa55daf94612ba4",
+    "linear-clean/linear-t1-f250-r0--48": "dd7d61519d353e85a1050ad250b5d57c81267edd470679e935ba76b68205e9fb",
+    "linear-clean/linear-t1-f250-r0--60": "d85e1a1797da886f11b754a3b2fba56247164e4b0d0cfbc7a450c7d944cdc16a",
+    "linear-clean/linear-t1-f250-r0.5--48": "3f23ff9c2a6bbcce4284832b41c7f770d13cb5081171208e1da1555f8d9e7cf6",
+    "linear-clean/linear-t1-f250-r0.5--60": "b473f480cee1809bf7d7ddd248327409295ab88e92c889b6db0a712cc4e63b99",
+    "linear-clean/linear-t1-f250-r0.8--48": "b8b500bc12d1abe6d1b1f21c827f8d7f3b5f1f59ed0cbb5f0de68984725f0da7",
+    "linear-clean/linear-t1-f250-r0.8--60": "e42bb82a63283f5b60e1a5a00754bb2bd42dad4a384b76a54aa03c1e4c547446",
+    "linear-clean/linear-t1-f250-r0.95--48": "d8cd5d2069bf8ab02061213f46ebc4b7c0703569c49317ff425b0a3993b50fc1",
+    "linear-clean/linear-t1-f250-r0.95--60": "595c73fb79f77a7301c44e6b9a1c3d92ad8c66a955b324c774477f8b219199b7",
+    "linear-clean/linear-t1-f1000-r0--48": "f35154f234ff4dda9a59db635e2507a9df9270fe8ff6d5458e23fec5f39d053c",
+    "linear-clean/linear-t1-f1000-r0--60": "9bfd9998d28b92713b068ee5b2d91a8d087b2af99e08120209b206af650116f9",
+    "linear-clean/linear-t1-f1000-r0.5--48": "0a8b988efded10da04844ecfba24f0df063da60944be282ce7e873c25ae28bf9",
+    "linear-clean/linear-t1-f1000-r0.5--60": "af9aa450b9b7d6875323010730c22700849bbfdee85d4da191990ac635f66aba",
+    "linear-clean/linear-t1-f1000-r0.8--48": "5a5064f485c2950f2c67c2c05d7bc4e54be089e1fe4ed3f9eda21c9f96106692",
+    "linear-clean/linear-t1-f1000-r0.8--60": "71f2bd099e2846f3dc87e90d0f2166752f8a9fb6f117298c8720fbdfd194afa6",
+    "linear-clean/linear-t1-f1000-r0.95--48": "0a4206f5e6de6c31f7018345898e401c916758dfc6375e43deaca3273de43346",
+    "linear-clean/linear-t1-f1000-r0.95--60": "1d609aa54ff86e6a89fc3106f46cf79b305243a18fe987093d2de647fa76b52c",
+    "linear-clean/linear-t1-f4000-r0--48": "ac78c6931d38c3e7c2cd66b682a99cffa139fa7bf756367a2363719255e28aae",
+    "linear-clean/linear-t1-f4000-r0--60": "cdec5393d113ba3d96e78f3b9b017d61b36f65b881824a0ae4d6acd3dfb7a1d5",
+    "linear-clean/linear-t1-f4000-r0.5--48": "7e265d9b1580e05d6c1ee7e03258b34841ca262a8106e7af0aa7ba779b29dba3",
+    "linear-clean/linear-t1-f4000-r0.5--60": "62a7c30fc39f4bfa0f49afe8b6b6105284fec1e7c1837263a7141abc86c6180d",
+    "linear-clean/linear-t1-f4000-r0.8--48": "e5df7d881dc2ab7ec2902ce9fde8b67fd70ed3e99003168fcd7320ae8a013734",
+    "linear-clean/linear-t1-f4000-r0.8--60": "d1db4456c57be6ddaacc08f00f97e46b4e703e186626df6afed42c56b1d0270f",
+    "linear-clean/linear-t1-f4000-r0.95--48": "f62a99f3bb543f7f5a3c16c10e4af0af951aaa4e29a51fff5b314c09af86181c",
+    "linear-clean/linear-t1-f4000-r0.95--60": "de7b581c1e3b9c667985fddc34af435e0b7044ede21eef354ea2d1a1721a82c6",
+    "linear-clean/linear-t2-f250-r0--48": "8457fa508afd48588242ea086811a0d529243126d43fbf6b5a4d50bf68bd22ae",
+    "linear-clean/linear-t2-f250-r0--60": "4366768f9d5762938fa6edec8346934e300de535a4b0126bd892a8dbd68cb390",
+    "linear-clean/linear-t2-f250-r0.5--48": "c3f86f79c90c89a6ca403facd2b6772a767aac8454dbffbdac97bdd7ec3e069a",
+    "linear-clean/linear-t2-f250-r0.5--60": "703dfa89d4dc091fc49642f02ed89336d4dc937dd06f689f89d2b209048dadf1",
+    "linear-clean/linear-t2-f250-r0.8--48": "8afa34317101a1779522698b248ab16783aceda190951e4183e0ec34a0f8d863",
+    "linear-clean/linear-t2-f250-r0.8--60": "0b09fd36709e51bf9ff772f1947ef5de9c4ddd19bd98e3fde455d06be44b31b2",
+    "linear-clean/linear-t2-f250-r0.95--48": "ad81fa8d32470fee0387993acf131b9bdf590a75c02dd78e145ebd832cfcf2d9",
+    "linear-clean/linear-t2-f250-r0.95--60": "3b3c9b0d0c917ac15e768ef397c51d4a81da56cc1ddd7d9f124da448c262b228",
+    "linear-clean/linear-t2-f1000-r0--48": "a4946e623483bb4ef4c8dc1ddc75d21ec69645e3b280b8f8941efec6e4c6bd96",
+    "linear-clean/linear-t2-f1000-r0--60": "4307f1a795da6f77f0582bbd4ed09f58dcbfff1783130cd57bccbe7a460c0b1b",
+    "linear-clean/linear-t2-f1000-r0.5--48": "65560f94bf0ff8963791869b25c2978df8257bd946b2c56ad0e799e1db3bf141",
+    "linear-clean/linear-t2-f1000-r0.5--60": "1c0412fd46b6b2c5e3820443baee8470ad2bc83dbbca9fbc04b6fa0cc0c4b7dd",
+    "linear-clean/linear-t2-f1000-r0.8--48": "1871d084b105aa296ed9c6009f68a2dcc989bf698662d8ec76757b007cd0fc8c",
+    "linear-clean/linear-t2-f1000-r0.8--60": "c252530877013ce57f13d3b1e5251f8100e0ec5f47d5fef9b4de6cdd104f3439",
+    "linear-clean/linear-t2-f1000-r0.95--48": "3a52eeca5df50daaa94185ebd42dce1fe34bbc6ec4bfc6162bd12dc9fdaf27b1",
+    "linear-clean/linear-t2-f1000-r0.95--60": "64aca022fbc6b59a05fda4ce3f8c735e00cee3071a6c222be7f2ec090c89cdec",
+    "linear-clean/linear-t2-f4000-r0--48": "b4ef4ec3765103d8cc9a08de9886c36477573dcf1295286ea5b0979abb4e2303",
+    "linear-clean/linear-t2-f4000-r0--60": "e6a2e805b8a2a3a25083f8f3422da083b30f50ba75e4bcfa127860890a52607e",
+    "linear-clean/linear-t2-f4000-r0.5--48": "afeef79680432dc20de17256db74efbc51c3e2bd1a2bc9ac56be011ba2b13555",
+    "linear-clean/linear-t2-f4000-r0.5--60": "a49e02d525561bc4595c78e0876db54446fc70d8c45008a84914f146c7e377a6",
+    "linear-clean/linear-t2-f4000-r0.8--48": "5fe2ac9fd9b4665f63959ffa1ff2262cb93a42af1247deecd350cfd1724bd41f",
+    "linear-clean/linear-t2-f4000-r0.8--60": "a0c1489f4bc6f4236085064d4554bfa0f3a2ebb4dd4b797234cb456e84b88f16",
+    "linear-clean/linear-t2-f4000-r0.95--48": "dc7b97498cd45916f0d3d193582e294c27dcad656cd14efafc770a7b8d9b28ad",
+    "linear-clean/linear-t2-f4000-r0.95--60": "a675d6a9212f1328a58d74a2249934f5574943ea75885e854d130cefcb36922c",
+    "linear/bypass-saw--60": "388a1b592556b16dd64bf73ffd62f980bcc012c4edd669d1ebeab338de8a8af9",
+    "linear/linear-t1-f1000-r0--60": "ad13fc8cdd6e6753d09001aac0a02999985a3aa4423ed8d97a9e743508074296",
+    "linear/linear-t2-f1000-r0--60": "4967b980e61797c1c9104aa80859b4f3507d828602e56fc3931afe4e3771eceb"
+  },
+  "limitations": "No phase alignment, gain fit, or per-note clipping fit is used in holdout predictions. Individual ceilings are diagnostics only. Local spectral SNR is a heuristic. Clipping results do not establish internal gain placement, antialiasing, or a complete nonlinear filter model.",
+  "analysis_report_sha256": {
+    "summing": "7570ddf6ca37096924e7c3ce4708c08792e3b0e60bd0bf5c699d68554b757336",
+    "linear": "5fe875f99a13ccc1a8d947e80c43f9753e4c22758676f935f665539fe89b6fe1",
+    "linear-clean": "558e2d58949ee05b9cc06c151a4023884c34fe81413c9ab5582dfc7e9ca1283a",
+    "ordering": "c9d1345ba01772d26be31d6e28a3a18dd6c1baffa8e444760fc62f412b4ec002"
+  }
+}

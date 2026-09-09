@@ -1033,7 +1033,7 @@ impl App {
 
         self.history.reset();
         self.device_registry.clear();
-        if let Err(error) = self.graph_controller().add_empty_track() {
+        if let Err(error) = self.graph_controller().add_default_project_tracks() {
             self.editor.status_message = Some((format!("New project: {error}"), Instant::now()));
             return;
         }
@@ -3684,7 +3684,11 @@ impl App {
                             }
                         }
                     }
-                    if let Some(name) = saved_name {
+                    // Device-less tracks use the current automatic name, but
+                    // an explicitly authored track name always survives loading.
+                    if let Some(name) = saved_name.filter(|_| saved_name_user_authored
+                        || self.graph.track_instrument_types[track_idx] != InstrumentType::Empty)
+                    {
                         self.tracks[track_idx] = name;
                     }
                     self.normalize_track_name_authorship();

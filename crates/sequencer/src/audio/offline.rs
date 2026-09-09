@@ -162,6 +162,47 @@ mod tests {
     }
 
     #[test]
+    fn synchronous_scheduler_renders_transient_slice_sampler() {
+        use crate::analysis::{pack_ptr, OnsetTableShared};
+
+        let engine = sampler_engine();
+        let slot = &engine.state.pattern.instrument_slots[0];
+        let lid = engine.state.runtime.sampler_lids[0].load(Ordering::Relaxed);
+        slot.apply_descriptor(&crate::effects::EffectDescriptor::builtin_sampler(), lid as u32);
+        slot.defaults.set(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 1.0);
+        slot.defaults.set(crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY, 1.0);
+        slot.defaults.set(6, 1.0);
+        engine.state.pattern.track_params[0].gate.store(false, Ordering::Relaxed);
+        engine.state.set_step_param(0, 0, StepParam::Transpose, 1.0);
+        let table = OnsetTableShared {
+            onsets_frames: vec![0, 24_000],
+            sample_len_frames: 48_000,
+            sample_rate: 48_000,
+            bpm: 120.0,
+            downbeat_frame: Some(0),
+            manual_edits: None,
+        };
+        let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
+        engine.state.runtime.sampler_onset_ptr_lo[0].store(lo.to_bits(), Ordering::Relaxed);
+        engine.state.runtime.sampler_onset_ptr_hi[0].store(hi.to_bits(), Ordering::Relaxed);
+        engine.state.runtime.sampler_analysis_status[0].store(2, Ordering::Release);
+        engine.state.publish_scheduler_snapshot();
+        let mut session = OfflineAudioSession::new(&engine, 4_096).unwrap();
+        let mut output = vec![0.0; engine.block_size * 2];
+        let mut peak = 0.0_f32;
+        for start in (0..4_096).step_by(engine.block_size) {
+            session.render_block(start as u64, &mut output).unwrap();
+            for sample in &output {
+                assert!(sample.is_finite());
+                peak = peak.max(sample.abs());
+            }
+        }
+        assert!(peak > 0.1, "scheduled slice must produce audio, peak={peak}");
+        drop(session);
+        unsafe { engine.destroy(); }
+    }
+
+    #[test]
     fn synchronous_scheduler_renders_sampler_through_transactional_wav_sink() {
         let engine = sampler_engine();
         let plan = crate::bounce::BouncePlan::new(48_000, engine.block_size,

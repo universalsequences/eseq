@@ -1,0 +1,170 @@
+{
+  "note": "Research only. No FS1R hardware comparison, listening verdict, production synth, or full-app CPU measurement.",
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "cpu": "Apple M1 Max",
+  "compiler": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/tools/DGenLisp-macos-arm64.dist/dgenlisp-macos-arm64/DGenLisp",
+  "compiler_sha256": "34c1066d31d82739010c7bca234fe37756a0bd1ec455186190813a9cca6c1c78",
+  "measurement_script_sha256": "98a5da1d5f25d413c328382fa3487be8d40300dd8fccfb2a131ed7fdd57ae432",
+  "source_sha256": {
+    "probe.lisp": "8220a49f5c32bd9f8b973023be9fb2214c9c1d8a825226cfe50b99d33047baa4",
+    "bank.lisp": "724e0eb8a13f7ead1519343f6621a6d6e6a5130e6d92b85668c68e8e4824a0ac"
+  },
+  "sample_rate": 48000,
+  "repository_head": "aeff67d86bcd9b195bdbdef3f8887a48afbcbd4f",
+  "dgen_lock": "# Published DGenLisp distributions. Each target stanza is independent so a\n# platform may remain pinned while another advances. Fetching is explicit:\n# scripts/fetch_dgenlisp.sh downloads the pinned url, hard-fails unless the\n# download's sha256 matches the pin, and installs the compiler under\n# crates/sequencer/tools/ (gitignored) at DGenLisp-<target>.\n\ntarget linux-x86_64\nversion dgenlisp-v0.1.5\nurl https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.5/DGenLisp-linux-x86_64.tar.gz\nsha256 5bab458a33dc9ab2ffab621ba87ef7d72289cf91d1c19b386e487a45e532a087\nformat tar.gz\nexecutable_path dgenlisp-linux-x86_64/DGenLisp\nupstream_commit 3fb5065c0976f10d2acb2043215efcfbddab88dc\nglibc_floor 2.35\ncontainer_image swift:6.3.3-jammy\n\ntarget macos-arm64\nversion dgenlisp-v0.1.13\nurl https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.13/DGenLisp-macos-arm64.tar.gz\nsha256 e1aa3f7b8bfb513c81e3680abed84d4fe2ae60c0a8888977b0e39035f66786a2\nformat tar.gz\nexecutable_path dgenlisp-macos-arm64/DGenLisp\nupstream_commit b0f120d2514e9eed20996d36f8dcf6dd4f8b4049\n",
+  "preamble_source_sha256": "60dc477d6abf8ded40249e09ba181a3da82a47af19bdcdffb7a626b5ef9782c2",
+  "static_cases": [
+    {
+      "pitch_hz": 100,
+      "center_hz": 1200,
+      "width_index": 2,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 1200.0,
+      "max_abs_error_from_phase_reference": 3.9988624011277896e-06
+    },
+    {
+      "pitch_hz": 200,
+      "center_hz": 1200,
+      "width_index": 1,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 1200.0,
+      "max_abs_error_from_phase_reference": 2.525339352691747e-06
+    },
+    {
+      "pitch_hz": 400,
+      "center_hz": 1200,
+      "width_index": 0.5,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 1200.0,
+      "max_abs_error_from_phase_reference": 1.4871832791253778e-06
+    },
+    {
+      "pitch_hz": 100,
+      "center_hz": 700,
+      "width_index": 2,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 700.0,
+      "max_abs_error_from_phase_reference": 3.2563062770558926e-06
+    },
+    {
+      "pitch_hz": 100,
+      "center_hz": 2500,
+      "width_index": 2,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 2500.0,
+      "max_abs_error_from_phase_reference": 1.909018855217326e-05
+    },
+    {
+      "pitch_hz": 110,
+      "center_hz": 1234,
+      "width_index": 2,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 1210.0,
+      "max_abs_error_from_phase_reference": 5.524012868865502e-06
+    },
+    {
+      "pitch_hz": 500,
+      "center_hz": 8000,
+      "width_index": 2,
+      "pm_depth": 8,
+      "pm_ratio": 8,
+      "peak_hz": 16000.0,
+      "max_abs_error_from_phase_reference": 1.103772107347023e-05
+    },
+    {
+      "pitch_hz": 1000,
+      "center_hz": 18000,
+      "width_index": 12,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 24000.0,
+      "max_abs_error_from_phase_reference": 3.2063298657791783e-06
+    }
+  ],
+  "block_invariance": [
+    {
+      "block_size": 64,
+      "max_abs_diff": 0.0
+    },
+    {
+      "block_size": 256,
+      "max_abs_diff": 0.0
+    }
+  ],
+  "bank_signal": {
+    "peak": 0.9002158045768738,
+    "rms": 0.0651649609208107,
+    "last_100ms_rms": 1.7480525360547006e-10
+  },
+  "benchmarks": {
+    "single_paf_with_two_phase_diagnostics": {
+      "median_us_per_128_frames": 2.4350625,
+      "batch_min_us": 2.3591664999999997,
+      "batch_max_us": 2.5592289999999998,
+      "batch_us": [
+        2.3591664999999997,
+        2.5592289999999998,
+        2.3987914999999997,
+        2.4672289999999997,
+        2.4350625,
+        2.4058960000000003,
+        2.4854165
+      ],
+      "one_voice_percent_one_core": 0.09131484375
+    },
+    "eight_pairs": {
+      "median_us_per_128_frames": 44.011,
+      "batch_min_us": 43.424521,
+      "batch_max_us": 44.2288125,
+      "batch_us": [
+        43.5020625,
+        43.498521000000004,
+        44.04225,
+        44.2288125,
+        43.424521,
+        44.059771,
+        44.011
+      ],
+      "one_voice_percent_one_core": 1.6504125
+    }
+  },
+  "analytic_alias_cases": [
+    {
+      "pitch_hz": 100,
+      "center_hz": 1200,
+      "width_index": 2,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "native_alias_error_db": -251.19299889869038,
+      "reference_8x_vs_16x_error_db": -257.23418188760144
+    },
+    {
+      "pitch_hz": 1000,
+      "center_hz": 18000,
+      "width_index": 12,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "native_alias_error_db": -8.189936776042423,
+      "reference_8x_vs_16x_error_db": -245.54105098097452
+    },
+    {
+      "pitch_hz": 500,
+      "center_hz": 8000,
+      "width_index": 2,
+      "pm_depth": 8,
+      "pm_ratio": 8,
+      "native_alias_error_db": -1.40310816368628,
+      "reference_8x_vs_16x_error_db": -239.39250773376872
+    }
+  ],
+  "build_dirs": [
+    "/Users/alecresende/.cache/eseq-audition/9399ebbd622d7bc7",
+    "/Users/alecresende/.cache/eseq-audition/a34d5520148cd1fe"
+  ]
+}

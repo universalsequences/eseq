@@ -496,19 +496,17 @@
         (box
           :height 1
           :width :fill
-          :background-color (rgba (nth color 0) (nth color 1) (nth color 2) 1.0)
           (h-stack 
             :gap 0
-            (box :width 1.0)
             (badge (substring (nth SEQ.track-names SEQ.current-track) 0 15)
               :key (str "pianoroll-label-content-" SEQ.current-track)
               :icon (eseq.track-collapse/type-icon SEQ.current-track)
-              :width 10.8
+              :width clip-panel-width
               :height 1.0
               :padding 0
               :font-size 10
               :h-align :left
-              :background-color :transparent
+          :background-color (rgba (nth color 0) (nth color 1) (nth color 2) 1.0)
               :border-color :transparent
               :highlight-color :transparent
               :shadow-color :transparent
@@ -667,8 +665,9 @@
               :value (automation-selected-label)
               :options (automation-param-options)
               :on-change (lambda (v) (select-automation-param v))
+              :badge-color :transparent
               :background-color :buffer-bg
-              :width 17 :height 1.3 :font-size 10)))
+              :width 12 :height 1.3 :font-size 10)))
         (automation-axis)))))
 
 (def automation-row ()

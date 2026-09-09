@@ -1,0 +1,883 @@
+{
+  "source_sha256": "5a502f43c41e49d401b6d9baeaf06595ec6c202844b78fe38d4f7f49478f5be2",
+  "compiler_sha256": "34c1066d31d82739010c7bca234fe37756a0bd1ec455186190813a9cca6c1c78",
+  "scope": "Validate the actual Digi Drift voice, gain placement, and native-rate extremes.\n\nThis is a behavioral/stability gate for the emulation, not a native-match gate.\nThe compiler audit and generated-code fusion check remain enabled.\n",
+  "static_cases": [
+    {
+      "sample_rate": 22050,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 0,
+      "peak": 0.018753159791231155,
+      "rms": 0.005053116091173991
+    },
+    {
+      "sample_rate": 22050,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 0.8,
+      "peak": 0.0438041016459465,
+      "rms": 0.012748374208701068
+    },
+    {
+      "sample_rate": 22050,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 1,
+      "peak": 0.08271805942058563,
+      "rms": 0.04640177522711368
+    },
+    {
+      "sample_rate": 22050,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.14658996993152537
+    },
+    {
+      "sample_rate": 22050,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.1593853545033266
+    },
+    {
+      "sample_rate": 22050,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.16186475012890977
+    },
+    {
+      "sample_rate": 22050,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.15285113554739188
+    },
+    {
+      "sample_rate": 22050,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.1546081008037373
+    },
+    {
+      "sample_rate": 22050,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.15508268764912816
+    },
+    {
+      "sample_rate": 22050,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 0,
+      "peak": 0.005879441276192665,
+      "rms": 0.0017300727212245565
+    },
+    {
+      "sample_rate": 22050,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 0.8,
+      "peak": 0.053096938878297806,
+      "rms": 0.02447383054278539
+    },
+    {
+      "sample_rate": 22050,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 1,
+      "peak": 0.10242702066898346,
+      "rms": 0.057596152667068926
+    },
+    {
+      "sample_rate": 22050,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.13504090731375237
+    },
+    {
+      "sample_rate": 22050,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.14760584704285074
+    },
+    {
+      "sample_rate": 22050,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.14850740894432155
+    },
+    {
+      "sample_rate": 22050,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.14272822416004177
+    },
+    {
+      "sample_rate": 22050,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.14279171854999115
+    },
+    {
+      "sample_rate": 22050,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.14279537128872502
+    },
+    {
+      "sample_rate": 32000,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 0,
+      "peak": 0.018753642216324806,
+      "rms": 0.005053291641530612
+    },
+    {
+      "sample_rate": 32000,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 0.8,
+      "peak": 0.04380444437265396,
+      "rms": 0.012748080379704632
+    },
+    {
+      "sample_rate": 32000,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 1,
+      "peak": 0.08271848410367966,
+      "rms": 0.04640199852140403
+    },
+    {
+      "sample_rate": 32000,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.14655764262650292
+    },
+    {
+      "sample_rate": 32000,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.15940992332704026
+    },
+    {
+      "sample_rate": 32000,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.16188713451846004
+    },
+    {
+      "sample_rate": 32000,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.1528739114057689
+    },
+    {
+      "sample_rate": 32000,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.1545976816414068
+    },
+    {
+      "sample_rate": 32000,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.1550673253631261
+    },
+    {
+      "sample_rate": 32000,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 0,
+      "peak": 0.005878548603504896,
+      "rms": 0.001729832379231718
+    },
+    {
+      "sample_rate": 32000,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 0.8,
+      "peak": 0.0530942864716053,
+      "rms": 0.024476704235352614
+    },
+    {
+      "sample_rate": 32000,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 1,
+      "peak": 0.10244728624820709,
+      "rms": 0.05760393928489562
+    },
+    {
+      "sample_rate": 32000,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.13499928754259097
+    },
+    {
+      "sample_rate": 32000,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.14764114650874716
+    },
+    {
+      "sample_rate": 32000,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.1485537623590275
+    },
+    {
+      "sample_rate": 32000,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.14275577239296502
+    },
+    {
+      "sample_rate": 32000,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.14278687723920253
+    },
+    {
+      "sample_rate": 32000,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.1427885995610374
+    },
+    {
+      "sample_rate": 44100,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 0,
+      "peak": 0.018754364922642708,
+      "rms": 0.005053546574327686
+    },
+    {
+      "sample_rate": 44100,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 0.8,
+      "peak": 0.04380709305405617,
+      "rms": 0.012749024227067628
+    },
+    {
+      "sample_rate": 44100,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 1,
+      "peak": 0.08272421360015869,
+      "rms": 0.04640706417799556
+    },
+    {
+      "sample_rate": 44100,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.14654400266166545
+    },
+    {
+      "sample_rate": 44100,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.15942018342118192
+    },
+    {
+      "sample_rate": 44100,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.1618981422964465
+    },
+    {
+      "sample_rate": 44100,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.1528841986569249
+    },
+    {
+      "sample_rate": 44100,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.1545934893108986
+    },
+    {
+      "sample_rate": 44100,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.15506168202950776
+    },
+    {
+      "sample_rate": 44100,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 0,
+      "peak": 0.005879652686417103,
+      "rms": 0.001730158383341486
+    },
+    {
+      "sample_rate": 44100,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 0.8,
+      "peak": 0.05310315638780594,
+      "rms": 0.024477337279593538
+    },
+    {
+      "sample_rate": 44100,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 1,
+      "peak": 0.10242875665426254,
+      "rms": 0.057600533734037965
+    },
+    {
+      "sample_rate": 44100,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.1349818284152131
+    },
+    {
+      "sample_rate": 44100,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.14765638487873922
+    },
+    {
+      "sample_rate": 44100,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.14857431716259048
+    },
+    {
+      "sample_rate": 44100,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.1427681673359081
+    },
+    {
+      "sample_rate": 44100,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.14278533168907936
+    },
+    {
+      "sample_rate": 44100,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.14278625658614477
+    },
+    {
+      "sample_rate": 48000,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 0,
+      "peak": 0.01875491440296173,
+      "rms": 0.005053655989934384
+    },
+    {
+      "sample_rate": 48000,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 0.8,
+      "peak": 0.04380792751908302,
+      "rms": 0.012749264410392348
+    },
+    {
+      "sample_rate": 48000,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 1,
+      "peak": 0.08272161334753036,
+      "rms": 0.04639885899077492
+    },
+    {
+      "sample_rate": 48000,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 0,
+      "peak": 0.21978974342346191,
+      "rms": 0.1465415655326845
+    },
+    {
+      "sample_rate": 48000,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "peak": 0.21978974342346191,
+      "rms": 0.15942192588432377
+    },
+    {
+      "sample_rate": 48000,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 1,
+      "peak": 0.21978974342346191,
+      "rms": 0.16189991143301802
+    },
+    {
+      "sample_rate": 48000,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 0,
+      "peak": 0.21978974342346191,
+      "rms": 0.15288132722615402
+    },
+    {
+      "sample_rate": 48000,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 0.8,
+      "peak": 0.21978974342346191,
+      "rms": 0.1545949160643557
+    },
+    {
+      "sample_rate": 48000,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 1,
+      "peak": 0.21978974342346191,
+      "rms": 0.15506345934526497
+    },
+    {
+      "sample_rate": 48000,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 0,
+      "peak": 0.00587850995361805,
+      "rms": 0.0017298447280538827
+    },
+    {
+      "sample_rate": 48000,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 0.8,
+      "peak": 0.053092144429683685,
+      "rms": 0.024472575193172155
+    },
+    {
+      "sample_rate": 48000,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 1,
+      "peak": 0.10241473466157913,
+      "rms": 0.05759274374810942
+    },
+    {
+      "sample_rate": 48000,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 0,
+      "peak": 0.21978974342346191,
+      "rms": 0.13497837862363743
+    },
+    {
+      "sample_rate": 48000,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "peak": 0.21978974342346191,
+      "rms": 0.14765865018455118
+    },
+    {
+      "sample_rate": 48000,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 1,
+      "peak": 0.21978974342346191,
+      "rms": 0.14857715915332045
+    },
+    {
+      "sample_rate": 48000,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 0,
+      "peak": 0.21978974342346191,
+      "rms": 0.14276429981439243
+    },
+    {
+      "sample_rate": 48000,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 0.8,
+      "peak": 0.21978974342346191,
+      "rms": 0.1427861045797051
+    },
+    {
+      "sample_rate": 48000,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 1,
+      "peak": 0.21978974342346191,
+      "rms": 0.14278731478256776
+    },
+    {
+      "sample_rate": 96000,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 0,
+      "peak": 0.018754534423351288,
+      "rms": 0.005053432066997742
+    },
+    {
+      "sample_rate": 96000,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 0.8,
+      "peak": 0.04380311444401741,
+      "rms": 0.012747484397892143
+    },
+    {
+      "sample_rate": 96000,
+      "type": 0,
+      "cutoff": 20,
+      "resonance": 1,
+      "peak": 0.0826731026172638,
+      "rms": 0.0463266565794625
+    },
+    {
+      "sample_rate": 96000,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.14653222984536626
+    },
+    {
+      "sample_rate": 96000,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.15942935723269316
+    },
+    {
+      "sample_rate": 96000,
+      "type": 0,
+      "cutoff": 1000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.16190680751380046
+    },
+    {
+      "sample_rate": 96000,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.15286531785994173
+    },
+    {
+      "sample_rate": 96000,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.15460420929809357
+    },
+    {
+      "sample_rate": 96000,
+      "type": 0,
+      "cutoff": 18000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.15507583305051165
+    },
+    {
+      "sample_rate": 96000,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 0,
+      "peak": 0.005878393538296223,
+      "rms": 0.00172980545856903
+    },
+    {
+      "sample_rate": 96000,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 0.8,
+      "peak": 0.05308716744184494,
+      "rms": 0.02446805241343778
+    },
+    {
+      "sample_rate": 96000,
+      "type": 1,
+      "cutoff": 20,
+      "resonance": 1,
+      "peak": 0.10240647196769714,
+      "rms": 0.05758965364241941
+    },
+    {
+      "sample_rate": 96000,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.13496666937821142
+    },
+    {
+      "sample_rate": 96000,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.14766983643043238
+    },
+    {
+      "sample_rate": 96000,
+      "type": 1,
+      "cutoff": 1000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.14859166550164832
+    },
+    {
+      "sample_rate": 96000,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 0,
+      "peak": 0.21979008615016937,
+      "rms": 0.14274282579525568
+    },
+    {
+      "sample_rate": 96000,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 0.8,
+      "peak": 0.21979008615016937,
+      "rms": 0.1427914660680316
+    },
+    {
+      "sample_rate": 96000,
+      "type": 1,
+      "cutoff": 18000,
+      "resonance": 1,
+      "peak": 0.21979008615016937,
+      "rms": 0.14279492959117146
+    }
+  ],
+  "dynamic_rate_type_cases": 10,
+  "gain_checks": [
+    {
+      "type": 0,
+      "volume_scaling_relative_error": 4.817946219759506e-08,
+      "oscillator_level_compression_db": -4.176837153430032
+    },
+    {
+      "type": 1,
+      "volume_scaling_relative_error": 4.8793669549240803e-08,
+      "oscillator_level_compression_db": -3.3843238624144334
+    }
+  ],
+  "presets": [
+    {
+      "name": "Woolly Res Bass",
+      "peak": 0.2765204906463623,
+      "rms": 0.14801451032919824
+    },
+    {
+      "name": "Acid Squelch",
+      "peak": 0.2347087562084198,
+      "rms": 0.08408582051757771
+    },
+    {
+      "name": "Cyc Sweep Pad",
+      "peak": 0.024034975096583366,
+      "rms": 0.009005034181549314
+    },
+    {
+      "name": "Dust Pluck",
+      "peak": 0.20513418316841125,
+      "rms": 0.01750798479766663
+    },
+    {
+      "name": "Fat Analog Bass",
+      "peak": 0.26203104853630066,
+      "rms": 0.12312320906604964
+    },
+    {
+      "name": "Glass Bells",
+      "peak": 0.11026941984891891,
+      "rms": 0.027730631310841625
+    },
+    {
+      "name": "Hollow Lead",
+      "peak": 0.21726126968860626,
+      "rms": 0.07799635808085781
+    },
+    {
+      "name": "Lush Shark Pad",
+      "peak": 0.05196138843894005,
+      "rms": 0.0170313787726161
+    },
+    {
+      "name": "Ratio FM Stab",
+      "peak": 0.1460619866847992,
+      "rms": 0.03507045764022036
+    },
+    {
+      "name": "Wander Organ",
+      "peak": 0.1709076166152954,
+      "rms": 0.08463628984605663
+    },
+    {
+      "name": "Warm Drift Keys",
+      "peak": 0.1166820302605629,
+      "rms": 0.0572202623235782
+    },
+    {
+      "name": "alien transmission",
+      "peak": 0.009289141744375229,
+      "rms": 0.0031044199418501944
+    },
+    {
+      "name": "another town pad",
+      "peak": 0.009752723388373852,
+      "rms": 0.0033448584228599363
+    },
+    {
+      "name": "driftatronics",
+      "peak": 0.06185192987322807,
+      "rms": 0.007445805352921664
+    },
+    {
+      "name": "driftheaven",
+      "peak": 0.014261140488088131,
+      "rms": 0.004296994832461732
+    },
+    {
+      "name": "droner",
+      "peak": 0.012634745799005032,
+      "rms": 0.0036753056369908726
+    },
+    {
+      "name": "dub-mono",
+      "peak": 0.00625956617295742,
+      "rms": 0.0008146252428901365
+    },
+    {
+      "name": "equator plucker",
+      "peak": 0.12502798438072205,
+      "rms": 0.049511088074060676
+    },
+    {
+      "name": "nope",
+      "peak": 0.09666582196950912,
+      "rms": 0.03762727363372176
+    },
+    {
+      "name": "om shanti om",
+      "peak": 0.0711720809340477,
+      "rms": 0.021585468110003257
+    },
+    {
+      "name": "pluck of deus",
+      "peak": 0.18935665488243103,
+      "rms": 0.0469821277789786
+    },
+    {
+      "name": "pluckwantsdelay",
+      "peak": 0.07204017788171768,
+      "rms": 0.024514418721327487
+    },
+    {
+      "name": "potions master keys",
+      "peak": 0.09697890281677246,
+      "rms": 0.04446870615132591
+    },
+    {
+      "name": "quikie bass",
+      "peak": 0.11306113749742508,
+      "rms": 0.023673652179764786
+    },
+    {
+      "name": "rodrik transmission plate",
+      "peak": 0.0006443079910241067,
+      "rms": 0.00018807459731131167
+    },
+    {
+      "name": "waterbr",
+      "peak": 0.07086127251386642,
+      "rms": 0.007814055026142634
+    },
+    {
+      "name": "wowzers",
+      "peak": 0.12378253787755966,
+      "rms": 0.03880194244829617
+    },
+    {
+      "name": "xtal",
+      "peak": 0.13400737941265106,
+      "rms": 0.04248207460724608
+    }
+  ],
+  "passed": true
+}

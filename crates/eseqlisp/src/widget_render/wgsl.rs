@@ -516,6 +516,20 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         } else {
             d = min(abs(drop) - stroke, glint);
         }
+    } else if (input.value_t > 10.5) {
+        // MIDI: five-pin DIN socket, with an inset key slot and five contacts.
+        let body = length(p) - 0.52;
+        let notch = button_icon_box(p - vec2<f32>(0.0, -0.31), vec2<f32>(0.07, 0.11));
+        var pins = min(length(p - vec2<f32>(-0.30, 0.0)), length(p - vec2<f32>(0.30, 0.0)));
+        pins = min(pins, length(p - vec2<f32>(-0.21, 0.21)));
+        pins = min(pins, length(p - vec2<f32>(0.21, 0.21)));
+        pins = min(pins, length(p - vec2<f32>(0.0, 0.30))) - 0.075;
+        if (filled) {
+            d = body;
+            detail_d = min(pins, notch);
+        } else {
+            d = min(abs(body) - 0.055, min(pins, notch));
+        }
     } else {
         // document: Finder-style page. Portrait sheet with a folded top-right
         // corner; the fold is a real triangle sitting inside the cut. Stroke

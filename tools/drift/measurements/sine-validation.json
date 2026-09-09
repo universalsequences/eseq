@@ -1,0 +1,1165 @@
+{
+  "methodology": "Independent sine validation of the Type-I candidate from saw/HP captures.\n\nNo parameters, gain, delay, or phase are fitted to this batch. This validates\nonly the candidate's fundamental response; nonlinear harmonics are excluded.\n",
+  "analysis_report_sha256": "e67d1a3b759a0a96e280adbf91833ec1e38a213a6a44e4fa281d2ffb7bd9cc49",
+  "candidate_parameters": {
+    "internal_sample_rate": 96000,
+    "gain": 1.541,
+    "q_numerator": 0.423,
+    "hp_frequency": 20,
+    "hp_q": 1.469
+  },
+  "cases": [
+    {
+      "case": "sine-t1-f250-r0--24",
+      "cutoff": 250.0,
+      "resonance": 0.0,
+      "source": "bypass-sine-f250--24",
+      "notes": [
+        {
+          "note": 24,
+          "frequency_hz": 32.70264303565194,
+          "qualified": true,
+          "minimum_local_snr_db": 67.54373763547451,
+          "magnitude_error_db": -0.008551991215360858,
+          "phase_error_radians": 0.0007699584622835457
+        },
+        {
+          "note": 36,
+          "frequency_hz": 65.4075259236458,
+          "qualified": true,
+          "minimum_local_snr_db": 60.89941636421048,
+          "magnitude_error_db": -0.005613860599233601,
+          "phase_error_radians": 0.0013215408633850453
+        },
+        {
+          "note": 46,
+          "frequency_hz": 116.5408224024442,
+          "qualified": true,
+          "minimum_local_snr_db": 63.16957842539477,
+          "magnitude_error_db": 0.0028342856303231294,
+          "phase_error_radians": 0.00035165428941280873
+        },
+        {
+          "note": 50,
+          "frequency_hz": 146.8331646289005,
+          "qualified": true,
+          "minimum_local_snr_db": 66.48271758297922,
+          "magnitude_error_db": 0.00035763815647063557,
+          "phase_error_radians": 0.0006531957061913253
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 63.76523859054892,
+          "magnitude_error_db": 0.0040337557060379035,
+          "phase_error_radians": 0.00020745635056453724
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f250-r0.5--24",
+      "cutoff": 250.0,
+      "resonance": 0.5,
+      "source": "bypass-sine-f250--24",
+      "notes": [
+        {
+          "note": 24,
+          "frequency_hz": 32.70264303565194,
+          "qualified": true,
+          "minimum_local_snr_db": 69.683810012888,
+          "magnitude_error_db": -0.005244810042542408,
+          "phase_error_radians": 5.751494664841759e-05
+        },
+        {
+          "note": 36,
+          "frequency_hz": 65.4075259236458,
+          "qualified": true,
+          "minimum_local_snr_db": 61.96847023224344,
+          "magnitude_error_db": 0.006285710644359054,
+          "phase_error_radians": 0.001473393775750379
+        },
+        {
+          "note": 46,
+          "frequency_hz": 116.5408224024442,
+          "qualified": true,
+          "minimum_local_snr_db": 66.40895640743571,
+          "magnitude_error_db": 0.006745696842684277,
+          "phase_error_radians": 0.000643820739678191
+        },
+        {
+          "note": 50,
+          "frequency_hz": 146.8331646289005,
+          "qualified": true,
+          "minimum_local_snr_db": 65.71529765574526,
+          "magnitude_error_db": 0.01106784723129084,
+          "phase_error_radians": 0.00110386347918154
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 63.16463381445469,
+          "magnitude_error_db": 0.008017314362692787,
+          "phase_error_radians": 0.0004571263390488093
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f250-r0.8--24",
+      "cutoff": 250.0,
+      "resonance": 0.8,
+      "source": "bypass-sine-f250--24",
+      "notes": [
+        {
+          "note": 24,
+          "frequency_hz": 32.70264303565194,
+          "qualified": true,
+          "minimum_local_snr_db": 66.35807243550211,
+          "magnitude_error_db": 0.0018454276862780016,
+          "phase_error_radians": 0.00026694704114591384
+        },
+        {
+          "note": 36,
+          "frequency_hz": 65.4075259236458,
+          "qualified": true,
+          "minimum_local_snr_db": 63.844356250613245,
+          "magnitude_error_db": 0.0010678872582160473,
+          "phase_error_radians": 0.0016257455711061724
+        },
+        {
+          "note": 46,
+          "frequency_hz": 116.5408224024442,
+          "qualified": true,
+          "minimum_local_snr_db": 67.61080436330427,
+          "magnitude_error_db": 0.004446913269373915,
+          "phase_error_radians": 0.0012693602165174673
+        },
+        {
+          "note": 50,
+          "frequency_hz": 146.8331646289005,
+          "qualified": true,
+          "minimum_local_snr_db": 65.57093639163998,
+          "magnitude_error_db": 0.011332457534701811,
+          "phase_error_radians": 0.0001801166427945162
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 66.41379006054783,
+          "magnitude_error_db": 0.03376274629072786,
+          "phase_error_radians": -0.0005564885546694062
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f250-r0.95--24",
+      "cutoff": 250.0,
+      "resonance": 0.95,
+      "source": "bypass-sine-f250--24",
+      "notes": [
+        {
+          "note": 24,
+          "frequency_hz": 32.70264303565194,
+          "qualified": true,
+          "minimum_local_snr_db": 65.34749344397116,
+          "magnitude_error_db": 0.004888912370857489,
+          "phase_error_radians": 0.0006821338163179215
+        },
+        {
+          "note": 36,
+          "frequency_hz": 65.4075259236458,
+          "qualified": true,
+          "minimum_local_snr_db": 61.03985346006867,
+          "magnitude_error_db": 0.004593309735839603,
+          "phase_error_radians": 0.0009216200915224461
+        },
+        {
+          "note": 46,
+          "frequency_hz": 116.5408224024442,
+          "qualified": true,
+          "minimum_local_snr_db": 66.77881060406293,
+          "magnitude_error_db": -0.009164417154258673,
+          "phase_error_radians": 0.0007697490566196934
+        },
+        {
+          "note": 50,
+          "frequency_hz": 146.8331646289005,
+          "qualified": true,
+          "minimum_local_snr_db": 63.087825188342606,
+          "magnitude_error_db": 0.005517273765626838,
+          "phase_error_radians": 0.0014079363069855982
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 66.07443585609056,
+          "magnitude_error_db": 0.7182039418849591,
+          "phase_error_radians": -0.05521539242022777
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f250-r0--36",
+      "cutoff": 250.0,
+      "resonance": 0.0,
+      "source": "bypass-sine-f250--36",
+      "notes": [
+        {
+          "note": 24,
+          "frequency_hz": 32.70264303565194,
+          "qualified": true,
+          "minimum_local_snr_db": 55.93086075615144,
+          "magnitude_error_db": -0.03780792757361146,
+          "phase_error_radians": -4.749582660581623e-05
+        },
+        {
+          "note": 36,
+          "frequency_hz": 65.4075259236458,
+          "qualified": true,
+          "minimum_local_snr_db": 55.42933939721384,
+          "magnitude_error_db": 0.007001653133578665,
+          "phase_error_radians": 0.0005885403886520394
+        },
+        {
+          "note": 46,
+          "frequency_hz": 116.5408224024442,
+          "qualified": true,
+          "minimum_local_snr_db": 52.63750243057159,
+          "magnitude_error_db": 0.028438614156113363,
+          "phase_error_radians": -0.0006451124228443491
+        },
+        {
+          "note": 50,
+          "frequency_hz": 146.8331646289005,
+          "qualified": true,
+          "minimum_local_snr_db": 57.87631944647547,
+          "magnitude_error_db": 0.015531108019471338,
+          "phase_error_radians": 0.0018435332009775125
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 51.810881364821675,
+          "magnitude_error_db": -0.017113894098881928,
+          "phase_error_radians": 0.0008191638879376265
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f250-r0.5--36",
+      "cutoff": 250.0,
+      "resonance": 0.5,
+      "source": "bypass-sine-f250--36",
+      "notes": [
+        {
+          "note": 24,
+          "frequency_hz": 32.70264303565194,
+          "qualified": true,
+          "minimum_local_snr_db": 57.501720153495896,
+          "magnitude_error_db": -0.011602854497269936,
+          "phase_error_radians": -0.00475021762867027
+        },
+        {
+          "note": 36,
+          "frequency_hz": 65.4075259236458,
+          "qualified": true,
+          "minimum_local_snr_db": 55.036122864734544,
+          "magnitude_error_db": -0.014002587443127015,
+          "phase_error_radians": 0.0002522763118060411
+        },
+        {
+          "note": 46,
+          "frequency_hz": 116.5408224024442,
+          "qualified": true,
+          "minimum_local_snr_db": 56.05012841275964,
+          "magnitude_error_db": -0.002597147994970656,
+          "phase_error_radians": -0.0011857290691917844
+        },
+        {
+          "note": 50,
+          "frequency_hz": 146.8331646289005,
+          "qualified": true,
+          "minimum_local_snr_db": 52.4286659279063,
+          "magnitude_error_db": -0.012509109437179927,
+          "phase_error_radians": 0.0018986160095450571
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 53.58469465062866,
+          "magnitude_error_db": 0.0066647010436772115,
+          "phase_error_radians": 0.001200880368229412
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f250-r0.8--36",
+      "cutoff": 250.0,
+      "resonance": 0.8,
+      "source": "bypass-sine-f250--36",
+      "notes": [
+        {
+          "note": 24,
+          "frequency_hz": 32.70264303565194,
+          "qualified": true,
+          "minimum_local_snr_db": 54.818557896794985,
+          "magnitude_error_db": -0.0195310430177732,
+          "phase_error_radians": -0.002074418036150553
+        },
+        {
+          "note": 36,
+          "frequency_hz": 65.4075259236458,
+          "qualified": true,
+          "minimum_local_snr_db": 56.075966557068504,
+          "magnitude_error_db": -0.002670622839623049,
+          "phase_error_radians": -0.0013053434081024319
+        },
+        {
+          "note": 46,
+          "frequency_hz": 116.5408224024442,
+          "qualified": true,
+          "minimum_local_snr_db": 53.036138174525156,
+          "magnitude_error_db": 0.006821637159464693,
+          "phase_error_radians": -0.0017177981784445874
+        },
+        {
+          "note": 50,
+          "frequency_hz": 146.8331646289005,
+          "qualified": true,
+          "minimum_local_snr_db": 56.22872848548478,
+          "magnitude_error_db": -0.006608219387141807,
+          "phase_error_radians": 0.0026640586349405094
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 54.575230615190115,
+          "magnitude_error_db": 0.009960995830552499,
+          "phase_error_radians": -0.0020289349163815154
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f250-r0.95--36",
+      "cutoff": 250.0,
+      "resonance": 0.95,
+      "source": "bypass-sine-f250--36",
+      "notes": [
+        {
+          "note": 24,
+          "frequency_hz": 32.70264303565194,
+          "qualified": true,
+          "minimum_local_snr_db": 55.621204299296934,
+          "magnitude_error_db": -0.027656135387003268,
+          "phase_error_radians": -8.08419877765361e-05
+        },
+        {
+          "note": 36,
+          "frequency_hz": 65.4075259236458,
+          "qualified": true,
+          "minimum_local_snr_db": 52.62527078939743,
+          "magnitude_error_db": 0.005611053492967333,
+          "phase_error_radians": 0.0028981684082369685
+        },
+        {
+          "note": 46,
+          "frequency_hz": 116.5408224024442,
+          "qualified": true,
+          "minimum_local_snr_db": 57.56240123104904,
+          "magnitude_error_db": 0.00800556914438561,
+          "phase_error_radians": 0.0011188184620464726
+        },
+        {
+          "note": 50,
+          "frequency_hz": 146.8331646289005,
+          "qualified": true,
+          "minimum_local_snr_db": 51.53943367660978,
+          "magnitude_error_db": 0.01668372077538035,
+          "phase_error_radians": 0.003328197080989295
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 56.76469122023426,
+          "magnitude_error_db": 0.048907847287470156,
+          "phase_error_radians": -0.004272258927926761
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f1000-r0--24",
+      "cutoff": 1000.0,
+      "resonance": 0.0,
+      "source": "bypass-sine-f1000--24",
+      "notes": [
+        {
+          "note": 48,
+          "frequency_hz": 130.8126641909607,
+          "qualified": true,
+          "minimum_local_snr_db": 71.1956381841278,
+          "magnitude_error_db": -0.003092593025321277,
+          "phase_error_radians": 0.00020954100351162547
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 72.27758100074351,
+          "magnitude_error_db": -0.002908714789349025,
+          "phase_error_radians": 0.00015381993066275452
+        },
+        {
+          "note": 70,
+          "frequency_hz": 466.1637018640623,
+          "qualified": true,
+          "minimum_local_snr_db": 77.46023842511212,
+          "magnitude_error_db": 0.0008505734279979877,
+          "phase_error_radians": 0.00025560085613557024
+        },
+        {
+          "note": 74,
+          "frequency_hz": 587.3283514707892,
+          "qualified": true,
+          "minimum_local_snr_db": 77.2996731728785,
+          "magnitude_error_db": -0.0011993333052767417,
+          "phase_error_radians": 0.0003483846089175778
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 74.66669863882207,
+          "magnitude_error_db": 0.00042531684722554836,
+          "phase_error_radians": 3.200420426580438e-05
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f1000-r0.5--24",
+      "cutoff": 1000.0,
+      "resonance": 0.5,
+      "source": "bypass-sine-f1000--24",
+      "notes": [
+        {
+          "note": 48,
+          "frequency_hz": 130.8126641909607,
+          "qualified": true,
+          "minimum_local_snr_db": 71.1956381841278,
+          "magnitude_error_db": -0.0022760473942328354,
+          "phase_error_radians": 0.0003046831659588002
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 72.27758100074351,
+          "magnitude_error_db": 0.0021523944419616185,
+          "phase_error_radians": 0.00033265704147141266
+        },
+        {
+          "note": 70,
+          "frequency_hz": 466.1637018640623,
+          "qualified": true,
+          "minimum_local_snr_db": 73.7041566338676,
+          "magnitude_error_db": 0.0028341793723783105,
+          "phase_error_radians": 0.0008510122168390376
+        },
+        {
+          "note": 74,
+          "frequency_hz": 587.3283514707892,
+          "qualified": true,
+          "minimum_local_snr_db": 75.03847753331476,
+          "magnitude_error_db": 0.007330108005564662,
+          "phase_error_radians": 0.0010832791003598911
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 78.1705810237216,
+          "magnitude_error_db": 0.011721750148366263,
+          "phase_error_radians": -0.00010979974714669054
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f1000-r0.8--24",
+      "cutoff": 1000.0,
+      "resonance": 0.8,
+      "source": "bypass-sine-f1000--24",
+      "notes": [
+        {
+          "note": 48,
+          "frequency_hz": 130.8126641909607,
+          "qualified": true,
+          "minimum_local_snr_db": 71.1956381841278,
+          "magnitude_error_db": -0.0003673445357717538,
+          "phase_error_radians": 9.332469033042077e-05
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 72.27758100074351,
+          "magnitude_error_db": -0.0023353920964296546,
+          "phase_error_radians": 0.00016188052674220626
+        },
+        {
+          "note": 70,
+          "frequency_hz": 466.1637018640623,
+          "qualified": true,
+          "minimum_local_snr_db": 75.4013057325003,
+          "magnitude_error_db": 0.0005397089952949331,
+          "phase_error_radians": 0.0006251655404348456
+        },
+        {
+          "note": 74,
+          "frequency_hz": 587.3283514707892,
+          "qualified": true,
+          "minimum_local_snr_db": 74.68639439212538,
+          "magnitude_error_db": 0.004302646314905205,
+          "phase_error_radians": 0.0012602199221965885
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 78.1705810237216,
+          "magnitude_error_db": 0.039896201930628136,
+          "phase_error_radians": -0.0011824172080633806
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f1000-r0.95--24",
+      "cutoff": 1000.0,
+      "resonance": 0.95,
+      "source": "bypass-sine-f1000--24",
+      "notes": [
+        {
+          "note": 48,
+          "frequency_hz": 130.8126641909607,
+          "qualified": true,
+          "minimum_local_snr_db": 71.1956381841278,
+          "magnitude_error_db": -0.0016509232933243191,
+          "phase_error_radians": 0.00022944177769021018
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 72.27758100074351,
+          "magnitude_error_db": -0.004108677753682848,
+          "phase_error_radians": 1.424225969504447e-05
+        },
+        {
+          "note": 70,
+          "frequency_hz": 466.1637018640623,
+          "qualified": true,
+          "minimum_local_snr_db": 75.95448746328599,
+          "magnitude_error_db": 0.0016958902752620955,
+          "phase_error_radians": 0.0007599943703839271
+        },
+        {
+          "note": 74,
+          "frequency_hz": 587.3283514707892,
+          "qualified": true,
+          "minimum_local_snr_db": 77.51015103118132,
+          "magnitude_error_db": 0.0012106177410656227,
+          "phase_error_radians": 0.0012502432381614405
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 78.1539932593754,
+          "magnitude_error_db": 0.7202429627198463,
+          "phase_error_radians": -0.05591329751188454
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f1000-r0--36",
+      "cutoff": 1000.0,
+      "resonance": 0.0,
+      "source": "bypass-sine-f1000--36",
+      "notes": [
+        {
+          "note": 48,
+          "frequency_hz": 130.8126641909607,
+          "qualified": true,
+          "minimum_local_snr_db": 58.37835645257539,
+          "magnitude_error_db": -0.010960666712547903,
+          "phase_error_radians": 0.000763989384377628
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 63.01862711168711,
+          "magnitude_error_db": -0.011122283821987749,
+          "phase_error_radians": 0.00024067867157229666
+        },
+        {
+          "note": 70,
+          "frequency_hz": 466.1637018640623,
+          "qualified": true,
+          "minimum_local_snr_db": 63.168318087771304,
+          "magnitude_error_db": 0.0022591887382044243,
+          "phase_error_radians": -0.0012525070040997008
+        },
+        {
+          "note": 74,
+          "frequency_hz": 587.3283514707892,
+          "qualified": true,
+          "minimum_local_snr_db": 61.41838639785589,
+          "magnitude_error_db": 0.0008576881240288558,
+          "phase_error_radians": -0.00014330095876667452
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 60.27722660282293,
+          "magnitude_error_db": -0.008354420561834632,
+          "phase_error_radians": -0.0010338865609429398
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f1000-r0.5--36",
+      "cutoff": 1000.0,
+      "resonance": 0.5,
+      "source": "bypass-sine-f1000--36",
+      "notes": [
+        {
+          "note": 48,
+          "frequency_hz": 130.8126641909607,
+          "qualified": true,
+          "minimum_local_snr_db": 58.37835645257539,
+          "magnitude_error_db": -0.015002021855440452,
+          "phase_error_radians": 0.0005572084006080819
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 61.80010899792022,
+          "magnitude_error_db": -0.012712200863802748,
+          "phase_error_radians": -0.000213590701122692
+        },
+        {
+          "note": 70,
+          "frequency_hz": 466.1637018640623,
+          "qualified": true,
+          "minimum_local_snr_db": 65.20255816064072,
+          "magnitude_error_db": -0.005721189211877895,
+          "phase_error_radians": -0.00015428289188842327
+        },
+        {
+          "note": 74,
+          "frequency_hz": 587.3283514707892,
+          "qualified": true,
+          "minimum_local_snr_db": 64.01423189147494,
+          "magnitude_error_db": 0.010339127110691433,
+          "phase_error_radians": 0.0010978640889546458
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 62.18237198449042,
+          "magnitude_error_db": 0.01416576098669701,
+          "phase_error_radians": -0.0006805896861847076
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f1000-r0.8--36",
+      "cutoff": 1000.0,
+      "resonance": 0.8,
+      "source": "bypass-sine-f1000--36",
+      "notes": [
+        {
+          "note": 48,
+          "frequency_hz": 130.8126641909607,
+          "qualified": true,
+          "minimum_local_snr_db": 58.37835645257539,
+          "magnitude_error_db": 8.320210832200208e-05,
+          "phase_error_radians": 0.0005908785929204111
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 63.01862711168711,
+          "magnitude_error_db": -0.010871640806931093,
+          "phase_error_radians": 0.000401736890628675
+        },
+        {
+          "note": 70,
+          "frequency_hz": 466.1637018640623,
+          "qualified": true,
+          "minimum_local_snr_db": 65.20255816064072,
+          "magnitude_error_db": -0.0035338478133796333,
+          "phase_error_radians": -0.000775721867279793
+        },
+        {
+          "note": 74,
+          "frequency_hz": 587.3283514707892,
+          "qualified": true,
+          "minimum_local_snr_db": 62.563973547400124,
+          "magnitude_error_db": 0.0011823001750199183,
+          "phase_error_radians": 0.00018677479736948905
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 68.7410817999836,
+          "magnitude_error_db": 0.0055217592594929196,
+          "phase_error_radians": -0.0016777519633215995
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f1000-r0.95--36",
+      "cutoff": 1000.0,
+      "resonance": 0.95,
+      "source": "bypass-sine-f1000--36",
+      "notes": [
+        {
+          "note": 48,
+          "frequency_hz": 130.8126641909607,
+          "qualified": true,
+          "minimum_local_snr_db": 58.37835645257539,
+          "magnitude_error_db": -0.013065933124782887,
+          "phase_error_radians": 0.0011025617092134752
+        },
+        {
+          "note": 60,
+          "frequency_hz": 261.6276128122425,
+          "qualified": true,
+          "minimum_local_snr_db": 63.01862711168711,
+          "magnitude_error_db": -0.007458954152173422,
+          "phase_error_radians": -0.000253386465775605
+        },
+        {
+          "note": 70,
+          "frequency_hz": 466.1637018640623,
+          "qualified": true,
+          "minimum_local_snr_db": 65.20255816064072,
+          "magnitude_error_db": -0.011844259897921285,
+          "phase_error_radians": -0.00042248835483683087
+        },
+        {
+          "note": 74,
+          "frequency_hz": 587.3283514707892,
+          "qualified": true,
+          "minimum_local_snr_db": 60.90349156095587,
+          "magnitude_error_db": -0.002864659537373244,
+          "phase_error_radians": -0.0007716931384470524
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 65.52725623561214,
+          "magnitude_error_db": 0.05665960669060004,
+          "phase_error_radians": -0.005678655294661115
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f4000-r0--24",
+      "cutoff": 4000.0,
+      "resonance": 0.0,
+      "source": "bypass-sine-f4000--24",
+      "notes": [
+        {
+          "note": 72,
+          "frequency_hz": 523.2526245545532,
+          "qualified": true,
+          "minimum_local_snr_db": 74.17267004467186,
+          "magnitude_error_db": -0.0020148848679389384,
+          "phase_error_radians": 0.00014003135556355079
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 81.34640611611304,
+          "magnitude_error_db": -0.0006694058300288065,
+          "phase_error_radians": 0.00016959838434047294
+        },
+        {
+          "note": 94,
+          "frequency_hz": 1864.6435379017164,
+          "qualified": true,
+          "minimum_local_snr_db": 86.7928719134872,
+          "magnitude_error_db": 0.00020385012196732792,
+          "phase_error_radians": 0.0001248545264808088
+        },
+        {
+          "note": 98,
+          "frequency_hz": 2349.3294150652655,
+          "qualified": true,
+          "minimum_local_snr_db": 85.38476537037413,
+          "magnitude_error_db": -0.0004332404777608961,
+          "phase_error_radians": 7.210673931254015e-05
+        },
+        {
+          "note": 108,
+          "frequency_hz": 4186.021372023418,
+          "qualified": true,
+          "minimum_local_snr_db": 91.17948243805587,
+          "magnitude_error_db": -0.0004869517948878849,
+          "phase_error_radians": 1.9682110641684253e-05
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f4000-r0.5--24",
+      "cutoff": 4000.0,
+      "resonance": 0.5,
+      "source": "bypass-sine-f4000--24",
+      "notes": [
+        {
+          "note": 72,
+          "frequency_hz": 523.2526245545532,
+          "qualified": true,
+          "minimum_local_snr_db": 74.17267004467186,
+          "magnitude_error_db": -0.0014660103082190555,
+          "phase_error_radians": 0.0002487830195371776
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 81.34640611611304,
+          "magnitude_error_db": -1.833984140705833e-05,
+          "phase_error_radians": 0.0004458530169045163
+        },
+        {
+          "note": 94,
+          "frequency_hz": 1864.6435379017164,
+          "qualified": true,
+          "minimum_local_snr_db": 86.60775326394537,
+          "magnitude_error_db": 0.0034659751607664575,
+          "phase_error_radians": 0.0006970418706018833
+        },
+        {
+          "note": 98,
+          "frequency_hz": 2349.3294150652655,
+          "qualified": true,
+          "minimum_local_snr_db": 88.87910566103707,
+          "magnitude_error_db": 0.005287624349644374,
+          "phase_error_radians": 0.0007209744494760319
+        },
+        {
+          "note": 108,
+          "frequency_hz": 4186.021372023418,
+          "qualified": true,
+          "minimum_local_snr_db": 92.06218832603841,
+          "magnitude_error_db": 0.010476516199031229,
+          "phase_error_radians": -4.754531199098331e-05
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f4000-r0.8--24",
+      "cutoff": 4000.0,
+      "resonance": 0.8,
+      "source": "bypass-sine-f4000--24",
+      "notes": [
+        {
+          "note": 72,
+          "frequency_hz": 523.2526245545532,
+          "qualified": true,
+          "minimum_local_snr_db": 74.17267004467186,
+          "magnitude_error_db": -0.0021798729766984003,
+          "phase_error_radians": 0.0001676677388951506
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 81.34640611611304,
+          "magnitude_error_db": -0.0006196613490619282,
+          "phase_error_radians": 0.0002385506785955609
+        },
+        {
+          "note": 94,
+          "frequency_hz": 1864.6435379017164,
+          "qualified": true,
+          "minimum_local_snr_db": 86.7928719134872,
+          "magnitude_error_db": 0.0007991625241498157,
+          "phase_error_radians": 0.0006264185004911965
+        },
+        {
+          "note": 98,
+          "frequency_hz": 2349.3294150652655,
+          "qualified": true,
+          "minimum_local_snr_db": 88.49126533270507,
+          "magnitude_error_db": 0.003316021067382776,
+          "phase_error_radians": 0.0009766749865363568
+        },
+        {
+          "note": 108,
+          "frequency_hz": 4186.021372023418,
+          "qualified": true,
+          "minimum_local_snr_db": 95.0783175335902,
+          "magnitude_error_db": 0.03850321697497717,
+          "phase_error_radians": -0.0008324981837046421
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f4000-r0.95--24",
+      "cutoff": 4000.0,
+      "resonance": 0.95,
+      "source": "bypass-sine-f4000--24",
+      "notes": [
+        {
+          "note": 72,
+          "frequency_hz": 523.2526245545532,
+          "qualified": true,
+          "minimum_local_snr_db": 74.17267004467186,
+          "magnitude_error_db": -0.001960620602288618,
+          "phase_error_radians": 0.00014066115893189202
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 81.34640611611304,
+          "magnitude_error_db": -0.0004501724032567369,
+          "phase_error_radians": 0.000159296738550081
+        },
+        {
+          "note": 94,
+          "frequency_hz": 1864.6435379017164,
+          "qualified": true,
+          "minimum_local_snr_db": 84.86177388495868,
+          "magnitude_error_db": 0.00039084043411707144,
+          "phase_error_radians": 0.0005411979946267501
+        },
+        {
+          "note": 98,
+          "frequency_hz": 2349.3294150652655,
+          "qualified": true,
+          "minimum_local_snr_db": 88.87910566103707,
+          "magnitude_error_db": 0.0015851082110022118,
+          "phase_error_radians": 0.0009155303242235745
+        },
+        {
+          "note": 108,
+          "frequency_hz": 4186.021372023418,
+          "qualified": true,
+          "minimum_local_snr_db": 87.75347033711945,
+          "magnitude_error_db": 0.7108170216002792,
+          "phase_error_radians": -0.055492387030566095
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f4000-r0--36",
+      "cutoff": 4000.0,
+      "resonance": 0.0,
+      "source": "bypass-sine-f4000--36",
+      "notes": [
+        {
+          "note": 72,
+          "frequency_hz": 523.2526245545532,
+          "qualified": true,
+          "minimum_local_snr_db": 64.08291461778245,
+          "magnitude_error_db": 0.0021731075432038956,
+          "phase_error_radians": 1.6491326709706948e-05
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 69.0422469248165,
+          "magnitude_error_db": -0.00679798846449413,
+          "phase_error_radians": -7.403431598410164e-05
+        },
+        {
+          "note": 94,
+          "frequency_hz": 1864.6435379017164,
+          "qualified": true,
+          "minimum_local_snr_db": 72.72162644078283,
+          "magnitude_error_db": -0.00244155610866577,
+          "phase_error_radians": 0.00019980067592270646
+        },
+        {
+          "note": 98,
+          "frequency_hz": 2349.3294150652655,
+          "qualified": true,
+          "minimum_local_snr_db": 72.67856381061432,
+          "magnitude_error_db": -0.002606713223276806,
+          "phase_error_radians": -0.0002457305427116985
+        },
+        {
+          "note": 108,
+          "frequency_hz": 4186.021372023418,
+          "qualified": true,
+          "minimum_local_snr_db": 75.82832615838976,
+          "magnitude_error_db": -0.0009491542375109354,
+          "phase_error_radians": 0.00014076095763876988
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f4000-r0.5--36",
+      "cutoff": 4000.0,
+      "resonance": 0.5,
+      "source": "bypass-sine-f4000--36",
+      "notes": [
+        {
+          "note": 72,
+          "frequency_hz": 523.2526245545532,
+          "qualified": true,
+          "minimum_local_snr_db": 64.08291461778245,
+          "magnitude_error_db": 0.0023073645176221766,
+          "phase_error_radians": -0.00014201253204688168
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 69.0422469248165,
+          "magnitude_error_db": -0.004434127180029719,
+          "phase_error_radians": 0.000107043149469951
+        },
+        {
+          "note": 94,
+          "frequency_hz": 1864.6435379017164,
+          "qualified": true,
+          "minimum_local_snr_db": 72.72162644078283,
+          "magnitude_error_db": -0.000966680716194264,
+          "phase_error_radians": 0.0008659157411800381
+        },
+        {
+          "note": 98,
+          "frequency_hz": 2349.3294150652655,
+          "qualified": true,
+          "minimum_local_snr_db": 72.67856381061432,
+          "magnitude_error_db": 0.0017800961807922268,
+          "phase_error_radians": 0.0006139185275388875
+        },
+        {
+          "note": 108,
+          "frequency_hz": 4186.021372023418,
+          "qualified": true,
+          "minimum_local_snr_db": 76.63584461536617,
+          "magnitude_error_db": 0.008206897605539446,
+          "phase_error_radians": -3.4963605470918774e-05
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f4000-r0.8--36",
+      "cutoff": 4000.0,
+      "resonance": 0.8,
+      "source": "bypass-sine-f4000--36",
+      "notes": [
+        {
+          "note": 72,
+          "frequency_hz": 523.2526245545532,
+          "qualified": true,
+          "minimum_local_snr_db": 64.08291461778245,
+          "magnitude_error_db": 0.0040695207668229,
+          "phase_error_radians": -7.589246808289398e-05
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 69.0422469248165,
+          "magnitude_error_db": -0.006629943855451446,
+          "phase_error_radians": -8.145507161623409e-05
+        },
+        {
+          "note": 94,
+          "frequency_hz": 1864.6435379017164,
+          "qualified": true,
+          "minimum_local_snr_db": 72.72162644078283,
+          "magnitude_error_db": -0.0011576991386692329,
+          "phase_error_radians": 0.0006652923529252559
+        },
+        {
+          "note": 98,
+          "frequency_hz": 2349.3294150652655,
+          "qualified": true,
+          "minimum_local_snr_db": 72.67856381061432,
+          "magnitude_error_db": 0.0021491892788944246,
+          "phase_error_radians": 0.0003038233209613444
+        },
+        {
+          "note": 108,
+          "frequency_hz": 4186.021372023418,
+          "qualified": true,
+          "minimum_local_snr_db": 78.20956695149924,
+          "magnitude_error_db": 0.009535049370062996,
+          "phase_error_radians": -0.00031788388661144646
+        }
+      ]
+    },
+    {
+      "case": "sine-t1-f4000-r0.95--36",
+      "cutoff": 4000.0,
+      "resonance": 0.95,
+      "source": "bypass-sine-f4000--36",
+      "notes": [
+        {
+          "note": 72,
+          "frequency_hz": 523.2526245545532,
+          "qualified": true,
+          "minimum_local_snr_db": 64.08291461778245,
+          "magnitude_error_db": 0.005200103063409618,
+          "phase_error_radians": -0.00020868011362633104
+        },
+        {
+          "note": 84,
+          "frequency_hz": 1046.5050726308298,
+          "qualified": true,
+          "minimum_local_snr_db": 69.0422469248165,
+          "magnitude_error_db": -0.00571911808272105,
+          "phase_error_radians": -0.0002734993262348565
+        },
+        {
+          "note": 94,
+          "frequency_hz": 1864.6435379017164,
+          "qualified": true,
+          "minimum_local_snr_db": 72.72162644078283,
+          "magnitude_error_db": -0.0034991009939542937,
+          "phase_error_radians": 0.00011944956850306843
+        },
+        {
+          "note": 98,
+          "frequency_hz": 2349.3294150652655,
+          "qualified": true,
+          "minimum_local_snr_db": 72.67856381061432,
+          "magnitude_error_db": -0.0015458827828981837,
+          "phase_error_radians": -0.00011481723355551829
+        },
+        {
+          "note": 108,
+          "frequency_hz": 4186.021372023418,
+          "qualified": true,
+          "minimum_local_snr_db": 73.48535232668569,
+          "magnitude_error_db": 0.05550250289472965,
+          "phase_error_radians": -0.005291734391552302
+        }
+      ]
+    }
+  ]
+}

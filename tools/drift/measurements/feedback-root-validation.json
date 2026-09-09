@@ -1,0 +1,9 @@
+{
+  "compiler_sha256": "34c1066d31d82739010c7bca234fe37756a0bd1ec455186190813a9cca6c1c78",
+  "cases": 30,
+  "roots": 3840,
+  "maximum_relative_error": 2.195913729380484e-07,
+  "fusion_clean": true,
+  "passed": true,
+  "scope": "Numerical solver only; no native-audio acceptance claim"
+}

@@ -143,6 +143,7 @@ pub(super) fn icon_name_value(value: &str) -> Option<f32> {
         "sine" | "lfo" => Some(8.0),
         "drop" | "droplet" | "bubbles" | "audio-fx" => Some(9.0),
         "document" | "project" => Some(10.0),
+        "midi" => Some(11.0),
         _ => None,
     }
 }
@@ -448,6 +449,20 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
             detail_d = glint;
         } else {
             d = min(abs(drop) - stroke, glint);
+        }
+    } else if (in.value_t > 10.5) {
+        // MIDI: five-pin DIN socket, with an inset key slot and five contacts.
+        float body = length(p) - 0.52;
+        float notch = button_icon_box(p - float2(0.0, -0.31), float2(0.07, 0.11));
+        float pins = min(length(p - float2(-0.30, 0.0)), length(p - float2(0.30, 0.0)));
+        pins = min(pins, length(p - float2(-0.21, 0.21)));
+        pins = min(pins, length(p - float2(0.21, 0.21)));
+        pins = min(pins, length(p - float2(0.0, 0.30))) - 0.075;
+        if (filled) {
+            d = body;
+            detail_d = min(pins, notch);
+        } else {
+            d = min(abs(body) - 0.055, min(pins, notch));
         }
     } else {
         // document: Finder-style page. Portrait sheet with a folded top-right
@@ -1155,6 +1170,7 @@ mod tests {
     #[test]
     fn source_list_icon_names_resolve_to_button_icons() {
         for icon in [
+            "midi",
             "piano",
             "sliders",
             "note-arrow",

@@ -34,8 +34,6 @@ const APPROX_CHAR_WIDTH: f32 = super::menu_style::APPROX_CHAR_WIDTH;
 // Round action-menu glyphs sit optically below the midpoint when placed at
 // the font baseline's mathematical center.
 const ACTION_MENU_ICON_OPTICAL_OFFSET: f32 = -0.08;
-const CHECKMARK_HEIGHT_EM: f32 = 0.8;
-const CHECKMARK_WIDTH_TO_HEIGHT: f32 = 1.15;
 
 // ── Internal state ──────────────────────────────────────────────────────────
 
@@ -1109,43 +1107,12 @@ impl WidgetDefinition for DropdownWidget {
 
                 // Check mark for selected item
                 if !action_menu && sel_idx == Some(i) {
-                    let mark_height_px = (menu_font_size * CHECKMARK_HEIGHT_EM).max(1.0);
-                    let mark_width_px = mark_height_px * CHECKMARK_WIDTH_TO_HEIGHT;
-                    let mark_width = mark_width_px / viewport.cell_w.max(1.0);
-                    let mark_height = mark_height_px / viewport.cell_h.max(1.0);
-                    let mark_rect = Rect {
-                        row: item_y + (MENU_ROW_HEIGHT - mark_height) * 0.5,
-                        col: label_col + (check_col_width - mark_width) * 0.5,
-                        width: mark_width,
-                        height: mark_height,
-                    };
-                    let (ndc_min, ndc_max) = ndc_bounds(mark_rect, viewport);
-                    super::push_overlay_primitive(GpuPrimitive::WidgetInstance {
-                        widget_type: "dropdown-checkmark".to_string(),
-                        instance: WidgetInstance {
-                            ndc_min,
-                            ndc_max,
-                            value_t: 0.0,
-                            orientation: 0.0,
-                            itime: viewport.time_seconds,
-                            uniform_a: [0.0; 4],
-                            uniform_b: [0.0; 4],
-                            uniform_c: [0.0; 4],
-                            uniform_d: [0.0; 4],
-                            color_a: [
-                                check_color.r,
-                                check_color.g,
-                                check_color.b,
-                                check_color.a,
-                            ],
-                            color_b: [0.0; 4],
-                            color_c: [0.0; 4],
-                            color_d: [0.0; 4],
-                            corner_radius: 0.0,
-                            pixel_aspect: mark_width_px / mark_height_px,
-                        },
-                        is_background: false,
-                    });
+                    super::push_overlay_primitive(super::menu_style::checkmark_primitive(
+                        Rect { row: item_y, col: menu_col, width: menu_width, height: MENU_ROW_HEIGHT },
+                        menu_font_size,
+                        check_color,
+                        viewport,
+                    ));
                 }
 
                 // Option label
@@ -1163,7 +1130,8 @@ impl WidgetDefinition for DropdownWidget {
                         text: option_display,
                         font_size: menu_font_size,
                         scale: 1.0,
-                        fg: text_color,
+                        // Popup labels are chrome, not the trigger's colored value.
+                        fg: theme::FG(),
                         bg: transparent,
                     },
                 ));

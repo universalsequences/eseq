@@ -4,16 +4,15 @@
 //! placement policies, but their panel chrome and rows intentionally share this
 //! style so the two renderers cannot drift apart.
 
-/// Font size (px) for popup-menu rows — dropdown options and `menu-item`
+/// Font size (points) for popup-menu rows — dropdown options and `menu-item`
 /// labels alike. Popup rows are chrome, not tile content, so they deliberately
 /// ignore the surrounding tile's inherited font size; an explicit `:font-size`
 /// prop still overrides this.
 pub(crate) const MENU_FONT_SIZE: f32 = 10.0;
 pub(crate) const ROW_HEIGHT: f32 = 1.4;
-pub(crate) const PANEL_PADDING_V: f32 = 0.3;
-pub(crate) const TEXT_PADDING_H: f32 = 0.6;
-pub(crate) const HIGHLIGHT_INSET_H: f32 = 0.15;
-pub(crate) const CORNER_RADIUS_PX: f32 = 10.0;
+pub(crate) const PANEL_PADDING_V: f32 = 0.15;
+pub(crate) const TEXT_PADDING_H: f32 = 1.0;
+pub(crate) const CORNER_RADIUS_PX: f32 = 20.0;
 pub(crate) const APPROX_CHAR_WIDTH: f32 = 0.55;
 
 use super::{GpuPrimitive, WidgetInstance, WidgetViewport, ndc_bounds};
@@ -28,20 +27,22 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
         return 0.001;
     }
     let px_h = (rect.height * viewport.cell_h).max(1.0);
-    ((super::ui_design_px(radius_px) * 2.0) / px_h).clamp(0.001, 0.5)
+    ((super::ui_design_px(radius_px) * 2.0) / px_h).clamp(0.001, 1.0)
 }
 
-pub(crate) fn emit_rounded_rect_overlay(
+fn shape_primitive(
+    widget_type: &str,
     rect: Rect,
     color: Color,
     radius_px: f32,
+    is_background: bool,
     viewport: WidgetViewport,
-) {
+) -> GpuPrimitive {
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    super::push_overlay_primitive(GpuPrimitive::WidgetInstance {
-        widget_type: "dropdown".to_string(),
+    GpuPrimitive::WidgetInstance {
+        widget_type: widget_type.to_string(),
         instance: WidgetInstance {
             ndc_min,
             ndc_max,
@@ -59,8 +60,14 @@ pub(crate) fn emit_rounded_rect_overlay(
             corner_radius: normalized_corner_radius(rect, viewport, radius_px),
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
-        is_background: true,
-    });
+        is_background,
+    }
+}
+
+pub(crate) fn emit_rounded_rect_overlay(
+    rect: Rect, color: Color, radius_px: f32, viewport: WidgetViewport,
+) {
+    super::push_overlay_primitive(shape_primitive("dropdown", rect, color, radius_px, true, viewport));
 }
 
 pub(crate) fn emit_panel_chrome(
@@ -88,25 +95,46 @@ pub(crate) fn emit_panel_chrome(
     emit_rounded_rect_overlay(panel_rect, background, CORNER_RADIUS_PX, viewport);
 }
 
-pub(crate) fn row_highlight_rect(row_rect: crate::layout::Rect) -> crate::layout::Rect {
-    crate::layout::Rect {
-        col: row_rect.col + HIGHLIGHT_INSET_H,
-        width: (row_rect.width - HIGHLIGHT_INSET_H * 2.0).max(0.0),
+/// Use the panel's vertical padding on both axes in framebuffer space. Cell
+/// widths and heights differ, so equal cell counts would not be equal insets.
+pub(crate) fn row_highlight_rect(row_rect: Rect, viewport: WidgetViewport) -> Rect {
+    let inset = PANEL_PADDING_V * viewport.cell_h / viewport.cell_w.max(1.0);
+    Rect {
+        col: row_rect.col + inset,
+        width: (row_rect.width - inset * 2.0).max(0.0),
         ..row_rect
     }
 }
 
-pub(crate) fn emit_row_highlight(
-    row_rect: Rect,
-    color: Color,
-    viewport: WidgetViewport,
-) {
-    emit_rounded_rect_overlay(
-        row_highlight_rect(row_rect),
-        color,
-        0.0,
-        viewport,
-    );
+pub(crate) fn row_highlight_primitive(
+    row_rect: Rect, color: Color, viewport: WidgetViewport,
+) -> GpuPrimitive {
+    // Concentric curves: the inner radius is the outer radius minus the gap.
+    let inset_px = PANEL_PADDING_V * viewport.cell_h;
+    let radius = (CORNER_RADIUS_PX - inset_px / super::ui_px_scale()).max(0.0);
+    shape_primitive("dropdown", row_highlight_rect(row_rect, viewport), color, radius, true, viewport)
+}
+
+pub(crate) fn emit_row_highlight(row_rect: Rect, color: Color, viewport: WidgetViewport) {
+    super::push_overlay_primitive(row_highlight_primitive(row_rect, color, viewport));
+}
+
+/// Same vector mark for dropdown selections and checked context-menu actions.
+/// Menu fonts are point-sized; primitive bounds must use backing pixels.
+pub(crate) fn checkmark_primitive(
+    row_rect: Rect, font_size: f32, color: Color, viewport: WidgetViewport,
+) -> GpuPrimitive {
+    let height_px = super::ui_design_px(font_size * super::UI_DESIGN_REFERENCE_SCALE * 1.2);
+    let width_px = height_px * 0.85;
+    let width = width_px / viewport.cell_w.max(1.0);
+    let height = height_px / viewport.cell_h.max(1.0);
+    let rect = Rect {
+        row: row_rect.row + (row_rect.height - height) * 0.5,
+        col: row_rect.col + TEXT_PADDING_H + (1.5 - width) * 0.5,
+        width,
+        height,
+    };
+    shape_primitive("dropdown-checkmark", rect, color, 0.0, false, viewport)
 }
 
 /// Marker prop stamped by the layout pass next to an *inherited* `font-size`

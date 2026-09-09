@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = eng.state.clone();
     let stream = eng._stream;
 
-    // 2. Start with an editable, device-less track rather than a canned sound.
+    // 2. Start with two editable, device-less tracks rather than canned sounds.
     let master_recorder = eng.master_recorder.clone();
     let mut app = app::App::new(
         eng.state.clone(),
@@ -147,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eng.keyboard_tx,
     );
 
-    app.graph_controller().add_empty_track()?;
+    app.graph_controller().add_default_project_tracks()?;
     let track_names = app.tracks.clone();
 
     // Collect node IDs for param pushing to audiograph

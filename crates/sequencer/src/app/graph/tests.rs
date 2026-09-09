@@ -1632,7 +1632,10 @@
 
         app.start_new_project();
 
-        assert_eq!(app.graph.track_instrument_types, vec![InstrumentType::Empty]);
+        assert_eq!(app.graph.track_instrument_types, vec![InstrumentType::Empty; 2]);
+        assert_eq!(app.ui.cursor_track, 0);
+        assert_empty_track(&app, 0);
+        assert_empty_track(&app, 1);
         // The old project's arrangement is gone; the new project starts on
         // the EMPTY arrangement (empty-arrangement spec 4.3), never on
         // "no arrangement".
@@ -1692,13 +1695,15 @@
             assert!(output.iter().all(|sample| *sample == 0.0), "empty tracks must be silent");
         };
         app.start_new_project();
+        assert_eq!(app.tracks.len(), 2);
         assert_empty_track(&app, 0);
+        assert_empty_track(&app, 1);
         let track = app.graph_controller().add_empty_track().unwrap();
         let id = app.track_registry.id_at(track).unwrap();
         app.commit_created_track(track, "Add empty track").unwrap();
         assert_empty_track(&app, track);
         assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
-        assert_eq!(app.tracks.len(), 1);
+        assert_eq!(app.tracks.len(), 2);
         assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
         assert_eq!(app.track_registry.id_at(track), Some(id));
         assert_empty_track(&app, track);
@@ -1706,7 +1711,11 @@
         app.state.pattern.patterns[track].set_step_active(7, true);
         app.state.publish_scheduler_snapshot();
         let name = format!("__test-empty-track-{}", std::process::id());
-        let project = app.capture_project(&name).unwrap();
+        let mut project = app.capture_project(&name).unwrap();
+        let automatic_name = app.tracks[0].clone();
+        project.tracks[0].name = Some("Legacy automatic name".to_string());
+        project.tracks[track].name = Some("Authored name".to_string());
+        project.tracks[track].name_user_authored = true;
         assert!(matches!(project.tracks[track].kind, crate::project::ProjectTrackKind::Empty));
         let path = crate::project::save_project(&name, &project).unwrap();
         let _cleanup = TestProjectFile(path.clone());
@@ -1717,6 +1726,9 @@
             process_block();
         }
         assert!(!app.has_pending_project_load());
+        assert_eq!(app.tracks[0], automatic_name);
+        assert_eq!(Some(&app.tracks[track]), project.tracks[track].name.as_ref());
+        assert!(app.track_name_user_authored[track]);
         assert_eq!(app.track_registry.id_at(track), Some(id));
         assert_empty_track(&app, track);
         assert!(app.state.pattern.patterns[track].is_active(7));

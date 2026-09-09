@@ -131,8 +131,8 @@
       :piano-white-key              '(0.874 0.903 0.931 1.0)
       :piano-key-border               '(0.212 0.212 0.222 1.0)
       :piano-black-key                '(0.020 0.020 0.022 1.0)
-      :piano-white-lane               '(0.073 0.073 0.086 1.0)
-      :piano-black-lane               '(0.040 0.040 0.045 1.0)
+      :piano-white-lane               '(0.133 0.133 0.146 1.0)
+      :piano-black-lane               '(0.110 0.110 0.115 1.0)
       :timeline-grid-minor            '(0.202 0.202 0.222 1.0)
       :timeline-playhead              '(1.00 0.80 0.00)
       :search-icon                    '(0.45 0.47 0.50 1.0)
@@ -208,7 +208,7 @@
       
       ;; Tile borders
       :border-active   '(0.42 0.42 0.44)     ; Lighter gray for active tile
-      :border-inactive '(0.10 0.10 .105)    ; Match buffer background
+      :border-inactive '(0.15 0.15 .155)    ; Match buffer background
       
       ;; Browser tree icons (solid colored silhouettes; the rail keeps white strokes)
       :list-icon-detail     '(0.12 0.13 0.14)   ; cutouts match the row bg
@@ -258,8 +258,8 @@
       :dropdown-ring     '(0.00 0.48 0.95)
       :dropdown-chevron  '(0.96 0.96 0.98)
       :dropdown-badge-bg '(0.00 0.48 0.95)
-      :dropdown-menu-bg  '(0.26 0.265 0.28)
-      :dropdown-menu-border '(0.46 0.46 0.48)
+      :dropdown-menu-bg  '(0.16 0.165 0.18)
+      :dropdown-menu-border '(0.56 0.56 0.58)
       :dropdown-hover-bg '(0.00 0.35 0.82)
       :dropdown-check    '(0.96 0.96 0.98)
       :dropdown-scrollbar '(1.00 1.00 1.00 0.25)

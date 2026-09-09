@@ -187,16 +187,16 @@
 (def header-height 2.6)
 ;; One cell (~20 px at the default scale) between ruler/loop chrome and the
 ;; scene lane. The transport-start triangle lives in this gutter.
-(def cursor-gutter-height 1)
+(def cursor-gutter-height 0.5)
 (def scene-lane-height 4.6)
-(def track-lane-height 2.85)
+(def track-lane-height 3.85)
 ;; Timeline borders are drawn inside the widget, in physical pixels, without
 ;; changing row pitch or the shared ruler/grid alignment. Lanes that stack
 ;; flush (the track rows) must draw only ONE of the two edges, otherwise two
 ;; adjacent 1 px borders read as a 2 px seam — see `track-lane`.
-(def lane-border-top-color :mixer-strip-border)
-(def lane-border-bottom-color :mixer-strip-border)
-(def lane-border-width 1)
+(def lane-border-top-color :bg)
+(def lane-border-bottom-color :bg)
+(def lane-border-width 3)
 ;; Vertical distance in CELLS between one track row's top and the next.
 ;; Track rows stack in a :gap 0 v-stack (see the buffer composition below), so
 ;; the pitch is exactly the lane height — no gap and no per-row chrome to add.
@@ -208,8 +208,8 @@
 ;; Clip title-bar height in cells (region spec 3.1): the move/resize strip
 ;; above each clip's body. Fixed rather than proportional so clips read the
 ;; same at any lane height; tune by eye against the Ableton reference.
-(def clip-title-bar-height 0.9)
-(def clip-label-font-size 9)
+(def clip-title-bar-height 1.1)
+(def clip-label-font-size 10)
 (def clip-label-color :clip-label-fg)
 
 (def scene-color () THEME.scene_clip_bg)
@@ -218,7 +218,7 @@
 ;; Clip corner radius in CELLS (GarageBand-style rounded clips), so it scales
 ;; with the UI zoom like the lane heights above. 0 gives the square clips
 ;; every other timeline host draws.
-(def clip-corner-radius 0.22)
+(def clip-corner-radius 0.142)
 ;; Requests one finer candidate from the timeline's zoom-adaptive grid. The
 ;; widget promotes crowded candidates to a readable aligned interval, and that
 ;; one resolved interval drives lines, labels, cursor placement, marquee, and
@@ -228,7 +228,7 @@
 ;; Fixed width for the composed seqv-track-header column so every lane's time
 ;; axis starts at the same x; the scene lane leads with a spacer of the same
 ;; width (spec 4.2: the per-track sidebar role is played by the header).
-(def header-width 29.0)
+(def header-width 30.0)
 
 (def event-num (event key fallback)
   (let ((value (get event key)))
@@ -711,8 +711,9 @@
           :kind :midi
           :label (track-clip-label clip)
           :content (clip-content i clip)
-          :color (lane-clip-color i)
-          :sound-dot (clip-sound-dot i (get clip :clip-id)))))
+          ;; The sound-identity square (clip-sound-dot) is no longer drawn
+          ;; on clips: the user found it visual noise next to the title.
+          :color (lane-clip-color i))))
     (track-clips i)))
 
 ;; ── Provisional capture content (realtime feedback spec 3) ────────────────
@@ -1889,8 +1890,8 @@
 ;; bounded width for flex distribution — without it the row collapses to its
 ;; fixed content and the flexed lane measures ~zero wide.
 (def track-row (i)
-  (box :width :fill :border-color :bg :border-width 2
-    (h-stack :width :fill :align :start
+  (box :width :fill :border-color :bg :border-width 3
+    (h-stack :width :fill :align :start :gap 0
       (box
         :key (str "track-header-" i)
         :height :fill :width header-width
@@ -2006,7 +2007,7 @@
       (eseq.sample-import/panel))
     (subtree :key "arr-scene-row"
       (box :width :fill
-        (h-stack :width :fill :align :start
+        (h-stack :width :fill :align :start :gap 0
           (box :key "scene-header-spacer"
             :width header-width :height scene-lane-height
             (v-stack :width :fill :align :start :gap 0
@@ -2017,7 +2018,6 @@
                   (box :width 0.6)
                   (label "Click to place · Esc cancels" :font-size 8 :color :dim)))))
           (scene-lane))))
-    (box :width :fill :height 0.1 :background-color :bg)
     (scroll :key "track-scroll" :width :fill :flex 1
       (v-stack :width :fill :height :fill :gap 0.0
         (each (eseq.track-collapse/visible-track-indices) |i|
@@ -2027,10 +2027,10 @@
         ;; hidden by default in this view, so without this there is no place
         ;; to drop a sample / instrument / Sound to add a track.
         (h-stack :key "arr-grid-continuation-row"
-          :width :fill :flex 1 :align :stretch
+          :width :fill :flex 1 :align :stretch :gap 0
           (box :width header-width (new-track-drop-zone))
           (continuation-lane "arr-grid-continuation" 0 0))))
-    (h-stack :key "arr-bottom-ruler-row" :width :fill :align :start
+    (h-stack :key "arr-bottom-ruler-row" :gap 0 :width :fill :align :start
       (box :width header-width :height 1)
       ;; Footer ruler: total height 1 cell, all of it header/ruler, so the
       ;; lane's content rect below the ruler is zero cells tall. The timeline

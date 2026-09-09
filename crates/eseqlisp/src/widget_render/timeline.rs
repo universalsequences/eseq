@@ -986,24 +986,54 @@ fn build_primitives(
                 },
             }));
         }
-        for (x, _) in view.metal_grid_lines() {
-            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
-                x: x - 0.0625,
-                y: rect.row,
-                width: 0.125,
-                height: view.header_height,
-                color: theme::BRIGHT_BLACK(),
-            }));
+        let label_font_size = 10.5_f32;
+        // Cap height of the label glyphs in framebuffer pixels; the text
+        // primitive centers its glyphs in the row it is given, so the cap
+        // spans `center ± cap/2`.
+        let cap_rows = super::with_render_text_measurer(|m| m.cap_height_px(label_font_size))
+            .unwrap_or(viewport.cell_h * 0.5)
+            / viewport.cell_h.max(1.0);
+        let px_rows = 1.0 / viewport.cell_h.max(1.0);
+        // The bar tick stands on the loop band (or the chrome bottom when
+        // there is none), Ableton-style. On a tall header the label sits
+        // just above the band too, so the tick reads as label-height rather
+        // than running up the whole row.
+        let tick_bottom = loop_band
+            .map(|(_, y, _, _)| y)
+            .unwrap_or(rect.row + header_chrome_height);
+        let label_row = if header_chrome_height >= 1.6 {
+            (tick_bottom - 0.5 - cap_rows * 0.5 - 3.0 * px_rows).max(rect.row)
+        } else {
+            rect.row + 0.06
+        };
+        let label_center = label_row + 0.5;
+        let tick_top = (label_center - cap_rows * 0.5 - 3.0 * px_rows).max(rect.row + 0.04);
+        let tick_height = (tick_bottom - tick_top).max(0.0);
+        let stroke = 0.08;
+        if tick_height > 0.0 {
+            for (x, is_major) in view.metal_grid_lines() {
+                if is_major {
+                    primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+                        x: x - stroke * 0.5,
+                        y: tick_top,
+                        width: stroke,
+                        height: tick_height,
+                        color: theme::FG_MUTED(),
+                    }));
+                } else {
+                    primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
+                        x: x - 0.06,
+                        y: tick_bottom - 0.16,
+                        width: 0.12,
+                        height: 0.12,
+                        color: theme::BRIGHT_BLACK(),
+                    }));
+                }
+            }
         }
         for (x, label) in view.metal_time_ruler_labels() {
             let label_col = x + 0.36;
             let label_width = label.chars().count() as f32 * 0.58 + 0.28;
-            let label_row = rect.row
-                + if header_chrome_height >= 1.6 {
-                    0.26
-                } else {
-                    0.06
-                };
             primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: Rect {
                     row: label_row - 0.04,
@@ -3185,14 +3215,22 @@ impl TimelineView {
                         vec![item.id.clone()]
                     };
                     let raw_time = self.time_at_col(local_col);
+                    // Captured at press: the drag clamp must not read the
+                    // item list again mid-gesture, because the host's ghost
+                    // projection rewrites the dragged item's start there.
+                    let min_start = self.min_selected_start(&ids).unwrap_or(item.start);
                     Some(map_value(vec![
                         ("kind", keyword(":move")),
                         ("ids", list_value(ids)),
                         ("anchor-id", item.id),
                         ("anchor-start", Value::Number(item.start)),
+                        ("min-start", Value::Number(min_start)),
                         ("time-offset", Value::Number(current_time - item.start)),
                         ("raw-time-offset", Value::Number(raw_time - item.start)),
                         ("alignment-helper-snapped", Value::Bool(false)),
+                        // Flipped by the first drag event that leaves home
+                        // (`set_map_bool` only writes keys that exist).
+                        ("moved", Value::Bool(false)),
                         (
                             "lane-offset",
                             Value::Number(current_lane as f64 - item.lane as f64),
@@ -3441,8 +3479,16 @@ impl TimelineView {
                     &gesture,
                     anchor_start,
                 )?;
-                let min_start = self
-                    .min_selected_start_from_value(gesture.get("ids")?)
+                // The leftmost selected start as of the press. Hosts that
+                // preview the drag by projecting a ghost into `items` (the
+                // arrangement) move the anchor itself, so recomputing this
+                // from `items` here made the clamp chase the ghost: the
+                // bound `anchor_start - min_start` grew with every leftward
+                // step and pinned the clip at half its original start.
+                let min_start = gesture
+                    .get("min-start")
+                    .and_then(as_number)
+                    .or_else(|| self.min_selected_start_from_value(gesture.get("ids")?))
                     .unwrap_or(anchor_start);
                 let clamped_start = unclamped_start.max(anchor_start - min_start).max(0.0);
                 let next_lane = (current_lane as f64 - as_number(gesture.get("lane-offset")?)?)
@@ -3454,11 +3500,18 @@ impl TimelineView {
                     .find(|item| item.id == anchor_id)
                     .map(|item| item.lane as f64)
                     .unwrap_or(next_lane);
-                if (clamped_start - anchor_start).abs() < f64::EPSILON
-                    && (next_lane - anchor_lane).abs() < f64::EPSILON
-                {
+                // A drag that never left home is a no-op and emits nothing
+                // (a click must not become a move). Once it HAS moved, a
+                // return to the original start is a real update: the host's
+                // ghost is sitting elsewhere and needs to be told to come
+                // back, otherwise the original slot is the one position the
+                // clip can never be dragged to.
+                let at_home = (clamped_start - anchor_start).abs() < f64::EPSILON
+                    && (next_lane - anchor_lane).abs() < f64::EPSILON;
+                if at_home && !map_bool(gesture_value, "moved") {
                     return None;
                 }
+                set_map_bool(gesture_value, "moved", true);
                 Some(action_map(vec![
                     ("type", keyword(":move-items-absolute")),
                     ("ids", gesture.get("ids")?.clone()),
@@ -5091,6 +5144,133 @@ mod tests {
         assert_eq!(
             map.get("type").map(|value| value.borrow().clone()),
             Some(Value::Keyword("move-items-absolute".to_string()))
+        );
+    }
+
+    /// Regression: while a move is live, the arrangement publishes the ghost
+    /// back into `items`, so the dragged item's start already reflects the
+    /// previous drag event. The leftward clamp must come from the press-time
+    /// selection, not from those projected items, or every leftward step
+    /// raises the floor and the clip sticks at half its original start.
+    #[test]
+    fn leftward_move_is_not_clamped_by_the_projected_ghost() {
+        let props_at = |start: f64| {
+            HashMap::from([
+                ("tool".to_string(), keyword_value("pointer")),
+                (
+                    "lanes".to_string(),
+                    list_value_raw(vec![map_value_raw(vec![
+                        ("id", number_value(0.0)),
+                        ("label", Value::String("L0".to_string())),
+                    ])]),
+                ),
+                (
+                    "items".to_string(),
+                    list_value_raw(vec![map_value_raw(vec![
+                        ("id", number_value(10.0)),
+                        ("lane", number_value(0.0)),
+                        ("start", number_value(start)),
+                        ("end", number_value(start + 4.0)),
+                        ("selected", bool_value(true)),
+                    ])]),
+                ),
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(16.0)),
+                ("snap".to_string(), number_value(1.0)),
+            ])
+        };
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 32.0,
+            height: 8.0,
+        };
+        // Press on a clip at 8..12 (2 cols per beat), grabbing at beat 10.
+        let pressed = TimelineView::from_props(&props_at(8.0), rect);
+        let gesture = pressed.begin_gesture(20.0, 2.0).expect("gesture");
+
+        // The host has already applied a ghost that slid the clip to 3; the
+        // pointer is now at beat 5, i.e. a start of 3. Before the fix the
+        // floor was 8 - 3 = 5 and this drag was clamped to 5.
+        let projected = TimelineView::from_props(&props_at(3.0), rect);
+        let action = projected
+            .handle_pointer_drag(10.0, 2.0, Some(&gesture))
+            .expect("drag action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0)),
+            "the clamp floor is the press-time min start, so 3 stays 3"
+        );
+
+        // And all the way to 0, with the ghost sitting at 1.
+        let projected = TimelineView::from_props(&props_at(1.0), rect);
+        let action = projected
+            .handle_pointer_drag(4.0, 2.0, Some(&gesture))
+            .expect("drag action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.0))
+        );
+    }
+
+    /// A move that has already left its origin must be able to come back:
+    /// the host previews the drag with a ghost elsewhere, so a drag event
+    /// landing on the original start is a real update, not a no-op.
+    #[test]
+    fn moved_gesture_returning_home_still_emits_move_action() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(8.0)),
+                    ("selected", bool_value(true)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let gesture = view.begin_gesture(10.0, 2.0).expect("gesture");
+        assert!(
+            view.handle_pointer_drag(10.0, 2.0, Some(&gesture)).is_none(),
+            "a drag that never left home is still a no-op"
+        );
+        assert!(view.handle_pointer_drag(20.0, 2.0, Some(&gesture)).is_some());
+        let action = view
+            .handle_pointer_drag(10.0, 2.0, Some(&gesture))
+            .expect("returning to the original start emits a move");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
         );
     }
 

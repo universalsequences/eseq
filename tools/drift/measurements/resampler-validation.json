@@ -1,0 +1,26 @@
+{
+  "scope": "Resampling implementation only; no native-audio claim",
+  "compiler_sha256": "34c1066d31d82739010c7bca234fe37756a0bd1ec455186190813a9cca6c1c78",
+  "macro_sha256": "b71a63c3c5add030ab5e05b6de0832fd7bc0cdb4dacf42ff76ffc9b9f4ae1751",
+  "base_frame_latency": 63,
+  "passband_error_db": 4.068621709090181e-05,
+  "stopband_maximum_db": -106.5873602417564,
+  "cases": [
+    {
+      "block_frames": 1,
+      "maximum_absolute_error": 1.1229989299588183e-07,
+      "passed": true
+    },
+    {
+      "block_frames": 17,
+      "maximum_absolute_error": 1.1229989299588183e-07,
+      "passed": true
+    },
+    {
+      "block_frames": 128,
+      "maximum_absolute_error": 1.1229989299588183e-07,
+      "passed": true
+    }
+  ],
+  "passed": true
+}

@@ -29899,6 +29899,8 @@ mod drift_waveform_tests;
             assert!(node.rect.col + node.rect.width <= 140.0);
             assert!(node.rect.row + node.rect.height <= 30.0);
         }
+        let label = find_layout_node_by_stable_key_suffix(&layout, "/track-name-label-0").unwrap();
+        assert_eq!(label.props.get("icon"), Some(&Value::Keyword("midi".to_string())));
         let select = find_layout_node_by_stable_key_suffix(&layout, "/select-0").unwrap();
         let callback = select.props["on-double-click"].clone();
         editor.drain_host_commands();
@@ -29928,6 +29930,23 @@ mod drift_waveform_tests;
         editor.runtime_mut().invoke(empty_zone.props["on-double-click"].clone(), vec![Value::Nil]).unwrap();
         assert!(matches!(editor.drain_host_commands().as_slice(),
             [eseqlisp::host::HostCommand::Custom { name, .. }] if name == "add-track-empty"));
+
+        let mixer_id = editor.buffers.iter().find(|buffer| buffer.name == "*mixer*").unwrap().id;
+        editor.set_active_buffer(mixer_id);
+        editor.set_layout_viewport(180, 16);
+        let mixer_layout = editor.widget_layout().unwrap();
+        let label = find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-0").unwrap();
+        assert_finite_nonzero_rect(label, "empty track mixer header");
+        assert_eq!(label.props.get("icon"), Some(&Value::Keyword("midi".to_string())));
+        let badge = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-strip-label-0").unwrap();
+        let callback = badge.props["on-double-click"].clone();
+        editor.runtime_mut().eval_str(
+            "(eseq.seq-panels/seq-open-piano-roll-bottom-for-track 0) (set! sbrowser-tab \"samples\")"
+        ).unwrap();
+        editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
+        assert_eq!(editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
+            Some(Value::String("instruments".to_string())),
+            "empty mixer headers should choose a device, including from piano roll");
     }
 
     #[test]
@@ -30138,6 +30157,16 @@ mod drift_waveform_tests;
             remembered_split_ratio(&editor.tile_root, "sequencer-lower-panel:*piano-roll*")
                 .expect("piano-roll lower-panel split should have a remembered identity");
 
+        // A header double-click must leave piano-roll mode even if another
+        // track is selected (or the single-click selection has not synchronized).
+        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(1.0));
+        let selected_track = Rc::new(RefCell::new(None));
+        let selected_capture = Rc::clone(&selected_track);
+        editor.runtime_mut().register_native("seq-set-track", move |args, _ctx| {
+            *selected_capture.borrow_mut() = args.first().cloned();
+            Ok(Value::Bool(true))
+        });
+
         editor
             .runtime_mut()
             .invoke(
@@ -30155,6 +30184,8 @@ mod drift_waveform_tests;
             Some(Value::String("*fx*".to_string())),
             "second mixer badge double-click should restore FX"
         );
+        assert_eq!(*selected_track.borrow(), Some(Value::Number(0.0)),
+            "FX must belong to the double-clicked track");
 
         editor
             .runtime_mut()
@@ -54969,6 +55000,18 @@ mod drift_waveform_tests;
 
 #[path = "clap_ui_tests.rs"]
 mod clap_ui_tests;
+
+#[path = "kick808_ui_tests.rs"]
+mod kick808_ui_tests;
+
+#[path = "hat909_ui_tests.rs"]
+mod hat909_ui_tests;
+
+#[path = "drum_rollout_ui_tests.rs"]
+mod drum_rollout_ui_tests;
+
+#[path = "fm_formant_ui_tests.rs"]
+mod fm_formant_ui_tests;
 
 #[path = "melt_ui_tests.rs"]
 mod melt_ui_tests;

@@ -1,0 +1,381 @@
+{
+  "methodology": "Identify candidate linear sections from noise-qualified complex responses.\n\nThese are per-case identification fits, not independent validation or native\ntopology claims. Parameters must not be copied into production without holdouts.\nThe HP controls distinguish a resonant HP section from a one-pole assumption.\n",
+  "note": 36,
+  "minimum_local_snr_db": 30,
+  "source_sha256": "8e9c863542d40aa6cf31d84592ce87c6e4a377b28afde1191809522a270602d1",
+  "cases": [
+    {
+      "case": "hp-100",
+      "harmonics_compared": 244,
+      "capture_sha256": "0944b0039c9ebf053dcc6e4a0a1f66e0180a155d2e41a416194e41acae5972b8",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 17134.84272824253,
+            "lp_q": 0.3720144502125609,
+            "gain": 1.5755213996950002,
+            "hp_frequency": 99.76825210313102,
+            "hp_q": 1.5568388413248697
+          },
+          "rms_magnitude_error_db": 0.4810780512022628,
+          "rms_phase_error_radians": 0.053526549978104694
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 19984.758705641052,
+            "lp_q": 0.4234586663504794,
+            "gain": 1.5407788677043646,
+            "hp_frequency": 99.99341784110624,
+            "hp_q": 1.469274467439623
+          },
+          "rms_magnitude_error_db": 0.025673729505012885,
+          "rms_phase_error_radians": 0.0030775789325295385
+        }
+      ]
+    },
+    {
+      "case": "hp-1000",
+      "harmonics_compared": 244,
+      "capture_sha256": "3699b9105a58d460e80abdf5f408cb560a2b412e1b2d4a5fcdfad730a26d4fb6",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 17220.94425974705,
+            "lp_q": 0.3737815420998138,
+            "gain": 1.5616117743650118,
+            "hp_frequency": 994.2265949611906,
+            "hp_q": 1.5470710638549043
+          },
+          "rms_magnitude_error_db": 0.4583754807780296,
+          "rms_phase_error_radians": 0.05315235933362112
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 20016.58637823698,
+            "lp_q": 0.42235684347032354,
+            "gain": 1.5414092561199755,
+            "hp_frequency": 1000.1902868077482,
+            "hp_q": 1.4695381583410871
+          },
+          "rms_magnitude_error_db": 0.025190204962863148,
+          "rms_phase_error_radians": 0.003080322344344429
+        }
+      ]
+    },
+    {
+      "case": "hp-4000",
+      "harmonics_compared": 244,
+      "capture_sha256": "881f9d46e036e6e03c8a54d5aee830a6c4326509c59e2fc0dea65e138c7773c2",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 17450.833499155895,
+            "lp_q": 0.38476592384893815,
+            "gain": 1.5412820170553252,
+            "hp_frequency": 3897.1571889613883,
+            "hp_q": 1.4704967906012447
+          },
+          "rms_magnitude_error_db": 0.38334029381030615,
+          "rms_phase_error_radians": 0.04991825576513589
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 19983.69921161448,
+            "lp_q": 0.42348270771937263,
+            "gain": 1.5405010635285463,
+            "hp_frequency": 3999.7656924737726,
+            "hp_q": 1.4699224265939834
+          },
+          "rms_magnitude_error_db": 0.025571538971476477,
+          "rms_phase_error_radians": 0.002985560134833809
+        }
+      ]
+    },
+    {
+      "case": "response-t1-f250-r0",
+      "harmonics_compared": 22,
+      "capture_sha256": "1676ea40cba1932bd9fb89ba2c05fa55ff2be514ab7fe42171ec15b4013dd206",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 249.0907890666035,
+            "lp_q": 0.4200723458040636,
+            "gain": 1.5612720137866096,
+            "hp_frequency": 18.871115163317402,
+            "hp_q": 1.3498413089486452
+          },
+          "rms_magnitude_error_db": 0.11179850909914299,
+          "rms_phase_error_radians": 0.011881784068545669
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 249.32013322365714,
+            "lp_q": 0.42128101837285226,
+            "gain": 1.5543208616310797,
+            "hp_frequency": 19.214315184806228,
+            "hp_q": 1.3892791120508472
+          },
+          "rms_magnitude_error_db": 0.11158452031486236,
+          "rms_phase_error_radians": 0.011837299169575618
+        }
+      ]
+    },
+    {
+      "case": "response-t1-f250-r0.5",
+      "harmonics_compared": 22,
+      "capture_sha256": "b0b28e6bb83eeafa16674b260ed7d1f1b6f61767294a83f87ec50ad0ed010649",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 250.2060996217426,
+            "lp_q": 0.8421369181975429,
+            "gain": 1.542448639520558,
+            "hp_frequency": 19.894071324370135,
+            "hp_q": 1.4639170139929047
+          },
+          "rms_magnitude_error_db": 0.10332034649075657,
+          "rms_phase_error_radians": 0.008887897519829008
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 250.2617129916336,
+            "lp_q": 0.843776114438053,
+            "gain": 1.5384345282681058,
+            "hp_frequency": 20.1535197251787,
+            "hp_q": 1.4903506692261492
+          },
+          "rms_magnitude_error_db": 0.1014137523497331,
+          "rms_phase_error_radians": 0.008857637773523566
+        }
+      ]
+    },
+    {
+      "case": "response-t1-f250-r0.8",
+      "harmonics_compared": 24,
+      "capture_sha256": "605f8256808ac77a591664cf4c0e628a436d5f1d594fc9663828423ac76c6a92",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 250.11975207841925,
+            "lp_q": 2.0974300647281714,
+            "gain": 1.5439746125393745,
+            "hp_frequency": 19.780505376991144,
+            "hp_q": 1.4376996206819521
+          },
+          "rms_magnitude_error_db": 0.08647222861798838,
+          "rms_phase_error_radians": 0.012753728062902854
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 250.14436456576706,
+            "lp_q": 2.1018355261642037,
+            "gain": 1.540041803368918,
+            "hp_frequency": 20.085056519458046,
+            "hp_q": 1.4651617610578327
+          },
+          "rms_magnitude_error_db": 0.0906591183684074,
+          "rms_phase_error_radians": 0.012731088280204188
+        }
+      ]
+    },
+    {
+      "case": "response-t1-f1000-r0",
+      "harmonics_compared": 81,
+      "capture_sha256": "a9ba31423cf513fff79b6eef0992e4eb06cc85be193284d6c9c7115b860df4db",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 1005.903926572039,
+            "lp_q": 0.41558327658876204,
+            "gain": 1.5682531047520114,
+            "hp_frequency": 17.62016688494296,
+            "hp_q": 1.2910327461087265
+          },
+          "rms_magnitude_error_db": 0.16247621172295892,
+          "rms_phase_error_radians": 0.014744867455623605
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 999.7565207221525,
+            "lp_q": 0.42407481395098867,
+            "gain": 1.5376893469052728,
+            "hp_frequency": 20.27684687649119,
+            "hp_q": 1.5006397650870547
+          },
+          "rms_magnitude_error_db": 0.118502700958758,
+          "rms_phase_error_radians": 0.013009934608864083
+        }
+      ]
+    },
+    {
+      "case": "response-t1-f1000-r0.5",
+      "harmonics_compared": 80,
+      "capture_sha256": "8271a77ae852462a115caf4e1ab7eaa401153db06540a140fffdd31dd8db6141",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 1004.136002725473,
+            "lp_q": 0.8238118915888323,
+            "gain": 1.5756891958779156,
+            "hp_frequency": 16.767992220169223,
+            "hp_q": 1.2054505173607022
+          },
+          "rms_magnitude_error_db": 0.19976013275899349,
+          "rms_phase_error_radians": 0.014272236926325864
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 1000.5629588125221,
+            "lp_q": 0.8423447704343757,
+            "gain": 1.5413475304722342,
+            "hp_frequency": 20.004970129386496,
+            "hp_q": 1.4626445864370545
+          },
+          "rms_magnitude_error_db": 0.11625818556486585,
+          "rms_phase_error_radians": 0.012437609677580376
+        }
+      ]
+    },
+    {
+      "case": "response-t1-f1000-r0.8",
+      "harmonics_compared": 83,
+      "capture_sha256": "d73f357097d216427de1022e3d9ec98aeba7cebf2cfb8675e60483c14f687ded",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 1002.2569785156326,
+            "lp_q": 2.062109317269483,
+            "gain": 1.5741053592800462,
+            "hp_frequency": 16.709883527567168,
+            "hp_q": 1.2108336868740666
+          },
+          "rms_magnitude_error_db": 0.17610068791264716,
+          "rms_phase_error_radians": 0.01487445308933904
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 1000.6669528231212,
+            "lp_q": 2.110125545587114,
+            "gain": 1.5383234892649145,
+            "hp_frequency": 20.21351766470253,
+            "hp_q": 1.4946848396631962
+          },
+          "rms_magnitude_error_db": 0.10485547548299405,
+          "rms_phase_error_radians": 0.014081799733974413
+        }
+      ]
+    },
+    {
+      "case": "response-t1-f4000-r0",
+      "harmonics_compared": 212,
+      "capture_sha256": "b1f2e5282073795140711b1ce40ebee3a46a6b47cd4bbb79cee627c65897b5f1",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 4349.2796448721565,
+            "lp_q": 0.36786773405133927,
+            "gain": 1.703877766745757,
+            "hp_frequency": 1.160898756152233,
+            "hp_q": 0.10000006643655938
+          },
+          "rms_magnitude_error_db": 0.8295513983680568,
+          "rms_phase_error_radians": 0.06008468917722438
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 4001.83595125804,
+            "lp_q": 0.4232233084821475,
+            "gain": 1.542277531807209,
+            "hp_frequency": 19.864811278532784,
+            "hp_q": 1.4686292521205544
+          },
+          "rms_magnitude_error_db": 0.09831732812349366,
+          "rms_phase_error_radians": 0.009050350407930221
+        }
+      ]
+    },
+    {
+      "case": "response-t1-f4000-r0.5",
+      "harmonics_compared": 213,
+      "capture_sha256": "8526911d7a6f173ab5b86cffc6bcd051d67b75fd9812dd18bd1357a4fbe735db",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 4221.489103948492,
+            "lp_q": 0.7210462798947842,
+            "gain": 1.7586255802779558,
+            "hp_frequency": 1.3229657680143796,
+            "hp_q": 0.10000000000010585
+          },
+          "rms_magnitude_error_db": 1.0395781009951495,
+          "rms_phase_error_radians": 0.06368141877569948
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 4001.1838765804796,
+            "lp_q": 0.845479579535112,
+            "gain": 1.541668969400743,
+            "hp_frequency": 19.921797920009865,
+            "hp_q": 1.4710423735155584
+          },
+          "rms_magnitude_error_db": 0.10777782777586703,
+          "rms_phase_error_radians": 0.011463073559132505
+        }
+      ]
+    },
+    {
+      "case": "response-t1-f4000-r0.8",
+      "harmonics_compared": 208,
+      "capture_sha256": "1d4ffd16d25f29dc00f7d03f962d21a394e06215afd0c36977bc7a65bff9d879",
+      "fits": [
+        {
+          "internal_sample_rate": 48000,
+          "parameters": {
+            "lp_frequency": 4096.959473303205,
+            "lp_q": 1.797267734988778,
+            "gain": 1.7809381837274274,
+            "hp_frequency": 1.4613330397149034,
+            "hp_q": 0.10000002032020631
+          },
+          "rms_magnitude_error_db": 1.1764039326448983,
+          "rms_phase_error_radians": 0.049660509654739116
+        },
+        {
+          "internal_sample_rate": 96000,
+          "parameters": {
+            "lp_frequency": 4001.0315669339243,
+            "lp_q": 2.1063788858312855,
+            "gain": 1.5430223443683362,
+            "hp_frequency": 19.800607975326848,
+            "hp_q": 1.4642449930854662
+          },
+          "rms_magnitude_error_db": 0.09178541888679612,
+          "rms_phase_error_radians": 0.010966489020605867
+        }
+      ]
+    }
+  ],
+  "analysis_report_sha256": "4e38420db5542d280729dffaa1f522a4c48bd2d3235f18ddbe6a7c4982364b3b"
+}

@@ -1,0 +1,202 @@
+{
+  "instrument": "factory:Synths/Digi Drift",
+  "presets": [
+    {
+      "preset": "Woolly Res Bass",
+      "peak": 0.27659985423088074,
+      "rms": 0.1667764037847519,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "Acid Squelch",
+      "peak": 0.25166383385658264,
+      "rms": 0.08470585942268372,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "Cyc Sweep Pad",
+      "peak": 0.036467064172029495,
+      "rms": 0.013627568259835243,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "Dust Pluck",
+      "peak": 0.19925782084465027,
+      "rms": 0.016220543533563614,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "Fat Analog Bass",
+      "peak": 0.2661608159542084,
+      "rms": 0.11062166839838028,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "Glass Bells",
+      "peak": 0.10608365386724472,
+      "rms": 0.027669984847307205,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "Hollow Lead",
+      "peak": 0.1991949826478958,
+      "rms": 0.07678229361772537,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "Lush Shark Pad",
+      "peak": 0.06003516912460327,
+      "rms": 0.017656629905104637,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "Ratio FM Stab",
+      "peak": 0.14268548786640167,
+      "rms": 0.03518257662653923,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "Wander Organ",
+      "peak": 0.16781209409236908,
+      "rms": 0.08420135825872421,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "Warm Drift Keys",
+      "peak": 0.11196063458919525,
+      "rms": 0.05604782700538635,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "alien transmission",
+      "peak": 0.005538009572774172,
+      "rms": 0.002087783068418503,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "another town pad",
+      "peak": 0.0016207121079787612,
+      "rms": 0.00046448339708149433,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "driftatronics",
+      "peak": 0.050423070788383484,
+      "rms": 0.003424521302804351,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "driftheaven",
+      "peak": 0.01004796288907528,
+      "rms": 0.0027522575110197067,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "droner",
+      "peak": 0.011183282360434532,
+      "rms": 0.003378314198926091,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "dub-mono",
+      "peak": 0.0018209804547950625,
+      "rms": 0.00023903039982542396,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "equator plucker",
+      "peak": 0.10836339741945267,
+      "rms": 0.03005821257829666,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "nope",
+      "peak": 0.0725543424487114,
+      "rms": 0.02615024894475937,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "om shanti om",
+      "peak": 0.03835727274417877,
+      "rms": 0.012096068821847439,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "pluck of deus",
+      "peak": 0.11989858746528625,
+      "rms": 0.027251478284597397,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "pluckwantsdelay",
+      "peak": 0.0686398446559906,
+      "rms": 0.020619018003344536,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "potions master keys",
+      "peak": 0.08026643842458725,
+      "rms": 0.04161560535430908,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "quikie bass",
+      "peak": 0.08604444563388824,
+      "rms": 0.011878326535224915,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "rodrik transmission plate",
+      "peak": 0.0004900434869341552,
+      "rms": 0.00015221147623378783,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "waterbr",
+      "peak": 0.07217128574848175,
+      "rms": 0.005004605744034052,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "wowzers",
+      "peak": 0.12245351821184158,
+      "rms": 0.03926754742860794,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    },
+    {
+      "preset": "xtal",
+      "peak": 0.08522405475378036,
+      "rms": 0.02738303132355213,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0
+    }
+  ],
+  "passed": true
+}

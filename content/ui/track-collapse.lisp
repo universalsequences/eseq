@@ -65,7 +65,8 @@
           :piano
           (if (= track-type "rack")
             :sampler
-            (if (= track-type "modulator") :sine nil)))))
+            (if (= track-type "modulator") :sine
+              (if (= track-type "empty") :midi nil))))))
     nil))
 
 (def group-type-icon (group)

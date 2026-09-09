@@ -222,11 +222,13 @@
   (select-track-for-edit track))
 
 (def open-piano-roll-for-track (track)
-  (if (and (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*") (= SEQ.current-track track))
-    (eseq.seq-panels/seq-show-fx-lower-panel)
-    (do
-      (activate-track-for-edit track)
-      (eseq.seq-panels/seq-open-piano-roll-bottom-for-track track))))
+  (do
+    (activate-track-for-edit track)
+    (if (eseq.track-collapse/empty-instrument? track)
+      (eseq.browser/open-device-picker)
+      (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
+        (eseq.seq-panels/seq-show-fx-lower-panel)
+        (eseq.seq-panels/seq-open-piano-roll-bottom-for-track track)))))
 
 (def show-fx-for-track (track)
   (do
@@ -786,7 +788,7 @@
         (if (= take-state 1)
           (rgba 0.35 0.82 0.40 1.0)
           (if (= take-state 2)
-            (rgba 0.62 0.63 0.67 1.0)
+            :mixer-control-bg
             (rgba 0 0 0 0)))))))
 
 
