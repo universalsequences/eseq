@@ -54970,5 +54970,11 @@ mod drift_waveform_tests;
 #[path = "clap_ui_tests.rs"]
 mod clap_ui_tests;
 
+#[path = "melt_ui_tests.rs"]
+mod melt_ui_tests;
+
+#[path = "digi_fm_ui_tests.rs"]
+mod digi_fm_ui_tests;
+
 #[path = "mnm_ui_tests.rs"]
 mod mnm_ui_tests;
