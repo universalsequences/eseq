@@ -1700,13 +1700,13 @@ impl App {
                 rack_slot,
                 effect_slot,
                 saved.ir.as_deref(),
-            );
+            )?;
             self.restore_filter_table_rack_slot(
                 track,
                 rack_slot,
                 effect_slot,
                 saved.table.as_deref(),
-            );
+            )?;
             let live = self
                 .state
                 .pattern
@@ -3150,18 +3150,15 @@ impl App {
         track: usize,
         slot_idx: usize,
         ir_ref: Option<&str>,
-    ) {
-        let Some(ir_ref) = ir_ref else { return };
+    ) -> Result<(), String> {
+        let Some(ir_ref) = ir_ref else { return Ok(()); };
         if ir_ref.is_empty() || ir_ref == crate::effects::conv_reverb::DEFAULT_IR_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_conv_reverb_ir_path(ir_ref) {
-            if let Err(e) = self.set_conv_reverb_ir(track, slot_idx, &path, ir_ref) {
-                eprintln!("project-load: conv reverb IR '{ir_ref}' not restored: {e}");
-            }
-        } else {
-            eprintln!("project-load: conv reverb IR '{ir_ref}' could not be resolved");
-        }
+        let path = self.resolve_conv_reverb_ir_path(ir_ref)
+            .ok_or_else(|| format!("Convolution Reverb IR '{ir_ref}' could not be resolved"))?;
+        self.set_conv_reverb_ir(track, slot_idx, &path, ir_ref)
+            .map_err(|error| format!("track Convolution Reverb IR '{ir_ref}' could not be restored: {error}"))
     }
 
     fn restore_filter_table_track(
@@ -3169,33 +3166,22 @@ impl App {
         track: usize,
         slot_idx: usize,
         table_ref: Option<&str>,
-    ) {
-        let Some(table_ref) = table_ref else { return };
-        // Saved references embed the analysis mode and optionally the engine;
-        // the sample resolves by its decoded name while the bare reference
-        // keeps the analysis deterministic. `fltab:` references resolve to
-        // baked asset files instead of samples. The engine restores first so
-        // the table lands on the node that will keep it.
+    ) -> Result<(), String> {
+        let Some(table_ref) = table_ref else { return Ok(()); };
+        // Restore the engine before its table: changing engines replaces the node.
         let (table_ref, engine) = crate::effects::filter_table::split_engine_ref(table_ref);
         if engine != crate::effects::filter_table::TableEngine::default() {
-            if let Err(error) = self.set_track_filter_table_engine(track, slot_idx, engine) {
-                eprintln!(
-                    "project-load: Filter Table engine '{}' not restored: {error}",
-                    engine.tag()
-                );
-            }
+            self.set_track_filter_table_engine(track, slot_idx, engine)
+                .map_err(|error| format!("track Filter Table engine could not be restored: {error}"))?;
         }
         let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
         if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_filter_table_source_path(sample_name) {
-            if let Err(error) = self.set_filter_table_source(track, slot_idx, &path, table_ref) {
-                eprintln!("project-load: Filter Table '{table_ref}' not restored: {error}");
-            }
-        } else {
-            eprintln!("project-load: Filter Table '{table_ref}' could not be resolved");
-        }
+        let path = self.resolve_filter_table_source_path(sample_name)
+            .ok_or_else(|| format!("Filter Table '{table_ref}' could not be resolved"))?;
+        self.set_filter_table_source(track, slot_idx, &path, table_ref)
+            .map_err(|error| format!("track Filter Table '{table_ref}' could not be restored: {error}"))
     }
 
     /// Resolve a decoded Filter Table reference to a file on disk: an asset
@@ -3212,30 +3198,22 @@ impl App {
         bus_idx: usize,
         slot_idx: usize,
         table_ref: Option<&str>,
-    ) {
-        let Some(table_ref) = table_ref else { return };
+    ) -> Result<(), String> {
+        let Some(table_ref) = table_ref else { return Ok(()); };
+        // Restore the engine before its table: changing engines replaces the node.
         let (table_ref, engine) = crate::effects::filter_table::split_engine_ref(table_ref);
         if engine != crate::effects::filter_table::TableEngine::default() {
-            if let Err(error) = self.set_bus_filter_table_engine(bus_idx, slot_idx, engine) {
-                eprintln!(
-                    "project-load: bus Filter Table engine '{}' not restored: {error}",
-                    engine.tag()
-                );
-            }
+            self.set_bus_filter_table_engine(bus_idx, slot_idx, engine)
+                .map_err(|error| format!("bus Filter Table engine could not be restored: {error}"))?;
         }
         let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
         if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_filter_table_source_path(sample_name) {
-            if let Err(error) =
-                self.set_filter_table_source_bus(bus_idx, slot_idx, &path, table_ref)
-            {
-                eprintln!("project-load: bus Filter Table '{table_ref}' not restored: {error}");
-            }
-        } else {
-            eprintln!("project-load: bus Filter Table '{table_ref}' could not be resolved");
-        }
+        let path = self.resolve_filter_table_source_path(sample_name)
+            .ok_or_else(|| format!("Filter Table '{table_ref}' could not be resolved"))?;
+        self.set_filter_table_source_bus(bus_idx, slot_idx, &path, table_ref)
+            .map_err(|error| format!("bus Filter Table '{table_ref}' could not be restored: {error}"))
     }
 
     /// Rack-slot counterpart of `restore_filter_table_track`. A Filter Table
@@ -3248,36 +3226,22 @@ impl App {
         rack_slot: usize,
         effect_slot: usize,
         table_ref: Option<&str>,
-    ) {
-        let Some(table_ref) = table_ref else { return };
+    ) -> Result<(), String> {
+        let Some(table_ref) = table_ref else { return Ok(()); };
+        // Restore the engine before its table: changing engines replaces the node.
         let (table_ref, engine) = crate::effects::filter_table::split_engine_ref(table_ref);
         if engine != crate::effects::filter_table::TableEngine::default() {
-            if let Err(error) =
-                self.set_rack_filter_table_engine(track, rack_slot, effect_slot, engine)
-            {
-                eprintln!(
-                    "project-load: rack Filter Table engine '{}' not restored: {error}",
-                    engine.tag()
-                );
-            }
+            self.set_rack_filter_table_engine(track, rack_slot, effect_slot, engine)
+                .map_err(|error| format!("rack Filter Table engine could not be restored: {error}"))?;
         }
         let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
         if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_filter_table_source_path(sample_name) {
-            if let Err(error) = self.set_filter_table_source_rack_slot(
-                track,
-                rack_slot,
-                effect_slot,
-                &path,
-                table_ref,
-            ) {
-                eprintln!("project-load: rack Filter Table '{table_ref}' not restored: {error}");
-            }
-        } else {
-            eprintln!("project-load: rack Filter Table '{table_ref}' could not be resolved");
-        }
+        let path = self.resolve_filter_table_source_path(sample_name)
+            .ok_or_else(|| format!("Filter Table '{table_ref}' could not be resolved"))?;
+        self.set_filter_table_source_rack_slot(track, rack_slot, effect_slot, &path, table_ref)
+            .map_err(|error| format!("rack Filter Table '{table_ref}' could not be restored: {error}"))
     }
 
     /// Rack-slot counterpart of `restore_conv_reverb_ir_track`.
@@ -3287,20 +3251,15 @@ impl App {
         rack_slot: usize,
         effect_slot: usize,
         ir_ref: Option<&str>,
-    ) {
-        let Some(ir_ref) = ir_ref else { return };
+    ) -> Result<(), String> {
+        let Some(ir_ref) = ir_ref else { return Ok(()); };
         if ir_ref.is_empty() || ir_ref == crate::effects::conv_reverb::DEFAULT_IR_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_conv_reverb_ir_path(ir_ref) {
-            if let Err(error) =
-                self.set_conv_reverb_ir_rack_slot(track, rack_slot, effect_slot, &path, ir_ref)
-            {
-                eprintln!("project-load: rack conv reverb IR '{ir_ref}' not restored: {error}");
-            }
-        } else {
-            eprintln!("project-load: rack conv reverb IR '{ir_ref}' could not be resolved");
-        }
+        let path = self.resolve_conv_reverb_ir_path(ir_ref)
+            .ok_or_else(|| format!("Convolution Reverb IR '{ir_ref}' could not be resolved"))?;
+        self.set_conv_reverb_ir_rack_slot(track, rack_slot, effect_slot, &path, ir_ref)
+            .map_err(|error| format!("rack Convolution Reverb IR '{ir_ref}' could not be restored: {error}"))
     }
 
     /// Bus counterpart of `restore_conv_reverb_ir_track`.
@@ -3309,18 +3268,15 @@ impl App {
         bus_idx: usize,
         slot_idx: usize,
         ir_ref: Option<&str>,
-    ) {
-        let Some(ir_ref) = ir_ref else { return };
+    ) -> Result<(), String> {
+        let Some(ir_ref) = ir_ref else { return Ok(()); };
         if ir_ref.is_empty() || ir_ref == crate::effects::conv_reverb::DEFAULT_IR_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_conv_reverb_ir_path(ir_ref) {
-            if let Err(e) = self.set_conv_reverb_ir_bus(bus_idx, slot_idx, &path, ir_ref) {
-                eprintln!("project-load: conv reverb bus IR '{ir_ref}' not restored: {e}");
-            }
-        } else {
-            eprintln!("project-load: conv reverb bus IR '{ir_ref}' could not be resolved");
-        }
+        let path = self.resolve_conv_reverb_ir_path(ir_ref)
+            .ok_or_else(|| format!("Convolution Reverb IR '{ir_ref}' could not be resolved"))?;
+        self.set_conv_reverb_ir_bus(bus_idx, slot_idx, &path, ir_ref)
+            .map_err(|error| format!("bus Convolution Reverb IR '{ir_ref}' could not be restored: {error}"))
     }
 
     pub(super) fn advance_project_load(&mut self) -> Result<(), String> {
@@ -3643,13 +3599,13 @@ impl App {
                                     rack_slot,
                                     effect_slot,
                                     saved.ir.as_deref(),
-                                );
+                                )?;
                                 self.restore_filter_table_rack_slot(
                                     track_idx,
                                     rack_slot,
                                     effect_slot,
                                     saved.table.as_deref(),
-                                );
+                                )?;
                                 let graph_slot = self
                                     .state
                                     .pattern
@@ -3752,7 +3708,7 @@ impl App {
                             track_idx,
                             BUILTIN_SLOT_COUNT + offset,
                             saved_ir.as_deref(),
-                        );
+                        )?;
                         let saved_table = pending.project.patterns.iter().find_map(|pattern| {
                             pattern.effect_slots
                                 .get(track_idx)
@@ -3763,7 +3719,7 @@ impl App {
                             track_idx,
                             BUILTIN_SLOT_COUNT + offset,
                             saved_table.as_deref(),
-                        );
+                        )?;
                     }
                     pending.phase = super::PendingProjectLoadPhase::AddEffect {
                         track_idx,
@@ -4127,8 +4083,8 @@ impl App {
             self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
             // Restore a saved Convolution Reverb IR (the default was auto-loaded
             // on create, so only override for a non-default reference).
-            self.restore_conv_reverb_ir_bus(bus_idx, slot_idx, saved_ir.as_deref());
-            self.restore_filter_table_bus(bus_idx, slot_idx, saved_table.as_deref());
+            self.restore_conv_reverb_ir_bus(bus_idx, slot_idx, saved_ir.as_deref())?;
+            self.restore_filter_table_bus(bus_idx, slot_idx, saved_table.as_deref())?;
         }
         let default_bus_snapshot = self.capture_bus_pattern_snapshot();
         self.state
@@ -5111,6 +5067,27 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effect_asset_restore_rejects_missing_references_for_every_host() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let mut app = App::new(Arc::clone(&engine.state), engine.lg_ptr, engine.sample_rate,
+            engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
+        let missing = format!("__missing-effect-asset-{}__", std::process::id());
+        for result in [
+            app.restore_conv_reverb_ir_track(0, 0, Some(&missing)),
+            app.restore_conv_reverb_ir_bus(0, 0, Some(&missing)),
+            app.restore_conv_reverb_ir_rack_slot_ref(0, 0, 0, Some(&missing)),
+            app.restore_filter_table_track(0, 0, Some(&missing)),
+            app.restore_filter_table_bus(0, 0, Some(&missing)),
+            app.restore_filter_table_rack_slot(0, 0, 0, Some(&missing)),
+        ] {
+            let error = result.unwrap_err();
+            assert!(error.contains(&missing) && error.contains("could not be resolved"), "{error}");
+        }
+        drop(app);
+        unsafe { engine.destroy(); }
+    }
 
     #[test]
     fn blank_sampler_project_and_sound_roundtrip_preserves_unassigned_sources() {

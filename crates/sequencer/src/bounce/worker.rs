@@ -159,6 +159,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn missing_effect_asset_fails_export_without_replacing_destination() {
+        let folder = tempfile::tempdir().unwrap();
+        let missing = format!("__missing-export-ir-{}__", std::process::id());
+        let project_path = folder.path().join("project.json");
+        {
+            let fixture = WorkerEngine(engine::init_headless_engine(48_000, 2).unwrap());
+            let engine = &fixture.0;
+            let mut app = App::new(Arc::clone(&engine.state), engine.lg_ptr, engine.sample_rate,
+                engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
+            app.graph_controller().add_blank_sampler_track().unwrap();
+            let slot = app.add_builtin_effect_sync(0, "Convolution Reverb").unwrap();
+            app.state.set_committed_arrangement(Some(
+                crate::sequencer::ProjectArrangement::new(1, 0.25),
+            )).unwrap();
+            let mut project = app.capture_bounce_project("missing-ir").unwrap();
+            project.patterns[0].effect_slots[0][slot - crate::effects::BUILTIN_SLOT_COUNT].ir = Some(missing.clone());
+            serde_json::to_writer(File::create(&project_path).unwrap(), &project).unwrap();
+        }
+        let destination = folder.path().join("export.wav");
+        std::fs::write(&destination, b"existing recording").unwrap();
+        let options = ExportOptions {
+            project: project_path, destination: destination.clone(), sample_rate: 48_000,
+            tail_seconds: 0.0, selection: None, replace: true, cancel_path: None,
+        };
+        let error = export_project(&options, &BounceCancellation::default(), |_| {}).unwrap_err();
+        assert!(error.to_string().contains(&missing), "{error}");
+        assert_eq!(std::fs::read(destination).unwrap(), b"existing recording");
+    }
+
+    #[test]
     fn saved_sampler_arrangement_exports_audible_exact_length_wav() {
         let folder = tempfile::tempdir().unwrap();
         let sample_path = folder.path().join("source.wav");
