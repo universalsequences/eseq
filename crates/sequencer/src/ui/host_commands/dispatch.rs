@@ -12,6 +12,7 @@ pub(crate) fn dispatch_custom_host_command(
 ) {
     match name {
         n if super::export::COMMANDS.contains(&n) => super::export::handle(name, payload, app, editor, ctx),
+        n if super::file_menu::COMMANDS.contains(&n) => super::file_menu::handle(name, payload, app, editor, ctx),
         n if super::step_history::COMMANDS.contains(&n) => super::step_history::handle(name, payload, app, editor, ctx),
         n if super::tracks::COMMANDS.contains(&n) => super::tracks::handle(name, payload, app, editor, ctx),
         n if super::scenes::COMMANDS.contains(&n) => super::scenes::handle(name, payload, app, editor, ctx),

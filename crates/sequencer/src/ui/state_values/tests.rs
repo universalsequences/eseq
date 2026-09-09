@@ -29364,7 +29364,7 @@ mod drift_waveform_tests;
         let fx_button = find_layout_node_by_stable_key(&layout, "transport-fx-panel-button")
             .expect("FX panel button");
         let save_button =
-            find_layout_node_by_stable_key(&layout, "transport-save-button").expect("save button");
+            find_layout_node_by_stable_key(&layout, "transport-file-menu-button").expect("file menu button");
         assert_finite_nonzero_rect(samples_button, "samples sidebar button");
         assert_finite_nonzero_rect(mixer_button, "mixer panel button");
         assert_finite_nonzero_rect(fx_button, "FX panel button");
@@ -54951,6 +54951,86 @@ mod drift_waveform_tests;
             "only the loose tracks keep their step grids while the rack is collapsed"
         );
     }
+    #[test]
+    fn metal_seq_file_menu_lists_commands_and_save_modal_cancels_or_saves() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/file-menu-save").is_none());
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.transport/open-file-menu (dict :col 5 :row 1))")
+            .unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        for key in [
+            "/file-menu-save",
+            "/file-menu-save-as",
+            "/file-menu-open-project",
+            "/file-menu-export",
+            "/file-menu-help",
+            "/file-menu-about",
+        ] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert_finite_nonzero_rect(node, key);
+        }
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str("(eseq.transport/file-menu-save-as)").unwrap();
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, payload } if name == "project-save-open"
+                && value_contains_string(payload, "save-as"))));
+
+        let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(160, 60);
+        assert!(find_layout_node_by_stable_key_suffix(&editor.widget_layout().unwrap(), "/project-save-name").is_none());
+
+        // Cancel: the modal closes and no save is requested.
+        editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.file-dialogs/open-save "Save project" "")"#)
+            .unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        let name = find_layout_node_by_stable_key_suffix(&layout, "/project-save-name").unwrap();
+        assert_finite_nonzero_rect(name, "project name input");
+        let submit = find_layout_node_by_stable_key_suffix(&layout, "/project-save-submit").unwrap();
+        assert_eq!(layout_prop_bool(submit, "disabled"), Some(true), "empty name cannot save");
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/project-save-cancel").is_some());
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/close-save)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert!(find_layout_node_by_stable_key_suffix(&editor.widget_layout().unwrap(), "/project-save-name").is_none());
+        assert!(!editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, .. } if name == "save-project")));
+
+        // Save As seeds the current name and commits it through save-project.
+        editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.file-dialogs/open-save "Save project as" "demo")"#)
+            .unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        let submit = find_layout_node_by_stable_key_suffix(&layout, "/project-save-submit").unwrap();
+        assert_eq!(layout_prop_bool(submit, "disabled"), Some(false));
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/commit-save)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, payload } if name == "save-project"
+                && value_contains_string(payload, "demo"))));
+        assert!(find_layout_node_by_stable_key_suffix(&editor.widget_layout().unwrap(), "/project-save-name").is_none());
+    }
+
     #[test]
     fn metal_seq_export_song_modal_has_usable_settings_and_job_states() {
         let mut editor = full_grid_editor_for_scroll_tests();

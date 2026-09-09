@@ -909,6 +909,54 @@
       :key "transpose-apply-all-banks"
       :on-select (lambda (event) (apply-transpose-menu "all-banks")))))
 
+;; ── File menu ──
+;; The toolbar's File dropdown. It replaces native menus so the same command
+;; set works with no menu bar. Save/Save As/About go through host commands
+;; because their modals are mounted in the step-panel buffers, and Rust must
+;; activate that tile before opening one.
+
+(defstate file-menu-open false)
+(defstate file-menu-col 0)
+(defstate file-menu-row 0)
+
+(def open-file-menu (event)
+  (do
+    (set! file-menu-col (get event :col))
+    (set! file-menu-row (get event :row))
+    (set! file-menu-open true)))
+
+(def file-menu-save ()
+  (host-command "project-save-open" (dict :mode "save")))
+
+(def file-menu-save-as ()
+  (host-command "project-save-open" (dict :mode "save-as")))
+
+(def file-menu-open-project ()
+  (do
+    (if (not eseq.seq-core-state/samples-sidebar-visible)
+      (eseq.seq-panels/seq-toggle-samples-sidebar)
+      nil)
+    (eseq.browser/open-project-browser)))
+
+(def file-context-menu ()
+  (context-menu :is-open file-menu-open
+    :anchor-col file-menu-col :anchor-row file-menu-row
+    :on-close (lambda () (set! file-menu-open false))
+    (menu-item "Save" :key "file-menu-save"
+      :on-select (lambda (event) (file-menu-save)))
+    (menu-item "Save As…" :key "file-menu-save-as"
+      :on-select (lambda (event) (file-menu-save-as)))
+    (menu-item "Open Project…" :key "file-menu-open-project"
+      :on-select (lambda (event) (file-menu-open-project)))
+    (menu-separator)
+    (menu-item "Export Audio…" :key "file-menu-export"
+      :on-select (lambda (event) (eseq.export-song/export-song)))
+    (menu-separator)
+    (menu-item "Help" :key "file-menu-help"
+      :on-select (lambda (event) (host-command "open-help" (dict))))
+    (menu-item "About eseq" :key "file-menu-about"
+      :on-select (lambda (event) (host-command "about-open" (dict))))))
+
 ;; ── Transport layout ──
 
 (effect-buffer "*transport*"
@@ -933,11 +981,11 @@
         :active (if eseq.seq-core-state/lower-panel-visible 1 0)))
     
     (box :width 2)
-    (subtree :key "transport-save-button"
+    (subtree :key "transport-file-menu-button"
       (save-icon
-        :on-click |x y r| (eseq.browser/open-project-save)
+        :on-click (lambda (event) (open-file-menu event))
         :style transport-icon-style
-        :active (if (eseq.browser/project-save-mode?) 1 0)))
+        :active (if file-menu-open 1 0)))
     
     ;; Transport buttons in a shared rounded-rect container
     (box :background-color :mixer-strip-bg :corner-radius 72 :padding 0.015 :height 1.4
@@ -1211,6 +1259,8 @@
     
     (subtree :key "transport-transpose-context-menu"
       (transpose-context-menu))
+    (subtree :key "transport-file-context-menu"
+      (file-context-menu))
 
     ;; Session and arrangement are app views, not tabs in the main buffer.
     ;; This spacer keeps the view pair against the transport's right edge.

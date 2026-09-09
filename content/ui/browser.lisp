@@ -10,8 +10,8 @@
 ;; Migration aliases (module spec §10 step 2) for the names unconverted callers
 ;; still spell flat.  Six are lisp-side — mixer.lisp / sequencer.lisp route
 ;; track drops here, effects/instrument-panel.lisp and effects/sampler-panel.lisp
-;; drop sounds and open the preset-save sidebar, transport.lisp opens the
-;; project-save sheet — and `sample-browser-here` keeps its spelling for the
+;; drop sounds and open the preset-save sidebar, transport.lisp's File menu
+;; opens the project browser — and `sample-browser-here` keeps its spelling for the
 ;; "C-x s" binding and src/ui/input.rs.  The rest are entry points src/ui/input.rs
 ;; and the Rust state_values tests drive by name.  Deleted as each consumer
 ;; converts.
@@ -32,8 +32,8 @@
         sbrowser-editor-name
         preset-filter
         editor-status-row
-        project-save-mode?
         open-project-save
+        open-project-browser
         new-project
         drop-instrument-new-track
         drop-instrument-on-track
@@ -92,7 +92,6 @@
 (def source-buffer "")
 (defstate mode "audition")
 (defstate eseq.vanilla/sbrowser-tab "samples")
-(defstate project-name "")
 (defstate last-track-index -1)
 (defstate last-sidebar-sample "")
 (defstate selected-sample "")
@@ -184,9 +183,6 @@
 (def project-browser-mode? ()
   (= mode "project-browser"))
 
-(def project-save-mode? ()
-  (= mode "project-save"))
-
 (def editor-mode? ()
   (not (= SEQ.editor-mode "")))
 
@@ -255,15 +251,10 @@
   (set! mode "audition")
   (set! sbrowser-tab "projects"))
 
+;; Saving a named project writes it directly; an unnamed project opens the
+;; File-menu name modal (eseq.file-dialogs) instead of a sidebar mode.
 (def open-project-save ()
-  (if (= SEQ.current-project-name "")
-    (do
-      (set! search-filter "")
-      (set! project-name "")
-      (set! mode "project-save"))
-    (do
-      (host-command "save-project" (dict :name SEQ.current-project-name))
-      (status (str "Save project: " SEQ.current-project-name)))))
+  (host-command "project-save-open" (dict :mode "save")))
 
 (def new-project ()
   (host-command "new-project" (dict))
@@ -801,21 +792,10 @@
         (status (str "Load script: " (get item :label))))
       (status "Choose a script file"))))
 
-(def save-project ()
-  (if (= (len project-name) 0)
-    (status "Enter a project name")
-    (do
-      (host-command "save-project" (dict :name project-name))
-      (reset-to-audition)
-      (status (str "Save project: " project-name)))))
-
 (def load-project (name)
   (host-command "load-project" (dict :name name))
   (reset-to-audition)
   (status (str "Open project: " name)))
-
-(def select-project-for-save (item)
-  (set! project-name (get item :label)))
 
 ;; ── Search bar widget ──
 
@@ -869,25 +849,6 @@
         :font-size 9
         :color :gray
         :bg :transparent))))
-
-(def project-save-header ()
-  (box :width :fill :padding 0.25
-    (v-stack :width :fill :gap 0.5
-      (text-input
-        :width :fill
-        :value project-name
-        :placeholder "Project name..."
-        :on-change (lambda (v) (set! project-name v))
-        :height 1.5
-        :font-size 12
-        (mag-glass))
-      (button "Save"
-        :variant :primary
-        :width 8.0
-        :height 1.2
-        :font-size 11
-        :on-click |x y r| (save-project)
-        :color :white))))
 
 ;; Saved-instrument tier filter: "" shows both the shipped Factory tree and
 ;; the user's Library, "factory" or "user" narrows to one. Single-select so a
@@ -1579,9 +1540,6 @@
             :on-select (lambda (item) (load-project (get item :label)))
             :on-activate (lambda (item) (load-project (get item :label)))))))))
 
-(def project-save-panel ()
-  (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))
-
 ;; ── Preset save sidebar ──
 
 (def preset-save-mode? ()
@@ -1870,12 +1828,8 @@
         (list
           (preset-save-header)
           (preset-save-panel))
-        (if (project-save-mode?)
-          (list
-            (project-save-header)
-            (project-save-panel))
-          (list
-            (tabbed-content)))))))
+        (list
+          (tabbed-content))))))
 
 ;; ── Reactive rendering (like ui/main.lisp) ──
 

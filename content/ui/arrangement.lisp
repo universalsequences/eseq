@@ -25,6 +25,7 @@
 (import eseq.sound-palette)
 (import eseq.sample-import)
 (import eseq.export-song)
+(import eseq.file-dialogs)
 
 (export view-start
         view-duration
@@ -2003,6 +2004,8 @@
     ;; share a tile); Rust activates whichever tile shows it before opening.
     (subtree :key "arr-export-song"
       (eseq.export-song/panel))
+    (subtree :key "arr-file-dialogs"
+      (eseq.file-dialogs/panel))
     (subtree :key "arr-sample-import"
       (eseq.sample-import/panel))
     (subtree :key "arr-scene-row"

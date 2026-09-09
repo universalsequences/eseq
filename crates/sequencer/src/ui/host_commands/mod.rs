@@ -3,6 +3,7 @@ mod dispatch;
 mod drum_rack_v2;
 mod effects;
 pub(crate) mod export;
+mod file_menu;
 mod instrument_authoring;
 mod instrument_params;
 mod learn;

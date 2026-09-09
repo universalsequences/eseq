@@ -27,6 +27,7 @@
 ;; Drag-and-drop sample import modal (zero footprint while closed).
 (import eseq.sample-import)
 (import eseq.export-song)
+(import eseq.file-dialogs)
 
 (export track-selected-binding
         expanded-track-ids
@@ -2294,6 +2295,8 @@
     ;; centered overlay (modal spec) with zero footprint here while closed.
     (subtree :key "seq-export-song"
       (eseq.export-song/panel))
+    (subtree :key "seq-file-dialogs"
+      (eseq.file-dialogs/panel))
     (subtree :key "seq-sample-import"
       (eseq.sample-import/panel))
     (each (eseq.drum-rack-v2/grid-render-items) |item|
