@@ -30,6 +30,7 @@ pub const SHAPE_RANDOM_RAMP: f32 = 5.0;
 /// The clipped, descending triangle used by Analog-style LFOs.
 pub const SHAPE_CLIPPED_TRIANGLE: f32 = 6.0;
 pub const SHAPE_FULL_WIDTH_PULSE: f32 = 7.0;
+pub const SHAPE_SAW_DOWN: f32 = 8.0;
 
 // Stable illustrative random levels, not a claim to display a live noise stream.
 fn random_level(cycle: f32) -> f32 {
@@ -65,6 +66,7 @@ pub fn shape_value(shape: f32, phase: f32, pulse_width: f32) -> f32 {
             }
         }
         3 => phase * 2.0 - 1.0,
+        8 => 1.0 - phase * 2.0,
         4 => random_level(cycle),
         5 => {
             let start = random_level(cycle - 1.0);
@@ -163,7 +165,7 @@ impl WidgetDefinition for LfoCurveWidget {
         node: &LayoutNode,
         viewport: WidgetViewport,
     ) -> Vec<GpuPrimitive> {
-        let shape = prop_num(&node.props, "shape", SHAPE_TRIANGLE).clamp(0.0, 7.0);
+        let shape = prop_num(&node.props, "shape", SHAPE_TRIANGLE).clamp(0.0, SHAPE_SAW_DOWN);
         let pw = prop_num(&node.props, "pw", 0.5).clamp(0.0, 1.0);
         // Degrees, like the `modN_lfo_phase` param; the shader works in cycles.
         let phase_offset = prop_num(&node.props, "phase-offset", 0.0) / 360.0;
@@ -250,6 +252,7 @@ float lc_shape(int shape, float x, float pw) {
     } else if (shape == 3) {
         return phase * 2.0 - 1.0;
     }
+    if (shape == 8) return 1.0 - phase * 2.0;
     if (shape == 4) return lc_random(floor(x));
     if (shape == 5) return mix(lc_random(floor(x) - 1.0), lc_random(floor(x)), clamp(phase / 0.4, 0.0, 1.0));
     if (shape == 6) {
@@ -266,7 +269,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
     float aspect = max(in.aspect, 0.0001);
-    int shape = int(round(clamp(in.uniform_a.x, 0.0, 7.0)));
+    int shape = int(round(clamp(in.uniform_a.x, 0.0, 8.0)));
     float pw = in.uniform_a.y;
     float offset = in.uniform_a.z;
     float markerPhase = in.uniform_a.w;
@@ -326,6 +329,14 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descending_saw_is_the_inverse_of_ascending_saw() {
+        for phase in [-0.2, 0.0, 0.25, 0.5, 0.99, 1.0, 1.25] {
+            assert_eq!(shape_value(SHAPE_SAW_DOWN, phase, 0.5),
+                -shape_value(SHAPE_SAW, phase, 0.5));
+        }
+    }
 
     #[test]
     fn extended_shapes_have_correct_boundaries_and_repeatable_random_transitions() {

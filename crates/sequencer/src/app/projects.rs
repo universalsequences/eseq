@@ -27,6 +27,15 @@ use super::{
     App, BusChannelState, InputMode, ProjectSampleAsset, Region, SidebarMode, SidebarTab,
 };
 
+struct ProjectCapture {
+    bank: Vec<PatternSnapshot>,
+    bus_pattern_bank: Vec<Vec<BusPatternSnapshot>>,
+    scenes_for_takes: crate::sequencer::ProjectScenes,
+    tracks: Vec<ProjectTrack>,
+    custom_effects: Vec<Vec<Option<String>>>,
+    device_instances: crate::project::ProjectDeviceInstances,
+}
+
 pub(super) fn resolve_live_macro_target(
     state: &crate::sequencer::SequencerState,
     effect_descriptors: &[Vec<EffectDescriptor>],
@@ -1024,6 +1033,10 @@ impl App {
 
         self.history.reset();
         self.device_registry.clear();
+        if let Err(error) = self.graph_controller().add_default_project_tracks() {
+            self.editor.status_message = Some((format!("New project: {error}"), Instant::now()));
+            return;
+        }
 
         // Empty-arrangement spec 4.3: the arrangement always exists. The
         // teardown above cleared it to `None` (its lanes were indexed by the
@@ -1252,6 +1265,7 @@ impl App {
             built_patterns: Vec::new(),
             built_bus_patterns: Vec::new(),
             fallback_samples: 0,
+            strict_samples: false,
             phase: super::PendingProjectLoadPhase::ClearExisting,
         });
         Ok(())
@@ -1259,6 +1273,14 @@ impl App {
 
     pub fn has_pending_project_load(&self) -> bool {
         self.editor.pending_project_load.is_some()
+    }
+
+    fn create_blank_project_sample(&mut self) -> Result<ProjectSampleAsset, String> {
+        Ok(ProjectSampleAsset {
+            buffer_id: self.create_blank_sampler_buffer()?,
+            sample_rate: self.graph.sample_rate,
+            decoded_name: String::new(),
+        })
     }
 
     fn load_project_sample_asset(
@@ -1291,6 +1313,12 @@ impl App {
         };
         sample_assets.insert(canonical_path, asset.clone());
         Ok(asset)
+    }
+
+    pub(crate) fn queue_bounce_project(&mut self, name: &str, project: ProjectFile) -> Result<(), String> {
+        self.queue_loaded_project(name, project)?;
+        self.editor.pending_project_load.as_mut().unwrap().strict_samples = true;
+        Ok(())
     }
 
     pub fn advance_pending_project_load(&mut self) -> Result<(), String> {
@@ -1381,7 +1409,7 @@ impl App {
                 let sample_name = pattern.sample_names.get(track).cloned();
                 let slot_source = crate::project::ProjectRackTrackSlot {
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
-                    sample_path: Some(sample_path.clone()),
+                    sample_path: sample_path.clone(),
                     sample_name: sample_name.clone(),
                     instrument_name: None,
                 };
@@ -1404,7 +1432,7 @@ impl App {
                     effect_slots: pattern.effect_slots[track].clone(),
                     custom_effects: project.custom_effects[track].clone(),
                     track_sound_state: pattern.track_sound_states[track].clone(),
-                    sample_path: Some(sample_path),
+                    sample_path,
                     sample_name,
                 };
                 (
@@ -1478,8 +1506,8 @@ impl App {
                     },
                 )
             }
-            ProjectTrackKind::Modulator => {
-                return Err("Modulator tracks cannot be saved as Sounds".to_string())
+            ProjectTrackKind::Empty | ProjectTrackKind::Modulator => {
+                return Err("Empty and modulator tracks cannot be saved as Sounds".to_string())
             }
         };
         let sound = crate::project::ProjectSoundPreset {
@@ -1541,7 +1569,7 @@ impl App {
         sound: crate::project::ProjectSoundPreset,
         fallback_name: &str,
     ) -> Result<usize, String> {
-        let track = self.graph_controller().add_blank_sampler_track()?;
+        let track = self.graph_controller().add_empty_track()?;
         if let Err(error) = self.load_container_preset_onto_track(track, sound, fallback_name) {
             let rollback = self.graph_controller().delete_track(track);
             return match rollback {
@@ -1571,31 +1599,31 @@ impl App {
         for (slot_idx, (source, slot)) in source_slots.iter().zip(&mut rack.slots).enumerate() {
             match source.instrument_type {
                 crate::project::ProjectInstrumentType::Sampler => {
-                    let sample_path = source
-                        .sample_path
-                        .as_deref()
-                        .ok_or_else(|| format!("Sound slot {} has no sample path", slot_idx + 1))?;
-                    let loaded =
-                        crate::instruments::sampler::load_wav_buffer(self.graph.lg.0, Path::new(sample_path))
-                            .map_err(|error| {
-                                format!(
-                                    "Failed to load Sound sample '{}' for slot {}: {error}",
-                                    sample_path,
-                                    slot_idx + 1
-                                )
-                            })?;
-                    self.submit_sample_analysis(&loaded);
-                    let sample_name = source
-                        .sample_name
-                        .clone()
-                        .unwrap_or_else(|| loaded.name.clone());
-                    self.register_loaded_sample_path(
-                        &sample_name,
-                        loaded.buffer_id,
-                        PathBuf::from(sample_path),
-                    );
+                    let asset = if let Some(sample_path) = source.sample_path.as_deref() {
+                        let loaded = crate::instruments::sampler::load_wav_buffer(
+                            self.graph.lg.0, Path::new(sample_path),
+                        ).map_err(|error| format!(
+                            "Failed to load Sound sample '{}' for slot {}: {error}",
+                            sample_path, slot_idx + 1,
+                        ))?;
+                        self.submit_sample_analysis(&loaded);
+                        ProjectSampleAsset {
+                            buffer_id: loaded.buffer_id,
+                            sample_rate: loaded.sample_rate,
+                            decoded_name: loaded.name,
+                        }
+                    } else {
+                        self.create_blank_project_sample()?
+                    };
+                    let sample_name = source.sample_name.clone()
+                        .unwrap_or_else(|| asset.decoded_name.clone());
+                    if let Some(sample_path) = &source.sample_path {
+                        self.register_loaded_sample_path(
+                            &sample_name, asset.buffer_id, PathBuf::from(sample_path),
+                        );
+                    }
                     slot.instrument_type = InstrumentType::Sampler;
-                    slot.sample_id = Some((loaded.buffer_id, sample_name, loaded.sample_rate));
+                    slot.sample_id = Some((asset.buffer_id, sample_name, asset.sample_rate));
                     slot.track_sound_state.engine_id = None;
                 }
                 crate::project::ProjectInstrumentType::Custom => {
@@ -1609,7 +1637,8 @@ impl App {
                     slot.track_sound_state.engine_id = Some(prepared.engine_id);
                     slot.sample_id = None;
                 }
-                crate::project::ProjectInstrumentType::Modulator
+                crate::project::ProjectInstrumentType::Empty
+                | crate::project::ProjectInstrumentType::Modulator
                 | crate::project::ProjectInstrumentType::Rack => {
                     return Err(format!(
                         "Sound slot {} has unsupported instrument type",
@@ -1671,13 +1700,13 @@ impl App {
                 rack_slot,
                 effect_slot,
                 saved.ir.as_deref(),
-            );
+            )?;
             self.restore_filter_table_rack_slot(
                 track,
                 rack_slot,
                 effect_slot,
                 saved.table.as_deref(),
-            );
+            )?;
             let live = self
                 .state
                 .pattern
@@ -2192,15 +2221,8 @@ impl App {
         crate::project::save_sound_preset(preset_name, &sound).map_err(|error| error.to_string())
     }
 
-    pub(super) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
+    pub(crate) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
         let num_tracks = self.tracks.len();
-        let current_pattern = self.state.current_scene_index();
-        let current_track = if num_tracks == 0 {
-            0
-        } else {
-            self.ui.cursor_track.min(num_tracks - 1)
-        };
-
         self.state.save_current_pattern_snapshot(
             num_tracks,
             &self.graph.track_buffer_ids,
@@ -2224,7 +2246,25 @@ impl App {
             .export_bus_pattern_repository(&default_bus_snapshot);
         let tracks = self.capture_project_tracks()?;
         let custom_effects = self.capture_custom_effects();
-        let device_instances = self.capture_project_device_instances(&tracks, &custom_effects)?;
+        let mut identities = self.device_registry.clone();
+        let device_instances = self.capture_project_device_instances(&tracks, &custom_effects, &mut identities)?;
+        self.device_registry = identities;
+        self.state.prune_unreferenced_sounds();
+        let scenes_for_takes = self.state.capture_project_scenes();
+        self.serialize_project_snapshot(project_name, ProjectCapture {
+            bank, bus_pattern_bank, scenes_for_takes, tracks, custom_effects, device_instances,
+        })
+    }
+
+    fn serialize_project_snapshot(&self, project_name: &str, capture: ProjectCapture) -> Result<ProjectFile, String> {
+        let ProjectCapture { bank, bus_pattern_bank, scenes_for_takes, tracks, custom_effects, device_instances } = capture;
+        let num_tracks = self.tracks.len();
+        let current_pattern = self.state.current_scene_index();
+        let current_track = if num_tracks == 0 {
+            0
+        } else {
+            self.ui.cursor_track.min(num_tracks - 1)
+        };
         let patterns = bank
             .iter()
             .enumerate()
@@ -2243,20 +2283,14 @@ impl App {
                         .copied()
                         .unwrap_or(InstrumentType::Sampler)
                         == InstrumentType::Sampler
-                        && !sample_name.is_empty()
                     {
-                        self.resolve_sample_path_for_snapshot(
-                            pattern_idx,
-                            track_idx,
-                            sample_buffer_id,
-                            &sample_name,
-                        )?
+                        self.capture_sampler_source_path(sample_buffer_id, &sample_name)?
                         .map(|path| path.to_string_lossy().to_string())
                     } else {
                         None
                     };
+                    sample_names.push(if sample_path.is_some() { sample_name } else { String::new() });
                     sample_paths.push(sample_path);
-                    sample_names.push(sample_name);
                 }
                 Ok(ProjectPattern::from_snapshot(
                     snapshot,
@@ -2273,17 +2307,6 @@ impl App {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        // §17.4 prune-on-save: drop orphaned entities from the LIVE pools
-        // before capturing. This is the one seam the spec sanctions, and it
-        // is safe here because nothing holds Patch/Mix ids into the live
-        // pools from outside `ProjectScenes` — undo lane snapshots clone
-        // pools wholesale, so history entries stay self-consistent.
-        self.state.prune_unreferenced_sounds();
-        // Takes spec 6.1/11.1: record per-scene cell presence (the dense
-        // `patterns` bank cannot encode a bare lane) and serialize each
-        // track's take pool with its chunk patterns inline — chunks are in
-        // no scene cell, so the pattern bank never carries them.
-        let scenes_for_takes = self.state.capture_project_scenes();
         let scene_banks = scenes_for_takes
             .banks
             .iter()
@@ -2342,20 +2365,12 @@ impl App {
                         .copied()
                         .unwrap_or(InstrumentType::Sampler)
                         == InstrumentType::Sampler
-                        && !sample_name.is_empty()
                     {
-                        // `usize::MAX` bypasses the current-scene live-path
-                        // shortcut; chunks resolve through the registries.
                         sample_paths[track] = self
-                            .resolve_sample_path_for_snapshot(
-                                usize::MAX,
-                                track,
-                                buffer_id,
-                                &sample_name,
-                            )?
+                            .capture_sampler_source_path(buffer_id, &sample_name)?
                             .map(|path| path.to_string_lossy().to_string());
                     }
-                    sample_names[track] = sample_name;
+                    sample_names[track] = if sample_paths[track].is_some() { sample_name } else { String::new() };
                     chunks.push(ProjectPattern::from_snapshot(
                         &snapshot,
                         sample_paths,
@@ -2476,12 +2491,10 @@ impl App {
                         mix: crate::sequencer::MixId(refs.mix),
                     })
                 });
-                let Some(data) = data else {
-                    // Dangling refs (always-resolves invariant violated): the
-                    // content is already unrecoverable; keep the save usable.
-                    debug_assert!(false, "bare cell refs do not resolve on track {track}");
-                    continue;
-                };
+                let data = data.ok_or_else(|| format!(
+                    "Track {} sound references patch {} and mix {} that cannot be resolved",
+                    track + 1, refs.patch, refs.mix,
+                ))?;
                 let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
                 snapshot.set_track_pattern_data(track, data);
                 let mut sample_paths = vec![None; num_tracks];
@@ -2493,18 +2506,12 @@ impl App {
                     .copied()
                     .unwrap_or(InstrumentType::Sampler)
                     == InstrumentType::Sampler
-                    && !sample_name.is_empty()
                 {
                     sample_paths[track] = self
-                        .resolve_sample_path_for_snapshot(
-                            usize::MAX,
-                            track,
-                            buffer_id,
-                            &sample_name,
-                        )?
+                        .capture_sampler_source_path(buffer_id, &sample_name)?
                         .map(|path| path.to_string_lossy().to_string());
                 }
-                sample_names[track] = sample_name;
+                sample_names[track] = if sample_paths[track].is_some() { sample_name } else { String::new() };
                 orphan_sounds.push(crate::project::ProjectOrphanSound {
                     patch: refs.patch,
                     mix: refs.mix,
@@ -2614,7 +2621,7 @@ impl App {
                     .state
                     .committed_arrangement()
                     .unwrap_or_else(|| self.empty_arrangement()),
-                &self.state.capture_project_scenes(),
+                &scenes_for_takes,
             )?),
             macros: self
                 .macro_engine
@@ -2675,21 +2682,12 @@ impl App {
                                     .as_ref()
                                     .map(|(_, name, _)| name.clone())
                                     .unwrap_or_default();
-                                let path = self
-                                    .sample_path_registry
-                                    .get(&sample_name)
-                                    .cloned()
-                                    .or_else(|| self.resolve_sample_path_by_name(&sample_name))
-                                    .ok_or_else(|| {
-                                        format!(
-                                            "Couldn't resolve sample path for rack track '{}' slot {}",
-                                            name,
-                                            slot_idx + 1
-                                        )
-                                    })?;
+                                let path = slot.sample_id.as_ref()
+                                    .map(|(id, name, _)| self.capture_sampler_source_path(*id, name))
+                                    .transpose()?.flatten();
                                 slots.push(crate::project::ProjectRackTrackSlot {
                                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
-                                    sample_path: Some(path.to_string_lossy().to_string()),
+                                    sample_path: path.map(|path| path.to_string_lossy().to_string()),
                                     sample_name: (!sample_name.is_empty()).then_some(sample_name),
                                     instrument_name: None,
                                 });
@@ -2715,16 +2713,12 @@ impl App {
                                             engine_id
                                         )
                                     })?;
-                                let instrument_name = crate::lisp_host::qualify_instrument_id(
-                                    &instrument_name,
-                                )
-                                .map_err(|error| {
-                                    format!(
-                                        "Could not qualify instrument for rack track '{}' slot {}: {error}",
-                                        name,
-                                        slot_idx + 1
-                                    )
-                                })?;
+                                let instrument_name =
+                                    crate::lisp_host::qualify_instrument_id(&instrument_name)
+                                        .map_err(|error| format!(
+                                            "Could not qualify instrument for rack track '{}' slot {}: {error}",
+                                            name, slot_idx + 1,
+                                        ))?;
                                 slots.push(crate::project::ProjectRackTrackSlot {
                                     instrument_type: crate::project::ProjectInstrumentType::Custom,
                                     sample_path: None,
@@ -2732,7 +2726,7 @@ impl App {
                                     instrument_name: Some(instrument_name),
                                 });
                             }
-                            InstrumentType::Modulator | InstrumentType::Rack => {
+                            InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {
                                 return Err(format!(
                                     "Rack track '{}' slot {} has unsupported instrument type",
                                     name,
@@ -2756,12 +2750,9 @@ impl App {
                         },
                     })
                 } else if self.is_sampler_track(track_idx) {
-                    let path = self
-                        .sampler_path_for_track(track_idx)
-                        .or_else(|| self.resolve_sample_path_by_name(name));
-                    let Some(path) = path else {
-                        return Err(format!("Couldn't resolve sample path for '{}'", name));
-                    };
+                    let path = self.capture_sampler_source_path(
+                        self.graph.track_buffer_ids[track_idx], name,
+                    )?;
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),
@@ -2772,11 +2763,11 @@ impl App {
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Sampler {
-                            sample_path: path.to_string_lossy().to_string(),
+                            sample_path: path.map(|path| path.to_string_lossy().to_string()),
                         },
                     })
-                } else if self.graph.track_instrument_types.get(track_idx)
-                    == Some(&InstrumentType::Modulator)
+                } else if matches!(self.graph.track_instrument_types.get(track_idx),
+                    Some(InstrumentType::Empty | InstrumentType::Modulator))
                 {
                     Ok(ProjectTrack {
                         id,
@@ -2787,7 +2778,11 @@ impl App {
                             .unwrap_or(false),
                         color,
                         collapsed,
-                        kind: ProjectTrackKind::Modulator,
+                        kind: if self.graph.track_instrument_types[track_idx] == InstrumentType::Empty {
+                            ProjectTrackKind::Empty
+                        } else {
+                            ProjectTrackKind::Modulator
+                        },
                     })
                 } else {
                     let instrument_name = self
@@ -2798,12 +2793,10 @@ impl App {
                         .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
                         .map(|engine| engine.name.clone())
                         .unwrap_or_else(|| name.clone());
-                    let instrument_name = crate::lisp_host::qualify_instrument_id(
-                        &instrument_name,
-                    )
-                    .map_err(|error| {
-                        format!("Could not qualify instrument for track '{}': {error}", name)
-                    })?;
+                    let instrument_name =
+                        crate::lisp_host::qualify_instrument_id(&instrument_name).map_err(|error| {
+                            format!("Could not qualify instrument for track '{}': {error}", name)
+                        })?;
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),
@@ -2852,20 +2845,21 @@ impl App {
     }
 
     fn capture_project_device_instances(
-        &mut self,
+        &self,
         tracks: &[ProjectTrack],
         custom_effects: &[Vec<Option<String>>],
+        identities: &mut super::DeviceIdentityRegistry,
     ) -> Result<crate::project::ProjectDeviceInstances, String> {
         let mut result = crate::project::ProjectDeviceInstances::default();
         for (track, project_track) in tracks.iter().enumerate() {
             let sources = custom_effects.get(track).cloned().unwrap_or_default();
             let active_sources = sources.into_iter().take_while(Option::is_some)
                 .flatten().collect::<Vec<_>>();
-            let ids = self.device_registry.audio_effect_chain(
+            let ids = identities.audio_effect_chain(
                 project_track.id,
                 (0..active_sources.len()).map(|offset| BUILTIN_SLOT_COUNT + offset),
             );
-            self.device_registry.bind_audio_effect_chain(
+            identities.bind_audio_effect_chain(
                 project_track.id,
                 BUILTIN_SLOT_COUNT,
                 &ids,
@@ -2883,8 +2877,8 @@ impl App {
             let midi_names = self.state.pattern.track_params.get(track)
                 .map(|params| params.midi_fx_chain())
                 .unwrap_or_default();
-            let midi_ids = self.device_registry.midi_effect_chain(project_track.id, midi_names.len());
-            self.device_registry.bind_midi_effect_chain(project_track.id, &midi_ids)?;
+            let midi_ids = identities.midi_effect_chain(project_track.id, midi_names.len());
+            identities.bind_midi_effect_chain(project_track.id, &midi_ids)?;
             result.midi_effects.push(crate::project::ProjectMidiEffectChain {
                 track_id: project_track.id.0,
                 instances: midi_ids.into_iter().zip(midi_names).map(|(id, name)| {
@@ -2896,9 +2890,9 @@ impl App {
             let names = bus.custom_effect_names.iter().take_while(|name| name.is_some())
                 .filter_map(|name| name.clone()).collect::<Vec<_>>();
             let ids = (0..names.len()).map(|slot| {
-                self.device_registry.bus_audio_effect(bus.id, slot)
+                identities.bus_audio_effect(bus.id, slot)
             }).collect::<Vec<_>>();
-            self.device_registry.bind_bus_audio_effect_chain(bus.id, &ids)?;
+            identities.bind_bus_audio_effect_chain(bus.id, &ids)?;
             result.bus_effects.push(crate::project::ProjectBusEffectChain {
                 bus_id: bus.id.0,
                 instances: ids.into_iter().zip(names).map(|(id, name)| {
@@ -2913,13 +2907,13 @@ impl App {
         for (track, rack) in racks.into_iter().enumerate() {
             let (Some(project_track), Some(rack)) = (tracks.get(track), rack) else { continue };
             for (slot_index, slot) in rack.slots.into_iter().enumerate() {
-                let rack_slot_id = self.device_registry.rack_slot(project_track.id, slot_index);
+                let rack_slot_id = identities.rack_slot(project_track.id, slot_index);
                 let names = slot.custom_effect_names.into_iter().take_while(Option::is_some)
                     .flatten().collect::<Vec<_>>();
                 let ids = (0..names.len()).map(|effect_slot| {
-                    self.device_registry.rack_audio_effect(rack_slot_id, effect_slot)
+                    identities.rack_audio_effect(rack_slot_id, effect_slot)
                 }).collect::<Vec<_>>();
-                self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
+                identities.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
                 result.rack_effects.push(crate::project::ProjectRackEffectChain {
                     track_id: project_track.id.0,
                     slot_index,
@@ -3087,34 +3081,6 @@ impl App {
         Ok(())
     }
 
-    fn resolve_sample_path_for_snapshot(
-        &self,
-        pattern_idx: usize,
-        track_idx: usize,
-        buffer_id: i32,
-        sample_name: &str,
-    ) -> Result<Option<PathBuf>, String> {
-        if self.state.current_scene_index() == pattern_idx {
-            if let Some(path) = self.sampler_path_for_track(track_idx) {
-                return Ok(Some(path));
-            }
-        }
-        if let Some(path) = self.sample_buffer_path_registry.get(&buffer_id) {
-            return Ok(Some(path.clone()));
-        }
-        if let Some(path) = self.sample_path_registry.get(sample_name) {
-            return Ok(Some(path.clone()));
-        }
-        let resolved = self.resolve_sample_path_by_name(sample_name);
-        if resolved.is_none() {
-            return Err(format!(
-                "Couldn't resolve sample path for '{}'",
-                sample_name
-            ));
-        }
-        Ok(resolved)
-    }
-
     pub fn resolve_sample_path_by_name(&self, sample_name: &str) -> Option<PathBuf> {
         fn walk(dir: &Path, sample_name: &str) -> Option<PathBuf> {
             let entries = std::fs::read_dir(dir).ok()?;
@@ -3155,18 +3121,15 @@ impl App {
         track: usize,
         slot_idx: usize,
         ir_ref: Option<&str>,
-    ) {
-        let Some(ir_ref) = ir_ref else { return };
+    ) -> Result<(), String> {
+        let Some(ir_ref) = ir_ref else { return Ok(()); };
         if ir_ref.is_empty() || ir_ref == crate::effects::conv_reverb::DEFAULT_IR_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_conv_reverb_ir_path(ir_ref) {
-            if let Err(e) = self.set_conv_reverb_ir(track, slot_idx, &path, ir_ref) {
-                eprintln!("project-load: conv reverb IR '{ir_ref}' not restored: {e}");
-            }
-        } else {
-            eprintln!("project-load: conv reverb IR '{ir_ref}' could not be resolved");
-        }
+        let path = self.resolve_conv_reverb_ir_path(ir_ref)
+            .ok_or_else(|| format!("Convolution Reverb IR '{ir_ref}' could not be resolved"))?;
+        self.set_conv_reverb_ir(track, slot_idx, &path, ir_ref)
+            .map_err(|error| format!("track Convolution Reverb IR '{ir_ref}' could not be restored: {error}"))
     }
 
     fn restore_filter_table_track(
@@ -3174,33 +3137,22 @@ impl App {
         track: usize,
         slot_idx: usize,
         table_ref: Option<&str>,
-    ) {
-        let Some(table_ref) = table_ref else { return };
-        // Saved references embed the analysis mode and optionally the engine;
-        // the sample resolves by its decoded name while the bare reference
-        // keeps the analysis deterministic. `fltab:` references resolve to
-        // baked asset files instead of samples. The engine restores first so
-        // the table lands on the node that will keep it.
+    ) -> Result<(), String> {
+        let Some(table_ref) = table_ref else { return Ok(()); };
+        // Restore the engine before its table: changing engines replaces the node.
         let (table_ref, engine) = crate::effects::filter_table::split_engine_ref(table_ref);
         if engine != crate::effects::filter_table::TableEngine::default() {
-            if let Err(error) = self.set_track_filter_table_engine(track, slot_idx, engine) {
-                eprintln!(
-                    "project-load: Filter Table engine '{}' not restored: {error}",
-                    engine.tag()
-                );
-            }
+            self.set_track_filter_table_engine(track, slot_idx, engine)
+                .map_err(|error| format!("track Filter Table engine could not be restored: {error}"))?;
         }
         let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
         if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_filter_table_source_path(sample_name) {
-            if let Err(error) = self.set_filter_table_source(track, slot_idx, &path, table_ref) {
-                eprintln!("project-load: Filter Table '{table_ref}' not restored: {error}");
-            }
-        } else {
-            eprintln!("project-load: Filter Table '{table_ref}' could not be resolved");
-        }
+        let path = self.resolve_filter_table_source_path(sample_name)
+            .ok_or_else(|| format!("Filter Table '{table_ref}' could not be resolved"))?;
+        self.set_filter_table_source(track, slot_idx, &path, table_ref)
+            .map_err(|error| format!("track Filter Table '{table_ref}' could not be restored: {error}"))
     }
 
     /// Resolve a decoded Filter Table reference to a file on disk: an asset
@@ -3217,30 +3169,22 @@ impl App {
         bus_idx: usize,
         slot_idx: usize,
         table_ref: Option<&str>,
-    ) {
-        let Some(table_ref) = table_ref else { return };
+    ) -> Result<(), String> {
+        let Some(table_ref) = table_ref else { return Ok(()); };
+        // Restore the engine before its table: changing engines replaces the node.
         let (table_ref, engine) = crate::effects::filter_table::split_engine_ref(table_ref);
         if engine != crate::effects::filter_table::TableEngine::default() {
-            if let Err(error) = self.set_bus_filter_table_engine(bus_idx, slot_idx, engine) {
-                eprintln!(
-                    "project-load: bus Filter Table engine '{}' not restored: {error}",
-                    engine.tag()
-                );
-            }
+            self.set_bus_filter_table_engine(bus_idx, slot_idx, engine)
+                .map_err(|error| format!("bus Filter Table engine could not be restored: {error}"))?;
         }
         let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
         if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_filter_table_source_path(sample_name) {
-            if let Err(error) =
-                self.set_filter_table_source_bus(bus_idx, slot_idx, &path, table_ref)
-            {
-                eprintln!("project-load: bus Filter Table '{table_ref}' not restored: {error}");
-            }
-        } else {
-            eprintln!("project-load: bus Filter Table '{table_ref}' could not be resolved");
-        }
+        let path = self.resolve_filter_table_source_path(sample_name)
+            .ok_or_else(|| format!("Filter Table '{table_ref}' could not be resolved"))?;
+        self.set_filter_table_source_bus(bus_idx, slot_idx, &path, table_ref)
+            .map_err(|error| format!("bus Filter Table '{table_ref}' could not be restored: {error}"))
     }
 
     /// Rack-slot counterpart of `restore_filter_table_track`. A Filter Table
@@ -3253,36 +3197,22 @@ impl App {
         rack_slot: usize,
         effect_slot: usize,
         table_ref: Option<&str>,
-    ) {
-        let Some(table_ref) = table_ref else { return };
+    ) -> Result<(), String> {
+        let Some(table_ref) = table_ref else { return Ok(()); };
+        // Restore the engine before its table: changing engines replaces the node.
         let (table_ref, engine) = crate::effects::filter_table::split_engine_ref(table_ref);
         if engine != crate::effects::filter_table::TableEngine::default() {
-            if let Err(error) =
-                self.set_rack_filter_table_engine(track, rack_slot, effect_slot, engine)
-            {
-                eprintln!(
-                    "project-load: rack Filter Table engine '{}' not restored: {error}",
-                    engine.tag()
-                );
-            }
+            self.set_rack_filter_table_engine(track, rack_slot, effect_slot, engine)
+                .map_err(|error| format!("rack Filter Table engine could not be restored: {error}"))?;
         }
         let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
         if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_filter_table_source_path(sample_name) {
-            if let Err(error) = self.set_filter_table_source_rack_slot(
-                track,
-                rack_slot,
-                effect_slot,
-                &path,
-                table_ref,
-            ) {
-                eprintln!("project-load: rack Filter Table '{table_ref}' not restored: {error}");
-            }
-        } else {
-            eprintln!("project-load: rack Filter Table '{table_ref}' could not be resolved");
-        }
+        let path = self.resolve_filter_table_source_path(sample_name)
+            .ok_or_else(|| format!("Filter Table '{table_ref}' could not be resolved"))?;
+        self.set_filter_table_source_rack_slot(track, rack_slot, effect_slot, &path, table_ref)
+            .map_err(|error| format!("rack Filter Table '{table_ref}' could not be restored: {error}"))
     }
 
     /// Rack-slot counterpart of `restore_conv_reverb_ir_track`.
@@ -3292,20 +3222,15 @@ impl App {
         rack_slot: usize,
         effect_slot: usize,
         ir_ref: Option<&str>,
-    ) {
-        let Some(ir_ref) = ir_ref else { return };
+    ) -> Result<(), String> {
+        let Some(ir_ref) = ir_ref else { return Ok(()); };
         if ir_ref.is_empty() || ir_ref == crate::effects::conv_reverb::DEFAULT_IR_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_conv_reverb_ir_path(ir_ref) {
-            if let Err(error) =
-                self.set_conv_reverb_ir_rack_slot(track, rack_slot, effect_slot, &path, ir_ref)
-            {
-                eprintln!("project-load: rack conv reverb IR '{ir_ref}' not restored: {error}");
-            }
-        } else {
-            eprintln!("project-load: rack conv reverb IR '{ir_ref}' could not be resolved");
-        }
+        let path = self.resolve_conv_reverb_ir_path(ir_ref)
+            .ok_or_else(|| format!("Convolution Reverb IR '{ir_ref}' could not be resolved"))?;
+        self.set_conv_reverb_ir_rack_slot(track, rack_slot, effect_slot, &path, ir_ref)
+            .map_err(|error| format!("rack Convolution Reverb IR '{ir_ref}' could not be restored: {error}"))
     }
 
     /// Bus counterpart of `restore_conv_reverb_ir_track`.
@@ -3314,18 +3239,15 @@ impl App {
         bus_idx: usize,
         slot_idx: usize,
         ir_ref: Option<&str>,
-    ) {
-        let Some(ir_ref) = ir_ref else { return };
+    ) -> Result<(), String> {
+        let Some(ir_ref) = ir_ref else { return Ok(()); };
         if ir_ref.is_empty() || ir_ref == crate::effects::conv_reverb::DEFAULT_IR_REF {
-            return;
+            return Ok(());
         }
-        if let Some(path) = self.resolve_conv_reverb_ir_path(ir_ref) {
-            if let Err(e) = self.set_conv_reverb_ir_bus(bus_idx, slot_idx, &path, ir_ref) {
-                eprintln!("project-load: conv reverb bus IR '{ir_ref}' not restored: {e}");
-            }
-        } else {
-            eprintln!("project-load: conv reverb bus IR '{ir_ref}' could not be resolved");
-        }
+        let path = self.resolve_conv_reverb_ir_path(ir_ref)
+            .ok_or_else(|| format!("Convolution Reverb IR '{ir_ref}' could not be resolved"))?;
+        self.set_conv_reverb_ir_bus(bus_idx, slot_idx, &path, ir_ref)
+            .map_err(|error| format!("bus Convolution Reverb IR '{ir_ref}' could not be restored: {error}"))
     }
 
     pub(super) fn advance_project_load(&mut self) -> Result<(), String> {
@@ -3376,7 +3298,13 @@ impl App {
                     let saved_color = pending.project.tracks[track_idx].color();
                     let saved_collapsed = pending.project.tracks[track_idx].collapsed();
                     match &pending.project.tracks[track_idx].kind {
-                        ProjectTrackKind::Sampler { sample_path } => {
+                        ProjectTrackKind::Empty => {
+                            self.graph_controller().add_empty_track()?;
+                        }
+                        ProjectTrackKind::Sampler { sample_path: None } => {
+                            self.graph_controller().add_blank_sampler_track()?;
+                        }
+                        ProjectTrackKind::Sampler { sample_path: Some(sample_path) } => {
                             eprintln!(
                                 "project-load: add sampler track index={} path={}",
                                 track_idx, sample_path
@@ -3465,28 +3393,17 @@ impl App {
                                             .or_else(|| {
                                                 saved_pattern_slot
                                                     .and_then(|slot| slot.sample_path.as_ref())
-                                            })
-                                            .ok_or_else(|| {
-                                                format!(
-                                                    "Rack track {} slot {} is a sampler but has no sample_path",
-                                                    track_idx + 1,
-                                                    slot_idx + 1
-                                                )
-                                            })?;
-                                        let asset = self
-                                            .load_project_sample_asset(
-                                                &mut pending.sample_assets,
-                                                Path::new(sample_path),
-                                            )
-                                            .map_err(|error| {
-                                                format!(
-                                                    "Failed to load rack sample '{}' for track {} slot {}: {}",
-                                                    sample_path,
-                                                    track_idx + 1,
-                                                    slot_idx + 1,
-                                                    error
-                                                )
-                                            })?;
+                                            });
+                                        let asset = if let Some(sample_path) = sample_path {
+                                            self.load_project_sample_asset(
+                                                &mut pending.sample_assets, Path::new(sample_path),
+                                            ).map_err(|error| format!(
+                                                "Failed to load rack sample '{}' for track {} slot {}: {error}",
+                                                sample_path, track_idx + 1, slot_idx + 1,
+                                            ))?
+                                        } else {
+                                            self.create_blank_project_sample()?
+                                        };
                                         let sample_name = slot
                                             .sample_name
                                             .clone()
@@ -3495,11 +3412,11 @@ impl App {
                                                     .and_then(|slot| slot.sample_name.clone())
                                             })
                                             .unwrap_or_else(|| asset.decoded_name.clone());
-                                        self.register_loaded_sample_path(
-                                            &sample_name,
-                                            asset.buffer_id,
-                                            PathBuf::from(sample_path),
-                                        );
+                                        if let Some(sample_path) = sample_path {
+                                            self.register_loaded_sample_path(
+                                                &sample_name, asset.buffer_id, PathBuf::from(sample_path),
+                                            );
+                                        }
                                         prepared_sources.push(PreparedRackSlotSource::Sampler(
                                             RackSamplerBuildSpec {
                                                 buffer_id: asset.buffer_id,
@@ -3528,7 +3445,8 @@ impl App {
                                             prepared_customs.len() - 1,
                                         ));
                                     }
-                                    crate::project::ProjectInstrumentType::Modulator
+                                    crate::project::ProjectInstrumentType::Empty
+                                    | crate::project::ProjectInstrumentType::Modulator
                                     | crate::project::ProjectInstrumentType::Rack => {
                                         return Err(format!(
                                             "Rack track {} slot {} has unsupported instrument type",
@@ -3652,13 +3570,13 @@ impl App {
                                     rack_slot,
                                     effect_slot,
                                     saved.ir.as_deref(),
-                                );
+                                )?;
                                 self.restore_filter_table_rack_slot(
                                     track_idx,
                                     rack_slot,
                                     effect_slot,
                                     saved.table.as_deref(),
-                                );
+                                )?;
                                 let graph_slot = self
                                     .state
                                     .pattern
@@ -3693,7 +3611,11 @@ impl App {
                             }
                         }
                     }
-                    if let Some(name) = saved_name {
+                    // Device-less tracks use the current automatic name, but
+                    // an explicitly authored track name always survives loading.
+                    if let Some(name) = saved_name.filter(|_| saved_name_user_authored
+                        || self.graph.track_instrument_types[track_idx] != InstrumentType::Empty)
+                    {
                         self.tracks[track_idx] = name;
                     }
                     self.normalize_track_name_authorship();
@@ -3757,7 +3679,7 @@ impl App {
                             track_idx,
                             BUILTIN_SLOT_COUNT + offset,
                             saved_ir.as_deref(),
-                        );
+                        )?;
                         let saved_table = pending.project.patterns.iter().find_map(|pattern| {
                             pattern.effect_slots
                                 .get(track_idx)
@@ -3768,7 +3690,7 @@ impl App {
                             track_idx,
                             BUILTIN_SLOT_COUNT + offset,
                             saved_table.as_deref(),
-                        );
+                        )?;
                     }
                     pending.phase = super::PendingProjectLoadPhase::AddEffect {
                         track_idx,
@@ -3787,9 +3709,9 @@ impl App {
                     pending.phase = super::PendingProjectLoadPhase::Finalize;
                 } else {
                     let (snapshot, bus_patterns, fallback_count) = self
-                        .project_pattern_into_snapshot(
+                        .project_pattern_into_snapshot_with_policy(
                             pending.project.patterns[pattern_idx].clone(),
-                            &mut pending.sample_assets,
+                            &mut pending.sample_assets, pending.strict_samples,
                         )?;
                     pending.built_patterns.push(snapshot);
                     pending.built_bus_patterns.push(bus_patterns);
@@ -3893,9 +3815,9 @@ impl App {
                 let mut chunk_data = Vec::with_capacity(take.chunks.len());
                 for chunk in take.chunks {
                     let (snapshot, _, fallback_count) =
-                        self.project_pattern_into_snapshot(
+                        self.project_pattern_into_snapshot_with_policy(
                             chunk,
-                            &mut pending.sample_assets,
+                            &mut pending.sample_assets, pending.strict_samples,
                         )?;
                     let data = snapshot.track_pattern_data(track).ok_or_else(|| {
                         format!(
@@ -3924,7 +3846,9 @@ impl App {
             let mut carriers = Vec::with_capacity(sounds.orphan_sounds.len());
             for carrier in sounds.orphan_sounds {
                 let (snapshot, _, fallback_count) = self
-                    .project_pattern_into_snapshot(carrier.data, &mut pending.sample_assets)?;
+                    .project_pattern_into_snapshot_with_policy(
+                        carrier.data, &mut pending.sample_assets, pending.strict_samples,
+                    )?;
                 let data = snapshot.track_pattern_data(track).ok_or_else(|| {
                     format!(
                         "Sound carrier is missing lane data for track {}",
@@ -4130,8 +4054,8 @@ impl App {
             self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
             // Restore a saved Convolution Reverb IR (the default was auto-loaded
             // on create, so only override for a non-default reference).
-            self.restore_conv_reverb_ir_bus(bus_idx, slot_idx, saved_ir.as_deref());
-            self.restore_filter_table_bus(bus_idx, slot_idx, saved_table.as_deref());
+            self.restore_conv_reverb_ir_bus(bus_idx, slot_idx, saved_ir.as_deref())?;
+            self.restore_filter_table_bus(bus_idx, slot_idx, saved_table.as_deref())?;
         }
         let default_bus_snapshot = self.capture_bus_pattern_snapshot();
         self.state
@@ -4376,7 +4300,7 @@ impl App {
                                 }
                             }
                         }
-                        InstrumentType::Modulator | InstrumentType::Rack => {}
+                        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
                     }
                     slot.effect_descriptors = graph_slot.effect_descriptors.clone();
                     slot.custom_effect_names = graph_slot.custom_effect_names.clone();
@@ -4458,6 +4382,15 @@ impl App {
         pattern: ProjectPattern,
         sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
     ) -> Result<(PatternSnapshot, Vec<BusPatternSnapshot>, usize), String> {
+        self.project_pattern_into_snapshot_with_policy(pattern, sample_assets, false)
+    }
+
+    fn project_pattern_into_snapshot_with_policy(
+        &mut self,
+        pattern: ProjectPattern,
+        sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
+        strict_samples: bool,
+    ) -> Result<(PatternSnapshot, Vec<BusPatternSnapshot>, usize), String> {
         let num_tracks = self.tracks.len();
         let mut sample_ids = Vec::with_capacity(num_tracks);
         let mut fallback_count = 0;
@@ -4467,7 +4400,7 @@ impl App {
                     .sample_paths
                     .get(track_idx)
                     .and_then(|path| path.as_ref())
-                    .map(PathBuf::from);
+                    .map(|path| crate::app_paths::resolve_sample_ref(Path::new(path)));
                 let saved_name = pattern
                     .sample_names
                     .get(track_idx)
@@ -4482,6 +4415,11 @@ impl App {
                     continue;
                 }
 
+                if strict_samples && saved_path.as_ref().is_none_or(|path| !path.is_file()) {
+                    return Err(format!("Export cannot reopen sample for track {}: {}",
+                        track_idx + 1, saved_path.as_ref().map(|path| path.display().to_string())
+                            .unwrap_or_else(|| format!("missing path for '{saved_name}'"))));
+                }
                 let resolved_path = saved_path
                     .as_ref()
                     .filter(|path| path.exists())
@@ -5100,6 +5038,88 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effect_asset_restore_rejects_missing_references_for_every_host() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let mut app = App::new(Arc::clone(&engine.state), engine.lg_ptr, engine.sample_rate,
+            engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
+        let missing = format!("__missing-effect-asset-{}__", std::process::id());
+        for result in [
+            app.restore_conv_reverb_ir_track(0, 0, Some(&missing)),
+            app.restore_conv_reverb_ir_bus(0, 0, Some(&missing)),
+            app.restore_conv_reverb_ir_rack_slot_ref(0, 0, 0, Some(&missing)),
+            app.restore_filter_table_track(0, 0, Some(&missing)),
+            app.restore_filter_table_bus(0, 0, Some(&missing)),
+            app.restore_filter_table_rack_slot(0, 0, 0, Some(&missing)),
+        ] {
+            let error = result.unwrap_err();
+            assert!(error.contains(&missing) && error.contains("could not be resolved"), "{error}");
+        }
+        drop(app);
+        unsafe { engine.destroy(); }
+    }
+
+    #[test]
+    fn blank_sampler_project_and_sound_roundtrip_preserves_unassigned_sources() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        assert!(app.capture_sampler_source_path(i32::MAX, "unregistered").is_err());
+        app.register_sample_path(&app.tracks[0].clone(), PathBuf::from("/unrelated-same-name.wav"));
+        assert_eq!(app.capture_sampler_source_path(app.graph.track_buffer_ids[0], &app.tracks[0]).unwrap(), None);
+        assert!(app.sampler_path_for_track(0).is_none());
+        app.sample_path_registry.clear();
+        let rack = app.graph_controller().add_empty_layer_rack_track().unwrap();
+        let buffer = app.create_blank_sampler_buffer().unwrap();
+        app.graph_controller().add_sampler_slot_to_rack_buffer(rack, buffer, 48_000, "").unwrap();
+        app.state.pattern.patterns[0].set_step_active(7, true);
+        let snapshot = app.capture_project("blank-samplers").unwrap();
+        assert!(matches!(snapshot.tracks[0].kind, ProjectTrackKind::Sampler { sample_path: None }));
+        assert!(snapshot.patterns[0].sample_paths[0].is_none());
+        assert!(snapshot.patterns[0].sample_names[0].is_empty());
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        assert!(encoded["tracks"][0].get("sample_path").is_none());
+        let restored: ProjectFile = serde_json::from_value(encoded).unwrap();
+        app.queue_loaded_project("blank-samplers", restored).unwrap();
+        for _ in 0..100 {
+            if !app.has_pending_project_load() { break; }
+            app.advance_pending_project_load().unwrap();
+            unsafe { crate::audiograph::prepare_graph_for_render(lg.0); }
+        }
+        assert!(!app.has_pending_project_load());
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
+        assert!(app.sampler_path_for_track(0).is_none());
+        assert!(app.state.pattern.patterns[0].is_active(7));
+        let saved = app.capture_project("blank-samplers").unwrap();
+        assert!(matches!(saved.tracks[0].kind, ProjectTrackKind::Sampler { sample_path: None }));
+        let ProjectTrackKind::Rack { slots, .. } = &saved.tracks[rack].kind else { panic!("missing rack") };
+        assert!(slots[0].sample_path.is_none());
+        for track in [0, rack] {
+            let sound = app.capture_track_as_container_preset(
+                track, "Blank sampler", Vec::new(), String::new(),
+            ).unwrap();
+            let added = app.add_track_from_sound_preset(sound, "Blank sampler").unwrap();
+            assert_eq!(app.graph.track_instrument_types[added], InstrumentType::Rack);
+        }
+        let mut output = [0.0_f32; 1024];
+        unsafe { lg.process_next_block(output.as_mut_ptr(), 512); }
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        // An explicit missing file must not be reinterpreted as a blank sampler.
+        let mut missing = saved;
+        missing.tracks[0].kind = ProjectTrackKind::Sampler {
+            sample_path: Some("/missing-eseq-sampler-roundtrip.wav".into()),
+        };
+        app.queue_loaded_project("missing-sample", missing).unwrap();
+        app.advance_pending_project_load().unwrap();
+        assert!(app.advance_pending_project_load().unwrap_err().contains("Failed to resolve sample"));
+        unsafe {
+            crate::audiograph::engine_stop_workers();
+            crate::audiograph::destroy_live_graph(lg.0);
+        }
+    }
 
     /// Bead eseq-jo7.21: a project switch used to leave the outgoing
     /// project's jaki sequencers, process instances and channels registered,
@@ -5743,7 +5763,7 @@ mod tests {
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Sampler {
-                    sample_path: "samples/kick.wav".to_string(),
+                    sample_path: Some("samples/kick.wav".to_string()),
                 },
             }],
             custom_effects: vec![custom_effects],

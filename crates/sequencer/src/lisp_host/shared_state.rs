@@ -398,9 +398,26 @@ pub struct ScratchControlRuntime {
     #[cfg(test)]
     pub(super) process_run_cache_enabled: bool,
     pub(super) runtime_globals: Vec<String>,
+    first_invocation_error: Option<String>,
 }
 
 impl ScratchControlRuntime {
+    /// Preserve the first failed musical invocation even when a live caller
+    /// recovers with an empty emission. The offline driver checks this before
+    /// rendering; the single retained error keeps recovery paths bounded.
+    pub(crate) fn take_invocation_error(&mut self) -> Option<String> {
+        self.first_invocation_error.take()
+    }
+
+    pub(super) fn record_invocation_result<T>(
+        &mut self, context: &str, result: Result<T, String>,
+    ) -> Result<T, String> {
+        if let Err(error) = &result {
+            self.first_invocation_error.get_or_insert_with(|| format!("{context}: {error}"));
+        }
+        result
+    }
+
     pub fn new(
         state: Arc<crate::sequencer::SequencerState>,
         effect_descriptors: Vec<Vec<EffectDescriptor>>,
@@ -547,6 +564,7 @@ impl ScratchControlRuntime {
             #[cfg(test)]
             process_run_cache_enabled: true,
             runtime_globals: Vec::new(),
+            first_invocation_error: None,
         };
         this.install_accumulator_macro();
         this.install_midi_fx_macro();
@@ -704,6 +722,31 @@ impl ScratchControlRuntime {
         effect_params: Vec<ScheduledEffectParam>,
         instrument_params: Vec<ScheduledInstrumentParam>,
     ) -> Result<AccumulatorEvalOutput, String> {
+        let result = self.invoke_accumulator_inner(
+            registry_index, step, value, resolved, chord, chord_durations, chord_step_transpose,
+            note_spans, step_beats, num_steps, effect_slots, instrument_slot, effect_params,
+            instrument_params,
+        );
+        self.record_invocation_result("accumulator", result)
+    }
+
+    fn invoke_accumulator_inner(
+        &mut self,
+        registry_index: usize,
+        step: usize,
+        value: f32,
+        resolved: ResolvedStep,
+        chord: Vec<f32>,
+        chord_durations: Vec<f32>,
+        chord_step_transpose: f32,
+        note_spans: Option<Vec<AccumulatorNoteSpan>>,
+        step_beats: f32,
+        num_steps: usize,
+        effect_slots: Vec<EffectSlotSnapshot>,
+        instrument_slot: EffectSlotSnapshot,
+        effect_params: Vec<ScheduledEffectParam>,
+        instrument_params: Vec<ScheduledInstrumentParam>,
+    ) -> Result<AccumulatorEvalOutput, String> {
         let callback = self
             .accumulators
             .lock()
@@ -812,6 +855,34 @@ impl ScratchControlRuntime {
     }
 
     pub fn invoke_midi_fx_with_arp_phase_beats(
+        &mut self,
+        registry_index: usize,
+        track: usize,
+        step: usize,
+        value: f32,
+        resolved: ResolvedStep,
+        chord: Vec<f32>,
+        chord_durations: Vec<f32>,
+        chord_step_transpose: f32,
+        note_spans: Option<Vec<AccumulatorNoteSpan>>,
+        midi_fx_slot: EffectSlotSnapshot,
+        arp_phase_beats: f32,
+        step_beats: f32,
+        num_steps: usize,
+        effect_slots: Vec<EffectSlotSnapshot>,
+        instrument_slot: EffectSlotSnapshot,
+        effect_params: Vec<ScheduledEffectParam>,
+        instrument_params: Vec<ScheduledInstrumentParam>,
+    ) -> Result<AccumulatorEvalOutput, String> {
+        let result = self.invoke_midi_fx_with_arp_phase_beats_inner(
+            registry_index, track, step, value, resolved, chord, chord_durations, chord_step_transpose,
+            note_spans, midi_fx_slot, arp_phase_beats, step_beats, num_steps, effect_slots,
+            instrument_slot, effect_params, instrument_params,
+        );
+        self.record_invocation_result("midi fx with arp phase beats", result)
+    }
+
+    fn invoke_midi_fx_with_arp_phase_beats_inner(
         &mut self,
         registry_index: usize,
         track: usize,
@@ -998,6 +1069,7 @@ impl ScratchControlRuntime {
             #[cfg(test)]
             process_run_cache_enabled: true,
             runtime_globals: Vec::new(),
+            first_invocation_error: None,
         };
         this.install_accumulator_macro();
         this.install_midi_fx_macro();
@@ -1146,6 +1218,17 @@ impl ScratchControlRuntime {
         registry_index: usize,
         input: crate::generator::GeneratorTickInput,
     ) -> Result<crate::generator::GeneratorTickResult, String> {
+        let result = self.invoke_sequencer_tick_inner(
+            registry_index, input,
+        );
+        self.record_invocation_result("sequencer tick", result)
+    }
+
+    fn invoke_sequencer_tick_inner(
+        &mut self,
+        registry_index: usize,
+        input: crate::generator::GeneratorTickInput,
+    ) -> Result<crate::generator::GeneratorTickResult, String> {
         let (id, callback) = self
             .sequencers
             .lock()
@@ -1201,6 +1284,16 @@ impl ScratchControlRuntime {
     }
 
     pub fn invoke_process_run(
+        &mut self,
+        invocation: crate::process::ProcessRunInvocation,
+    ) -> Result<crate::process::ProcessRunResult, String> {
+        let result = self.invoke_process_run_inner(
+            invocation,
+        );
+        self.record_invocation_result("process run", result)
+    }
+
+    fn invoke_process_run_inner(
         &mut self,
         invocation: crate::process::ProcessRunInvocation,
     ) -> Result<crate::process::ProcessRunResult, String> {
@@ -1309,6 +1402,19 @@ impl ScratchControlRuntime {
     }
 
     pub fn invoke_process_ratchet_shape(
+        &mut self,
+        shape_context: &mut crate::process::ProcessRatchetShapeContext,
+        shape: &EValue,
+        index: u32,
+        event: crate::process::ProcessRatchetEvent,
+    ) -> Result<crate::process::ProcessRatchetEvent, String> {
+        let result = self.invoke_process_ratchet_shape_inner(
+            shape_context, shape, index, event,
+        );
+        self.record_invocation_result("process ratchet shape", result)
+    }
+
+    fn invoke_process_ratchet_shape_inner(
         &mut self,
         shape_context: &mut crate::process::ProcessRatchetShapeContext,
         shape: &EValue,

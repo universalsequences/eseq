@@ -56,8 +56,8 @@ impl GraphController<'_> {
                         ));
                     }
                 }
-                InstrumentType::Rack => {
-                    return Err("Nested rack layers are not supported".to_string());
+                InstrumentType::Empty | InstrumentType::Rack => {
+                    return Err("Empty or nested rack layers are not supported".to_string());
                 }
             }
         }
@@ -163,8 +163,8 @@ impl GraphController<'_> {
                         first_graph_node_identity(&engine.modulator_ids),
                     )
                 }
-                InstrumentType::Rack => {
-                    return Err("Nested rack layers are not supported".to_string());
+                InstrumentType::Empty | InstrumentType::Rack => {
+                    return Err("Empty or nested rack layers are not supported".to_string());
                 }
             };
 
@@ -385,8 +385,8 @@ impl GraphController<'_> {
                             slot_pan_id: mixer.slot_pan_id,
                         });
                     }
-                    InstrumentType::Rack => {
-                        return Err("Nested rack layers are not supported".to_string());
+                    InstrumentType::Empty | InstrumentType::Rack => {
+                        return Err("Empty or nested rack layers are not supported".to_string());
                     }
                 }
             }

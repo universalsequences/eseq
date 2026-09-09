@@ -1,3 +1,5 @@
+#[path = "poseidon_ui_tests.rs"]
+mod poseidon_ui_tests;
 #[path = "drift_waveform_tests.rs"]
 mod drift_waveform_tests;
 
@@ -14806,6 +14808,149 @@ mod drift_waveform_tests;
         );
     }
 
+    // Bead eseq-2k9p.21: the piano-roll automation lane publishes one point
+    // per triggered step for the selected parameter — its lock, or the gray
+    // base value in force without one — plus the picker rows (step params
+    // always, device params only once they carry a lock somewhere).
+    #[test]
+    fn piano_roll_automation_publishes_step_params_and_device_locks() {
+        use super::super::piano_roll::{
+            build_piano_roll_automation_params_value, build_piano_roll_automation_value,
+            PianoRollLanes,
+        };
+        let instrument = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = instrument
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let effect = sequencer::effects::EffectDescriptor::builtin_filter();
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![vec![sequencer::effects::EffectSlotState::new(&effect, 0)]],
+        ));
+        state.pattern.track_params[0].set_num_steps(16);
+        state.pattern.instrument_slots[0].apply_descriptor(&instrument, 0);
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            state.clone(),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app.graph.instrument_descriptors = vec![instrument.clone()];
+        app.graph.effect_descriptors = vec![vec![effect.clone()]];
+
+        state.pattern.patterns[0].set_step_active(0, true);
+        state.pattern.patterns[0].set_step_active(4, true);
+        state.pattern.step_data[0].set(4, StepParam::Velocity, 0.5);
+        state.pattern.step_data[0].set(4, StepParam::Duration, 2.0);
+
+        let lanes = PianoRollLanes::live(&state, 0);
+
+        let params = value_list_maps(&build_piano_roll_automation_params_value(&app, &state, 0));
+        assert!(
+            params
+                .iter()
+                .all(|row| value_map_string(row, "target").as_deref() == Some("step-param")),
+            "no device lock yet, so only step params are offered: {params:?}"
+        );
+        assert_eq!(
+            value_map_string(&params[1], "key").as_deref(),
+            Some("step-param:1"),
+            "velocity is the default lane key"
+        );
+
+        let lane = build_piano_roll_automation_value(&app, &state, &lanes, "step-param:1");
+        let Value::Map(lane_map) = &lane else {
+            panic!("lane is a map")
+        };
+        assert_eq!(value_map_string(&lane_map, "label").as_deref(), Some("Velocity"));
+        assert_eq!(value_map_number(&lane_map, "max"), Some(1.0));
+        let points = value_list_maps(&lane_map["points"].borrow().clone());
+        assert_eq!(points.len(), 2, "one point per triggered step: {points:?}");
+        assert_eq!(value_map_number(&points[0], "step"), Some(0.0));
+        assert_eq!(
+            value_map_number(&points[0], "value"),
+            Some(StepParam::Velocity.default_value() as f64)
+        );
+        assert_eq!(
+            value_map_bool(&points[0], "locked"),
+            Some(true),
+            "step params always draw in the track color"
+        );
+        assert_eq!(value_map_number(&points[1], "value"), Some(0.5));
+        assert_eq!(value_map_number(&points[1], "start"), Some(4.0));
+        assert_eq!(
+            value_map_number(&points[1], "end"),
+            Some(6.0),
+            "the bar spans the note's duration"
+        );
+
+        // A device lock on step 4: step 0 shows the gray base value, step 4
+        // the lock, and an off-step lock on 9 holds as a bare point.
+        state.pattern.instrument_slots[0].set_plock(4, cutoff_idx, 900.0);
+        state.pattern.instrument_slots[0].set_plock(9, cutoff_idx, 300.0);
+        let params = value_list_maps(&build_piano_roll_automation_params_value(&app, &state, 0));
+        let cutoff_row = params
+            .iter()
+            .find(|row| value_map_string(row, "key").as_deref() == Some(&format!("instrument:{cutoff_idx}")))
+            .expect("locked cutoff joins the picker");
+        assert_eq!(value_map_string(cutoff_row, "label").as_deref(), Some("cutoff"));
+
+        let lane = build_piano_roll_automation_value(
+            &app,
+            &state,
+            &lanes,
+            &format!("instrument:{cutoff_idx}"),
+        );
+        let Value::Map(lane_map) = &lane else {
+            panic!("lane is a map")
+        };
+        assert_eq!(value_map_number(&lane_map, "param-idx"), Some(cutoff_idx as f64));
+        let points = value_list_maps(&lane_map["points"].borrow().clone());
+        assert_eq!(points.len(), 3, "{points:?}");
+        let cutoff = &instrument.params[cutoff_idx];
+        assert_eq!(
+            value_map_bool(&points[0], "locked"),
+            Some(false),
+            "step 0 carries no lock: base value drawn gray"
+        );
+        assert_eq!(
+            value_map_number(&points[0], "value"),
+            Some(cutoff.stored_to_user(state.pattern.instrument_slots[0].defaults.get(cutoff_idx)) as f64)
+        );
+        assert_eq!(value_map_bool(&points[1], "locked"), Some(true));
+        assert_eq!(
+            value_map_number(&points[1], "value"),
+            Some(cutoff.stored_to_user(900.0) as f64)
+        );
+        assert_eq!(value_map_number(&points[2], "step"), Some(9.0));
+        assert_eq!(value_map_bool(&points[2], "active"), Some(false));
+
+        // A stale key (lock cleared) falls back to velocity instead of a
+        // blank lane.
+        state.pattern.instrument_slots[0].plocks.clear_param(4, cutoff_idx);
+        state.pattern.instrument_slots[0].plocks.clear_param(9, cutoff_idx);
+        let lane = build_piano_roll_automation_value(&app, &state, &lanes, "instrument:9999");
+        let Value::Map(lane_map) = &lane else {
+            panic!("lane is a map")
+        };
+        assert_eq!(value_map_string(&lane_map, "key").as_deref(), Some("step-param:1"));
+    }
+
     #[test]
     fn track_plock_any_rows_cover_rack_slot_effect_params() {
         let app = test_app_with_rack_panel_and_slot_fx();
@@ -15536,6 +15681,8 @@ mod drift_waveform_tests;
                     test_list(vec![Value::Map(test_instrument_map())]),
                 ),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
+                ("piano-roll-automation-params", Value::List(vec![])),
+                ("piano-roll-automation", Value::Nil),
                 ("piano-roll-items", Value::List(vec![])),
                 ("piano-roll-selection", Value::List(vec![])),
                 ("sidebar-kind", Value::String("sampler".to_string())),
@@ -15643,6 +15790,7 @@ mod drift_waveform_tests;
             true,
         );
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
+        editor.runtime_mut().register_reactive("EXPORT", vec![], true);
         for step in 0..16 {
             editor.runtime_mut().set_reactive(
                 "SEQ",
@@ -29729,6 +29877,79 @@ mod drift_waveform_tests;
     }
 
     #[test]
+    fn metal_seq_empty_track_double_click_chooses_device_without_changing_track() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive("SEQ", "track-instrument-types",
+            build_string_list(&["empty".to_string(), "sampler".to_string()]));
+        editor.runtime_mut().eval_str(
+            "(set! eseq.seq-core-state/samples-sidebar-visible false)"
+        ).unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor.buffers.iter().find(|buffer| buffer.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 30);
+        let layout = editor.widget_layout().unwrap();
+        for key in ["/select-0", "/track-name-label-0", "/step-cell-0-0"] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key).unwrap();
+            assert!(node.rect.col.is_finite() && node.rect.row.is_finite());
+            assert!(node.rect.width.is_finite() && node.rect.width > 0.0);
+            assert!(node.rect.height.is_finite() && node.rect.height > 0.0);
+            assert!(node.rect.col >= 0.0 && node.rect.row >= 0.0);
+            assert!(node.rect.col + node.rect.width <= 140.0);
+            assert!(node.rect.row + node.rect.height <= 30.0);
+        }
+        let label = find_layout_node_by_stable_key_suffix(&layout, "/track-name-label-0").unwrap();
+        assert_eq!(label.props.get("icon"), Some(&Value::Keyword("midi".to_string())));
+        let select = find_layout_node_by_stable_key_suffix(&layout, "/select-0").unwrap();
+        let callback = select.props["on-double-click"].clone();
+        editor.drain_host_commands();
+        editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
+            Some(Value::String("instruments".to_string())));
+        assert_eq!(editor.runtime_mut().eval_str("eseq.seq-core-state/samples-sidebar-visible").unwrap(),
+            Some(Value::Bool(true)));
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().all(|command| matches!(command,
+            eseqlisp::host::HostCommand::Custom { name, .. } if name == "refresh-mixer-ui"
+        )), "opening the picker must only refresh the layout: {commands:?}");
+
+        editor.runtime_mut().eval_str("(eseq.browser/activate-instrument \"Synths/Digi Wave\")").unwrap();
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "swap-track-instrument");
+                let Value::Map(payload) = payload else { panic!("expected device load payload") };
+                assert_eq!(value_map_number(payload, "track"), Some(0.0));
+            }
+            other => panic!("expected device load, got {other:?}"),
+        }
+        let empty_zone = find_layout_node_by_stable_key_suffix(&layout, "/new-track-drop-zone").unwrap();
+        editor.runtime_mut().invoke(empty_zone.props["on-double-click"].clone(), vec![Value::Nil]).unwrap();
+        assert!(matches!(editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, .. }] if name == "add-track-empty"));
+
+        let mixer_id = editor.buffers.iter().find(|buffer| buffer.name == "*mixer*").unwrap().id;
+        editor.set_active_buffer(mixer_id);
+        editor.set_layout_viewport(180, 16);
+        let mixer_layout = editor.widget_layout().unwrap();
+        let label = find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-0").unwrap();
+        assert_finite_nonzero_rect(label, "empty track mixer header");
+        assert_eq!(label.props.get("icon"), Some(&Value::Keyword("midi".to_string())));
+        let badge = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-strip-label-0").unwrap();
+        let callback = badge.props["on-double-click"].clone();
+        editor.runtime_mut().eval_str(
+            "(eseq.seq-panels/seq-open-piano-roll-bottom-for-track 0) (set! sbrowser-tab \"samples\")"
+        ).unwrap();
+        editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
+        assert_eq!(editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
+            Some(Value::String("instruments".to_string())),
+            "empty mixer headers should choose a device, including from piano roll");
+    }
+
+    #[test]
     fn metal_seq_track_name_double_click_always_shows_lower_fx_mode() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let sequencer_id = editor
@@ -29936,6 +30157,16 @@ mod drift_waveform_tests;
             remembered_split_ratio(&editor.tile_root, "sequencer-lower-panel:*piano-roll*")
                 .expect("piano-roll lower-panel split should have a remembered identity");
 
+        // A header double-click must leave piano-roll mode even if another
+        // track is selected (or the single-click selection has not synchronized).
+        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(1.0));
+        let selected_track = Rc::new(RefCell::new(None));
+        let selected_capture = Rc::clone(&selected_track);
+        editor.runtime_mut().register_native("seq-set-track", move |args, _ctx| {
+            *selected_capture.borrow_mut() = args.first().cloned();
+            Ok(Value::Bool(true))
+        });
+
         editor
             .runtime_mut()
             .invoke(
@@ -29953,6 +30184,8 @@ mod drift_waveform_tests;
             Some(Value::String("*fx*".to_string())),
             "second mixer badge double-click should restore FX"
         );
+        assert_eq!(*selected_track.borrow(), Some(Value::Number(0.0)),
+            "FX must belong to the double-clicked track");
 
         editor
             .runtime_mut()
@@ -44464,22 +44697,23 @@ mod drift_waveform_tests;
             drift_ui,
         )));
         let mut drift_inst = test_instrument_map();
-        drift_inst.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![
-                Value::Map(test_param_map("osc1_wave", 0, 4.0, 0.0, 6.0)),
-                Value::Map(test_param_map("lfo_rate_hz", 1, 1.2, 0.01, 30.0)),
-                Value::Map(test_param_map("lp_freq", 2, 2500.0, 20.0, 18000.0)),
-                Value::Map(test_param_map("mm2_amt", 7, 0.0, -1.0, 1.0)),
-                Value::Map(test_param_map("mm3_amt", 3, 0.0, -1.0, 1.0)),
-                Value::Map(test_param_map("volume_db", 4, -12.0, -36.0, 6.0)),
-                Value::Map(test_param_map("glide_ms", 5, 0.0, 0.0, 1000.0)),
-                Value::Map(test_param_map("drift", 6, 0.3, 0.0, 1.0)),
-                Value::Map(test_param_map("lp_res", 8, 0.2, 0.0, 1.0)),
-                Value::Map(test_param_map("filter_drive", 9, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("hp_freq", 10, 20.0, 20.0, 4000.0)),
-            ]))),
-        );
+        let dsp = read_factory_source("instruments/Synths/Digi Drift/dsp.lisp").unwrap();
+        let mut bindings = Vec::new();
+        let params = dsp.lines().map(str::trim).filter(|line| line.starts_with("(param "))
+            .enumerate().map(|(index, line)| {
+                let words: Vec<_> = line.trim_end_matches(')').split_whitespace().collect();
+                let number = |key| {
+                    let pos = words.iter().position(|word| *word == key).unwrap();
+                    words[pos + 1].parse::<f64>().unwrap()
+                };
+                let value = number("@default");
+                let mut param = test_param_map(words[1], index, value, number("@min"), number("@max"));
+                let field = format!("drift-test-{}", words[1]);
+                param.insert("value-field".into(), Rc::new(RefCell::new(Value::String(field.clone()))));
+                bindings.push((field, Value::Number(value)));
+                Value::Map(param)
+            }).collect();
+        drift_inst.insert("synth".into(), Rc::new(RefCell::new(test_list(params))));
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 18);
@@ -44499,6 +44733,9 @@ mod drift_waveform_tests;
             ],
             true,
         );
+        for (field, value) in bindings {
+            editor.runtime_mut().set_reactive("SEQ", &field, value);
+        }
         editor
             .runtime_mut()
             .eval_str(
@@ -44552,6 +44789,81 @@ mod drift_waveform_tests;
             adsr_editor.rect
         );
 
+        fn assert_visible(node: &eseqlisp::layout::LayoutNode, panel: &eseqlisp::layout::LayoutNode) {
+            if matches!(node.widget_type.as_str(), "knob-number" | "number-picker" | "dropdown" |
+                "adsr-editor" | "response-curve-editor" | "lfo-curve" | "drift-waveform") {
+                assert_finite_nonzero_rect(node, &node.widget_type);
+                assert!(node.rect.row >= panel.rect.row
+                    && node.rect.row + node.rect.height <= panel.rect.row + panel.rect.height + 0.001
+                    && node.rect.col >= panel.rect.col
+                    && node.rect.col + node.rect.width <= panel.rect.col + panel.rect.width + 0.001,
+                    "{} outside panel: {:?} / {:?}", node.widget_type, node.rect, panel.rect);
+            }
+            for child in &node.children { assert_visible(child, panel); }
+        }
+        for section in [0, 1] {
+            editor.runtime_mut().eval_str(&format!(r#"
+                (do
+                  (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+                  ((eseq.effects.custom-ui-sections/ui-section-select-callback {section}) false))
+            "#)).unwrap();
+            editor.refresh_runtime_side_effects();
+            let current = editor.widget_layout().unwrap();
+            let panel = find_layout_node_by_debug_name(&current, "instrument-panel").unwrap();
+            assert_visible(panel, panel);
+            let env = find_layout_node_by_debug_name(&current, "drift-envelope").unwrap();
+            for stage in ["attack", "decay", "sustain", "release"] {
+                let Value::ReactiveRef { field, .. } = &env.props[stage] else { panic!("bound {stage}"); };
+                assert_eq!(field, &format!("drift-test-env{}_{stage}", section + 1));
+            }
+            editor.drain_host_commands();
+            let values = [("attack", 12.0), ("decay", 230.0), ("sustain", 0.45), ("release", 340.0)];
+            let event = Value::Map(values.into_iter().map(|(key, value)|
+                (key.to_string(), Rc::new(RefCell::new(Value::Number(value))))).collect());
+            editor.runtime_mut().invoke(env.props["on-change"].clone(), vec![event]).unwrap();
+            let commands = editor.drain_host_commands();
+            let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else {
+                panic!("ADSR parameter batch: {commands:?}");
+            };
+            assert_eq!(name, "set-instrument-param-batch");
+            let updates = payload["updates"].borrow();
+            let Value::List(updates) = &*updates else { panic!("ADSR updates"); };
+            assert_eq!(updates.len(), 4);
+            for (update, (stage, value)) in updates.iter().zip(values) {
+                let update = update.borrow();
+                let Value::Map(update) = &*update else { panic!("ADSR update"); };
+                let param = format!("env{}_{stage}", section + 1);
+                let index = dsp.lines().map(str::trim).filter(|line| line.starts_with("(param "))
+                    .position(|line| line.split_whitespace().nth(1) == Some(param.as_str())).unwrap();
+                assert_eq!(*update["param-idx"].borrow(), Value::Number(index as f64));
+                assert_eq!(*update["value"].borrow(), Value::Number(value));
+            }
+            for param in ["osc1_on", "osc2_on", "osc1_route", "osc2_route", "noise_route"] {
+                let switch = find_layout_node_by_debug_name(&current, &format!("drift-switch-{param}")).unwrap();
+                editor.drain_host_commands();
+                editor.runtime_mut().invoke(switch.props["on-click"].clone(),
+                    vec![Value::Number(0.0), Value::Number(0.0), Value::Nil]).unwrap();
+                let commands = editor.drain_host_commands();
+                let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else {
+                    panic!("switch parameter edit: {commands:?}");
+                };
+                assert_eq!(name, "set-instrument-param");
+                let index = dsp.lines().map(str::trim).filter(|line| line.starts_with("(param "))
+                    .position(|line| line.split_whitespace().nth(1) == Some(param)).unwrap();
+                assert_eq!(*payload["param-idx"].borrow(), Value::Number(index as f64));
+                assert_eq!(*payload["value"].borrow(), Value::Number(0.0));
+            }
+            let curve = find_layout_node_by_debug_name(&current, "drift-filter-response").unwrap();
+            let Value::List(bands) = &curve.props["bands"] else { panic!("filter bands"); };
+            assert_eq!(bands.len(), 2);
+            for name in ["mm1_src", "mm1_dest",
+                "mm1_amt", "mm2_src", "mm2_dest", "mm2_amt", "env2_mode", "cyc_rate_hz",
+                "cyc_tilt", "cyc_hold", "pitch_mod1_src", "pitch_mod2_src", "vel_to_vol"] {
+                let control = find_stable_key_suffix(&current, name).unwrap_or_else(|| panic!("missing {name}"));
+                assert_finite_nonzero_rect(control, name);
+            }
+        }
+
         for suffix in suffixes {
             let node = find_stable_key_suffix(&layout, suffix)
                 .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
@@ -44584,7 +44896,7 @@ mod drift_waveform_tests;
             node.children.iter().find_map(|child| find_param(child, suffix))
         }
         fn assert_controls_visible(node: &eseqlisp::layout::LayoutNode, panel: &eseqlisp::layout::LayoutNode) {
-            if matches!(node.widget_type.as_str(), "number-picker" | "knob-number" | "dropdown") {
+            if matches!(node.widget_type.as_str(), "number-picker" | "knob-number" | "dropdown" | "response-curve-editor" | "adsr-editor" | "lfo-curve") {
                 assert!(node.rect.width > 0.0 && node.rect.height > 0.0);
                 assert!(node.rect.row >= panel.rect.row
                     && node.rect.row + node.rect.height <= panel.rect.row + panel.rect.height
@@ -44646,6 +44958,12 @@ mod drift_waveform_tests;
         // The initial detail is Global, and each routing button applies the
         // complete configuration as one undoable parameter batch.
         let layout = editor.widget_layout().expect("default Heat layout");
+        for prefix in ["filter1", "filter2"] {
+            let curve = find_layout_node_by_debug_name(&layout, &format!("heat-{prefix}-response"))
+                .expect("persistent filter response");
+            assert_eq!(curve.widget_type, "response-curve-editor");
+            assert_finite_nonzero_rect(curve, prefix);
+        }
         for name in ["unison_voices", "unison_detune_cents", "unison_delay_ms", "unison_spread",
             "glide_mode", "glide_rate_mode", "glide_time_ms", "octave", "tune_semitones",
             "detune_cents", "stretch_cents", "tuning_error_cents", "bend_range_semitones",
@@ -44658,6 +44976,118 @@ mod drift_waveform_tests;
             "filter1_to_filter2", "filter1_enabled", "filter2_enabled", "amp1_enabled", "amp2_enabled"];
         let param_index = |name: &str| dsp.lines().filter(|line| line.starts_with("(param "))
             .position(|line| line.split_whitespace().nth(1) == Some(name)).unwrap() as f64;
+        // Every DSP-supported unison count and the continuous controls retain
+        // the normal scoped host parameter route.
+        for (param, input, expected) in [
+            ("unison_voices", Value::String("Off".into()), 1.0),
+            ("unison_voices", Value::String("2".into()), 2.0),
+            ("unison_voices", Value::String("3".into()), 3.0),
+            ("unison_voices", Value::String("4".into()), 4.0),
+            ("unison_detune_cents", Value::Number(23.0), 23.0),
+            ("unison_delay_ms", Value::Number(12.0), 12.0),
+            ("unison_spread", Value::Number(0.8), 0.8),
+        ] {
+            let control = find_param(&layout, param).unwrap();
+            let kind = if param == "unison_voices" { "dropdown" } else { "number-picker" };
+            let control = find_layout_node_by_widget_type(control, kind).unwrap();
+            assert!(matches!(control.props.get(if kind == "dropdown" { "value-index" } else { "value" }),
+                Some(Value::ReactiveRef { .. })));
+            editor.drain_host_commands();
+            editor.runtime_mut().invoke(control.props["on-change"].clone(), vec![input]).unwrap();
+            let commands = editor.drain_host_commands();
+            let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else {
+                panic!("unison parameter command: {commands:?}");
+            };
+            assert_eq!(name, "set-instrument-param");
+            assert_eq!(*payload["param-idx"].borrow(), Value::Number(param_index(param)));
+            assert_eq!(*payload["value"].borrow(), Value::Number(expected));
+        }
+        for prefix in ["filter1", "filter2"] {
+            for (mode, family, stages, q_power) in [
+                (0, "lowpass", 1, 1.0), (1, "lowpass", 2, 0.5),
+                (2, "bandpass", 1, 1.0), (3, "bandpass", 2, 1.0),
+                (4, "notch", 1, 1.0), (5, "notch", 2, 1.0),
+                (6, "highpass", 1, 1.0), (7, "highpass", 2, 0.5),
+            ] {
+                editor.runtime_mut().set_reactive("SEQ", &format!("heat-test-{prefix}_mode"), Value::Number(mode as f64));
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let current = editor.widget_layout().unwrap();
+                let curve = find_layout_node_by_debug_name(&current, &format!("heat-{prefix}-response")).unwrap();
+                let Value::List(bands) = &curve.props["bands"] else { panic!("filter bands"); };
+                assert_eq!(bands.len(), stages);
+                for band in bands {
+                    let band = band.borrow();
+                    let Value::Map(band) = &*band else { panic!("filter band"); };
+                    assert_eq!(*band["type"].borrow(), Value::String(family.into()));
+                    assert_eq!(*band["q-curve-power"].borrow(), Value::Number(q_power));
+                    assert_eq!(*band["q-taper"].borrow(), Value::Keyword("log".into()));
+                    for (prop, param) in [("freq", "cutoff_hz"), ("q", "q")] {
+                        let binding = band[prop].borrow();
+                        let Value::ReactiveRef { field, .. } = &*binding else { panic!("bound {prop}"); };
+                        assert_eq!(field, &format!("heat-test-{prefix}_{param}"));
+                    }
+                }
+            }
+            let current = editor.widget_layout().unwrap();
+            let curve = find_layout_node_by_debug_name(&current, &format!("heat-{prefix}-response")).unwrap();
+            for (event_type, commit) in [("change-band", false), ("commit-band", true)] {
+                let event = Value::Map([
+                    ("type", Value::Keyword(event_type.into())),
+                    ("id", Value::Number(0.0)), ("freq", Value::Number(2400.0)), ("q", Value::Number(2.0)),
+                ].into_iter().map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(value)))).collect());
+                editor.drain_host_commands();
+                editor.runtime_mut().invoke(curve.props["on-action"].clone(), vec![event]).unwrap();
+                let commands = editor.drain_host_commands();
+                let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else {
+                    panic!("filter response batch: {commands:?}");
+                };
+                assert_eq!(name, "set-instrument-param-batch");
+                assert_eq!(*payload["commit"].borrow(), Value::Bool(commit));
+                let updates = payload["updates"].borrow();
+                let Value::List(updates) = &*updates else { panic!("filter updates"); };
+                assert_eq!(updates.len(), 2);
+                for (update, (suffix, expected)) in updates.iter().zip([("cutoff_hz", 2400.0), ("q", 2.0)]) {
+                    let update = update.borrow();
+                    let Value::Map(update) = &*update else { panic!("filter update"); };
+                    assert_eq!(*update["param-idx"].borrow(), Value::Number(param_index(&format!("{prefix}_{suffix}"))));
+                    assert_eq!(*update["value"].borrow(), Value::Number(expected));
+                }
+            }
+        }
+        // In Follow mode the graph edits the octave offset, not the unused
+        // independent Filter 2 cutoff. Changes to Filter 1 redraw this graph.
+        for (param, value) in [("filter2_follow", 1.0), ("filter1_cutoff_hz", 1000.0),
+            ("filter2_offset_octaves", 1.0)] {
+            editor.runtime_mut().set_reactive("SEQ", &format!("heat-test-{param}"), Value::Number(value));
+        }
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let followed = editor.widget_layout().unwrap();
+        let curve = find_layout_node_by_debug_name(&followed, "heat-filter2-response").unwrap();
+        let Value::List(bands) = &curve.props["bands"] else { panic!("follow bands"); };
+        let band = bands[0].borrow();
+        let Value::Map(band) = &*band else { panic!("follow band"); };
+        assert_eq!(*band["freq"].borrow(), Value::Number(2000.0));
+        let event = Value::Map([
+            ("type", Value::Keyword("commit-band".into())),
+            ("id", Value::Number(0.0)), ("freq", Value::Number(4000.0)), ("q", Value::Number(1.0)),
+        ].into_iter().map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(value)))).collect());
+        editor.drain_host_commands();
+        editor.runtime_mut().invoke(curve.props["on-action"].clone(), vec![event]).unwrap();
+        let commands = editor.drain_host_commands();
+        let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else {
+            panic!("follow curve command: {commands:?}");
+        };
+        assert_eq!(name, "set-instrument-param-batch");
+        let updates = payload["updates"].borrow();
+        let Value::List(updates) = &*updates else { panic!("follow updates"); };
+        let offset = updates[0].borrow();
+        let Value::Map(offset) = &*offset else { panic!("offset update"); };
+        assert_eq!(*offset["param-idx"].borrow(), Value::Number(param_index("filter2_offset_octaves")));
+        let Value::Number(value) = *offset["value"].borrow() else { panic!("offset value"); };
+        assert!((value - 2.0).abs() < 0.0001);
+        editor.runtime_mut().set_reactive("SEQ", "heat-test-filter2_follow", Value::Number(0.0));
         for (mode, expected) in [
             [1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             [0.5, 0.5, 0.5, 0.0, 1.0, 1.0, 1.0, 1.0],
@@ -44720,6 +45150,12 @@ mod drift_waveform_tests;
             assert_finite_layout_tree(&layout);
             let panel = find_layout_node_by_debug_name(&layout, "instrument-panel").unwrap();
             assert_controls_visible(panel, panel);
+            let display = find_layout_node_by_debug_name(&layout, "heat-detail-display").unwrap();
+            assert_finite_nonzero_rect(display, "contextual display");
+            assert!(display.rect.row + display.rect.height <= panel.rect.row + panel.rect.height + 0.001,
+                "detail must fit the fixed FX body");
+            assert_controls_visible(display, display);
+
             for name in ["osc1_level_db", "filter2_cutoff_hz", suffix] {
                 let control = find_param(&layout, name).unwrap_or_else(|| panic!("missing {name} in section {section}"));
                 assert!(control.rect.width > 0.0 && control.rect.height > 0.0, "zero-sized {name}");
@@ -44831,7 +45267,7 @@ mod drift_waveform_tests;
                 "mm2_amt",
                 "volume_db",
                 "lp_freq",
-                "filter_drive",
+                "lp_res",
                 "hp_freq",
                 "drift",
             ],
@@ -51050,6 +51486,8 @@ mod drift_waveform_tests;
                 ("focus-live", Value::Bool(true)),
                 ("piano-roll-playhead", Value::Number(-1.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
+                ("piano-roll-automation-params", Value::List(vec![])),
+                ("piano-roll-automation", Value::Nil),
                 ("piano-roll-items", Value::List(vec![])),
                 ("piano-roll-selection", Value::List(vec![])),
             ],
@@ -51142,10 +51580,9 @@ mod drift_waveform_tests;
                 .runtime_mut()
                 .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read empty piano roll lane scroll"),
-            // The "No song yet" banner is gone (empty-arrangement spec 8),
-            // so the lower pane is one banner-height taller and C4 centers
-            // one lane row earlier.
-            Some(Value::Number(39.0)),
+            // The automation lane (eseq-2k9p.21) takes 3.5 cells off the
+            // note grid, so C4 centers over fewer visible lanes.
+            Some(Value::Number(42.5)),
             "empty piano roll should center C4 at the default lower-pane height"
         );
         assert_eq!(
@@ -51153,14 +51590,14 @@ mod drift_waveform_tests;
                 .runtime_mut()
                 .eval_str("(eseq.piano-roll/piano-roll-max-lane-scroll)")
                 .expect("read default piano roll max lane scroll"),
-            // Also one banner-height taller (empty-arrangement spec 8).
-            Some(Value::Number(78.0)),
+            // 7 more lanes are hidden behind the automation row (eseq-2k9p.21).
+            Some(Value::Number(85.0)),
             "default lower-pane height should allow scrolling below C4"
         );
         editor
             .runtime_mut()
             .eval_str(
-                "(eseq.piano-roll/piano-roll-action (dict :type :scroll-view :lane-scroll 78 :delta-lanes 0))",
+                "(eseq.piano-roll/piano-roll-action (dict :type :scroll-view :lane-scroll 85 :delta-lanes 0))",
             )
             .expect("scroll piano roll to low lanes");
         assert_eq!(
@@ -51168,7 +51605,7 @@ mod drift_waveform_tests;
                 .runtime_mut()
                 .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read low piano roll lane scroll"),
-            Some(Value::Number(78.0))
+            Some(Value::Number(85.0))
         );
         editor
             .runtime_mut()
@@ -51304,9 +51741,9 @@ mod drift_waveform_tests;
                 .runtime_mut()
                 .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read fitted piano roll lane scroll"),
-            // One lane row earlier since the "No song yet" banner's removal
-            // made the lower pane taller (empty-arrangement spec 8).
-            Some(Value::Number(31.0))
+            // The automation lane (eseq-2k9p.21) takes 3.5 cells off the
+            // note grid, so the fit centers over fewer visible lanes.
+            Some(Value::Number(34.5))
         );
     }
 
@@ -51323,6 +51760,8 @@ mod drift_waveform_tests;
                 ("track-colors", test_track_colors()),
                 ("tp-num-steps", Value::Number(16.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
+                ("piano-roll-automation-params", Value::List(vec![])),
+                ("piano-roll-automation", Value::Nil),
                 ("piano-roll-items", Value::List(vec![])),
                 ("piano-roll-selection", Value::List(vec![])),
             ],
@@ -51373,9 +51812,9 @@ mod drift_waveform_tests;
             runtime
                 .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read fitted lane scroll after sync"),
-            // One lane row earlier since the "No song yet" banner's removal
-            // made the lower pane taller (empty-arrangement spec 8).
-            Some(Value::Number(39.0))
+            // The automation lane (eseq-2k9p.21) takes 3.5 cells off the note
+            // grid, so the fit centers over fewer visible lanes.
+            Some(Value::Number(42.5))
         );
     }
 
@@ -54512,3 +54951,73 @@ mod drift_waveform_tests;
             "only the loose tracks keep their step grids while the rack is collapsed"
         );
     }
+    #[test]
+    fn metal_seq_export_song_modal_has_usable_settings_and_job_states() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(160, 60);
+        assert!(find_layout_node_by_stable_key_suffix(&editor.widget_layout().unwrap(), "/export-name").is_none());
+        let fixture = include_str!("../../../ui/capture-fixtures/export-song.lisp");
+        let setup = &fixture[fixture.find("(def capture-after-sync").unwrap()..];
+        editor.runtime_mut().eval_str(setup).unwrap();
+        editor.runtime_mut().eval_str("(capture-after-sync)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(160, 60);
+        let layout = editor.widget_layout().unwrap();
+        assert_finite_layout_tree(&layout);
+        for key in ["/export-name", "/export-range", "/export-start", "/export-end", "/export-rate", "/export-tail", "/export-submit"] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key).unwrap_or_else(|| panic!("missing {key}"));
+            assert!(node.rect.width > 0.0 && node.rect.height > 0.0, "{key}: {:?}", node.rect);
+        }
+        editor.runtime_mut().eval_str("(eseq.export-song/export-song)").unwrap();
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, .. } if name == "export-song-open")));
+        use sequencer::bounce::job::WorkerStatus;
+        // Exercise the same publisher used by Start and worker polling. No
+        // test-only reactive cycle, reopening or resize may make it repaint.
+        crate::host_commands::export::publish_job_status(&mut editor, &WorkerStatus::Preparing, true);
+        let layout = editor.widget_layout().unwrap();
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-cancel").is_some());
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-submit").is_none());
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-save-note").is_none());
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-preparing").is_some());
+        let status = find_layout_node_by_stable_key_suffix(&layout, "/export-status").unwrap();
+        assert!(status.rect.width > 0.0 && status.rect.height > 0.0);
+        let preparing_text = status.props.get("text").cloned();
+        crate::host_commands::export::publish_job_status(&mut editor, &WorkerStatus::Rendering { percent: 37 }, true);
+        let layout = editor.widget_layout().unwrap();
+        let status = find_layout_node_by_stable_key_suffix(&layout, "/export-status").unwrap();
+        assert_ne!(status.props.get("text").cloned(), preparing_text);
+        assert!(matches!(status.props.get("text"), Some(Value::String(text)) if text.contains("37%")));
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/export-preparing").is_none());
+        crate::host_commands::export::publish_job_status(&mut editor, &WorkerStatus::Completed { frames: 24000, tail_warning: false }, false);
+        let layout = editor.widget_layout().unwrap();
+        let reveal = find_layout_node_by_stable_key_suffix(&layout, "/export-reveal").unwrap();
+        assert!(reveal.rect.width > 0.0 && reveal.rect.height > 0.0);
+    }
+
+#[path = "clap_ui_tests.rs"]
+mod clap_ui_tests;
+
+#[path = "kick808_ui_tests.rs"]
+mod kick808_ui_tests;
+
+#[path = "hat909_ui_tests.rs"]
+mod hat909_ui_tests;
+
+#[path = "drum_rollout_ui_tests.rs"]
+mod drum_rollout_ui_tests;
+
+#[path = "fm_formant_ui_tests.rs"]
+mod fm_formant_ui_tests;
+
+#[path = "melt_ui_tests.rs"]
+mod melt_ui_tests;
+
+#[path = "digi_fm_ui_tests.rs"]
+mod digi_fm_ui_tests;
+
+#[path = "mnm_ui_tests.rs"]
+mod mnm_ui_tests;

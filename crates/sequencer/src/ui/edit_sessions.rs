@@ -260,8 +260,7 @@ pub(super) fn capture_instrument_swap_target(
                 return Err(format!("Custom track {} has no engine binding", track + 1));
             }
         }
-        Some(InstrumentType::Sampler) => {}
-        Some(InstrumentType::Rack) => {}
+        Some(InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Rack) => {}
         Some(other) => {
             return Err(format!(
                 "Track {} has instrument type {other:?}, which cannot be replaced",

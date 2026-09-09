@@ -6,6 +6,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "rename-group",
     "convert-group-to-drum-rack",
     "ungroup-tracks",
+    "add-track-empty",
     "add-track-sampler",
     "add-track-rack",
     "add-track-layer-rack",
@@ -245,9 +246,12 @@ pub(super) fn handle(
                 Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
         }
-        "add-track-sampler" => match app.graph_controller().add_blank_sampler_track()
-            .and_then(|idx| {
-                app.commit_created_track(idx, "Add sampler track")?;
+        "add-track-empty" | "add-track-sampler" => match (if name == "add-track-empty" {
+                app.graph_controller().add_empty_track()
+            } else {
+                app.graph_controller().add_blank_sampler_track()
+            }).and_then(|idx| {
+                app.commit_created_track(idx, if name == "add-track-empty" { "Add empty track" } else { "Add sampler track" })?;
                 Ok(idx)
             }) {
             Ok(idx) => {
@@ -324,13 +328,13 @@ pub(super) fn handle(
                 editor.refresh_runtime_side_effects();
                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                 editor.handle_host_event(HostEvent::Status(format!(
-                    "Added sampler track {}: {new_name}",
+                    "Added track {}: {new_name}",
                     idx + 1
                 )));
             }
             Err(e) => {
                 editor.handle_host_event(HostEvent::Status(format!(
-                    "Error adding sampler track: {e}"
+                    "Error adding track: {e}"
                 )));
             }
         },

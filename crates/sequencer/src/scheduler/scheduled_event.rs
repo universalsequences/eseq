@@ -5,7 +5,7 @@ use arrayvec::ArrayVec;
 use std::cell::UnsafeCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -191,9 +191,45 @@ pub struct StepEvent {
     pub source: EventSource,
 }
 
+/// Note allocation and gate behavior resolved from the same row as the note.
+/// These must not change when the UI mirrors a later scene while a note is
+/// still in lookahead. Mixer controls retain their independent live path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScheduledVoicePolicy {
+    pub gate: bool,
+    pub polyphonic: bool,
+    pub max_polyphony: usize,
+    pub mono_trigger: crate::sequencer::MonoTrigger,
+    pub voice_priority: crate::sequencer::VoicePriority,
+    pub base_note_offset: f32,
+}
+
+impl ScheduledVoicePolicy {
+    pub fn from_track(track: &crate::sequencer::SequencerTrackSnapshot) -> Self {
+        Self {
+            gate: track.params.gate,
+            polyphonic: track.params.polyphonic,
+            max_polyphony: track.params.max_polyphony,
+            mono_trigger: track.params.mono_trigger,
+            voice_priority: track.params.voice_priority,
+            base_note_offset: track.instrument_base_note_offset,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Default for ScheduledVoicePolicy {
+    fn default() -> Self {
+        Self { gate: true, polyphonic: false, max_polyphony: 6,
+            mono_trigger: crate::sequencer::MonoTrigger::Retrig,
+            voice_priority: crate::sequencer::VoicePriority::Last, base_note_offset: 0.0 }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScheduledEventKind {
     ResolvedTrigger {
+        voice_policy: ScheduledVoicePolicy,
         track: usize,
         step: usize,
         samples_per_step: f32,
@@ -207,6 +243,7 @@ pub enum ScheduledEventKind {
         rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
     },
     NetworkTrigger {
+        voice_policy: ScheduledVoicePolicy,
         track: usize,
         source_neuron: usize,
         seed: Option<(usize, usize)>,
@@ -284,12 +321,14 @@ pub struct ScheduledEventQueue<const CAPACITY: usize> {
     slots: Box<[UnsafeCell<MaybeUninit<ScheduledEvent>>]>,
     head: AtomicUsize,
     tail: AtomicUsize,
+    rejected_events: AtomicU64,
 }
 
 unsafe impl<const CAPACITY: usize> Sync for ScheduledEventQueue<CAPACITY> {}
 
 impl<const CAPACITY: usize> ScheduledEventQueue<CAPACITY> {
     pub fn new() -> Self {
+        assert!(CAPACITY >= 2, "scheduled event queue needs at least two slots");
         let slots = (0..CAPACITY)
             .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
             .collect::<Vec<_>>()
@@ -298,6 +337,7 @@ impl<const CAPACITY: usize> ScheduledEventQueue<CAPACITY> {
             slots,
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
+            rejected_events: AtomicU64::new(0),
         }
     }
 
@@ -311,6 +351,7 @@ impl<const CAPACITY: usize> ScheduledEventQueue<CAPACITY> {
         let next_tail = Self::next_index(tail);
         let head = self.head.load(Ordering::Acquire);
         if next_tail == head {
+            self.rejected_events.fetch_add(1, Ordering::Relaxed);
             return Err(event);
         }
 
@@ -333,8 +374,22 @@ impl<const CAPACITY: usize> ScheduledEventQueue<CAPACITY> {
         Some(event)
     }
 
+    /// Cumulative admission failures, including failures a producer logs and
+    /// continues past. Clearing pending events must not erase render failures.
+    pub fn rejected_events(&self) -> u64 {
+        self.rejected_events.load(Ordering::Relaxed)
+    }
+
     pub fn clear(&self) {
         while self.pop().is_some() {}
+    }
+}
+
+impl<const CAPACITY: usize> Drop for ScheduledEventQueue<CAPACITY> {
+    fn drop(&mut self) {
+        // MaybeUninit does not drop queued payloads itself. Exclusive access
+        // at destruction guarantees there can be no producer/consumer race.
+        self.clear();
     }
 }
 
@@ -365,6 +420,47 @@ mod tests {
     }
 
     #[test]
+    fn queue_reports_rejections_across_clear_and_reuse() {
+        let queue = ScheduledEventQueue::<2>::new();
+        let event = ScheduledEvent {
+            pattern_epoch: 0, sample_time: 1,
+            kind: ScheduledEventKind::RackParams { track: 0, step: 0 },
+        };
+        queue.push(event.clone()).unwrap();
+        assert_eq!(queue.push(event.clone()), Err(event.clone()));
+        assert_eq!(queue.rejected_events(), 1);
+        queue.clear();
+        queue.push(event.clone()).unwrap();
+        assert_eq!(queue.push(event.clone()), Err(event));
+        assert_eq!(queue.rejected_events(), 2);
+    }
+
+    #[test]
+    fn queue_drop_releases_unconsumed_event_payloads() {
+        let params = crate::sequencer::TrackParams::new();
+        params.set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination: crate::sequencer::BusId::DEFAULT_A, amount: 0.5,
+        }]);
+        let baseline = params.send_baseline(crate::sequencer::BusId::DEFAULT_A).unwrap();
+        drop(params);
+        let retained = std::sync::Arc::downgrade(&baseline);
+        let queue = ScheduledEventQueue::<2>::new();
+        queue.push(ScheduledEvent {
+            pattern_epoch: 0, sample_time: 1000,
+            kind: ScheduledEventKind::EffectParams {
+                track: 0,
+                effect_params: vec![ScheduledEffectParam {
+                    logical_id: 1, idx: 0, value: 0.5,
+                    live_value: Some(super::LiveScheduledEffectValue::new(baseline)),
+                }],
+            },
+        }).unwrap();
+        assert!(retained.upgrade().is_some());
+        drop(queue);
+        assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
     fn queue_preserves_fifo_order() {
         let queue = ScheduledEventQueue::<8>::new();
         queue
@@ -372,6 +468,7 @@ mod tests {
                 pattern_epoch: 0,
                 sample_time: 10,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                     track: 0,
                     step: 1,
                     samples_per_step: 120.0,
@@ -416,6 +513,7 @@ mod tests {
                 pattern_epoch: 0,
                 sample_time: 11,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                     track: 0,
                     step: 2,
                     samples_per_step: 120.0,
@@ -455,6 +553,7 @@ mod tests {
                 pattern_epoch: 0,
                 sample_time: 10,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                     track: 0,
                     step: 1,
                     samples_per_step: 120.0,
@@ -500,6 +599,7 @@ mod tests {
                 pattern_epoch: 0,
                 sample_time: 11,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                     track: 0,
                     step: 2,
                     samples_per_step: 120.0,
@@ -543,6 +643,7 @@ mod tests {
                 pattern_epoch: 0,
                 sample_time: 1,
                 kind: ScheduledEventKind::ResolvedTrigger {
+                    voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                     track: 0,
                     step: 0,
                     samples_per_step: 120.0,
@@ -580,6 +681,7 @@ mod tests {
             pattern_epoch: 0,
             sample_time: 2,
             kind: ScheduledEventKind::ResolvedTrigger {
+                voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                 track: 0,
                 step: 1,
                 samples_per_step: 120.0,

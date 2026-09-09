@@ -406,6 +406,14 @@ impl App {
         Ok(SongTransportMode::SongPlayback)
     }
 
+    /// Start the authored arrangement in an isolated render worker. Export
+    /// does not invoke the performer's auto-latch on an intentional silent intro.
+    pub(crate) fn start_bounce_playback(&mut self) -> Result<(), String> {
+        self.prepare_song_playback_at(0.0)?;
+        self.state.start_playback();
+        Ok(())
+    }
+
     /// Auto-latch on a silent start (unified-transport spec 4.1): when the
     /// row governing the Play position is an unscened row that resolves
     /// every lane to silence (empty arrangement, unscened gap, past the
@@ -832,9 +840,7 @@ impl App {
             device_hold_mask,
         )?;
         self.graph_controller().apply_sample_ids(&sample_ids);
-        let _ = self
-            .graph_controller()
-            .sync_track_instrument_run_modes_from_live_state();
+        self.graph_controller().sync_track_instrument_run_modes_from_live_state()?;
         self.graph_controller().sync_current_pattern_mod_routes();
         self.push_all_restored_defaults_except(device_hold_mask);
         Ok(())

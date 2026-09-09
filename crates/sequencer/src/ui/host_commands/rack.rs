@@ -1154,11 +1154,20 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    refresh_instrument_panel_reactive(
+                    // The rack transpose picker and slot base-note knob share
+                    // this value binding; neither changes panel structure.
+                    refresh_rack_direct_param_reactive(
                         &mut editor,
                         &app,
+                        &state,
                         track,
+                        RackDirectDisplayTarget::SlotParam {
+                            slot_idx,
+                            param: RackSlotParam::BaseNote,
+                        },
                         &selected_steps,
+                        RackPlockRowsSync::Unchanged,
+                        &ctx.shared.expanded_step_projection,
                         &ui_epoch,
                     );
                 }
@@ -2440,6 +2449,37 @@ mod tests {
             assert_eq!(rack.macros[0].value, 0.0);
             assert!(rack.macros[0].plocks.iter().all(Option::is_none));
             assert_eq!(reactive_number(&h.editor, &rack_macro_value_field(TRACK, 0)), 1.0);
+        }
+    }
+
+    #[test]
+    fn rack_slot_base_note_drag_repaints_without_rebuilding_the_panel() {
+        let mut h = RackHarness::new(HashSet::new());
+        let field = rack_slot_value_field(TRACK, SLOT, RackSlotParam::BaseNote);
+        h.editor.runtime_mut().set_reactive("SEQ", &field, Value::Number(0.0));
+        h.editor.runtime_mut().eval_str(&format!(
+            r#"(effect (h-stack
+                 (number-picker :value (bind "SEQ" "{field}"))
+                 (number-picker :value (bind "SEQ" "{field}"))))"#,
+        )).expect("mount both rack pitch controls on their shared value binding");
+
+        for value in [-3.0f64, -12.0, 7.0, 99.0] {
+            let before = h.epochs();
+            h.editor.clear_needs_redraw();
+            h.dispatch("set-rack-slot-base-note", number_payload(&[
+                ("track", TRACK as f64), ("slot", SLOT as f64), ("value", value),
+            ]));
+            let expected = value.clamp(-48.0, 48.0);
+            let slot = rack_slot_snapshot_for_host(&h.state, TRACK, SLOT).unwrap();
+            assert_eq!(slot.instrument_base_note_offset as f64, expected);
+            assert!(slot.track_sound_state.dirty);
+            assert_eq!(reactive_number(&h.editor, &field), expected);
+            assert!(h.editor.needs_redraw(), "both pitch controls must repaint immediately");
+            assert_eq!(h.epochs(), before, "pitch drags must not trigger a full UI sync");
+            assert!(
+                h.editor.runtime().reactive_field_value("SEQ", "instrument-panel").is_none(),
+                "pitch drags must not republish the structural panel description"
+            );
         }
     }
 

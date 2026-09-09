@@ -51,6 +51,9 @@ typedef enum {
   GBE_NOTE_ON = 1,
   GBE_GATE_OFF,
   GBE_PULSE,
+  GBE_PRESSURE = 4,
+  GBE_EXPRESSION = 5,
+  GBE_MIXER_PARAM = 6,
 } GraphBlockEventKind;
 
 typedef struct {

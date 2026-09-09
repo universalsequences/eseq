@@ -490,25 +490,8 @@ pub fn render_loaded_instrument_for_test(
         }
     }
 
-    let apply_param = |memory: &mut [f32], name: &str, value: f32| -> Result<(), String> {
-        let param = manifest
-            .params
-            .iter()
-            .find(|param| param.name == name)
-            .ok_or_else(|| format!("unknown instrument parameter '{name}'"))?;
-        if param.cell_id >= total_slots {
-            return Err(format!(
-                "parameter '{}' cell {} is outside memory size {}",
-                param.name, param.cell_id, total_slots
-            ));
-        }
-        for lane in 0..param.cell_span {
-            let idx = param.cell_id + lane;
-            if idx < total_slots {
-                memory[idx] = value;
-            }
-        }
-        Ok(())
+    let apply_param = |memory: &mut [f32], name: &str, value: f32| {
+        apply_render_parameter(manifest, memory, name, value)
     };
 
     for (name, value) in &options.param_overrides {
@@ -708,33 +691,8 @@ pub(in crate::lisp_host) fn render_loaded_effect_for_test_with_host_services(
         }
     }
 
-    let apply_param = |memory: &mut [f32], name: &str, value: f32| -> Result<(), String> {
-        if let Some(param) = manifest.params.iter().find(|param| param.name == name) {
-            if param.cell_id >= total_slots {
-                return Err(format!(
-                    "parameter '{}' cell {} is outside memory size {}",
-                    param.name, param.cell_id, total_slots
-                ));
-            }
-            for lane in 0..param.cell_span {
-                let idx = param.cell_id + lane;
-                if idx < total_slots {
-                    memory[idx] = value;
-                }
-            }
-            return Ok(());
-        }
-
-        let Some(cell_id) = host_mod_descriptor_param_cell(manifest, name) else {
-            return Err(format!("unknown effect parameter '{name}'"));
-        };
-        if cell_id >= total_slots {
-            return Err(format!(
-                "parameter '{name}' cell {cell_id} is outside memory size {total_slots}"
-            ));
-        }
-        memory[cell_id] = value;
-        Ok(())
+    let apply_param = |memory: &mut [f32], name: &str, value: f32| {
+        apply_render_parameter(manifest, memory, name, value)
     };
 
     for (name, value) in &options.param_overrides {
@@ -920,6 +878,38 @@ pub(in crate::lisp_host) fn render_loaded_effect_for_test_with_host_services(
         first_samples: rendered.iter().copied().take(32).collect(),
         samples: rendered,
     })
+}
+
+// Both probes accept the compiler's host modulation descriptor cells as
+// parameter overrides, so modulation uses the same initialized ABI state.
+fn apply_render_parameter(manifest: &DGenManifest, memory: &mut [f32], name: &str, value: f32) -> Result<(), String> {
+    let total_slots = manifest.total_memory_slots;
+    if let Some(param) = manifest.params.iter().find(|param| param.name == name) {
+        if param.cell_id >= total_slots {
+            return Err(format!(
+                "parameter '{}' cell {} is outside memory size {}",
+                param.name, param.cell_id, total_slots
+            ));
+        }
+        for lane in 0..param.cell_span {
+            let idx = param.cell_id + lane;
+            if idx < total_slots {
+                memory[idx] = value;
+            }
+        }
+        return Ok(());
+    }
+
+    let Some(cell_id) = host_mod_descriptor_param_cell(manifest, name) else {
+        return Err(format!("unknown parameter '{name}'"));
+    };
+    if cell_id >= total_slots {
+        return Err(format!(
+            "parameter '{name}' cell {cell_id} is outside memory size {total_slots}"
+        ));
+    }
+    memory[cell_id] = value;
+    Ok(())
 }
 
 pub(in crate::lisp_host) fn host_mod_descriptor_param_cell(manifest: &DGenManifest, name: &str) -> Option<usize> {

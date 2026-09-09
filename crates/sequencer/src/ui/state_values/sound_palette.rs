@@ -205,7 +205,7 @@ fn rack_slot_binding_descriptor(
                 app.editor.engine_registry.get_instrument_descriptor(engine_id)
             })
         }
-        sequencer::sequencer::InstrumentType::Rack => None,
+        sequencer::sequencer::InstrumentType::Empty | sequencer::sequencer::InstrumentType::Rack => None,
     }
 }
 

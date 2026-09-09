@@ -100,6 +100,9 @@ use reactive_sync::*;
 mod tests;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("export-worker") {
+        return sequencer::bounce::command::run(std::env::args().skip(2));
+    }
     let capture_args = capture::CaptureArgs::parse_env()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let app_paths = sequencer::app_paths::init()?;
@@ -133,8 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = eng.state.clone();
     let stream = eng._stream;
 
-    // 2. Create App. Start intentionally empty so the first action is choosing
-    // a sound instead of editing a canned pattern.
+    // 2. Start with two editable, device-less tracks rather than canned sounds.
     let master_recorder = eng.master_recorder.clone();
     let mut app = app::App::new(
         eng.state.clone(),
@@ -145,7 +147,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eng.keyboard_tx,
     );
 
-    let track_names: Vec<String> = Vec::new();
+    app.graph_controller().add_default_project_tracks()?;
+    let track_names = app.tracks.clone();
 
     // Collect node IDs for param pushing to audiograph
     let track_pan_ids: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(

@@ -40,6 +40,7 @@ mod effect_params;
 mod effects;
 mod fx_chain;
 mod graph;
+pub(crate) use graph::latency::LatencyPlan;
 mod hooks;
 pub mod mixer_controls;
 mod params;
@@ -254,6 +255,7 @@ struct PendingProjectLoad {
     built_patterns: Vec<crate::sequencer::PatternSnapshot>,
     built_bus_patterns: Vec<Vec<BusPatternSnapshot>>,
     fallback_samples: usize,
+    strict_samples: bool,
     phase: PendingProjectLoadPhase,
 }
 
@@ -595,7 +597,7 @@ impl GraphState {
                 .and_then(|engine| engine.as_ref())
                 .map(|engine| !engine.mod_output_channels.is_empty())
                 .unwrap_or(false),
-            Some(InstrumentType::Sampler) | Some(InstrumentType::Rack) | None => false,
+            Some(InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Rack) | None => false,
         }
     }
 }
@@ -706,6 +708,7 @@ pub struct BusSendNodeIds {
 }
 
 /// Audio bus node IDs, passed to App::new to reduce parameter count.
+#[derive(Clone)]
 pub struct AudioBuses {
     pub bus_l_id: i32,
     pub bus_r_id: i32,
@@ -918,11 +921,12 @@ pub struct App {
     pub groups: Vec<crate::project::ProjectTrackGroup>,
     /// Engaged sequenced mute/solo holds keyed by resolved target
     /// (docs/jaki-mixer-control-routes-spec.md §3); values are release samples.
-    pub(crate) mixer_control_holds: HashMap<mixer_controls::MixerControlHoldKey, u64>,
+    pub(crate) mixer_control_holds: crate::mixer_control::MixerControlHolds<mixer_controls::MixerControlHoldKey>,
     pub sampler_paths: Vec<Option<PathBuf>>,
     pub rack_selected_slots: Vec<usize>,
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
+    blank_sample_buffers: HashSet<i32>,
     pub current_project_name: Option<String>,
     pub ui: UiState,
     pub editor: EditorState,
@@ -1054,7 +1058,7 @@ struct RecordingHistoryTransaction {
     changed: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DeviceIdentityRegistry {
     next_id: u64,
     audio_effects: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::EffectInstanceId>,
@@ -2389,11 +2393,12 @@ impl App {
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
             groups: Vec::new(),
-            mixer_control_holds: HashMap::new(),
+            mixer_control_holds: crate::mixer_control::MixerControlHolds::default(),
             sampler_paths: Vec::new(),
             rack_selected_slots: Vec::new(),
             sample_path_registry: HashMap::new(),
             sample_buffer_path_registry: HashMap::new(),
+            blank_sample_buffers: HashSet::new(),
             current_project_name: None,
             ui: UiState {
                 cursor_step: 0,
@@ -3540,8 +3545,29 @@ impl App {
     ) {
         self.register_sample_path(sample_name, path.clone());
         if buffer_id >= 0 {
+            self.blank_sample_buffers.remove(&buffer_id);
             self.sample_buffer_path_registry.insert(buffer_id, path);
         }
+    }
+
+    /// Allocate an authored blank and retain its source identity independently
+    /// of display names. Unknown buffers must not become silent during capture.
+    pub(super) fn create_blank_sampler_buffer(&mut self) -> Result<i32, String> {
+        let buffer = crate::instruments::sampler::create_silent_buffer(self.graph.lg.0)?;
+        self.blank_sample_buffers.insert(buffer);
+        Ok(buffer)
+    }
+
+    pub(super) fn capture_sampler_source_path(
+        &self, buffer: i32, name: &str,
+    ) -> Result<Option<PathBuf>, String> {
+        if self.blank_sample_buffers.contains(&buffer) || (buffer < 0 && name.is_empty()) {
+            return Ok(None);
+        }
+        self.sample_path_for_buffer(buffer, name)
+            .or_else(|| self.resolve_sample_path_by_name(name))
+            .map(Some)
+            .ok_or_else(|| format!("Sample buffer {buffer} ('{name}') has no source reference"))
     }
 
     /// Manual slice overrides only apply to the sample they were authored
@@ -3575,6 +3601,9 @@ impl App {
     }
 
     pub fn sample_path_for_buffer(&self, buffer_id: i32, sample_name: &str) -> Option<PathBuf> {
+        if self.blank_sample_buffers.contains(&buffer_id) {
+            return None;
+        }
         self.sample_buffer_path_registry
             .get(&buffer_id)
             .cloned()
@@ -3582,6 +3611,11 @@ impl App {
     }
 
     pub fn sampler_path_for_track(&self, track: usize) -> Option<PathBuf> {
+        if self.graph.track_buffer_ids.get(track)
+            .is_some_and(|buffer| self.blank_sample_buffers.contains(buffer))
+        {
+            return None;
+        }
         self.sampler_paths
             .get(track)
             .and_then(|path| path.as_ref())

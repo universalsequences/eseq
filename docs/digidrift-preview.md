@@ -46,3 +46,27 @@ props, all five live modulation offsets, and zero additional oscillator
 evaluations across 120 draws with changing filter/epoch values. It reports draw
 time diagnostically, without a machine-dependent timing ceiling. Capture is
 macOS-only; inspect the PNG as well as running the geometry test.
+
+## Embedded display layout
+
+Digi Drift shares Heat's compact display language: stacked sources on the left,
+a themed envelope/cycle and modulation display in the center, persistent filter
+and LFO plots to its right, and pitch/output controls at the end. The body uses
+9.8 rows inside the existing instrument frame. The synth/mods/keys header stays
+owned by eseq.
+
+The center's ENV 1 / ENV 2 buttons select the editable ADSR; editing other
+controls preserves that selection. Cycle mode, rate, tilt and hold remain
+available alongside both modulation-matrix rows. Source enable and filter-send
+switches and the host base-note control remain accessible.
+
+Display and enabled-label colors use the paired `control-on-bg` /
+`control-on-fg` theme roles. Dropdowns retain dark backgrounds for contrast.
+All plots and text use ordinary antialiased rendering. The LFO preview is a
+static shape illustration, including distinct rising and falling saw shapes;
+it does not claim to display a running voice's phase. The filter response model
+and source-preview bindings are unchanged.
+
+Validate layout and envelope/switch callbacks with
+`state_values::tests::metal_seq_fx_lisp_lays_out_digi_drift_columns` and capture
+`crates/sequencer/ui/capture-fixtures/digi-drift.lisp` for the production panel.

@@ -69,8 +69,7 @@
         "spread": 0.0,
         "vel_to_vol": 0.5,
         "voice_pan": 0.0,
-        "volume_db": -10.0,
-        "filter_drive": 0.9
+        "volume_db": -10.0
       }
     },
     {
@@ -139,8 +138,7 @@
         "spread": 0.0,
         "vel_to_vol": 0.6,
         "voice_pan": 0.0,
-        "volume_db": -9.0,
-        "filter_drive": 0.4
+        "volume_db": -9.0
       }
     },
     {
@@ -209,8 +207,7 @@
         "spread": 0.7,
         "vel_to_vol": 0.2,
         "voice_pan": 0.0,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -279,8 +276,7 @@
         "spread": 0.45,
         "vel_to_vol": 0.65,
         "voice_pan": 0.0,
-        "volume_db": -10.0,
-        "filter_drive": 0.4
+        "volume_db": -10.0
       }
     },
     {
@@ -349,8 +345,7 @@
         "spread": 0.0,
         "vel_to_vol": 0.5,
         "voice_pan": 0.0,
-        "volume_db": -10.0,
-        "filter_drive": 0.4
+        "volume_db": -10.0
       }
     },
     {
@@ -419,8 +414,7 @@
         "spread": 0.5,
         "vel_to_vol": 0.6,
         "voice_pan": 0.0,
-        "volume_db": -11.0,
-        "filter_drive": 0.25
+        "volume_db": -11.0
       }
     },
     {
@@ -489,8 +483,7 @@
         "spread": 0.1,
         "vel_to_vol": 0.4,
         "voice_pan": 0.0,
-        "volume_db": -10.0,
-        "filter_drive": 0.4
+        "volume_db": -10.0
       }
     },
     {
@@ -559,8 +552,7 @@
         "spread": 0.85,
         "vel_to_vol": 0.25,
         "voice_pan": 0.0,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -629,8 +621,7 @@
         "spread": 0.3,
         "vel_to_vol": 0.55,
         "voice_pan": 0.0,
-        "volume_db": -11.0,
-        "filter_drive": 0.25
+        "volume_db": -11.0
       }
     },
     {
@@ -699,8 +690,7 @@
         "spread": 0.4,
         "vel_to_vol": 0.15,
         "voice_pan": 0.0,
-        "volume_db": -12.0,
-        "filter_drive": 0.25
+        "volume_db": -12.0
       }
     },
     {
@@ -769,8 +759,7 @@
         "spread": 0.35,
         "vel_to_vol": 0.45,
         "voice_pan": 0.0,
-        "volume_db": -12.0,
-        "filter_drive": 0.4
+        "volume_db": -12.0
       }
     },
     {
@@ -967,8 +956,7 @@
         "spread": 0.680246,
         "vel_to_vol": 0.25,
         "voice_pan": 0.16147584,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -1165,8 +1153,7 @@
         "spread": 0.680246,
         "vel_to_vol": 0.25,
         "voice_pan": 0.16147584,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -1363,8 +1350,7 @@
         "spread": 0.2,
         "vel_to_vol": 0.35,
         "voice_pan": 0.0,
-        "volume_db": -12.0,
-        "filter_drive": 0.25
+        "volume_db": -12.0
       },
       "key_locks": {
         "55": {
@@ -1594,8 +1580,7 @@
         "spread": 1.0,
         "vel_to_vol": 0.25,
         "voice_pan": 0.16147584,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -1792,8 +1777,7 @@
         "spread": 0.6479504,
         "vel_to_vol": 0.25,
         "voice_pan": 0.0,
-        "volume_db": -13.0,
-        "filter_drive": 0.4
+        "volume_db": -13.0
       }
     },
     {
@@ -1990,8 +1974,7 @@
         "spread": 0.6479504,
         "vel_to_vol": 0.25,
         "voice_pan": 0.0,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -2188,8 +2171,7 @@
         "spread": 0.85,
         "vel_to_vol": 0.25,
         "voice_pan": 0.0,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -2386,8 +2368,7 @@
         "spread": 0.680246,
         "vel_to_vol": 0.25,
         "voice_pan": 0.0,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -2584,8 +2565,7 @@
         "spread": 0.2,
         "vel_to_vol": 0.35,
         "voice_pan": 0.0,
-        "volume_db": -12.0,
-        "filter_drive": 0.25
+        "volume_db": -12.0
       }
     },
     {
@@ -2782,8 +2762,7 @@
         "spread": 0.2,
         "vel_to_vol": 0.35,
         "voice_pan": 0.0,
-        "volume_db": -12.0,
-        "filter_drive": 0.25
+        "volume_db": -12.0
       }
     },
     {
@@ -2980,8 +2959,7 @@
         "spread": 0.9486052,
         "vel_to_vol": 0.25,
         "voice_pan": 0.0,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       },
       "key_locks": {
         "64": {
@@ -3201,8 +3179,7 @@
         "spread": 0.680246,
         "vel_to_vol": 0.25,
         "voice_pan": 0.0,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -3399,8 +3376,7 @@
         "spread": 0.72205245,
         "vel_to_vol": 0.25,
         "voice_pan": 0.16147584,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -3597,8 +3573,7 @@
         "spread": 0.72205245,
         "vel_to_vol": 0.25,
         "voice_pan": 0.16147584,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -3795,8 +3770,7 @@
         "spread": 0.2,
         "vel_to_vol": 0.35,
         "voice_pan": 0.0,
-        "volume_db": -12.0,
-        "filter_drive": 0.25
+        "volume_db": -12.0
       },
       "key_locks": {
         "55": {
@@ -4026,8 +4000,7 @@
         "spread": 0.680246,
         "vel_to_vol": 0.25,
         "voice_pan": 0.16147584,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     },
     {
@@ -4224,8 +4197,7 @@
         "spread": 1.0,
         "vel_to_vol": 0.25,
         "voice_pan": 0.16147584,
-        "volume_db": -13.0,
-        "filter_drive": 0.25
+        "volume_db": -13.0
       }
     }
   ]

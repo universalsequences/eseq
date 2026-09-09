@@ -64,7 +64,10 @@
 ; exponential segment starting at t0 seconds, zero before it
 (defmacro seg (t t0 rate) (gswitch (lt t t0) 0.0 (exp (* rate (- t t0)))))
 
-(def tn (semi (mod tune)))
+; incoming note tracks the filter set (C4 = the identified sound); tune offsets
+; it in semitones. Clamped to +-2 octaves so extreme notes stay a clap.
+(def note_ratio (clip (/ pitch 261.6256) 0.25 4.0))
+(def tn (* note_ratio (semi (mod tune))))
 (def vel (clip velocity 0 1))
 ; accum holds 0 for the trigger sample and the one after it, so it lags the
 ; fit's n/samplerate ramp by one sample; add the sample back (only sample 0

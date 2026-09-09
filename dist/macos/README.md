@@ -59,6 +59,27 @@ before it packages anything. Those flags are part of the build fingerprint, so
 packaging uses its own `target/package/` directory rather than fighting
 `cargo build --release` for the shared one.
 
+## App icon
+
+`AppIcon.svg` is the approved eseq wordmark, copied unchanged from
+`eseq-site/assets/eseq-logo.svg` (the website's dark logo/favicon).
+The source is vendored here so packaging does not require a sibling checkout.
+`AppIcon.icns` contains the 16, 32, 128, 256, and 512 point representations
+at both 1× and 2× resolution, rendered directly from that vector.
+
+To regenerate after changing the artwork on macOS:
+
+```sh
+brew install librsvg
+./dist/macos/generate-icon.sh
+./dist/macos/generate-icon.sh --check
+```
+
+The check regenerates into a temporary directory and rejects a stale ICNS.
+Ordinary release builds use the checked-in ICNS and need no SVG renderer.
+`build.sh` copies it into `Contents/Resources/AppIcon.icns` before signing;
+`CFBundleIconFile=AppIcon` supplies the Finder, launcher, and Dock icon.
+
 ## Signed and notarized release (R3)
 
 The same script produces a Developer ID signed, notarized, and stapled

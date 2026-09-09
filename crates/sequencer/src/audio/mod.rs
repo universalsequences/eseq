@@ -51,6 +51,8 @@ mod render;
 #[cfg(target_os = "linux")]
 mod rtkit;
 mod state;
+mod session;
+pub(crate) mod offline;
 mod stream;
 mod voices;
 
@@ -62,7 +64,7 @@ pub use voices::MAX_VOICES;
 #[allow(unused_imports)]
 use {
     callback::*, device::*, events::*, fire::*, graph_dispatch::*, params::*, rack::*, render::*,
-    state::*, stream::*, voices::*,
+    state::*, session::*, stream::*, voices::*,
 };
 
 use arrayvec::ArrayVec;

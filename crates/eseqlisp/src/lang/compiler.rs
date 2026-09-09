@@ -250,6 +250,7 @@ fn is_widget_name(name: &str) -> bool {
             | "scroll"
             | "tree"
             | "xy-pad"
+            | "automation-lane"
     )
 }
 

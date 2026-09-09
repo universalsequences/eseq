@@ -63,6 +63,11 @@
 ;; PINNED (hazard m): mutable plain def, read flat by production Rust.
 (def eseq.vanilla/piano-roll-fit-pending false)
 (def fit-track -1)
+;; PINNED (hazard m) for the same reason: the automation lane's selected
+;; parameter key ("step-param:1" = velocity, "instrument:3", "effect:0:2",
+;; "rack-macro:1", "midi-fx:0:2"), read flat by `src/ui/piano_roll.rs` on
+;; every piano-roll sync to build SEQ.piano-roll-automation.
+(def eseq.vanilla/piano-roll-automation-param "step-param:1")
 
 ;; True only when the lower piano roll was entered from arrangement clip
 ;; gestures. Kept in a reactive channel rather than a source defstate because
@@ -73,6 +78,8 @@
 
 (def timeline-height 35)
 (def header-height 2)
+;; Automation lane row under the note grid (bead eseq-2k9p.21).
+(def automation-height 3.5)
 (def view-padding 1)
 (def min-view-duration 4)
 (def max-view-duration 256)
@@ -104,7 +111,8 @@
 (def content-height ()
   (max 1
     (- eseq.seq-step-tabs/piano-roll-default-pane-height
-      header-height)))
+      header-height
+      automation-height)))
 
 (def visible-lane-count ()
   (/ (content-height) (lane-height-value)))
@@ -360,7 +368,8 @@
       :window-repeat SEQ.focus-window-repeat
       :lane-scroll piano-roll-lane-scroll
       :lane-height (lane-height-value)
-      :scroll-viewport-height eseq.seq-step-tabs/piano-roll-default-pane-height
+      :scroll-viewport-height (- eseq.seq-step-tabs/piano-roll-default-pane-height
+                                automation-height)
       :snap 1
       :min-duration 0.03125
       :create-duration create-duration
@@ -487,19 +496,17 @@
         (box
           :height 1
           :width :fill
-          :background-color (rgba (nth color 0) (nth color 1) (nth color 2) 1.0)
           (h-stack 
             :gap 0
-            (box :width 1.0)
             (badge (substring (nth SEQ.track-names SEQ.current-track) 0 15)
               :key (str "pianoroll-label-content-" SEQ.current-track)
               :icon (eseq.track-collapse/type-icon SEQ.current-track)
-              :width 10.8
+              :width clip-panel-width
               :height 1.0
               :padding 0
               :font-size 10
               :h-align :left
-              :background-color :transparent
+          :background-color (rgba (nth color 0) (nth color 1) (nth color 2) 1.0)
               :border-color :transparent
               :highlight-color :transparent
               :shadow-color :transparent
@@ -534,6 +541,158 @@
               (if (= SEQ.focus-kind :take) "off" "on")
               "panel-loop")))))))
 
+;; ── Automation lane (bead eseq-2k9p.21) ───────────────────────────────────
+;; One parameter across the focus axis, Ableton velocity-lane style: a dot at
+;; each note's onset spanning the note's duration at the value in force.
+;; Locked values draw in the track color; a device parameter's BASE value
+;; (what plays when the step carries no lock) draws gray, and dragging it
+;; writes a lock. The picker lists the step params plus only the device
+;; params that carry a lock somewhere in the pattern — never every lockable
+;; parameter. Rust publishes both surfaces from `sync_piano_roll_state`, so
+;; edits, playback and focus switches all refresh the lane.
+
+(def automation-params ()
+  (or SEQ.piano-roll-automation-params '()))
+
+(def automation ()
+  (or SEQ.piano-roll-automation (dict)))
+
+(def first-matching (pred items)
+  (let ((hits (filter pred items)))
+    (if (empty? hits) nil (first hits))))
+
+(def automation-param-label (p)
+  (if (= (get p :target) "step-param")
+    (get p :label)
+    (str (get p :group) " " (get p :label))))
+
+(def automation-param-options ()
+  (map (lambda (p) (automation-param-label p)) (automation-params)))
+
+(def automation-selected-label ()
+  (let ((key (get (automation) :key)))
+    (let ((row (first-matching (lambda (p) (= (get p :key) key)) (automation-params))))
+      (if (= row nil)
+        (or (get (automation) :label) "Velocity")
+        (automation-param-label row)))))
+
+(def select-automation-param (label)
+  (let ((row (first-matching (lambda (p) (= (automation-param-label p) label))
+               (automation-params))))
+    (if (= row nil)
+      nil
+      (do
+        (set! eseq.vanilla/piano-roll-automation-param (get row :key))
+        (set! automation-edit-value nil)
+        (host-command "piano-roll-automation-refresh" (dict))))))
+
+(def automation-entry-payload (step)
+  (let ((a (automation)))
+    (dict :target (get a :target)
+      :step-idx step
+      :slot-idx (get a :slot-idx)
+      :param-idx (get a :param-idx))))
+
+;; The lane's `on-change` contract: `(:set step value)` per press/drag frame,
+;; `(:finish step value)` on release, `(:clear step value)` on double-click or
+;; alt-click. Sets and clears go through the step-addressed p-lock commands
+;; the *step* panel uses, so undo and the variant registry see them the same
+;; way; a pinned pattern/take focus is display-only (device locks are live).
+(def automation-action (kind step value)
+  (if (not (get (automation) :editable))
+    nil
+    (match kind
+      :set
+      (do
+        (set! automation-edit-value value)
+        (host-command "set-track-plock-entry"
+          (merge (automation-entry-payload step) :value value)))
+      :clear
+      (do
+        (set! automation-edit-value nil)
+        (host-command "clear-track-plock-entry" (automation-entry-payload step)))
+      :finish nil)))
+
+;; Value readout of the point under edit (the last :set), cleared when the
+;; lane changes parameter. Ableton shows the hovered point's value beside
+;; the axis; a drag is the moment the number matters most here.
+(defstate automation-edit-value nil)
+
+(def format-lane-value (v)
+  (if (= v nil)
+    ""
+    (let ((rounded (/ (round (* v 100)) 100)))
+      (if (= rounded (round rounded))
+        (str (round rounded))
+        (str rounded)))))
+
+;; Range axis in the sidebar strip left of the lane: max at the top, min at
+;; the bottom, the edited value between them in white.
+(def automation-axis ()
+  (box :width 5 :height (- automation-height 0.08)
+    (v-stack :gap 0 :height (- automation-height 0.08) :width :fill :align :end
+      (box :width :fill :height 1.0 :h-align :right :v-align :top
+        (label (format-lane-value (get (automation) :max))
+          :key "automation-axis-max"
+          :width 4.4 :h-align :right
+          :font-size 8 :color :dim :bg :transparent))
+      (box :width :fill :height 1.0 :h-align :right :v-align :center
+        (label (format-lane-value automation-edit-value)
+          :key "automation-axis-value"
+          :width 4.4 :h-align :right
+          :font-size 10 :color :white :bg :transparent))
+      (box :width :fill :height 1.0 :h-align :right :v-align :bottom
+        (label (format-lane-value (get (automation) :min))
+          :key "automation-axis-min"
+          :width 4.4 :h-align :right
+          :font-size 8 :color :dim :bg :transparent)))))
+
+;; Lane header: mirrors the clip panel's column (dim caption, white value)
+;; so the picker reads as part of the panel rather than a floating control.
+(def automation-header ()
+  (box :width (+ clip-panel-width 5) :height automation-height
+    :background-color :mixer-strip-bg
+    (v-stack :gap 0 :height :fill :width :fill
+      (box :width :fill :height 0.08 :background-color :mixer-strip-border)
+      (h-stack :gap 0 :height (- automation-height 0.08) :width :fill
+        (box :padding 1 :height (- automation-height 0.08) :width clip-panel-width
+          :v-align :center
+          (h-stack :gap 0.5 :align :center :width :fill
+            (box :width 4.6 :height 1.0
+              (label "Lane" :font-size 10 :color :dim :bg :transparent))
+            (dropdown
+              :key "automation-param"
+              :value (automation-selected-label)
+              :options (automation-param-options)
+              :on-change (lambda (v) (select-automation-param v))
+              :badge-color :transparent
+              :background-color :buffer-bg
+              :width 12 :height 1.3 :font-size 10)))
+        (automation-axis)))))
+
+(def automation-row ()
+  (h-stack :width :fill :gap 0.0 :height automation-height
+    (automation-header)
+    (box :height automation-height :flex 1 :width 0
+      (v-stack :gap 0 :height :fill :width :fill
+        (box :width :fill :height 0.08 :background-color :mixer-strip-border)
+        (automation-lane
+          :key "automation-lane"
+          :width :fill
+          :height (- automation-height 0.08)
+          :points (get (automation) :points)
+          :min (get (automation) :min)
+          :max (get (automation) :max)
+          :default (get (automation) :default)
+          :increment (get (automation) :increment)
+          :view-start piano-roll-view-start
+          :view-duration piano-roll-view-duration
+          :color (current-track-color)
+          :base-color (list 0.55 0.55 0.55)
+          :background :buffer-bg
+          :on-change (lambda (kind step value)
+            (automation-action kind step value)))))))
+
 (def buffer-content ()
   (if (and (piano-roll-arrangement-mode?) (= SEQ.focus-clip-start nil))
     (box
@@ -543,9 +702,12 @@
       (label "No clip selected"
         :key "no-clip-selected-label"
         :font-size 11 :color :dim :bg :transparent))
-    (h-stack :width :fill :gap 0.0 :height :fill
-      (clip-panel)
-      (piano-roll-timeline))))
+    (v-stack :width :fill :gap 0.0 :height :fill
+      (box :width :fill :flex 1 :height 0
+        (h-stack :width :fill :gap 0.0 :height :fill
+          (clip-panel)
+          (piano-roll-timeline)))
+      (automation-row))))
 
 (effect-buffer "*piano-roll*"
   (box :width :fill :height :fill

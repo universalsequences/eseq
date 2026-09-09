@@ -6,6 +6,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "piano-roll-gesture-update",
     "piano-roll-gesture-finish",
     "piano-roll-history-action",
+    "piano-roll-automation-refresh",
     "delete-selected-steps",
     "paste-steps",
     "set-step-param-history",
@@ -384,6 +385,15 @@ pub(super) fn handle(
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
             }
+        }
+        // The lane changed its selected parameter (a Lisp-side pinned def):
+        // republish through the ordinary piano-roll sync so the lane body
+        // follows the new key.
+        "piano-roll-automation-refresh" => {
+            ui_invalidations.push(UiInvalidation::PianoRoll {
+                track: current_track.load(Ordering::Relaxed),
+                change: PianoRollInvalidation::Selection,
+            });
         }
         "delete-selected-steps" => {
             let track = match &payload {

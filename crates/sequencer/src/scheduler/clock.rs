@@ -52,6 +52,11 @@ pub(super) struct SnapshotSequencerClock {
     pub(super) total_beats: f64,
     pub(super) track_clocks: Vec<SnapshotTrackClockState>,
     pub(super) was_playing: bool,
+    tempo_origin_beats: f64,
+    tempo_frames: u64,
+    tempo_bpm: u32,
+    last_global_16th: u32,
+    last_bar: u32,
 }
 
 impl SnapshotSequencerClock {
@@ -72,11 +77,16 @@ impl SnapshotSequencerClock {
             total_beats: 0.0,
             track_clocks,
             was_playing: false,
+            tempo_origin_beats: 0.0,
+            tempo_frames: 0,
+            tempo_bpm: 0,
+            last_global_16th: 0,
+            last_bar: 0,
         }
     }
 
     pub(super) fn reset(&mut self) {
-        self.total_beats = 0.0;
+        self.seek_beats(0.0);
         self.was_playing = false;
         for track in &mut self.track_clocks {
             track.last_local_step = u32::MAX;
@@ -84,6 +94,17 @@ impl SnapshotSequencerClock {
             track.anchor_beat = 0.0;
             track.offset_steps = 0.0;
         }
+    }
+
+    /// Establish a new musical clock origin after a seek or tempo change.
+    /// Between origins, time advances by integer samples rather than adding a
+    /// rounded beat increment on every sample.
+    pub(super) fn seek_beats(&mut self, beat: f64) {
+        self.total_beats = beat;
+        self.tempo_origin_beats = beat;
+        self.tempo_frames = 0;
+        self.last_global_16th = (beat / 0.25) as u32;
+        self.last_bar = (beat / 4.0) as u32;
     }
 
     /// Install the active song row's per-lane phase anchors (takes spec
@@ -105,16 +126,28 @@ impl SnapshotSequencerClock {
         }
     }
 
-    /// Forget one track's step-dedup memory: the next derived step fires
-    /// even if its index matches the last one derived. Used at song row
-    /// boundaries where the lane's SOURCE changes — a new clip is a fresh
-    /// trigger domain, and without this a silenced lane whose clock wrapped
-    /// into step 0 just before the boundary (fractional captured row
-    /// starts make this common) swallows the new clip's downbeat.
-    pub(super) fn reset_track_step_memory(&mut self, track: usize) {
-        if let Some(clock) = self.track_clocks.get_mut(track) {
-            clock.last_local_step = u32::MAX;
-        }
+    /// Adopt a changed source after installing its clip anchor. A fractional
+    /// offset can enter an already sounding step; that is not a new onset.
+    /// Still allow an onset whose first representable sample is this frame,
+    /// even when the outgoing source last played the same step index.
+    pub(super) fn adopt_track_source(&mut self, track: usize, snapshot: &SequencerSnapshot) {
+        self.precompute_boundaries(snapshot, track);
+        let ns = snapshot.tracks[track].params.num_steps;
+        let clock = &mut self.track_clocks[track];
+        let local_beats = Self::anchored_local_beats(clock, self.total_beats, ns);
+        let position = local_beats.rem_euclid(clock.cycle_beats);
+        clock.last_local_step = Self::derive_local_step(clock, position, ns)
+            .filter(|step| {
+                let onset_beat = clock.anchor_beat - Self::offset_beats(clock, ns)
+                    + (local_beats / clock.cycle_beats).floor() * clock.cycle_beats
+                    + clock.boundaries[*step];
+                let onset_frame = ((onset_beat - self.tempo_origin_beats)
+                    * self.sample_rate * 60.0 / snapshot.transport.bpm as f64).ceil();
+                onset_frame < self.tempo_frames as f64
+            })
+            .map(|step| step as u32)
+            .unwrap_or(u32::MAX);
+        clock.last_read_position = f64::NAN;
     }
 
     /// Clear one track's anchor (manual-override latch, takes spec 10): the
@@ -235,7 +268,7 @@ impl SnapshotSequencerClock {
         let bpm = snapshot.transport.bpm as f64;
         let beats_per_sample = bpm / (self.sample_rate * 60.0);
         let ahead_samples = scheduled_until_sample.saturating_sub(rendered_sample) as f64;
-        self.total_beats = (self.total_beats - ahead_samples * beats_per_sample).max(0.0);
+        self.seek_beats((self.total_beats - ahead_samples * beats_per_sample).max(0.0));
         self.was_playing = snapshot.transport.playing;
 
         let num_tracks = snapshot.transport.num_tracks;
@@ -383,17 +416,21 @@ impl SnapshotSequencerClock {
         }
 
         let bpm = snapshot.transport.bpm as f64;
-        let beats_per_sample = bpm / (self.sample_rate * 60.0);
         let samples_per_quarter = self.sample_rate * 60.0 / bpm;
         let num_tracks = snapshot.transport.num_tracks;
 
         if !self.was_playing {
             self.was_playing = true;
-            self.total_beats = 0.0;
+            self.seek_beats(0.0);
             for t in 0..MAX_TRACKS {
                 self.track_clocks[t].last_local_step = u32::MAX;
                 self.track_clocks[t].last_read_position = f64::NAN;
             }
+        }
+        if self.tempo_bpm != snapshot.transport.bpm {
+            self.tempo_origin_beats = self.total_beats;
+            self.tempo_frames = 0;
+            self.tempo_bpm = snapshot.transport.bpm;
         }
 
         for t in 0..num_tracks {
@@ -412,23 +449,21 @@ impl SnapshotSequencerClock {
         }
 
         let mut triggers = Vec::new();
-        let mut last_global_16th = (self.total_beats / 0.25) as u32;
-        let mut last_bar = (self.total_beats / 4.0) as u32;
+        // These indices describe the last evaluated sample, not the next
+        // sample at total_beats. Keep them across chunk boundaries.
         for offset in 0..nframes {
-            self.total_beats += beats_per_sample;
-
             let global_16th = (self.total_beats / 0.25) as u32;
-            if global_16th != last_global_16th {
+            if offset == 0 || global_16th != self.last_global_16th {
                 state
                     .transport
                     .playhead
                     .store(global_16th, Ordering::Relaxed);
-                last_global_16th = global_16th;
+                self.last_global_16th = global_16th;
             }
 
             let bar = (self.total_beats / 4.0) as u32;
-            if bar != last_bar {
-                last_bar = bar;
+            if bar != self.last_bar {
+                self.last_bar = bar;
                 if state
                     .transport
                     .pending_mod_resync
@@ -503,6 +538,11 @@ impl SnapshotSequencerClock {
                     }
                 }
             }
+            // Sample zero observes beat zero. Only after evaluating this
+            // sample do we advance to the next sample's musical position.
+            self.tempo_frames += 1;
+            self.total_beats = self.tempo_origin_beats
+                + self.tempo_frames as f64 / samples_per_quarter;
         }
 
         // Publish the local phase every scheduler block, not only on a step

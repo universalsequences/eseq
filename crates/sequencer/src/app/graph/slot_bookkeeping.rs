@@ -17,13 +17,14 @@ impl GraphController<'_> {
             instrument,
         } = registration;
         let instrument_type = match &instrument {
+            InstrumentRegistration::Empty => InstrumentType::Empty,
             InstrumentRegistration::Sampler { .. } => InstrumentType::Sampler,
             InstrumentRegistration::Custom { .. } => InstrumentType::Custom,
             InstrumentRegistration::Modulator => InstrumentType::Modulator,
         };
         let run_mode = match &instrument {
             InstrumentRegistration::Custom { run_mode, .. } => *run_mode,
-            InstrumentRegistration::Sampler { .. } | InstrumentRegistration::Modulator => {
+            InstrumentRegistration::Empty | InstrumentRegistration::Sampler { .. } | InstrumentRegistration::Modulator => {
                 CustomInstrumentRunMode::Instrument
             }
         };
@@ -186,16 +187,19 @@ impl GraphController<'_> {
                 self.app.graph.track_engine_ids.push(Some(engine_id));
                 self.initialize_instrument_slot(idx, &track_name, manifest);
             }
-            InstrumentRegistration::Modulator => {
-                unsafe {
-                    crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, shell.mod_env_id);
-                    crate::audiograph::graph_connect(
-                        self.app.graph.lg.0,
-                        shell.mod_env_id,
-                        0,
-                        shell.mod_out_id,
-                        0,
-                    );
+            InstrumentRegistration::Empty | InstrumentRegistration::Modulator => {
+                self.clear_sampler_runtime_pool(idx);
+                if instrument_type == InstrumentType::Modulator {
+                    unsafe {
+                        crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, shell.mod_env_id);
+                        crate::audiograph::graph_connect(
+                            self.app.graph.lg.0,
+                            shell.mod_env_id,
+                            0,
+                            shell.mod_out_id,
+                            0,
+                        );
+                    }
                 }
                 self.app.state.runtime.track_engine_ids[idx].store(u32::MAX, Ordering::Release);
                 if let Some(sound) = self
@@ -235,9 +239,13 @@ impl GraphController<'_> {
                 self.app.graph.track_synth_node_ids.push(Vec::new());
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
                 self.app.graph.track_engine_ids.push(None);
-                let desc = crate::instruments::track_modulator::descriptor();
-                self.app.state.pattern.instrument_slots[idx]
-                    .apply_descriptor(&desc, shell.mod_env_id as u32);
+                let (desc, node_id) = if instrument_type == InstrumentType::Modulator {
+                    (crate::instruments::track_modulator::descriptor(), shell.mod_env_id as u32)
+                } else {
+                    (EffectDescriptor::empty_custom_slot(), 0)
+                };
+                self.app.state.pattern.instrument_slots[idx].clear();
+                self.app.state.pattern.instrument_slots[idx].apply_descriptor(&desc, node_id);
                 self.app.graph.instrument_descriptors.push(desc);
             }
         }
@@ -283,7 +291,7 @@ impl GraphController<'_> {
         self.app.ui.sidebar_tab = super::super::SidebarTab::Tools;
         self.app.ui.sidebar_mode = match instrument_type {
             InstrumentType::Custom => super::super::SidebarMode::Presets,
-            InstrumentType::Sampler | InstrumentType::Modulator | InstrumentType::Rack => {
+            InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Modulator | InstrumentType::Rack => {
                 super::super::SidebarMode::Audition
             }
         };
@@ -291,6 +299,7 @@ impl GraphController<'_> {
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app.latch_track_created_during_song_playback(idx);
+        self.app.sync_scratch_runtime_descriptors();
         self.app.state.publish_event_compatible_topology();
         Ok(())
     }

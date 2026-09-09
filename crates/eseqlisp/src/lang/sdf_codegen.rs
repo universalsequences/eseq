@@ -292,7 +292,7 @@ impl ShaderEmitter {
                 match head.as_str() {
                     "vec2" => Some("float2"),
                     "vec3" => Some("float3"),
-                    "vec4" | "rgba" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/layer" => {
+                    "vec4" | "rgba" | "sdf/region" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/layer" => {
                         Some("float4")
                     }
                     "let" | "do" => items.last().and_then(|expr| self.expr_type(expr)),
@@ -366,7 +366,7 @@ impl ShaderEmitter {
                     "rgba" => self.emit_func_call(self.constructor("float4"), args),
 
                     // 1-arg math intrinsics (same name in Metal)
-                    "abs" | "sin" | "cos" | "sqrt" | "fract" | "floor" | "ceil" | "round"
+                    "exp" | "abs" | "sin" | "cos" | "sqrt" | "fract" | "floor" | "ceil" | "round"
                     | "length" | "normalize" | "fwidth" => self.emit_func_call(head, args),
 
                     // 2-arg math intrinsics
@@ -383,6 +383,7 @@ impl ShaderEmitter {
                     // SDF compositing forms (Milestone 2)
                     "sdf/layer" => self.emit_sdf_layer(args),
                     "sdf/fill" => self.emit_sdf_fill(args),
+                    "sdf/region" => self.emit_sdf_region(args),
                     "sdf/paint" => self.emit_sdf_paint(args),
                     "sdf/stroke" => self.emit_sdf_stroke(args),
 
@@ -993,6 +994,20 @@ impl ShaderEmitter {
         Ok(Some(shadow_result))
     }
 
+    /// Named interactive shape with optional independent hit geometry.
+    fn emit_sdf_region(&mut self, args: &[Expression]) -> Result<String, CodegenError> {
+        if !(args.len() == 3 || args.len() == 4)
+            || !matches!(args.first(), Some(Expression::Keyword(_))) {
+            return Err(CodegenError::UnsupportedExpression(
+                "sdf/region requires (:name visible-sdf material [hit-sdf])".into(),
+            ));
+        }
+        // Validate hit geometry against the shader language too. The GPU
+        // optimizer removes this unused calculation; CPU hit testing uses it.
+        if let Some(hit_shape) = args.get(3) { self.emit_expr(hit_shape)?; }
+        self.emit_sdf_shape_color(&args[1], &args[2], true)
+    }
+
     fn emit_sdf_fill(&mut self, args: &[Expression]) -> Result<String, CodegenError> {
         if args.len() < 2 {
             return Err(CodegenError::UnsupportedExpression(
@@ -1264,7 +1279,7 @@ fn expr_returns_float4(expr: &Expression) -> bool {
                 return false;
             };
             match head.as_str() {
-                "vec4" | "rgba" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/layer" => true,
+                "vec4" | "rgba" | "sdf/region" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/layer" => true,
                 "let" => items.last().is_some_and(expr_returns_float4),
                 "do" => items.last().is_some_and(expr_returns_float4),
                 "if" => items.get(2).is_some_and(expr_returns_float4),

@@ -294,7 +294,7 @@ pub(super) fn collect_rack_slot_active_voice_releases(
                 note_offs.push(RackSlotNoteOff::Custom { logical_id: lid });
             }
         }
-        InstrumentType::Modulator | InstrumentType::Rack => {}
+        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
     }
     note_offs
 }
@@ -403,7 +403,7 @@ pub(super) fn collect_track_active_voice_releases(
                 note_offs.push(RackSlotNoteOff::Custom { logical_id: lid });
             }
         }
-        InstrumentType::Modulator | InstrumentType::Rack => {}
+        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
     }
 }
 
@@ -879,7 +879,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                     },
                 );
             }
-            InstrumentType::Modulator | InstrumentType::Rack => {}
+            InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
         }
     }
 
@@ -1140,7 +1140,7 @@ pub(super) fn fire_rack_slot_note(
                 );
             }
         }
-        InstrumentType::Modulator | InstrumentType::Rack => {}
+        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
     }
 }
 
@@ -1430,7 +1430,7 @@ fn dispatch_rack_slot_params_to_active_voices(
                 }
             }
         }
-        InstrumentType::Modulator | InstrumentType::Rack => {}
+        InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
     }
 }
 

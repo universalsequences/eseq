@@ -473,6 +473,10 @@ impl WidgetDefinition for MenuItemWidget {
         &["menu-item"]
     }
 
+    // Keyboard focus uses the same inset row as pointer hover. Do not let the
+    // container collector paint its full-width square focus background too.
+    fn renders_own_focus(&self) -> bool { true }
+
     fn is_container(&self) -> bool { true }
 
     fn layout_children(
@@ -584,14 +588,11 @@ impl WidgetDefinition for MenuItemWidget {
             }
         };
         if !disabled && (super::pointer_hovered(node.widget_id) || _viewport.focused_widget_id == Some(node.widget_id) || submenu_open(node)) {
-            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
-                rect: super::menu_style::row_highlight_rect(node.rect),
-                color: resolve_named_color(
-                    &node.props,
-                    "hover-color",
-                    crate::theme::DROPDOWN_HOVER_BG(),
-                ),
-            }));
+            prims.push(super::menu_style::row_highlight_primitive(
+                node.rect,
+                resolve_named_color(&node.props, "hover-color", crate::theme::DROPDOWN_HOVER_BG()),
+                _viewport,
+            ));
         }
         let font_size = super::menu_style::menu_font_size_from_props(&node.props);
         let text_row = node.rect.row + (ITEM_ROW_HEIGHT - 1.0) * 0.5;
@@ -616,13 +617,18 @@ impl WidgetDefinition for MenuItemWidget {
         }
         let checked = matches!(node.props.get("checked"), Some(Value::Bool(true)))
             || matches!(node.props.get("checked"), Some(Value::Number(n)) if *n > 0.5);
-        if has_submenu(node) || checked {
+        if checked {
+            prims.push(super::menu_style::checkmark_primitive(
+                node.rect, font_size, dim(crate::theme::DROPDOWN_CHECK()), _viewport,
+            ));
+        }
+        if has_submenu(node) {
             prims.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
                 row: text_row,
                 col: node.rect.col + ITEM_PADDING_COLS,
                 align_width: (node.rect.width - ITEM_PADDING_COLS * 2.0).max(0.0),
-                h_align: if has_submenu(node) { 1.0 } else { 0.0 },
-                text: if has_submenu(node) { "›" } else { "✓" }.to_string(),
+                h_align: 1.0,
+                text: "›".to_string(),
                 font_size, scale: 1.0,
                 fg: dim(crate::theme::DROPDOWN_FG()), bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
             }));
@@ -835,6 +841,40 @@ mod tests {
             item.rect.width,
             width_at(tile_font)
         );
+    }
+
+    #[test]
+    fn checked_context_row_emits_finite_vector_mark_and_focus_highlight() {
+        let tree = widget_node("context-menu", &[("is-open", Value::Bool(true))], vec![
+            widget_node("menu-item", &[
+                ("text", Value::String("Route".to_string())),
+                ("checked", Value::Bool(true)),
+            ], vec![]),
+        ]);
+        let layout = crate::layout::LayoutEngine::new(80, 30, 1.0).layout(&tree).unwrap();
+        let item = find_widget(&layout, "menu-item").unwrap();
+        assert!(item.rect.width.is_finite() && item.rect.width > 0.0);
+        assert!(item.rect.height.is_finite() && item.rect.height > 0.0);
+        let viewport = WidgetViewport {
+            cell_w: 14.0, cell_h: 28.0, vp_w: 1120.0, vp_h: 840.0,
+            time_seconds: 0.0, focused_widget_id: Some(item.widget_id),
+            focused_branch: false, overlay_viewport_bottom: 30.0,
+            scroll_top: 0.0, scroll_left: 0.0, inherited_hover: false,
+        };
+        let (primitives, _) = super::super::collect_gpu_primitives(item, viewport, 0.0, 30);
+        assert!(!primitives.iter().any(|p| matches!(p, GpuPrimitive::Rect(_))),
+            "menu focus must not add the generic square container background");
+        for kind in ["dropdown", "dropdown-checkmark"] {
+            let instance = primitives.iter().find_map(|p| match p {
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. } if widget_type == kind => Some(instance),
+                _ => None,
+            }).expect("shared menu shape");
+            for axis in 0..2 {
+                assert!(instance.ndc_min[axis].is_finite());
+                assert!(instance.ndc_max[axis].is_finite());
+                assert!((instance.ndc_max[axis] - instance.ndc_min[axis]).abs() > 0.0);
+            }
+        }
     }
 
     fn menu_item_node(props: &[(&str, Value)]) -> Value {

@@ -1,0 +1,967 @@
+{
+  "scope": "Research diagnostic; not production acceptance",
+  "rows": [
+    {
+      "complex_relative_error": 0.0055939595795963,
+      "fundamental_phase_error": 0.00040263405584603057,
+      "case": "character-t1-sine-f250-r0-p0",
+      "note": 36,
+      "fundamental_error_db": 0.017138097455391504,
+      "harmonic_relative_error": 0.005010662950637567
+    },
+    {
+      "complex_relative_error": 0.009075023330625721,
+      "fundamental_phase_error": 1.4000661526163119e-05,
+      "case": "character-t1-sine-f250-r0-p0",
+      "note": 48,
+      "fundamental_error_db": 0.07440169765864205,
+      "harmonic_relative_error": 0.008661780758647406
+    },
+    {
+      "complex_relative_error": 0.005285331997561843,
+      "fundamental_phase_error": -3.8760125816352394e-05,
+      "case": "character-t1-sine-f250-r0-p0",
+      "note": 60,
+      "fundamental_error_db": 0.03789406341795213,
+      "harmonic_relative_error": 0.004920674006970843
+    },
+    {
+      "complex_relative_error": 0.0015361482657533937,
+      "fundamental_phase_error": -6.893045469767752e-05,
+      "case": "character-t1-sine-f250-r0-p0",
+      "note": 72,
+      "fundamental_error_db": -0.01148534884286433,
+      "harmonic_relative_error": 0.0014496369941439395
+    },
+    {
+      "complex_relative_error": 0.001956866725661138,
+      "fundamental_phase_error": -0.00017046942159157567,
+      "case": "character-t1-sine-f250-r0-p0",
+      "note": 84,
+      "fundamental_error_db": -0.01660430669056211,
+      "harmonic_relative_error": 0.0019479462471972064
+    },
+    {
+      "complex_relative_error": 0.009855291985425145,
+      "fundamental_phase_error": 0.008993145733574032,
+      "case": "character-t1-sine-f250-r0.5-p0",
+      "note": 36,
+      "fundamental_error_db": 0.01341580001138992,
+      "harmonic_relative_error": 0.00299934892505133
+    },
+    {
+      "complex_relative_error": 0.013781301514103658,
+      "fundamental_phase_error": 0.007971245463976723,
+      "case": "character-t1-sine-f250-r0.5-p0",
+      "note": 48,
+      "fundamental_error_db": 0.07737605023293682,
+      "harmonic_relative_error": 0.010344230768541865
+    },
+    {
+      "complex_relative_error": 0.014481007722098605,
+      "fundamental_phase_error": -0.011169113073579174,
+      "case": "character-t1-sine-f250-r0.5-p0",
+      "note": 60,
+      "fundamental_error_db": 0.055233530735662714,
+      "harmonic_relative_error": 0.008333061843205408
+    },
+    {
+      "complex_relative_error": 0.0026296197391084608,
+      "fundamental_phase_error": 0.0011318733102281186,
+      "case": "character-t1-sine-f250-r0.5-p0",
+      "note": 72,
+      "fundamental_error_db": -0.015642084699235493,
+      "harmonic_relative_error": 0.001811072846700266
+    },
+    {
+      "complex_relative_error": 0.001982787342682894,
+      "fundamental_phase_error": -0.00044801933814989786,
+      "case": "character-t1-sine-f250-r0.5-p0",
+      "note": 84,
+      "fundamental_error_db": -0.01659418888272091,
+      "harmonic_relative_error": 0.001931072142786243
+    },
+    {
+      "complex_relative_error": 0.02227759756306145,
+      "fundamental_phase_error": 0.0159255597045949,
+      "case": "character-t1-sine-f250-r0.8-p0",
+      "note": 36,
+      "fundamental_error_db": 0.0016200388055866584,
+      "harmonic_relative_error": 0.012736383136429618
+    },
+    {
+      "complex_relative_error": 0.05351003175868771,
+      "fundamental_phase_error": 0.040252286950501585,
+      "case": "character-t1-sine-f250-r0.8-p0",
+      "note": 48,
+      "fundamental_error_db": 0.07944854795370325,
+      "harmonic_relative_error": 0.029025692892973437
+    },
+    {
+      "complex_relative_error": 0.0999570826844633,
+      "fundamental_phase_error": -0.09859434909229296,
+      "case": "character-t1-sine-f250-r0.8-p0",
+      "note": 60,
+      "fundamental_error_db": -0.07799389258973272,
+      "harmonic_relative_error": 0.017715454263432327
+    },
+    {
+      "complex_relative_error": 0.009183169110882431,
+      "fundamental_phase_error": 0.007991215865693277,
+      "case": "character-t1-sine-f250-r0.8-p0",
+      "note": 72,
+      "fundamental_error_db": -0.03080140864267734,
+      "harmonic_relative_error": 0.00417580902020797
+    },
+    {
+      "complex_relative_error": 0.0019732439222529424,
+      "fundamental_phase_error": -0.000324104519719067,
+      "case": "character-t1-sine-f250-r0.8-p0",
+      "note": 84,
+      "fundamental_error_db": -0.01677280090038023,
+      "harmonic_relative_error": 0.0019460643988452697
+    },
+    {
+      "complex_relative_error": 0.0077614427917389855,
+      "fundamental_phase_error": 1.5708902064966892e-05,
+      "case": "character-t1-sine-f4000-r0-p0",
+      "note": 36,
+      "fundamental_error_db": -0.021529187432128408,
+      "harmonic_relative_error": 0.007430124800391546
+    },
+    {
+      "complex_relative_error": 0.00799985718785442,
+      "fundamental_phase_error": 9.484201071818942e-06,
+      "case": "character-t1-sine-f4000-r0-p0",
+      "note": 48,
+      "fundamental_error_db": -0.020628801744769054,
+      "harmonic_relative_error": 0.007669990660793253
+    },
+    {
+      "complex_relative_error": 0.007754967237745773,
+      "fundamental_phase_error": 6.93011276662542e-05,
+      "case": "character-t1-sine-f4000-r0-p0",
+      "note": 60,
+      "fundamental_error_db": -0.018322204288242525,
+      "harmonic_relative_error": 0.0074891588778536475
+    },
+    {
+      "complex_relative_error": 0.007019136565013296,
+      "fundamental_phase_error": 0.00019697445734330896,
+      "case": "character-t1-sine-f4000-r0-p0",
+      "note": 72,
+      "fundamental_error_db": -0.009225996125932117,
+      "harmonic_relative_error": 0.00682010512066525
+    },
+    {
+      "complex_relative_error": 0.006208323400062271,
+      "fundamental_phase_error": 0.0003758611485716663,
+      "case": "character-t1-sine-f4000-r0-p0",
+      "note": 84,
+      "fundamental_error_db": 0.023079754747331684,
+      "harmonic_relative_error": 0.005679611388466033
+    },
+    {
+      "complex_relative_error": 0.00702520021301786,
+      "fundamental_phase_error": 0.0006895354174665681,
+      "case": "character-t1-sine-f4000-r0.5-p0",
+      "note": 36,
+      "fundamental_error_db": -0.013686201927588985,
+      "harmonic_relative_error": 0.006580718713827995
+    },
+    {
+      "complex_relative_error": 0.007427690930524179,
+      "fundamental_phase_error": 0.0013622475295704272,
+      "case": "character-t1-sine-f4000-r0.5-p0",
+      "note": 48,
+      "fundamental_error_db": -0.012925362548298513,
+      "harmonic_relative_error": 0.006817867415321125
+    },
+    {
+      "complex_relative_error": 0.007717492600557615,
+      "fundamental_phase_error": 0.002741924185712656,
+      "case": "character-t1-sine-f4000-r0.5-p0",
+      "note": 60,
+      "fundamental_error_db": -0.01117492906730726,
+      "harmonic_relative_error": 0.006538731778643873
+    },
+    {
+      "complex_relative_error": 0.008353081298695315,
+      "fundamental_phase_error": 0.005279267625823439,
+      "case": "character-t1-sine-f4000-r0.5-p0",
+      "note": 72,
+      "fundamental_error_db": -0.004401344351135525,
+      "harmonic_relative_error": 0.0054124387653717585
+    },
+    {
+      "complex_relative_error": 0.010041513865867593,
+      "fundamental_phase_error": 0.008957521727241331,
+      "case": "character-t1-sine-f4000-r0.5-p0",
+      "note": 84,
+      "fundamental_error_db": 0.019277108858065335,
+      "harmonic_relative_error": 0.003641026463737518
+    },
+    {
+      "complex_relative_error": 0.00670951371582619,
+      "fundamental_phase_error": 0.001092796033545293,
+      "case": "character-t1-sine-f4000-r0.8-p0",
+      "note": 36,
+      "fundamental_error_db": -0.008860556354502258,
+      "harmonic_relative_error": 0.006135393417744829
+    },
+    {
+      "complex_relative_error": 0.007418287931313351,
+      "fundamental_phase_error": 0.0021630985544457216,
+      "case": "character-t1-sine-f4000-r0.8-p0",
+      "note": 48,
+      "fundamental_error_db": -0.008304738530809352,
+      "harmonic_relative_error": 0.006428235110660362
+    },
+    {
+      "complex_relative_error": 0.00893043147118735,
+      "fundamental_phase_error": 0.004378978261890767,
+      "case": "character-t1-sine-f4000-r0.8-p0",
+      "note": 60,
+      "fundamental_error_db": -0.007170739251201801,
+      "harmonic_relative_error": 0.006471975300820684
+    },
+    {
+      "complex_relative_error": 0.013650192308996589,
+      "fundamental_phase_error": 0.008722708968797305,
+      "case": "character-t1-sine-f4000-r0.8-p0",
+      "note": 72,
+      "fundamental_error_db": -0.002304802111523974,
+      "harmonic_relative_error": 0.007625407606794675
+    },
+    {
+      "complex_relative_error": 0.02295427606730662,
+      "fundamental_phase_error": 0.015787631902076552,
+      "case": "character-t1-sine-f4000-r0.8-p0",
+      "note": 84,
+      "fundamental_error_db": 0.007497542764074293,
+      "harmonic_relative_error": 0.013772644145382899
+    },
+    {
+      "complex_relative_error": 0.012060978697513339,
+      "fundamental_phase_error": 0.0005412998900219114,
+      "case": "character-t1-sine-f250-r0-p6",
+      "note": 36,
+      "fundamental_error_db": -0.0625277250577248,
+      "harmonic_relative_error": 0.011354195783111328
+    },
+    {
+      "complex_relative_error": 0.013501109478296549,
+      "fundamental_phase_error": -5.59226766731543e-05,
+      "case": "character-t1-sine-f250-r0-p6",
+      "note": 48,
+      "fundamental_error_db": -0.007498873598663157,
+      "harmonic_relative_error": 0.008051897078496044
+    },
+    {
+      "complex_relative_error": 0.013939296767794322,
+      "fundamental_phase_error": -7.249147250556716e-05,
+      "case": "character-t1-sine-f250-r0-p6",
+      "note": 60,
+      "fundamental_error_db": 0.10281307951039789,
+      "harmonic_relative_error": 0.012423779620213841
+    },
+    {
+      "complex_relative_error": 0.022422116850363733,
+      "fundamental_phase_error": 0.0003532668831726103,
+      "case": "character-t1-sine-f250-r0-p6",
+      "note": 72,
+      "fundamental_error_db": 0.18708153672684216,
+      "harmonic_relative_error": 0.021778289608033134
+    },
+    {
+      "complex_relative_error": 0.01987066862262612,
+      "fundamental_phase_error": -7.247318779491648e-05,
+      "case": "character-t1-sine-f250-r0-p6",
+      "note": 84,
+      "fundamental_error_db": 0.1706999727725694,
+      "harmonic_relative_error": 0.019836978424225004
+    },
+    {
+      "complex_relative_error": 0.01708853470883933,
+      "fundamental_phase_error": 0.012260176647883984,
+      "case": "character-t1-sine-f250-r0.5-p6",
+      "note": 36,
+      "fundamental_error_db": 0.0210132690501856,
+      "harmonic_relative_error": 0.006750225776107196
+    },
+    {
+      "complex_relative_error": 0.01952561159561289,
+      "fundamental_phase_error": 0.00679484347798874,
+      "case": "character-t1-sine-f250-r0.5-p6",
+      "note": 48,
+      "fundamental_error_db": 0.12072322623846338,
+      "harmonic_relative_error": 0.016675952937048218
+    },
+    {
+      "complex_relative_error": 0.03041319949327156,
+      "fundamental_phase_error": -0.028232195670323673,
+      "case": "character-t1-sine-f250-r0.5-p6",
+      "note": 60,
+      "fundamental_error_db": -0.011359442905429592,
+      "harmonic_relative_error": 0.006669953542221401
+    },
+    {
+      "complex_relative_error": 0.017758290946477632,
+      "fundamental_phase_error": 0.0030497412145266533,
+      "case": "character-t1-sine-f250-r0.5-p6",
+      "note": 72,
+      "fundamental_error_db": 0.1414376359862714,
+      "harmonic_relative_error": 0.016774496162520604
+    },
+    {
+      "complex_relative_error": 0.020499713087296475,
+      "fundamental_phase_error": -0.001619172572405477,
+      "case": "character-t1-sine-f250-r0.5-p6",
+      "note": 84,
+      "fundamental_error_db": 0.17571418176030024,
+      "harmonic_relative_error": 0.02042056292079573
+    },
+    {
+      "complex_relative_error": 0.04268820952430466,
+      "fundamental_phase_error": 0.019915397505745898,
+      "case": "character-t1-sine-f250-r0.8-p6",
+      "note": 36,
+      "fundamental_error_db": -0.055946260024340305,
+      "harmonic_relative_error": 0.020766863283117585
+    },
+    {
+      "complex_relative_error": 0.08505534454256863,
+      "fundamental_phase_error": 0.055459774868817036,
+      "case": "character-t1-sine-f250-r0.8-p6",
+      "note": 48,
+      "fundamental_error_db": 0.13766066148628633,
+      "harmonic_relative_error": 0.059517408705717784
+    },
+    {
+      "complex_relative_error": 0.1417324884469207,
+      "fundamental_phase_error": -0.13921989923707698,
+      "case": "character-t1-sine-f250-r0.8-p6",
+      "note": 60,
+      "fundamental_error_db": 0.06664177114755926,
+      "harmonic_relative_error": 0.016967222253946264
+    },
+    {
+      "complex_relative_error": 0.0194971119477219,
+      "fundamental_phase_error": 0.016489384853526096,
+      "case": "character-t1-sine-f250-r0.8-p6",
+      "note": 72,
+      "fundamental_error_db": 0.06650943109628825,
+      "harmonic_relative_error": 0.009671910015101771
+    },
+    {
+      "complex_relative_error": 0.02033710008227932,
+      "fundamental_phase_error": -0.0018439463351359294,
+      "case": "character-t1-sine-f250-r0.8-p6",
+      "note": 84,
+      "fundamental_error_db": 0.1740956454336282,
+      "harmonic_relative_error": 0.020250441035521222
+    },
+    {
+      "complex_relative_error": 0.012580306096552751,
+      "fundamental_phase_error": 8.187975471789134e-06,
+      "case": "character-t1-sine-f4000-r0-p6",
+      "note": 36,
+      "fundamental_error_db": -0.08020828524091878,
+      "harmonic_relative_error": 0.012580298025697443
+    },
+    {
+      "complex_relative_error": 0.012789530636317919,
+      "fundamental_phase_error": 3.532663715328243e-05,
+      "case": "character-t1-sine-f4000-r0-p6",
+      "note": 48,
+      "fundamental_error_db": -0.07994400043302688,
+      "harmonic_relative_error": 0.012789076109999358
+    },
+    {
+      "complex_relative_error": 0.01267811325526893,
+      "fundamental_phase_error": 0.00012673417682450592,
+      "case": "character-t1-sine-f4000-r0-p6",
+      "note": 60,
+      "fundamental_error_db": -0.07896076091178693,
+      "harmonic_relative_error": 0.012664765452455387
+    },
+    {
+      "complex_relative_error": 0.012349924823515884,
+      "fundamental_phase_error": 0.00030220352711760534,
+      "case": "character-t1-sine-f4000-r0-p6",
+      "note": 72,
+      "fundamental_error_db": -0.07525401090898866,
+      "harmonic_relative_error": 0.012196598870210079
+    },
+    {
+      "complex_relative_error": 0.01219690118249087,
+      "fundamental_phase_error": 0.0004652176676834757,
+      "case": "character-t1-sine-f4000-r0-p6",
+      "note": 84,
+      "fundamental_error_db": -0.05848825591008874,
+      "harmonic_relative_error": 0.011476909890395223
+    },
+    {
+      "complex_relative_error": 0.0075669607980886275,
+      "fundamental_phase_error": 0.0012050701493644795,
+      "case": "character-t1-sine-f4000-r0.5-p6",
+      "note": 36,
+      "fundamental_error_db": -0.02770152366996771,
+      "harmonic_relative_error": 0.007392186848036858
+    },
+    {
+      "complex_relative_error": 0.008131645633382952,
+      "fundamental_phase_error": 0.0024023867468222024,
+      "case": "character-t1-sine-f4000-r0.5-p6",
+      "note": 48,
+      "fundamental_error_db": -0.026794333702744897,
+      "harmonic_relative_error": 0.007447179660393092
+    },
+    {
+      "complex_relative_error": 0.009109698336473014,
+      "fundamental_phase_error": 0.004684575732653743,
+      "case": "character-t1-sine-f4000-r0.5-p6",
+      "note": 60,
+      "fundamental_error_db": -0.023448329454410853,
+      "harmonic_relative_error": 0.006676941486607744
+    },
+    {
+      "complex_relative_error": 0.011524849945594115,
+      "fundamental_phase_error": 0.008437360602158418,
+      "case": "character-t1-sine-f4000-r0.5-p6",
+      "note": 72,
+      "fundamental_error_db": -0.011884753651021122,
+      "harmonic_relative_error": 0.005148618209543389
+    },
+    {
+      "complex_relative_error": 0.017685698803623532,
+      "fundamental_phase_error": 0.012185538227906984,
+      "case": "character-t1-sine-f4000-r0.5-p6",
+      "note": 84,
+      "fundamental_error_db": 0.025135817917849825,
+      "harmonic_relative_error": 0.007182437109508233
+    },
+    {
+      "complex_relative_error": 0.0067525581155624655,
+      "fundamental_phase_error": 0.0020110460803377914,
+      "case": "character-t1-sine-f4000-r0.8-p6",
+      "note": 36,
+      "fundamental_error_db": 0.005974360567657428,
+      "harmonic_relative_error": 0.00615607659441188
+    },
+    {
+      "complex_relative_error": 0.0085368577118338,
+      "fundamental_phase_error": 0.004022379750010561,
+      "case": "character-t1-sine-f4000-r0.8-p6",
+      "note": 48,
+      "fundamental_error_db": 0.007191780686175174,
+      "harmonic_relative_error": 0.00635058320446958
+    },
+    {
+      "complex_relative_error": 0.013296543128798606,
+      "fundamental_phase_error": 0.007836073129574137,
+      "case": "character-t1-sine-f4000-r0.8-p6",
+      "note": 60,
+      "fundamental_error_db": 0.011631399008256466,
+      "harmonic_relative_error": 0.006355610586525955
+    },
+    {
+      "complex_relative_error": 0.025856482519876597,
+      "fundamental_phase_error": 0.014176018899226867,
+      "case": "character-t1-sine-f4000-r0.8-p6",
+      "note": 72,
+      "fundamental_error_db": 0.02414078164553437,
+      "harmonic_relative_error": 0.012008082335201991
+    },
+    {
+      "complex_relative_error": 0.05224168281058993,
+      "fundamental_phase_error": 0.023873567621786666,
+      "case": "character-t1-sine-f4000-r0.8-p6",
+      "note": 84,
+      "fundamental_error_db": 0.03932917104353732,
+      "harmonic_relative_error": 0.027222467118507208
+    },
+    {
+      "complex_relative_error": 0.01037007327553467,
+      "fundamental_phase_error": 0.0030801545962335394,
+      "case": "character-t1-saw-f250-r0-p0",
+      "note": 36,
+      "fundamental_error_db": 0.08239127131921543,
+      "harmonic_relative_error": 0.009767184643141608
+    },
+    {
+      "complex_relative_error": 0.008622292409047955,
+      "fundamental_phase_error": 0.0011730470602046756,
+      "case": "character-t1-saw-f250-r0-p0",
+      "note": 48,
+      "fundamental_error_db": 0.06726217150797136,
+      "harmonic_relative_error": 0.008274498132977386
+    },
+    {
+      "complex_relative_error": 0.002246811425619642,
+      "fundamental_phase_error": 0.0006106901176578603,
+      "case": "character-t1-saw-f250-r0-p0",
+      "note": 60,
+      "fundamental_error_db": 0.01636489506300507,
+      "harmonic_relative_error": 0.002087334970571941
+    },
+    {
+      "complex_relative_error": 0.0019777322580030567,
+      "fundamental_phase_error": -0.0014033547885306747,
+      "case": "character-t1-saw-f250-r0-p0",
+      "note": 72,
+      "fundamental_error_db": -0.005922487076673006,
+      "harmonic_relative_error": 0.0008521263578452527
+    },
+    {
+      "complex_relative_error": 0.005719336778572261,
+      "fundamental_phase_error": -0.0053701506682616055,
+      "case": "character-t1-saw-f250-r0-p0",
+      "note": 84,
+      "fundamental_error_db": 0.00033391125378879846,
+      "harmonic_relative_error": 0.0003297608945982525
+    },
+    {
+      "complex_relative_error": 0.016462489501678994,
+      "fundamental_phase_error": 0.0075372309012722285,
+      "case": "character-t1-saw-f250-r0.5-p0",
+      "note": 36,
+      "fundamental_error_db": 0.07490471678073282,
+      "harmonic_relative_error": 0.011847443718387661
+    },
+    {
+      "complex_relative_error": 0.02355955465811032,
+      "fundamental_phase_error": 0.008710535169046829,
+      "case": "character-t1-saw-f250-r0.5-p0",
+      "note": 48,
+      "fundamental_error_db": 0.16537857700786393,
+      "harmonic_relative_error": 0.021957364881826178
+    },
+    {
+      "complex_relative_error": 0.01816561046076263,
+      "fundamental_phase_error": -0.0019514412797109733,
+      "case": "character-t1-saw-f250-r0.5-p0",
+      "note": 60,
+      "fundamental_error_db": 0.1475953422927786,
+      "harmonic_relative_error": 0.01765245513079133
+    },
+    {
+      "complex_relative_error": 0.0014738102350151483,
+      "fundamental_phase_error": -0.0010950222946961544,
+      "case": "character-t1-saw-f250-r0.5-p0",
+      "note": 72,
+      "fundamental_error_db": 2.7833959454722885e-05,
+      "harmonic_relative_error": 0.0004797589780776364
+    },
+    {
+      "complex_relative_error": 0.005891582653304419,
+      "fundamental_phase_error": -0.005638396499176232,
+      "case": "character-t1-saw-f250-r0.5-p0",
+      "note": 84,
+      "fundamental_error_db": 2.580678205333008e-05,
+      "harmonic_relative_error": 0.00028820297788685953
+    },
+    {
+      "complex_relative_error": 0.05859347598944268,
+      "fundamental_phase_error": 0.015647862167483834,
+      "case": "character-t1-saw-f250-r0.8-p0",
+      "note": 36,
+      "fundamental_error_db": 0.08994873554176554,
+      "harmonic_relative_error": 0.042463565899810166
+    },
+    {
+      "complex_relative_error": 0.06238310522534135,
+      "fundamental_phase_error": 0.006663639875013156,
+      "case": "character-t1-saw-f250-r0.8-p0",
+      "note": 48,
+      "fundamental_error_db": 0.43108619199892195,
+      "harmonic_relative_error": 0.056235891557530567
+    },
+    {
+      "complex_relative_error": 0.06202465279675587,
+      "fundamental_phase_error": -0.058212081449673485,
+      "case": "character-t1-saw-f250-r0.8-p0",
+      "note": 60,
+      "fundamental_error_db": 0.11519108909904223,
+      "harmonic_relative_error": 0.017747778568648606
+    },
+    {
+      "complex_relative_error": 0.0038729654831482184,
+      "fundamental_phase_error": 0.0036131616557202382,
+      "case": "character-t1-saw-f250-r0.8-p0",
+      "note": 72,
+      "fundamental_error_db": -0.006110844533254302,
+      "harmonic_relative_error": 0.0012065082508178767
+    },
+    {
+      "complex_relative_error": 0.005738399134395966,
+      "fundamental_phase_error": -0.0054868309720582115,
+      "case": "character-t1-saw-f250-r0.8-p0",
+      "note": 84,
+      "fundamental_error_db": -0.0011297395953502468,
+      "harmonic_relative_error": 0.000311041700518785
+    },
+    {
+      "complex_relative_error": 0.008744966934812658,
+      "fundamental_phase_error": 0.00024954107784537467,
+      "case": "character-t1-saw-f4000-r0-p0",
+      "note": 36,
+      "fundamental_error_db": 0.05771448172464484,
+      "harmonic_relative_error": 0.008229133956405702
+    },
+    {
+      "complex_relative_error": 0.008792622768792559,
+      "fundamental_phase_error": 0.0001908086421071376,
+      "case": "character-t1-saw-f4000-r0-p0",
+      "note": 48,
+      "fundamental_error_db": 0.05864944253383081,
+      "harmonic_relative_error": 0.008216577324543554
+    },
+    {
+      "complex_relative_error": 0.009212078634153645,
+      "fundamental_phase_error": 4.8477629170062157e-05,
+      "case": "character-t1-saw-f4000-r0-p0",
+      "note": 60,
+      "fundamental_error_db": 0.061364685675707964,
+      "harmonic_relative_error": 0.00820196629332369
+    },
+    {
+      "complex_relative_error": 0.011306941965936526,
+      "fundamental_phase_error": -0.0008253169704498974,
+      "case": "character-t1-saw-f4000-r0-p0",
+      "note": 72,
+      "fundamental_error_db": 0.07172774272276204,
+      "harmonic_relative_error": 0.00877677927990738
+    },
+    {
+      "complex_relative_error": 0.015517957046753498,
+      "fundamental_phase_error": -0.004335466345933408,
+      "case": "character-t1-saw-f4000-r0-p0",
+      "note": 84,
+      "fundamental_error_db": 0.09485947912811211,
+      "harmonic_relative_error": 0.012268009904788412
+    },
+    {
+      "complex_relative_error": 0.008559517467259206,
+      "fundamental_phase_error": 0.0006641926755654533,
+      "case": "character-t1-saw-f4000-r0.5-p0",
+      "note": 36,
+      "fundamental_error_db": 0.05871482128186796,
+      "harmonic_relative_error": 0.008099229752035569
+    },
+    {
+      "complex_relative_error": 0.008632059724348145,
+      "fundamental_phase_error": 0.0005427167431671757,
+      "case": "character-t1-saw-f4000-r0.5-p0",
+      "note": 48,
+      "fundamental_error_db": 0.05877482648085136,
+      "harmonic_relative_error": 0.008174895184710883
+    },
+    {
+      "complex_relative_error": 0.009543516548536144,
+      "fundamental_phase_error": 0.00036919055072271996,
+      "case": "character-t1-saw-f4000-r0.5-p0",
+      "note": 60,
+      "fundamental_error_db": 0.058858710655900884,
+      "harmonic_relative_error": 0.009239139553990609
+    },
+    {
+      "complex_relative_error": 0.012174293171831288,
+      "fundamental_phase_error": 9.118077289354947e-05,
+      "case": "character-t1-saw-f4000-r0.5-p0",
+      "note": 72,
+      "fundamental_error_db": 0.06289356597956434,
+      "harmonic_relative_error": 0.01009407103044935
+    },
+    {
+      "complex_relative_error": 0.018229227747129494,
+      "fundamental_phase_error": -8.053101872976351e-05,
+      "case": "character-t1-saw-f4000-r0.5-p0",
+      "note": 84,
+      "fundamental_error_db": 0.08713007530554609,
+      "harmonic_relative_error": 0.016249659679303148
+    },
+    {
+      "complex_relative_error": 0.009760975236393486,
+      "fundamental_phase_error": -0.0004956368470920074,
+      "case": "character-t1-saw-f4000-r0.8-p0",
+      "note": 36,
+      "fundamental_error_db": 0.053937845842908644,
+      "harmonic_relative_error": 0.008302365414079717
+    },
+    {
+      "complex_relative_error": 0.008940812748360304,
+      "fundamental_phase_error": 0.0009678417390224308,
+      "case": "character-t1-saw-f4000-r0.8-p0",
+      "note": 48,
+      "fundamental_error_db": 0.0577962875074385,
+      "harmonic_relative_error": 0.008101192499139598
+    },
+    {
+      "complex_relative_error": 0.022646744317001,
+      "fundamental_phase_error": 0.003093686290495541,
+      "case": "character-t1-saw-f4000-r0.8-p0",
+      "note": 60,
+      "fundamental_error_db": 0.06193346453282572,
+      "harmonic_relative_error": 0.019990071715063697
+    },
+    {
+      "complex_relative_error": 0.056115333062400484,
+      "fundamental_phase_error": 0.005501474067094836,
+      "case": "character-t1-saw-f4000-r0.8-p0",
+      "note": 72,
+      "fundamental_error_db": 0.07224074692904812,
+      "harmonic_relative_error": 0.043283248520204855
+    },
+    {
+      "complex_relative_error": 0.06724083506410194,
+      "fundamental_phase_error": 0.010548687336711675,
+      "case": "character-t1-saw-f4000-r0.8-p0",
+      "note": 84,
+      "fundamental_error_db": 0.13420433354180908,
+      "harmonic_relative_error": 0.05231894112659687
+    },
+    {
+      "complex_relative_error": 0.012509411226043172,
+      "fundamental_phase_error": -0.004945778114793166,
+      "case": "character-t1-saw-f250-r0-p6",
+      "note": 36,
+      "fundamental_error_db": -0.03450837266711651,
+      "harmonic_relative_error": 0.008667656301714538
+    },
+    {
+      "complex_relative_error": 0.009588705580750508,
+      "fundamental_phase_error": -0.003105085563786554,
+      "case": "character-t1-saw-f250-r0-p6",
+      "note": 48,
+      "fundamental_error_db": 0.04976737163581397,
+      "harmonic_relative_error": 0.007692191032024869
+    },
+    {
+      "complex_relative_error": 0.012480009368222744,
+      "fundamental_phase_error": -0.00441469587882036,
+      "case": "character-t1-saw-f250-r0-p6",
+      "note": 60,
+      "fundamental_error_db": 0.08837298411033334,
+      "harmonic_relative_error": 0.010217959741774899
+    },
+    {
+      "complex_relative_error": 0.015928925159904392,
+      "fundamental_phase_error": -0.014854440633986702,
+      "case": "character-t1-saw-f250-r0-p6",
+      "note": 72,
+      "fundamental_error_db": 0.0090823108043851,
+      "harmonic_relative_error": 0.0026621571867855866
+    },
+    {
+      "complex_relative_error": 0.03638748581194675,
+      "fundamental_phase_error": -0.034538168326137736,
+      "case": "character-t1-saw-f250-r0-p6",
+      "note": 84,
+      "fundamental_error_db": -0.0699206985682684,
+      "harmonic_relative_error": 0.00865937944052424
+    },
+    {
+      "complex_relative_error": 0.01752414711888536,
+      "fundamental_phase_error": 0.006980556281529205,
+      "case": "character-t1-saw-f250-r0.5-p6",
+      "note": 36,
+      "fundamental_error_db": -0.04733284024292781,
+      "harmonic_relative_error": 0.011233862242872882
+    },
+    {
+      "complex_relative_error": 0.01835191554146112,
+      "fundamental_phase_error": 0.007793824433287888,
+      "case": "character-t1-saw-f250-r0.5-p6",
+      "note": 48,
+      "fundamental_error_db": 0.11903997105434391,
+      "harmonic_relative_error": 0.01590605248796888
+    },
+    {
+      "complex_relative_error": 0.01960598813383166,
+      "fundamental_phase_error": -0.016824705125038326,
+      "case": "character-t1-saw-f250-r0.5-p6",
+      "note": 60,
+      "fundamental_error_db": 0.06016692630719622,
+      "harmonic_relative_error": 0.009652162832790436
+    },
+    {
+      "complex_relative_error": 0.012119007116126457,
+      "fundamental_phase_error": -0.01099440711590438,
+      "case": "character-t1-saw-f250-r0.5-p6",
+      "note": 72,
+      "fundamental_error_db": 0.006988566531921955,
+      "harmonic_relative_error": 0.004478000782589562
+    },
+    {
+      "complex_relative_error": 0.03678083731781482,
+      "fundamental_phase_error": -0.03531333667961736,
+      "case": "character-t1-saw-f250-r0.5-p6",
+      "note": 84,
+      "fundamental_error_db": -0.06631923628203099,
+      "harmonic_relative_error": 0.00816445186848849
+    },
+    {
+      "complex_relative_error": 0.07893150987441824,
+      "fundamental_phase_error": 0.01576215224731357,
+      "case": "character-t1-saw-f250-r0.8-p6",
+      "note": 36,
+      "fundamental_error_db": -0.2310828263230439,
+      "harmonic_relative_error": 0.052031859039616095
+    },
+    {
+      "complex_relative_error": 0.07256509250397508,
+      "fundamental_phase_error": 0.028462393330720225,
+      "case": "character-t1-saw-f250-r0.8-p6",
+      "note": 48,
+      "fundamental_error_db": 0.2431581669660824,
+      "harmonic_relative_error": 0.0558798605229507
+    },
+    {
+      "complex_relative_error": 0.11104885980345937,
+      "fundamental_phase_error": -0.1109449952351215,
+      "case": "character-t1-saw-f250-r0.8-p6",
+      "note": 60,
+      "fundamental_error_db": -0.039198213812501326,
+      "harmonic_relative_error": 0.005836526940999273
+    },
+    {
+      "complex_relative_error": 0.006565812392061491,
+      "fundamental_phase_error": 0.0020239142538094755,
+      "case": "character-t1-saw-f250-r0.8-p6",
+      "note": 72,
+      "fundamental_error_db": -0.007143275029686753,
+      "harmonic_relative_error": 0.0044340648699704955
+    },
+    {
+      "complex_relative_error": 0.0366215937740612,
+      "fundamental_phase_error": -0.03526205189454831,
+      "case": "character-t1-saw-f250-r0.8-p6",
+      "note": 84,
+      "fundamental_error_db": -0.06740797670345909,
+      "harmonic_relative_error": 0.008166670353813126
+    },
+    {
+      "complex_relative_error": 0.014220384724859463,
+      "fundamental_phase_error": -0.008179578954723231,
+      "case": "character-t1-saw-f4000-r0-p6",
+      "note": 36,
+      "fundamental_error_db": -0.058208676906294235,
+      "harmonic_relative_error": 0.01023556964323574
+    },
+    {
+      "complex_relative_error": 0.017645839356774114,
+      "fundamental_phase_error": -0.011528510022037043,
+      "case": "character-t1-saw-f4000-r0-p6",
+      "note": 48,
+      "fundamental_error_db": -0.07593286063066355,
+      "harmonic_relative_error": 0.01256506147765931
+    },
+    {
+      "complex_relative_error": 0.021653301756285274,
+      "fundamental_phase_error": -0.014476222452797883,
+      "case": "character-t1-saw-f4000-r0-p6",
+      "note": 60,
+      "fundamental_error_db": -0.08010516807619669,
+      "harmonic_relative_error": 0.013236955543210107
+    },
+    {
+      "complex_relative_error": 0.03093574101700856,
+      "fundamental_phase_error": -0.021817426442585042,
+      "case": "character-t1-saw-f4000-r0-p6",
+      "note": 72,
+      "fundamental_error_db": -0.09392873343994379,
+      "harmonic_relative_error": 0.015717692889319467
+    },
+    {
+      "complex_relative_error": 0.047544238599728166,
+      "fundamental_phase_error": -0.037472812681105486,
+      "case": "character-t1-saw-f4000-r0-p6",
+      "note": 84,
+      "fundamental_error_db": -0.11413314207638989,
+      "harmonic_relative_error": 0.01906612065135157
+    },
+    {
+      "complex_relative_error": 0.011035332128522125,
+      "fundamental_phase_error": -0.005983923009540814,
+      "case": "character-t1-saw-f4000-r0.5-p6",
+      "note": 36,
+      "fundamental_error_db": -0.04216683432116945,
+      "harmonic_relative_error": 0.007945017593148892
+    },
+    {
+      "complex_relative_error": 0.012916144268881909,
+      "fundamental_phase_error": -0.007279226336382256,
+      "case": "character-t1-saw-f4000-r0.5-p6",
+      "note": 48,
+      "fundamental_error_db": -0.05225535857235234,
+      "harmonic_relative_error": 0.009052949196075806
+    },
+    {
+      "complex_relative_error": 0.019417180131342148,
+      "fundamental_phase_error": -0.007824793275741395,
+      "case": "character-t1-saw-f4000-r0.5-p6",
+      "note": 60,
+      "fundamental_error_db": -0.05705626120092355,
+      "harmonic_relative_error": 0.012040064686820513
+    },
+    {
+      "complex_relative_error": 0.03271211587658506,
+      "fundamental_phase_error": -0.011685102152600962,
+      "case": "character-t1-saw-f4000-r0.5-p6",
+      "note": 72,
+      "fundamental_error_db": -0.07338674767044145,
+      "harmonic_relative_error": 0.01520433274568589
+    },
+    {
+      "complex_relative_error": 0.04350416208277261,
+      "fundamental_phase_error": -0.020918507494741032,
+      "case": "character-t1-saw-f4000-r0.5-p6",
+      "note": 84,
+      "fundamental_error_db": -0.08828326667180633,
+      "harmonic_relative_error": 0.014230382601042342
+    },
+    {
+      "complex_relative_error": 0.009434182433567672,
+      "fundamental_phase_error": -0.004536436288403117,
+      "case": "character-t1-saw-f4000-r0.8-p6",
+      "note": 36,
+      "fundamental_error_db": -0.034584090216158304,
+      "harmonic_relative_error": 0.0068618451042493245
+    },
+    {
+      "complex_relative_error": 0.01494628764589099,
+      "fundamental_phase_error": -0.007527196844356994,
+      "case": "character-t1-saw-f4000-r0.8-p6",
+      "note": 48,
+      "fundamental_error_db": -0.05101488422019709,
+      "harmonic_relative_error": 0.009867800371727782
+    },
+    {
+      "complex_relative_error": 0.020009217292972586,
+      "fundamental_phase_error": -0.010956044874989999,
+      "case": "character-t1-saw-f4000-r0.8-p6",
+      "note": 60,
+      "fundamental_error_db": -0.07800089548115562,
+      "harmonic_relative_error": 0.014523267541664718
+    },
+    {
+      "complex_relative_error": 0.048419057107167755,
+      "fundamental_phase_error": -0.01602619185865158,
+      "case": "character-t1-saw-f4000-r0.8-p6",
+      "note": 72,
+      "fundamental_error_db": -0.1423996413368981,
+      "harmonic_relative_error": 0.03173122365061769
+    },
+    {
+      "complex_relative_error": 0.08663639546250827,
+      "fundamental_phase_error": -0.01543117743543492,
+      "case": "character-t1-saw-f4000-r0.8-p6",
+      "note": 84,
+      "fundamental_error_db": -0.20963324885733714,
+      "harmonic_relative_error": 0.056711726919146756
+    }
+  ],
+  "research_manifest_sha256": "2bfe677b432d0b7d1dacabe9d695646e5af59b81c20e8ec65d2cc95136e14433",
+  "research_report_sha256": "93c49c2f64941d04c8d56ef8102064099c76491d9f221b323904ff3e43e2c8ec"
+}

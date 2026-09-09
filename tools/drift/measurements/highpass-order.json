@@ -1,0 +1,649 @@
+{
+  "methodology": "Predict driven captures by changing only their final linear high-pass.\n\nUse the captured 20 Hz HP output as the source, remove its known response,\nand apply the independently identified target HP response. No fitting of\ngain, phase, delay, or filter coefficients is performed.\n",
+  "minimum_local_snr_db": 30,
+  "report_sha256": "2f8839cd5fe63fc21d0a459a322e8f9d00977c6c26f8d71f694dbd6fd8f2fe73",
+  "hp_q": 1.47,
+  "internal_sample_rate": 96000,
+  "cases": [
+    {
+      "case": "hp-drive-t1-h1000--24",
+      "source": "hp-drive-t1-h20--24",
+      "note": 36,
+      "harmonics_compared": 3,
+      "rms_magnitude_error_db": 0.1309610920221236,
+      "rms_phase_error_radians": 0.02704331749785377
+    },
+    {
+      "case": "hp-drive-t1-h1000--24",
+      "source": "hp-drive-t1-h20--24",
+      "note": 48,
+      "harmonics_compared": 3,
+      "rms_magnitude_error_db": 0.09316674931964006,
+      "rms_phase_error_radians": 0.015175825174350106
+    },
+    {
+      "case": "hp-drive-t1-h1000--24",
+      "source": "hp-drive-t1-h20--24",
+      "note": 60,
+      "harmonics_compared": 3,
+      "rms_magnitude_error_db": 0.07814620967139556,
+      "rms_phase_error_radians": 0.0034193159288935446
+    },
+    {
+      "case": "hp-drive-t1-h1000--24",
+      "source": "hp-drive-t1-h20--24",
+      "note": 72,
+      "harmonics_compared": 3,
+      "rms_magnitude_error_db": 0.029244679890749442,
+      "rms_phase_error_radians": 0.024332487621832242
+    },
+    {
+      "case": "hp-drive-t1-h1000--24",
+      "source": "hp-drive-t1-h20--24",
+      "note": 84,
+      "harmonics_compared": 2,
+      "rms_magnitude_error_db": 0.021674022259889812,
+      "rms_phase_error_radians": 0.004796144652798382
+    },
+    {
+      "case": "hp-drive-t1-h1000--6",
+      "source": "hp-drive-t1-h20--6",
+      "note": 36,
+      "harmonics_compared": 6,
+      "rms_magnitude_error_db": 0.055738457242260675,
+      "rms_phase_error_radians": 0.008582870512230561
+    },
+    {
+      "case": "hp-drive-t1-h1000--6",
+      "source": "hp-drive-t1-h20--6",
+      "note": 48,
+      "harmonics_compared": 6,
+      "rms_magnitude_error_db": 0.17839937547173856,
+      "rms_phase_error_radians": 0.011509023230616953
+    },
+    {
+      "case": "hp-drive-t1-h1000--6",
+      "source": "hp-drive-t1-h20--6",
+      "note": 60,
+      "harmonics_compared": 5,
+      "rms_magnitude_error_db": 0.06368897014684888,
+      "rms_phase_error_radians": 0.006071457037285899
+    },
+    {
+      "case": "hp-drive-t1-h1000--6",
+      "source": "hp-drive-t1-h20--6",
+      "note": 72,
+      "harmonics_compared": 5,
+      "rms_magnitude_error_db": 0.0999756373408756,
+      "rms_phase_error_radians": 0.011034964818193826
+    },
+    {
+      "case": "hp-drive-t1-h1000--6",
+      "source": "hp-drive-t1-h20--6",
+      "note": 84,
+      "harmonics_compared": 4,
+      "rms_magnitude_error_db": 0.00925496375270372,
+      "rms_phase_error_radians": 0.0023501019448029857
+    },
+    {
+      "case": "hp-drive-t1-h1000-p0",
+      "source": "hp-drive-t1-h20-p0",
+      "note": 36,
+      "harmonics_compared": 25,
+      "rms_magnitude_error_db": 0.09017925567710054,
+      "rms_phase_error_radians": 0.021088660447092875
+    },
+    {
+      "case": "hp-drive-t1-h1000-p0",
+      "source": "hp-drive-t1-h20-p0",
+      "note": 48,
+      "harmonics_compared": 24,
+      "rms_magnitude_error_db": 0.21950145524455286,
+      "rms_phase_error_radians": 0.014118009355807544
+    },
+    {
+      "case": "hp-drive-t1-h1000-p0",
+      "source": "hp-drive-t1-h20-p0",
+      "note": 60,
+      "harmonics_compared": 18,
+      "rms_magnitude_error_db": 0.14245250505543847,
+      "rms_phase_error_radians": 0.010186830889588145
+    },
+    {
+      "case": "hp-drive-t1-h1000-p0",
+      "source": "hp-drive-t1-h20-p0",
+      "note": 72,
+      "harmonics_compared": 14,
+      "rms_magnitude_error_db": 0.06826719120212546,
+      "rms_phase_error_radians": 0.00875490969563303
+    },
+    {
+      "case": "hp-drive-t1-h1000-p0",
+      "source": "hp-drive-t1-h20-p0",
+      "note": 84,
+      "harmonics_compared": 10,
+      "rms_magnitude_error_db": 0.11255963571210295,
+      "rms_phase_error_radians": 0.015870104269253872
+    },
+    {
+      "case": "hp-drive-t1-h1000-p6",
+      "source": "hp-drive-t1-h20-p6",
+      "note": 36,
+      "harmonics_compared": 46,
+      "rms_magnitude_error_db": 0.14857898380926135,
+      "rms_phase_error_radians": 0.010983768786004395
+    },
+    {
+      "case": "hp-drive-t1-h1000-p6",
+      "source": "hp-drive-t1-h20-p6",
+      "note": 48,
+      "harmonics_compared": 41,
+      "rms_magnitude_error_db": 0.13227762820721212,
+      "rms_phase_error_radians": 0.01243027008341614
+    },
+    {
+      "case": "hp-drive-t1-h1000-p6",
+      "source": "hp-drive-t1-h20-p6",
+      "note": 60,
+      "harmonics_compared": 28,
+      "rms_magnitude_error_db": 0.08437346349658606,
+      "rms_phase_error_radians": 0.014051497275711426
+    },
+    {
+      "case": "hp-drive-t1-h1000-p6",
+      "source": "hp-drive-t1-h20-p6",
+      "note": 72,
+      "harmonics_compared": 19,
+      "rms_magnitude_error_db": 0.13471073731646524,
+      "rms_phase_error_radians": 0.014674539072406453
+    },
+    {
+      "case": "hp-drive-t1-h1000-p6",
+      "source": "hp-drive-t1-h20-p6",
+      "note": 84,
+      "harmonics_compared": 13,
+      "rms_magnitude_error_db": 0.03138939291934655,
+      "rms_phase_error_radians": 0.002747525842601066
+    },
+    {
+      "case": "hp-drive-t1-h4000--24",
+      "source": "hp-drive-t1-h20--24",
+      "note": 36,
+      "harmonics_compared": 3,
+      "rms_magnitude_error_db": 0.06595432552954701,
+      "rms_phase_error_radians": 0.004755074069870382
+    },
+    {
+      "case": "hp-drive-t1-h4000--24",
+      "source": "hp-drive-t1-h20--24",
+      "note": 48,
+      "harmonics_compared": 3,
+      "rms_magnitude_error_db": 0.05855303931579662,
+      "rms_phase_error_radians": 0.01952949087805712
+    },
+    {
+      "case": "hp-drive-t1-h4000--24",
+      "source": "hp-drive-t1-h20--24",
+      "note": 60,
+      "harmonics_compared": 3,
+      "rms_magnitude_error_db": 0.08834186413833102,
+      "rms_phase_error_radians": 0.014437418646243151
+    },
+    {
+      "case": "hp-drive-t1-h4000--24",
+      "source": "hp-drive-t1-h20--24",
+      "note": 72,
+      "harmonics_compared": 3,
+      "rms_magnitude_error_db": 0.05978684737933883,
+      "rms_phase_error_radians": 0.024040191713563364
+    },
+    {
+      "case": "hp-drive-t1-h4000--24",
+      "source": "hp-drive-t1-h20--24",
+      "note": 84,
+      "harmonics_compared": 2,
+      "rms_magnitude_error_db": 0.02715630205071188,
+      "rms_phase_error_radians": 0.002267595678273661
+    },
+    {
+      "case": "hp-drive-t1-h4000--6",
+      "source": "hp-drive-t1-h20--6",
+      "note": 36,
+      "harmonics_compared": 6,
+      "rms_magnitude_error_db": 0.03939479198113034,
+      "rms_phase_error_radians": 0.007475039122896875
+    },
+    {
+      "case": "hp-drive-t1-h4000--6",
+      "source": "hp-drive-t1-h20--6",
+      "note": 48,
+      "harmonics_compared": 6,
+      "rms_magnitude_error_db": 0.2976738147493366,
+      "rms_phase_error_radians": 0.003601784805438876
+    },
+    {
+      "case": "hp-drive-t1-h4000--6",
+      "source": "hp-drive-t1-h20--6",
+      "note": 60,
+      "harmonics_compared": 5,
+      "rms_magnitude_error_db": 0.0225158005046135,
+      "rms_phase_error_radians": 0.007113020392317287
+    },
+    {
+      "case": "hp-drive-t1-h4000--6",
+      "source": "hp-drive-t1-h20--6",
+      "note": 72,
+      "harmonics_compared": 5,
+      "rms_magnitude_error_db": 0.041046637634049504,
+      "rms_phase_error_radians": 0.0063515781653235405
+    },
+    {
+      "case": "hp-drive-t1-h4000--6",
+      "source": "hp-drive-t1-h20--6",
+      "note": 84,
+      "harmonics_compared": 4,
+      "rms_magnitude_error_db": 0.03040774963710875,
+      "rms_phase_error_radians": 0.01733971287222382
+    },
+    {
+      "case": "hp-drive-t1-h4000-p0",
+      "source": "hp-drive-t1-h20-p0",
+      "note": 36,
+      "harmonics_compared": 25,
+      "rms_magnitude_error_db": 0.15556946841264416,
+      "rms_phase_error_radians": 0.015224386472727705
+    },
+    {
+      "case": "hp-drive-t1-h4000-p0",
+      "source": "hp-drive-t1-h20-p0",
+      "note": 48,
+      "harmonics_compared": 23,
+      "rms_magnitude_error_db": 0.12752363123882882,
+      "rms_phase_error_radians": 0.02145477124542279
+    },
+    {
+      "case": "hp-drive-t1-h4000-p0",
+      "source": "hp-drive-t1-h20-p0",
+      "note": 60,
+      "harmonics_compared": 17,
+      "rms_magnitude_error_db": 0.052836127426337275,
+      "rms_phase_error_radians": 0.005237016316177478
+    },
+    {
+      "case": "hp-drive-t1-h4000-p0",
+      "source": "hp-drive-t1-h20-p0",
+      "note": 72,
+      "harmonics_compared": 14,
+      "rms_magnitude_error_db": 0.1443659257818232,
+      "rms_phase_error_radians": 0.010571702931773045
+    },
+    {
+      "case": "hp-drive-t1-h4000-p0",
+      "source": "hp-drive-t1-h20-p0",
+      "note": 84,
+      "harmonics_compared": 9,
+      "rms_magnitude_error_db": 0.14756820589613848,
+      "rms_phase_error_radians": 0.013328044708022681
+    },
+    {
+      "case": "hp-drive-t1-h4000-p6",
+      "source": "hp-drive-t1-h20-p6",
+      "note": 36,
+      "harmonics_compared": 45,
+      "rms_magnitude_error_db": 0.09044631221697341,
+      "rms_phase_error_radians": 0.011481824506031857
+    },
+    {
+      "case": "hp-drive-t1-h4000-p6",
+      "source": "hp-drive-t1-h20-p6",
+      "note": 48,
+      "harmonics_compared": 40,
+      "rms_magnitude_error_db": 0.14650642639682537,
+      "rms_phase_error_radians": 0.015358838148239823
+    },
+    {
+      "case": "hp-drive-t1-h4000-p6",
+      "source": "hp-drive-t1-h20-p6",
+      "note": 60,
+      "harmonics_compared": 31,
+      "rms_magnitude_error_db": 0.13384548189447412,
+      "rms_phase_error_radians": 0.011734586309182522
+    },
+    {
+      "case": "hp-drive-t1-h4000-p6",
+      "source": "hp-drive-t1-h20-p6",
+      "note": 72,
+      "harmonics_compared": 20,
+      "rms_magnitude_error_db": 0.10472781229706349,
+      "rms_phase_error_radians": 0.009827414959767501
+    },
+    {
+      "case": "hp-drive-t1-h4000-p6",
+      "source": "hp-drive-t1-h20-p6",
+      "note": 84,
+      "harmonics_compared": 13,
+      "rms_magnitude_error_db": 0.11081999499881384,
+      "rms_phase_error_radians": 0.005035127492170391
+    },
+    {
+      "case": "hp-drive-t2-h1000--24",
+      "source": "hp-drive-t2-h20--24",
+      "note": 36,
+      "harmonics_compared": 10,
+      "rms_magnitude_error_db": 0.10952453839525092,
+      "rms_phase_error_radians": 0.015424237926136617
+    },
+    {
+      "case": "hp-drive-t2-h1000--24",
+      "source": "hp-drive-t2-h20--24",
+      "note": 48,
+      "harmonics_compared": 9,
+      "rms_magnitude_error_db": 0.08143175846102896,
+      "rms_phase_error_radians": 0.006734453788250012
+    },
+    {
+      "case": "hp-drive-t2-h1000--24",
+      "source": "hp-drive-t2-h20--24",
+      "note": 60,
+      "harmonics_compared": 8,
+      "rms_magnitude_error_db": 0.0385744346644663,
+      "rms_phase_error_radians": 0.0027944557058130265
+    },
+    {
+      "case": "hp-drive-t2-h1000--24",
+      "source": "hp-drive-t2-h20--24",
+      "note": 72,
+      "harmonics_compared": 6,
+      "rms_magnitude_error_db": 0.05751479756798987,
+      "rms_phase_error_radians": 0.016467798099396688
+    },
+    {
+      "case": "hp-drive-t2-h1000--24",
+      "source": "hp-drive-t2-h20--24",
+      "note": 84,
+      "harmonics_compared": 4,
+      "rms_magnitude_error_db": 0.014766342073664665,
+      "rms_phase_error_radians": 0.002278955165742717
+    },
+    {
+      "case": "hp-drive-t2-h1000--6",
+      "source": "hp-drive-t2-h20--6",
+      "note": 36,
+      "harmonics_compared": 18,
+      "rms_magnitude_error_db": 0.05598457299338909,
+      "rms_phase_error_radians": 0.015050157672561583
+    },
+    {
+      "case": "hp-drive-t2-h1000--6",
+      "source": "hp-drive-t2-h20--6",
+      "note": 48,
+      "harmonics_compared": 15,
+      "rms_magnitude_error_db": 0.04205077098380375,
+      "rms_phase_error_radians": 0.006961701472725836
+    },
+    {
+      "case": "hp-drive-t2-h1000--6",
+      "source": "hp-drive-t2-h20--6",
+      "note": 60,
+      "harmonics_compared": 11,
+      "rms_magnitude_error_db": 0.0753778556544389,
+      "rms_phase_error_radians": 0.001995312009957506
+    },
+    {
+      "case": "hp-drive-t2-h1000--6",
+      "source": "hp-drive-t2-h20--6",
+      "note": 72,
+      "harmonics_compared": 8,
+      "rms_magnitude_error_db": 0.030878241190290676,
+      "rms_phase_error_radians": 0.007112983551515785
+    },
+    {
+      "case": "hp-drive-t2-h1000--6",
+      "source": "hp-drive-t2-h20--6",
+      "note": 84,
+      "harmonics_compared": 5,
+      "rms_magnitude_error_db": 0.01735625086684711,
+      "rms_phase_error_radians": 0.004785138925250558
+    },
+    {
+      "case": "hp-drive-t2-h1000-p0",
+      "source": "hp-drive-t2-h20-p0",
+      "note": 36,
+      "harmonics_compared": 71,
+      "rms_magnitude_error_db": 0.14278155903631998,
+      "rms_phase_error_radians": 0.006229044542984869
+    },
+    {
+      "case": "hp-drive-t2-h1000-p0",
+      "source": "hp-drive-t2-h20-p0",
+      "note": 48,
+      "harmonics_compared": 46,
+      "rms_magnitude_error_db": 0.10644021095714959,
+      "rms_phase_error_radians": 0.010006529508930835
+    },
+    {
+      "case": "hp-drive-t2-h1000-p0",
+      "source": "hp-drive-t2-h20-p0",
+      "note": 60,
+      "harmonics_compared": 30,
+      "rms_magnitude_error_db": 0.050094067155930344,
+      "rms_phase_error_radians": 0.00716666913427186
+    },
+    {
+      "case": "hp-drive-t2-h1000-p0",
+      "source": "hp-drive-t2-h20-p0",
+      "note": 72,
+      "harmonics_compared": 22,
+      "rms_magnitude_error_db": 0.04237449750585933,
+      "rms_phase_error_radians": 0.007687528291628955
+    },
+    {
+      "case": "hp-drive-t2-h1000-p0",
+      "source": "hp-drive-t2-h20-p0",
+      "note": 84,
+      "harmonics_compared": 14,
+      "rms_magnitude_error_db": 0.020345866600765934,
+      "rms_phase_error_radians": 0.010072818735283175
+    },
+    {
+      "case": "hp-drive-t2-h1000-p6",
+      "source": "hp-drive-t2-h20-p6",
+      "note": 36,
+      "harmonics_compared": 84,
+      "rms_magnitude_error_db": 0.08594515885052782,
+      "rms_phase_error_radians": 0.008887969390116482
+    },
+    {
+      "case": "hp-drive-t2-h1000-p6",
+      "source": "hp-drive-t2-h20-p6",
+      "note": 48,
+      "harmonics_compared": 58,
+      "rms_magnitude_error_db": 0.09807281223223335,
+      "rms_phase_error_radians": 0.010357976712547274
+    },
+    {
+      "case": "hp-drive-t2-h1000-p6",
+      "source": "hp-drive-t2-h20-p6",
+      "note": 60,
+      "harmonics_compared": 41,
+      "rms_magnitude_error_db": 0.08144962489588346,
+      "rms_phase_error_radians": 0.009996083482980362
+    },
+    {
+      "case": "hp-drive-t2-h1000-p6",
+      "source": "hp-drive-t2-h20-p6",
+      "note": 72,
+      "harmonics_compared": 25,
+      "rms_magnitude_error_db": 0.09704833918142515,
+      "rms_phase_error_radians": 0.004999026748579364
+    },
+    {
+      "case": "hp-drive-t2-h1000-p6",
+      "source": "hp-drive-t2-h20-p6",
+      "note": 84,
+      "harmonics_compared": 17,
+      "rms_magnitude_error_db": 0.053202126070590015,
+      "rms_phase_error_radians": 0.006214469497778397
+    },
+    {
+      "case": "hp-drive-t2-h4000--24",
+      "source": "hp-drive-t2-h20--24",
+      "note": 36,
+      "harmonics_compared": 9,
+      "rms_magnitude_error_db": 0.15243198020716617,
+      "rms_phase_error_radians": 0.014166517024189066
+    },
+    {
+      "case": "hp-drive-t2-h4000--24",
+      "source": "hp-drive-t2-h20--24",
+      "note": 48,
+      "harmonics_compared": 10,
+      "rms_magnitude_error_db": 0.1331516792875173,
+      "rms_phase_error_radians": 0.01782906251954539
+    },
+    {
+      "case": "hp-drive-t2-h4000--24",
+      "source": "hp-drive-t2-h20--24",
+      "note": 60,
+      "harmonics_compared": 8,
+      "rms_magnitude_error_db": 0.07647540753550945,
+      "rms_phase_error_radians": 0.003048763285184582
+    },
+    {
+      "case": "hp-drive-t2-h4000--24",
+      "source": "hp-drive-t2-h20--24",
+      "note": 72,
+      "harmonics_compared": 6,
+      "rms_magnitude_error_db": 0.12255647989198529,
+      "rms_phase_error_radians": 0.017480138305713974
+    },
+    {
+      "case": "hp-drive-t2-h4000--24",
+      "source": "hp-drive-t2-h20--24",
+      "note": 84,
+      "harmonics_compared": 4,
+      "rms_magnitude_error_db": 0.03696466326688152,
+      "rms_phase_error_radians": 0.0015014388247442197
+    },
+    {
+      "case": "hp-drive-t2-h4000--6",
+      "source": "hp-drive-t2-h20--6",
+      "note": 36,
+      "harmonics_compared": 19,
+      "rms_magnitude_error_db": 0.052815284331719524,
+      "rms_phase_error_radians": 0.009165433602739612
+    },
+    {
+      "case": "hp-drive-t2-h4000--6",
+      "source": "hp-drive-t2-h20--6",
+      "note": 48,
+      "harmonics_compared": 15,
+      "rms_magnitude_error_db": 0.0800016940177166,
+      "rms_phase_error_radians": 0.009284338556347442
+    },
+    {
+      "case": "hp-drive-t2-h4000--6",
+      "source": "hp-drive-t2-h20--6",
+      "note": 60,
+      "harmonics_compared": 11,
+      "rms_magnitude_error_db": 0.04074457708014836,
+      "rms_phase_error_radians": 0.006128041704233574
+    },
+    {
+      "case": "hp-drive-t2-h4000--6",
+      "source": "hp-drive-t2-h20--6",
+      "note": 72,
+      "harmonics_compared": 8,
+      "rms_magnitude_error_db": 0.08773423252787811,
+      "rms_phase_error_radians": 0.009671408648287161
+    },
+    {
+      "case": "hp-drive-t2-h4000--6",
+      "source": "hp-drive-t2-h20--6",
+      "note": 84,
+      "harmonics_compared": 6,
+      "rms_magnitude_error_db": 0.03282695797065672,
+      "rms_phase_error_radians": 0.008587082194725744
+    },
+    {
+      "case": "hp-drive-t2-h4000-p0",
+      "source": "hp-drive-t2-h20-p0",
+      "note": 36,
+      "harmonics_compared": 71,
+      "rms_magnitude_error_db": 0.10320328745726251,
+      "rms_phase_error_radians": 0.01016856787919854
+    },
+    {
+      "case": "hp-drive-t2-h4000-p0",
+      "source": "hp-drive-t2-h20-p0",
+      "note": 48,
+      "harmonics_compared": 45,
+      "rms_magnitude_error_db": 0.09317382757777531,
+      "rms_phase_error_radians": 0.006297205861539616
+    },
+    {
+      "case": "hp-drive-t2-h4000-p0",
+      "source": "hp-drive-t2-h20-p0",
+      "note": 60,
+      "harmonics_compared": 31,
+      "rms_magnitude_error_db": 0.06004502102057518,
+      "rms_phase_error_radians": 0.009678821564116492
+    },
+    {
+      "case": "hp-drive-t2-h4000-p0",
+      "source": "hp-drive-t2-h20-p0",
+      "note": 72,
+      "harmonics_compared": 22,
+      "rms_magnitude_error_db": 0.06534847609396666,
+      "rms_phase_error_radians": 0.008520579816619021
+    },
+    {
+      "case": "hp-drive-t2-h4000-p0",
+      "source": "hp-drive-t2-h20-p0",
+      "note": 84,
+      "harmonics_compared": 14,
+      "rms_magnitude_error_db": 0.02291750844997197,
+      "rms_phase_error_radians": 0.008145676695768827
+    },
+    {
+      "case": "hp-drive-t2-h4000-p6",
+      "source": "hp-drive-t2-h20-p6",
+      "note": 36,
+      "harmonics_compared": 85,
+      "rms_magnitude_error_db": 0.077866551427546,
+      "rms_phase_error_radians": 0.012153809811336564
+    },
+    {
+      "case": "hp-drive-t2-h4000-p6",
+      "source": "hp-drive-t2-h20-p6",
+      "note": 48,
+      "harmonics_compared": 58,
+      "rms_magnitude_error_db": 0.0862081000270841,
+      "rms_phase_error_radians": 0.011570760992179203
+    },
+    {
+      "case": "hp-drive-t2-h4000-p6",
+      "source": "hp-drive-t2-h20-p6",
+      "note": 60,
+      "harmonics_compared": 39,
+      "rms_magnitude_error_db": 0.1069814349211236,
+      "rms_phase_error_radians": 0.009124976486724131
+    },
+    {
+      "case": "hp-drive-t2-h4000-p6",
+      "source": "hp-drive-t2-h20-p6",
+      "note": 72,
+      "harmonics_compared": 25,
+      "rms_magnitude_error_db": 0.07628650116665946,
+      "rms_phase_error_radians": 0.009295990270067543
+    },
+    {
+      "case": "hp-drive-t2-h4000-p6",
+      "source": "hp-drive-t2-h20-p6",
+      "note": 84,
+      "harmonics_compared": 17,
+      "rms_magnitude_error_db": 0.09788438882309425,
+      "rms_phase_error_radians": 0.005789282050489873
+    }
+  ]
+}

@@ -58,6 +58,46 @@ fn adsr_bracketDistance(p: vec2<f32>, corner: vec2<f32>, inward: vec2<f32>, leng
     return min(horizontal, vertical);
 }
 
+fn adsr_decayValue(t: f32, initial: f32, zero: f32, db: f32) -> f32 {
+    if (db > 0.0) { return zero + (initial - zero) * exp(-db * 0.11512925465 * t); }
+    return adsr_expFall(t, initial, zero);
+}
+
+fn adsr_ahdDisplay(input: WidgetVaryings) -> vec4<f32> {
+    let perPixel = max(vec2<f32>(fwidth(input.uv.x), fwidth(input.uv.y)), vec2<f32>(1e-6));
+    let p = input.uv / perPixel;
+    let attack = input.uniform_a.x;
+    let hold = input.uniform_a.y;
+    let decay = input.uniform_a.z;
+    var col = input.color_b;
+    var distance = adsr_sdSegment(p, adsr_toPlot(vec2<f32>(0.03, 0.0)) / perPixel, adsr_toPlot(vec2<f32>(attack, 1.0)) / perPixel);
+    distance = min(distance, adsr_sdSegment(p, adsr_toPlot(vec2<f32>(attack, 1.0)) / perPixel, adsr_toPlot(vec2<f32>(hold, 1.0)) / perPixel));
+    var previous = adsr_toPlot(vec2<f32>(hold, 1.0)) / perPixel;
+    for (var i = 1; i <= 64; i += 1) {
+        let x = mix(hold, 1.0, f32(i) / 64.0);
+        let level = adsr_decayValue((x - hold) / max(decay - hold, 1e-6), 1.0, 0.0, input.uniform_a.w);
+        let current = adsr_toPlot(vec2<f32>(x, level)) / perPixel;
+        distance = min(distance, adsr_sdSegment(p, previous, current));
+        previous = current;
+    }
+    let baseline = adsr_sdSegment(p, adsr_toPlot(vec2<f32>(0.0, 0.0)) / perPixel, adsr_toPlot(vec2<f32>(1.0, 0.0)) / perPixel);
+    col = vec4<f32>(mix(col.rgb, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * input.color_c.a * 0.25), col.a);
+    col = vec4<f32>(mix(col.rgb, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * input.color_a.a), col.a);
+    let scale = max(input.uniform_b.z, 0.001);
+    for (var index = 1; index <= 3; index += 1) {
+        if (index == 2 && input.uniform_c.x < 0.5) { continue; }
+        let point = select(select(vec2<f32>(decay, input.uniform_c.y), vec2<f32>(hold, 1.0), index == 2), vec2<f32>(attack, 1.0), index == 1);
+        let h = adsr_toPlot(point) / perPixel;
+        let highlighted = abs(f32(index) - input.uniform_b.y) < 0.5;
+        let halfSize = select(6.0, 7.2, highlighted) * scale;
+        let d = max(abs(p.x - h.x), abs(p.y - h.y));
+        let outer = 1.0 - smoothstep(halfSize, halfSize + 0.75, d);
+        let inner = 1.0 - smoothstep(halfSize - 1.5 * scale, halfSize - 1.5 * scale + 0.75, d);
+        col = vec4<f32>(mix(col.rgb, input.color_d.rgb, select(max(outer - inner, 0.0), outer, highlighted) * input.color_d.a), col.a);
+    }
+    return col;
+}
+
 fn adsr_decayDisplay(input: WidgetVaryings) -> vec4<f32> {
     var uv: vec2<f32> = input.uv;
     var perPixel: vec2<f32> = max(vec2<f32>(fwidth(uv.x), fwidth(uv.y)), vec2<f32>(1e-6));
@@ -72,15 +112,22 @@ fn adsr_decayDisplay(input: WidgetVaryings) -> vec4<f32> {
     var previous: vec2<f32> = adsr_toPlot(vec2<f32>(0.03, initial)) / perPixel;
     for (var i: i32 = 1; i <= 64; i = i + 1) {
         var t: f32 = f32(i) / 64.0;
-        var current: vec2<f32> = adsr_toPlot(vec2<f32>(mix(0.03, end, t), adsr_expFall(t, initial, zero))) / perPixel;
+        var current: vec2<f32> = adsr_toPlot(vec2<f32>(mix(0.03, end, t), adsr_decayValue(t, initial, zero, input.uniform_a.x))) / perPixel;
         distance = min(distance, adsr_sdSegment(p, previous, current));
         previous = current;
     }
-    distance = min(distance, adsr_sdSegment(p, previous, adsr_toPlot(vec2<f32>(1.0, zero)) / perPixel));
+    for (var tail = 1; tail <= 8; tail += 1) {
+        let x = mix(end, 1.0, f32(tail) / 8.0);
+        let level = adsr_decayValue((x - 0.03) / max(end - 0.03, 1e-6), initial, zero, input.uniform_a.x);
+        let current = adsr_toPlot(vec2<f32>(x, level)) / perPixel;
+        distance = min(distance, adsr_sdSegment(p, previous, current));
+        previous = current;
+    }
     col = vec4<f32>(mix(col.rgb, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * input.color_a.a), col.a);
     var scale: f32 = max(input.uniform_b.z, 0.001);
     for (var i: i32 = 1; i <= 2; i = i + 1) {
-        var h: vec2<f32> = adsr_toPlot(select(vec2<f32>(end, zero), vec2<f32>(0.03, initial), i == 1)) / perPixel;
+        if (i == 1 && input.uniform_a.y < 0.5) { continue; }
+        var h: vec2<f32> = adsr_toPlot(select(vec2<f32>(end, mix(zero, initial, input.uniform_a.z)), vec2<f32>(0.03, initial), i == 1)) / perPixel;
         var highlighted: bool = abs(f32(i) - input.uniform_b.y) < 0.5;
         var halfSize: f32 = select(6.0, 7.2, highlighted) * scale;
         var d: f32 = max(abs(p.x - h.x), abs(p.y - h.y));
@@ -91,9 +138,57 @@ fn adsr_decayDisplay(input: WidgetVaryings) -> vec4<f32> {
     return col;
 }
 
+// ADE positions are computed once on the CPU and shared with hit testing.
+fn adsr_adePoint(index: i32, shape: vec4<f32>, gated: bool) -> vec2<f32> {
+    if (index == 0) { return vec2<f32>(0.03, 0.0); }
+    if (index == 1) { return vec2<f32>(shape.x, 0.0); }
+    if (index == 2) { return vec2<f32>(shape.y, 1.0); }
+    if (index == 3) { return vec2<f32>(select(shape.y, 0.68, gated), 1.0); }
+    if (index == 4) { return vec2<f32>(shape.z, shape.w); }
+    return vec2<f32>(1.0, shape.w);
+}
+
+fn adsr_adeDisplay(input: WidgetVaryings) -> vec4<f32> {
+    let perPixel = max(vec2<f32>(fwidth(input.uv.x), fwidth(input.uv.y)), vec2<f32>(1e-6));
+    let p = input.uv / perPixel;
+    let gated = input.uniform_c.x > 0.5;
+    let heldPeak = gated && input.uniform_c.y > 0.5;
+    var col = input.color_b;
+    let baseline = adsr_sdSegment(p, adsr_toPlot(vec2<f32>(0.0, 0.0)) / perPixel, adsr_toPlot(vec2<f32>(1.0, 0.0)) / perPixel);
+    col = vec4<f32>(mix(col.rgb, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, baseline)) * input.color_c.a * 0.25), col.a);
+    let noteOff = adsr_sdSegment(p, adsr_toPlot(vec2<f32>(0.68, 0.0)) / perPixel, adsr_toPlot(vec2<f32>(0.68, 1.0)) / perPixel);
+    let dash = step(0.5, fract(p.y / 8.0));
+    col = vec4<f32>(mix(col.rgb, input.color_c.rgb, (1.0 - smoothstep(0.5, 1.5, noteOff)) * dash * input.color_c.a * 0.35), col.a);
+    var distance = 10000.0;
+    var ghost = 10000.0;
+    for (var segment = 0; segment < 5; segment += 1) {
+        let a = adsr_toPlot(adsr_adePoint(segment, input.uniform_a, gated)) / perPixel;
+        let b = adsr_toPlot(adsr_adePoint(segment + 1, input.uniform_a, gated)) / perPixel;
+        if (heldPeak && segment >= 3) { ghost = min(ghost, adsr_sdSegment(p, a, b)); }
+        else { distance = min(distance, adsr_sdSegment(p, a, b)); }
+    }
+    if (heldPeak) { distance = min(distance, adsr_sdSegment(p, adsr_toPlot(vec2<f32>(0.68, 1.0)) / perPixel, adsr_toPlot(vec2<f32>(1.0, 1.0)) / perPixel)); }
+    col = vec4<f32>(mix(col.rgb, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, ghost)) * input.color_a.a * 0.25), col.a);
+    col = vec4<f32>(mix(col.rgb, input.color_a.rgb, (1.0 - smoothstep(0.65, 1.55, distance)) * input.color_a.a), col.a);
+    let scale = max(input.uniform_b.z, 0.001);
+    for (var handleIndex = 1; handleIndex <= 4; handleIndex += 1) {
+        let pointIndex = select(handleIndex + 1, handleIndex, handleIndex <= 2);
+        let h = adsr_toPlot(adsr_adePoint(pointIndex, input.uniform_a, gated)) / perPixel;
+        let highlighted = abs(f32(handleIndex) - input.uniform_b.y) < 0.5;
+        let halfSize = select(6.0, 7.2, highlighted) * scale;
+        let d = max(abs(p.x - h.x), abs(p.y - h.y));
+        let outer = 1.0 - smoothstep(halfSize, halfSize + 0.75, d);
+        let inner = 1.0 - smoothstep(halfSize - 1.5 * scale, halfSize - 1.5 * scale + 0.75, d);
+        col = vec4<f32>(mix(col.rgb, input.color_d.rgb, select(max(outer - inner, 0.0), outer, highlighted) * input.color_d.a), col.a);
+    }
+    return col;
+}
+
 @fragment
 fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 {
+    if (input.uniform_d.x > 2.5) { return adsr_ahdDisplay(input); }
+    if (input.uniform_d.x > 1.5) { return adsr_adeDisplay(input); }
     if (input.uniform_d.x > 0.5) { return adsr_decayDisplay(input); }
     var attack: f32 = input.uniform_a.x;
     var decay: f32 = input.uniform_a.y;
@@ -420,6 +515,20 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
             detail_d = glint;
         } else {
             d = min(abs(drop) - stroke, glint);
+        }
+    } else if (input.value_t > 10.5) {
+        // MIDI: five-pin DIN socket, with an inset key slot and five contacts.
+        let body = length(p) - 0.52;
+        let notch = button_icon_box(p - vec2<f32>(0.0, -0.31), vec2<f32>(0.07, 0.11));
+        var pins = min(length(p - vec2<f32>(-0.30, 0.0)), length(p - vec2<f32>(0.30, 0.0)));
+        pins = min(pins, length(p - vec2<f32>(-0.21, 0.21)));
+        pins = min(pins, length(p - vec2<f32>(0.21, 0.21)));
+        pins = min(pins, length(p - vec2<f32>(0.0, 0.30))) - 0.075;
+        if (filled) {
+            d = body;
+            detail_d = min(pins, notch);
+        } else {
+            d = min(abs(body) - 0.055, min(pins, notch));
         }
     } else {
         // document: Finder-style page. Portrait sheet with a folded top-right
@@ -982,6 +1091,7 @@ fn lc_shape(shape: i32, x: f32, pw: f32) -> f32 {
     } else if (shape == 3) {
         return phase * 2.0 - 1.0;
     }
+    if (shape == 8) { return 1.0 - phase * 2.0; }
     if (shape == 4) { return lc_random(floor(x)); }
     if (shape == 5) { return mix(lc_random(floor(x) - 1.0), lc_random(floor(x)), clamp(phase / 0.4, 0.0, 1.0)); }
     if (shape == 6) {
@@ -999,7 +1109,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
 {
     var uv: vec2<f32> = input.uv;
     var aspect: f32 = max(input.aspect, 0.0001);
-    var shape: i32 = i32(round(clamp(input.uniform_a.x, 0.0, 7.0)));
+    var shape: i32 = i32(round(clamp(input.uniform_a.x, 0.0, 8.0)));
     var pw: f32 = input.uniform_a.y;
     var offset: f32 = input.uniform_a.z;
     var markerPhase: f32 = input.uniform_a.w;

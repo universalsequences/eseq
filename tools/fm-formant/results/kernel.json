@@ -1,0 +1,669 @@
+{
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "compiler_sha256": "34c1066d31d82739010c7bca234fe37756a0bd1ec455186190813a9cca6c1c78",
+  "source_sha256": "8ae914bb0943b99db86f78f0edb39f956647ab494f473047f8017e0001da76cd",
+  "cases": [
+    {
+      "sr": 44100,
+      "f0": 55,
+      "center": 1234,
+      "bandwidth": 20,
+      "skirt": 0,
+      "peak_error": 3.3672327364175914e-06,
+      "relative_error_db": -114.20667235732418
+    },
+    {
+      "sr": 44100,
+      "f0": 55,
+      "center": 1234,
+      "bandwidth": 20,
+      "skirt": 0.5,
+      "peak_error": 2.595165041724412e-06,
+      "relative_error_db": -114.28332576066053
+    },
+    {
+      "sr": 44100,
+      "f0": 55,
+      "center": 1234,
+      "bandwidth": 20,
+      "skirt": 1,
+      "peak_error": 1.823097347086744e-06,
+      "relative_error_db": -114.38109518440882
+    },
+    {
+      "sr": 44100,
+      "f0": 110,
+      "center": 1200,
+      "bandwidth": 300,
+      "skirt": 0,
+      "peak_error": 1.8891148296784621e-06,
+      "relative_error_db": -117.74046671380852
+    },
+    {
+      "sr": 44100,
+      "f0": 110,
+      "center": 1200,
+      "bandwidth": 300,
+      "skirt": 0.5,
+      "peak_error": 1.844767919700896e-06,
+      "relative_error_db": -118.1154204785368
+    },
+    {
+      "sr": 44100,
+      "f0": 110,
+      "center": 1200,
+      "bandwidth": 300,
+      "skirt": 1,
+      "peak_error": 1.7964033108275324e-06,
+      "relative_error_db": -118.49333430442798
+    },
+    {
+      "sr": 44100,
+      "f0": 440,
+      "center": 5000,
+      "bandwidth": 1200,
+      "skirt": 0,
+      "peak_error": 2.044584478611e-06,
+      "relative_error_db": -117.85152892885378
+    },
+    {
+      "sr": 44100,
+      "f0": 440,
+      "center": 5000,
+      "bandwidth": 1200,
+      "skirt": 0.5,
+      "peak_error": 2.1986980190402683e-06,
+      "relative_error_db": -118.11383372763572
+    },
+    {
+      "sr": 44100,
+      "f0": 440,
+      "center": 5000,
+      "bandwidth": 1200,
+      "skirt": 1,
+      "peak_error": 2.4528460744743796e-06,
+      "relative_error_db": -118.38308228498539
+    },
+    {
+      "sr": 44100,
+      "f0": 10,
+      "center": 80,
+      "bandwidth": 8000,
+      "skirt": 0,
+      "peak_error": 2.262612967276166e-08,
+      "relative_error_db": -131.71678710585064
+    },
+    {
+      "sr": 44100,
+      "f0": 10,
+      "center": 80,
+      "bandwidth": 8000,
+      "skirt": 0.5,
+      "peak_error": 8.161414100094078e-08,
+      "relative_error_db": -134.5148311072968
+    },
+    {
+      "sr": 44100,
+      "f0": 10,
+      "center": 80,
+      "bandwidth": 8000,
+      "skirt": 1,
+      "peak_error": 1.412187861093983e-07,
+      "relative_error_db": -136.38410744825637
+    },
+    {
+      "sr": 44100,
+      "f0": 1000,
+      "center": 16000,
+      "bandwidth": 8000,
+      "skirt": 0,
+      "peak_error": 2.2447171252326648e-06,
+      "relative_error_db": -113.47731922377547
+    },
+    {
+      "sr": 44100,
+      "f0": 1000,
+      "center": 16000,
+      "bandwidth": 8000,
+      "skirt": 0.5,
+      "peak_error": 2.355056772720965e-06,
+      "relative_error_db": -113.72195489553323
+    },
+    {
+      "sr": 44100,
+      "f0": 1000,
+      "center": 16000,
+      "bandwidth": 8000,
+      "skirt": 1,
+      "peak_error": 2.5845578150163195e-06,
+      "relative_error_db": -113.74237243938
+    },
+    {
+      "sr": 44100,
+      "f0": 10000,
+      "center": 80,
+      "bandwidth": 20,
+      "skirt": 0,
+      "peak_error": 1.2325935010374068e-35,
+      "relative_error_db": -300.0
+    },
+    {
+      "sr": 44100,
+      "f0": 10000,
+      "center": 80,
+      "bandwidth": 20,
+      "skirt": 0.5,
+      "peak_error": 1.2325935010374068e-35,
+      "relative_error_db": -300.0
+    },
+    {
+      "sr": 44100,
+      "f0": 10000,
+      "center": 80,
+      "bandwidth": 20,
+      "skirt": 1,
+      "peak_error": 1.2325935010374068e-35,
+      "relative_error_db": -300.0
+    },
+    {
+      "sr": 44100,
+      "f0": 220,
+      "center": 1319.999,
+      "bandwidth": 400,
+      "skirt": 0,
+      "peak_error": 1.1850078818209653e-06,
+      "relative_error_db": -122.65900364288927
+    },
+    {
+      "sr": 44100,
+      "f0": 220,
+      "center": 1319.999,
+      "bandwidth": 400,
+      "skirt": 0.5,
+      "peak_error": 1.1967134058432638e-06,
+      "relative_error_db": -123.10714973071896
+    },
+    {
+      "sr": 44100,
+      "f0": 220,
+      "center": 1319.999,
+      "bandwidth": 400,
+      "skirt": 1,
+      "peak_error": 1.421000089272162e-06,
+      "relative_error_db": -123.6238362912119
+    },
+    {
+      "sr": 44100,
+      "f0": 220,
+      "center": 1320.001,
+      "bandwidth": 400,
+      "skirt": 0,
+      "peak_error": 1.2446966602963627e-06,
+      "relative_error_db": -122.62628347671088
+    },
+    {
+      "sr": 44100,
+      "f0": 220,
+      "center": 1320.001,
+      "bandwidth": 400,
+      "skirt": 0.5,
+      "peak_error": 1.3390721397832372e-06,
+      "relative_error_db": -123.20087174287036
+    },
+    {
+      "sr": 44100,
+      "f0": 220,
+      "center": 1320.001,
+      "bandwidth": 400,
+      "skirt": 1,
+      "peak_error": 1.427319783975367e-06,
+      "relative_error_db": -123.62712460080726
+    },
+    {
+      "sr": 48000,
+      "f0": 55,
+      "center": 1234,
+      "bandwidth": 20,
+      "skirt": 0,
+      "peak_error": 3.483413934107782e-06,
+      "relative_error_db": -114.6072794900884
+    },
+    {
+      "sr": 48000,
+      "f0": 55,
+      "center": 1234,
+      "bandwidth": 20,
+      "skirt": 0.5,
+      "peak_error": 2.6819737445338276e-06,
+      "relative_error_db": -114.64780627627532
+    },
+    {
+      "sr": 48000,
+      "f0": 55,
+      "center": 1234,
+      "bandwidth": 20,
+      "skirt": 1,
+      "peak_error": 1.880533554987629e-06,
+      "relative_error_db": -114.68248377285795
+    },
+    {
+      "sr": 48000,
+      "f0": 110,
+      "center": 1200,
+      "bandwidth": 300,
+      "skirt": 0,
+      "peak_error": 1.8784945891026084e-06,
+      "relative_error_db": -119.50066270763246
+    },
+    {
+      "sr": 48000,
+      "f0": 110,
+      "center": 1200,
+      "bandwidth": 300,
+      "skirt": 0.5,
+      "peak_error": 1.7938725971333724e-06,
+      "relative_error_db": -119.72463046962802
+    },
+    {
+      "sr": 48000,
+      "f0": 110,
+      "center": 1200,
+      "bandwidth": 300,
+      "skirt": 1,
+      "peak_error": 1.6899026519003046e-06,
+      "relative_error_db": -119.90898523518631
+    },
+    {
+      "sr": 48000,
+      "f0": 440,
+      "center": 5000,
+      "bandwidth": 1200,
+      "skirt": 0,
+      "peak_error": 2.094532118190884e-06,
+      "relative_error_db": -117.77343882537048
+    },
+    {
+      "sr": 48000,
+      "f0": 440,
+      "center": 5000,
+      "bandwidth": 1200,
+      "skirt": 0.5,
+      "peak_error": 1.9942044406917603e-06,
+      "relative_error_db": -118.15816283431006
+    },
+    {
+      "sr": 48000,
+      "f0": 440,
+      "center": 5000,
+      "bandwidth": 1200,
+      "skirt": 1,
+      "peak_error": 1.911691823161532e-06,
+      "relative_error_db": -118.42318029572967
+    },
+    {
+      "sr": 48000,
+      "f0": 10,
+      "center": 80,
+      "bandwidth": 8000,
+      "skirt": 0,
+      "peak_error": 3.759514599632752e-08,
+      "relative_error_db": -131.41118696158034
+    },
+    {
+      "sr": 48000,
+      "f0": 10,
+      "center": 80,
+      "bandwidth": 8000,
+      "skirt": 0.5,
+      "peak_error": 9.719979388034261e-08,
+      "relative_error_db": -134.13230670160596
+    },
+    {
+      "sr": 48000,
+      "f0": 10,
+      "center": 80,
+      "bandwidth": 8000,
+      "skirt": 1,
+      "peak_error": 1.0814346418364096e-07,
+      "relative_error_db": -136.89364226264638
+    },
+    {
+      "sr": 48000,
+      "f0": 1000,
+      "center": 16000,
+      "bandwidth": 8000,
+      "skirt": 0,
+      "peak_error": 2.3172478924651796e-06,
+      "relative_error_db": -113.86517303947103
+    },
+    {
+      "sr": 48000,
+      "f0": 1000,
+      "center": 16000,
+      "bandwidth": 8000,
+      "skirt": 0.5,
+      "peak_error": 2.522959354503418e-06,
+      "relative_error_db": -113.70403290331535
+    },
+    {
+      "sr": 48000,
+      "f0": 1000,
+      "center": 16000,
+      "bandwidth": 8000,
+      "skirt": 1,
+      "peak_error": 2.7411953411188295e-06,
+      "relative_error_db": -113.40328842057211
+    },
+    {
+      "sr": 48000,
+      "f0": 10000,
+      "center": 80,
+      "bandwidth": 20,
+      "skirt": 0,
+      "peak_error": 1.59987062685021e-35,
+      "relative_error_db": -300.0
+    },
+    {
+      "sr": 48000,
+      "f0": 10000,
+      "center": 80,
+      "bandwidth": 20,
+      "skirt": 0.5,
+      "peak_error": 1.59987062685021e-35,
+      "relative_error_db": -300.0
+    },
+    {
+      "sr": 48000,
+      "f0": 10000,
+      "center": 80,
+      "bandwidth": 20,
+      "skirt": 1,
+      "peak_error": 1.59987062685021e-35,
+      "relative_error_db": -300.0
+    },
+    {
+      "sr": 48000,
+      "f0": 220,
+      "center": 1319.999,
+      "bandwidth": 400,
+      "skirt": 0,
+      "peak_error": 1.2390992569777382e-06,
+      "relative_error_db": -122.92868287588989
+    },
+    {
+      "sr": 48000,
+      "f0": 220,
+      "center": 1319.999,
+      "bandwidth": 400,
+      "skirt": 0.5,
+      "peak_error": 1.1921357340183292e-06,
+      "relative_error_db": -123.3927607076108
+    },
+    {
+      "sr": 48000,
+      "f0": 220,
+      "center": 1319.999,
+      "bandwidth": 400,
+      "skirt": 1,
+      "peak_error": 1.2671156032484365e-06,
+      "relative_error_db": -123.92343623482651
+    },
+    {
+      "sr": 48000,
+      "f0": 220,
+      "center": 1320.001,
+      "bandwidth": 400,
+      "skirt": 0,
+      "peak_error": 1.161571349717061e-06,
+      "relative_error_db": -123.05864349883299
+    },
+    {
+      "sr": 48000,
+      "f0": 220,
+      "center": 1320.001,
+      "bandwidth": 400,
+      "skirt": 0.5,
+      "peak_error": 1.2148390057253877e-06,
+      "relative_error_db": -123.61744944001663
+    },
+    {
+      "sr": 48000,
+      "f0": 220,
+      "center": 1320.001,
+      "bandwidth": 400,
+      "skirt": 1,
+      "peak_error": 1.2553234901013788e-06,
+      "relative_error_db": -124.04495003693967
+    },
+    {
+      "sr": 96000,
+      "f0": 55,
+      "center": 1234,
+      "bandwidth": 20,
+      "skirt": 0,
+      "peak_error": 3.6536922724400567e-06,
+      "relative_error_db": -114.46474135120887
+    },
+    {
+      "sr": 96000,
+      "f0": 55,
+      "center": 1234,
+      "bandwidth": 20,
+      "skirt": 0.5,
+      "peak_error": 2.8154055809470613e-06,
+      "relative_error_db": -114.50884914288395
+    },
+    {
+      "sr": 96000,
+      "f0": 55,
+      "center": 1234,
+      "bandwidth": 20,
+      "skirt": 1,
+      "peak_error": 1.97525624427361e-06,
+      "relative_error_db": -114.56469078520078
+    },
+    {
+      "sr": 96000,
+      "f0": 110,
+      "center": 1200,
+      "bandwidth": 300,
+      "skirt": 0,
+      "peak_error": 1.823919164811727e-06,
+      "relative_error_db": -119.01519689647331
+    },
+    {
+      "sr": 96000,
+      "f0": 110,
+      "center": 1200,
+      "bandwidth": 300,
+      "skirt": 0.5,
+      "peak_error": 1.812225065955797e-06,
+      "relative_error_db": -119.22364724110696
+    },
+    {
+      "sr": 96000,
+      "f0": 110,
+      "center": 1200,
+      "bandwidth": 300,
+      "skirt": 1,
+      "peak_error": 1.959678133975351e-06,
+      "relative_error_db": -119.39707273641567
+    },
+    {
+      "sr": 96000,
+      "f0": 440,
+      "center": 5000,
+      "bandwidth": 1200,
+      "skirt": 0,
+      "peak_error": 2.1861998237560076e-06,
+      "relative_error_db": -117.70996662536018
+    },
+    {
+      "sr": 96000,
+      "f0": 440,
+      "center": 5000,
+      "bandwidth": 1200,
+      "skirt": 0.5,
+      "peak_error": 2.405846703551484e-06,
+      "relative_error_db": -117.99773273137716
+    },
+    {
+      "sr": 96000,
+      "f0": 440,
+      "center": 5000,
+      "bandwidth": 1200,
+      "skirt": 1,
+      "peak_error": 2.7073103527897047e-06,
+      "relative_error_db": -118.14811234485813
+    },
+    {
+      "sr": 96000,
+      "f0": 10,
+      "center": 80,
+      "bandwidth": 8000,
+      "skirt": 0,
+      "peak_error": 6.927714057969325e-08,
+      "relative_error_db": -137.93300025619735
+    },
+    {
+      "sr": 96000,
+      "f0": 10,
+      "center": 80,
+      "bandwidth": 8000,
+      "skirt": 0.5,
+      "peak_error": 8.316788313589285e-08,
+      "relative_error_db": -138.1040778452467
+    },
+    {
+      "sr": 96000,
+      "f0": 10,
+      "center": 80,
+      "bandwidth": 8000,
+      "skirt": 1,
+      "peak_error": 8.168550053033741e-08,
+      "relative_error_db": -139.6539717912758
+    },
+    {
+      "sr": 96000,
+      "f0": 1000,
+      "center": 16000,
+      "bandwidth": 8000,
+      "skirt": 0,
+      "peak_error": 2.0567415678351963e-06,
+      "relative_error_db": -113.70480841271196
+    },
+    {
+      "sr": 96000,
+      "f0": 1000,
+      "center": 16000,
+      "bandwidth": 8000,
+      "skirt": 0.5,
+      "peak_error": 2.0233614922426923e-06,
+      "relative_error_db": -113.82489878735868
+    },
+    {
+      "sr": 96000,
+      "f0": 1000,
+      "center": 16000,
+      "bandwidth": 8000,
+      "skirt": 1,
+      "peak_error": 2.3601141250495505e-06,
+      "relative_error_db": -113.76370925402003
+    },
+    {
+      "sr": 96000,
+      "f0": 10000,
+      "center": 80,
+      "bandwidth": 20,
+      "skirt": 0,
+      "peak_error": 4.140368618986049e-35,
+      "relative_error_db": -300.0
+    },
+    {
+      "sr": 96000,
+      "f0": 10000,
+      "center": 80,
+      "bandwidth": 20,
+      "skirt": 0.5,
+      "peak_error": 4.140368618986049e-35,
+      "relative_error_db": -300.0
+    },
+    {
+      "sr": 96000,
+      "f0": 10000,
+      "center": 80,
+      "bandwidth": 20,
+      "skirt": 1,
+      "peak_error": 4.140368618986049e-35,
+      "relative_error_db": -300.0
+    },
+    {
+      "sr": 96000,
+      "f0": 220,
+      "center": 1319.999,
+      "bandwidth": 400,
+      "skirt": 0,
+      "peak_error": 1.2365398615044043e-06,
+      "relative_error_db": -122.56139262549306
+    },
+    {
+      "sr": 96000,
+      "f0": 220,
+      "center": 1319.999,
+      "bandwidth": 400,
+      "skirt": 0.5,
+      "peak_error": 1.2077299806345643e-06,
+      "relative_error_db": -122.99775958965984
+    },
+    {
+      "sr": 96000,
+      "f0": 220,
+      "center": 1319.999,
+      "bandwidth": 400,
+      "skirt": 1,
+      "peak_error": 1.3424835677011693e-06,
+      "relative_error_db": -123.53739829401931
+    },
+    {
+      "sr": 96000,
+      "f0": 220,
+      "center": 1320.001,
+      "bandwidth": 400,
+      "skirt": 0,
+      "peak_error": 1.26038815545515e-06,
+      "relative_error_db": -122.71279536512804
+    },
+    {
+      "sr": 96000,
+      "f0": 220,
+      "center": 1320.001,
+      "bandwidth": 400,
+      "skirt": 0.5,
+      "peak_error": 1.3451383881202261e-06,
+      "relative_error_db": -123.26631472816311
+    },
+    {
+      "sr": 96000,
+      "f0": 220,
+      "center": 1320.001,
+      "bandwidth": 400,
+      "skirt": 1,
+      "peak_error": 1.369993070432507e-06,
+      "relative_error_db": -123.6540010236798
+    }
+  ],
+  "benchmark_96k": {
+    "batch_mean_us": [
+      6.9235,
+      6.935,
+      7.294417999999999,
+      6.96625,
+      6.835916,
+      7.288918,
+      7.101084,
+      6.8855,
+      7.155416
+    ],
+    "median_us": 6.96625
+  }
+}

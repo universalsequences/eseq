@@ -69,7 +69,7 @@ fn rack_topology_signature(rack: &RackTrackSnapshot) -> RackTopologySignature {
                     InstrumentType::Custom | InstrumentType::Modulator => {
                         slot.track_sound_state.engine_id
                     }
-                    InstrumentType::Sampler | InstrumentType::Rack => None,
+                    InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Rack => None,
                 },
                 fx_chain: slot
                     .effect_slots
@@ -180,6 +180,7 @@ struct SamplerVoiceSetup {
 }
 
 enum InstrumentRegistration<'a> {
+    Empty,
     Sampler {
         buffer_id: i32,
         sample_rate: u32,

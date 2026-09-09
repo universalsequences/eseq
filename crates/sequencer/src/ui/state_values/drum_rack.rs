@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn rack_slot_type_name(slot: &sequencer::sequencer::RackSlotSnapshot) -> &'static str {
     match slot.instrument_type {
+        sequencer::sequencer::InstrumentType::Empty => "empty",
         sequencer::sequencer::InstrumentType::Sampler => "sampler",
         sequencer::sequencer::InstrumentType::Custom => "custom",
         sequencer::sequencer::InstrumentType::Modulator => "modulator",
@@ -29,7 +30,7 @@ pub(super) fn rack_slot_raw_name(
             .map(|engine| engine.name.clone())
             .or_else(|| slot.track_sound_state.loaded_preset.clone())
             .unwrap_or_else(|| format!("Instrument {}", slot_idx + 1)),
-        sequencer::sequencer::InstrumentType::Rack => format!("Unsupported {}", slot_idx + 1),
+        sequencer::sequencer::InstrumentType::Empty | sequencer::sequencer::InstrumentType::Rack => format!("Unsupported {}", slot_idx + 1),
     }
 }
 

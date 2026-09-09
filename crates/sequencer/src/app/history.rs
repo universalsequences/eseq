@@ -474,6 +474,7 @@ impl RackSlotStructurePatch {
 
 #[derive(Clone, Debug)]
 pub enum TrackInstrumentSource {
+    Empty,
     Custom { engine_id: usize },
     Sampler {
         buffer_id: i32,
@@ -522,7 +523,7 @@ pub struct TrackCreationPatch {
 impl TrackCreationPatch {
     pub fn retained_bytes(&self) -> usize {
         let source_bytes = match &self.state.source {
-            TrackInstrumentSource::Custom { .. } | TrackInstrumentSource::Modulator => 0,
+            TrackInstrumentSource::Empty | TrackInstrumentSource::Custom { .. } | TrackInstrumentSource::Modulator => 0,
             TrackInstrumentSource::Sampler { path, .. } => path
                 .as_ref()
                 .map(|path| path.as_os_str().len())
@@ -573,7 +574,7 @@ impl InstrumentBindingPatch {
     pub fn retained_bytes(&self) -> usize {
         fn state_bytes(state: &TrackInstrumentState) -> usize {
             let source_bytes = match &state.source {
-                TrackInstrumentSource::Custom { .. } | TrackInstrumentSource::Modulator => 0,
+                TrackInstrumentSource::Empty | TrackInstrumentSource::Custom { .. } | TrackInstrumentSource::Modulator => 0,
                 TrackInstrumentSource::Sampler { path, .. } => path
                     .as_ref()
                     .map(|path| path.as_os_str().len())

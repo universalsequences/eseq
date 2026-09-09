@@ -1,0 +1,17 @@
+;; Export settings over the production sequencer panel, with deterministic
+;; saved-project metadata so this fixture never writes user recordings.
+(capture-project (track :sampler :name "Sampler"))
+(def capture-after-sync ()
+  (reactive-set "EXPORT" "export-default-name" "Night Drive (2)")
+  (reactive-set "EXPORT" "export-output-name" "Night Drive (2).wav")
+  (reactive-set "EXPORT" "export-project" "Night Drive")
+  (reactive-set "EXPORT" "export-folder" "recordings")
+  (reactive-set "EXPORT" "export-end" 64)
+  (reactive-set "EXPORT" "export-percent" -1)
+  (reactive-set "EXPORT" "export-busy" false)
+  (reactive-set "EXPORT" "export-done" false)
+  (reactive-set "EXPORT" "export-message" "")
+  (reactive-set "EXPORT" "export-reveal-label" "Show in Finder")
+  (eseq.export-song/reset)
+  (set! eseq.export-song/range-draft "Beat range")
+  (eseq.export-song/open))

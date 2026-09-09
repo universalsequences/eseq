@@ -8,6 +8,7 @@ license = "GPL-3.0-only"
 crossterm = "0.28"
 cpal = "0.15"
 hound = "3.5"
+tempfile = "3.27"
 sha2 = "0.10"
 rustfft = "6.2"
 symphonia = { version = "0.5", default-features = false, features = ["aiff", "flac", "mp3", "pcm", "wav"] }

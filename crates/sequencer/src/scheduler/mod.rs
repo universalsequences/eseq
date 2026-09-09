@@ -27,6 +27,7 @@ use {
 };
 
 pub use worker::spawn_scheduler_thread;
+pub(crate) use worker::{SchedulerDriver, SchedulerInput};
 
 use std::cell::RefCell;
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};

@@ -2375,7 +2375,7 @@
                (jak "package-import" :16 . . - . -> 0)"#,
             false,
         )
-        .expect("imported Jaki sequencer should keep the scheduler runtime alive");
+        .0.expect("imported Jaki sequencer should keep the scheduler runtime alive");
 
         assert!(
             runtime
@@ -2394,7 +2394,7 @@
             r#"(def-sequencer "graph-scratch" :shape (line 1))"#,
             false,
         )
-        .expect("builtin MIDI FX should keep scheduler runtime alive");
+        .0.expect("builtin MIDI FX should keep scheduler runtime alive");
         let names = runtime.midi_fx_names();
         assert!(
             names.iter().any(|name| name == "arp"),
@@ -4694,6 +4694,8 @@
             vec![default_empty_effect_chain(), default_empty_effect_chain()],
         );
         state.pattern.track_params[1].set_fts_scale(1);
+        state.pattern.track_params[1].gate.store(false, Ordering::Relaxed);
+        state.pattern.instrument_base_note_offsets[1].store(12.0_f32.to_bits(), Ordering::Relaxed);
         let snapshot = state.publish_scheduler_snapshot();
         let queue = ScheduledEventQueue::<8>::new();
         let mut event = StepEvent {
@@ -4743,10 +4745,12 @@
         let scheduled = queue.pop().expect("network trigger");
         match scheduled.kind {
             ScheduledEventKind::NetworkTrigger {
-                track, resolved, ..
+                track, resolved, voice_policy, ..
             } => {
                 assert_eq!(track, 1);
                 assert_eq!(resolved.transpose, 4.0);
+                assert!(!voice_policy.gate);
+                assert_eq!(voice_policy.base_note_offset, 12.0);
             }
             other => panic!("expected network trigger, got {other:?}"),
         }
@@ -7509,6 +7513,42 @@
     /// Install a two-chunk take (256 + 40 = 296 steps, transposes 5/6) on
     /// track 0 and return its id. Chunks are MAX_STEPS-long 16th-timebase
     /// patterns, so one chunk spans 64 beats.
+    #[test]
+    fn song_sample_boundaries_and_events_are_independent_of_chunk_size() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            state.transport.bpm.store(137, Ordering::Relaxed);
+            let row_beats = [0.0, 0.50037, 1.00314];
+            let end_beat = 2.00271;
+            song_mode_commit(&state, row_beats.iter().enumerate().map(|(row, beat)| {
+                song_mode_row(row as u64, *beat, row, Vec::new())
+            }).collect(), end_beat, false);
+            let song = state.preflight_runtime_song().unwrap();
+            let samples_per_quarter = 48_000.0 * 60.0 / 137.0;
+            let expected_rows: Vec<_> = row_beats.iter().map(|beat| {
+                (beat * samples_per_quarter).ceil() as u64
+            }).collect();
+            let end_sample = (end_beat * samples_per_quarter).ceil() as u64;
+            let mut reference = None;
+            for block in [1, 127, 512, 16_000] {
+                let (events, notices) = drive_song_lookahead(&state, Arc::clone(&song), block, end_sample + 1);
+                let row_samples: Vec<_> = song_row_applied(&notices).iter()
+                    .map(|row| row.effective_sample).collect();
+                assert_eq!(row_samples, expected_rows, "block={block}");
+                assert!(notices.iter().any(|notice| matches!(notice,
+                    crate::sequencer::SongPlaybackNotice::Ended { end_sample: actual, .. }
+                    if *actual == end_sample)), "block={block}");
+                let trace: Vec<_> = events.iter().map(|event| {
+                    assert!(event.sample_time < end_sample);
+                    (event.sample_time, event.track, event.transpose.to_bits())
+                }).collect();
+                if let Some(reference) = reference.as_ref() {
+                    assert_eq!(&trace, reference, "block={block}");
+                } else { reference = Some(trace); }
+            }
+        });
+    }
+
     fn song_mode_install_take(state: &SequencerState) -> crate::sequencer::TakeId {
         state.with_scenes_mut(|scenes| {
             let mut chunk = scenes.track_pools[0]
@@ -8067,6 +8107,68 @@
     }
 
     #[test]
+    fn song_recorded_launch_does_not_retrigger_the_partial_step() {
+        run_with_scheduler_stack(|| {
+            for (bpm, delta) in [120, 137].into_iter().flat_map(|bpm| {
+                [-0.001, -0.00001, 0.0, 0.00001, 0.001].map(|delta| (bpm, delta))
+            }) {
+                let (state, pattern) = song_mode_fixture();
+                state.transport.bpm.store(bpm, Ordering::Relaxed);
+                let samples_per_beat = 48_000.0 * 60.0 / bpm as f64;
+                let beat = 4.0 + delta;
+                let mut incoming = song_mode_row(1, beat, 1, vec![(0, pattern.0)]);
+                // Recorded launches retain the free-running pattern phase.
+                incoming.overrides[0].offset_steps = (beat * 4.0) % 16.0;
+                song_mode_commit(&state, vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()), incoming,
+                ], 5.0, false);
+                let song = state.preflight_runtime_song().unwrap();
+                for block in [127, 512, 16_000] {
+                    let (events, _) = drive_song_lookahead(&state, Arc::clone(&song), block, (5.0 * samples_per_beat).ceil() as u64);
+                    let hits: Vec<_> = events.iter().filter(|event| event.track == 0)
+                        .map(|event| event.sample_time).collect();
+                    assert_eq!(hits, (0..20).map(|step| (step as f64 * 0.25 * samples_per_beat).ceil() as u64).collect::<Vec<_>>(),
+                        "bpm={bpm} delta={delta} block={block}: recorded launch must preserve the step grid");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn song_near_bar_launch_emits_one_incoming_step_zero() {
+        run_with_scheduler_stack(|| {
+            for bpm in [120, 137] {
+                for delta in [-0.001, -0.00001, 0.0, 0.00001, 0.001] {
+                    let (state, _) = song_mode_fixture();
+                    state.transport.bpm.store(bpm, Ordering::Relaxed);
+                    let boundary_beat = 4.0 + delta;
+                    song_mode_commit(&state, vec![
+                        song_mode_row(0, 0.0, 0, Vec::new()),
+                        song_mode_row(1, boundary_beat, 1, Vec::new()),
+                    ], 5.0, false);
+                    let song = state.preflight_runtime_song().unwrap();
+                    let samples_per_beat = 48_000.0 * 60.0 / bpm as f64;
+                    let boundary = (boundary_beat * samples_per_beat).ceil() as u64;
+                    for block in [127, 512, 16_000] {
+                        let (events, _) = drive_song_lookahead(
+                            &state, Arc::clone(&song), block,
+                            (5.0 * samples_per_beat).ceil() as u64,
+                        );
+                        let near: Vec<_> = events.iter().filter(|event| {
+                            event.track == 0 && event.sample_time >= boundary
+                                && event.sample_time < boundary + 100
+                        }).collect();
+                        assert_eq!(near.len(), 1,
+                            "bpm={bpm} delta={delta} block={block}: {near:?}");
+                        assert_eq!(near[0].sample_time, boundary);
+                        assert_eq!(near[0].transpose, 2.0);
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
     fn song_unquantized_row_boundary_keeps_sample_offset() {
         run_with_scheduler_stack(|| {
             let (state, _) = song_mode_fixture();
@@ -8088,10 +8190,8 @@
                 .iter()
                 .find(|record| record.row_ordinal == 1)
                 .expect("row 1 applied");
-            assert!(
-                (36_008..=36_009).contains(&row1.effective_sample),
-                "unquantized boundary must keep its sub-block sample offset: {row1:?}"
-            );
+            assert_eq!(row1.effective_sample, 36_009,
+                "a boundary uses the first sample at or after its authored beat");
             assert!((row1.effective_beat - 1.50037).abs() < 1e-9);
             assert_ne!(row1.effective_sample % 16_000, 0, "must not snap to block edges");
             assert_ne!(row1.effective_sample % 6_000, 0, "must not snap to the step grid");
@@ -8106,17 +8206,15 @@
                 .filter(|event| event.sample_time < boundary)
                 .max_by_key(|event| event.sample_time)
                 .expect("step before the boundary");
-            assert!((35_999..=36_000).contains(&before.sample_time), "{before:?}");
+            assert_eq!(before.sample_time, 36_000, "{before:?}");
             assert_eq!(before.transpose, 1.0);
             let after = track0
                 .iter()
                 .filter(|event| event.sample_time >= boundary)
                 .min_by_key(|event| event.sample_time)
                 .expect("step after the boundary");
-            assert!(
-                (36_008..=36_009).contains(&after.sample_time),
-                "the anchored row's step 0 must fire at the boundary: {after:?}"
-            );
+            assert_eq!(after.sample_time, 36_009,
+                "the anchored row's step 0 must fire at the boundary: {after:?}");
             assert_eq!(after.transpose, 2.0);
         });
     }
@@ -9547,7 +9645,7 @@
         state.toggle_play();
         let snapshot = state.publish_scheduler_snapshot();
         let mut clock = SnapshotSequencerClock::new(48_000);
-        clock.total_beats = 0.9;
+        clock.seek_beats(0.9);
         clock.was_playing = true;
         let mut roll = RollState::new();
 
@@ -9572,7 +9670,7 @@
             .abs()
             < 1.0e-9);
 
-        clock.total_beats = 1.1;
+        clock.seek_beats(1.1);
         roll.apply_commands_with_clock(
             &[RollCommand::SetRate { rate: Timebase::Eighth }],
             &mut clock,
@@ -9582,7 +9680,7 @@
         assert_eq!(roll.window_start[1], Some(0.0));
 
         // A same-rate slow straight re-press is a no-op.
-        clock.total_beats = 0.2;
+        clock.seek_beats(0.2);
         roll.apply_commands_with_clock(
             &[RollCommand::SetRate { rate: Timebase::Eighth }],
             &mut clock,
@@ -9596,7 +9694,7 @@
             &mut clock,
             &snapshot,
         );
-        clock.total_beats = 0.7;
+        clock.seek_beats(0.7);
         roll.apply_commands_with_clock(
             &[RollCommand::SetRate { rate: Timebase::ThirtySecond }],
             &mut clock,
@@ -9615,7 +9713,7 @@
         state.toggle_play();
         let snapshot = state.publish_scheduler_snapshot();
         let mut clock = SnapshotSequencerClock::new(48_000);
-        clock.total_beats = 0.6;
+        clock.seek_beats(0.6);
         clock.was_playing = true;
         let mut roll = RollState::new();
         roll.apply_commands_with_clock(
@@ -9729,7 +9827,7 @@ fn scratch_generator_follows_a_mid_playback_scene_switch() {
 "#;
         let scratch_runtime =
             super::lookahead::build_scheduler_scratch_runtime(Arc::clone(&state), source, false)
-                .expect("scratch runtime for the generator source");
+                .0.expect("scratch runtime for the generator source");
         let generator_defs = scratch_runtime.sequencer_defs();
         let mut scratch_runtime = Some(scratch_runtime);
 
@@ -9893,3 +9991,149 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
         }
     });
 }
+
+    #[test]
+    fn scheduler_driver_matches_song_trace_without_wall_clock_pacing() {
+        run_with_scheduler_stack(|| {
+            let run = |live: bool, horizon_size: u64| {
+                let (state, override_id) = song_mode_fixture();
+                song_mode_commit(&state, vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 0.50037, 1, vec![(0, override_id.0)]),
+                    song_mode_row(2, 1.00314, 2, Vec::new()),
+                ], 2.00271, false);
+                state.transport.playing.store(true, Ordering::Relaxed);
+                let song = state.preflight_runtime_song().unwrap();
+                state.publish_scheduler_snapshot();
+                state.song_playback().send_command(crate::sequencer::SongPlaybackCommand::Start {
+                    song, start_beat: 0.0, open_ended: false,
+                }).unwrap();
+                let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+                let mut driver = super::worker::SchedulerDriver::new(
+                    state.clone(), 48_000, 512, queue.clone(),
+                );
+                let (_tx, rx) = std::sync::mpsc::channel();
+                let mut trace = Vec::new();
+                let end = (2.00271_f64 * 24_000.0).ceil() as u64;
+                let mut rendered = 0;
+                while rendered < end {
+                    let horizon = (rendered + horizon_size).min(end);
+                    let input = if live {
+                        super::worker::SchedulerInput::Live { keyboard: &rx, clock: &Instant::now }
+                    } else { super::worker::SchedulerInput::Offline };
+                    let advanced = driver.advance(rendered, horizon, input);
+                    assert_eq!(advanced.scheduled_until_sample, horizon);
+                    assert_eq!(advanced.queue_rejections, 0);
+                    trace.extend(observed_triggers(&queue));
+                    rendered = horizon;
+                }
+                assert!(trace.iter().all(|event| event.sample_time < end));
+                (trace, song_row_applied(&state.drain_song_playback_notices()))
+            };
+            let (expected, expected_rows) = run(true, 2048);
+            assert!(!expected.is_empty());
+            assert_eq!(expected_rows.len(), 3);
+            for horizon in [127, 512, 16_000] {
+                let (events, rows) = run(false, horizon);
+                assert_eq!(events, expected, "horizon={horizon}");
+                assert_eq!(rows, expected_rows, "horizon={horizon}");
+            }
+        });
+    }
+
+    #[test]
+    fn scheduler_driver_horizon_excludes_event_at_range_end() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            song_mode_commit(&state, vec![song_mode_row(0, 0.0, 0, Vec::new())], 4.0, false);
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let song = state.preflight_runtime_song().unwrap();
+            state.publish_scheduler_snapshot();
+            state.song_playback().send_command(crate::sequencer::SongPlaybackCommand::Start {
+                song, start_beat: 0.0, open_ended: false,
+            }).unwrap();
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver = super::worker::SchedulerDriver::new(state, 48_000, 512, queue.clone());
+            let advanced = driver.advance(0, 6000, super::worker::SchedulerInput::Offline);
+            assert_eq!(advanced.scheduled_until_sample, 6000);
+            let events = observed_triggers(&queue);
+            assert!(events.iter().any(|event| event.sample_time == 0));
+            assert!(events.iter().all(|event| event.sample_time < 6000));
+            // The next sample admits the boundary step exactly once.
+            let advanced = driver.advance(6000, 6001, super::worker::SchedulerInput::Offline);
+            assert_eq!(advanced.scheduled_until_sample, 6001);
+            let boundary = observed_triggers(&queue);
+            assert_eq!(boundary.len(), 2);
+            assert!(boundary.iter().all(|event| event.sample_time == 6000));
+        });
+    }
+
+    #[test]
+    fn scheduler_driver_preserves_live_roll_start_hold_with_an_injected_clock() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.toggle_step_and_clear_plocks(0, 0);
+            state.transport.roll_mode.store(true, Ordering::Relaxed);
+            state.toggle_play();
+            state.publish_scheduler_snapshot();
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver = super::worker::SchedulerDriver::new(state, 48_000, 512, queue.clone());
+            let (_tx, rx) = std::sync::mpsc::channel();
+            let start = Instant::now();
+            for elapsed in [0, 49, 50] {
+                let clock = || start + Duration::from_millis(elapsed);
+                let advanced = driver.advance(0, 512, super::worker::SchedulerInput::Live {
+                    keyboard: &rx, clock: &clock,
+                });
+                assert_eq!(advanced.scheduled_until_sample, if elapsed < 50 { 0 } else { 512 });
+                assert_eq!(advanced.queue_rejections, 0);
+            }
+            let events = observed_triggers(&queue);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].sample_time, 0);
+        });
+    }
+
+    #[test]
+    fn snapshot_clock_bar_and_playhead_boundaries_are_chunk_invariant() {
+        for chunk in [1, 127, 512, 5760, 92160] {
+            let state = SequencerState::new(0, vec![]);
+            state.transport.bpm.store(125, Ordering::Relaxed);
+            state.toggle_play();
+            let snapshot = state.latest_scheduler_snapshot();
+            let mut clock = SnapshotSequencerClock::new(48_000);
+            // At this tempo every bar is exactly 180 production-size chunks.
+            for bar in 0..3 {
+                state.transport.pending_mod_resync.store(true, Ordering::Relaxed);
+                let end = (bar + 1) * 92160;
+                let mut frame = bar * 92160 + usize::from(bar > 0);
+                while frame < end {
+                    let frames = chunk.min(end - frame);
+                    clock.process_chunk(frames, &snapshot, &state);
+                    frame += frames;
+                }
+                assert_eq!(state.transport.mod_reset_counter.load(Ordering::Relaxed), bar as u32);
+                clock.process_chunk(1, &snapshot, &state);
+                assert_eq!(state.transport.mod_reset_counter.load(Ordering::Relaxed), bar as u32 + 1,
+                    "bar boundary lost for chunk size {chunk}");
+                assert_eq!(state.transport.playhead.load(Ordering::Relaxed), (bar as u32 + 1) * 16);
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_clock_seek_does_not_resync_but_next_bar_does() {
+        let state = SequencerState::new(0, vec![]);
+        state.transport.bpm.store(125, Ordering::Relaxed);
+        state.toggle_play();
+        let snapshot = state.latest_scheduler_snapshot();
+        let mut clock = SnapshotSequencerClock::new(48_000);
+        clock.process_chunk(1, &snapshot, &state);
+        state.transport.pending_mod_resync.store(true, Ordering::Relaxed);
+        clock.seek_beats(8.0);
+        clock.process_chunk(92160, &snapshot, &state);
+        assert_eq!(state.transport.mod_reset_counter.load(Ordering::Relaxed), 0);
+        clock.process_chunk(1, &snapshot, &state);
+        assert_eq!(state.transport.mod_reset_counter.load(Ordering::Relaxed), 1);
+        assert_eq!(state.transport.playhead.load(Ordering::Relaxed), 48);
+    }

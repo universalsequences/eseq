@@ -60,6 +60,7 @@ fn eval_sdf_expr(expr: &Expression, vars: &HashMap<String, f64>) -> f64 {
                 }
 
                 // Math intrinsics
+                "exp" => eval_sdf_expr(&args[0], vars).exp(),
                 "abs" => eval_sdf_expr(&args[0], vars).abs(),
                 "sqrt" => eval_sdf_expr(&args[0], vars).sqrt(),
                 "sin" => eval_sdf_expr(&args[0], vars).sin(),
@@ -233,7 +234,7 @@ fn eval_sdf_expr(expr: &Expression, vars: &HashMap<String, f64>) -> f64 {
 fn collect_fill_distances(
     expr: &Expression,
     vars: &HashMap<String, f64>,
-    distances: &mut Vec<f64>,
+    distances: &mut Vec<(f64, Option<String>)>,
 ) {
     let Expression::List(items) = expr else {
         return;
@@ -272,9 +273,15 @@ fn collect_fill_distances(
                 collect_fill_distances(child, vars, distances);
             }
         }
+        "sdf/region" => {
+            if let Some(Expression::Keyword(name)) = args.first()
+                && let Some(shape) = args.get(3).or_else(|| args.get(1)) {
+                distances.push((eval_sdf_expr(shape, vars), Some(name.clone())));
+            }
+        }
         "sdf/fill" => {
             if let Some(region_sdf) = args.first() {
-                distances.push(eval_sdf_expr(region_sdf, vars));
+                distances.push((eval_sdf_expr(region_sdf, vars), None));
             }
         }
         _ => {}
@@ -286,12 +293,12 @@ fn collect_fill_distances(
 /// `x` and `y` should be in the SDF coordinate space ([-1,1] with aspect correction).
 /// Returns the index of the topmost `sdf/fill` region containing the point,
 /// or -1 if no region is hit.
-pub fn sdf_hit_test_with_vars(
+pub fn sdf_hit_region_with_vars(
     sdf_expr: &Expression,
     x: f64,
     y: f64,
     extra_vars: &HashMap<String, f64>,
-) -> i32 {
+) -> (i32, Option<String>) {
     let mut vars = extra_vars.clone();
     vars.insert("x".to_string(), x);
     vars.insert("y".to_string(), y);
@@ -303,16 +310,22 @@ pub fn sdf_hit_test_with_vars(
     let mut distances = Vec::new();
     collect_fill_distances(sdf_expr, &vars, &mut distances);
     if distances.is_empty() {
-        return -1;
+        return (-1, None);
     }
 
     // Iterate top-to-bottom for early exit — topmost region wins
-    for (i, distance) in distances.iter().enumerate().rev() {
+    for (i, (distance, name)) in distances.iter().enumerate().rev() {
         if *distance < 0.0 {
-            return i as i32;
+            return (i as i32, name.clone());
         }
     }
-    -1
+    (-1, None)
+}
+
+pub fn sdf_hit_test_with_vars(
+    sdf_expr: &Expression, x: f64, y: f64, extra_vars: &HashMap<String, f64>,
+) -> i32 {
+    sdf_hit_region_with_vars(sdf_expr, x, y, extra_vars).0
 }
 
 pub fn sdf_hit_test(sdf_expr: &Expression, x: f64, y: f64) -> i32 {
@@ -359,6 +372,14 @@ mod tests {
         let mut rt = Runtime::new();
         rt.expand_macros_expression(&parse_expr(src))
             .expect("expand SDF macro")
+    }
+
+    #[test]
+    fn named_region_uses_independent_hit_shape_and_bound_geometry() {
+        let expr = expand_expr("(let ((cx offset)) (sdf/layer (sdf/paint (sdf/circle 1) :black) (sdf/region :handle (sdf/translate cx 0 (sdf/circle 0.05)) :accent (sdf/translate cx 0 (sdf/circle 0.2)))))");
+        let vars = HashMap::from([("offset".to_string(), 0.5)]);
+        assert_eq!(sdf_hit_region_with_vars(&expr, 0.65, 0.0, &vars), (0, Some("handle".into())));
+        assert_eq!(sdf_hit_region_with_vars(&expr, 0.0, 0.0, &vars), (-1, None));
     }
 
     #[test]

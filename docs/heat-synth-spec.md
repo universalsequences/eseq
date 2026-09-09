@@ -462,6 +462,30 @@ CPU for the actual shipped source at maximum intended note/unison load.
 
 ## 8. UI specification
 
+Author-approved layout, 2026-09-08: keep the embedded eseq header and existing
+synth/mods/keys tabs. Stack Osc1/Osc2 and Noise on the left, place the contextual
+detail display in the center, and stack the Filter1/Amp1 and Filter2/Amp2 paths
+on the right, followed by the narrow LFO/output strip. Keep the body within
+9.8 layout rows so it does not introduce vertical scrolling in the FX panel.
+Amp Pan and Level controls sit side by side in wider panels. Both resonance
+knobs and the filter plots use logarithmic Q input mapping over the full
+0.1–100 DSP range; this gives Q=1–8 approximately 30% of the interaction travel
+without changing the filter response.
+The center changes with section selection; its Overview action returns to
+Quick Routing and the Vibrato, Keyboard, Unison, Glide, Pressure and Tuning
+groups. Unison exposes Off/2/3/4 copies, detune, onset delay and stereo spread.
+
+The display, enabled section labels, knob arcs and filter curves use the
+paired theme roles `control-on-bg` and `control-on-fg`; do not hardcode yellow
+or black. Use ordinary antialiased text and graphics. Pixel-rendered container
+support is deferred and is not required for this layout.
+
+The persistent filter plots show the static linear response before drive and
+per-voice modulation, using one or two SVF stages and the DSP's Q split. Curve
+drags edit cutoff/Q through scoped, undoable parameter batches. In Filter 2
+Follow mode, the plot follows Filter 1's base cutoff and the octave offset;
+its horizontal drag edits the offset instead of the unused independent cutoff.
+
 Heat should retain a persistent signal-path overview and one selected detail
 panel. The early patch's small text, crowded output controls, and placeholder
 LFO plot should not define the factory design.

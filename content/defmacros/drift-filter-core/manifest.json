@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "drift-filter-core",
+  "params": [
+    "x",
+    "cutoff",
+    "resonance",
+    "hp-cutoff",
+    "filter-type"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "Digi Drift calibrated nonlinear Type I/II low-pass and resonant high-pass.",
+  "tags": [
+    "filter",
+    "synth"
+  ]
+}

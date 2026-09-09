@@ -1,0 +1,66 @@
+{
+  "compiler_sha256": "34c1066d31d82739010c7bca234fe37756a0bd1ec455186190813a9cca6c1c78",
+  "rows": [
+    {
+      "mode": 0,
+      "hz": 100,
+      "gain_db": -0.03398166432898569
+    },
+    {
+      "mode": 0,
+      "hz": 1000,
+      "gain_db": -4.436972058584546
+    },
+    {
+      "mode": 0,
+      "hz": 10000,
+      "gain_db": -42.76284888293021
+    },
+    {
+      "mode": 1,
+      "hz": 100,
+      "gain_db": -20.04627371121902
+    },
+    {
+      "mode": 1,
+      "hz": 1000,
+      "gain_db": -4.436972921449909
+    },
+    {
+      "mode": 1,
+      "hz": 10000,
+      "gain_db": -21.393827802376613
+    },
+    {
+      "mode": 2,
+      "hz": 100,
+      "gain_db": -40.05856601038641
+    },
+    {
+      "mode": 2,
+      "hz": 1000,
+      "gain_db": -4.436972058584546
+    },
+    {
+      "mode": 2,
+      "hz": 10000,
+      "gain_db": -0.02480567013190956
+    },
+    {
+      "mode": 3,
+      "hz": 100,
+      "gain_db": -0.12102993973650819
+    },
+    {
+      "mode": 3,
+      "hz": 1000,
+      "gain_db": -131.7467304659492
+    },
+    {
+      "mode": 3,
+      "hz": 10000,
+      "gain_db": -0.08841259193589918
+    }
+  ],
+  "scope": "Pinned compiler built-in SVF mode diagnostic, input sine 0.01 amplitude, 48 kHz, cutoff 1000 Hz, Q 0.6; fresh state; final second RMS. Audit explicitly supplied from pinned upstream revision; fusion clean."
+}

@@ -1,0 +1,157 @@
+{
+  "scope": "Research diagnostic; not production acceptance",
+  "rows": [
+    {
+      "cutoff": 20,
+      "resonance": 0,
+      "maximum_absolute_error": 6.820555467204614e-06,
+      "relative_rms_error": 0.0003315753603791693
+    },
+    {
+      "cutoff": 20,
+      "resonance": 0.5,
+      "maximum_absolute_error": 1.1183436425768467e-05,
+      "relative_rms_error": 0.00029620866205008447
+    },
+    {
+      "cutoff": 20,
+      "resonance": 0.8,
+      "maximum_absolute_error": 2.1153595089681843e-05,
+      "relative_rms_error": 0.00033056767673149466
+    },
+    {
+      "cutoff": 20,
+      "resonance": 0.95,
+      "maximum_absolute_error": 0.00010327013758555659,
+      "relative_rms_error": 0.0005928881900621477
+    },
+    {
+      "cutoff": 20,
+      "resonance": 1,
+      "maximum_absolute_error": 0.0009163691104563387,
+      "relative_rms_error": 0.002625074552936065
+    },
+    {
+      "cutoff": 100,
+      "resonance": 0,
+      "maximum_absolute_error": 9.678930217180137e-06,
+      "relative_rms_error": 0.00011762841848432485
+    },
+    {
+      "cutoff": 100,
+      "resonance": 0.5,
+      "maximum_absolute_error": 8.596040145719686e-06,
+      "relative_rms_error": 8.416465415070943e-05
+    },
+    {
+      "cutoff": 100,
+      "resonance": 0.8,
+      "maximum_absolute_error": 1.1356468410342324e-05,
+      "relative_rms_error": 6.675853307780882e-05
+    },
+    {
+      "cutoff": 100,
+      "resonance": 0.95,
+      "maximum_absolute_error": 1.4432523442797773e-05,
+      "relative_rms_error": 4.951186067724102e-05
+    },
+    {
+      "cutoff": 100,
+      "resonance": 1,
+      "maximum_absolute_error": 0.00016490845543851163,
+      "relative_rms_error": 0.0003963939258884825
+    },
+    {
+      "cutoff": 1000,
+      "resonance": 0,
+      "maximum_absolute_error": 8.597779733568456e-06,
+      "relative_rms_error": 4.212916284162048e-05
+    },
+    {
+      "cutoff": 1000,
+      "resonance": 0.5,
+      "maximum_absolute_error": 8.717945675140726e-06,
+      "relative_rms_error": 2.9984489851884668e-05
+    },
+    {
+      "cutoff": 1000,
+      "resonance": 0.8,
+      "maximum_absolute_error": 9.050348244443729e-06,
+      "relative_rms_error": 1.962447395003912e-05
+    },
+    {
+      "cutoff": 1000,
+      "resonance": 0.95,
+      "maximum_absolute_error": 1.0458574224297967e-05,
+      "relative_rms_error": 1.2232141227902857e-05
+    },
+    {
+      "cutoff": 1000,
+      "resonance": 1,
+      "maximum_absolute_error": 1.2340668233593033e-05,
+      "relative_rms_error": 1.0086030793113003e-05
+    },
+    {
+      "cutoff": 4000,
+      "resonance": 0,
+      "maximum_absolute_error": 8.689865495153937e-06,
+      "relative_rms_error": 2.1136734341940167e-05
+    },
+    {
+      "cutoff": 4000,
+      "resonance": 0.5,
+      "maximum_absolute_error": 8.729897139625464e-06,
+      "relative_rms_error": 1.5386658654428522e-05
+    },
+    {
+      "cutoff": 4000,
+      "resonance": 0.8,
+      "maximum_absolute_error": 9.180768852645738e-06,
+      "relative_rms_error": 1.0476382650709437e-05
+    },
+    {
+      "cutoff": 4000,
+      "resonance": 0.95,
+      "maximum_absolute_error": 1.2048800879294053e-05,
+      "relative_rms_error": 7.4053510245800664e-06
+    },
+    {
+      "cutoff": 4000,
+      "resonance": 1,
+      "maximum_absolute_error": 1.1728481806055902e-05,
+      "relative_rms_error": 6.2905295152831874e-06
+    },
+    {
+      "cutoff": 16000,
+      "resonance": 0,
+      "maximum_absolute_error": 8.499269247785879e-06,
+      "relative_rms_error": 1.1018642325473348e-05
+    },
+    {
+      "cutoff": 16000,
+      "resonance": 0.5,
+      "maximum_absolute_error": 8.56298889839735e-06,
+      "relative_rms_error": 8.261255163771717e-06
+    },
+    {
+      "cutoff": 16000,
+      "resonance": 0.8,
+      "maximum_absolute_error": 9.92369651808822e-06,
+      "relative_rms_error": 5.992336472139851e-06
+    },
+    {
+      "cutoff": 16000,
+      "resonance": 0.95,
+      "maximum_absolute_error": 1.191754483920171e-05,
+      "relative_rms_error": 4.937636863169698e-06
+    },
+    {
+      "cutoff": 16000,
+      "resonance": 1,
+      "maximum_absolute_error": 1.2876869283390269e-05,
+      "relative_rms_error": 4.587727254673166e-06
+    }
+  ],
+  "research_manifest_sha256": "2bfe677b432d0b7d1dacabe9d695646e5af59b81c20e8ec65d2cc95136e14433",
+  "research_report_sha256": "1dc7b39d1ecbe4a897a9b6b3f012bad8cfe684dae17f727c50a264513dd6e6cd"
+}

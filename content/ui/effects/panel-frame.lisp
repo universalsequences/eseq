@@ -68,7 +68,7 @@
     :debug-name debug-name
     :icon "•••"
     :options options
-    :width 2.25 :height 0.70 :font-size 10
+    :width 1.85 :height 0.70 :font-size 8
     :bg-color :mixer-control-bg
     :text-color :dim
     :menu-bg :dropdown-menu-bg

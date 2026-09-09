@@ -26,6 +26,7 @@
 
 ;; Drag-and-drop sample import modal (zero footprint while closed).
 (import eseq.sample-import)
+(import eseq.export-song)
 
 (export track-selected-binding
         expanded-track-ids
@@ -221,16 +222,20 @@
   (select-track-for-edit track))
 
 (def open-piano-roll-for-track (track)
-  (if (and (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*") (= SEQ.current-track track))
-    (eseq.seq-panels/seq-show-fx-lower-panel)
-    (do
-      (activate-track-for-edit track)
-      (eseq.seq-panels/seq-open-piano-roll-bottom-for-track track))))
+  (do
+    (activate-track-for-edit track)
+    (if (eseq.track-collapse/empty-instrument? track)
+      (eseq.browser/open-device-picker)
+      (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
+        (eseq.seq-panels/seq-show-fx-lower-panel)
+        (eseq.seq-panels/seq-open-piano-roll-bottom-for-track track)))))
 
 (def show-fx-for-track (track)
   (do
     (select-track-for-edit track)
-    (eseq.seq-panels/seq-show-fx-lower-panel)))
+    (if (eseq.track-collapse/empty-instrument? track)
+      (eseq.browser/open-device-picker)
+      (eseq.seq-panels/seq-show-fx-lower-panel))))
 
 (def track-expanded? (track-id)
   (reactive-get "SEQV" (expanded-track-field track-id)))
@@ -783,7 +788,7 @@
         (if (= take-state 1)
           (rgba 0.35 0.82 0.40 1.0)
           (if (= take-state 2)
-            (rgba 0.62 0.63 0.67 1.0)
+            :mixer-control-bg
             (rgba 0 0 0 0)))))))
 
 
@@ -2287,6 +2292,8 @@
   (v-stack :width :fill :fill-content-style true :padding 0.00 :gap 0.0
     ;; Sample import modal: opened by Rust after a file drop; renders as a
     ;; centered overlay (modal spec) with zero footprint here while closed.
+    (subtree :key "seq-export-song"
+      (eseq.export-song/panel))
     (subtree :key "seq-sample-import"
       (eseq.sample-import/panel))
     (each (eseq.drum-rack-v2/grid-render-items) |item|
@@ -2303,6 +2310,7 @@
       :drop-types (list "sample" "instrument" "sound")
       :drop-meta (dict :kind "new-sample-track")
       :on-drop (lambda (event) (drop-new-track event))
+      :on-double-click (lambda (event) (host-command "add-track-empty" (dict)))
       (label ""
         :font-size 1
         :color :transparent

@@ -1,0 +1,149 @@
+{
+  "note": "Research only. No FS1R hardware comparison, listening verdict, production synth, or full-app CPU measurement.",
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "cpu": "Apple M1 Max",
+  "compiler": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/tools/DGenLisp-macos-arm64",
+  "compiler_sha256": "34c1066d31d82739010c7bca234fe37756a0bd1ec455186190813a9cca6c1c78",
+  "source_sha256": {
+    "probe.lisp": "8220a49f5c32bd9f8b973023be9fb2214c9c1d8a825226cfe50b99d33047baa4",
+    "bank.lisp": "724e0eb8a13f7ead1519343f6621a6d6e6a5130e6d92b85668c68e8e4824a0ac"
+  },
+  "sample_rate": 48000,
+  "compiler_version": "macOS pinned dgenlisp-v0.1.13",
+  "static_cases": [
+    {
+      "pitch_hz": 100,
+      "center_hz": 1200,
+      "width_index": 2,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 1200.0,
+      "max_abs_error_from_phase_reference": 3.9988624011277896e-06
+    },
+    {
+      "pitch_hz": 200,
+      "center_hz": 1200,
+      "width_index": 1,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 1200.0,
+      "max_abs_error_from_phase_reference": 2.525339352691747e-06
+    },
+    {
+      "pitch_hz": 400,
+      "center_hz": 1200,
+      "width_index": 0.5,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 1200.0,
+      "max_abs_error_from_phase_reference": 1.4871832791253778e-06
+    },
+    {
+      "pitch_hz": 100,
+      "center_hz": 700,
+      "width_index": 2,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 700.0,
+      "max_abs_error_from_phase_reference": 3.2563062770558926e-06
+    },
+    {
+      "pitch_hz": 100,
+      "center_hz": 2500,
+      "width_index": 2,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 2500.0,
+      "max_abs_error_from_phase_reference": 1.909018855217326e-05
+    },
+    {
+      "pitch_hz": 110,
+      "center_hz": 1234,
+      "width_index": 2,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 1210.0,
+      "max_abs_error_from_phase_reference": 5.524012868865502e-06
+    },
+    {
+      "pitch_hz": 500,
+      "center_hz": 8000,
+      "width_index": 2,
+      "pm_depth": 8,
+      "pm_ratio": 8,
+      "peak_hz": 16000.0,
+      "max_abs_error_from_phase_reference": 1.103772107347023e-05
+    },
+    {
+      "pitch_hz": 1000,
+      "center_hz": 18000,
+      "width_index": 12,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "peak_hz": 24000.0,
+      "max_abs_error_from_phase_reference": 3.2063298657791783e-06
+    }
+  ],
+  "block_invariance": [
+    {
+      "block_size": 64,
+      "max_abs_diff": 0.0
+    },
+    {
+      "block_size": 256,
+      "max_abs_diff": 0.0
+    }
+  ],
+  "bank_signal": {
+    "peak": 0.9002158045768738,
+    "rms": 0.0651649609208107,
+    "last_100ms_rms": 1.7480525360547006e-10
+  },
+  "benchmarks": {
+    "single_paf_with_two_phase_diagnostics": {
+      "median_us_per_128_frames": 2.75,
+      "batch_min_us": 2.4919585,
+      "batch_max_us": 3.6495625,
+      "one_voice_percent_one_core": 0.10312500000000001
+    },
+    "eight_pairs": {
+      "median_us_per_128_frames": 109.422417,
+      "batch_min_us": 54.7021875,
+      "batch_max_us": 127.99697900000001,
+      "one_voice_percent_one_core": 4.1033406375
+    }
+  },
+  "analytic_alias_cases": [
+    {
+      "pitch_hz": 100,
+      "center_hz": 1200,
+      "width_index": 2,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "native_alias_error_db": -251.19299889869038,
+      "reference_8x_vs_16x_error_db": -257.23418188760144
+    },
+    {
+      "pitch_hz": 1000,
+      "center_hz": 18000,
+      "width_index": 12,
+      "pm_depth": 0,
+      "pm_ratio": 2,
+      "native_alias_error_db": -8.189936776042423,
+      "reference_8x_vs_16x_error_db": -245.54105098097452
+    },
+    {
+      "pitch_hz": 500,
+      "center_hz": 8000,
+      "width_index": 2,
+      "pm_depth": 8,
+      "pm_ratio": 8,
+      "native_alias_error_db": -1.40310816368628,
+      "reference_8x_vs_16x_error_db": -239.39250773376872
+    }
+  ],
+  "build_dirs": [
+    "/Users/alecresende/.cache/eseq-audition/9399ebbd622d7bc7",
+    "/Users/alecresende/.cache/eseq-audition/a34d5520148cd1fe"
+  ]
+}

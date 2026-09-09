@@ -1,0 +1,215 @@
+{
+  "version": 2,
+  "frames": [
+    {
+      "position": 0.0,
+      "pitch_semitones": 0,
+      "pairs": [
+        {
+          "voiced_level": 0.8,
+          "voiced_center": 750,
+          "voiced_bandwidth": 130,
+          "skirt": 0.6,
+          "unvoiced_level": 0.08,
+          "unvoiced_center": 750,
+          "unvoiced_bandwidth": 300
+        },
+        {
+          "voiced_level": 0.5519999999999999,
+          "voiced_center": 1200,
+          "voiced_bandwidth": 220,
+          "skirt": 0.6,
+          "unvoiced_level": 0.064,
+          "unvoiced_center": 1200,
+          "unvoiced_bandwidth": 470
+        },
+        {
+          "voiced_level": 0.38087999999999994,
+          "voiced_center": 2500,
+          "voiced_bandwidth": 310,
+          "skirt": 0.6,
+          "unvoiced_level": 0.05120000000000001,
+          "unvoiced_center": 2500,
+          "unvoiced_bandwidth": 640
+        },
+        {
+          "voiced_level": 0.26280719999999996,
+          "voiced_center": 4200,
+          "voiced_bandwidth": 400,
+          "skirt": 0.6,
+          "unvoiced_level": 0.04096000000000001,
+          "unvoiced_center": 4200,
+          "unvoiced_bandwidth": 810
+        }
+      ]
+    },
+    {
+      "position": 0.25,
+      "pitch_semitones": 0,
+      "pairs": [
+        {
+          "voiced_level": 0.8,
+          "voiced_center": 500,
+          "voiced_bandwidth": 130,
+          "skirt": 0.6,
+          "unvoiced_level": 0.08,
+          "unvoiced_center": 500,
+          "unvoiced_bandwidth": 300
+        },
+        {
+          "voiced_level": 0.5519999999999999,
+          "voiced_center": 1900,
+          "voiced_bandwidth": 220,
+          "skirt": 0.6,
+          "unvoiced_level": 0.064,
+          "unvoiced_center": 1900,
+          "unvoiced_bandwidth": 470
+        },
+        {
+          "voiced_level": 0.38087999999999994,
+          "voiced_center": 2700,
+          "voiced_bandwidth": 310,
+          "skirt": 0.6,
+          "unvoiced_level": 0.05120000000000001,
+          "unvoiced_center": 2700,
+          "unvoiced_bandwidth": 640
+        },
+        {
+          "voiced_level": 0.26280719999999996,
+          "voiced_center": 4200,
+          "voiced_bandwidth": 400,
+          "skirt": 0.6,
+          "unvoiced_level": 0.04096000000000001,
+          "unvoiced_center": 4200,
+          "unvoiced_bandwidth": 810
+        }
+      ]
+    },
+    {
+      "position": 0.5,
+      "pitch_semitones": 0,
+      "pairs": [
+        {
+          "voiced_level": 0.8,
+          "voiced_center": 300,
+          "voiced_bandwidth": 130,
+          "skirt": 0.6,
+          "unvoiced_level": 0.08,
+          "unvoiced_center": 300,
+          "unvoiced_bandwidth": 300
+        },
+        {
+          "voiced_level": 0.5519999999999999,
+          "voiced_center": 2300,
+          "voiced_bandwidth": 220,
+          "skirt": 0.6,
+          "unvoiced_level": 0.064,
+          "unvoiced_center": 2300,
+          "unvoiced_bandwidth": 470
+        },
+        {
+          "voiced_level": 0.38087999999999994,
+          "voiced_center": 3100,
+          "voiced_bandwidth": 310,
+          "skirt": 0.6,
+          "unvoiced_level": 0.05120000000000001,
+          "unvoiced_center": 3100,
+          "unvoiced_bandwidth": 640
+        },
+        {
+          "voiced_level": 0.26280719999999996,
+          "voiced_center": 4200,
+          "voiced_bandwidth": 400,
+          "skirt": 0.6,
+          "unvoiced_level": 0.04096000000000001,
+          "unvoiced_center": 4200,
+          "unvoiced_bandwidth": 810
+        }
+      ]
+    },
+    {
+      "position": 0.75,
+      "pitch_semitones": 0,
+      "pairs": [
+        {
+          "voiced_level": 0.8,
+          "voiced_center": 450,
+          "voiced_bandwidth": 130,
+          "skirt": 0.6,
+          "unvoiced_level": 0.08,
+          "unvoiced_center": 450,
+          "unvoiced_bandwidth": 300
+        },
+        {
+          "voiced_level": 0.5519999999999999,
+          "voiced_center": 850,
+          "voiced_bandwidth": 220,
+          "skirt": 0.6,
+          "unvoiced_level": 0.064,
+          "unvoiced_center": 850,
+          "unvoiced_bandwidth": 470
+        },
+        {
+          "voiced_level": 0.38087999999999994,
+          "voiced_center": 2500,
+          "voiced_bandwidth": 310,
+          "skirt": 0.6,
+          "unvoiced_level": 0.05120000000000001,
+          "unvoiced_center": 2500,
+          "unvoiced_bandwidth": 640
+        },
+        {
+          "voiced_level": 0.26280719999999996,
+          "voiced_center": 4200,
+          "voiced_bandwidth": 400,
+          "skirt": 0.6,
+          "unvoiced_level": 0.04096000000000001,
+          "unvoiced_center": 4200,
+          "unvoiced_bandwidth": 810
+        }
+      ]
+    },
+    {
+      "position": 1.0,
+      "pitch_semitones": 0,
+      "pairs": [
+        {
+          "voiced_level": 0.8,
+          "voiced_center": 750,
+          "voiced_bandwidth": 130,
+          "skirt": 0.6,
+          "unvoiced_level": 0.08,
+          "unvoiced_center": 750,
+          "unvoiced_bandwidth": 300
+        },
+        {
+          "voiced_level": 0.5519999999999999,
+          "voiced_center": 1200,
+          "voiced_bandwidth": 220,
+          "skirt": 0.6,
+          "unvoiced_level": 0.064,
+          "unvoiced_center": 1200,
+          "unvoiced_bandwidth": 470
+        },
+        {
+          "voiced_level": 0.38087999999999994,
+          "voiced_center": 2500,
+          "voiced_bandwidth": 310,
+          "skirt": 0.6,
+          "unvoiced_level": 0.05120000000000001,
+          "unvoiced_center": 2500,
+          "unvoiced_bandwidth": 640
+        },
+        {
+          "voiced_level": 0.26280719999999996,
+          "voiced_center": 4200,
+          "voiced_bandwidth": 400,
+          "skirt": 0.6,
+          "unvoiced_level": 0.04096000000000001,
+          "unvoiced_center": 4200,
+          "unvoiced_bandwidth": 810
+        }
+      ]
+    }
+  ]
+}

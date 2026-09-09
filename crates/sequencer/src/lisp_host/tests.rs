@@ -16573,3 +16573,16 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             crate::process::ProcessTargetHint::RackMacroParam { macro_id: 0 }
         );
     }
+
+    #[test]
+    fn instrument_probe_applies_host_modulation_descriptors() {
+        let source = "(def modulation (in 5 @name mod1 @modulator 1))\n(param gain @default 0.2 @min 0 @max 1 @mod true @mod-mode additive)\n(out (mod gain) 1)";
+        let report = super::render_instrument_source_for_test(source, None, &super::InstrumentRenderOptions {
+            sample_rate: 48000, block_size: 128, frames: 512, midi_note: 69.0,
+            velocity: 1.0, gate_frames: 512, voice_index: 0,
+            param_overrides: vec![("__dgen_mod_active__gain".into(), 1.0), ("mod gain slot 1 amt".into(), 0.3)],
+            param_events: Vec::new(), input_overrides: vec![(4, 1.0)],
+        }).unwrap();
+        assert_eq!(report.non_finite_samples, 0);
+        assert!((report.rms - 0.5).abs() < 0.0001, "{report:?}");
+    }

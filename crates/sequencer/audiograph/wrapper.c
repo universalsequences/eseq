@@ -5,6 +5,7 @@ bool params_push_wrapper(LiveGraph *lg, ParamMsg m) {
     atomic_fetch_add_explicit(&g_param_push_count, 1, memory_order_relaxed);
     bool ok = params_push(lg->params, m);
     if (!ok) {
+        atomic_fetch_add_explicit(&lg->control_submission_failures, 1, memory_order_relaxed);
         uint64_t fail = atomic_fetch_add_explicit(
                             &g_param_push_fail_count, 1, memory_order_acq_rel) +
                         1;
@@ -32,6 +33,7 @@ bool push_block_event(LiveGraph *lg, GraphBlockEvent event) {
     }
     bool ok = block_events_push(lg->block_events, event);
     if (!ok) {
+        atomic_fetch_add_explicit(&lg->control_submission_failures, 1, memory_order_relaxed);
         uint64_t fail = atomic_fetch_add_explicit(
                             &g_block_event_push_fail_count, 1, memory_order_acq_rel) +
                         1;

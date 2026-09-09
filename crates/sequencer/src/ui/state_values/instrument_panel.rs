@@ -1338,6 +1338,7 @@ pub(crate) fn build_instrument_panel_value(
         }
     });
     let instrument_type_name = match instrument_type {
+        sequencer::sequencer::InstrumentType::Empty => "empty",
         sequencer::sequencer::InstrumentType::Sampler => "sampler",
         sequencer::sequencer::InstrumentType::Custom => "custom",
         sequencer::sequencer::InstrumentType::Modulator => "modulator",

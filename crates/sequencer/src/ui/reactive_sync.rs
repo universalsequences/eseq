@@ -2644,7 +2644,7 @@ pub(super) fn load_or_convert_sampler_track(
     let instrument_type = app.graph.track_instrument_types[track];
     if !matches!(
         instrument_type,
-        InstrumentType::Sampler | InstrumentType::Custom | InstrumentType::Rack
+        InstrumentType::Empty | InstrumentType::Sampler | InstrumentType::Custom | InstrumentType::Rack
     ) {
         return Err(
             "Samples can only replace sampler, custom instrument, or rack tracks".to_string(),
@@ -2702,8 +2702,8 @@ pub(super) fn load_or_convert_sampler_track(
                         &new_name,
                     )?)
                 }
-                InstrumentType::Rack => {
-                    let summary = app.graph_controller().replace_rack_track_with_sampler(
+                InstrumentType::Empty | InstrumentType::Rack => {
+                    let summary = app.graph_controller().replace_unvoiced_track_with_sampler(
                         track,
                         new_buffer_id,
                         sample_rate,

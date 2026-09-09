@@ -119,14 +119,15 @@ pub(super) fn build_scheduler_scratch_runtime(
     state: Arc<SequencerState>,
     user_source: &str,
     debug_accum: bool,
-) -> Option<lisp_host::ScratchControlRuntime> {
+) -> (Option<lisp_host::ScratchControlRuntime>, Vec<String>) {
+    let mut errors = Vec::new();
     let midi_fx_source = lisp_host::load_midi_fx_library_source();
     let process_source = lisp_host::load_process_library_source();
     if midi_fx_source.trim().is_empty()
         && process_source.trim().is_empty()
         && user_source.trim().is_empty()
     {
-        return None;
+        return (None, errors);
     }
 
     let mut runtime = lisp_host::scheduler_scratch_runtime_with_fallbacks(state, 0, 0);
@@ -143,6 +144,7 @@ pub(super) fn build_scheduler_scratch_runtime(
                 }
             }
             Err(err) => {
+                errors.push(format!("builtin MIDI FX: {err}"));
                 if debug_accum || debug_routing_enabled() {
                     let status = runtime.take_status_message();
                     eprintln!(
@@ -169,6 +171,7 @@ pub(super) fn build_scheduler_scratch_runtime(
                 }
             }
             Err(err) => {
+                errors.push(format!("builtin processes: {err}"));
                 if debug_accum || debug_routing_enabled() {
                     let status = runtime.take_status_message();
                     eprintln!(
@@ -196,6 +199,7 @@ pub(super) fn build_scheduler_scratch_runtime(
                 }
             }
             Err(err) => {
+                errors.push(format!("project scratch: {err}"));
                 if debug_accum || debug_routing_enabled() {
                     let status = runtime.take_status_message();
                     eprintln!(
@@ -209,7 +213,7 @@ pub(super) fn build_scheduler_scratch_runtime(
         }
     }
 
-    keep_runtime.then_some(runtime)
+    (keep_runtime.then_some(runtime), errors)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,7 +301,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         .map(|runtime| runtime.midi_fx_descriptors())
         .unwrap_or_default();
 
-    while scheduled_until_sample < rendered.saturating_add(lookahead_target_samples) {
+    let horizon = rendered.saturating_add(lookahead_target_samples);
+    while scheduled_until_sample < horizon {
+        let max_chunk_frames = (horizon - scheduled_until_sample)
+            .min(scheduler_block_size as u64) as usize;
         // Song playback: clamp this chunk to the next row boundary and
         // schedule it from the current row's prebuilt snapshot. A boundary
         // inside a block therefore splits scheduling exactly at its sample:
@@ -305,7 +312,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // from the new row (docs/song-mode-spec.md 10.2). The snapshot switch
         // is an `Arc` handoff prepared at preflight — no mutexes, no pattern
         // cloning, no asset loading on this path (spec 9).
-        let mut chunk_frames = scheduler_block_size;
+        let mut chunk_frames = max_chunk_frames;
         let mut song_row_snapshot: Option<Arc<SequencerSnapshot>> = None;
         if song_playback.is_none() {
             // A song that just stopped must not leave stale per-lane phase
@@ -320,7 +327,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             let (frames, install) = session_launches.next_session_chunk(
                 clock.total_beats,
                 samples_per_quarter,
-                scheduler_block_size,
+                max_chunk_frames,
             );
             chunk_frames = frames;
             match install {
@@ -355,7 +362,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             match song.next_chunk(
                 scheduled_until_sample,
                 clock.total_beats,
-                scheduler_block_size,
+                max_chunk_frames,
                 state.song_playback(),
             ) {
                 crate::sequencer::SongChunkPlan::Ended => break,
@@ -388,25 +395,6 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 current,
                                 pending_accum_reset,
                             );
-                            // A source change is also a fresh TRIGGER
-                            // domain: drop the step-dedup memory so the new
-                            // clip's first step fires even when the
-                            // previous row's clock wrapped into the same
-                            // step index just before the boundary (silenced
-                            // lanes update the memory too; fractional
-                            // captured row starts make that wrap common).
-                            // Latched lanes free-run and keep their memory.
-                            let latch = state.song_manual_latch_mask();
-                            for track in 0..MAX_TRACKS.min(64) {
-                                if latch >> track & 1 == 1 {
-                                    continue;
-                                }
-                                if previous.resolved_sources.get(track)
-                                    != current.resolved_sources.get(track)
-                                {
-                                    clock.reset_track_step_memory(track);
-                                }
-                            }
                         }
                     }
                     if wrapped {
@@ -432,6 +420,17 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     // the anchors survive it.
                     let (anchor_beat, lane_offsets) = song.row_clock_anchor(row);
                     clock.set_song_row_anchors(anchor_beat, lane_offsets);
+                    if row_changed && !wrapped {
+                        let (previous, current) = song.transition_rows(prev_row, row);
+                        let latch = state.song_manual_latch_mask();
+                        for track in 0..current.scheduler_snapshot.tracks.len().min(MAX_TRACKS).min(64) {
+                            if latch >> track & 1 == 0
+                                && previous.resolved_sources.get(track) != current.resolved_sources.get(track)
+                            {
+                                clock.adopt_track_source(track, &current.scheduler_snapshot);
+                            }
+                        }
+                    }
                     // Manual-override latch (takes spec 10): latched tracks
                     // suspend the song's launch authority — they schedule
                     // from the LIVE session snapshot, free-running (anchor

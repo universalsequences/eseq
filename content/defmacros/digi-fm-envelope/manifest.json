@@ -1,0 +1,1 @@
+{"version":1,"name":"digi-fm-envelope","params":["gate","trigger","delay-ms","attack-ms","decay-ms","end-level","gated","reset","hold"],"outputs":["out"],"summary":"Triggered/gated FM timbre envelope with nonzero end and exact note-off hold.","tags":["envelope","fm"]}

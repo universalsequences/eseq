@@ -198,6 +198,7 @@ pub(crate) fn reactive_tick_and_render(
     stub_animation_cache: &mut StubAnimationRenderCache,
     ui_loop_stats: &mut UiLoopStats,
 ) -> Result<TickFlow, Box<dyn std::error::Error>> {
+    host_commands::export::poll(editor);
     poll_pending_compile_status(
         &mut app,
         &mut editor,

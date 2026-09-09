@@ -56,6 +56,7 @@ pub mod wavetable_viewer;
 pub(crate) mod wgsl;
 pub mod wrap;
 pub mod xy_pad;
+pub mod automation_lane;
 
 pub use focus_decoration::{FocusCornerStyle, FocusDecoration};
 
@@ -1303,6 +1304,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &tree::TREE_WIDGET,
     &tree::TREE_ROW_BG_WIDGET,
     &xy_pad::XY_PAD_WIDGET,
+    &automation_lane::AUTOMATION_LANE_WIDGET,
 ];
 
 pub fn widget_definition(widget_type: &str) -> Option<&'static dyn WidgetDefinition> {
@@ -3172,7 +3174,7 @@ pub fn map_mouse_event(
     }
     // SDF widgets handle their own mouse events
     if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
-        return sdf_widget::sdf_map_mouse_event(node, mouse_kind, local_col, local_row);
+        return sdf_widget::sdf_map_mouse_event(node, mouse_kind, local_col, local_row, gesture, cell_w, cell_h);
     }
     widget_definition(&node.widget_type)
         .map(|definition| {
@@ -3232,7 +3234,12 @@ pub fn begin_widget_gesture(
     local_col: f32,
     local_row: f32,
     modifiers: KeyModifiers,
+    cell_w: f32,
+    cell_h: f32,
 ) -> Option<Value> {
+    if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
+        return Some(sdf_widget::sdf_begin_gesture(node, local_col, local_row, cell_w, cell_h));
+    }
     widget_definition(&node.widget_type)?.begin_gesture(node, local_col, local_row, modifiers)
 }
 

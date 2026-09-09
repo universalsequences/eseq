@@ -570,6 +570,18 @@ bool apply_write_node_state(LiveGraph *lg, int node_id, size_t dest_offset,
 }
 
 // to be called from block-boundary (i.e. before each block is executed)
+// A queued disconnect succeeds when its requested link is already absent.
+// Keep that distinct from malformed endpoints or a failed graph mutation.
+typedef enum {
+  DISCONNECT_ERROR = -1,
+  DISCONNECT_UNCHANGED = 0,
+  DISCONNECT_CHANGED = 1,
+} DisconnectResult;
+
+static DisconnectResult apply_disconnect_result(LiveGraph *lg, int src_node,
+                                                int src_port, int dst_node,
+                                                int dst_port);
+
 bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
   GraphEditCmd cmd;
   GraphEditCmd next_cmd;
@@ -582,6 +594,7 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
 
   if (reserved_node_id >= lg->node_capacity &&
       !grow_node_capacity(lg, reserved_node_id)) {
+    atomic_fetch_add_explicit(&lg->graph_edit_delivery_failures, 1, memory_order_relaxed);
     return false;
   }
 
@@ -639,10 +652,11 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
       break;
     }
     case GE_DISCONNECT: {
-      ok = apply_disconnect_internal(
+      DisconnectResult result = apply_disconnect_result(
           lg, cmd.u.disconnect.src_id, cmd.u.disconnect.src_port,
           cmd.u.disconnect.dst_id, cmd.u.disconnect.dst_port);
-      topology_changed = ok;
+      ok = result != DISCONNECT_ERROR;
+      topology_changed = result == DISCONNECT_CHANGED;
       break;
     }
     case GE_HOT_SWAP_NODE:
@@ -697,6 +711,7 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
     }
     }
     if (!ok) {
+      atomic_fetch_add_explicit(&lg->graph_edit_delivery_failures, 1, memory_order_relaxed);
       all_ok = false;
     }
     if (topology_changed) {
@@ -721,11 +736,11 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
  * Internal disconnect - skips update_orphaned_status for batched operations.
  * Also uses apply_delete_node_internal to avoid nested orphan updates.
  */
-bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
-                               int dst_node, int dst_port) {
+static DisconnectResult apply_disconnect_result(LiveGraph *lg, int src_node, int src_port,
+                                                int dst_node, int dst_port) {
   if (!lg || src_node < 0 || src_node >= lg->node_count || dst_node < 0 ||
       dst_node >= lg->node_count) {
-    return false;
+    return DISCONNECT_ERROR;
   }
 
   RTNode *S = &lg->nodes[src_node];
@@ -733,11 +748,11 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
 
   if (src_port < 0 || src_port >= S->nOutputs || dst_port < 0 ||
       dst_port >= D->nInputs) {
-    return false;
+    return DISCONNECT_ERROR;
   }
 
   if (!D->inEdgeId || !S->outEdgeId)
-    return false;
+    return DISCONNECT_ERROR;
 
   // Check if dst_port has a SUM node
   int sum_id = D->fanin_sum_node_id ? D->fanin_sum_node_id[dst_port] : -1;
@@ -749,11 +764,11 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
 
     // Nothing connected on that dst port → nothing to do
     if (eid_in < 0)
-      return false;
+      return DISCONNECT_UNCHANGED;
 
     // Ensure we're disconnecting the intended link
     if (eid_out < 0 || eid_in != eid_out) {
-      return false;
+      return DISCONNECT_UNCHANGED;
     }
 
     // Unwire the destination port
@@ -779,12 +794,12 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
     // SUM node exists - find which SUM input corresponds to src_node:src_port
     if (!is_sum_node_valid(lg, sum_id)) {
       // SUM node was deleted - treat as successful disconnect
-      return true;
+      return DISCONNECT_CHANGED;
     }
     RTNode *SUM = &lg->nodes[sum_id];
     int src_eid = S->outEdgeId[src_port];
     if (src_eid < 0)
-      return false; // Source not connected
+      return DISCONNECT_UNCHANGED; // Source not connected
 
     // Find the SUM input that matches this source
     int sum_input_idx = -1;
@@ -796,7 +811,7 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
     }
 
     if (sum_input_idx == -1)
-      return false; // Source not connected to this SUM
+      return DISCONNECT_UNCHANGED; // Source not connected to this SUM
 
     // Disconnect src_node from SUM
     SUM->inEdgeId[sum_input_idx] = -1;
@@ -821,7 +836,7 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
     // Validate SUM node before realloc - it may have been deleted
     if (!SUM->inEdgeId) {
       // SUM node was deleted - skip realloc
-      return true;
+      return DISCONNECT_CHANGED;
     }
 
     if (SUM->nInputs > 0) {
@@ -874,7 +889,7 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
         D->fanin_sum_node_id[dst_port] = -1;
         indegree_dec_on_last_pred(lg, sum_id, dst_node);
         apply_delete_node_internal(lg, sum_id);
-        return true;
+        return DISCONNECT_CHANGED;
       }
 
       // Find the source of the remaining edge
@@ -886,13 +901,13 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
         D->fanin_sum_node_id[dst_port] = -1;
         indegree_dec_on_last_pred(lg, sum_id, dst_node);
         apply_delete_node_internal(lg, sum_id);
-        return true;
+        return DISCONNECT_CHANGED;
       }
 
       // Create a new edge for the direct connection
       int direct_eid = alloc_edge(lg);
       if (direct_eid < 0)
-        return false;
+        return DISCONNECT_ERROR;
 
       // Set up the new direct edge
       lg->edges[direct_eid].src_node = remaining_src;
@@ -906,7 +921,7 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
                                   sizeof(float));
         if (!lg->edges[direct_eid].buf) {
           retire_edge(lg, direct_eid);
-          return false;
+          return DISCONNECT_ERROR;
         }
         memset(lg->edges[direct_eid].buf, 0,
                sizeof(float) * (lg->block_size + EDGE_BUFFER_PAD_FLOATS));
@@ -1015,7 +1030,7 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
     // If SUM->nInputs > 1, SUM continues to exist with fewer inputs
   }
 
-  return true;
+  return DISCONNECT_CHANGED;
 }
 
 /**
@@ -1024,6 +1039,12 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
  * hidden SUM logic automatically. Returns true if the logical connection
  * existed and was removed.
  */
+bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
+                               int dst_node, int dst_port) {
+  return apply_disconnect_result(lg, src_node, src_port, dst_node, dst_port) ==
+         DISCONNECT_CHANGED;
+}
+
 bool apply_disconnect(LiveGraph *lg, int src_node, int src_port, int dst_node,
                       int dst_port) {
   bool result =

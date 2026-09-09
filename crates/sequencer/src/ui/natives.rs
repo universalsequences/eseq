@@ -2699,6 +2699,8 @@ pub(crate) fn init_runtime(
                     },
                 ),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
+                ("piano-roll-automation-params", Value::List(vec![])),
+                ("piano-roll-automation", Value::Nil),
                 (
                     "piano-roll-items",
                     if track_count == 0 {
@@ -6525,6 +6527,7 @@ pub(crate) fn init_runtime(
     );
     eprintln!("metal_seq: sample db opened");
     register_sample_import_natives(&mut runtime);
+    runtime.register_reactive("EXPORT", vec![], true);
 
     let sample_db_for_search = sample_db.clone();
     runtime.register_native("seq-search-samples", move |args, _ctx| {

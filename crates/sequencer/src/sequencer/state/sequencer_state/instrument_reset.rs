@@ -3,7 +3,7 @@ use super::super::*;
 impl SequencerState {
     /// Validates the shared state lanes needed to replace a track's instrument
     /// source without mutating any state.
-    pub(super) fn validate_instrument_source_reset_target(&self, track: usize) -> Result<(), String> {
+    pub fn validate_instrument_source_reset_target(&self, track: usize) -> Result<(), String> {
         let require_track = |len: usize, collection: &str| {
             if track < len {
                 Ok(())
@@ -96,6 +96,17 @@ impl SequencerState {
                 engine_id,
                 run_mode,
             },
+        )
+    }
+
+    pub fn reset_empty_slot_all_patterns(&self, track: usize) -> Option<InstrumentSlotResetSummary> {
+        self.validate_instrument_source_reset_target(track).ok()?;
+        self.reset_instrument_source_all_patterns(
+            track,
+            &EffectDescriptor::empty_custom_slot(),
+            0,
+            0,
+            InstrumentSourceReset::Empty,
         )
     }
 

@@ -53,11 +53,6 @@ impl App {
             return outcome;
         }
 
-        // Releases first: back-to-back windows stay engaged, and an OFF and
-        // an ON due on the same frame land in the documented OFF-then-ON
-        // order (spec §4).
-        self.release_elapsed_mixer_control_holds(rendered_sample, &mut outcome);
-
         for control in self
             .state
             .scheduled_mixer_controls()
@@ -71,17 +66,13 @@ impl App {
                 }
             };
             let key = (control.op, target);
-            match self.mixer_control_holds.get_mut(&key) {
-                Some(release) => {
-                    // Already engaged: extend to the later release (union of
-                    // overlapping windows), no re-push.
-                    *release = (*release).max(control.release_sample);
+            match self.mixer_control_holds.engage(key, control.engage_sample, control.release_sample) {
+                Ok(transitions) => {
+                    for transition in transitions {
+                        self.apply_mixer_control(transition.key, transition.engaged, &mut outcome);
+                    }
                 }
-                None => {
-                    self.mixer_control_holds
-                        .insert(key, control.release_sample);
-                    self.apply_mixer_control(key, true, &mut outcome);
-                }
+                Err(error) => outcome.errors.push(error),
             }
         }
 
@@ -128,25 +119,15 @@ impl App {
         rendered_sample: u64,
         outcome: &mut MixerControlDrainOutcome,
     ) {
-        let elapsed: Vec<MixerControlHoldKey> = self
-            .mixer_control_holds
-            .iter()
-            .filter(|(_, release)| **release <= rendered_sample)
-            .map(|(key, _)| *key)
-            .collect();
-        for key in elapsed {
-            self.mixer_control_holds.remove(&key);
-            self.apply_mixer_control(key, false, outcome);
+        for transition in self.mixer_control_holds.release_through(rendered_sample) {
+            self.apply_mixer_control(transition.key, transition.engaged, outcome);
         }
     }
 
     /// Release everything engaged (transport stop / project switch).
     pub fn release_all_mixer_control_holds(&mut self, outcome: &mut MixerControlDrainOutcome) {
-        let engaged: Vec<MixerControlHoldKey> =
-            self.mixer_control_holds.keys().copied().collect();
-        for key in engaged {
-            self.mixer_control_holds.remove(&key);
-            self.apply_mixer_control(key, false, outcome);
+        for transition in self.mixer_control_holds.release_all(self.state.audio_rendered_sample()) {
+            self.apply_mixer_control(transition.key, transition.engaged, outcome);
         }
     }
 
@@ -384,6 +365,20 @@ mod tests {
         assert_eq!(outcome.applied.len(), 2);
         assert!(app.state.pattern.track_params[0].is_muted());
         app.drain_due_mixer_controls(200);
+        assert!(!app.state.pattern.track_params[0].is_muted());
+    }
+
+    #[test]
+    fn late_frame_extends_an_overlapping_hold_without_releasing_it_first() {
+        let mut app = test_app();
+        push(&app, 0, 100, MixerControlOp::Mute, MixerControlTarget::Track(0));
+        app.drain_due_mixer_controls(0);
+        push(&app, 50, 200, MixerControlOp::Mute, MixerControlTarget::Track(0));
+        // The next UI frame arrives after the original release, but the
+        // earlier extension made that release obsolete on the timeline.
+        assert!(app.drain_due_mixer_controls(150).applied.is_empty());
+        assert!(app.state.pattern.track_params[0].is_muted());
+        assert_eq!(app.drain_due_mixer_controls(200).applied.len(), 1);
         assert!(!app.state.pattern.track_params[0].is_muted());
     }
 
