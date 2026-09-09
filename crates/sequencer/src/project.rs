@@ -2779,34 +2779,46 @@ pub fn load_kit_preset(path: &Path) -> std::io::Result<ProjectKitPreset> {
 
 pub fn list_kit_presets() -> std::io::Result<Vec<PathBuf>> {
     let app_paths = crate::app_paths::app_paths();
-    std::fs::create_dir_all(app_paths.user_kits_dir())?;
+    list_factory_and_user_presets(app_paths.kits_dir(), app_paths.user_kits_dir(), "kit")
+}
+
+/// Sounds the browser's Sounds tab lists: the read-only factory tree shipped
+/// in the bundle first, then the user's own saves. Saving always writes to the
+/// user dir (`save_sound_preset`), so factory entries can never be overwritten
+/// or deleted from the app.
+pub fn list_sound_presets() -> std::io::Result<Vec<PathBuf>> {
+    let app_paths = crate::app_paths::app_paths();
+    list_factory_and_user_presets(
+        app_paths.factory_sounds_dir(),
+        app_paths.sounds_dir(),
+        "sound",
+    )
+}
+
+/// Shared listing for browser objects with a factory tier and a user tier.
+/// The user dir is created on demand; a missing factory dir is simply empty.
+/// Factory entries sort before user entries so shipped content leads the list.
+fn list_factory_and_user_presets(
+    factory_dir: PathBuf,
+    user_dir: PathBuf,
+    extension: &str,
+) -> std::io::Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(&user_dir)?;
     let mut presets = Vec::new();
-    for dir in [app_paths.kits_dir(), app_paths.user_kits_dir()] {
+    for dir in [factory_dir, user_dir] {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
-        presets.extend(
-            entries
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("kit")),
-        );
+        let mut tier = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some(extension))
+            .collect::<Vec<_>>();
+        tier.sort();
+        presets.extend(tier);
     }
-    presets.sort();
     presets.dedup();
     Ok(presets)
-}
-
-pub fn list_sound_presets() -> std::io::Result<Vec<PathBuf>> {
-    let dir = crate::app_paths::app_paths().sounds_dir();
-    std::fs::create_dir_all(&dir)?;
-    let mut paths = std::fs::read_dir(&dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sound"))
-        .collect::<Vec<_>>();
-    paths.sort();
-    Ok(paths)
 }
 
 pub fn sanitize_project_name(name: &str) -> String {
@@ -3503,6 +3515,47 @@ pub fn chord_snapshot_from_steps_and_durations(
 
 #[cfg(test)]
 mod tests {
+
+    /// eseq-2k9p.25.1: Sounds (like kits) merge a read-only factory tree with
+    /// the user tier. Factory entries lead, a missing factory dir is empty,
+    /// the user dir is created, and foreign extensions are ignored.
+    #[test]
+    fn factory_and_user_presets_merge_factory_first() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let factory = root.path().join("factory-sounds");
+        let user = root.path().join("user-sounds");
+        std::fs::create_dir_all(&factory).unwrap();
+        std::fs::write(factory.join("Zed-Pad.sound"), "{}").unwrap();
+        std::fs::write(factory.join("Acid-Bass.sound"), "{}").unwrap();
+        std::fs::write(factory.join("notes.txt"), "").unwrap();
+
+        let listed = list_factory_and_user_presets(factory.clone(), user.clone(), "sound")
+            .expect("list with absent user dir");
+        assert!(user.is_dir(), "user dir is created on demand");
+        assert_eq!(
+            listed,
+            vec![factory.join("Acid-Bass.sound"), factory.join("Zed-Pad.sound")]
+        );
+
+        std::fs::write(user.join("Aaa-Mine.sound"), "{}").unwrap();
+        let listed = list_factory_and_user_presets(factory.clone(), user.clone(), "sound")
+            .unwrap();
+        assert_eq!(
+            listed,
+            vec![
+                factory.join("Acid-Bass.sound"),
+                factory.join("Zed-Pad.sound"),
+                user.join("Aaa-Mine.sound"),
+            ],
+            "factory entries lead even when a user name sorts earlier"
+        );
+
+        let missing_factory = root.path().join("nope");
+        let listed =
+            list_factory_and_user_presets(missing_factory, user.clone(), "sound").unwrap();
+        assert_eq!(listed, vec![user.join("Aaa-Mine.sound")]);
+    }
+
     #[test]
     fn voice_priority_roundtrips_in_project_and_runtime_snapshots() {
         use crate::sequencer::{VoicePriority, TrackParamsSnapshot};

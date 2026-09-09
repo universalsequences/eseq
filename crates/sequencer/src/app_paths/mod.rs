@@ -506,6 +506,11 @@ impl AppPaths {
     pub fn kits_dir(&self) -> PathBuf {
         self.factory_root().join("kits")
     }
+    /// Read-only factory Sounds shipped in the bundle; merged with the
+    /// user's `sounds_dir()` by `project::list_sound_presets`.
+    pub fn factory_sounds_dir(&self) -> PathBuf {
+        self.factory_root().join("sounds")
+    }
     pub fn processes_dir(&self) -> PathBuf {
         self.factory_root().join("processes")
     }
