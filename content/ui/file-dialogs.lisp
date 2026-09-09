@@ -5,20 +5,26 @@
 ;; step-panel buffers (`*sequencer*` and `*arrangement*`), like export-song.
 (module eseq.file-dialogs)
 (export panel open-save close-save save-open? save-draft commit-save
+        open-unsaved-prompt close-unsaved-prompt unsaved-prompt-open?
+        unsaved-prompt-save unsaved-prompt-discard
         open-about close-about about-open?)
 
 (defstate save-open? false)
 (defstate save-draft "")
 (defstate save-title "Save project")
+;; "" or a host command to run after a successful save ("new-project").
+(defstate save-then "")
+(defstate unsaved-prompt-open? false)
 (defstate about-open? false)
 (defstate about-version "")
 
 ;; `initial` seeds the name field: "" for a never-saved project, the current
 ;; name for Save As. Cancelling leaves the project untouched: no host command
 ;; runs until `commit-save`.
-(def open-save (title initial)
+(def open-save (title initial then)
   (set! save-title title)
   (set! save-draft initial)
+  (set! save-then then)
   (set! save-open? true))
 
 (def close-save () (set! save-open? false))
@@ -27,8 +33,22 @@
   (if (= (len (string-trim save-draft)) 0)
     (status "Enter a project name")
     (do
-      (host-command "save-project" (dict :name save-draft))
+      (host-command "save-project" (dict :name save-draft :then save-then))
       (close-save))))
+
+;; File > New Project on a project with unsaved changes. Save routes through
+;; the normal save path (naming first when needed) and only then starts the
+;; new project; Don't Save starts it immediately; Cancel does nothing.
+(def open-unsaved-prompt () (set! unsaved-prompt-open? true))
+(def close-unsaved-prompt () (set! unsaved-prompt-open? false))
+
+(def unsaved-prompt-save ()
+  (close-unsaved-prompt)
+  (host-command "project-save-open" (dict :mode "save" :then "new-project")))
+
+(def unsaved-prompt-discard ()
+  (close-unsaved-prompt)
+  (host-command "new-project" (dict)))
 
 (def open-about (version)
   (set! about-version version)
@@ -57,6 +77,22 @@
         :disabled (= (len (string-trim save-draft)) 0)
         :on-click |x y r| (commit-save)))))
 
+(def unsaved-prompt-body ()
+  (v-stack :width :fill :height :fill :gap 0.5
+    (label "Save changes first?" :key "unsaved-prompt-title"
+      :font-size 16 :color :white :bg :transparent)
+    (label "Starting a new project discards unsaved changes." :width :fill :wrap true
+      :font-size 11 :color :dim :bg :transparent)
+    (box :flex 1 :bg :transparent)
+    (h-stack :width :fill :gap 0.5
+      (button "Don't Save" :key "unsaved-prompt-discard"
+        :on-click |x y r| (unsaved-prompt-discard))
+      (box :flex 1 :bg :transparent)
+      (button "Cancel" :key "unsaved-prompt-cancel"
+        :on-click |x y r| (close-unsaved-prompt))
+      (button "Save" :key "unsaved-prompt-save" :variant :primary
+        :on-click |x y r| (unsaved-prompt-save)))))
+
 (def about-body ()
   (v-stack :width :fill :height :fill :gap 0.4
     (label "eseq" :key "about-title" :font-size 20 :color :white :bg :transparent)
@@ -73,6 +109,10 @@
     (modal :is-open save-open? :on-close (lambda () (close-save)) :width-px 520 :height-px 380
       (box :debug-name "project-save-panel" :width :fill :height :fill :padding 0.6 :bg :transparent
         (if save-open? (save-body) (box :width 0 :height 0 :bg :transparent))))
+    (modal :is-open unsaved-prompt-open? :on-close (lambda () (close-unsaved-prompt))
+        :width-px 560 :height-px 300
+      (box :debug-name "unsaved-prompt-panel" :width :fill :height :fill :padding 0.6 :bg :transparent
+        (if unsaved-prompt-open? (unsaved-prompt-body) (box :width 0 :height 0 :bg :transparent))))
     (modal :is-open about-open? :on-close (lambda () (close-about)) :width-px 480 :height-px 340
       (box :debug-name "about-panel" :width :fill :height :fill :padding 0.6 :bg :transparent
         (if about-open? (about-body) (box :width 0 :height 0 :bg :transparent))))))

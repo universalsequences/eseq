@@ -54991,6 +54991,7 @@ mod drift_waveform_tests;
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();
         for key in [
+            "/file-menu-new-project",
             "/file-menu-save",
             "/file-menu-save-as",
             "/file-menu-open-project",
@@ -55016,7 +55017,7 @@ mod drift_waveform_tests;
         // Cancel: the modal closes and no save is requested.
         editor
             .runtime_mut()
-            .eval_str(r#"(eseq.file-dialogs/open-save "Save project" "")"#)
+            .eval_str(r#"(eseq.file-dialogs/open-save "Save project" "" "")"#)
             .unwrap();
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -55037,7 +55038,7 @@ mod drift_waveform_tests;
         // Save As seeds the current name and commits it through save-project.
         editor
             .runtime_mut()
-            .eval_str(r#"(eseq.file-dialogs/open-save "Save project as" "demo")"#)
+            .eval_str(r#"(eseq.file-dialogs/open-save "Save project as" "demo" "new-project")"#)
             .unwrap();
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -55049,8 +55050,36 @@ mod drift_waveform_tests;
         editor.refresh_runtime_side_effects();
         assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
             HostCommand::Custom { name, payload } if name == "save-project"
-                && value_contains_string(payload, "demo"))));
+                && value_contains_string(payload, "demo")
+                && value_contains_string(payload, "new-project"))));
         assert!(find_layout_node_by_stable_key_suffix(&editor.widget_layout().unwrap(), "/project-save-name").is_none());
+
+        // New Project with unsaved changes: Save chains the save into a new
+        // project, Don't Save starts one directly, Cancel does nothing.
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/open-unsaved-prompt)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        for key in ["/unsaved-prompt-save", "/unsaved-prompt-discard", "/unsaved-prompt-cancel"] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert_finite_nonzero_rect(node, key);
+        }
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/close-unsaved-prompt)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert!(editor.drain_host_commands().is_empty());
+        assert!(find_layout_node_by_stable_key_suffix(&editor.widget_layout().unwrap(), "/unsaved-prompt-save").is_none());
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/open-unsaved-prompt)").unwrap();
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/unsaved-prompt-save)").unwrap();
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, payload } if name == "project-save-open"
+                && value_contains_string(payload, "new-project"))));
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/open-unsaved-prompt)").unwrap();
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/unsaved-prompt-discard)").unwrap();
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, .. } if name == "new-project")));
     }
 
     #[test]

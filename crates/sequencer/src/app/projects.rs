@@ -1193,6 +1193,16 @@ impl App {
         }
     }
 
+    /// A fresh, never-edited project has no saved revision yet but nothing to
+    /// lose either; every other departure from the saved revision counts.
+    pub fn has_unsaved_changes(&self) -> bool {
+        let history = &self.history;
+        if history.is_at_saved_revision() {
+            return false;
+        }
+        !(history.saved_revision().is_none() && history.current_revision() == 0)
+    }
+
     pub fn save_project_with_name(
         &mut self,
         requested_name: Option<&str>,

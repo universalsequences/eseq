@@ -307,6 +307,17 @@ pub(super) fn handle(
             } else {
                 None
             };
+            // `:then "new-project"` chains the File > New "Save first" path;
+            // it runs only after the write succeeded so a failed save never
+            // discards the project.
+            let then = if let Value::Map(ref map) = payload {
+                map.get("then").and_then(|cell| match &*cell.borrow() {
+                    Value::String(name) => Some(name.clone()),
+                    _ => None,
+                })
+            } else {
+                None
+            };
             match app.save_project_with_name(requested_name.as_deref()) {
                 Ok(save_name) => {
                     let rt = editor.runtime_mut();
@@ -316,6 +327,9 @@ pub(super) fn handle(
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Saved project '{save_name}'"
                     )));
+                    if then.as_deref() == Some("new-project") {
+                        handle("new-project", Value::Nil, app, editor, ctx);
+                    }
                 }
                 Err(error) => {
                     editor.handle_host_event(HostEvent::Status(format!(

@@ -1,6 +1,11 @@
 use crate::*;
 
-pub(super) const COMMANDS: &[&str] = &["project-save-open", "open-help", "about-open"];
+pub(super) const COMMANDS: &[&str] = &[
+    "project-save-open",
+    "project-new-request",
+    "open-help",
+    "about-open",
+];
 
 const HELP_URL: &str = "https://github.com/universalsequences/eseq#readme";
 
@@ -42,13 +47,21 @@ pub(super) fn handle(
     let result = (|| -> Result<(), String> {
         match name {
             "project-save-open" => {
-                let mode = match payload {
-                    Value::Map(ref map) => map_string(map, "mode").unwrap_or_default(),
-                    _ => String::new(),
+                let (mode, then) = match payload {
+                    Value::Map(ref map) => (
+                        map_string(map, "mode").unwrap_or_default(),
+                        map_string(map, "then").unwrap_or_default(),
+                    ),
+                    _ => (String::new(), String::new()),
                 };
                 let current = app.current_project_name.clone().unwrap_or_default();
                 if mode != "save-as" && !current.is_empty() {
-                    super::project::handle("save-project", Value::Nil, app, editor, ctx);
+                    let mut map = std::collections::HashMap::new();
+                    map.insert(
+                        "then".to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::String(then))),
+                    );
+                    super::project::handle("save-project", Value::Map(map), app, editor, ctx);
                     return Ok(());
                 }
                 let title = if mode == "save-as" {
@@ -60,10 +73,22 @@ pub(super) fn handle(
                 editor
                     .runtime_mut()
                     .eval_str(&format!(
-                        "(eseq.file-dialogs/open-save {} {})",
+                        "(eseq.file-dialogs/open-save {} {} {})",
                         lisp_string(title),
-                        lisp_string(&current)
+                        lisp_string(&current),
+                        lisp_string(&then)
                     ))
+                    .map_err(|e| format!("{e:?}"))?;
+            }
+            "project-new-request" => {
+                if !app.has_unsaved_changes() {
+                    super::project::handle("new-project", Value::Nil, app, editor, ctx);
+                    return Ok(());
+                }
+                activate_dialog_tile(editor);
+                editor
+                    .runtime_mut()
+                    .eval_str("(eseq.file-dialogs/open-unsaved-prompt)")
                     .map_err(|e| format!("{e:?}"))?;
             }
             "open-help" => open_url(HELP_URL)?,

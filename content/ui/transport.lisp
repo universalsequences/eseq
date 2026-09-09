@@ -942,6 +942,9 @@
   (context-menu :is-open file-menu-open
     :anchor-col file-menu-col :anchor-row file-menu-row
     :on-close (lambda () (set! file-menu-open false))
+    (menu-item "New Project" :key "file-menu-new-project"
+      :on-select (lambda (event) (host-command "project-new-request" (dict))))
+    (menu-separator)
     (menu-item "Save" :key "file-menu-save"
       :on-select (lambda (event) (file-menu-save)))
     (menu-item "Save As…" :key "file-menu-save-as"
@@ -984,7 +987,8 @@
     ;; A plain box, not an SDF icon: SDF widgets call `:on-click` with bare
     ;; |x y r| args, while a box passes the event map the menu anchors on.
     (subtree :key "transport-file-menu-button"
-      (box :height 1.4 :padding 0.35 :corner-radius 8
+      (box :height 1.4 :padding 0.35 :corner-radius 12
+        :width 4
         :background-color (if file-menu-open :mixer-strip-selected-bg :mixer-strip-bg)
         :style transport-icon-style
         :on-click (lambda (event) (open-file-menu event))
@@ -1265,7 +1269,7 @@
       (transpose-context-menu))
     (subtree :key "transport-file-context-menu"
       (file-context-menu))
-
+    
     ;; Session and arrangement are app views, not tabs in the main buffer.
     ;; This spacer keeps the view pair against the transport's right edge.
     (box :width 0 :flex 1)
