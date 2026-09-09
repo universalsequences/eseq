@@ -16,8 +16,8 @@ const STATE_SLICE_FRAMES: usize = 10;
 const STATE_EVENTS: usize = 11;
 const EVENT_WIDTH: usize = 3;
 pub const STEREO_PANNER_TIMELINE_CAPACITY: usize = 64;
-pub const STEREO_PANNER_STATE_SIZE: usize =
-    STATE_EVENTS + EVENT_WIDTH * STEREO_PANNER_TIMELINE_CAPACITY;
+const STATE_RENDERED: usize = STATE_EVENTS + EVENT_WIDTH * STEREO_PANNER_TIMELINE_CAPACITY;
+pub const STEREO_PANNER_STATE_SIZE: usize = STATE_RENDERED + 1;
 
 pub const STEREO_PANNER_PARAM_VOLUME: u64 = STATE_VOLUME as u64;
 pub const STEREO_PANNER_PARAM_PAN: u64 = STATE_PAN as u64;
@@ -89,11 +89,6 @@ unsafe extern "C" fn stereo_panner_schedule_event(
     true
 }
 
-fn gains_for(volume: f32, pan: f32) -> (f32, f32) {
-    let angle = (pan.clamp(-1.0, 1.0) + 1.0) * 0.25 * std::f32::consts::PI;
-    (volume.max(0.0) * angle.cos(), volume.max(0.0) * angle.sin())
-}
-
 fn balance_gains_for(volume: f32, pan: f32) -> (f32, f32) {
     let pan = pan.clamp(-1.0, 1.0);
     if pan >= 0.0 {
@@ -115,9 +110,9 @@ unsafe extern "C" fn stereo_panner_init(
     *s.add(STATE_SAMPLE_RATE) = sample_rate as f32;
     *s.add(STATE_MUTE) = 0.0;
     *s.add(STATE_MUTED_BY_SOLO) = 0.0;
-    let (gain_l, gain_r) = gains_for(1.0, 0.0);
-    *s.add(STATE_SMOOTH_L) = gain_l;
-    *s.add(STATE_SMOOTH_R) = gain_r;
+    *s.add(STATE_SMOOTH_L) = 0.0;
+    *s.add(STATE_SMOOTH_R) = 0.0;
+    *s.add(STATE_RENDERED) = 0.0;
     *s.add(STATE_PEAK_L) = 0.0;
     *s.add(STATE_PEAK_R) = 0.0;
     *s.add(STATE_EVENT_COUNT) = 0.0;
@@ -138,6 +133,7 @@ unsafe extern "C" fn stereo_panner_process(
     let sample_rate = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
     let mut smooth_l = *s.add(STATE_SMOOTH_L);
     let mut smooth_r = *s.add(STATE_SMOOTH_R);
+    let mut rendered = *s.add(STATE_RENDERED) != 0.0;
     let prev_peak_l = *s.add(STATE_PEAK_L);
     let prev_peak_r = *s.add(STATE_PEAK_R);
     let smooth_coeff = 1.0 - (-2.0 * std::f32::consts::PI * 60.0 / sample_rate).exp();
@@ -173,8 +169,18 @@ unsafe extern "C" fn stereo_panner_process(
                 balance_gains_for(*s.add(STATE_VOLUME), *s.add(STATE_PAN))
             };
         }
-        smooth_l += smooth_coeff * (target_l - smooth_l);
-        smooth_r += smooth_coeff * (target_r - smooth_r);
+        if !rendered {
+            // Host parameters arrive after node initialization. Seed from the
+            // first sample's target, including frame-zero timeline events, so
+            // saved mute/gain/pan settings do not ramp from unrelated defaults.
+            // Once any sample has been processed, all changes remain smoothed.
+            smooth_l = target_l;
+            smooth_r = target_r;
+            rendered = true;
+        } else {
+            smooth_l += smooth_coeff * (target_l - smooth_l);
+            smooth_r += smooth_coeff * (target_r - smooth_r);
+        }
         let sample_l = *in0.add(i) * smooth_l;
         let sample_r = *in1.add(i) * smooth_r;
         *out0.add(i) = sample_l;
@@ -185,6 +191,7 @@ unsafe extern "C" fn stereo_panner_process(
 
     *s.add(STATE_SMOOTH_L) = smooth_l;
     *s.add(STATE_SMOOTH_R) = smooth_r;
+    *s.add(STATE_RENDERED) = if rendered { 1.0 } else { 0.0 };
     *s.add(STATE_PEAK_L) = peak_l.max(prev_peak_l * 0.92);
     *s.add(STATE_PEAK_R) = peak_r.max(prev_peak_r * 0.92);
     *s.add(STATE_EVENT_COUNT) = 0.0;
@@ -224,6 +231,46 @@ mod tests {
                 state.as_mut_ptr().cast(), std::ptr::null_mut());
         }
         left.into_iter().zip(right).map(|(l, r)| [l, r]).collect()
+    }
+
+    #[test]
+    fn initial_settings_apply_exactly_without_a_startup_ramp() {
+        for (volume, pan, mute, solo_mute, expected) in [
+            (1.0, 0.0, 0.0, 0.0, [1.0, 1.0]),
+            (0.25, 0.5, 0.0, 0.0, [0.125, 0.25]),
+            (0.5, -0.75, 0.0, 0.0, [0.5, 0.125]),
+            (1.0, 0.0, 1.0, 0.0, [0.0, 0.0]),
+            (1.0, 0.0, 0.0, 1.0, [0.0, 0.0]),
+        ] {
+            let mut state = state();
+            // A zero-frame call must not finalize initialization before the
+            // host has supplied the authored parameters.
+            assert!(render(&mut state, 0).is_empty());
+            state[STATE_VOLUME] = volume;
+            state[STATE_PAN] = pan;
+            state[STATE_MUTE] = mute;
+            state[STATE_MUTED_BY_SOLO] = solo_mute;
+            assert_eq!(render(&mut state, 32), vec![expected; 32]);
+        }
+    }
+
+    #[test]
+    fn frame_zero_mute_initializes_silently_but_later_changes_still_smooth() {
+        let mut state = state();
+        unsafe {
+            stereo_panner_begin_event_slice(state.as_mut_ptr().cast(), 1, 0, 32);
+            let event = mixer_param_event(0, 0, 0, STEREO_PANNER_PARAM_MUTE, 1.0).unwrap();
+            assert!(stereo_panner_schedule_event(state.as_mut_ptr().cast(), &event));
+        }
+        assert_eq!(render(&mut state, 32), vec![[0.0, 0.0]; 32]);
+        state[STATE_MUTE] = 0.0;
+        let coeff = 1.0 - (-2.0 * std::f32::consts::PI * 60.0 / 48_000.0).exp();
+        assert_eq!(render(&mut state, 1), vec![[coeff, coeff]]);
+        let next = coeff + coeff * (1.0 - coeff);
+        assert_eq!(render(&mut state, 1), vec![[next, next]], "must not reinitialize per call");
+        state[STATE_MUTE] = 1.0;
+        let muted = next + coeff * -next;
+        assert_eq!(render(&mut state, 1), vec![[muted, muted]], "live mute still fades");
     }
 
     #[test]
