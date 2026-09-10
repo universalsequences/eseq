@@ -7209,7 +7209,7 @@ mod tests {
     /// keyboard without disturbing anything else about it, and refuses to
     /// collide with a pad that is already there.
     #[test]
-    fn rack_pad_notes_can_move_and_never_collide() {
+    fn rack_pad_notes_can_move_and_swap_on_collision() {
         let graph = TestLiveGraph::new("drum-rack-pad-note-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);
         let (group_id, _) = app
@@ -7239,10 +7239,14 @@ mod tests {
         );
         assert_eq!(app.groups[0].rack_pad_track(40), Some(snare));
 
-        assert!(
-            app.set_rack_pad_note_recorded(group_id, 40, 36).is_err(),
-            "pad notes stay unique within a rack",
-        );
+        app.set_rack_pad_note_recorded(group_id, 40, 36)
+            .expect("an occupied note swaps the two pads");
+        assert_eq!(app.groups[0].rack_pad_track(36), Some(snare), "pads swap notes");
+        assert_eq!(app.groups[0].rack_pad_track(40), Some(kick), "pads swap notes");
+        app.set_rack_pad_note_recorded(group_id, 36, 40)
+            .expect("swap back");
+        assert_eq!(app.groups[0].rack_pad_track(40), Some(snare));
+        assert_eq!(app.groups[0].rack_pad_track(36), Some(kick));
         assert!(
             app.set_rack_pad_note_recorded(group_id, 40, 40).is_err(),
             "a no-op is not an edit",
@@ -7251,6 +7255,20 @@ mod tests {
             app.set_rack_pad_note_recorded(group_id, 40, 200).is_err(),
             "pad notes outside the drum rack range are rejected",
         );
+        // Undo the swap-back, then the swap: a swap is one history entry that
+        // restores both pads at once.
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.groups[0].rack_pad_track(36), Some(snare), "undo restores the swap");
+        assert_eq!(app.groups[0].rack_pad_track(40), Some(kick), "undo restores the swap");
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.groups[0].rack_pad_track(36), Some(kick), "undo unswaps both pads");
+        assert_eq!(app.groups[0].rack_pad_track(40), Some(snare), "undo unswaps both pads");
         assert!(matches!(
             crate::app::edit::undo(&mut app),
             crate::app::history::HistoryReplay::Applied(_)

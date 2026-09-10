@@ -22,6 +22,25 @@ mod rack_slot_indicator_tests;
         )
     }
 
+
+    /// Drop the always-installed default lane entries from a published
+    /// process lane/slot list so a test sees only what it authored.
+    fn non_default_lane_entries(value: Value) -> Vec<Value> {
+        let Value::List(entries) = value else {
+            panic!("process lanes/slots should be a list");
+        };
+        entries
+            .iter()
+            .filter(|entry| {
+                let Value::Map(map) = &*entry.borrow() else {
+                    return false;
+                };
+                map.get("default-lane").map(|cell| cell.borrow().clone()) != Some(Value::Bool(true))
+            })
+            .map(|entry| entry.borrow().clone())
+            .collect()
+    }
+
     #[test]
     fn process_lane_short_label_preserves_the_complete_inlet_name() {
         assert_eq!(
@@ -9096,6 +9115,9 @@ mod rack_slot_indicator_tests;
         sync_all_track_playhead_fields(&mut runtime, &state, &app);
         assert_eq!(playhead_row_active(&runtime, 0, 0), Value::Bool(true));
         assert_eq!(playhead_row_active(&runtime, 0, 1), Value::Bool(false));
+        assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_active_field(0, 0)), Value::Bool(true));
+        assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_active_field(0, 1)), Value::Bool(false));
+        assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_page_field(0)), Value::Number(0.0));
 
         // Step 20 lives on row 1, so the delta path must hand the flag over.
         let mut previous = vec![0u32];
@@ -9111,6 +9133,15 @@ mod rack_slot_indicator_tests;
 
         clear_all_track_playhead_fields(&mut runtime, &app);
         assert_eq!(playhead_row_active(&runtime, 0, 1), Value::Bool(false));
+        assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_active_field(0, 21)), Value::Bool(false));
+
+        // A full sync must clear stale steps, including after restart at zero.
+        state.transport.track_playheads[0].store(0, Ordering::Relaxed);
+        sync_all_track_playhead_fields(&mut runtime, &state, &app);
+        for step in 0..MAX_STEPS {
+            assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_active_field(0, step)),
+                Value::Bool(step == 0));
+        }
     }
 
     fn value_list_maps(value: &Value) -> Vec<HashMap<String, Rc<RefCell<Value>>>> {
@@ -16240,9 +16271,10 @@ mod rack_slot_indicator_tests;
             .runtime_mut()
             .set_reactive_list_index("SEQ", "track-steps", 0, steps);
         editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(true));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-playhead-active-0-1", Value::Bool(true));
+        let playback_state = Arc::new(SequencerState::new(1, vec![]));
+        playback_state.transport.track_playheads[0].store(1, Ordering::Relaxed);
+        let playback_app = test_app_for_track_visual_state(playback_state.clone());
+        sync_all_track_playhead_fields(editor.runtime_mut(), &playback_state, &playback_app);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout = {
@@ -16273,11 +16305,44 @@ mod rack_slot_indicator_tests;
             layout_node_contains_text_fragment(playhead_cell, "C-"),
             "a track-steps index publish must re-render the toggled cell (velocity seed varies)"
         );
-        assert!(
-            matches!(playhead_cell.props.get("background-color"), Some(Value::Keyword(k)) if k == "dark-gray"),
-            "the per-step playhead field must tint the cell: {:?}",
-            playhead_cell.props.get("background-color")
+        let background = playhead_cell.props.get("background-color").expect("cell background");
+        let idle_cell = find_layout_node_by_key_early(&layout, "tracker-cell-0-2").unwrap();
+        assert_ne!(Some(background), idle_cell.props.get("background-color"));
+        if let Value::Keyword(name) = background {
+            assert!(eseqlisp::theme::named_color(name).is_some(), "unrenderable color: {name}");
+        }
+        let row = find_layout_node_by_key_early(&layout, "tracker-row-1").unwrap();
+        assert_eq!(row.props.get("active"), Some(&Value::Bool(true)));
+        for node in [playhead_cell, row] {
+            assert!(node.rect.width.is_finite() && node.rect.width > 0.0);
+            assert!(node.rect.height.is_finite() && node.rect.height > 0.0);
+        }
+
+        // Exercise the production delta publisher, not a manually injected
+        // field: the old row must deactivate and the next one must activate.
+        let mut previous = vec![1];
+        playback_state.transport.track_playheads[0].store(2, Ordering::Relaxed);
+        sync_track_playhead_field_delta(
+            editor.runtime_mut(), &playback_state, &playback_app, &mut previous,
         );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let tree = editor.buffers.iter().find(|b| b.name == "*tracker*")
+            .and_then(|b| b.widget_tree.as_ref()).unwrap();
+        let moved = eseqlisp::layout::LayoutEngine::new(120, 80, 1.0).layout(tree).unwrap();
+        assert_eq!(find_layout_node_by_key_early(&moved, "tracker-row-1").unwrap()
+            .props.get("active"), Some(&Value::Bool(false)));
+        assert_eq!(find_layout_node_by_key_early(&moved, "tracker-row-2").unwrap()
+            .props.get("active"), Some(&Value::Bool(true)));
+        editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(false));
+        clear_all_track_playhead_fields(editor.runtime_mut(), &playback_app);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let tree = editor.buffers.iter().find(|b| b.name == "*tracker*")
+            .and_then(|b| b.widget_tree.as_ref()).unwrap();
+        let stopped = eseqlisp::layout::LayoutEngine::new(120, 80, 1.0).layout(tree).unwrap();
+        assert_eq!(find_layout_node_by_key_early(&stopped, "tracker-row-2").unwrap()
+            .props.get("active"), Some(&Value::Bool(false)));
 
         // Keyboard: DOWN moves the cursor to row 1, RET toggles it, `a` enters
         // C of the current octave (transpose 0); the step is already active
@@ -19739,11 +19804,9 @@ mod rack_slot_indicator_tests;
             "process-lane modes should publish the same cursor projection as step params"
         );
 
-        let Value::List(slots) = build_process_slots_value(&state, 0) else {
-            panic!("process slots should be a list");
-        };
+        let slots = non_default_lane_entries(build_process_slots_value(&state, 0));
         assert_eq!(slots.len(), 1);
-        let Value::Map(slot) = &*slots[0].borrow() else {
+        let Value::Map(slot) = &slots[0] else {
             panic!("process slot should be a map");
         };
         let ports_value = slot
@@ -19783,10 +19846,8 @@ mod rack_slot_indicator_tests;
                 param_id: None,
             },
         ));
-        let Value::List(slots) = build_process_slots_value(&state, 0) else {
-            panic!("process slots should be a list after binding");
-        };
-        let Value::Map(slot) = &*slots[0].borrow() else {
+        let slots = non_default_lane_entries(build_process_slots_value(&state, 0));
+        let Value::Map(slot) = &slots[0] else {
             panic!("process slot should be a map after binding");
         };
         let ports_value = slot
@@ -19888,6 +19949,59 @@ mod rack_slot_indicator_tests;
     }
 
     #[test]
+    fn track_process_scopes_publish_default_lane_state_history_per_track() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let chain = state
+            .composed_track_process_chain(1)
+            .expect("composed chain with default lanes");
+        let rand = chain
+            .slots
+            .iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("rand"))
+            .expect("rand default lane");
+        let runtime_id = sequencer::process::track_process_slot_runtime_id(rand, 1).0;
+        state.publish_process_scope_values(HashMap::from([(
+            runtime_id,
+            HashMap::from([("held".to_string(), vec![3.0, 5.0, 2.0])]),
+        )]));
+
+        let Value::List(tracks) = build_track_process_scopes_value(&state) else {
+            panic!("scopes should be a list per track");
+        };
+        assert_eq!(tracks.len(), 2);
+        let Value::List(track0) = &*tracks[0].borrow() else {
+            panic!("track scopes should be a list");
+        };
+        assert!(track0.is_empty(), "track 0 has not fired: no scope entries");
+        let Value::List(track1) = &*tracks[1].borrow() else {
+            panic!("track scopes should be a list");
+        };
+        assert_eq!(track1.len(), 1);
+        let Value::Map(entry) = &*track1[0].borrow() else {
+            panic!("scope entry should be a map");
+        };
+        assert_eq!(
+            entry.get("instance-id").map(|cell| cell.borrow().clone()),
+            Some(Value::Number(rand.instance_id.0 as f64))
+        );
+        assert_eq!(
+            entry.get("current").map(|cell| cell.borrow().clone()),
+            Some(Value::Number(2.0))
+        );
+        assert_eq!(
+            entry.get("values").map(|cell| cell.borrow().clone()),
+            Some(test_list(vec![
+                Value::Number(3.0),
+                Value::Number(5.0),
+                Value::Number(2.0)
+            ]))
+        );
+    }
+
+    #[test]
     fn process_lane_payload_excludes_connectable_process_inlet_ports() {
         let state = Arc::new(SequencerState::new(
             1,
@@ -19919,11 +20033,11 @@ mod rack_slot_indicator_tests;
             )
             .expect("define and attach connected processes");
 
-        let Value::List(lanes) = build_process_lanes_value(&state, 0) else {
-            panic!("process lanes should be a list");
-        };
+        // The always-installed default lanes come first; the test's own lane
+        // is the only non-default one.
+        let lanes = non_default_lane_entries(build_process_lanes_value(&state, 0));
         assert_eq!(lanes.len(), 1);
-        let Value::Map(lane) = &*lanes[0].borrow() else {
+        let Value::Map(lane) = &lanes[0] else {
             panic!("process lane should be a map");
         };
         assert_eq!(
@@ -19932,10 +20046,8 @@ mod rack_slot_indicator_tests;
             "process connections must not appear in the step-lane parameter mapper"
         );
 
-        let Value::List(slots) = build_process_slots_value(&state, 0) else {
-            panic!("process slots should be a list");
-        };
-        let Value::Map(source_slot) = &*slots[0].borrow() else {
+        let slots = non_default_lane_entries(build_process_slots_value(&state, 0));
+        let Value::Map(source_slot) = &slots[0] else {
             panic!("source process slot should be a map");
         };
         let ports = source_slot
@@ -19990,17 +20102,13 @@ mod rack_slot_indicator_tests;
             .eval_source_at_path(script_path, &source)
             .expect("evaluate multi accumulator demo");
 
-        let Value::List(slots) = build_process_slots_value(&state, 0) else {
-            panic!("process slots should be a list");
-        };
+        let slots = non_default_lane_entries(build_process_slots_value(&state, 0));
         assert_eq!(slots.len(), 3, "demo should attach three process slots");
 
-        let Value::List(lanes) = build_process_lanes_value(&state, 0) else {
-            panic!("process lanes should be a list");
-        };
+        let lanes = non_default_lane_entries(build_process_lanes_value(&state, 0));
         let labels = lanes
             .iter()
-            .map(|lane| match &*lane.borrow() {
+            .map(|lane| match lane {
                 Value::Map(map) => map
                     .get("label")
                     .map(|label| label.borrow().clone())
@@ -55061,6 +55169,154 @@ mod rack_slot_indicator_tests;
     /// is one bound field per member track, so a hit repaints the cell without
     /// re-rendering the panel: the assertions below read the SAME layout nodes
     /// before and after the flag flips, with no relayout in between.
+    /// Pads move by drag: an occupied grid cell is a "rack-pad" drag source,
+    /// every grid cell and every octave-map cell takes that drop and moves the
+    /// pad to the cell's own note (a swap when it is occupied), and a click on
+    /// a pad only focuses it — it no longer auditions.
+    #[test]
+    fn metal_seq_rack_pads_drag_between_cells_and_octaves() {
+        std::thread::Builder::new()
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(metal_seq_rack_pads_drag_between_cells_and_octaves_impl)
+            .expect("spawn test thread")
+            .join()
+            .expect("test thread panicked");
+    }
+
+    fn metal_seq_rack_pads_drag_between_cells_and_octaves_impl() {
+        let mut editor = rack_fx_panel_editor();
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+            .expect("selecting the rack selects its bus");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(150, 24);
+        let layout = editor.widget_layout().expect("rack fx panel layout");
+        let grid = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-grid-7")
+            .expect("rack pad grid");
+        let map = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-map-7")
+            .expect("rack pad mini-map");
+        let occupied = find_layout_node_by_stable_key_suffix(grid, "/rack-pad-cell-7-12")
+            .expect("grid cell for note 36");
+        let empty = find_layout_node_by_stable_key_suffix(grid, "/rack-pad-cell-7-13")
+            .expect("grid cell for note 37");
+        let map_cell = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-cell-7-24")
+            .expect("map cell for note 24, an octave below the page");
+
+        assert_eq!(
+            occupied.props.get("drag-type"),
+            Some(&Value::String("rack-pad".to_string())),
+            "an occupied cell is a pad drag source"
+        );
+        assert!(
+            matches!(empty.props.get("drag-type"), None | Some(Value::Nil)),
+            "an empty cell has nothing to drag"
+        );
+        for (label, cell) in [("empty grid cell", empty), ("octave-map cell", map_cell)] {
+            let accepts = cell
+                .props
+                .get("drop-types")
+                .is_some_and(|types| matches!(types, Value::List(items)
+                    if items.iter().any(|item| *item.borrow() == Value::String("rack-pad".to_string()))));
+            assert!(accepts, "{label} accepts a dragged pad");
+            assert!(cell.props.contains_key("on-drop"), "{label} handles the drop");
+        }
+
+        // Same octave: the pad on 36 dropped on the empty cell for 37.
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/drop-on-pad-cell
+                    (dict :drag-type "rack-pad"
+                      :payload (dict :group-id 7 :pad-note 36))
+                    0 13)"#,
+            )
+            .expect("pad drop on a grid cell should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "set-rack-pad-note"),
+            vec![("group-id", 7.0), ("pad-note", 36.0), ("note", 37.0)],
+            "a drop within the page moves the pad to the cell's note"
+        );
+
+        // Onto an occupied cell (note 38, cell 14): the host swaps the pads.
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/drop-on-pad-cell
+                    (dict :drag-type "rack-pad"
+                      :payload (dict :group-id 7 :pad-note 36))
+                    0 14)"#,
+            )
+            .expect("pad drop on an occupied cell should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "set-rack-pad-note"),
+            vec![("group-id", 7.0), ("pad-note", 36.0), ("note", 38.0)],
+            "a drop on an occupied cell asks the host for the swap"
+        );
+
+        // Another octave: the map cell for note 24, without paging first.
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/drop-pad-on-note
+                    (dict :drag-type "rack-pad"
+                      :payload (dict :group-id 7 :pad-note 36))
+                    0 24)"#,
+            )
+            .expect("pad drop on the octave map should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "set-rack-pad-note"),
+            vec![("group-id", 7.0), ("pad-note", 36.0), ("note", 24.0)],
+            "a drop on the octave map moves the pad to that exact note"
+        );
+
+        // Dropping a pad back on its own note, or a pad from another rack, is
+        // not an edit.
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(do
+                    (eseq.sequencer/drop-pad-on-note
+                      (dict :drag-type "rack-pad" :payload (dict :group-id 7 :pad-note 36))
+                      0 36)
+                    (eseq.sequencer/drop-pad-on-note
+                      (dict :drag-type "rack-pad" :payload (dict :group-id 99 :pad-note 36))
+                      0 40))"#,
+            )
+            .expect("no-op pad drops should evaluate");
+        assert!(
+            !editor.drain_host_commands().iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "set-rack-pad-note"
+            )),
+            "a same-note drop and a foreign-rack drop send no pad move"
+        );
+
+        // A click on a pad focuses it without auditioning it.
+        let _ = editor.drain_host_commands();
+        let click = occupied.props.get("on-click").cloned().expect("pad cell click handler");
+        editor
+            .runtime_mut()
+            .invoke(click, vec![Value::Number(0.0); 3])
+            .expect("pad click should evaluate");
+        assert!(
+            !editor.drain_host_commands().iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "trigger-rack-pad"
+            )),
+            "a pad click no longer triggers the pad"
+        );
+    }
+
     #[test]
     fn metal_seq_rack_pad_cells_light_on_the_member_track_trigger_binding() {
         std::thread::Builder::new()

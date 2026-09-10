@@ -23,6 +23,8 @@
 (import eseq.drum-rack-v2)
 
 (import eseq.seq-panels)
+;; Process-port arm/bind state shared with the fx panel (lane strip map button).
+(import eseq.effects.param-controls :as pc)
 
 ;; Drag-and-drop sample import modal (zero footprint while closed).
 (import eseq.sample-import)
@@ -1123,6 +1125,13 @@
 (def expanded-slider-fill (track)
   (rgba (expanded-track-color-r track) (expanded-track-color-g track) (expanded-track-color-b track) 1.0))
 
+;; Process lanes draw in the process accent so a lane never reads as a
+;; builtin step param.
+(def expanded-slider-fill-for-mode (track mode)
+  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
+    :process-lane-accent
+    (expanded-slider-fill track)))
+
 (def expanded-slider-muted-fill (track)
   (rgba
     (+ (* (expanded-track-color-r track) 0.30) (* 0.08 0.70))
@@ -1355,13 +1364,15 @@
     (activate-track-for-edit track)
     (eseq.seq-core-state/cool-off-follow)
     (eseq.step-grid-interactions/set-track-cursor-step (track-current-step track track-id))
+    ;; The track's number picker is one control for the whole row: with a
+    ;; selection it writes every selected step, otherwise the cursor step.
     (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
-      (eseq.step-grid-interactions/seq-set-process-lane-from-step
+      (eseq.step-grid-interactions/seq-set-process-lane-from-selection-or-step
         track
         mode
         (track-current-step track track-id)
         (eseq.seqv-track-params/seqv-track-step-param-value track mode value))
-      (eseq.step-grid-interactions/seq-set-step-param-from-step
+      (eseq.step-grid-interactions/seq-set-step-param-from-selection-or-step
         (track-current-step track track-id)
         (eseq.seqv-track-params/seqv-param-keyword mode)
         (eseq.seqv-track-params/seqv-step-param-value mode value)))))
@@ -1414,18 +1425,73 @@
 (def param-header-width (mode)
   (if (eseq.seqv-track-params/seqv-process-lane-mode? mode) 17.8 6.4))
 
+;; Step-param name a process port binds to when a tab is clicked while a
+;; process map is armed. Names resolve through the scheduler's step-param
+;; table, so they must be the long forms.
+(def param-tab-step-param (mode)
+  (if (= mode 0) "velocity"
+    (if (= mode 1) "duration"
+      (if (= mode 3) "transpose"
+        (if (= mode 4) "pan"
+          (if (= mode 5) "sync"
+            (if (= mode 6) "delay"
+              (if (= mode 7) "retrig"
+                (if (= mode 8) "rate" "")))))))))
+
+;; A process map armed on this track whose port can take a step param.
+(def param-tab-map-armed? (track)
+  (and (pc/process-map-active?)
+       (= pc/process-map-track track)
+       (or (= pc/process-map-target-kind "")
+           (= pc/process-map-target-kind "step-param"))))
+
+(def param-tab-bind (track mode)
+  ;; Disarm first: a failing bind must never leave the tabs stuck in the
+  ;; armed tint. The bind's own error surfaces through the editor log.
+  (let ((map-track pc/process-map-track)
+        (map-instance pc/process-map-instance-id)
+        (map-port pc/process-map-port)
+        (add (lane-armed-port-bound?))
+        (param (param-tab-step-param mode)))
+    (do
+      (pc/process-map-clear)
+      (if add
+        (if (lane-edit-all?)
+          (seq-add-process-port-fanout map-track map-instance map-port
+            (dict :kind "step-param" :param param) :all)
+          (seq-add-process-port-fanout map-track map-instance map-port
+            (dict :kind "step-param" :param param)))
+        (if (lane-edit-all?)
+          (seq-bind-process-port map-track map-instance map-port
+            (dict :kind "step-param" :param param) :all)
+          (seq-bind-process-port map-track map-instance map-port
+            (dict :kind "step-param" :param param))))
+      (status (str (if add "Added fan-out → " "Mapped process port → ") param
+                   (if (lane-edit-all?) " (all tracks)" ""))))))
+
 (def param-tab (track track-id mode tab-label)
-  (box :width (param-tab-width mode) :height 2
-    :key (str "expanded-param-tab-" track-id "-" mode)
-    :bg (if (= (track-param-mode track-id) mode) (eseq.seqv-track-params/seqv-param-color mode) :dark-gray)
-    :on-click |x y r| (do (activate-track-for-edit track) (set-track-param-mode track-id mode))
-    (label tab-label :font-size 12
-      :color (if (= (track-param-mode track-id) mode) :primary :dim)
-      :bg :transparent)))
+  (let ((armed (param-tab-map-armed? track)))
+    (box :width (param-tab-width mode) :height 2
+      :key (str "expanded-param-tab-" track-id "-" mode)
+      :bg (if (= (track-param-mode track-id) mode) (eseq.seqv-track-params/seqv-param-color mode) :dark-gray)
+      :background-color (if armed :process-map-arm-bg (rgba 0 0 0 0))
+      :corner-radius 6
+      :on-click |x y r| (if armed
+                          (param-tab-bind track mode)
+                          (do (activate-track-for-edit track) (set-track-param-mode track-id mode)))
+      (label tab-label :font-size 12
+        :color (if armed
+                 :process-lane-accent
+                 (if (= (track-param-mode track-id) mode) :primary :dim))
+        :bg :transparent))))
 
 (def process-lane-option-label (track lane-idx)
   (let ((lane (nth (eseq.seqv-track-params/seqv-track-process-lanes track) lane-idx)))
-    (str (+ lane-idx 1) " " (get lane :short-label))))
+    ;; Default project lanes read like the builtin step params ("prob",
+    ;; "acc A"); script-authored lanes keep their numbered class/inlet form.
+    (if (get lane :default-lane)
+      (get lane :short-label)
+      (str (+ lane-idx 1) " " (get lane :short-label)))))
 
 (def process-lane-options (track)
   (append
@@ -1475,6 +1541,401 @@
     :options (process-lane-options track)
     :on-change (lambda (v) (select-process-lane-option track track-id v))
     :width 10.8 :height 1.45 :font-size 10))
+
+
+;; ---------------------------------------------------------------------------
+;; Lane strip: the selected process lane's two ends (docs/default-process-lanes-spec.md).
+;;
+;; IN   the lane's own values, or a wire from another lane's `wire` port
+;; MODE accumulate | pass, for slots with a `mode` inlet
+;; OUT  the mappable port's target plus the map button (arms the same
+;;      process-map state the fx panel uses; step tabs, other lanes and
+;;      device params all light up as targets)
+;; plus the slot's scalar inlets (source, lag, lo, hi) and reorder buttons.
+
+;; Edit scope for project lanes: "track" forks the slot for this track only
+;; (bindings, mode, lo/hi, lane values); "all" writes the shared slot that
+;; every track inherits. Cirklon's per-track aux config by default, the
+;; global effect on purpose.
+(defstate lane-edit-scope "track")
+
+(def lane-edit-all? () (= lane-edit-scope "all"))
+
+(def lane-toggle-edit-scope ()
+  (set! lane-edit-scope (if (lane-edit-all?) "track" "all")))
+
+(def lane-scope-chip ()
+  (button (if (lane-edit-all?) "all tracks" "this track")
+    :key "lane-edit-scope-toggle"
+    :height 1.0 :padding 0.2 :font-size 7.5
+    :background-color (if (lane-edit-all?) :process-lane-accent :transparent)
+    :border-color :process-lane-accent
+    :color (if (lane-edit-all?) :black :dim)
+    :on-click (lambda (event) (lane-toggle-edit-scope))))
+
+(def track-process-slots (track)
+  (if (< track (len SEQ.track-process-slots))
+    (nth SEQ.track-process-slots track)
+    '()))
+
+(def track-process-slot (track instance-id)
+  (reduce |acc slot| (if (= (get slot :instance-id) instance-id) slot acc)
+    nil
+    (track-process-slots track)))
+
+(def slot-port-named (slot name)
+  (reduce |acc port| (if (= (get port :name) name) port acc)
+    nil
+    (if (get slot :ports) (get slot :ports) '())))
+
+(def slot-first-port-where (slot key)
+  (reduce |acc port| (if (and (= acc nil) (get port key)) port acc)
+    nil
+    (if (get slot :ports) (get slot :ports) '())))
+
+(def slot-inlet-named (slot name)
+  (reduce |acc inlet| (if (= (get inlet :name) name) inlet acc)
+    nil
+    (if (get slot :inlets) (get slot :inlets) '())))
+
+(def slot-display-name (slot)
+  (if (get slot :instance-name) (get slot :instance-name) (get slot :name)))
+
+;; The slot whose `wire` port is bound to this lane's inlet, or nil.
+(def lane-writer-slot (track lane)
+  (reduce |acc slot|
+    (let ((wire (slot-port-named slot "wire")))
+      (if (and (= acc nil)
+               wire
+               (= (get wire :target-instance-id) (get lane :instance-id))
+               (= (get wire :target-inlet) (get lane :inlet)))
+        slot
+        acc))
+    nil
+    (track-process-slots track)))
+
+;; Chain order is dropdown order: a writer below its reader lands next fire.
+(def lane-wire-backward? (track writer lane)
+  (> (get writer :slot-index) (get lane :slot-index)))
+
+(def lane-target-label (port)
+  (if (= port nil)
+    "unbound"
+    (if (get port :target-step-param)
+      (get port :target-step-param)
+      (if (get port :target-instance-id)
+        (let ((target (track-process-slot SEQ.current-track (get port :target-instance-id))))
+          (if target (slot-display-name target) (get port :target)))
+        (get port :target)))))
+
+(def lane-chip (text filled dim)
+  ;; `filled` / `dim` are 1 or 0. No border: a thin SDF border on a small
+  ;; rounded box floods it with the border color.
+  (box :height 1.1 :padding 0.25 :corner-radius 6
+    :background-color (if (= filled 1)
+                        (if (= dim 1) (rgba 0.94 0.63 0.24 0.45) :process-lane-accent)
+                        (rgba 0.94 0.63 0.24 0.14))
+    (label text :font-size 9
+      :color (if (= filled 1) :black (if (= dim 1) :dim :process-lane-accent))
+      :bg :transparent)))
+
+(def lane-strip-row-label (text)
+  (label text :v-align :center :width 2.4 :font-size 8 :color :dim :bg :transparent))
+
+(def lane-strip-in-row (track lane)
+  (let ((writer (lane-writer-slot track lane)))
+    (h-stack :width :fill :gap 0.3 :align :center
+      (lane-strip-row-label "IN")
+      (if writer
+        (lane-chip (str "← " (slot-display-name writer)) 1 (if (lane-wire-backward? track writer lane) 1 0))
+        (lane-chip "lane" 0 0)))))
+
+(def lane-strip-mode-button (track slot text value)
+  (let ((mode-inlet (slot-inlet-named slot "mode"))
+        (current (if (> (get mode-inlet :value) 0.5) 1 0)))
+    (button text
+      :key (str "lane-mode-" (get slot :instance-id) "-" value)
+      :flex 1 :height 1.1 :padding 0 :font-size 8.5
+      :background-color (if (= current value) :process-lane-accent :transparent)
+      :border-color :transparent
+      :color (if (= current value) :black :dim)
+      :on-click (lambda (event)
+        (if (lane-edit-all?)
+          (seq-set-process-inlet track (get slot :instance-id) "mode" value :all)
+          (seq-set-process-inlet track (get slot :instance-id) "mode" value))))))
+
+(def lane-strip-mode-row (track slot)
+  (if (slot-inlet-named slot "mode")
+    (h-stack :width :fill :gap 0.15 :padding 0.1 :corner-radius 6
+      :background-color (rgba 0 0 0 0.25)
+      (lane-strip-mode-button track slot "accumulate" 0)
+      (lane-strip-mode-button track slot "pass" 1))
+    (box :height 0)))
+
+;; Fan-out rows: extra targets on the OUT port, each with its own lo..hi
+;; that the port value is rescaled into (the slot's lo/hi is the source).
+(def lane-fanout-label (entry)
+  (if (get entry :target-step-param)
+    (get entry :target-step-param)
+    (if (get entry :target-instance-id)
+      (let ((target (track-process-slot SEQ.current-track (get entry :target-instance-id))))
+        (if target (slot-display-name target) (get entry :target)))
+      (get entry :target))))
+
+(def lane-fanout-range-picker (track slot port entry which)
+  (number-picker
+    :key (str "lane-fanout-" (get slot :instance-id) "-" (get port :name) "-" (get entry :index) "-" which)
+    :value (get entry which)
+    :min -1000 :max 1000 :decimals 2
+    :noui true :font-size 8.5 :text-color :white :text-align :right
+    :on-change (lambda (value)
+      (let ((lo (if (= which :lo) value (get entry :lo)))
+            (hi (if (= which :hi) value (get entry :hi))))
+        (if (lane-edit-all?)
+          (seq-set-process-port-fanout-range track (get slot :instance-id) (get port :name) (get entry :index) lo hi :all)
+          (seq-set-process-port-fanout-range track (get slot :instance-id) (get port :name) (get entry :index) lo hi))))
+    :width 2.9 :height 1.0))
+
+(def lane-fanout-row (track slot port entry)
+  (h-stack :width :fill :gap 0.25 :align :center
+    :key (str "lane-fanout-row-" (get slot :instance-id) "-" (get port :name) "-" (get entry :index))
+    (box :width 2.4 :height 0.1)
+    (lane-chip (str "→ " (lane-fanout-label entry)) 1 0)
+    (box :flex 1 :height 0.1)
+    (lane-fanout-range-picker track slot port entry :lo)
+    (label "…" :font-size 8 :color :dim :bg :transparent)
+    (lane-fanout-range-picker track slot port entry :hi)
+    (button "×"
+      :key (str "lane-fanout-remove-" (get slot :instance-id) "-" (get port :name) "-" (get entry :index))
+      :width 1.2 :height 1.0 :padding 0 :font-size 9
+      :background-color :transparent :border-color :transparent :color :dim
+      :on-click (lambda (event)
+        (if (lane-edit-all?)
+          (seq-remove-process-port-fanout track (get slot :instance-id) (get port :name) (get entry :index) :all)
+          (seq-remove-process-port-fanout track (get slot :instance-id) (get port :name) (get entry :index)))))))
+
+(def lane-fanout-rows (track slot)
+  (let ((port (slot-first-port-where slot :mappable)))
+    (if port
+      (each (if (get port :fanout) (get port :fanout) '()) |entry|
+        (lane-fanout-row track slot port entry))
+      nil)))
+
+;; While mapping, a port that is already bound gains the clicked target as a
+;; fan-out entry instead of replacing its binding.
+(def lane-armed-port-bound? ()
+  (let ((slot (track-process-slot pc/process-map-track pc/process-map-instance-id)))
+    (if slot
+      (let ((port (slot-port-named slot pc/process-map-port)))
+        (and port (= (get port :status) "bound") true))
+      false)))
+
+(def lane-strip-out-row (track slot)
+  (let ((port (slot-first-port-where slot :mappable))
+        (armed (and port (pc/process-map-port-active? track slot port))))
+    (if port
+      (h-stack :width :fill :gap 0.3 :align :center
+        (lane-strip-row-label "OUT")
+        (lane-chip (str "→ " (lane-target-label port)) (if (= (get port :status) "bound") 1 0) 0)
+        (box :flex 1 :height 0.1)
+        (button (if armed "mapping…" "map")
+          :key (str "lane-map-" (get slot :instance-id))
+          :width 5.2 :height 1.1 :padding 0 :font-size 8.5
+          :background-color (if armed :process-lane-accent :transparent)
+          :border-color :process-lane-accent
+          :color (if armed :black :process-lane-accent)
+          :on-click (lambda (event)
+            (pc/process-map-arm-port track slot port))))
+      (box :height 0))))
+
+;; Scalar inlets the strip edits in place. `mode` has its own row.
+(def lane-strip-inlet-row (track slot inlet)
+  (h-stack :width :fill :gap 0.3 :align :center
+    :key (str "lane-inlet-" (get slot :instance-id) "-" (get inlet :name))
+    (label (get inlet :label) :flex 1 :font-size 8.5 :color :white :bg :transparent)
+    (number-picker
+      :key (str "lane-inlet-control-" (get slot :instance-id) "-" (get inlet :name))
+      :value (get inlet :value)
+      :min (get inlet :min)
+      :max (get inlet :max)
+      :decimals (get inlet :decimals)
+      :noui true :font-size 9 :text-color :white :text-align :right
+      :on-change (lambda (value)
+        (if (lane-edit-all?)
+          (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) value :all)
+          (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) value)))
+      :width 4.6 :height 1.0)))
+
+;; Track-typed inlets (grab's `source`) pick from the track list by name.
+(def lane-track-option (index)
+  (str (+ index 1) " " (if (< index (len SEQ.track-names)) (nth SEQ.track-names index) "")))
+
+(def lane-track-options ()
+  (map lane-track-option (range 0 (len SEQ.track-names))))
+
+(def lane-track-option-index (label)
+  (reduce |acc index| (if (= label (lane-track-option index)) index acc)
+    0
+    (range 0 (len SEQ.track-names))))
+
+(def lane-strip-track-inlet-row (track slot inlet)
+  (h-stack :width :fill :gap 0.3 :align :center
+    :key (str "lane-inlet-" (get slot :instance-id) "-" (get inlet :name))
+    (label (get inlet :label) :flex 1 :font-size 8.5 :color :white :bg :transparent)
+    (dropdown
+      :key (str "lane-inlet-track-" (get slot :instance-id) "-" (get inlet :name))
+      :value (lane-track-option (floor (get inlet :value)))
+      :options (lane-track-options)
+      :on-change (lambda (label)
+        (let ((index (lane-track-option-index label)))
+          (if (lane-edit-all?)
+            (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) index :all)
+            (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) index))))
+      :width 7.5 :height 1.1 :font-size 8.5)))
+
+(def lane-strip-inlets (track slot)
+  ;; `mode` has its own row; `reset` is written by the shared reset lane's
+  ;; wire, never typed.
+  (each (filter (lambda (inlet) (not (or (= (get inlet :name) "mode") (= (get inlet :name) "reset"))))
+                (if (get slot :inlets) (get slot :inlets) '()))
+        |inlet|
+    (if (= (get inlet :kind) "track")
+      (lane-strip-track-inlet-row track slot inlet)
+      (lane-strip-inlet-row track slot inlet))))
+
+;; Reorder within the chain: move before the previous slot, or after the next.
+(def lane-strip-neighbor (track slot delta)
+  (let ((slots (track-process-slots track))
+        (idx (+ (get slot :slot-index) delta)))
+    (if (and (>= idx 0) (< idx (len slots))) (nth slots idx) nil)))
+
+(def lane-strip-move-button (track slot text delta)
+  (let ((neighbor (lane-strip-neighbor track slot delta)))
+    (button text
+      :key (str "lane-move-" (get slot :instance-id) "-" delta)
+      :width 1.6 :height 1.0 :padding 0 :font-size 9
+      :background-color :transparent :border-color :transparent
+      :color (if neighbor :dim (rgba 1 1 1 0.15))
+      :on-click (lambda (event)
+        (if neighbor
+          (if (< delta 0)
+            (seq-move-process-slot-before track (get slot :instance-id) (get neighbor :instance-id))
+            (let ((after (lane-strip-neighbor track slot 2)))
+              (seq-move-process-slot-before track (get slot :instance-id)
+                (if after (get after :instance-id) nil))))
+          nil)))))
+
+;; Scope: the lane's state history on this track (one sample per fire),
+;; published by the scheduler as SEQ.track-process-scopes. Accumulators show
+;; their running value, rand its held roll, count its count. Empty until the
+;; lane has fired on this track.
+(def lane-scope-entry (track slot)
+  (if SEQ.track-process-scopes
+    (let ((entries (if (< track (len SEQ.track-process-scopes))
+                     (nth SEQ.track-process-scopes track)
+                     '())))
+      (reduce |acc entry| (if (= (get entry :instance-id) (get slot :instance-id)) entry acc)
+        nil
+        entries))
+    nil))
+
+(def lane-scope-bound (slot name fallback)
+  (let ((inlet (slot-inlet-named slot name)))
+    (if inlet (get inlet :value) fallback)))
+
+(def lane-strip-scope-row (track slot)
+  (let ((entry (lane-scope-entry track slot)))
+    (if (and entry (> (len (get entry :values)) 0))
+      (v-stack :width :fill :gap 0.15
+        (h-stack :width :fill :gap 0.3 :align :center
+          (lane-strip-row-label "NOW")
+          (label (fmt "{:.2}" (get entry :current))
+            :font-size 10 :color :process-lane-accent :bg :transparent)
+          (box :flex 1 :height 0.1)
+          (label (get entry :state) :font-size 8 :color :dim :bg :transparent))
+        (box :width :fill :height 2.6 :corner-radius 6 :padding 0.2
+          :background-color (rgba 0 0 0 0.3)
+          (linegraph
+            :key (str "lane-scope-" track "-" (get slot :instance-id))
+            :width :fill :height :fill
+            :values (get entry :values)
+            :total-points 64
+            :min (lane-scope-bound slot "lo" 0)
+            :max (lane-scope-bound slot "hi" 1)
+            :line-color :process-lane-accent
+            :area true)))
+      nil)))
+
+(def lane-strip (track track-id mode)
+  (let ((lane (selected-process-lane track mode))
+      (slot (if lane (track-process-slot track (get lane :instance-id)) nil)))
+    (if (and lane slot)
+      (box :width 15 :padding 0.5 :corner-radius 10
+        :key (str "lane-strip-" track-id "-" (get slot :instance-id))
+        :background-color (rgba 1 1 1 0.04)
+        :border-width 0.08 :border-color (rgba 1 1 1 0.08)
+        (v-stack :width :fill :gap 0.35
+          (h-stack :width :fill :gap 0.3 :align :center
+            (label (slot-display-name slot)
+              :v-align :center
+              :font-size 11 :color :process-lane-accent :bg :transparent)
+            (box :flex 1 :height 0.1)
+            (if (get slot :project)
+              (lane-scope-chip)
+              (label "track lane" :v-align :center :font-size 7.5 :color :dim :bg :transparent))
+            (lane-strip-move-button track slot "▲" -1)
+            (lane-strip-move-button track slot "▼" 1))
+          (lane-strip-in-row track lane)
+          (lane-strip-mode-row track slot)
+          (lane-strip-out-row track slot)
+          (lane-fanout-rows track slot)
+          (lane-strip-scope-row track slot)
+          (lane-strip-inlets track slot)))
+      nil)))
+
+;; While a lane's map button is armed, the other lanes on the track offer
+;; their inlets as wire targets (bound through the writer's `wire` port).
+(def other-lanes-armed? (track)
+  (and (pc/process-map-active?)
+       (= pc/process-map-track track)
+       (let ((slot (track-process-slot track pc/process-map-instance-id)))
+         (and slot (slot-port-named slot "wire") true))))
+
+(def other-lane-chip (track lane)
+  (button (get lane :short-label)
+    :key (str "other-lane-" track "-" (get lane :instance-id) "-" (get lane :inlet))
+    :height 1.1 :padding 0.25 :font-size 9
+    :background-color :process-map-arm-bg
+    :border-color :process-lane-accent
+    :color :process-lane-accent
+    :on-click (lambda (event)
+      (let ((map-instance pc/process-map-instance-id))
+        (do
+          (pc/process-map-clear)
+          (if (lane-edit-all?)
+            (seq-bind-process-port track map-instance "wire"
+              (dict :kind "process-inlet"
+                    :process (get lane :class)
+                    :inlet (get lane :inlet)
+                    :instance-id (get lane :instance-id))
+              :all)
+            (seq-bind-process-port track map-instance "wire"
+              (dict :kind "process-inlet"
+                    :process (get lane :class)
+                    :inlet (get lane :inlet)
+                    :instance-id (get lane :instance-id))))
+          (status (str "Wired → " (get lane :short-label)
+                       (if (lane-edit-all?) " (all tracks)" ""))))))))
+
+(def other-lanes-row (track)
+  (if (other-lanes-armed? track)
+    (h-stack :width :fill :gap 0.3 :align :center :padding 0.2
+      (label "OTHER LANES" :font-size 8 :color :dim :bg :transparent)
+      (each (filter (lambda (lane) (not (= (get lane :instance-id) pc/process-map-instance-id)))
+                    (eseq.seqv-track-params/seqv-track-process-lanes track))
+            |lane|
+        (other-lane-chip track lane)))
+    nil))
 
 (def expanded-track-quick-controls (track track-id)
   (let ((mode (track-param-mode track-id)))
@@ -1553,6 +2014,7 @@
             (process-lane-selector track track-id mode)
             )
           
+          (h-stack :gap 0.5 :padding 0 :align :start
           (grid
             :cols 16
             :col-width 4
@@ -1590,7 +2052,7 @@
                         :items (if (= mode 5) SEQ.sync-labels '())
                         :font-size 11
                         :color :white
-                        :fill (expanded-slider-fill track)
+                        :fill (expanded-slider-fill-for-mode track mode)
                         :dot-color :dark-gray
                         :active active-ref
                         :track-r track-r
@@ -1644,7 +2106,9 @@
                     :color :dim)
                   (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
                     (step-playhead-dot
-                      :active (slot-playhead-binding track-id i)))))))))
+                      :active (slot-playhead-binding track-id i)))))))
+          (lane-strip track track-id mode))
+          (other-lanes-row track)))
       )
     )
   )
@@ -1936,11 +2400,27 @@
 (def pad-cell-track (pad)
   (if (= pad nil) -1 (get pad :track)))
 
+;; Every cell also takes a dragged pad ("rack-pad"): dropping one on an empty
+;; cell moves it to that note, dropping it on an occupied cell swaps the two.
 (def pad-cell-drop-types (pad)
   (let ((track (pad-cell-track pad)))
-    (if (and (>= track 0) (< track SEQ.num-tracks))
-      (sound-drop-types track)
-      (list "sample" "instrument"))))
+    (cons "rack-pad"
+      (if (and (>= track 0) (< track SEQ.num-tracks))
+        (sound-drop-types track)
+        (list "sample" "instrument")))))
+
+;; A pad dragged from the grid carries its rack and note; the drop target
+;; only needs to know which note it lands on. The drag stays within one rack:
+;; a pad from another group is ignored rather than adopted.
+(def pad-drag-payload (gidx pad)
+  (dict :group-id (eseq.drum-rack-v2/group-id gidx)
+        :pad-note (get pad :pad-note)))
+
+(def drop-pad-on-note (event gidx note)
+  (let ((payload (get event :payload)))
+    (if (= (get payload :group-id) (eseq.drum-rack-v2/group-id gidx))
+      (eseq.drum-rack-v2/move-pad-to-note gidx (get payload :pad-note) note)
+      (status "Drag pads within one rack"))))
 
 (def pad-cell-drop-meta (gidx cell pad)
   (let ((track (pad-cell-track pad)))
@@ -1953,9 +2433,11 @@
 
 (def drop-on-pad-cell (event gidx cell)
   (let ((track (pad-cell-track (pad-at gidx cell))))
-    (if (and (>= track 0) (< track SEQ.num-tracks))
-      (drop-on-track event)
-      (drop-on-empty-pad event gidx cell))))
+    (if (= (get event :drag-type) "rack-pad")
+      (drop-pad-on-note event gidx (pad-cell-note gidx cell))
+      (if (and (>= track 0) (< track SEQ.num-tracks))
+        (drop-on-track event)
+        (drop-on-empty-pad event gidx cell)))))
 
 ;; A pad's own fx ARE its member track's chain (docs/drum-rack-v2-spec.md,
 ;; "UI"), so "open this pad" means: make its member the track under edit. That
@@ -1999,13 +2481,14 @@
       :drop-types (pad-cell-drop-types pad)
       :drop-meta (pad-cell-drop-meta gidx cell pad)
       :on-drop (lambda (event) (drop-on-pad-cell event gidx cell))
-      ;; A hit both plays the pad and focuses it: auditioning IS how you pick
-      ;; the pad you then want to open, so the two must not need two gestures.
-      :on-click |x y r| (if (= pad nil)
-        nil
-        (do
-          (select-pad gidx pad)
-          (eseq.drum-rack-v2/trigger-pad gidx pad)))
+      ;; An occupied cell is a drag source: drag it onto another cell of this
+      ;; page, or onto a note in the octave map, to move the pad there.
+      :drag-type (if (= pad nil) nil "rack-pad")
+      :drag-modifier :none
+      :drag-payload (if (= pad nil) nil (pad-drag-payload gidx pad))
+      ;; A click focuses the pad; it no longer auditions it (the pad keys and
+      ;; the sequencer play it), so a click that turns into a drag is silent.
+      :on-click |x y r| (if (= pad nil) nil (select-pad gidx pad))
       (v-stack :width :fill :height :fill :gap 0.05
         ;; The note is the cell's own, so an empty cell still says which note
         ;; a drop here would claim.
@@ -2121,7 +2604,10 @@
 
 ;; The map lights on the same per-track binding the enlarged grid does, which
 ;; is what makes a hit on a pad the grid is NOT showing still visible here.
-(def pad-map-cell (gid tracks note)
+;;
+;; Each map cell is also a drop target for a dragged pad: that is how a pad
+;; reaches another octave in one gesture, without paging first.
+(def pad-map-cell (gidx gid tracks note)
   (let ((track (note-track tracks note)))
     (box :key (str "rack-pad-map-cell-" gid "-" note)
       :width pad-map-cell-width :height pad-map-cell-height
@@ -2130,6 +2616,12 @@
         '(rgba 0.19 0.20 0.21 1.0))
       :selected (if (>= track 0) (bind-seq (str "rack-pad-trigger-" track)) nil)
       :selected-background-color '(rgba 0.95 0.98 1.0 1.0)
+      :drop-types (list "rack-pad")
+      :drop-hover-background-color :mixer-strip-selected-border
+      :on-drop (lambda (event) (drop-pad-on-note event gidx note))
+      ;; Being a drop target makes the cell a pointer target too, so it must
+      ;; page the grid itself: the click no longer reaches the row.
+      :on-click |x y r| (set-pad-page gidx (eseq.drum-rack-v2/page-of-note note))
       :corner-radius 2)))
 
 ;; A row is the click target, not its cells: four notes is already a finer jump
@@ -2148,7 +2640,7 @@
       :on-click |x y r| (set-pad-page gidx (eseq.drum-rack-v2/page-of-note base))
       (h-stack :gap 0.08 :align :center
         (each (range 0 4) |col|
-          (pad-map-cell gid tracks (+ base col)))))))
+          (pad-map-cell gidx gid tracks (+ base col)))))))
 
 (def pad-map-intrinsic-width 3.6)
 

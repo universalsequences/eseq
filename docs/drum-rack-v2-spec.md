@@ -289,10 +289,14 @@ The grid view renders the rack as a header row plus full member rows:
     *bound* field, a hit repaints the cell without re-rendering the panel, and
     a rack with nothing playing publishes nothing at all.
 
-  A cell click hits the pad down the live path (member track at base pitch), so
-  choke groups and the member's own fx chain apply exactly as from the
-  keyboard, and it also focuses the pad so the panel can open that member's own
-  track.
+  A cell click focuses the pad so the panel can open that member's own track;
+  it does not audition it (the pad keys and the sequencer do), so a click that
+  becomes a drag is silent. An occupied cell is a `rack-pad` drag source: drop
+  it on any cell of the visible page, or on any note of the octave map, and
+  the pad moves to that cell's note without paging first. A drop on an occupied
+  note **swaps** the two pads (both keep their member track and choke group),
+  so the `set-rack-pad-note` edit never refuses a collision; nudging past a
+  neighbour trades places with it for the same reason.
 - The pad-note badge is a note name with −/+ nudges, and the choke selector is
   an Off/1..16 dropdown; both address the pad by *(rack group id, pad note)*,
   never by track index, and both are ordinary recorded edits.

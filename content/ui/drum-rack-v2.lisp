@@ -44,6 +44,7 @@
         choke-options
         choke-value-index
         set-pad-choke
+        move-pad-to-note
         trigger-pad
         note-label
         min-pad-page
@@ -325,8 +326,8 @@
 (def clamp-pad-note (note)
   (max (min-grid-pad-note) (min (max-grid-pad-note) note)))
 
-;; Move a pad by a semitone. The host rejects a collision with another pad and
-;; leaves the map alone, so the badge simply does not move. Nudges clamp to the
+;; Move a pad by a semitone. A collision with another pad swaps the two, so a
+;; nudge past a neighbour trades places with it. Nudges clamp to the
 ;; note-positional grid's range, not raw MIDI: notes above the top page's last
 ;; cell exist but no page can show them, and a nudge must never strand a pad
 ;; where the grid cannot render it.
@@ -358,6 +359,14 @@
 
 ;; A pad-grid hit takes the same live path a pad key takes: the pad's member
 ;; track at base pitch, so choke groups and the member's fx chain apply.
+;; Move a pad to an exact note: the pad-grid and octave-map drop targets. An
+;; occupied destination swaps the two pads (see set-rack-pad-note).
+(def move-pad-to-note (gidx pad-note note)
+  (if (= note pad-note)
+    nil
+    (host-command "set-rack-pad-note"
+      (dict :group-id (group-id gidx) :pad-note pad-note :note note))))
+
 (def trigger-pad (gidx pad)
   (host-command "trigger-rack-pad"
     (dict :group-id (group-id gidx) :pad-note (get pad :pad-note))))

@@ -3353,8 +3353,11 @@ impl App {
             if new_note == pad_note {
                 return Err("Pad note is unchanged".to_string());
             }
-            if rack.pad_index_for_note(new_note).is_some() {
-                return Err(format!("Drum rack pad {new_note} is already occupied"));
+            // An occupied destination SWAPS: dragging a pad onto another pad
+            // exchanges their notes, the way every hardware drum rack reorders
+            // pads. Both pads keep their member track and choke group.
+            if let Some(other) = rack.pad_index_for_note(new_note) {
+                rack.pads[other].pad_note = pad_note;
             }
             rack.pads[pad_index].pad_note = new_note;
             Ok(())
@@ -9826,15 +9829,73 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
     }
 }
 
+/// One process-lane slider drag in flight. Lane writes during the drag go
+/// straight to state (the scheduler picks them up per publish); the scene
+/// structure captured before the first write becomes the single history
+/// entry when the gesture ends. Capturing per drag event was what made the
+/// transport skip triggers: each capture serializes every scene under the
+/// pattern locks the scheduler needs.
+pub(crate) struct ProcessLaneDrag {
+    pub(crate) merge_key: MergeKey,
+    pub(crate) before: crate::sequencer::ProjectScenes,
+}
+
+const PROCESS_LANE_DRAG_GESTURE_ID: GestureId = GestureId(0x7072_6f63_6c61_6e65);
+
+pub fn apply_process_lane_drag_step(
+    app: &mut App,
+    track: usize,
+    instance_id: crate::process::ProcessInstanceId,
+    inlet: &str,
+    step: usize,
+    value: f32,
+) -> Result<(), String> {
+    let merge_key = MergeKey::new(format!(
+        "process-lane-drag:{track}:{}:{inlet}",
+        instance_id.0
+    ));
+    let continuing = app
+        .history
+        .active_gesture()
+        .is_some_and(|gesture| gesture.merge_key == merge_key);
+    if !continuing {
+        // Closes any other gesture (including an earlier lane drag, which
+        // commits through the hook in `finish_active_gesture`).
+        let before = app.capture_synchronized_scene_structure_state()?;
+        app.history
+            .begin_gesture(ActiveGesture {
+                id: PROCESS_LANE_DRAG_GESTURE_ID,
+                merge_key: merge_key.clone(),
+            })
+            .map_err(|_| "Another edit gesture is still active".to_string())?;
+        app.process_lane_drag = Some(ProcessLaneDrag { merge_key, before });
+    } else {
+        app.history.touch_active_gesture();
+    }
+    if !app
+        .state
+        .set_process_lane_value(track, instance_id, inlet, step, value)
+    {
+        return Err("Process lane target was missing".to_string());
+    }
+    Ok(())
+}
+
 pub fn finish_active_gesture(app: &mut App) -> bool {
     let publish_scheduler = app
         .history
         .active_gesture()
         .and_then(|gesture| app.history.active_gesture_patch(&gesture.merge_key))
         .is_some_and(pending_gesture_publishes_scheduler);
-    let finished = app.history.finish_active_gesture().is_some();
+    let finished_gesture = app.history.finish_active_gesture();
+    let finished = finished_gesture.is_some();
     if finished && publish_scheduler {
         app.state.publish_scheduler_snapshot();
+    }
+    if let (Some(gesture), Some(drag)) = (finished_gesture, app.process_lane_drag.take()) {
+        if gesture.merge_key == drag.merge_key {
+            app.commit_applied_scene_structure_mutation(drag.before, "Edit process lane");
+        }
     }
     if finished {
         if let Some((track, pattern)) = app.pending_song_row_invalidation.take() {
