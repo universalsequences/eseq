@@ -1,0 +1,24 @@
+(defsynth-ui
+  (eseq.effects.physical-model-surface/panel "PM HI-HAT"
+    (list
+      '("METAL" ("voicing.character" "Voicing" 2 :linear) ("body.size" "Size" 2 :log))
+      '("RING" ("body.decay" "Decay" 2 :log) ("body.damping" "Upper loss" 2 :log))
+      '("CONTACT" ("stick.hardness" "Hardness" 2 :linear) ("contact.openness" "Openness" 2 :linear))
+      '("BELL & LEVEL" ("body.bell" "Bell" 2 :linear) ("output.gain" "Output" 2 :linear)))
+    (list
+      (dict :title "Metal"
+        :view (lambda () (eseq.effects.physical-model-surface/cymbal-body-view))
+        :controls (lambda () '(("tuning.tracking" "Key tracking" 2)))
+        :hint "Voicing follows the reference collection; Size changes the body.")
+      (dict :title "Ring"
+        :view (lambda () (eseq.effects.physical-model-surface/cymbal-loss-view))
+        :controls (lambda () '(("contact.touch" "Choke" 2)))
+        :hint "Choke dissipates the ringing state; key-up leaves it ringing.")
+      (dict :title "Contact"
+        :view (lambda () (eseq.effects.physical-model-surface/cymbal-contact-view true))
+        :controls (lambda () '(("body.wash" "Wash" 2) ("output.color" "Spectral color" 2)))
+        :hint "Openness changes contact losses and the closed/open voicing.")
+      (dict :title "Output"
+        :view (lambda () (eseq.effects.physical-model-surface/cymbal-output-view))
+        :controls (lambda () '(("output.width" "Stereo spread" 2)))
+        :hint "Bell and Wash balance resolved and dense body resonances."))))

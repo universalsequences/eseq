@@ -1,0 +1,74 @@
+[
+  {
+    "family": "crash",
+    "articulation": "default",
+    "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Crash_13.wav",
+    "reference_sha256": "4e978dd3552f0dab1af66e98257de318418992ab85d8e6af5f0b8b7568a078c4",
+    "source_sha256": "c4da0dbd5b9cb9116888473c5d9d57d7331b9f9eca91409a442e6f6eb9b058d4",
+    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd",
+    "reference_concentration": {
+      "top_10_bin_power_fraction": 0.14580118169398248,
+      "bins_for_90_percent_power": 697
+    },
+    "model_concentration": {
+      "top_10_bin_power_fraction": 0.20778549044882483,
+      "bins_for_90_percent_power": 333
+    },
+    "model_peak": 0.35518747568130493,
+    "audition_order": "reference, model, reference, model; early RMS matched"
+  },
+  {
+    "family": "ride",
+    "articulation": "default",
+    "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_29.wav",
+    "reference_sha256": "35dbceae162d764bb01376a11c8fd2dc40d531b6dd7a2068d7d9048705ca70d9",
+    "source_sha256": "5a1210bc240a6a802f8f71f005652db5fcdfaa4dedcfa1d93de57fdc417a11b3",
+    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd",
+    "reference_concentration": {
+      "top_10_bin_power_fraction": 0.13877081122667853,
+      "bins_for_90_percent_power": 664
+    },
+    "model_concentration": {
+      "top_10_bin_power_fraction": 0.18901014514134384,
+      "bins_for_90_percent_power": 384
+    },
+    "model_peak": 0.4712795615196228,
+    "audition_order": "reference, model, reference, model; early RMS matched"
+  },
+  {
+    "family": "hihat",
+    "articulation": "closed",
+    "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Hihat - Close_8.wav",
+    "reference_sha256": "93f1d94a59d45cd5ea16db5e2527804a5e7850401562c4a2319e213f6e58ddb4",
+    "source_sha256": "68ccee405e85a65ec6ec4db4c5ce466216eeca63f62b6c89dd7984333dcfef68",
+    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd",
+    "reference_concentration": {
+      "top_10_bin_power_fraction": 0.10463886462413308,
+      "bins_for_90_percent_power": 1828
+    },
+    "model_concentration": {
+      "top_10_bin_power_fraction": 0.07490992231743933,
+      "bins_for_90_percent_power": 1914
+    },
+    "model_peak": 0.6084383726119995,
+    "audition_order": "reference, model, reference, model; early RMS matched"
+  },
+  {
+    "family": "hihat",
+    "articulation": "open",
+    "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Hihat - Open_3.wav",
+    "reference_sha256": "17f71bbfb70e207103b5d94b6de5a5c3da9f3e25db9ca81300c648a74ef72fa8",
+    "source_sha256": "68ccee405e85a65ec6ec4db4c5ce466216eeca63f62b6c89dd7984333dcfef68",
+    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd",
+    "reference_concentration": {
+      "top_10_bin_power_fraction": 0.22270232929168093,
+      "bins_for_90_percent_power": 362
+    },
+    "model_concentration": {
+      "top_10_bin_power_fraction": 0.18468048647780028,
+      "bins_for_90_percent_power": 376
+    },
+    "model_peak": 0.460068017244339,
+    "audition_order": "reference, model, reference, model; early RMS matched"
+  }
+]

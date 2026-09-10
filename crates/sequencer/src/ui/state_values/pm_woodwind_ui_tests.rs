@@ -144,6 +144,10 @@ fn check_woodwind_surface(instrument: &str, pages: usize) {
             ("pm-saron-tuning", &["amount", "tune"]),
             ("pm-saron-damper", &["touch", "release", "lift"]),
             ("pm-saron-output", &["drive", "gain"]),
+            ("pm-cymbal-body", &["size", "character"]),
+            ("pm-cymbal-loss", &["decay", "damping", "touch"]),
+            ("pm-cymbal-contact", &["hardness", "touch"]),
+            ("pm-cymbal-output", &["bell", "wash", "gain", "width"]),
             ("pm-gamelan-mallet", &["hardness", "contact", "spread"]),
             ("pm-gamelan-body", &["decay", "bloom", "loss"]),
             ("pm-gamelan-tuning", &["amount", "tune"]),
@@ -155,6 +159,10 @@ fn check_woodwind_surface(instrument: &str, pages: usize) {
                     assert!(matches!(node.props.get(*property), Some(Value::ReactiveRef { .. })), "{debug}: live {property}");
                 }
             }
+        }
+        if instrument == "PM Hi-Hat" && section == 2 {
+            let contact = find_layout_node_by_debug_name(display, "pm-cymbal-contact").unwrap();
+            assert!(matches!(contact.props.get("openness"), Some(Value::ReactiveRef { .. })));
         }
         if instrument == "PM Clarinet" && section == 0 {
             let reed = find_layout_node_by_debug_name(display, "pm-reed").unwrap();
@@ -199,3 +207,12 @@ fn piano_surface_controls_and_pages() { check_woodwind_surface("PM Piano", 8); }
 
 #[test]
 fn saron_surface_controls_and_pages() { check_woodwind_surface("PM Saron", 5); }
+
+#[test]
+fn crash_surface_controls_and_pages() { check_woodwind_surface("PM Crash", 4); }
+
+#[test]
+fn ride_surface_controls_and_pages() { check_woodwind_surface("PM Ride", 4); }
+
+#[test]
+fn hihat_surface_controls_and_pages() { check_woodwind_surface("PM Hi-Hat", 4); }

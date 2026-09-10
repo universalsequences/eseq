@@ -1,0 +1,56 @@
+;; $name / reduced dispersive plate, identified from Donit's cymbal recordings.
+;; Six frequency regions, each with three paths and an orthogonal junction.
+;; Eight resolved resonances carry the bell/foot modes; dense plate modes live
+;; in the delay network. No PCM, recorded phase or sampled envelope is used.
+;; Rebuild and validation: tools/pm-cymbals/README.md.
+$inputs
+$parameters
+$tables
+
+(defmacro cymbal-smooth (target ms)
+  (make-history previous)
+  (make-history ready)
+  (def pole (exp (/ -1 (* 0.001 ms samplerate))))
+  (def value (gswitch (read-history ready) (mix target (read-history previous) pole) target))
+  (write-history previous value)
+  (write-history ready 1)
+  value)
+(defmacro cymbal-pole (input pole)
+  (make-history previous)
+  (def value (mix input (read-history previous) pole))
+  (write-history previous value)
+  value)
+(make-history last_gate)
+(def held (gt gate 0.5))
+(def onset (max (gt trigger 0.5) (* held (lte (read-history last_gate) 0.5))))
+(write-history last_gate held)
+(def tick (max onset (eq (accum 1 0 0 16) 0)))
+(def strength (latch (clip velocity 0 1) onset))
+(def scale (latch (cymbal-smooth (/ (clip (mod size) 0.5 2)
+  (pow (/ (clip pitch 65.406391 1046.50226) 261.625565) (clip tracking 0 1))) 12) tick))
+(def decay_v (latch (cymbal-smooth (clip (mod decay) 0.2 3) 8) tick))
+(def damping_v (latch (cymbal-smooth (clip (mod damping) 0.25 3) 8) tick))
+(def touch_v (cymbal-smooth (clip (mod touch) 0 1) 2))
+$voicing
+;; Openness is a live loss condition, not an output envelope. Closed-hat
+;; coefficients include contact losses; touch adds a choke to every wave path
+;; and resolved resonance. Gate-off deliberately leaves percussion ringing.
+(def contact_loss (* 180 touch_v touch_v))
+
+;; Finite stick contact: resolved modes receive the compression impulse;
+;; unresolved modes receive the compact, stochastic rough-contact force.
+;; Randomness exists only while the stick contacts the metal; all subsequent
+;; sound is the free response of the passive body.
+(def hardness_v (latch (clip (mod hardness) 0 1) tick))
+(def contact_s (latch (* base_contact_s (pow 2 (* 2 (- 0.5 hardness_v)))) tick))
+(def age (accum (/ 1 samplerate) onset 0 100000))
+(def pulse_phase (clip (/ age contact_s) 0 1))
+(def friction (* (noise) (sin (* pi pulse_phase)) (lt age contact_s)))
+(def force_pole (exp (/ -1 (* samplerate 0.000025 (pow 2 (* 3 (- 0.5 hardness_v)))))))
+(def force (cymbal-pole (cymbal-pole
+  (* strength friction 0.23) force_pole) force_pole))
+(def point_force (cymbal-pole (cymbal-pole (* onset strength) force_pole) force_pole))
+$network
+$radiation
+$modes
+$output

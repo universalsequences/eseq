@@ -1,0 +1,36 @@
+;; Reduced relative shell motion and a unilateral contact junction.
+;; q/v use energy-normalized spring coordinates. The free rotation contracts;
+;; projection only removes potential energy. On impact the two-port scattering
+;; has eigenvalues 1 and -restitution, so it cannot create stored energy.
+;; A normalized projection couples this one contact to all six wave regions.
+(make-history shell_q)
+(make-history shell_v)
+(def shell_angle (/ (* twopi 195) (* samplerate scale)))
+(def shell_radius (exp (/ (- (+ 2 (* 12 (- 1 openness_v)))) samplerate)))
+(def shell_c (* shell_radius (cos shell_angle)))
+(def shell_s (* shell_radius (sin shell_angle)))
+(def shell_free_q (+ (* shell_c (read-history shell_q)) (* shell_s (read-history shell_v))))
+(def shell_free_v (+ (- (* shell_c (read-history shell_v)) (* shell_s (read-history shell_q))) (* onset strength 0.05)))
+(def shell_gap (* 0.08 openness_v openness_v))
+(def incoming_contact (* 0.408248290463863 (+ damped0 damped3 damped6 damped9 damped12 damped15)))
+(def shell_impact (* (gt shell_free_q shell_gap) (gt shell_free_v incoming_contact)))
+(def restitution (+ 0.2 (* openness_v 0.65)))
+(def collision_a (* 0.5 (- 1 restitution)))
+(def collision_b (* 0.5 (+ 1 restitution)))
+(def outgoing_contact (+ (* collision_a incoming_contact) (* collision_b shell_free_v)))
+(def collision_velocity (+ (* collision_b incoming_contact) (* collision_a shell_free_v)))
+(def contact_delta (* shell_impact (- outgoing_contact incoming_contact) 0.408248290463863))
+(write-history shell_q (min shell_free_q shell_gap))
+(write-history shell_v (gswitch shell_impact collision_velocity shell_free_v))
+
+;; Unresolved microscopic contacts randomize reflection phase while preserving
+;; wave energy. Noise controls an orthogonal matrix; it is never added to the
+;; ringing signal. A physical-rate pole bounds the contact correlation time.
+(def contact_memory (cymbal-pole shell_impact (exp (/ -1 (* samplerate 0.0007)))))
+(def contact_fraction (max (pow (- 1 openness_v) 8) contact_memory))
+(def roughness_pole (exp (/ (* -1 twopi 4800) samplerate)))
+(def roughness (cymbal-pole (- (* 2 (noise)) 1) roughness_pole))
+;; Bipolar uniform noise has variance 1/3; normalize the filtered variance.
+(def roughness_scale (sqrt (/ (* 3 (+ 1 roughness_pole)) (- 1 roughness_pole))))
+(def scatter_u (+ 1 (* 0.8 contact_fraction roughness roughness_scale)))
+(def scatter_norm (/ 2 (+ 2 (* scatter_u scatter_u))))

@@ -1,0 +1,29 @@
+{
+  "crash": {
+    "instrument": "factory:Physical Models/PM Crash",
+    "frames": 48000,
+    "peak": 0.44398435950279236,
+    "rms": 0.03253902122378349,
+    "non_finite_samples": 0,
+    "non_finite_state_slots": 0,
+    "source_sha256": "c4da0dbd5b9cb9116888473c5d9d57d7331b9f9eca91409a442e6f6eb9b058d4"
+  },
+  "ride": {
+    "instrument": "factory:Physical Models/PM Ride",
+    "frames": 48000,
+    "peak": 0.5890995264053345,
+    "rms": 0.013440221548080444,
+    "non_finite_samples": 0,
+    "non_finite_state_slots": 0,
+    "source_sha256": "5a1210bc240a6a802f8f71f005652db5fcdfaa4dedcfa1d93de57fdc417a11b3"
+  },
+  "hihat": {
+    "instrument": "factory:Physical Models/PM Hi-Hat",
+    "frames": 48000,
+    "peak": 0.7605482339859009,
+    "rms": 0.027198100462555885,
+    "non_finite_samples": 0,
+    "non_finite_state_slots": 0,
+    "source_sha256": "68ccee405e85a65ec6ec4db4c5ce466216eeca63f62b6c89dd7984333dcfef68"
+  }
+}

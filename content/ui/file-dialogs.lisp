@@ -114,6 +114,10 @@
         (label "https://freesound.org/people/memeshift/packs/40343/" :font-size 10 :color :dim :bg :transparent)
         (label "https://www.latentsonorities.org/" :font-size 10 :color :dim :bg :transparent)
         (label "https://creativecommons.org/licenses/by-nc/4.0/" :font-size 10 :color :dim :bg :transparent)
+        (label "Acoustic Cymbals Vol.1 — Donit" :font-size 11 :color :white :bg :transparent)
+        (label "PM Crash · PM Ride · PM Hi-Hat" :font-size 10 :color :dim :bg :transparent)
+        (label "Physical models calibrated from measurements; no recordings embedded." :font-size 10 :color :dim :bg :transparent)
+        (label "https://youtu.be/UaVYYyqF4IY" :font-size 10 :color :dim :bg :transparent)
         (label "TR-808 — Michael Fischer · TidalCycles · CC0" :font-size 11 :color :white :bg :transparent)
         (label "VCSL — Versilian Studios LLC · CC0" :font-size 11 :color :white :bg :transparent)))
     (h-stack :width :fill :gap 0.5

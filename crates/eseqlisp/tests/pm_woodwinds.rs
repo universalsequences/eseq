@@ -12,8 +12,11 @@ use eseqlisp::widget_render::patcher::{
 fn check_factory_sidecars(names: &[&str]) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     eseqlisp::defmacro_library::set_default_library_root(root.join("content/defmacros"));
+    // Allow generated instruments to be verified before installing them live.
+    let factory = std::env::var_os("ESEQ_PM_FACTORY_DIR").map(PathBuf::from)
+        .unwrap_or_else(|| root.join("content/instruments/Physical Models"));
     for name in names {
-        let path = root.join("content/instruments/Physical Models").join(name).join("dsp.lisp");
+        let path = factory.join(name).join("dsp.lisp");
         let source = std::fs::read_to_string(&path).unwrap();
         assert!(source_opens_in_patch_editor(&path, &source, PatcherIntent::Instrument));
         let node = LayoutNode {
@@ -100,4 +103,9 @@ fn factory_saron_sidecar_preserves_executable_controls() {
 #[test]
 fn factory_gamelan_sidecars_preserve_executable_controls() {
     check_factory_sidecars(&["PM Slenthem", "PM Bonang", "PM Slenthem Slendro", "PM Kempyang", "PM Kethuk"]);
+}
+
+#[test]
+fn factory_cymbal_sidecars_preserve_executable_controls() {
+    check_factory_sidecars(&["PM Crash", "PM Ride", "PM Hi-Hat"]);
 }

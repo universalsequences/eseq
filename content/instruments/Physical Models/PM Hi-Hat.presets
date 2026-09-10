@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "engine_name": "Physical Models/PM Hi-Hat",
+  "source_file": "instruments/Physical Models/PM Hi-Hat/dsp.lisp",
+  "presets": [
+    {
+      "id": "closed",
+      "name": "Closed Hat",
+      "base_note_offset": 0,
+      "params": {
+        "voicing.character": 0.5,
+        "body.size": 1,
+        "body.decay": 1,
+        "body.damping": 1,
+        "stick.hardness": 0.5,
+        "body.bell": 0.5,
+        "body.wash": 1,
+        "contact.touch": 0,
+        "output.color": 0,
+        "output.width": 0,
+        "output.gain": 1,
+        "tuning.tracking": 0,
+        "contact.openness": 0
+      }
+    },
+    {
+      "id": "open",
+      "name": "Open Hat",
+      "base_note_offset": 0,
+      "params": {
+        "voicing.character": 0.5,
+        "body.size": 1,
+        "body.decay": 1,
+        "body.damping": 1,
+        "stick.hardness": 0.5,
+        "body.bell": 0.5,
+        "body.wash": 1,
+        "contact.touch": 0,
+        "output.color": 0,
+        "output.width": 0,
+        "output.gain": 1,
+        "tuning.tracking": 0,
+        "contact.openness": 1
+      }
+    },
+    {
+      "id": "loose",
+      "name": "Loose Hat",
+      "base_note_offset": 0,
+      "params": {
+        "voicing.character": 0.5,
+        "body.size": 1,
+        "body.decay": 1.3,
+        "body.damping": 1,
+        "stick.hardness": 0.5,
+        "body.bell": 0.5,
+        "body.wash": 1,
+        "contact.touch": 0,
+        "output.color": 0,
+        "output.width": 0,
+        "output.gain": 1,
+        "tuning.tracking": 0,
+        "contact.openness": 0.3
+      }
+    },
+    {
+      "id": "soft",
+      "name": "Soft Tick",
+      "base_note_offset": 0,
+      "params": {
+        "voicing.character": 0.5,
+        "body.size": 1,
+        "body.decay": 0.6,
+        "body.damping": 1,
+        "stick.hardness": 0.15,
+        "body.bell": 0.6,
+        "body.wash": 1,
+        "contact.touch": 0,
+        "output.color": 0,
+        "output.width": 0,
+        "output.gain": 1,
+        "tuning.tracking": 0,
+        "contact.openness": 0
+      }
+    },
+    {
+      "id": "tight",
+      "name": "Tight Bright",
+      "base_note_offset": 0,
+      "params": {
+        "voicing.character": 0.85,
+        "body.size": 1,
+        "body.decay": 0.55,
+        "body.damping": 1,
+        "stick.hardness": 0.5,
+        "body.bell": 0.5,
+        "body.wash": 1,
+        "contact.touch": 0.08,
+        "output.color": 0,
+        "output.width": 0,
+        "output.gain": 1,
+        "tuning.tracking": 0,
+        "contact.openness": 0
+      }
+    },
+    {
+      "id": "wide",
+      "name": "Wide Shimmer",
+      "base_note_offset": 0,
+      "params": {
+        "voicing.character": 0.5,
+        "body.size": 1,
+        "body.decay": 1.8,
+        "body.damping": 1,
+        "stick.hardness": 0.5,
+        "body.bell": 0.5,
+        "body.wash": 1,
+        "contact.touch": 0,
+        "output.color": 0,
+        "output.width": 0.7,
+        "output.gain": 1,
+        "tuning.tracking": 0,
+        "contact.openness": 1
+      }
+    }
+  ]
+}

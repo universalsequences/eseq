@@ -643,3 +643,76 @@
   (v-stack :gap 0.15 (caption "Hand damping / marker = key-up / natural loss remains")
     (pm-gamelan-damper :debug-name "pm-gamelan-damper" :touch (bind "damper.touch")
       :release (bind "damper.release_s") :lift (bind "damper.lift") :rate rate)))
+
+(export cymbal-body-view cymbal-loss-view cymbal-contact-view cymbal-output-view)
+
+;; These diagrams explain the reduced plate and contact conditions; they do not
+;; display measured audio or claim to recover the source cymbal's geometry.
+(defwidget pm-cymbal-body
+  :width 35.3 :height 3.1 :state (size character) :bindable (size character)
+  :shader
+  (let ((u (/ x (* aspect (+ 0.45 (* size 0.2)))))
+        (v (* y 3.5))
+        (radius (sqrt (+ (* u u) (* v v))))
+        (rings (abs (sin (* radius (+ 18 (* character 22)))))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (- (abs (- radius 1)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (max (- radius 0.94) (- rings 0.07)) (rgba 0.16 0.06 0.11 0.3))
+      (sdf/paint (- (abs (- radius 0.22)) 0.035) (eseq.effects.physical-model-surface/screen-ink)))))
+(def cymbal-body-view ()
+  (v-stack :gap 0.15 (caption "Plate size and voicing / dense inharmonic resonance")
+    (pm-cymbal-body :debug-name "pm-cymbal-body" :size (bind "body.size")
+      :character (bind "voicing.character"))))
+
+(defwidget pm-cymbal-loss
+  :width 35.3 :height 3.1 :state (decay damping touch) :bindable (decay damping touch)
+  :shader
+  (let ((time (* 1.5 (+ 1 (/ x aspect))))
+        (loss (* 180 touch touch))
+        (low (- 0.8 (* 1.5 (pow 2.7182818 (* (- time) (+ (/ 2 decay) loss))))))
+        (high (- 0.8 (* 1.5 (pow 2.7182818 (* (- time) (+ (/ (* 5 damping) decay) loss)))))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (- (abs (- y low)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (- (abs (- y high)) 0.025) (rgba 0.16 0.06 0.11 0.45)))))
+(def cymbal-loss-view ()
+  (v-stack :gap 0.15 (caption "Illustrative low / high loss and hand choke / 0-3 s")
+    (pm-cymbal-loss :debug-name "pm-cymbal-loss" :decay (bind "body.decay")
+      :damping (bind "body.damping") :touch (bind "contact.touch"))))
+
+(defwidget pm-cymbal-contact
+  :width 35.3 :height 3.1 :state (hardness openness touch hat) :bindable (hardness openness touch)
+  :shader
+  (let ((u (/ x aspect)) (profile (* 0.1 (- 1 (* u u))))
+        (gap (* hat (+ 0.015 (* openness 0.4))))
+        (upper (- y (+ profile gap))) (lower (+ y (+ profile gap)))
+        (tip (+ 0.12 (* hardness 0.45)))
+        (stick (- (abs (- y (+ tip (* 0.3 (+ u 0.3))))) (+ 0.025 (* (- 1 hardness) 0.045)))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (max (- (abs u) 0.85) (- (abs upper) 0.026)) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (max (- 0.5 hat) (max (- (abs u) 0.85) (- (abs lower) 0.026))) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (max (- (abs (+ u 0.25)) 0.3) stick) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (max (- (abs (- u 0.65)) (* touch 0.12)) (- (abs (- y 0.4)) (* touch 0.28)))
+        (rgba 0.16 0.06 0.11 0.45)))))
+(def cymbal-contact-view (hat?)
+  (v-stack :gap 0.15 (caption (if hat? "Stick contact and shell gap / closing adds loss" "Stick hardness and hand contact"))
+    (pm-cymbal-contact :debug-name "pm-cymbal-contact" :hardness (bind "stick.hardness")
+      :openness (if hat? (bind "contact.openness") 0) :touch (bind "contact.touch") :hat (if hat? 1 0))))
+
+(defwidget pm-cymbal-output
+  :width 35.3 :height 3.1 :state (bell wash gain width) :bindable (bell wash gain width)
+  :shader
+  (let ((u (/ x aspect)) (extent (+ 0.08 (* width 0.24)))
+        (b (- 0.8 (* 0.38 bell gain))) (w (- 0.8 (* 0.38 wash gain)))
+        (bell-bar (max (- (abs (+ u 0.4)) 0.065) (max (- b y) (- y 0.8))))
+        (wash-bar (max (- (abs (- u 0.35)) extent) (max (- w y) (- y 0.8)))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint bell-bar (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint wash-bar (rgba 0.16 0.06 0.11 0.45)))))
+(def cymbal-output-view ()
+  (v-stack :gap 0.15 (caption "Bell / dense wash / output and stereo radiation")
+    (pm-cymbal-output :debug-name "pm-cymbal-output" :bell (bind "body.bell")
+      :wash (bind "body.wash") :gain (bind "output.gain") :width (bind "output.width"))))
