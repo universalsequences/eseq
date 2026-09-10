@@ -291,6 +291,8 @@
               :wrap true
               :bg :transparent)))))))
 
+;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
+(set-buffer-mode-for "*agent*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*agent*"
   (let ((agent-generation AGENT.generation))
     (v-stack :width :fill :height :fill :gap 0.5 :padding 0.65
@@ -359,6 +361,8 @@
                 :active (if (or (busy?) (not (= prompt ""))) 1 0)
                 :canceling (if (busy?) 1 0)))))))))
 
+;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
+(set-buffer-mode-for "*agent-artifacts*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*agent-artifacts*"
   (let ((agent-generation AGENT.generation))
     (artifact-panel)))

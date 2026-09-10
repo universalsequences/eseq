@@ -13,7 +13,7 @@
     6)))))))
 (def tri-knob (name title width height size decimals taper)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s (tri-owner name) name title
-    width height size (tri-accent) decimals taper :widget-knob-track 9.0 8.0 :right))
+    width height size (tri-accent) decimals taper :widget-knob-track 10.5 9.5 :right))
 (def tri-panel (section width height body)
   (box :width width :height height :padding 0.12 :corner-radius 2
     :debug-name (str "tri-panel-" section)
@@ -59,7 +59,7 @@
       (subtree :key (str "tri-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (v-stack :width width :height height :gap 0.06
-          (label title :v-align :center :height label-height :font-size 7.6 :color ink :bg :transparent)
+          (label title :v-align :center :height label-height :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)

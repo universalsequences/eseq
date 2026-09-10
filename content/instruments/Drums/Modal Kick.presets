@@ -28,10 +28,10 @@
         "port": 1.0,
         "release": 200.0,
         "release2": 200.0,
-        "click": 0.6,
+        "click": 0.1,
         "bend": 0.3,
         "shell_level": 0.05,
-        "level": 0.15
+        "level": 0.3
       }
     },
     {
@@ -46,8 +46,8 @@
         "port": 0.0,
         "bend": 0.4,
         "bottom_mix": 0.9,
-        "click": 0.3,
-        "shell_pitch": 240.0
+        "click": 0.1,
+        "shell_pitch": 19.506
       }
     },
     {
@@ -70,10 +70,10 @@
       "params": {
         "muffle": 0.4,
         "port": 1.0,
-        "punch": 0.6,
-        "drive": 0.35,
-        "shell_level": 0.5,
-        "click": 0.8,
+        "punch": 0.25,
+        "drive": 0,
+        "shell_level": 0.25,
+        "click": 0.3,
         "release": 380.0
       }
     },
@@ -90,7 +90,7 @@
       "params": {
         "tune": -42.0,
         "bright": 0.0,
-        "click": 0.15,
+        "click": 0,
         "bend": 0.3,
         "release": 1200.0,
         "release2": 1200.0,
@@ -109,8 +109,8 @@
         "port": 0.7,
         "release": 260.0,
         "release2": 300.0,
-        "click": 0.9,
-        "punch": 0.5
+        "click": 0.15,
+        "punch": 0.2
       }
     },
     {
@@ -119,9 +119,10 @@
       "base_note_offset": 0.0,
       "params": {
         "beater_hard": 0.004,
-        "click": 1.2,
+        "click": 0.2,
         "bright": 0.8,
-        "shell_level": 0.5
+        "shell_level": 0.2,
+        "punch": 0.15
       }
     },
     {
@@ -136,10 +137,10 @@
         "bend_time": 23.0,
         "bottom_mix": 0.6285708,
         "bright": 0.4,
-        "click": 0.001,
-        "drive": 0.2,
+        "click": 0.1,
+        "drive": 0,
         "head_couple": 1.2825592,
-        "level": 0.18,
+        "level": 0.9,
         "mod1_drift_div": 10.0,
         "mod1_drift_rate": 0.5,
         "mod1_drift_sync": 0.0,
@@ -224,7 +225,7 @@
         "release2": 790.0,
         "shell_decay": 10.0,
         "shell_level": 0.074999996,
-        "shell_pitch": 122.0,
+        "shell_pitch": 13.535,
         "stretch": 1.2714732,
         "tilt": 1.257857,
         "tone": 0.6709162,

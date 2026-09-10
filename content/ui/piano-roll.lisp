@@ -593,6 +593,9 @@
         (or (get (automation) :label) "Velocity")
         (automation-param-label row)))))
 
+;; Declare before compiling the callbacks that write this reactive state.
+(defstate automation-edit-value nil)
+
 (def select-automation-param (label)
   (let ((row (first-matching (lambda (p) (= (automation-param-label p) label))
                (automation-params))))
@@ -613,27 +616,38 @@
 ;; The lane's `on-change` contract: `(:set step value)` per press/drag frame,
 ;; `(:finish step value)` on release, `(:clear step value)` on double-click or
 ;; alt-click. Sets and clears go through the step-addressed p-lock commands
-;; the *step* panel uses, so undo and the variant registry see them the same
-;; way; a pinned pattern/take focus is display-only (device locks are live).
+;; the *step* panel uses for live device locks. Step parameters use the
+;; piano roll's focus-aware history path, including pinned patterns/takes.
 (def automation-action (kind step value)
+  ;; Release always clears feedback, even if the focus became read-only.
+  (if (= kind :finish) (set! automation-edit-value nil) nil)
   (if (not (get (automation) :editable))
     nil
     (match kind
       :set
       (do
         (set! automation-edit-value value)
-        (host-command "set-track-plock-entry"
-          (merge (automation-entry-payload step) :value value)))
+        (if (= (get (automation) :target) "step-param")
+          (automation-step-edit "piano-roll-gesture-update" :update-automation-step-param step value)
+          (host-command "set-track-plock-entry"
+            (merge (automation-entry-payload step) :value value))))
       :clear
       (do
         (set! automation-edit-value nil)
-        (host-command "clear-track-plock-entry" (automation-entry-payload step)))
-      :finish nil)))
+        (if (= (get (automation) :target) "step-param")
+          (automation-step-edit "piano-roll-history-action" :set-automation-step-param
+            step (get (automation) :default))
+          (host-command "clear-track-plock-entry" (automation-entry-payload step))))
+      :finish
+      (if (= (get (automation) :target) "step-param")
+        (automation-step-edit "piano-roll-gesture-finish" :finish-automation-step-param step value)
+        nil))))
 
-;; Value readout of the point under edit (the last :set), cleared when the
-;; lane changes parameter. Ableton shows the hovered point's value beside
-;; the axis; a drag is the moment the number matters most here.
-(defstate automation-edit-value nil)
+(def automation-step-edit (command action step value)
+  (host-command command
+    (dict :track SEQ.current-track
+      :action (dict :type action
+        :step step :param-idx (get (automation) :param-idx) :value value))))
 
 (def format-lane-value (v)
   (if (= v nil)
@@ -726,6 +740,8 @@
           (piano-roll-timeline)))
       (automation-row))))
 
+;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
+(set-buffer-mode-for "*piano-roll*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*piano-roll*"
   (box :width :fill :height :fill
     (buffer-content)))

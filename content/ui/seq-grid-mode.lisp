@@ -106,7 +106,10 @@
     (eseq.step-grid-interactions/set-track-cursor-step (min (core/current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 ;; Cursor keys scoped to *metal* buffer via mode
-(define-mode "eseq.seq-grid-mode/seq-grid-mode" :read-only true :live-keys true :on-key "seq-grid-handle-key")
+;; Inherits the shared sequencer keymap (arrows, RET, BS/Delete, UP/DOWN);
+;; only the grid-specific keys are bound here.
+(define-mode "eseq.seq-grid-mode/seq-grid-mode" :read-only true :live-keys true :on-key "seq-grid-handle-key"
+  :inherit "eseq.sequencer-keys/sequencer-keys")
 ;; Named hold command: Rust recognizes this semantic binding on both key-down
 ;; and key-up, while the ordinary mode keymap remains the customization seam.
 ;; Rebind this command (and replace the old binding) in user lisp to move the
@@ -117,12 +120,7 @@
 ;; Global performance shortcut: editor widget focus runs before direct Lisp
 ;; bindings, so active text/value input still takes precedence.
 (bind-key ";" "roll-mode-toggle")
-(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "LEFT" "cursor-left")
-(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "RIGHT" "cursor-right")
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "C-a" "select-all-steps")
-(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "BS" "delete-selected-steps")
-(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "Delete" "delete-selected-steps")
-(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "RET" "cursor-toggle")
 ;; Qualified since S4: `seqv-collapse-all-tracks` was a compat alias, not the
 ;; def's base name, so the qualified→flat dispatch fallback cannot reach it.
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "C-h" "eseq.sequencer/collapse-all-tracks")

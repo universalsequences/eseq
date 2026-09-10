@@ -984,6 +984,8 @@
 
 ;; ── Transport layout ──
 
+;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
+(set-buffer-mode-for "*transport*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*transport*"
   (h-stack :width :fill :gap 0.5 :padding 0.5 :align :center
     

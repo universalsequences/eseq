@@ -7,7 +7,7 @@
 (def idclap-value (name) (reactive-value (idclap-bind name)))
 (def idclap-knob (section name title width)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title width 3.45 2.15
-    (idclap-c) 2 :linear :widget-knob-track 8.5 8 :center))
+    (idclap-c) 2 :linear :widget-knob-track 10 9.5 :center))
 (def idclap-label (title width)
   (box :width width :height 0.72 :background-color (idclap-c)
     (label title :width width :height 0.72 :h-align :center :v-align :center
@@ -214,8 +214,53 @@
       (idclap-num 3 "t_hp" "Tail HP" 8.4 2)
     )
   ))
+
+;; The bank's control envelope in normalized cutoff coordinates, before VCO
+;; slew and note tracking. This is an editable control diagram, not audio.
+(defwidget eseq-clap-bank-display
+  :width 35.2 :height 4.1
+  :state (floor depth duration) :bindable (floor depth duration)
+  :shader
+  (let ((u (clamp (/ (+ (/ x aspect) 0.94) 1.88) 0 1))
+        (env (exp (/ (* -6907.7553 u) (max duration 1))))
+        (position (clamp (+ floor (* depth env)) 0 1))
+        (curve (- 0.82 (* 1.64 position))))
+    (sdf/layer
+      (sdf/region :curve (sdf/rect width height) :yellow)
+      (sdf/paint (max (- y 0.82) (- curve y)) (rgba 0 0 0 0.14))
+      (sdf/paint (- (abs (- y curve)) 0.025) :black))))
+(def idclap-bank-wave ()
+  (let ((gesture (eseq.effects.drum-surface/parameter-gesture "bank_time" "bank_env")))
+    (v-stack :width 35.2 :height 4.65 :gap 0.05
+      (label "Cutoff control envelope / 0–1 s" :height 0.5 :font-size 8 :color :black :bg :transparent)
+      (eseq-clap-bank-display :debug-name "clap-bank-envelope"
+        :floor (idclap-bind "bank_freq") :depth (idclap-bind "bank_env") :duration (idclap-bind "bank_time")
+        :on-mouse-down (get gesture :down) :on-drag (get gesture :drag) :on-mouse-up (get gesture :up)))))
+(def idclap-page-4 ()
+  (v-stack :gap 0.15
+    (h-stack :gap 0.35
+      (idclap-num 4 "bank" "Mix" 8.4 2)
+      (idclap-num 4 "bank_freq" "Cutoff" 8.4 2)
+      (idclap-num 4 "bank_res" "Resonance" 8.4 2)
+      (idclap-num 4 "bank_env" "Env depth" 8.4 2))
+    (h-stack :gap 0.35
+      (idclap-num 4 "bank_time" "Time ms" 8.4 0)
+      (idclap-num 4 "bank_harm" "Harmonic" 8.4 1)
+      (idclap-num 4 "bank_crunch" "Crush" 8.4 2)
+      (idclap-num 4 "bank_drive" "Drive" 8.4 2))))
+(def idclap-page-5 ()
+  (h-stack :gap 0.35
+    (idclap-num 5 "bank_recon" "Reconstruct" 8.4 2)
+    (v-stack :width 8.4 :height 1.15 :gap 0.08
+      (label "Tracking" :height 0.5 :v-align :center :font-size 8 :color :black :bg :transparent)
+      (let ((p (idclap-p "bank_track")))
+        (dropdown :width 8.4 :height 0.55 :font-size 8.5 :options '("Free" "Key")
+          :value-index (idclap-bind "bank_track")
+          :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s 5 p))))
+    (idclap-num 5 "smoothing" "Slew ms" 8.4 1)))
+
 (def idclap-page-button (section title)
-  (button title :width 8.55 :height 0.8 :padding 0 :font-size 8
+  (button title :width 5.6 :height 0.8 :padding 0 :font-size 8
     :color (if (= (idclap-section) section) (idclap-c) :black)
     :border-color :transparent
     :background-color (if (= (idclap-section) section) :black (idclap-c))
@@ -223,16 +268,19 @@
 (def idclap-display ()
   (box :debug-name "clap-display" :width 35.8 :height 9.8 :padding 0.3 :background-color (idclap-c)
     (v-stack :gap 0.15
-      (label (str "808 CLAP / " (nth '("BURSTS" "TAIL" "FILTERS" "OUTPUT") (idclap-section)))
+      (label (str "808 CLAP / " (nth '("BURSTS" "TAIL" "FILTERS" "OUTPUT" "BANK" "BANK FX") (idclap-section)))
         :width 35.2 :height 0.7 :h-align :center :v-align :center :font-size 8 :color (idclap-c) :bg :black)
-      (idclap-wave)
+      (if (< (idclap-section) 4) (idclap-wave) (idclap-bank-wave))
       (box :width 35.2 :height 2.6
         (if (= (idclap-section) 0) (idclap-page-0)
           (if (= (idclap-section) 1) (idclap-page-1)
-            (if (= (idclap-section) 2) (idclap-page-2) (idclap-page-3)))))
+            (if (= (idclap-section) 2) (idclap-page-2)
+              (if (= (idclap-section) 3) (idclap-page-3)
+                (if (= (idclap-section) 4) (idclap-page-4) (idclap-page-5)))))))
       (h-stack :gap 0.3
         (idclap-page-button 0 "Bursts") (idclap-page-button 1 "Tail")
-        (idclap-page-button 2 "Filters") (idclap-page-button 3 "Output")))))
+        (idclap-page-button 2 "Filters") (idclap-page-button 3 "Output")
+        (idclap-page-button 4 "Bank") (idclap-page-button 5 "Bank FX")))))
 (defsynth-ui
   (h-stack :height 9.8 :gap 0.3 :align :start
     (v-stack :gap 0.2 (idclap-play) (idclap-shape))

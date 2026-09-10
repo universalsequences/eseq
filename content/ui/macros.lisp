@@ -161,10 +161,10 @@
   (box :height 1.2 :padding 0.12 :background-color :mixer-strip-bg
     (h-stack :gap 0.25 :align :baseline
       (label "Macro" :width 6.0 :font-size 8.5 :color :dim :bg :transparent)
-      (label "Path" :width 16.5 :font-size 8.5 :color :dim :bg :transparent)
-      (label "Name" :width 10.0 :font-size 8.5 :color :dim :bg :transparent)
-      (label "Min" :width 5.0 :font-size 8.5 :color :dim :bg :transparent)
-      (label "Max" :width 5.0 :font-size 8.5 :color :dim :bg :transparent)
+      (label "Path" :width 8.5 :font-size 8.5 :color :dim :bg :transparent)
+      (label "Name" :width 7.0 :font-size 8.5 :color :dim :bg :transparent)
+      (label "Min" :width 7.0 :font-size 8.5 :color :dim :bg :transparent)
+      (label "Max" :width 7.0 :font-size 8.5 :color :dim :bg :transparent)
       (label "Curve" :width 5.0 :font-size 8.5 :color :dim :bg :transparent)
       (label "State" :width 3.8 :font-size 8.5 :color :dim :bg :transparent)
       (label "" :width 1.4 :font-size 8.5 :color :dim :bg :transparent))))
@@ -172,26 +172,26 @@
 (def macro-mapping-editor-row (macro mapping)
   (subtree :key (str "macro-mapping-row-" (get macro :id) "-" (get mapping :mapping-idx))
     (box :debug-name (if (get mapping :suspended)
-           "macro-mapping-table-row-suspended"
-           "macro-mapping-table-row")
-         :height 1.35 :padding 0.12
-         :background-color (if (get mapping :suspended)
-           (rgba 0.92 0.55 0.18 0.10)
-           (if (= (get macro :id) eseq.macro-state/mapping-selected)
-             (rgba 0.18 0.85 0.42 0.10)
-             :mixer-control-bg))
-      (h-stack :gap 0.25 :align :baseline
-        (label (get macro :name) :width 6.0 :font-size 9 :color :foreground :bg :transparent)
-        (label (get mapping :path-label) :width 16.5 :font-size 8.5 :color :dim :bg :transparent)
-        (label (get mapping :param-label) :width 10.0 :font-size 8.5
-          :color (if (get mapping :suspended) :dim :foreground) :bg :transparent)
+        "macro-mapping-table-row-suspended"
+        "macro-mapping-table-row")
+      :height 1.35 :padding 0.12
+      :background-color (if (get mapping :suspended)
+        (rgba 0.92 0.55 0.18 0.10)
+        (if (= (get macro :id) eseq.macro-state/mapping-selected)
+          (rgba 0.18 0.85 0.42 0.10)
+          :mixer-control-bg))
+      (h-stack :gap 0.25 :align :center
+        (label (get macro :name) :width 6.0 :font-size 9 :color :foreground :bg :transparent :v-align :center)
+        (label (substring (get mapping :path-label) 0 18) :width 8.5 :font-size 8.5 :color :dim :bg :transparent :v-align :center)
+        (label (substring (get mapping :param-label) 0 14) :width 7.0 :font-size 8.5
+          :color (if (get mapping :suspended) :dim :foreground) :v-align :center :bg :transparent)
         (number-picker
           :key (str "macro-mapping-min-" (get macro :id) "-" (get mapping :mapping-idx))
           :debug-name "macro-mapping-min"
           :value (get mapping :display-min)
           :min (get mapping :domain-min) :max (get mapping :domain-max)
           :decimals (get mapping :display-decimals) :unit (get mapping :display-unit)
-          :noui true :width 5.0 :height 1.0 :font-size 8.5
+          :noui true :width 7.0 :height 1.0 :font-size 8.5
           :text-align :right :text-color :dim :edit-color :green
           :on-change (lambda (value)
             (macro-set-mapping-display-range macro mapping :min value)))
@@ -201,7 +201,7 @@
           :value (get mapping :display-max)
           :min (get mapping :domain-min) :max (get mapping :domain-max)
           :decimals (get mapping :display-decimals) :unit (get mapping :display-unit)
-          :noui true :width 5.0 :height 1.0 :font-size 8.5
+          :noui true :width 7.0 :height 1.0 :font-size 8.5
           :text-align :right :text-color :cyan :edit-color :green
           :on-change (lambda (value)
             (macro-set-mapping-display-range macro mapping :max value)))
@@ -213,6 +213,7 @@
           :width 5.0 :height 1.0 :font-size 8.0
           :on-change (lambda (curve) (macro-set-mapping-curve macro mapping curve)))
         (label (if (get mapping :suspended) "off" "live")
+          :v-align :center
           :debug-name "macro-mapping-state" :width 3.8 :font-size 8
           :color (if (get mapping :suspended) :orange :green) :bg :transparent)
         (button "×" :debug-name "macro-mapping-unmap" :width 1.4 :height 1.0 :font-size 9
@@ -270,7 +271,7 @@
       (v-stack :width :fill :gap 0.2
         (h-stack :width :fill :height 1.3 :align :center
           (label (if rack-active "RACK MACRO MAPPINGS" "MACRO MAPPINGS")
-            :width 35 :font-size 11 :color :foreground :bg :transparent)
+            :width 40 :font-size 11 :color :foreground :bg :transparent)
           (button "done" :width 5.0 :height 1.05 :font-size 8.5
             :background-color (rgba 0.18 0.85 0.42 0.22) :color :foreground
             :on-click (lambda (event)
@@ -281,6 +282,7 @@
           (scroll :width :fill :flex 1
             (macro-mapping-editor-row-list macros)))))))
 
+(set-buffer-mode-for "*macro-mappings*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*macro-mappings*" (macro-mapping-table))
 
 ;; Usage: (macro-knob :macro :delay-push)

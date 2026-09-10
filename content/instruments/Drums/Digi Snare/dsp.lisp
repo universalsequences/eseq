@@ -1,3 +1,5 @@
+(use-defmacro drum-envelope)
+
 ; DigiSnare: the synthesised Machinedrum snare machines — TRX-SD, EFM-SD,
 ; EFM-RS. The PI (physical) machines and the TRX rim are gone; the
 ; membrane/modal snares cover the physical ground far better.
@@ -51,6 +53,10 @@
   (def flt (svf (svf hp lp (clip (mod fltq) 0.5 8) 0) lp (clip (mod fltq) 0.5 8) 0))
   (md-clip (md-srr flt (mod srr)) (mod dist)))
 
+; DSR amplitude controls, shared across machines. Short notes release smoothly.
+(param sustain @default 0 @min 0 @max 1 @mod true @mod-mode additive)
+(param release @default 40 @min 1 @max 4000 @unit ms @mod true @mod-mode additive)
+
 (param engine @default 1 @min 1 @max 3)
 (param ptch @default 0 @min -48 @max 48 @mod true @mod-mode additive)
 (param dec @default 310 @min 20 @max 2500 @unit ms @mod true @mod-mode additive)
@@ -82,21 +88,24 @@
 
 (def eng (clip (round engine) 1 3))
 (def vel (clip velocity 0 1))
+; C4 preserves the authored voice; match 808 Clap's +/-2 octave note range.
+(def note_ratio (clip (/ pitch 261.6256) 0.25 4.0))
 (def jit (* (latch-trig (noise) trigger) humanize))
 (def base (clip (* pitch (semi (+ (mod ptch) (* jit 2)))) 35 1400))
-(def amp (md-env trigger (clip (mod dec) 20 2500)))
+(def amp (drum-envelope gate trigger (clip (mod dec) 20 2500) (mod sustain) (mod release)))
 (def bump_env (md-env trigger (clip benv 2 320)))
 (def nraw (noise))
-(def nfast (md-env trigger (clip (* ndec 0.38) 4 600)))
-(def nslow (md-env trigger (clip ndec 8 1800)))
-(def hp_noise (svf nraw (clip (mod hpf) 60 9000) 1.0 2))
-(def bp_noise (svf nraw (+ 850 (* (mod tone) 5200)) (+ 0.7 (* (mod tone) 3.0)) 1))
+(def nfast (drum-envelope gate trigger (clip (* ndec 0.38) 4 600) (mod sustain) (mod release)))
+(def nslow (drum-envelope gate trigger (clip ndec 8 1800) (mod sustain) (mod release)))
+(def noise_ratio (gswitch (eq eng 1) note_ratio 1))
+(def hp_noise (svf nraw (clip (* (clip (mod hpf) 60 9000) noise_ratio) 20 19000) 1.0 2))
+(def bp_noise (svf nraw (clip (* (+ 850 (* (mod tone) 5200)) noise_ratio) 20 19000) (+ 0.7 (* (mod tone) 3.0)) 1))
 (def snap_layer (+ (* hp_noise nfast) (* bp_noise nslow)))
 
 ; TRX-SD
-(def sd_f1 (clip (* 180 (semi (mod ptch)) (+ 1 (* 0.10 (mod tune))) (semi (* (mod bump) bump_env))) 55 2600))
-(def sd_f2 (clip (* 330 (semi (mod ptch)) (+ 1 (* 0.35 (mod tune))) (semi (* (mod bump) bump_env 0.55))) 90 4200))
-(def sd_body_env (md-env trigger (clip (* (mod dec) 0.42) 15 1000)))
+(def sd_f1 (clip (* 180 note_ratio (semi (mod ptch)) (+ 1 (* 0.10 (mod tune))) (semi (* (mod bump) bump_env))) 55 2600))
+(def sd_f2 (clip (* 330 note_ratio (semi (mod ptch)) (+ 1 (* 0.35 (mod tune))) (semi (* (mod bump) bump_env 0.55))) 90 4200))
+(def sd_body_env (drum-envelope gate trigger (clip (* (mod dec) 0.42) 15 1000) (mod sustain) (mod release)))
 (def sd_body (* sd_body_env (+ (* 0.62 (sin (* (retrig-phasor sd_f1 trigger) twopi))) (* 0.38 (sin (* (retrig-phasor sd_f2 trigger) twopi))))))
 (def trx_sd (md-clip (+ sd_body (* snap_layer (mod snap) 1.25)) (mod clip)))
 
@@ -106,10 +115,10 @@
 (def fm_m (sin (+ (* (retrig-phasor (clip (mod mfrq) 10 3000) trigger) twopi) (* (read-history fmfb) 5.8 (mod mod_amt)))))
 (write-history fmfb (clip fm_m -1 1))
 (def efm_body (* (sin (+ (* (retrig-phasor base trigger) twopi) (* fm_m fm_menv (mod mod_amt) 14))) amp))
-(def efm_sd (+ efm_body (* hp_noise (md-env trigger (clip ndec 8 1800)) (mod noise))))
+(def efm_sd (+ efm_body (* hp_noise (drum-envelope gate trigger (clip ndec 8 1800) (mod sustain) (mod release)) (mod noise))))
 
 ; EFM-RS
-(def efm_rs (* (sin (+ (* (retrig-phasor (* base 3.2) trigger) twopi) (* fm_m 7.0 fm_menv))) (md-env trigger (clip (* (mod dec) 0.18) 8 300))))
+(def efm_rs (* (sin (+ (* (retrig-phasor (* base 3.2) trigger) twopi) (* fm_m 7.0 fm_menv))) (drum-envelope gate trigger (clip (* (mod dec) 0.18) 8 300) (mod sustain) (mod release))))
 
 (def voice (selector eng trx_sd efm_sd efm_rs))
 (out (* (md-out voice) vel (clip (mod level) 0 1)) 1 @name audio)

@@ -2097,7 +2097,8 @@
   (if (= SEQ.song-region nil) false
     (do (seq-song-region-duplicate) true)))
 
-(define-mode "arrangement-mode" :read-only true :live-keys true)
+(define-mode "arrangement-mode" :read-only true :live-keys true
+  :inherit "eseq.sequencer-keys/sequencer-keys")
 ;; Super is the macOS primary modifier; Ctrl is the primary modifier elsewhere.
 ;; Register both platform spellings so the authored UI remains portable.
 (mode-bind-key "arrangement-mode" "s-p" "arrangement-place-key")

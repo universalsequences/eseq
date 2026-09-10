@@ -178,7 +178,7 @@ Back to the [top page](index).")))
 
 ;; ── Rendering ──
 
-(def body-size 12)
+(def body-size 13)
 
 (def code-chip (text)
   (box :background-color :button-ghost-bg :corner-radius 3 :padding 0.08
@@ -211,11 +211,11 @@ Back to the [top page](index).")))
       (each (range 0 (len groups)) |i| (render-group (nth groups i))))))
 
 (def heading-size (head)
-  (if (= head 'h1) 20 (if (= head 'h2) 15 13)))
+  (if (= head 'h1) 24 (if (= head 'h2) 17 15)))
 
 (def render-heading (block)
   (label (nth block 1) :font-size (heading-size (nth block 0)) :color :white :bg :transparent
-    :width :fill :wrap true))
+    :width :fill :wrap true :color :dim))
 
 (def render-code-block (block)
   (let ((lines (string-split (nth block 2) "
@@ -231,7 +231,7 @@ Back to the [top page](index).")))
 (def render-list-item (marker item)
   (let ((groups (manual-wrap-runs (rest item))))
     (wrap :width :fill :gap 0.35 :row-gap 0.12
-      (label marker :font-size body-size :color :dim :bg :transparent)
+      (label marker :width 2 :font-size body-size :color :dim :bg :transparent)
       (each (range 0 (len groups)) |i| (render-group (nth groups i))))))
 
 (def render-list (block)
@@ -284,7 +284,7 @@ Back to the [top page](index).")))
 
 (def render-page ()
   (let ((blocks (rest manual-page)))
-    (v-stack :width :fill :gap 0.55 :debug-name "manual-page"
+    (v-stack :width :fill :gap 0.85 :debug-name "manual-page"
       (each (range 0 (len blocks)) |i| (render-block (nth blocks i))))))
 
 (def root-widget ()

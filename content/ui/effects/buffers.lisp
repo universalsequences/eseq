@@ -169,18 +169,19 @@
             (h-stack :debug-name "rack-fx-header-row" :gap 0.6 :align :center :width :fill
               (pf/fx-panel-header-leading-spacer)
               (label (substring (eseq.drum-rack-v2/group-name gidx) 0 12)
+                :v-align :center
                 :font-size 11 :color :white :bg :transparent)
               (box :flex 1 :height 0.15)
               (box :debug-name "rack-kit-save-button" :padding 0 :width 2 :align :center
                 (v-stack
                   (box :width 2.05 :height 1.45
-                  (fx-mini-save-icon
-                    :key (str "rack-fx-save-kit-" (eseq.drum-rack-v2/group-id gidx))
-                    :on-click |x y r|
-                    (eseq.browser/enter-kit-save
-                      (eseq.drum-rack-v2/group-id gidx)
-                      (eseq.drum-rack-v2/group-name gidx))
-                    :active 0))))
+                    (fx-mini-save-icon
+                      :key (str "rack-fx-save-kit-" (eseq.drum-rack-v2/group-id gidx))
+                      :on-click |x y r|
+                      (eseq.browser/enter-kit-save
+                        (eseq.drum-rack-v2/group-id gidx)
+                        (eseq.drum-rack-v2/group-name gidx))
+                      :active 0))))
               (box :width 0.5)))
           (pf/fx-panel-body "rack-fx-pads-body"
             ;; Mini-map on the LEFT of the enlarged grid, the way a drum rack
@@ -275,12 +276,21 @@
 (def paste-effect ()
   (seq-paste-effect))
 
-(define-mode "seq-fx-mode" :read-only true :live-keys true)
-;; Handler strings qualify against THIS module; the two below live in other
-;; converted modules, so they are written pre-qualified (dispatch resolves an
+;; BS/Delete: selected steps win over the selected effect, as the host table
+;; used to order them; with no step selection the parent binding declines and
+;; the effect delete runs.
+(def delete-key ()
+  (if (eseq.sequencer-keys/delete-selected-steps)
+    true
+    (eseq.effects.panel-widgets/delete-selected-effect)))
+
+(define-mode "seq-fx-mode" :read-only true :live-keys true
+  :inherit "eseq.sequencer-keys/sequencer-keys")
+;; Handler strings qualify against THIS module; handlers that live in other
+;; converted modules are written pre-qualified (dispatch resolves an
 ;; already-qualified name directly, resolve_handler_name).
-(mode-bind-key "seq-fx-mode" "BS" "eseq.effects.panel-widgets/delete-selected-effect")
-(mode-bind-key "seq-fx-mode" "Delete" "eseq.effects.panel-widgets/delete-selected-effect")
+(mode-bind-key "seq-fx-mode" "BS" "delete-key")
+(mode-bind-key "seq-fx-mode" "Delete" "delete-key")
 (mode-bind-key "seq-fx-mode" "s-c" "copy-selected-effect")
 (mode-bind-key "seq-fx-mode" "s-v" "paste-effect")
 (mode-bind-key "seq-fx-mode" "C-S-c" "copy-selected-effect")
@@ -295,7 +305,8 @@
       true)
     false))
 
-(define-mode "eseq.effects.buffers/seq-plock-panel-mode" :read-only true :live-keys true)
+(define-mode "eseq.effects.buffers/seq-plock-panel-mode" :read-only true :live-keys true
+  :inherit "eseq.sequencer-keys/sequencer-keys")
 (mode-bind-key "eseq.effects.buffers/seq-plock-panel-mode" "BS" "delete-selected-plock-row-key")
 (mode-bind-key "eseq.effects.buffers/seq-plock-panel-mode" "Delete" "delete-selected-plock-row-key")
 (set-buffer-mode-for "*track*" "eseq.effects.buffers/seq-plock-panel-mode")

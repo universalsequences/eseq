@@ -1,3 +1,5 @@
+(use-defmacro drum-envelope)
+
 ; Machinedrum-style hat machines: TRX-HH, EFM-HH, PI-HH.
 
 (def gate (in 1 @name gate))
@@ -28,13 +30,17 @@
   (def v (gswitch (gt trig 0.5) sig (read-history h)))
   (write-history h v)
   v)
-(defmacro md-ping-n (exc freq t60_ms)
+(defmacro md-ping-n (exc freq t60_ms gate release_ms)
   (make-history y1)
   (make-history y2)
-  (def r (exp (/ -6.907755 (max 1.0 (* t60_ms 0.001 samplerate)))))
+  ; Note-off damps the physical resonator itself, including its stored energy.
+  (def ring_ms (gswitch (gt gate 0.5) t60_ms (min t60_ms release_ms)))
+  (def r (exp (/ -6.907755 (max 1.0 (* ring_ms 0.001 samplerate)))))
   ; input normalized by resonator bandwidth so ring amplitude tracks the
   ; excitation instead of blowing up ~1/(1-r) at long decays (md-cymbal fix)
-  (def g (* 2.2 (sqrt (max 0.00001 (- 1.0 r)))))
+  ; Keep excitation gain independent of note-off damping to avoid a new strike.
+  (def natural_r (exp (/ -6.907755 (max 1.0 (* t60_ms 0.001 samplerate)))))
+  (def g (* 2.2 (sqrt (max 0.00001 (- 1.0 natural_r)))))
   (def y (- (+ (* exc g) (* 2 r (cos (* twopi (/ (clip freq 8 19000) samplerate))) (read-history y1))) (* r r (read-history y2))))
   (write-history y2 (read-history y1))
   (write-history y1 y)
@@ -51,8 +57,8 @@
   (write-history prev ph)
   (def sampled (latch x tick))
   (gswitch (lt a 0.0001) x sampled))
-(defmacro metal6 (tune spread jit mtal)
-  (def t (semi tune))
+(defmacro metal6 (ratio tune spread jit mtal)
+  (def t (* ratio (semi tune)))
   (def s (clip spread 0 2))
   (def duty (clip (+ 0.48 (* mtal 0.10)) 0.08 0.92))
   (+ (* 0.18 (polyblep_pulse (phasor (* 205.3 t (+ 1 (* s -0.18)) (+ 1 (* jit 0.015)))) duty (* 205.3 t)))
@@ -69,6 +75,10 @@
   (def lp (clip (+ (mod fltf) (mod fltw)) 40 19000))
   (def flt (svf (svf hp lp (clip (mod fltq) 0.5 8) 0) lp (clip (mod fltq) 0.5 8) 0))
   (md-clip (md-srr flt (mod srr)) (mod dist)))
+
+; DSR amplitude controls, shared across machines. Short notes release smoothly.
+(param sustain @default 0 @min 0 @max 1 @mod true @mod-mode additive)
+(param release @default 40 @min 1 @max 4000 @unit ms @mod true @mod-mode additive)
 
 (param engine @default 1 @min 1 @max 3)
 (param tune @default 0 @min -24 @max 24 @mod true @mod-mode additive)
@@ -107,15 +117,17 @@
 
 (def eng (clip (round engine) 1 3))
 (def vel (clip velocity 0 1))
+; C4 preserves the authored voice; match 808 Clap's +/-2 octave note range.
+(def note_ratio (clip (/ pitch 261.6256) 0.25 4.0))
 (def jit (* (latch-trig (noise) trigger) humanize))
-(def metal (metal6 (mod tune) (+ 0.25 (* (mod gap) 1.3)) jit (mod mtal)))
-(def mring (* (sin (* (phasor (* 540 (semi (mod tune)))) twopi)) (sin (* (phasor (* 800 (semi (mod tune)))) twopi)) (mod mtal)))
+(def metal (metal6 note_ratio (mod tune) (+ 0.25 (* (mod gap) 1.3)) jit (mod mtal)))
+(def mring (* (sin (* (phasor (* 540 note_ratio (semi (mod tune)))) twopi)) (sin (* (phasor (* 800 note_ratio (semi (mod tune)))) twopi)) (mod mtal)))
 
-(def trx_env1 (md-env trigger (clip (mod dec) 20 900)))
-(def trx_env2 (md-env trigger (clip (* (mod dec) 0.55) 10 500)))
-(def trx_b1 (* (svf metal 3440 (+ 1.0 (* (mod gap) 4.0)) 1) trx_env1))
-(def trx_b2 (* (svf metal 7100 (+ 1.0 (* (mod gap) 3.0)) 1) trx_env2 (+ 0.4 (* (mod gap) 0.8))))
-(def trx_hh (svf (svf (+ trx_b1 trx_b2 (* mring trx_env2 0.45)) (clip (mod hpf) 500 16000) 0.7 2) (clip (mod lpf) 1200 19000) 0.7 0))
+(def trx_env1 (drum-envelope gate trigger (clip (mod dec) 20 900) (mod sustain) (mod release)))
+(def trx_env2 (drum-envelope gate trigger (clip (* (mod dec) 0.55) 10 500) (mod sustain) (mod release)))
+(def trx_b1 (* (svf metal (clip (* 3440 note_ratio) 20 19000) (+ 1.0 (* (mod gap) 4.0)) 1) trx_env1))
+(def trx_b2 (* (svf metal (clip (* 7100 note_ratio) 20 19000) (+ 1.0 (* (mod gap) 3.0)) 1) trx_env2 (+ 0.4 (* (mod gap) 0.8))))
+(def trx_hh (svf (svf (+ trx_b1 trx_b2 (* mring trx_env2 0.45)) (clip (* (mod hpf) note_ratio) 20 19000) 0.7 2) (clip (* (mod lpf) note_ratio) 20 19000) 0.7 0))
 
 (make-history fmfb)
 (def fm_env (md-env trigger (clip mdec 1 500)))
@@ -127,9 +139,9 @@
 ; saturating into noise by 0.35; level trimmed to sit with TRX-HH
 (def efm_idx (* (mod mod_amt) (mod mod_amt) 14))
 (def efm_car (sin (+ (* cph twopi) (* m fm_env efm_idx))))
-(def efm_hh (* 0.30 efm_car (md-env trigger (clip (mod dec) 20 900)) tremolo))
+(def efm_hh (* 0.30 efm_car (drum-envelope gate trigger (clip (mod dec) 20 900) (mod sustain) (mod release)) tremolo))
 
-(def energy (md-env trigger (clip (mod dec) 20 900)))
+(def energy (drum-envelope gate trigger (clip (mod dec) 20 900) (mod sustain) (mod release)))
 ; clos = how far the cymbals are pressed together: shortens every mode's ring
 (def damp_mul (- 1 (* (/ (clip (mod clos) 0 127) 127) 0.85)))
 ; sparse random re-strikes (cymbals rattling against each other), not a noise bed
@@ -145,20 +157,20 @@
 ; against each other for the metallic swirl; flat-ish weights so no single
 ; mode reads as a bell
 (def pi_ring (* (mod dec) damp_mul (+ 0.20 (* (mod ring) 1.3))))
-(def pi_body (+ (* 0.12 (md-ping-n exc (* pf 1.00) (* pi_ring 1.00)))
-                (* 0.11 (md-ping-n exc (* pf 1.07) (* pi_ring 0.92)))
-                (* 0.13 (md-ping-n exc (* pf 1.34) (* pi_ring 0.85)))
-                (* 0.12 (md-ping-n exc (* pf 1.45) (* pi_ring 0.78)))
-                (* 0.14 (md-ping-n exc (* pf 1.72) (* pi_ring 0.70)))
-                (* 0.13 (md-ping-n exc (* pf 1.86) (* pi_ring 0.64)))
-                (* 0.13 (md-ping-n exc (* pf 2.18) (* pi_ring 0.58)))
-                (* 0.12 (md-ping-n exc (* pf 2.37) (* pi_ring 0.52)))
-                (* 0.11 (md-ping-n exc (* pf 2.63) (* pi_ring 0.47)))
-                (* 0.10 (md-ping-n exc (* pf 2.91) (* pi_ring 0.42)))
-                (* 0.09 (md-ping-n exc (* pf 3.10) (* pi_ring 0.38)))
-                (* 0.08 (md-ping-n exc (* pf 3.58) (* pi_ring 0.33)))
-                (* 0.07 (md-ping-n exc (* pf 4.21) (* pi_ring 0.29)))
-                (* 0.06 (md-ping-n exc (* pf 4.87) (* pi_ring 0.25)))))
+(def pi_body (+ (* 0.12 (md-ping-n exc (* pf 1.00) (* pi_ring 1.00) gate (mod release)))
+                (* 0.11 (md-ping-n exc (* pf 1.07) (* pi_ring 0.92) gate (mod release)))
+                (* 0.13 (md-ping-n exc (* pf 1.34) (* pi_ring 0.85) gate (mod release)))
+                (* 0.12 (md-ping-n exc (* pf 1.45) (* pi_ring 0.78) gate (mod release)))
+                (* 0.14 (md-ping-n exc (* pf 1.72) (* pi_ring 0.70) gate (mod release)))
+                (* 0.13 (md-ping-n exc (* pf 1.86) (* pi_ring 0.64) gate (mod release)))
+                (* 0.13 (md-ping-n exc (* pf 2.18) (* pi_ring 0.58) gate (mod release)))
+                (* 0.12 (md-ping-n exc (* pf 2.37) (* pi_ring 0.52) gate (mod release)))
+                (* 0.11 (md-ping-n exc (* pf 2.63) (* pi_ring 0.47) gate (mod release)))
+                (* 0.10 (md-ping-n exc (* pf 2.91) (* pi_ring 0.42) gate (mod release)))
+                (* 0.09 (md-ping-n exc (* pf 3.10) (* pi_ring 0.38) gate (mod release)))
+                (* 0.08 (md-ping-n exc (* pf 3.58) (* pi_ring 0.33) gate (mod release)))
+                (* 0.07 (md-ping-n exc (* pf 4.21) (* pi_ring 0.29) gate (mod release)))
+                (* 0.06 (md-ping-n exc (* pf 4.87) (* pi_ring 0.25) gate (mod release)))))
 ; wash: tanh intermodulation of the dense bank (the pairs intermodulate
 ; into yet more beating partials) plus a little noise ring-mod
 (def ringm (* pi_body (svf (noise) 7500 2.5 1) 3.0))

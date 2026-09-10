@@ -6,7 +6,7 @@
     (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
 (def idhat-knob (name title decimals)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s 0 name title 7.0 3.6 2.35
-    (idhat-c) decimals :linear :widget-knob-track 8.5 8 :center))
+    (idhat-c) decimals :linear :widget-knob-track 10 9.5 :center))
 (def idhat-panel (title a at ad b bt bd)
   (box :width 14.8 :height 4.8 :padding 0.2 :background-color :instrument-group-bg
     (v-stack :gap 0.15

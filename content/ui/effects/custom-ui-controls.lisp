@@ -94,7 +94,7 @@
             :mod-range-8-slot (rt/custom-ui-param-knob-mod-slot-prop p 8) :mod-range-8-depth (rt/custom-ui-param-knob-mod-depth-prop p 8)
             :mod-range-9-slot (rt/custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (rt/custom-ui-param-knob-mod-depth-prop p 9)
             :selected-mod-slot (rt/custom-ui-selected-mod-slot-prop p)
-            :font-size 8.5 :label-font-size 7.5
+            :font-size 10 :label-font-size 9.5
             :text-color (rt/custom-ui-param-plock-text-color p) :label-color :dim
             :plock-active (if (rt/custom-ui-param-plock-active? p) 1 0)
             :plock-default (rt/custom-ui-param-plock-default p)
@@ -114,7 +114,7 @@
           :value (rt/custom-ui-param-binding p)
           :min (rt/custom-ui-param-control-min p) :max (rt/custom-ui-param-control-max p) :decimals 0
           :step 1
-          :font-size 8.5 :label-font-size 7.5
+          :font-size 10 :label-font-size 9.5
           :text-color (rt/custom-ui-param-plock-text-color p) :label-color :dim
           :plock-active (if (rt/custom-ui-param-plock-active? p) 1 0)
           :plock-default (rt/custom-ui-param-plock-default p)

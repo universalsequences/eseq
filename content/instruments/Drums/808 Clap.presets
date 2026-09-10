@@ -7,6 +7,7 @@
     {"id": "Tight", "name": "Tight", "base_note_offset": 0.0, "params": {"flam": 0.7, "decay": 0.6, "body": 0.8}},
     {"id": "Dub Room", "name": "Dub Room", "base_note_offset": 0.0, "params": {"decay": 2.2, "body": 1.4, "bright": 0.6, "drive": 1.6}},
     {"id": "Wide Flam", "name": "Wide Flam", "base_note_offset": 0.0, "params": {"flam": 1.6, "snap": 1.3}},
-    {"id": "Dark", "name": "Dark", "base_note_offset": -4.0, "params": {"tune": -4, "bright": 0.2, "decay": 1.4}}
+    {"id": "Dark", "name": "Dark", "base_note_offset": -4.0, "params": {"tune": -4, "bright": 0.2, "decay": 1.4}},
+    {"id": "Sherman Clap", "name": "Sherman Clap", "base_note_offset": 0.0, "params": {"bank": 0.9, "bank_freq": 0.67, "bank_env": 0.67, "bank_res": 0.85, "bank_time": 115, "bank_harm": 5.5, "bank_crunch": 1, "bank_drive": 0.39, "bank_recon": 1, "bank_track": 1}}
   ]
 }

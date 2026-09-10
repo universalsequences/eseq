@@ -265,6 +265,7 @@
 (def add-instrument-track (name)
   (set! sbrowser-loading-instrument-name name)
   (host-command "add-track-instrument" (dict :name name))
+  (eseq.seq-panels/seq-show-fx-lower-panel)
   (status (str "Loading instrument: " name)))
 
 (def swap-track-instrument (track name preserve-track-selection)
@@ -276,6 +277,7 @@
         (host-command "swap-track-instrument"
           (dict :track track :name name
             :preserve-track-selection preserve-track-selection))
+        (eseq.seq-panels/seq-show-fx-lower-panel)
         (status (str "Loading instrument swap: " name)))
       (status "This track cannot load an instrument"))))
 
@@ -291,6 +293,7 @@
         (dict :track track :name name
           :preserve-track-selection preserve-track-selection))
       (set! sbrowser-tab "samples")
+      (eseq.seq-panels/seq-show-fx-lower-panel)
       (status "Loading sampler"))
     (add-builtin-instrument-track name)))
 
@@ -304,9 +307,7 @@
     (if name
       (if (= (get payload :kind) "builtin-instrument")
         (add-builtin-instrument-track name)
-        (do
-          (set! sbrowser-loading-instrument-name name)
-          (host-command "add-track-instrument" (dict :name name))))
+        (add-instrument-track name))
       (status "Drop an instrument, not a folder"))))
 
 (def drop-instrument-on-track (event)
@@ -740,12 +741,14 @@
           (if (eseq.seq-core-state/seq-has-selected-bus?)
             (host-command "add-builtin-bus-effect" (dict :bus eseq.seq-core-state/selected-bus :name name))
             (host-command "add-builtin-effect" (dict :name name)))
+          (eseq.seq-panels/seq-show-fx-lower-panel)
           (status (str "Add built-in effect: " name)))
         (if (= kind "custom-audio-effect")
           (do
             (if (eseq.seq-core-state/seq-has-selected-bus?)
               (host-command "add-bus-effect" (dict :bus eseq.seq-core-state/selected-bus :name name))
               (host-command "add-effect" (dict :name name)))
+            (eseq.seq-panels/seq-show-fx-lower-panel)
             (status (str "Add effect: " name)))
           (status "Choose an effect"))))))
 
@@ -760,11 +763,13 @@
     (if (= kind "midi-effect")
       (do
         (host-command "add-midi-fx" (dict :name name))
+        (eseq.seq-panels/seq-show-fx-lower-panel)
         (status (str "Add MIDI FX: " name)))
       (status "Choose a MIDI effect"))))
 
 (def load-preset (name)
   (host-command "load-instrument-preset" (dict :name name))
+  (eseq.seq-panels/seq-show-fx-lower-panel)
   (status (str "Load preset: " name)))
 
 (def select-script (item)
@@ -886,6 +891,9 @@
   (host-command "enter-new-instrument-editor" (dict)))
 
 (def add-builtin-instrument-track (name)
+  (if (or (= name "sampler") (= name "modulator") (= name "rack") (= name "layer-rack"))
+    (eseq.seq-panels/seq-show-fx-lower-panel)
+    nil)
   (if (= name "sampler")
     (add-sampler-track)
     (if (= name "modulator")
@@ -1837,6 +1845,8 @@
 (def refresh-buffer ()
   (render-widget-to-buffer "*samples*" (root-widget)))
 
+;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
+(set-buffer-mode-for "*samples*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*samples*"
   (root-widget))
 

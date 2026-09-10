@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "engine_name": "Drums/Digi Cymbal/",
+  "source_file": "instruments/Drums/Digi Cymbal/dsp.lisp",
+  "presets": [
+    {
+      "id": "808 Cymbal",
+      "name": "808 Cymbal",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 1,
+        "rich": 0.42,
+        "dec": 900,
+        "top": 0.38,
+        "ttun": 7100,
+        "size": 0.2,
+        "peak": 2.1
+      }
+    },
+    {
+      "id": "EFM Trash",
+      "name": "EFM Trash",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 2,
+        "dec": 620,
+        "mod_amt": 0.88,
+        "mfrq": 6900,
+        "mdec": 180,
+        "fb": 0.86,
+        "hpf": 6900,
+        "dist": 0.2
+      }
+    },
+    {
+      "id": "EFM Bell Ride",
+      "name": "EFM Bell Ride",
+      "base_note_offset": 0.0,
+      "params": {
+        "engine": 2,
+        "dec": 1600,
+        "mod_amt": 0.3,
+        "mfrq": 1120,
+        "mdec": 400,
+        "fb": 0.3,
+        "hpf": 900
+      }
+    }
+  ]
+}

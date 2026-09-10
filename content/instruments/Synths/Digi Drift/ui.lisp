@@ -5,7 +5,7 @@
 (def drift-section () (if (= eseq.vanilla/custom-ui-selected-section 1) 1 0))
 (def drift-knob (name title width height size decimals taper)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s (drift-section) name title
-    width height size (drift-accent) decimals taper :widget-knob-track 9.0 8.0 :right))
+    width height size (drift-accent) decimals taper :widget-knob-track 10.5 9.5 :right))
 (def drift-panel (width height body)
   (box :width width :height height :padding 0.12 :corner-radius 2
     :background-color :instrument-group-bg body))
@@ -76,7 +76,7 @@
       (subtree :key (str "drift-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (v-stack :width width :height height :gap 0.06
-          (label title :v-align :center :height label-height :font-size 7.6 :color ink :bg :transparent)
+          (label title :v-align :center :height label-height :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
@@ -99,7 +99,7 @@
       (subtree :key (str "drift-inline-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (h-stack :width width :height 0.8 :gap 0.25 :align :center
-          (label title :width 2.8 :height 0.8 :font-size 7.6 :color :dim :bg :transparent :v-align :center)
+          (label title :width 2.8 :height 0.8 :font-size 8.6 :color :dim :bg :transparent :v-align :center)
           (number-picker :width (- width 3.05) :height 0.75 :noui true :decimals decimals :font-size 8
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
@@ -258,7 +258,7 @@
         (box :width 33.2 :height 0.03 :background-color (drift-ink))
         (h-stack :gap 0.8 :align :end
           (h-stack :width 9.8 :height 1.1 :gap 0.3 :align :center
-            (label "Cycle" :width 3.3 :height 0.8 :font-size 7.6 :color (drift-ink) :bg :transparent :v-align :center)
+            (label "Cycle" :width 3.3 :height 0.8 :font-size 8.6 :color (drift-ink) :bg :transparent :v-align :center)
             (drift-option "env2_mode" (drift-env2-mode-options) 6.2 :fg :instrument-control-bg))
           (drift-num "cyc_rate_hz" "Rate Hz" 7.0 2 (drift-ink))
           (drift-num "cyc_tilt" "Tilt" 7.0 2 (drift-ink))

@@ -155,12 +155,6 @@
   (host-command (if (seq-has-selection?) "set-rack-macro-plock" "set-rack-macro-value")
     (dict :track track :id (get macro :id) :value value)))
 
-(def rack-macro-plock-row (macro)
-  (nth (filter |row|
-    (and (= (get row :target) "rack-macro")
-         (= (get row :param-idx) (get macro :id)))
-    SEQ.track-plocks) 0))
-
 (def rack-macro-display-value (macro)
   (if (get macro :value-field)
     (bind-seq (get macro :value-field))
@@ -192,7 +186,8 @@
         (run-hook "macro-mapping-sidebar-refresh-hook")))))
 
 (def rack-macro-control (track macro)
-  (let ((plock-row (rack-macro-plock-row macro)))
+  (let ((target (dict :track track :target "rack-macro" :param-idx (get macro :id)))
+        (has-locks (pc/target-plock-any? target)))
     (box :key (str "rack-macro-" (get macro :id)) :width 5.7 :height 4.35 :padding 0.18
       :corner-radius 9
       :background-color :mixer-strip-bg :border-color
@@ -202,15 +197,18 @@
           :width 5.2 :height 0.9 :font-size 8.5 :value (get macro :name)
           :on-change (lambda (name) (host-command "rename-rack-macro"
               (dict :track track :id (get macro :id) :name name))))
-        (knob-number :debug-name (str "rack-macro-knob-" (get macro :id))
-          :value (rack-macro-display-value macro) :min 0 :max 1 :decimals 2
-          :width 4.8 :height 2.45 :knob-size 1.8 :font-size 8 :label-font-size 8
-          :plock-active (rack-macro-plock-active macro)
-          :plock-default (rack-macro-plock-default macro)
-          :plock-color-r (pc/param-plock-color-r)
-          :plock-color-g (pc/param-plock-color-g)
-          :plock-color-b (pc/param-plock-color-b)
-          :on-change (lambda (value) (rack-macro-set track macro value)))
+        (box :debug-name (str "rack-macro-control-" (get macro :id))
+          :plock-any (if has-locks 1 0)
+          :on-right-click (lambda (event) (pc/open-target-plock-menu event target has-locks))
+          (knob-number :debug-name (str "rack-macro-knob-" (get macro :id))
+            :value (rack-macro-display-value macro) :min 0 :max 1 :decimals 2
+            :width 4.8 :height 2.45 :knob-size 1.8 :font-size 8 :label-font-size 8
+            :plock-active (rack-macro-plock-active macro)
+            :plock-default (rack-macro-plock-default macro)
+            :plock-color-r (pc/param-plock-color-r)
+            :plock-color-g (pc/param-plock-color-g)
+            :plock-color-b (pc/param-plock-color-b)
+            :on-change (lambda (value) (rack-macro-set track macro value))))
         (button (str "map " (get macro :mapping-count)) :width 4.6 :height 0.7 :font-size 7.5
           :active (if (= ms/rack-mapping-selected (get macro :id)) 1 0)
           :background-color :mixer-control-bg
@@ -376,6 +374,25 @@
       (> (reactive-value (bind-seq field)) 0.5)
       (get slot prop))))
 
+;; Slot controls are separate from instrument params, but use the same macro dot.
+(def rack-slot-param-macro-owned? (slot param)
+  (let ((panel (nth SEQ.instrument-panel 0)))
+    (and (= (get panel :track) (get slot :track))
+      (> (len (filter |macro|
+        (> (len (filter |mapping|
+          (and (= (get mapping :kind) "rack-slot")
+               (= (get mapping :rack-slot) (get slot :idx))
+               (= (get mapping :param) param))
+          (get macro :mappings))) 0)
+        (get panel :macros))) 0))))
+
+(def rack-slot-param-wrapper (slot param body)
+  (box :key (str "rack-slot-control-" (get slot :track) "-" (get slot :idx) "-" param)
+    :debug-name (str "rack-slot-control-" (get slot :idx) "-" param)
+    :background-color :transparent
+    :macro-owned (if (rack-slot-param-macro-owned? slot param) 1 0)
+    body))
+
 (def rack-slot-row (slot)
   (let ((delete-target (rack-slot-delete-target? slot))
       (selected (get slot :selected)))
@@ -426,50 +443,56 @@
               :active-color :white
               :bg :transparent)))
         
-        (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-          (label "T" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (rack-slot-display-value slot :base-note :base-note-field)
-            :min (get slot :base-note-min) :max (get slot :base-note-max) :decimals 0
-            :noui true :font-size 9.4
-            :text-align :center :text-color :dim :edit-color :yellow
-            :width 3.55 :height 0.84
-            :on-change (lambda (v) (rack-slot-set-base-note slot v))))
-        (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-          (label "G" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (rack-slot-display-value slot :gain :gain-field)
-            :min (get slot :gain-min) :max (get slot :gain-max) :decimals 2
-            :noui true :font-size 9.4
-            :text-align :center :text-color :dim :edit-color :yellow
-            :width 3.55 :height 0.84
-            :on-change (lambda (v) (rack-slot-set-gain slot v))))
-        (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-          (label "P" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (rack-slot-display-value slot :pan :pan-field)
-            :min (get slot :pan-min) :max (get slot :pan-max) :decimals 2
-            :noui true :font-size 9.4
-            :text-align :center :text-color :dim :edit-color :yellow
-            :width 3.55 :height 0.84
-            :on-change (lambda (v) (rack-slot-set-pan slot v))))
-        (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
-          (label "V" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (rack-slot-display-value slot :max-polyphony :max-polyphony-field)
-            :min (get slot :max-polyphony-min) :max (get slot :max-polyphony-max) :decimals 0
-            :noui true :font-size 9.4
-            :text-align :center :text-color :dim :edit-color :yellow
-            :width 3.55 :height 0.84
-            :on-change (lambda (v) (rack-slot-set-max-polyphony slot v))))
-        (button "M"
-          :width 2.0 :height 1.02 :padding 0 :font-size 9
-          :border-color :transparent
-          :background-color (if (rack-slot-display-scalar slot :mute :mute-field) :control-on-bg :mixer-control-bg)
-          :color (if (rack-slot-display-scalar slot :mute :mute-field) :control-on-fg :dim)
-          :on-click |x y r| (rack-slot-set-mute slot (not (rack-slot-display-scalar slot :mute :mute-field))))
-        (button "S"
-          :width 2.0 :height 1.02 :padding 0 :font-size 9
-          :border-color :transparent
-          :background-color (if (rack-slot-display-scalar slot :solo :solo-field) :control-on-bg :mixer-control-bg)
-          :color (if (rack-slot-display-scalar slot :solo :solo-field) :control-on-fg :dim)
-          :on-click |x y r| (rack-slot-set-solo slot (not (rack-slot-display-scalar slot :solo :solo-field))))))))
+        (rack-slot-param-wrapper slot "base-note"
+          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
+            (label "T" :font-size 8.2 :color :dim :bg :transparent)
+            (number-picker :value (rack-slot-display-value slot :base-note :base-note-field)
+              :min (get slot :base-note-min) :max (get slot :base-note-max) :decimals 0
+              :noui true :font-size 9.4
+              :text-align :center :text-color :dim :edit-color :yellow
+              :width 3.55 :height 0.84
+              :on-change (lambda (v) (rack-slot-set-base-note slot v)))))
+        (rack-slot-param-wrapper slot "gain"
+          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
+            (label "G" :font-size 8.2 :color :dim :bg :transparent)
+            (number-picker :value (rack-slot-display-value slot :gain :gain-field)
+              :min (get slot :gain-min) :max (get slot :gain-max) :decimals 2
+              :noui true :font-size 9.4
+              :text-align :center :text-color :dim :edit-color :yellow
+              :width 3.55 :height 0.84
+              :on-change (lambda (v) (rack-slot-set-gain slot v)))))
+        (rack-slot-param-wrapper slot "pan"
+          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
+            (label "P" :font-size 8.2 :color :dim :bg :transparent)
+            (number-picker :value (rack-slot-display-value slot :pan :pan-field)
+              :min (get slot :pan-min) :max (get slot :pan-max) :decimals 2
+              :noui true :font-size 9.4
+              :text-align :center :text-color :dim :edit-color :yellow
+              :width 3.55 :height 0.84
+              :on-change (lambda (v) (rack-slot-set-pan slot v)))))
+        (rack-slot-param-wrapper slot "max-polyphony"
+          (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
+            (label "V" :font-size 8.2 :color :dim :bg :transparent)
+            (number-picker :value (rack-slot-display-value slot :max-polyphony :max-polyphony-field)
+              :min (get slot :max-polyphony-min) :max (get slot :max-polyphony-max) :decimals 0
+              :noui true :font-size 9.4
+              :text-align :center :text-color :dim :edit-color :yellow
+              :width 3.55 :height 0.84
+              :on-change (lambda (v) (rack-slot-set-max-polyphony slot v)))))
+        (rack-slot-param-wrapper slot "mute"
+          (button "M"
+            :width 2.0 :height 1.02 :padding 0 :font-size 9
+            :border-color :transparent
+            :background-color (if (rack-slot-display-scalar slot :mute :mute-field) :control-on-bg :mixer-control-bg)
+            :color (if (rack-slot-display-scalar slot :mute :mute-field) :control-on-fg :dim)
+            :on-click |x y r| (rack-slot-set-mute slot (not (rack-slot-display-scalar slot :mute :mute-field)))))
+        (rack-slot-param-wrapper slot "solo"
+          (button "S"
+            :width 2.0 :height 1.02 :padding 0 :font-size 9
+            :border-color :transparent
+            :background-color (if (rack-slot-display-scalar slot :solo :solo-field) :control-on-bg :mixer-control-bg)
+            :color (if (rack-slot-display-scalar slot :solo :solo-field) :control-on-fg :dim)
+            :on-click |x y r| (rack-slot-set-solo slot (not (rack-slot-display-scalar slot :solo :solo-field)))))))))
 
 (def rack-empty-selected-panel (inst)
   (box :debug-name "rack-empty-selected-panel"
@@ -543,13 +566,16 @@
            :width 1.2 :height st/fx-fixed-panel-height :gap 0 :align :center
     (box :width 0.08 :flex 1 :background-color :mixer-strip-border)))
 
+(def rack-panel-expanded? ()
+  (or st/rack-panel-macros-open st/rack-panel-slot-list-open st/rack-panel-selected-chain-open))
+
 (def rack-panel (inst)
   (box
     (v-stack :debug-name "rack-panel-vstack" :gap 0 :height :fill
       (box :debug-name "rack-header-box" :height 1 :padding 0 :v-align :center :h-align :start :width :fill
         (h-stack :debug-name "rack-header-row" :gap 0.6 :align :center :width :fill
           (pf/fx-panel-header-leading-spacer)
-          (if st/rack-panel-slot-list-open
+          (if (rack-panel-expanded?)
             (h-stack :debug-name "rack-expanded-header-content" :gap 0.6 :align :start :flex 1
               (label (substring (get inst :display-name) 0 16)
                 :v-align :center
@@ -558,8 +584,10 @@
             (box :debug-name "rack-compact-header-content"
               :flex 1 :height 0.8 :padding 0 :h-align :center :v-align :center
               (label "R" :width :fill :font-size 8 :text-align :center
-                :color :dim :bg :transparent)))
-          (if st/rack-panel-slot-list-open
+                :v-align :center
+                :color :dim :bg :transparent))
+            )
+          (if (rack-panel-expanded?)
             (box :debug-name "rack-preset-button" :padding 0 :width 2 :align :center
               (v-stack
                 (box :width 1 :height 0.1)
@@ -596,7 +624,8 @@
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
     :padding 0
-    :width (+ 3.35 (if st/rack-panel-slot-list-open 34.7 0) (if st/rack-panel-macros-open 24.2 0))
+    :width (max (if (rack-panel-expanded?) 18 3.35)
+                (+ 3.35 (if st/rack-panel-slot-list-open 34.7 0) (if st/rack-panel-macros-open 24.2 0)))
     :height st/fx-fixed-panel-height
     :selected 0))
 

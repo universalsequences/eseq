@@ -40,6 +40,7 @@
         custom-ui-param-plock-active?
         custom-ui-param-plock-default
         custom-ui-param-plock-text-color
+        custom-ui-param-mod-highlighted?
         custom-ui-param-knob-mod-slot-prop
         custom-ui-param-knob-mod-depth-prop
         custom-ui-selected-mod-slot-prop
@@ -259,6 +260,11 @@
 
 (def custom-ui-param-plock-text-color (p)
   (pc/param-plock-text-color (current-fx) p))
+
+;; True while the mods tab paints its dark highlight box behind this param,
+;; so light-panel surfaces can swap their black ink for a legible color.
+(def custom-ui-param-mod-highlighted? (p)
+  (and p (pc/param-mods-open? (current-fx)) (get p :modulatable)))
 
 (def custom-ui-param-knob-mod-slot-prop (p idx)
   (pc/param-knob-mod-slot-prop (current-fx) p idx))

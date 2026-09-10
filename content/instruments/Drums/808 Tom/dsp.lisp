@@ -427,25 +427,29 @@
 ; Exact bypass at bank 0 (the cores keep running so engaging is click-free).
 ; ======================================================================
 
-; One switched-cap SVF core: input sampled on the tick, Chamberlin update
-; gated to the tick, states held (ZOH) between ticks. Biased tanh on the
-; bp state injection-locks the scream; amplitude-dependent damping (van
-; der Pol) gives a hard self-osc threshold. (From sc-filterbank.)
-(defmacro bank-svf (sig tick morph gcoef kbase)
-  (make-history lp_h)
-  (make-history bp_h)
-  (def xs (latch sig tick))
-  (def keff (+ kbase (* 1.2 (* (read-history bp_h) (read-history bp_h)))))
-  (def hp (- xs (+ (read-history lp_h) (* keff (read-history bp_h)))))
-  (def bpn (* 1.078 (- (tanh (+ (+ (read-history bp_h) (* gcoef hp)) 0.28)) (tanh 0.28))))
-  (def lpn (+ (read-history lp_h) (* gcoef bpn)))
-  (write-history bp_h (mix (read-history bp_h) bpn tick))
-  (write-history lp_h (mix (read-history lp_h) lpn tick))
-  (def lpw (clip (- 1 (* 2 morph)) 0 1))
-  (def hpw (clip (- (* 2 morph) 1) 0 1))
-  (+ (* (read-history lp_h) lpw)
-     (+ (* (read-history bp_h) (- 1 (+ lpw hpw)))
-        (* hp hpw))))
+; One clock event, with state passed explicitly so four sequential time
+; steps can share one set of histories. F2 advances on divided F1 events.
+(defmacro bank-clock-step (sig increment divisor gcoef kbase phase count lp1 bp1 xs1 lp2 bp2 xs2)
+  (def phase_sum (+ phase increment))
+  (def tick1 (gte phase_sum 1))
+  (def phase_next (- phase_sum tick1))
+  (def count_sum (+ count tick1))
+  (def tick2 (* tick1 (gte count_sum divisor)))
+  (def count_next (- count_sum (* divisor tick2)))
+  (def x1 (mix xs1 sig tick1))
+  (def k1 (+ kbase (* 1.2 bp1 bp1)))
+  (def hp1 (- x1 (+ lp1 (* k1 bp1))))
+  (def b1 (* 1.078 (- (tanh (+ bp1 (* gcoef hp1) 0.28)) (tanh 0.28))))
+  (def l1 (+ lp1 (* gcoef b1)))
+  (def x2 (mix xs2 (tanh (* 1.7 lp1)) tick2))
+  (def k2 (+ kbase (* 1.2 bp2 bp2)))
+  (def hp2 (- x2 (+ lp2 (* k2 bp2))))
+  (def b2 (* 1.078 (- (tanh (+ bp2 (* gcoef hp2) 0.28)) (tanh 0.28))))
+  (def l2 (+ lp2 (* gcoef b2)))
+  (tuple phase_next count_next
+         (mix lp1 l1 tick1) (mix bp1 b1 tick1) x1
+         (mix lp2 l2 tick2) (mix bp2 b2 tick2) x2
+         lp1 (+ (* 0.98 bp2) (* 0.02 hp2))))
 
 (defmacro bank-stage (sig triggered wet_a env_a freq_a res_a note_in)
   ; Defaults are the exact settings the gesture was discovered with:
@@ -538,24 +542,29 @@
   (def fpos (+ (read-history bk_fposh)
                (* (mix 0.0015 0.006 (> fpos_diff 0)) fpos_diff)))
   (write-history bk_fposh fpos)
-  (def fc (* 30 (exp (* 5.586 fpos))))
+  (def fc (min (* 30 (exp (* 5.586 fpos))) (* 0.45 samplerate)))
 
   ; switched-cap clock: crunch morphs ratio 100:1 -> 25:1 (log)
   (def ratio (* 100 (exp (* bank_crunch (log 0.25)))))
-  (def gcoef (* 2 (sin (/ pi ratio))))
   (def kbase (- (* 2.08 (- 1 (clip res_a 0 1))) 0.22))
 
   ; clock jitter, depth keyed to crunch
   (make-history bk_nzh)
   (def bk_nz (+ (read-history bk_nzh) (* 0.05 (- (noise) (read-history bk_nzh)))))
   (write-history bk_nzh bk_nz)
-  (def fclk (clip (* (* fc ratio) (+ 1 (* (* 0.012 (+ 0.3 bank_crunch)) bk_nz)))
-                  200 (* samplerate 0.99)))
-  (def ph1 (phasor fclk))
-  ; explicit wrap detector: ramp2trig misses wraps near the host rate
-  (make-history bk_prevph)
-  (def tick1 (< ph1 (read-history bk_prevph)))
-  (write-history bk_prevph ph1)
+  ; Four integration steps per host sample keep the Chamberlin coefficient
+  ; in its stable range at the top of the authored 30..8000 Hz cutoff range.
+  ; If the requested chip clock exceeds that rate, preserve fc by deriving
+  ; the coefficient from the actual clock. Crush still controls clock rate
+  ; wherever it can be represented; it no longer imposes a cutoff ceiling.
+  (def bank_rate (* 4 samplerate))
+  (def clock_limit (* 0.99 bank_rate))
+  (def requested_clock (* fc ratio))
+  (def clock_jitter (+ 1 (* (* 0.012 (+ 0.3 bank_crunch)) bk_nz)))
+  (def fclk (clip (* requested_clock clock_jitter) 200 clock_limit))
+  (def represented_ratio (/ fclk (* fc clock_jitter)))
+  (def gcoef (* 2 (sin (/ pi represented_ratio))))
+  (def clock_increment (/ fclk bank_rate))
 
   ; clock divider: F2's clock is F1's through the selected ratio
   ; (selector is 1-based; floor needs dgenlisp >= v0.1.6). The knob moves
@@ -567,20 +576,38 @@
   (def div_a (selector (+ 1 harm_i) 1 1.2 1.5 2 3 4 5 7))
   (def div_b (selector (+ 1 (clip (+ harm_i 1) 0 7)) 1 1.2 1.5 2 3 4 5 7))
   (def divisor (mix div_a div_b harm_f))
-  (make-history bk_divcnt)
-  (def cnt (+ (read-history bk_divcnt) tick1))
-  (def fire2 (>= cnt divisor))
-  (write-history bk_divcnt (- cnt (* divisor fire2)))
-  (def tick2 (* tick1 fire2))
-
   ; sweep thump: charge injection puts a moving DC offset into the loop
   (def thump (* 60 fpos_diff (mix 0.0015 0.006 (> fpos_diff 0))))
   (def xin (+ x thump))
 
-  (def f1 (bank-svf xin tick1 0.0 gcoef kbase))
-  ; serial: F1's resonance overdrives the stage feeding F2
-  (def f2in (tanh (* 1.7 f1)))
-  (def f2 (bank-svf f2in tick2 0.51 gcoef kbase))
+  ; Clock, held inputs and both filter states persist across host samples.
+  (make-history bk_phase)
+  (make-history bk_count)
+  (make-history bk_lp1)
+  (make-history bk_bp1)
+  (make-history bk_xs1)
+  (make-history bk_lp2)
+  (make-history bk_bp2)
+  (make-history bk_xs2)
+  (def (phase_1 count_1 lp1_1 bp1_1 xs1_1 lp2_1 bp2_1 xs2_1 f1_1 f2_1)
+    (bank-clock-step xin clock_increment divisor gcoef kbase (read-history bk_phase) (read-history bk_count) (read-history bk_lp1) (read-history bk_bp1) (read-history bk_xs1) (read-history bk_lp2) (read-history bk_bp2) (read-history bk_xs2)))
+  (def (phase_2 count_2 lp1_2 bp1_2 xs1_2 lp2_2 bp2_2 xs2_2 f1_2 f2_2)
+    (bank-clock-step xin clock_increment divisor gcoef kbase phase_1 count_1 lp1_1 bp1_1 xs1_1 lp2_1 bp2_1 xs2_1))
+  (def (phase_3 count_3 lp1_3 bp1_3 xs1_3 lp2_3 bp2_3 xs2_3 f1_3 f2_3)
+    (bank-clock-step xin clock_increment divisor gcoef kbase phase_2 count_2 lp1_2 bp1_2 xs1_2 lp2_2 bp2_2 xs2_2))
+  (def (phase_4 count_4 lp1_4 bp1_4 xs1_4 lp2_4 bp2_4 xs2_4 f1_4 f2_4)
+    (bank-clock-step xin clock_increment divisor gcoef kbase phase_3 count_3 lp1_3 bp1_3 xs1_3 lp2_3 bp2_3 xs2_3))
+  (write-history bk_phase phase_4)
+  (write-history bk_count count_4)
+  (write-history bk_lp1 lp1_4)
+  (write-history bk_bp1 bp1_4)
+  (write-history bk_xs1 xs1_4)
+  (write-history bk_lp2 lp2_4)
+  (write-history bk_bp2 bp2_4)
+  (write-history bk_xs2 xs2_4)
+  (def f1 f1_4)
+  (def f2 f2_4)
+  (def ph1 phase_4)
 
   ; clock bleed as charge injection, rising as the clock falls audible.
   ; Deviation from the effect port: the hardware's constant 0.3 idle-bleed

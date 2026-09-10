@@ -7,7 +7,7 @@
 (def melt-value (name) (reactive-value (melt-bind name)))
 (def melt-knob (section name title width decimals taper)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title width 3.55 2.6
-    (melt-accent) decimals taper :widget-knob-track 8.5 8 :center))
+    (melt-accent) decimals taper :widget-knob-track 10 9.5 :center))
 (def melt-panel (section title width body)
   (box :debug-name (str "melt-panel-" section) :width width :height 4.8 :padding 0.2
     :background-color (if (= (melt-section) section) :instrument-panel-bg :instrument-group-bg)

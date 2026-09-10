@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "drum-envelope",
+  "params": [
+    "gate",
+    "trigger",
+    "decay_ms",
+    "sustain",
+    "release_ms"
+  ],
+  "outputs": [
+    "out"
+  ],
+  "summary": "Trigger-started exponential decay/sustain/release envelope, with T60 times and silence before the first hit.",
+  "tags": [
+    "envelope",
+    "drum"
+  ]
+}

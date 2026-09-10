@@ -16,6 +16,7 @@
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
 (import eseq.effects.drag-drop :as effect-dd)
+(import eseq.effects.param-controls :as pc)
 ;; Shared scene-bank view state: the clip grid below shows only the bank the
 ;; transport strip is viewing (scene-banks spec 10.1).
 (import eseq.scene-banks)
@@ -832,19 +833,30 @@
   (str "track-" track "-pan"))
 
 (def send-knob (track send)
-  (knob-number :label (send-label (get send :name))
-    :key (str "track-" track "-send-" (get send :bus-idx))
-    :value (bind-seq (send-field track (get send :bus-idx)))
-    :min 0 :max 1 :decimals 2
-    :show-value false
-    :font-size 9 :label-font-size 5
-    :text-color :dim :label-color :dim
-    :width 3.4  :height 2.0 :knob-size 1.44
-    :on-change (lambda (v)
-      (do
-        (clear-delete-target)
-        (host-command "set-track-bus-send"
-          (dict :track track :bus (get send :bus-idx) :amount v))))))
+  (let ((field (send-field track (get send :bus-idx)))
+        (has-locks (= (reactive-get "SEQ" (str field "-plock-any")) 1))
+        (target (dict :track track :target "bus-send" :param-idx (get send :bus-idx))))
+    (box :debug-name (str "track-" track "-send-" (get send :bus-idx) "-plock")
+      :plock-any (if has-locks 1 0)
+      :on-right-click (lambda (event) (pc/open-target-plock-menu event target has-locks))
+      (knob-number :label (send-label (get send :name))
+        :key (str "track-" track "-send-" (get send :bus-idx))
+        :value (bind-seq field)
+        :plock-active (bind-seq (str field "-plock-active"))
+        :plock-default (bind-seq (str field "-plock-default"))
+        :plock-color-r (pc/param-plock-color-r)
+        :plock-color-g (pc/param-plock-color-g)
+        :plock-color-b (pc/param-plock-color-b)
+        :min 0 :max 1 :decimals 2
+        :show-value false
+        :font-size 9 :label-font-size 5
+        :text-color :dim :label-color :dim
+        :width 3.4 :height 2.0 :knob-size 1.44
+        :on-change (lambda (v)
+          (do
+            (clear-delete-target)
+            (host-command "set-track-bus-send"
+              (dict :track track :bus (get send :bus-idx) :amount v))))))))
 
 (def track-strip (i)
   (let ((sends (nth SEQ.track-bus-sends i)))
@@ -1229,15 +1241,21 @@
 (def delete-selected-track ()
   (seq-delete-active-target))
 
+;; BS/Delete: an armed delete target (an explicit click on a strip's delete
+;; badge) wins; with nothing armed the handler declines the key so the
+;; inherited sequencer keymap deletes the selected steps instead.
+(def delete-key ()
+  (if (seq-delete-active-target) true false))
+
 (def handle-key (key text)
   (if (= key "LEFT")
     (select-prev-channel)
     (if (= key "RIGHT")
       (select-next-channel)
       (if (= key "BS")
-        (seq-delete-active-target)
+        (delete-key)
         (if (= key "Delete")
-          (seq-delete-active-target)
+          (delete-key)
           false)))))
 
 (def bus-strip (i)
@@ -1703,6 +1721,8 @@
       (subtree :key (str "patch-mixer-strip-label-" i)
         (strip-label i)))))
 
+;; The patch mixer has no keys of its own; it takes the shared sequencer keymap.
+(set-buffer-mode-for "*patch-mixer*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*patch-mixer*"
   (box :padding 0.2
     (subtree :key (str "patch-mixer-track-" SEQ.current-track)
@@ -1722,7 +1742,8 @@
             (if (group-bus-id? (nth SEQ.bus-ids i))
               (box :width 0.0 :height 0.0)
               (bus-strip i)))))
-      (track-context-menu))))
+      (track-context-menu)
+      (subtree :key "mixer-param-plock-menu" (pc/param-plock-context-menu)))))
 
 ;; Ctrl+G / Cmd+G — fold the multi-selected tracks into a new group.
 (def group-selected ()
@@ -1737,7 +1758,8 @@
     (group-selected)
     (status "Select 2+ tracks to group")))
 
-(define-mode "seq-mixer-mode" :read-only true :live-keys true :on-key "handle-key")
+(define-mode "seq-mixer-mode" :read-only true :live-keys true :on-key "handle-key"
+  :inherit "eseq.sequencer-keys/sequencer-keys")
 (mode-bind-key "seq-mixer-mode" "LEFT" "select-prev-channel")
 (mode-bind-key "seq-mixer-mode" "RIGHT" "select-next-channel")
 (set-buffer-mode-for "*mixer*" "seq-mixer-mode")

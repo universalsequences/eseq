@@ -59,6 +59,7 @@
 ;; declared import.) step-grid-interactions / seqv-track-params /
 ;; seq-grid-mode used to ride in on ui/bus-grid.lisp; that file is gone with
 ;; the bus gate step sequencer, so they are anchored directly here.
+(import eseq.sequencer-keys)
 (import eseq.seq-script-picker)
 (import eseq.seq-macro-mapping-hooks)
 (import eseq.step-grid-interactions)

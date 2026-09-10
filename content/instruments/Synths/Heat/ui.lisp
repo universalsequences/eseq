@@ -7,13 +7,13 @@
 (def heat-bound (name fallback)
   (eseq.effects.custom-ui-controls/ui-param-bound-value name fallback))
 (def heat-knob (section name title)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title 4.7 2.15 2.58 (heat-accent) 2 "linear" :widget-knob-track 9.0 8.0 :right))
+  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title 4.7 2.15 2.58 (heat-accent) 2 "linear" :widget-knob-track 10.5 9.5 :right))
 (def heat-short-knob (section name title)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title 4.7 2.1 2.8 (heat-accent) 2 "linear" :widget-knob-track 9.0 8.0 :right))
+  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title 4.7 2.1 2.8 (heat-accent) 2 "linear" :widget-knob-track 10.5 9.5 :right))
 (def heat-log (section name title)
   (heat-log-sized section name title 4.7))
 (def heat-log-sized (section name title width)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title width 2.15 2.58 (heat-accent) 1 "log" :widget-knob-track 9.0 8.0 :right))
+  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title width 2.15 2.58 (heat-accent) 1 "log" :widget-knob-track 10.5 9.5 :right))
 (def heat-num (section name title)
   (heat-num-labeled section name title false))
 (def heat-num-labeled (section name title labels)
@@ -26,7 +26,7 @@
       (subtree :key (str "heat-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (v-stack :width width :height height :gap 0.06
-          (label title :v-align :center :height label-height :font-size 7.6 :color ink :bg :transparent)
+          (label title :v-align :center :height label-height :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
@@ -51,8 +51,8 @@
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "heat-option-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "heat-option-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
         (v-stack :width width :height height :gap 0.04
-          (label title :v-align :center :height (- height 0.79) :font-size 7.6 :color ink :bg :transparent)
-          (dropdown :width width :height 0.75 :font-size 7.6
+          (label title :v-align :center :height (- height 0.79) :font-size 8.6 :color ink :bg :transparent)
+          (dropdown :width width :height 0.75 :font-size 8.6
             :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :value-index-offset (get p :min) :options options
             :text-color ink :chevron-color ink :badge-color :transparent
@@ -95,7 +95,7 @@
       (h-stack :gap 1.5
         (heat-short-knob section (str prefix "_level_db") "Level dB")
         (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_semitones") "Semi"
-          4.7 2.1 2.8 (heat-accent) 0 "linear" :widget-knob-track 9.0 8.0 :right)
+          4.7 2.1 2.8 (heat-accent) 0 "linear" :widget-knob-track 10.5 9.5 :right)
         (heat-short-knob section (str prefix "_cents") "Detune")))))
 
 ; The response editor combines the same one/two SVF stages as heat-linear-filter.
@@ -161,15 +161,15 @@
         (heat-source-option section (str prefix "_mode") "Type"
           '("LP12" "LP24" "BP6" "BP12" "N2" "N4" "HP12" "HP24") 4.5)
         (heat-log-sized section (str prefix "_cutoff_hz") "Freq Hz" 5.6)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_q") "Reso Q" 4.7 2.15 2.58 (heat-accent) 2 "log" :widget-knob-track 9.0 8.0 :right))
+        (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_q") "Reso Q" 4.7 2.15 2.58 (heat-accent) 2 "log" :widget-knob-track 10.5 9.5 :right))
       (heat-filter-curve section prefix))))
 (def heat-amp-row (section prefix title)
   (heat-panel section 10.8 4.85
     (v-stack :gap 0.25 :align :center
       (heat-switch section (str prefix "_enabled") title)
       (h-stack :gap 0.3
-        (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_pan") "Pan" 5.1 2.9 3.5 (heat-accent) 2 "linear" :widget-knob-track 9.0 8.0 :right)
-        (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_level_db") "Level dB" 5.1 2.9 3.5 (heat-accent) 2 "linear" :widget-knob-track 9.0 8.0 :right)))))
+        (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_pan") "Pan" 5.1 2.9 3.5 (heat-accent) 2 "linear" :widget-knob-track 10.5 9.5 :center)
+        (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (str prefix "_level_db") "Level dB" 5.1 2.9 3.5 (heat-accent) 2 "linear" :widget-knob-track 10.5 9.5 :center)))))
 (def heat-lfo-row (prefix title)
   (v-stack :height 2.95 :gap 0.12 :align :center
     (heat-switch 4 (str prefix "_enabled") title)
@@ -393,7 +393,7 @@
       (subtree :key (str "heat-screen-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (h-stack :width 10.5 :height 0.5 :gap 0.1 :align :center
-          (label title :width 6.2 :height 0.5 :v-align :center :font-size 7.6 :color (heat-ink) :bg :transparent)
+          (label title :width 6.2 :height 0.5 :v-align :center :font-size 8.6 :color (heat-ink) :bg :transparent)
           (number-picker :width 4.1 :height 0.5 :noui true :font-size 8 :text-align :right
             :decimals decimals :step step :value-labels labels
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
@@ -417,8 +417,8 @@
       (str "heat-choice-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "heat-choice-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
         (h-stack :width 10.5 :height 0.65 :gap 0.1 :align :center
-          (label title :width 5.0 :height 0.5 :v-align :center :font-size 7.6 :color (heat-ink) :bg :transparent)
-          (dropdown :width 5.4 :height 0.65 :font-size 7.6
+          (label title :width 5.0 :height 0.5 :v-align :center :font-size 8.6 :color (heat-ink) :bg :transparent)
+          (dropdown :width 5.4 :height 0.65 :font-size 8.6
             :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :value-index-offset (get p :min) :options options
             :text-color (heat-ink) :chevron-color (heat-ink) :badge-color :transparent
@@ -478,7 +478,7 @@
             :width 27.5 :height 0.7 :font-size 8 :padding 0 :corner-radius 0
             :color (heat-accent) :background-color (heat-ink) :border-color :transparent
             :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback 0))
-          (button "Overview" :width 5.5 :height 0.7 :font-size 7.6 :padding 0 :corner-radius 0
+          (button "Overview" :width 5.5 :height 0.7 :font-size 8.6 :padding 0 :corner-radius 0
             :color (heat-ink) :background-color (heat-accent) :border-color (heat-ink)
             :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback 0)))
         (if (= section 1) (heat-osc-detail 1 "osc1")

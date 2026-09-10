@@ -19,19 +19,21 @@
         (label title :width 7 :height 0.7 :font-size 8 :h-align :center :v-align :center
           :color :black :bg :transparent))
       body)))
+(def mnm-ink (p)
+  (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white :black))
 (def mnm-num (name title decimals)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "mnm-mod-" name)
-      (v-stack :width 8.4 :height 1.15 :gap 0.08
-        (label title :height 0.5 :font-size 8 :v-align :center :color :black :bg :transparent)
-        (number-picker :debug-name (str "mnm-num-" name) :width 8.4 :height 0.55
-          :noui true :font-size 8.5 :decimals decimals :step (pow 10 (- 0 decimals))
+      (v-stack :width 8.4 :height 1.3 :gap 0
+        (label title :height 0.65 :font-size 9 :v-align :center :color (mnm-ink p) :bg :transparent)
+        (number-picker :debug-name (str "mnm-num-" name) :width 8.4 :height 0.65
+          :noui true :font-size 10 :decimals decimals :step (pow 10 (- 0 decimals))
           :value (mnm-bind name)
           :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
           :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
           :text-align :left
           :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-            (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :black)
+            (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) (mnm-ink p))
           :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))
 (def mnm-write (scope name value)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope name)))
@@ -39,7 +41,7 @@
       (max (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
         (min (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p) value)))))
 (def mnm-caption (text)
-  (label text :height 0.55 :font-size 7.4 :v-align :center :color :black :bg :transparent))
+  (label text :height 0.55 :font-size 8.4 :v-align :center :color :black :bg :transparent))
 
 
 (def mnm-ahd (attack hold decay height)
@@ -74,10 +76,10 @@
       (h-stack :gap 0.3
         (mnm-num "glide_ms" "Glide ms" 1)
         (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-base-note-param)))
-          (v-stack :width 8.4 :height 1.15 :gap 0.08
-            (label "Note" :height 0.5 :font-size 8 :v-align :center :color :black :bg :transparent)
-            (number-picker :debug-name "mnm-base-note" :width 8.4 :height 0.55
-              :noui true :font-size 8.5 :decimals 0 :step 1 :text-align :left :text-color :black
+          (v-stack :width 8.4 :height 1.3 :gap 0
+            (label "Note" :height 0.65 :font-size 9 :v-align :center :color :black :bg :transparent)
+            (number-picker :debug-name "mnm-base-note" :width 8.4 :height 0.65
+              :noui true :font-size 10 :decimals 0 :step 1 :text-align :left :text-color :black
               :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
               :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)

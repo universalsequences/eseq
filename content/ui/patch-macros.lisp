@@ -247,6 +247,8 @@
 ;; The buffer root must stay keyless: a keyed root is annotated as an
 ;; explicit subtree root and EmitTree then routes the update as a subtree
 ;; replacement, which is dropped when the buffer has no tree yet.
+;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
+(set-buffer-mode-for "*patch-macros*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*patch-macros*"
   ;; Pass the reactive fields at the render root so the effect subscribes even
   ;; though most sidebar assembly lives in helper functions.

@@ -34,6 +34,8 @@
         fx-param-text-value-for
         param-plock-active?
         param-plock-context-menu
+        target-plock-any?
+        open-target-plock-menu
         param-plock-default
         param-plock-color-r
         param-plock-color-g
@@ -654,15 +656,21 @@
 ;; "any"/"x" because it only has to match rows, while the clear has to name
 ;; storage.
 (def param-plock-menu-target (fx p)
-  (dict :target (param-plock-row-target fx)
+  (dict :track SEQ.current-track :target (param-plock-row-target fx)
         :slot-idx (if fx (get fx :slot-idx) 0)
         :rack-slot (if (and fx (get fx :rack-fx)) (get fx :rack-slot) 0)
         :param-idx (get p :idx)))
 
+(def target-plock-any? (target)
+  (= (reactive-get "SEQV" (str (param-plock-projected-row-key target) "-any")) 1))
+
 (def open-param-plock-menu (event fx p)
-  (if (param-plock-any? fx p)
+  (open-target-plock-menu event (param-plock-menu-target fx p) (param-plock-any? fx p)))
+
+(def open-target-plock-menu (event target has-locks)
+  (if has-locks
     (do
-      (set! param-plock-menu (param-plock-menu-target fx p))
+      (set! param-plock-menu target)
       (set! param-plock-menu-col (get event :col))
       (set! param-plock-menu-row (get event :row))
       true)
@@ -696,7 +704,8 @@
       (close-param-plock-menu)
       (if target
         (host-command "clear-param-plocks"
-          (dict :target (get target :target)
+          (dict :track (get target :track)
+                :target (get target :target)
                 :slot-idx (get target :slot-idx)
                 :rack-slot (get target :rack-slot)
                 :param-idx (get target :param-idx)

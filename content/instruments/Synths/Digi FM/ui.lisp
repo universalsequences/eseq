@@ -4,13 +4,13 @@
 (def df-bound (name fallback)
   (eseq.effects.custom-ui-controls/ui-param-bound-value name fallback))
 (def df-knob (section name title)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title 4.7 2.15 2.58 (df-accent) 2 "linear" :widget-knob-track 9.0 8.0 :right))
+  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title 4.7 2.15 2.58 (df-accent) 2 "linear" :widget-knob-track 10.5 9.5 :right))
 (def df-short-knob (section name title)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title 4.7 2.1 2.8 (df-accent) 2 "linear" :widget-knob-track 9.0 8.0 :right))
+  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title 4.7 2.1 2.8 (df-accent) 2 "linear" :widget-knob-track 10.5 9.5 :right))
 (def df-log (section name title)
   (df-log-sized section name title 4.7))
 (def df-log-sized (section name title width)
-  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title width 2.15 2.58 (df-accent) 1 "log" :widget-knob-track 9.0 8.0 :right))
+  (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title width 2.15 2.58 (df-accent) 1 "log" :widget-knob-track 10.5 9.5 :right))
 (def df-num (section name title)
   (df-num-labeled section name title false))
 (def df-num-labeled (section name title labels)
@@ -23,7 +23,7 @@
       (subtree :key (str "df-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (v-stack :width width :height height :gap 0.06
-          (label title :v-align :center :height label-height :font-size 7.6 :color ink :bg :transparent)
+          (label title :v-align :center :height label-height :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
@@ -48,7 +48,7 @@
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "df-option-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "df-option-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
         (v-stack :width width :height height :gap 0.04
-          (label title :v-align :center :height (- height 0.79) :font-size 7.6 :color ink :bg :transparent)
+          (label title :v-align :center :height (- height 0.79) :font-size 8.6 :color ink :bg :transparent)
           (dropdown :width width :height 0.75 :font-size 7.6
             :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :value-index-offset (get p :min) :options options
