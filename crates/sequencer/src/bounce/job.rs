@@ -67,6 +67,13 @@ pub fn next_name(folder: &Path, project: &str) -> io::Result<String> {
     Err(io::Error::other("No available export filename"))
 }
 
+pub struct ExportJobSettings {
+    pub destination: PathBuf,
+    pub sample_rate: u32,
+    pub tail_seconds: f64,
+    pub selection: Option<(f64, f64)>,
+}
+
 pub struct ExportJob {
     child: Option<Child>,
     directory: Option<tempfile::TempDir>,
@@ -76,19 +83,26 @@ pub struct ExportJob {
 
 impl ExportJob {
     /// The executable supports `export-worker` before starting its live engine.
-    /// Copy saved data into this job so later saves cannot change its arrangement.
-    pub fn start(executable: &Path, mut options: super::worker::ExportOptions) -> io::Result<Self> {
+    /// Own an immutable snapshot so subsequent edits or saves cannot change the export.
+    pub fn start(
+        executable: &Path,
+        project: &crate::project::ProjectFile,
+        options: ExportJobSettings,
+    ) -> io::Result<Self> {
         if options.destination.try_exists()? {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "A recording with this name already exists. Choose another name.",
             ));
         }
-        let project = options.load_project()?;
+        let end = project.arrangement.as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Project has no arrangement"))?
+            .end_beat;
+        super::BouncePlan::new(options.sample_rate, crate::audio::engine::ENGINE_BLOCK_FRAMES,
+            project.bpm, end, options.selection, 0, options.tail_seconds)?;
         let directory = tempfile::tempdir()?;
         let input = directory.path().join("project.json");
         serde_json::to_writer(File::create(&input)?, &project)?;
-        options.project = input;
         let cancel = directory.path().join("cancel");
         let status = directory.path().join("status.json");
         let log = File::create(directory.path().join("worker.log"))?;
@@ -96,7 +110,7 @@ impl ExportJob {
         command
             .arg("export-worker")
             .arg("--project")
-            .arg(&options.project)
+            .arg(&input)
             .arg("--out")
             .arg(&options.destination)
             .arg("--sample-rate")
@@ -260,20 +274,25 @@ exit 1
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let output = folder.path().join("out.wav");
+        let mut snapshot = crate::project::load_project_from_path(&project).unwrap();
+        snapshot.bpm = 137;
         let mut job = ExportJob::start(
             &executable,
-            super::super::worker::ExportOptions {
-                project,
+            &snapshot,
+            ExportJobSettings {
                 destination: output.clone(),
                 sample_rate: 48_000,
                 tail_seconds: 0.0,
                 selection: None,
-                replace: false,
-                cancel_path: None,
             },
         )
         .unwrap();
         let directory = job.directory.as_ref().unwrap().path().to_owned();
+        snapshot.bpm = 150;
+        let input = crate::project::load_project_from_path(&directory.join("project.json")).unwrap();
+        assert_eq!(input.bpm, 137);
+        assert_eq!(snapshot.bpm, 150);
+        assert_eq!(crate::project::load_project_from_path(&project).unwrap().bpm, 120);
         job.cancel().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while job.running() && std::time::Instant::now() < deadline {

@@ -516,6 +516,9 @@ pub struct MajorMode {
     pub keybindings: HashMap<String, String>,
     pub on_enter: Option<String>,
     pub on_key: Option<String>,
+    /// Parent mode consulted after this one for keybindings, the on-key
+    /// handler and the live-keys opt-in (`define-mode … :inherit`).
+    pub inherit: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1430,6 +1433,9 @@ impl Editor {
         self.active_tile = new_tile;
         self.record_buffer_access_by_idx(buffer_idx);
         self.sync_runtime_context();
+        // Event handlers can open frame-anchored overlays before the next
+        // render. Install the new owner's scroll before restoring/evaluating UI.
+        self.sync_layout_content_scroll();
         self.runtime
             .set_layout_frame_viewport(layout_frame_viewport);
         self.restore_buffer_widget_tree_with_cached_layout(
@@ -3964,13 +3970,24 @@ impl Editor {
     }
 
     pub(super) fn widget_layout_scroll_left(&self) -> f32 {
-        let scroll_left = self.active_leaf().widget_scroll_left;
-        if self.active_buffer().inline_code_widgets().is_empty() {
-            scroll_left
+        self.tile_layout_content_scroll(self.active_tile).0
+    }
+
+    /// Scroll in layout content coordinates, owned by the tile being laid out
+    /// rather than whichever buffer happens to be active in the shared runtime.
+    fn tile_layout_content_scroll(&self, tile_id: TileId) -> (f32, f32) {
+        let leaf = self.tile_root.find_leaf(tile_id).expect("layout tile must exist");
+        let buffer = &self.buffers[leaf.buffer_idx];
+        let inline = !buffer.inline_code_widgets().is_empty();
+        let (scale_x, scale_y) = self.text_cell_scales_for_buffer(buffer);
+        let col = leaf.widget_scroll_left * if inline { scale_x } else { 1.0 };
+        let text_row = if buffer.view_mode == ViewMode::UiOnly {
+            0.0
         } else {
-            let (text_cell_width_scale, _) = self.text_cell_scales_for_buffer(self.active_buffer());
-            scroll_left * text_cell_width_scale
-        }
+            buffer.scroll_top as f32 * if inline { scale_y } else { 1.0 }
+        };
+        let widget_row = if inline { 0.0 } else { leaf.widget_scroll_top };
+        (col, text_row + widget_row)
     }
 
     pub fn reset_widget_scroll_left(&mut self) {
@@ -4152,16 +4169,7 @@ impl Editor {
 
     /// Combined vertical scroll: widget scroll + text scroll.
     pub fn total_scroll_top(&self) -> f32 {
-        let text_scroll = if self.active_buffer().view_mode == ViewMode::UiOnly {
-            0.0
-        } else if !self.active_buffer().inline_code_widgets().is_empty() {
-            let (_, text_cell_height_scale) =
-                self.text_cell_scales_for_buffer(self.active_buffer());
-            self.active_buffer().scroll_top as f32 * text_cell_height_scale
-        } else {
-            self.active_buffer().scroll_top as f32
-        };
-        self.widget_scroll_top() + text_scroll
+        self.tile_layout_content_scroll(self.active_tile).1
     }
 
     /// Whether widget viewport scrolling should be smooth (sub-cell).
@@ -5780,25 +5788,67 @@ impl Editor {
         self.mode_keybinding(&buffer.mode, key)
     }
 
-    /// Whether the active major mode explicitly permits host live-keyboard
-    /// shortcuts. Modes opt in so ordinary source and special text modes keep
-    /// ownership of their bare keys by default.
+    /// The mode and its `:inherit` ancestors, nearest first. Parent names
+    /// resolve like every other mode reference (module-qualified first, flat
+    /// fallback); a missing or cyclic parent simply ends the chain.
+    pub fn mode_chain(&self, mode_name: &str) -> Vec<&MajorMode> {
+        let mut chain = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut next = Some(self.resolve_mode_name(mode_name.to_string()));
+        while let Some(name) = next.take() {
+            if !seen.insert(name.clone()) {
+                break;
+            }
+            let Some(mode) = self.mode_registry.get(&name) else {
+                break;
+            };
+            chain.push(mode);
+            next = mode
+                .inherit
+                .as_ref()
+                .map(|parent| self.resolve_mode_name(parent.clone()));
+        }
+        chain
+    }
+
+    fn active_mode_chain(&self) -> Vec<&MajorMode> {
+        match &self.active_buffer().mode {
+            BufferMode::Named(mode_name) => self.mode_chain(mode_name),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The on-key handler that owns the active buffer's unbound keys: the
+    /// nearest mode in the chain that declares one.
+    fn active_mode_on_key(&self) -> Option<String> {
+        self.active_mode_chain()
+            .into_iter()
+            .find_map(|mode| mode.on_key.clone())
+    }
+
+    /// Whether the active major mode (or an ancestor) explicitly permits host
+    /// live-keyboard shortcuts. Modes opt in so ordinary source and special
+    /// text modes keep ownership of their bare keys by default.
     pub fn active_mode_accepts_live_keys(&self) -> bool {
-        let BufferMode::Named(mode_name) = &self.active_buffer().mode else {
-            return false;
-        };
-        self.mode_registry
-            .get(mode_name)
-            .is_some_and(|mode| mode.live_keys)
+        self.active_mode_chain().iter().any(|mode| mode.live_keys)
+    }
+
+    /// Whether the active buffer has a declared major mode. A declared mode is
+    /// the authority on host key policy for its buffer (its `:live-keys`
+    /// decides live-keyboard routing); only mode-less buffers fall back to
+    /// host defaults.
+    pub fn active_buffer_has_named_mode(&self) -> bool {
+        matches!(&self.active_buffer().mode, BufferMode::Named(_))
     }
 
     fn mode_keybinding(&self, mode: &BufferMode, key: KeyEvent) -> Option<&str> {
         let BufferMode::Named(mode_name) = mode else {
             return None;
         };
-        self.mode_registry
-            .get(mode_name)
-            .and_then(|mode| mode.keybindings.get(&key_str(key)))
+        let key = key_str(key);
+        self.mode_chain(mode_name)
+            .into_iter()
+            .find_map(|mode| mode.keybindings.get(&key))
             .map(String::as_str)
     }
 
@@ -5913,56 +5963,51 @@ impl Editor {
             return;
         }
 
-        // A named mode's on-key handler outranks global Escape bindings and
-        // the "ESC ." chord table: modal list modes (buffer-list, etc.) use
-        // Escape to dismiss themselves, which must win over e.g. the global
-        // selection-clearing binding.
-        if key.code == KeyCode::Esc
-            && key.modifiers == KeyModifiers::NONE
-            && self.handle_mode_input_key(key)
-        {
-            return;
-        }
-
-        // Check direct keybinding before treating as chord prefix.
-        // This allows e.g. "ESC" to fire even when "ESC ." chords exist.
+        // Key precedence, most specific first: the buffer mode's `:on-key`
+        // handler, the mode's own keymap (`mode-bind-key`, ancestors via
+        // `:inherit` included), the global `bind-key` map, chord prefixes,
+        // Vim normal-mode keys, then editor builtins. Nothing a mode declares
+        // can be shadowed by a global binding, so a package-defined view owns
+        // its keys without knowing what the global map contains. The on-key
+        // handler precedes the mode keymap so a mode that treats printable
+        // keys as text (buffer-list's filter) keeps them even where it also
+        // binds the same letter as a command.
+        //
         // In Vim insert mode, literal characters and plain Tab retain their
-        // editing/completion meaning. Application bindings for those keys are
-        // normal-mode commands.
+        // editing/completion meaning; application bindings for those keys
+        // are normal-mode commands.
         let vim_insert_literal = key.modifiers == KeyModifiers::NONE
             && matches!(key.code, KeyCode::Char(_) | KeyCode::Tab)
             && self.active_vim_input_mode() == Some(VimInputMode::Insert);
-        // A mode's own `mode-bind-key` entry shadows a global `bind-key` for
-        // the same key: the more specific binding wins. Only keys the global
-        // keymap would otherwise claim come through here, so every other key
-        // still reaches the mode in the usual order further down. Without
-        // this, a globally bound key is unreachable from a mode that binds it
-        // — the Packages view's C-a ran the global select-all-steps.
         let ks = key_str(key);
+        // A modified global chord prefix that is not itself a direct binding
+        // opens the chord before a catch-all on-key handler can swallow it,
+        // so "C-x …" commands keep working from every mode. Unmodified
+        // prefixes ("ESC" with "ESC ." chords) still reach the mode first:
+        // Escape is a cancellation key modes rely on.
         if !vim_insert_literal
-            && self.lisp_bindings.contains_key(&ks)
-            && self.handle_mode_keybinding(&ks)
+            && key.modifiers != KeyModifiers::NONE
+            && !self.lisp_bindings.contains_key(&ks)
+            && self.binding_has_prefix(&ks)
         {
+            self.pending_key = Some(key);
+            return;
+        }
+        if self.handle_mode_input_key(key) {
+            return;
+        }
+        if !vim_insert_literal && self.handle_mode_keybinding(&ks) {
             return;
         }
         if !vim_insert_literal && self.run_direct_lisp_binding(&ks) {
             return;
         }
-
-        if self.binding_has_prefix(&key_str(key)) {
+        if self.binding_has_prefix(&ks) {
             self.pending_key = Some(key);
             return;
         }
 
         if self.handle_vim_normal_key(key) {
-            return;
-        }
-
-        if self.handle_mode_input_key(key) {
-            return;
-        }
-
-        if self.handle_mode_keybinding(&key_str(key)) {
             return;
         }
 
@@ -6005,20 +6050,20 @@ impl Editor {
     /// Run the active named mode's `mode-bind-key` handler for `key`, if it
     /// has one. A handler that answers `false` leaves the key unhandled so
     /// dispatch continues.
+    /// Run the first mode-keymap binding for `key` that handles it, nearest
+    /// mode first. A handler that returns false declines the key, and the
+    /// next ancestor's binding gets it (the fx panel's BS tries the selected
+    /// steps in the parent keymap before deleting the effect).
     fn handle_mode_keybinding(&mut self, key: &str) -> bool {
-        let BufferMode::Named(mode_name) = &self.active_buffer().mode else {
-            return false;
-        };
-        let Some(handler) = self
-            .mode_registry
-            .get(mode_name)
-            .and_then(|mode| mode.keybindings.get(key))
-            .cloned()
-        else {
-            return false;
-        };
-        if self.call_lisp_handler(&handler) {
-            return true;
+        let handlers: Vec<String> = self
+            .active_mode_chain()
+            .into_iter()
+            .filter_map(|mode| mode.keybindings.get(key).cloned())
+            .collect();
+        for handler in handlers {
+            if self.call_lisp_handler(&handler) {
+                return true;
+            }
         }
         self.clear_minibuffer_message();
         false
@@ -7397,13 +7442,7 @@ impl Editor {
     }
 
     fn handle_mode_input_key(&mut self, key: KeyEvent) -> bool {
-        let Some(handler) = (match &self.active_buffer().mode {
-            BufferMode::Named(mode_name) => self
-                .mode_registry
-                .get(mode_name)
-                .and_then(|mode| mode.on_key.clone()),
-            _ => None,
-        }) else {
+        let Some(handler) = self.active_mode_on_key() else {
             return false;
         };
 
@@ -7784,6 +7823,7 @@ impl Editor {
             .collect();
 
         for (tile_id, cols, rows, frame_viewport, viewport_known) in tiles_to_update {
+            let content_scroll = self.tile_layout_content_scroll(tile_id);
             let layout_started = Instant::now();
             let existing_layout = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
                 let layout = leaf.cached_layout.clone()?;
@@ -7819,6 +7859,7 @@ impl Editor {
                         tree,
                         Some((cols, rows)),
                         frame_viewport,
+                        content_scroll,
                         &mut dirty_widget_ids,
                     ) {
                         Ok((layout, rebuilds)) => {
@@ -7848,6 +7889,7 @@ impl Editor {
                                 tree,
                                 Some((cols, rows)),
                                 frame_viewport,
+                                content_scroll,
                                 buffer_id * 100_000,
                             )
                     });
@@ -7948,6 +7990,7 @@ impl Editor {
             .collect();
 
         for (tile_id, cols, rows, frame_viewport) in tiles_to_update {
+            let content_scroll = self.tile_layout_content_scroll(tile_id);
             let layout_started = Instant::now();
             let buffer_name = self.buffers[buffer_idx].name.clone();
             // Move the cached layout out of the tile (and drop the cached
@@ -8029,6 +8072,7 @@ impl Editor {
                         child_path,
                         Some((cols, rows)),
                         frame_viewport,
+                        content_scroll,
                         &mut dirty_widget_ids,
                     );
                     match relayout_result {
@@ -8055,6 +8099,7 @@ impl Editor {
                         tree,
                         Some((cols, rows)),
                         frame_viewport,
+                        content_scroll,
                         buffer_id * 100_000,
                     );
                 (layout, Vec::new())
@@ -8477,6 +8522,7 @@ impl Editor {
                     keybindings: HashMap::new(),
                     on_enter: definition.on_enter,
                     on_key: definition.on_key,
+                    inherit: definition.inherit,
                 },
             );
         }

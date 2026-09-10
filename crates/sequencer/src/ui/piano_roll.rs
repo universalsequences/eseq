@@ -241,6 +241,38 @@ impl PianoRollLanes {
         }
     }
 
+    fn set_step_param(&self, step: usize, param: StepParam, value: f32) {
+        let Some((address, local)) = self.resolve_step(step) else {
+            return;
+        };
+        match address {
+            PianoRollStepAddress::Live => {
+                self.state.set_step_param_no_publish(self.track, local, param, value);
+            }
+            PianoRollStepAddress::Pool(pattern) => {
+                self.state.with_pool_pattern_mut(self.track, pattern, |data| {
+                    let value = value.clamp(param.min(), param.max());
+                    let previous = data.step_data[local][param.index()];
+                    data.step_data[local][param.index()] = value;
+                    let delta = value - previous;
+                    // Match the live step-parameter setter: transpose moves
+                    // every chord voice; duration shifts explicit durations.
+                    if param == StepParam::Transpose {
+                        for note in data.chord_snapshot.steps.get_mut(local).into_iter().flatten() {
+                            *note += delta;
+                        }
+                    } else if param == StepParam::Duration {
+                        for duration in data.chord_snapshot.durations.get_mut(local).into_iter().flatten() {
+                            if *duration > 0.0 {
+                                *duration = (*duration + delta).clamp(param.min(), param.max());
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     fn step_delay(&self, step: usize) -> f32 {
         piano_roll_sanitize_delay(self.step_param(step, StepParam::Delay))
     }
@@ -488,6 +520,7 @@ struct PianoRollMoveItem {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PianoRollDragKind {
+    Automation,
     Move,
     Resize,
 }
@@ -1067,8 +1100,8 @@ pub(crate) fn build_piano_roll_automation_value(
                 increment: StepParam::Velocity.increment(),
             },
         ));
-    // Device locks live in the LIVE pattern only; a pinned focus shows its
-    // own step params read-only and no device lane.
+    // Device locks remain live-pattern-only; step parameters use the
+    // focus-aware piano-roll mutation path for every source kind.
     let live = matches!(lanes.focus(), PianoRollFocusSpec::Live);
     let is_step_param = matches!(target, PianoRollAutomationTarget::StepParam(_));
     let num_steps = lanes.num_steps();
@@ -1135,7 +1168,7 @@ pub(crate) fn build_piano_roll_automation_value(
         ("max", Value::Number(scale.max as f64)),
         ("default", Value::Number(scale.default as f64)),
         ("increment", Value::Number(scale.increment as f64)),
-        ("editable", Value::Bool(live)),
+        ("editable", Value::Bool(is_step_param || live)),
         ("points", list_value(points)),
     ];
     if let Some(slot_idx) = target.slot_idx() {
@@ -1406,6 +1439,8 @@ pub(crate) enum PianoRollGestureCommand {
 pub(crate) fn piano_roll_gesture_command(action: &Value) -> Option<PianoRollGestureCommand> {
     let map = cloned_map(action).ok()?;
     match value_as_keyword_or_string(map.get("type"))?.as_str() {
+        "update-automation-step-param" => Some(PianoRollGestureCommand::Update(PianoRollDragKind::Automation)),
+        "finish-automation-step-param" => Some(PianoRollGestureCommand::Finish(PianoRollDragKind::Automation)),
         "move-items-absolute" => Some(PianoRollGestureCommand::Update(PianoRollDragKind::Move)),
         "resize-item-absolute" => Some(PianoRollGestureCommand::Update(PianoRollDragKind::Resize)),
         "finish-move-items" => Some(PianoRollGestureCommand::Finish(PianoRollDragKind::Move)),
@@ -1422,6 +1457,9 @@ pub(crate) fn piano_roll_gesture_touched_steps(
     let map = cloned_map(action)?;
     let action_type = value_as_keyword_or_string(map.get("type"))
         .ok_or_else(|| "piano roll action missing :type".to_string())?;
+    if action_type == "update-automation-step-param" {
+        return automation_step_edit(lanes, &map).map(|(step, _, _)| vec![step]);
+    }
     let mut ids = parse_piano_roll_ids(map.get("ids"));
     if ids.is_empty() {
         if let Some(id) = value_as_u64(map.get("id")) {
@@ -1500,6 +1538,28 @@ pub(crate) fn piano_roll_gesture_touched_steps(
     Ok(steps)
 }
 
+fn automation_step_edit(
+    lanes: &PianoRollLanes,
+    action: &HashMap<String, Value>,
+) -> Result<(usize, StepParam, f32), String> {
+    let index = |key: &str| {
+        value_as_number(action.get(key))
+            .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0)
+            .map(|n| n as usize)
+            .ok_or_else(|| format!("Invalid automation {key}"))
+    };
+    let step = index("step")?;
+    if step >= lanes.num_steps() || lanes.resolve_step(step).is_none() {
+        return Err("Automation step is outside the focused source".to_string());
+    }
+    let param = StepParam::ALL.get(index("param-idx")?).copied()
+        .ok_or_else(|| "Invalid automation parameter".to_string())?;
+    let value = value_as_number(action.get("value"))
+        .filter(|n| n.is_finite())
+        .ok_or_else(|| "Invalid automation value".to_string())?;
+    Ok((step, param, value.clamp(param.min() as f64, param.max() as f64) as f32))
+}
+
 pub(crate) fn piano_roll_history_plan(
     lanes: &PianoRollLanes,
     action: &Value,
@@ -1510,6 +1570,10 @@ pub(crate) fn piano_roll_history_plan(
         return Err("piano roll action missing :type".to_string());
     };
     let (label, mut steps) = match action_type.as_str() {
+        "set-automation-step-param" => {
+            let (step, _, _) = automation_step_edit(lanes, &map)?;
+            ("Edit piano-roll automation", vec![step])
+        }
         "finish-create-item" => {
             let num_steps = lanes.num_steps();
             let start = value_as_number(map.get("start")).unwrap_or(0.0);
@@ -1650,6 +1714,11 @@ pub(crate) fn apply_piano_roll_action_with_clipboard(
     let num_steps = lanes.num_steps();
 
     match action_type.as_str() {
+        "set-automation-step-param" | "update-automation-step-param" => {
+            let (step, param, value) = automation_step_edit(lanes, &action)?;
+            lanes.set_step_param(step, param, value);
+            Ok("Edited piano-roll automation".to_string())
+        }
         "select" => {
             *move_state.lock().unwrap() = None;
             let ids = parse_piano_roll_ids(action.get("ids"));

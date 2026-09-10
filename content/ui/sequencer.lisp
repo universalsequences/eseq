@@ -1474,7 +1474,7 @@
     :key (str "expanded-process-lane-selector-" track-id)
     :options (process-lane-options track)
     :on-change (lambda (v) (select-process-lane-option track track-id v))
-    :width 14.8 :height 1.45 :font-size 10))
+    :width 10.8 :height 1.45 :font-size 10))
 
 (def expanded-track-quick-controls (track track-id)
   (let ((mode (track-param-mode track-id)))
@@ -1551,12 +1551,7 @@
             (param-tab track track-id 7 "rtrg")
             (param-tab track track-id 8 "rate")
             (process-lane-selector track track-id mode)
-            (h-stack :align :center :gap 0.35
-              (dropdown :value (track-timebase track)
-                :key (str "expanded-timebase-" track-id)
-                :options timebase-options
-                :on-change (lambda (v) (set-expanded-timebase track v))
-                :width 6 :height 1.45 :font-size 10)))
+            )
           
           (grid
             :cols 16
@@ -1650,9 +1645,9 @@
                   (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
                     (step-playhead-dot
                       :active (slot-playhead-binding track-id i)))))))))
+      )
     )
   )
-)
 
 (def track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))

@@ -1,0 +1,18 @@
+{
+  "source_sha256": "079b8a7aef840980ce272f560f34fdff89f3c012fa7298aa77effd8f81492787",
+  "compiler_sha256": "9ef1fe146cbcfb5a11d65461f7c2c9781011bd9f1c42fad25a83219fd9a132bd",
+  "clips": {
+    "reverse-lengths": {
+      "peak": 0.226342698559165,
+      "seconds": 6.2
+    },
+    "reverse-trip-hop": {
+      "peak": 0.204069555676881,
+      "seconds": 16.0
+    },
+    "reverse-felt-bloom": {
+      "peak": 0.16862741205841303,
+      "seconds": 9.0
+    }
+  }
+}

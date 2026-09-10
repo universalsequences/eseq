@@ -985,6 +985,16 @@ impl SizedFontCache {
             .sum()
     }
 
+    /// Rasterized ink above and below the baseline, without line leading.
+    pub fn text_ink_extents(&self, text: &str, size_tenths: u16) -> (f32, f32) {
+        let px = size_tenths as f32 / 10.0 * self.scale;
+        text.chars().fold((0.0_f32, 0.0_f32), |(above, below), ch| {
+            let metrics = self.face.metrics(ch, px);
+            (above.max((metrics.ymin + metrics.height as i32) as f32),
+                below.max(-metrics.ymin as f32))
+        })
+    }
+
     fn rasterize(&self, ch: char, size_tenths: u16) -> (GlyphMetrics, Vec<u8>) {
         let px = size_tenths as f32 / 10.0 * self.scale;
         self.face.rasterize(ch, px)
@@ -1295,6 +1305,19 @@ mod tests {
         load_any_font(true)
             .map(|loaded| loaded.post_script_name)
             .expect("an installed monospace font")
+    }
+
+    #[test]
+    fn numeric_ink_extents_exclude_unused_descender_space() {
+        for scale in [1.0, 2.0] {
+            let mut fonts = SizedFontCache::new(scale).expect("system UI font");
+            let numeric = fonts.text_ink_extents("0123456789.-kMG", 105);
+            let with_descender = fonts.text_ink_extents("0123456789.-kMGg", 105);
+            assert_eq!(fonts.text_ink_extents("", 105), (0.0, 0.0));
+            assert!(numeric.0 > 0.0 && numeric.1 >= 0.0);
+            assert!(numeric.0 + numeric.1 < fonts.line_height(105));
+            assert!(with_descender.0 >= numeric.0 && with_descender.1 > numeric.1);
+        }
     }
 
     #[test]

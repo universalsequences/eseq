@@ -16586,3 +16586,100 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(report.non_finite_samples, 0);
         assert!((report.rms - 0.5).abs() < 0.0001, "{report:?}");
     }
+
+    #[test]
+    fn digi_drums_respond_to_incoming_note_pitch() {
+        for (name, engines) in [("Digi Cymbal", 2), ("Digi Hat", 3), ("Digi Snare", 3)] {
+            let source = super::load_instrument_source(
+                &format!("factory:Drums/{name}"),
+            ).unwrap();
+            let compiled = super::compile_and_load_instrument(&source, 44_100).unwrap();
+            for engine in 1..=engines {
+                let mut previous: Option<Vec<f32>> = None;
+                for note in [48.0, 60.0, 72.0] {
+                    let report = super::render_loaded_instrument_for_test(
+                        &compiled.manifest, &compiled.lib, &super::InstrumentRenderOptions {
+                            sample_rate: 44_100, block_size: 128, frames: 4096,
+                            midi_note: note, velocity: 1.0, gate_frames: 4096, voice_index: 0,
+                            param_overrides: vec![("engine".into(), engine as f32), ("humanize".into(), 0.0)],
+                            param_events: Vec::new(), input_overrides: Vec::new(),
+                        },
+                    ).unwrap();
+                    assert_eq!(report.non_finite_samples, 0, "{name} engine {engine} note {note}");
+                    assert_eq!(report.non_finite_state_slots, 0, "{name} engine {engine} note {note}");
+                    assert!(report.rms > 0.0001, "{name} engine {engine} note {note}: silent");
+                    if let Some(previous) = previous {
+                        let difference = previous.iter().zip(&report.first_samples)
+                            .map(|(a, b)| (a - b).powi(2)).sum::<f32>() / previous.len() as f32;
+                        assert!(difference.sqrt() > 0.001,
+                            "{name} engine {engine}: octave change leaves the attack unchanged");
+                    }
+                    previous = Some(report.first_samples);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn digi_drums_honor_gate_duration_and_release() {
+        for (name, engines) in [("Digi Cymbal", 2), ("Digi Hat", 3), ("Digi Snare", 3)] {
+            let source = super::load_instrument_source(&format!("factory:Drums/{name}")).unwrap();
+            let compiled = super::compile_and_load_instrument(&source, 44_100).unwrap();
+            for engine in 1..=engines {
+                let render = |gate_frames, release, sustain| {
+                    let report = super::render_loaded_instrument_for_test(
+                        &compiled.manifest, &compiled.lib, &super::InstrumentRenderOptions {
+                            sample_rate: 44_100, block_size: 128, frames: 22_050,
+                            midi_note: 60.0, velocity: 1.0, gate_frames, voice_index: 0,
+                            param_overrides: vec![("engine".into(), engine as f32),
+                                ("humanize".into(), 0.0), ("sustain".into(), sustain), ("release".into(), release),
+                                // Isolate amplitude behavior from the hat high-pass, which removes
+                                // the FM carrier after its one-shot modulation transient decays.
+                                ("fltf".into(), 20.0), ("fltw".into(), 18000.0)],
+                            param_events: Vec::new(), input_overrides: Vec::new(),
+                        },
+                    ).unwrap();
+                    assert_eq!(report.non_finite_samples, 0, "{name} engine {engine}");
+                    assert_eq!(report.non_finite_state_slots, 0, "{name} engine {engine}");
+                    report
+                };
+                let short = render(882, 40.0, 0.6);
+                let held = render(22_050, 40.0, 0.6);
+                let long_release = render(882, 800.0, 0.6);
+                let no_sustain = render(22_050, 40.0, 0.0);
+                assert!(held.rms > short.rms * 1.5,
+                    "{name} engine {engine}: held {} vs short {}", held.rms, short.rms);
+                assert!(long_release.rms > short.rms * 1.1,
+                    "{name} engine {engine}: release has no effect: {} vs {}", long_release.rms, short.rms);
+                assert!(held.rms > no_sustain.rms * 1.2,
+                    "{name} engine {engine}: sustain has no effect");
+            }
+        }
+    }
+
+    #[test]
+    fn drum_envelope_is_silent_until_trigger_and_releases_continuously() {
+        let source = "(use-defmacro drum-envelope)\n(def gate (in 1 @name gate))\n(def trigger (in 4 @name trigger))\n(out (drum-envelope gate trigger 100 0.5 40) 1)";
+        let compiled = super::compile_and_load_instrument(source, 44_100).unwrap();
+        let render = |block_size, input_overrides| {
+            super::render_loaded_instrument_for_test(&compiled.manifest, &compiled.lib,
+                &super::InstrumentRenderOptions {
+                    sample_rate: 44_100, block_size, frames: 128, midi_note: 60.0,
+                    velocity: 1.0, gate_frames: 8, voice_index: 0,
+                    param_overrides: Vec::new(), param_events: Vec::new(), input_overrides,
+                }).unwrap()
+        };
+        let silent = render(128, vec![(3, 0.0)]);
+        assert_eq!(silent.peak, 0.0, "sustain must not sound before a trigger");
+        let report = render(128, Vec::new());
+        assert_eq!(report.first_samples[0], 1.0);
+        let coefficient = (-6.9077553_f32 / (0.040 * 44_100.0)).exp();
+        for pair in report.first_samples[7..].windows(2) {
+            assert!((pair[1] - pair[0] * coefficient).abs() < 0.00001,
+                "release must start at the current level without a jump");
+        }
+        let single_sample = render(1, Vec::new());
+        for (a, b) in report.first_samples.iter().zip(single_sample.first_samples) {
+            assert!((a - b).abs() < 0.00001, "gate timing depends on block size");
+        }
+    }

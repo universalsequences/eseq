@@ -1561,8 +1561,24 @@ pub(super) fn handle(
             if steps.is_empty() {
                 return;
             }
-            let track = current_track.load(Ordering::Relaxed);
+            let selected_track = current_track.load(Ordering::Relaxed);
+            let track = map_usize(map, "track").unwrap_or(selected_track);
+            if track >= state.active_track_count() {
+                return;
+            }
             let command = match target.as_str() {
+                "rack-macro" => Some(app::AppCommand::ClearRackMacroPlockMulti {
+                    track,
+                    steps,
+                    macro_idx: param_idx,
+                }),
+                "bus-send" => app.buses.get(param_idx).map(|bus| {
+                    app::AppCommand::ClearTrackBusSendPlockMulti {
+                        track,
+                        steps,
+                        destination: bus.id,
+                    }
+                }),
                 "instrument" => Some(app::AppCommand::ClearInstrumentPlockMulti {
                     track,
                     steps,
@@ -1602,6 +1618,23 @@ pub(super) fn handle(
             if !changed {
                 return;
             }
+            // Refresh the clicked strip without changing the selected track's
+            // parameter projection. Mixer controls may belong to any track.
+            if target == "rack-macro" {
+                let display_step = if track == selected_track {
+                    displayed_plock_step(&state, track, selected_plock_step(&selected_steps))
+                } else {
+                    None
+                };
+                sync_rack_macro_value_fields(editor.runtime_mut(), &app, track, display_step);
+            }
+            if target == "bus-send" {
+                sync_track_bus_send_binding_field(editor.runtime_mut(), &app, &state, track, param_idx);
+                sync_selected_track_bus_send_binding_fields(
+                    editor.runtime_mut(), &app, &state, selected_track, &selected_steps,
+                );
+            }
+            let track = selected_track;
             // Same refresh arms the per-step clear uses, plus the automation
             // presence field so the knob's dot goes out with the locks.
             let selection = selected_neural_neurons.lock().unwrap().clone();
@@ -1772,9 +1805,13 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
+            Self::with_track_count(1)
+        }
+
+        fn with_track_count(track_count: usize) -> Self {
             let state = Arc::new(sequencer::sequencer::SequencerState::new(
-                1,
-                vec![sequencer::sequencer::default_empty_effect_chain()],
+                track_count,
+                (0..track_count).map(|_| sequencer::sequencer::default_empty_effect_chain()).collect(),
             ));
             state.pattern.track_params[TRACK].set_num_steps(16);
             // An ACTIVE step: the duration bar and the piano roll only render
@@ -1796,9 +1833,9 @@ mod tests {
                 Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
                 keyboard_tx.clone(),
             );
-            app.tracks = vec!["Track 1".to_string()];
+            app.tracks = (0..track_count).map(|i| format!("Track {}", i + 1)).collect();
             app.track_registry =
-                sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+                sequencer::sequencer::TrackRegistry::for_legacy_track_count(track_count).unwrap();
 
             let mut runtime = Runtime::new();
             runtime.register_reactive("SEQ", Vec::new(), true);
@@ -2459,6 +2496,51 @@ mod tests {
             .into_iter()
             .collect(),
         )
+    }
+
+    #[test]
+    fn clear_rack_macro_and_mixer_send_plocks_are_scoped_and_undoable() {
+        use sequencer::sequencer::{BusId, RackMacroId, RackTrackSnapshot, default_rack_macros};
+        for target in ["rack-macro", "bus-send"] {
+            for scope in ["all", "selected"] {
+                let mut harness = Harness::with_track_count(2);
+                let track = 1;
+                let destination = BusId::DEFAULT_A;
+                let bus_idx = harness.app.buses.iter().position(|bus| bus.id == destination).unwrap();
+                let macro_id = RackMacroId::from_index(0).unwrap();
+                harness.state.set_rack_track_for_all_pattern_snapshots(track,
+                    RackTrackSnapshot::new(vec![], default_rack_macros()));
+                for step in [2, 9, 40] {
+                    harness.state.pattern.track_send_plocks[track].set(step, destination, 0.75);
+                    harness.state.pattern.track_send_plocks[0].set(step, destination, 0.5);
+                    assert!(harness.app.set_rack_macro_plock(track, macro_id, step, 0.75));
+                }
+                harness.selected_steps.lock().unwrap().insert(2);
+                let mut payload = clear_param_plocks_payload(scope, if target == "bus-send" { bus_idx } else { 0 });
+                let Value::Map(ref mut map) = payload else { unreachable!() };
+                map.insert("track".into(), Rc::new(RefCell::new(Value::Number(track as f64))));
+                map.insert("target".into(), Rc::new(RefCell::new(Value::String(target.into()))));
+                let before = harness.app.history.undo_len();
+                harness.dispatch("clear-param-plocks", payload);
+                assert_eq!(harness.app.history.undo_len(), before + 1, "{target}/{scope}");
+                for step in [2, 9, 40] {
+                    let cleared = scope == "all" || step == 2;
+                    let send_present = harness.state.pattern.track_send_plocks[track].snapshot()[step]
+                        .iter().any(|send| send.destination == destination);
+                    let macro_present = harness.state.pattern.rack_tracks.lock().unwrap()[track]
+                        .as_ref().unwrap().macros[0].plocks[step].is_some();
+                    assert_eq!(send_present, !(target == "bus-send" && cleared));
+                    assert_eq!(macro_present, !(target == "rack-macro" && cleared));
+                    assert!(!harness.state.pattern.track_send_plocks[0].snapshot()[step].is_empty());
+                }
+                assert!(matches!(app::edit::undo(&mut harness.app), app::history::HistoryReplay::Applied(_)));
+                for step in [2, 9, 40] {
+                    assert!(!harness.state.pattern.track_send_plocks[track].snapshot()[step].is_empty());
+                    assert!(harness.state.pattern.rack_tracks.lock().unwrap()[track]
+                        .as_ref().unwrap().macros[0].plocks[step].is_some());
+                }
+            }
+        }
     }
 
     /// Bead eseq-1gy6. "Clear p-locks" from the knob's right-click menu wipes

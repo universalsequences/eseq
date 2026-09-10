@@ -1198,6 +1198,46 @@ pub(super) fn pull_shared_bus_state(
     true
 }
 
+/// Buffers registered as main-panel step tabs (`eseq.seq-step-tabs`): the
+/// factory `*sequencer*` plus every custom sequencer view a script or
+/// package registered. Read from the Lisp registry so a new view needs no
+/// host edit to count as "the sequencer".
+pub(super) fn registered_sequencer_view_buffers(editor: &mut Editor) -> Vec<String> {
+    let mut names = vec!["*sequencer*".to_string()];
+    if let Ok(Some(Value::List(tabs))) = editor
+        .runtime_mut()
+        .invoke_global("eseq.seq-step-tabs/seq-main-step-tabs", Vec::new())
+    {
+        for tab in tabs {
+            let tab = tab.borrow();
+            let Value::List(fields) = &*tab else {
+                continue;
+            };
+            let Some(buffer) = fields.get(1) else {
+                continue;
+            };
+            let buffer = buffer.borrow();
+            let Value::String(buffer) = &*buffer else {
+                continue;
+            };
+            if !names.iter().any(|name| name == buffer) {
+                names.push(buffer.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Whether any sequencer view is on screen: `*sequencer*` or a registered
+/// step-tab buffer showing in its place. Per-frame sequencer publishes
+/// (step lists, playhead fields, expanded viewports) are gated on this, so
+/// a custom tab that replaces the factory grid keeps receiving state.
+pub(super) fn editor_has_visible_sequencer_view(editor: &mut Editor) -> bool {
+    registered_sequencer_view_buffers(editor)
+        .iter()
+        .any(|name| editor_has_visible_buffer(editor, name))
+}
+
 pub(super) fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
     editor.tile_root.leaf_ids().into_iter().any(|tile_id| {
         editor

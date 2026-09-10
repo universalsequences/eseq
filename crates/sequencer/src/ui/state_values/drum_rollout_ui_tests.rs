@@ -1,14 +1,18 @@
 use super::*;
 
 fn check_surface(instrument: &str, page_count: usize) {
+    check_surface_at(instrument, page_count, sequencer::app_paths::app_paths().instruments_dir().join("Drums"));
+}
+
+fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBuf) {
     let src = read_ui_source("effects.lisp").expect("read fx lisp");
     let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
         "test-instrument".to_string(),
         format!("instruments/Drums/{instrument}/ui.lisp"),
-        read_factory_source(&format!("instruments/Drums/{instrument}/ui.lisp")).unwrap(),
+        std::fs::read_to_string(root.join(format!("{instrument}/ui.lisp"))).unwrap(),
     )));
     let mut hat909_inst = test_instrument_map();
-    let dsp = read_factory_source(&format!("instruments/Drums/{instrument}/dsp.lisp")).unwrap();
+    let dsp = std::fs::read_to_string(root.join(format!("{instrument}/dsp.lisp"))).unwrap();
     let mut bindings = Vec::new();
     let params = dsp.lines().map(str::trim).filter(|line| line.starts_with("(param "))
         .enumerate().map(|(index, line)| {
@@ -106,7 +110,12 @@ fn check_surface(instrument: &str, page_count: usize) {
     let required: Vec<String> = dsp.lines().filter(|line| line.contains("@mod true"))
         .map(|line| line.split_whitespace().nth(1).unwrap().to_string()).collect();
     let mut seen = std::collections::HashSet::new();
-    let engines = if instrument.starts_with("Digi") { 3 } else { 1 };
+    let engines = dsp.lines().find(|line| line.starts_with("(param engine "))
+        .map(|line| {
+            let words: Vec<_> = line.trim_end_matches(')').split_whitespace().collect();
+            let max = words.iter().position(|word| *word == "@max").unwrap();
+            words[max + 1].parse::<usize>().unwrap()
+        }).unwrap_or(1);
     for engine in 1..=engines {
         if engines > 1 {
             editor.runtime_mut().set_reactive("SEQ", "hat909-test-engine", Value::Number(engine as f64));
@@ -202,6 +211,9 @@ fn digi_clap_surface() { check_surface("Digi Clap", 4); }
 fn digi_hat_surface() { check_surface("Digi Hat", 4); }
 
 #[test]
+fn digi_cymbal_surface() { check_surface("Digi Cymbal", 4); }
+
+#[test]
 fn digi_snare_surface() { check_surface("Digi Snare", 4); }
 
 #[test]
@@ -214,7 +226,10 @@ fn modal_kick_surface() { check_surface("Modal Kick", 6); }
 fn orbit_tom_66_surface() { check_surface("Orbit Tom 66", 4); }
 
 #[test]
-fn r8_kick_03_surface() { check_surface("R8 Kick 03", 4); }
+fn r8_kick_03_surface() {
+    check_surface_at("R8 Kick 03", 4, sequencer::app_paths::app_paths()
+        .dev_instrument_fixtures_dir().expect("development instrument fixtures").join("drums"));
+}
 
 #[test]
 fn virus_b_bassdrum_23_surface() { check_surface("Virus B BassDrum 23", 6); }

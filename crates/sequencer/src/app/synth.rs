@@ -1128,10 +1128,9 @@ impl App {
         id: crate::sequencer::RackMacroId,
         name: String,
     ) -> bool {
-        let name = name.trim().to_string();
-        if name.is_empty() {
-            return false;
-        }
+        // This is a live text-input value, not a submitted identifier.
+        // Preserve empty text and spaces so clearing/replacing a label works;
+        // macro identity and mappings are carried by RackMacroId, not its name.
         self.state
             .update_rack_macro_in_current_pattern(track, id, |rack_macro| {
                 rack_macro.name = name.clone()

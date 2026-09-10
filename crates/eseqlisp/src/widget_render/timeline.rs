@@ -3146,7 +3146,12 @@ impl TimelineView {
                 Some(bottom) => local_row < bottom,
                 None => true,
             };
-            let has_handles = in_title_bar && rect.width > 1.0;
+            // A bar-less item too narrow to hold a grip AND a move zone is
+            // resize-only (Ableton): a note shrunk to a sliver would
+            // otherwise be a pure move surface with no way to ever grow it
+            // back. Its whole width (plus the outside slop) is the end grip.
+            let resize_only = title_bar_bottom.is_none() && rect.width <= handle_width * 2.0;
+            let has_handles = in_title_bar && (rect.width > 1.0 || resize_only);
             // `item_rect` clamps a clip that begins left of the view to the
             // content's left edge, so `left` is NOT the clip's start edge for
             // a scrolled-off clip. Offering a start grip there would trim an
@@ -3154,7 +3159,7 @@ impl TimelineView {
             let start_edge_visible = item.start >= self.view_start;
 
             if local_col >= left && local_col < right {
-                if has_handles && local_col >= right - handle_width {
+                if has_handles && (resize_only || local_col >= right - handle_width) {
                     return Some(HitRegion::ItemEdgeEnd { item: item.clone() });
                 }
                 if has_handles
@@ -3958,6 +3963,9 @@ impl TimelineView {
         } else {
             fine_time
         };
+        let chorded = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         let lane_step = if key.modifiers.contains(KeyModifiers::SHIFT) {
             4.0
         } else {
@@ -4048,22 +4056,26 @@ impl TimelineView {
             KeyCode::Esc if !selected_ids.is_empty() || self.selection_rect.is_some() => {
                 Some(action_map(vec![("type", keyword(":clear-selection"))]))
             }
-            KeyCode::Char('p') => Some(action_map(vec![
+            // Tool and zoom keys are BARE letters. A chord on the same letter
+            // (Cmd+D duplicate, Cmd+E, Ctrl+P place …) belongs to the buffer
+            // mode; a focused lane swallowing it as "set tool" left the
+            // arrangement's Cmd+D dead whenever a lane had focus.
+            KeyCode::Char('p') if !chorded => Some(action_map(vec![
                 ("type", keyword(":set-tool")),
                 ("tool", keyword(":pointer")),
             ])),
-            KeyCode::Char('d') => Some(action_map(vec![
+            KeyCode::Char('d') if !chorded => Some(action_map(vec![
                 ("type", keyword(":set-tool")),
                 ("tool", keyword(":draw")),
             ])),
-            KeyCode::Char('e') => Some(action_map(vec![
+            KeyCode::Char('e') if !chorded => Some(action_map(vec![
                 ("type", keyword(":set-tool")),
                 ("tool", keyword(":erase")),
             ])),
-            KeyCode::Char('+') | KeyCode::Char('=') => {
+            KeyCode::Char('+') | KeyCode::Char('=') if !chorded => {
                 self.zoom_action(self.view_start + self.view_duration * 0.5, 1.1)
             }
-            KeyCode::Char('-') => {
+            KeyCode::Char('-') if !chorded => {
                 self.zoom_action(self.view_start + self.view_duration * 0.5, 1.0 / 1.1)
             }
             _ => None,
@@ -6651,6 +6663,42 @@ mod tests {
     }
 
     #[test]
+    fn chorded_tool_letters_fall_through_to_the_buffer_mode() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect { row: 0.0, col: 0.0, width: 32.0, height: 8.0 },
+        );
+        let tool_of = |action: Option<Value>| {
+            let Some(Value::Map(map)) = action else { return None };
+            map.get("tool").map(|value| value.borrow().clone())
+        };
+
+        // Bare `d` still picks the draw tool.
+        assert_eq!(
+            tool_of(view.handle_key(WidgetKeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::NONE,
+            })),
+            Some(Value::Keyword("draw".to_string()))
+        );
+        // Cmd+D / Ctrl+D are the arrangement's duplicate chord: the lane
+        // must not eat them as "set tool".
+        for modifiers in [KeyModifiers::SUPER, KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            for code in ['d', 'p', 'e', '-', '='] {
+                assert!(
+                    view.handle_key(WidgetKeyEvent { code: KeyCode::Char(code), modifiers })
+                        .is_none(),
+                    "{code:?} with {modifiers:?} must fall through"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn right_edge_resize_hit_allows_slightly_outside_note() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("pointer")),
@@ -8704,6 +8752,49 @@ mod tests {
         let clip_view = title_bar_view(Some(2.0));
         assert_eq!(hit_name(&clip_view, 10.5, 0.5), "title-bar");
         assert_eq!(hit_name(&clip_view, 11.5, 0.5), "edge-end");
+    }
+
+    /// A bar-less note narrower than two grips is resize-only (Ableton): the
+    /// whole sliver and the slop just outside it read as the end handle, so a
+    /// note accidentally shrunk to a hair can still be dragged back out.
+    #[test]
+    fn hit_test_tiny_note_without_a_title_bar_is_resize_only() {
+        let props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(1.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(4.25)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 16.0,
+                height: 8.0,
+            },
+        );
+        // A quarter-beat note; `item_rect` widens it to the 1-cell minimum,
+        // so it spans cols 4..5 with 0.75 cells of slop past that.
+        for row in [0.1_f32, 4.0, 7.9] {
+            assert_eq!(hit_name(&view, 4.05, row), "edge-end", "row {row}");
+            assert_eq!(hit_name(&view, 4.5, row), "edge-end", "row {row}");
+            assert_eq!(hit_name(&view, 4.95, row), "edge-end", "row {row}");
+            // Outside slop still lands on the grip.
+            assert_eq!(hit_name(&view, 5.5, row), "edge-end", "row {row}");
+            assert_eq!(hit_name(&view, 6.0, row), "background", "row {row}");
+        }
+        // A note wide enough for a grip and a move zone keeps its body.
+        let wide = title_bar_view(None);
+        assert_eq!(hit_name(&wide, 4.2, 4.0), "body");
     }
 
     /// A clip that begins left of the view has its rect clamped to the

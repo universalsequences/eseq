@@ -15210,6 +15210,54 @@ fn context_menu_anchors_at_the_pointer_when_the_tile_is_scrolled() {
 }
 
 #[test]
+fn context_menu_anchor_ignores_another_tiles_scroll() {
+    check_context_menu_anchor_ignores_another_tiles_scroll(false);
+}
+
+#[test]
+fn inactive_context_menu_anchor_ignores_active_tiles_scroll() {
+    check_context_menu_anchor_ignores_another_tiles_scroll(true);
+}
+
+fn check_context_menu_anchor_ignores_another_tiles_scroll(open_while_inactive: bool) {
+    let _overlay_guard = OverlayClearGuard;
+    let program = CONTEXT_MENU_PROGRAM.replace(":width 60", ":width 200")
+        .replace(":height 18", ":height 40");
+    let mut editor = context_menu_two_tile_editor_for(&program);
+    assert!(editor.switch_active_tile_to_buffer_named("*sequencer*"));
+    {
+        let leaf = editor.active_leaf_mut();
+        leaf.widget_scroll_left = 55.0;
+        leaf.widget_scroll_top = 18.0;
+    }
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    assert_eq!(editor.widget_scroll_left(), 55.0);
+    assert_eq!(editor.total_scroll_top(), 18.0);
+
+    if open_while_inactive {
+        editor.runtime_mut().eval_str(
+            "(set! menu-col 6) (set! menu-row 1.5) (set! menu-open true)"
+        ).unwrap();
+        editor.refresh_runtime_side_effects();
+        assert!(editor.switch_active_tile_to_buffer_named("*panel*"));
+        register_active_layout_overlays(&mut editor);
+    } else {
+        // Activate the unscrolled panel before its next render, as a File-button
+        // mouse-down does, then open its menu without first rendering the tile.
+        assert!(editor.switch_active_tile_to_buffer_named("*panel*"));
+        right_click_at(&mut editor, 6.0, 1.5);
+    }
+    let entry = crate::widget_render::topmost_overlay().expect("context menu overlay entry");
+    assert!(entry.rect.width.is_finite() && entry.rect.width > 0.0);
+    assert!(entry.rect.height.is_finite() && entry.rect.height > 0.0);
+    assert!(
+        (entry.rect.col - 6.0).abs() < 0.5 && (entry.rect.row - 1.5).abs() < 0.5,
+        "panel {:?} must anchor to its own pointer, not the other tile's scroll",
+        entry.rect
+    );
+}
+
+#[test]
 fn context_menu_item_hover_schedules_redraw_on_pointer_change() {
     let _overlay_guard = OverlayClearGuard;
     let mut editor = context_menu_two_tile_editor();

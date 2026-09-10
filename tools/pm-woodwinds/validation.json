@@ -1,0 +1,51 @@
+{
+  "date": "2026-09-09",
+  "platform": "Apple Silicon macOS",
+  "compiler_sha256": "14d5d11d8259d0803a5335b3712aae38eea793a52b39a87e746b04fc91ac6777",
+  "source_sha256": {
+    "PM Flute": "f15035b38ea983ab621ad1782a89cdc527dd21f45fdb2b54cad50319d85bd1b3",
+    "PM Saxophone": "7227cf40383cf312ad9437a89de0bff079991548b5ab59469e54383193a5bcbe"
+  },
+  "preset_bank_sha256": "e73193ac8b523b6a49428c36f8343d6be617cc743595f49860288019d00987e2",
+  "dsp_renders_passed": 358,
+  "roundtrip_and_host_modulation_renders_passed": 12,
+  "original_sax_max_sample_error": 0,
+  "original_flute_max_sample_error": 5.200505256652832e-06,
+  "patch_save_max_sample_error": 0.00025522708892822266,
+  "acoustic_preset_max_pitch_error_cents": 1.6568445033917296,
+  "pitch_test_hz": [
+    110,
+    185,
+    370,
+    740
+  ],
+  "sample_rates": [
+    44100,
+    48000,
+    96000
+  ],
+  "block_sizes": [
+    32,
+    64,
+    128,
+    256
+  ],
+  "rust_tests_passed": [
+    "eseqlisp::pm_woodwinds::factory_woodwind_sidecars_preserve_executable_controls"
+  ],
+  "host_probes_passed": [
+    "PM Flute default at MIDI 66",
+    "PM Saxophone Alto Soft at MIDI 66",
+    "PM Saxophone Alto Full at MIDI 54"
+  ],
+  "visual_captures_inspected": [
+    "pm-woodwinds.lisp track 0 (saxophone)",
+    "pm-woodwinds.lisp track 1 (flute)"
+  ],
+  "limitations": [
+    "Sax likeness is reference-informed but has not been perceptually accepted by the user.",
+    "Original Reed preserves its existing octave-down behavior and loss of sustained upper notes.",
+    "Extreme physical parameters can intentionally choke, overblow or squeak."
+  ],
+  "fragile_workarounds": "None identified. The new reed branch is explicitly a hybrid waveguide approximation; no sample playback or per-note tuning correction is used."
+}

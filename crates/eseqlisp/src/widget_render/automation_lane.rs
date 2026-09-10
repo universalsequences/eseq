@@ -15,7 +15,7 @@
 //!
 //! Plain primitives only (rects + circles), so no shader pair to maintain.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -38,6 +38,34 @@ pub static AUTOMATION_LANE_WIDGET: AutomationLaneWidget = AutomationLaneWidget;
 const DEFAULT_HEIGHT: f32 = 4.0;
 /// Horizontal hit tolerance around a point's onset, in design pixels.
 const HIT_TOLERANCE_PX: f32 = 7.0;
+
+thread_local! {
+    // Only one lane can be under the pointer. Avoid retaining state for every
+    // lane ever mounted while switching tracks and parameters.
+    static HOVERED_POINT: Cell<Option<(u64, usize)>> = const { Cell::new(None) };
+}
+
+fn set_hovered_point(widget_id: u64, point: Option<LanePoint>) {
+    let next = point.map(|point| (widget_id, point.step));
+    HOVERED_POINT.with(|hovered| {
+        let previous = hovered.replace(next);
+        if previous != next {
+            if let Some((previous_id, _)) = previous {
+                super::bump_widget_state_revision(previous_id);
+            }
+            super::bump_widget_state_revision(widget_id);
+        }
+    });
+}
+
+fn hovered_step(widget_id: u64) -> Option<usize> {
+    if !super::pointer_hovered(widget_id) {
+        return None;
+    }
+    HOVERED_POINT.with(|hovered| {
+        hovered.get().filter(|(id, _)| *id == widget_id).map(|(_, step)| step)
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LanePoint {
@@ -162,19 +190,32 @@ pub fn value_for_row(rect: Rect, scale: LaneScale, local_row: f32) -> f32 {
     }
 }
 
-/// The point whose onset is nearest `local_col`, within the hit tolerance.
+/// Hit the full duration of an active point, not just its onset. Like the
+/// original velocity-lane interaction, the hit region spans the lane's height
+/// so pressing above/below a bar can immediately set its value.
+/// Onsets take priority over bars; overlapping bars prefer the latest onset.
+/// Selection depends only on time, so value changes cannot retarget a drag.
 pub fn point_at_col(node: &LayoutNode, local_col: f32, cell_w: f32) -> Option<LanePoint> {
     let (view_start, view_duration) = view_axis(&node.props);
     let tolerance = super::ui_design_px(HIT_TOLERANCE_PX) / cell_w.max(1.0);
-    lane_points(&node.props)
-        .into_iter()
-        .filter_map(|point| {
-            let x = x_for_time(node.rect, view_start, view_duration, point.start);
-            let distance = (x - local_col).abs();
-            (distance <= tolerance).then_some((distance, point))
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, point)| point)
+    if local_col < node.rect.col || local_col > node.rect.col + node.rect.width {
+        return None;
+    }
+    let points = lane_points(&node.props);
+    let onset = points.iter().filter_map(|point| {
+        let x = x_for_time(node.rect, view_start, view_duration, point.start);
+        let distance = (x - local_col).abs();
+        // A clipped-away dot must not steal the visible end of another bar.
+        (x >= node.rect.col && x <= node.rect.col + node.rect.width && distance <= tolerance)
+            .then_some((distance, *point))
+    }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, point)| point);
+    onset.or_else(|| {
+        points.into_iter().filter(|point| {
+            let x0 = x_for_time(node.rect, view_start, view_duration, point.start);
+            let x1 = x_for_time(node.rect, view_start, view_duration, point.end);
+            point.active && x1 > x0 && local_col >= x0 && local_col <= x1
+        }).max_by(|a, b| a.start.total_cmp(&b.start).then(a.step.cmp(&b.step)))
+    })
 }
 
 fn lane_event(kind: &str, step: usize, value: f32) -> WidgetEvent {
@@ -288,15 +329,20 @@ impl WidgetDefinition for AutomationLaneWidget {
         cell_w: f32,
         cell_h: f32,
     ) -> MouseEventOutcome {
-        // The anchor is the point nearest where the press LANDED, so a drag
+        // The anchor is the point hit where the press LANDED, so a drag
         // that wanders sideways keeps editing the same step.
         let anchor_col = drag_start.map(|(col, _)| col).unwrap_or(local_col);
         let axis = value_rect(node.rect, cell_h);
         match mouse_kind {
+            MouseEventKind::Moved => {
+                set_hovered_point(node.widget_id, point_at_col(node, local_col, cell_w));
+                MouseEventOutcome::Consume
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 let Some(point) = point_at_col(node, local_col, cell_w) else {
                     return MouseEventOutcome::Ignore;
                 };
+                set_hovered_point(node.widget_id, Some(point));
                 if modifiers.contains(KeyModifiers::ALT) {
                     return MouseEventOutcome::Dispatch(lane_event(
                         "clear",
@@ -407,6 +453,7 @@ impl WidgetDefinition for AutomationLaneWidget {
             }));
         }
 
+        let hovered = hovered_step(node.widget_id);
         let dot_px = super::ui_design_px(get_f32_prop(&node.props, "dot-size", 5.5)).max(1.0);
         let mut dots = Vec::new();
         for point in lane_points(&node.props) {
@@ -416,7 +463,17 @@ impl WidgetDefinition for AutomationLaneWidget {
                 continue;
             }
             let y = y_for_value(axis, scale, point.value);
-            let color = if point.locked { accent } else { base };
+            let mut color = if point.locked { accent } else { base };
+            if hovered == Some(point.step) {
+                // Lift the existing locked/base color toward white, preserving
+                // the distinction between locked and inherited values.
+                color = Color {
+                    r: color.r + (1.0 - color.r) * 0.4,
+                    g: color.g + (1.0 - color.g) * 0.4,
+                    b: color.b + (1.0 - color.b) * 0.4,
+                    ..color
+                };
+            }
             if point.active && x1 > x0 {
                 let bar_left = x0.max(rect.col);
                 let bar_right = x1.min(right);
@@ -626,6 +683,96 @@ mod tests {
         let output = AUTOMATION_LANE_WIDGET.handle_event(&node, event).unwrap();
         assert_eq!(output.args[0], Value::Keyword("clear".to_string()));
         assert_eq!(output.args[1], Value::Number(0.0));
+    }
+
+    #[test]
+    fn duration_bar_press_drag_and_release_keep_the_original_step() {
+        let mut props = velocity_props();
+        props.insert("points".to_string(), Value::List(vec![
+            Rc::new(RefCell::new(point_value(0.0, 0.0, 1.0, 100.0, true))),
+            Rc::new(RefCell::new(point_value(4.0, 4.0, 12.0, 64.0, false))),
+        ]));
+        let mut node = node(props);
+        // Deep inside step 4's duration, many hit tolerances from its circle.
+        let anchor = (20.0, 6.0);
+        for (kind, col, row, drag_start, expected_kind, expected_value) in [
+            (MouseEventKind::Down(MouseButton::Left), anchor.0, anchor.1, None, "set", 64.0),
+            (MouseEventKind::Drag(MouseButton::Left), 10.0, -5.0, Some(anchor), "set", 127.0),
+            (MouseEventKind::Up(MouseButton::Left), 40.0, -5.0, Some(anchor), "finish", 127.0),
+        ] {
+            let outcome = AUTOMATION_LANE_WIDGET.mouse_event(
+                &node, kind, col, row, drag_start, None, KeyModifiers::NONE, 8.0, 16.0,
+            );
+            let MouseEventOutcome::Dispatch(event) = outcome else { panic!("bar dispatches"); };
+            let output = AUTOMATION_LANE_WIDGET.handle_event(&node, event).unwrap();
+            assert_eq!(output.args[0], Value::Keyword(expected_kind.to_string()));
+            assert_eq!(output.args[1], Value::Number(4.0));
+            assert_eq!(output.args[2], Value::Number(expected_value));
+            // Model the host publishing a fresh points list after each edit.
+            node.props.insert("points".to_string(), Value::List(vec![
+                Rc::new(RefCell::new(point_value(0.0, 0.0, 1.0, 100.0, true))),
+                Rc::new(RefCell::new(point_value(4.0, 4.0, 12.0, expected_value, true))),
+            ]));
+        }
+    }
+
+    #[test]
+    fn bar_hits_respect_clipping_inactive_points_and_onset_priority() {
+        let mut props = velocity_props();
+        let inactive = point_value(8.0, 8.0, 12.0, 80.0, true);
+        if let Value::Map(map) = &inactive {
+            *map["active"].borrow_mut() = Value::Bool(false);
+        }
+        props.insert("points".to_string(), Value::List(vec![
+            Rc::new(RefCell::new(point_value(0.0, -4.0, 7.0, 100.0, true))),
+            Rc::new(RefCell::new(point_value(4.0, 4.0, 6.0, 64.0, false))),
+            Rc::new(RefCell::new(inactive)),
+        ]));
+        let node = node(props);
+        assert_eq!(point_at_col(&node, 10.0, 8.0).unwrap().step, 0, "clipped bar remains hittable");
+        assert_eq!(point_at_col(&node, 14.1, 8.0).unwrap().step, 4, "onset beats overlapping bar");
+        assert_eq!(point_at_col(&node, 15.5, 8.0).unwrap().step, 4, "latest overlapping bar wins");
+        assert_eq!(point_at_col(&node, 16.5, 8.0).unwrap().step, 0);
+        assert!(point_at_col(&node, 20.0, 8.0).is_none(), "off-step locks have no bar");
+        assert!(point_at_col(&node, 9.9, 8.0).is_none(), "outside visible lane");
+        assert!(point_at_col(&node, 27.0, 8.0).is_none());
+    }
+
+    #[test]
+    fn hovering_a_bar_highlights_only_its_point_and_invalidates_render_state() {
+        let node = node(velocity_props());
+        let colors = |node: &LayoutNode| -> Vec<Color> {
+            AUTOMATION_LANE_WIDGET.build_primitives("automation-lane", node, viewport())
+                .iter().map(|primitive| match primitive {
+                    GpuPrimitive::Circle(circle) => circle.color,
+                    GpuPrimitive::Rect(rect) => rect.color,
+                    _ => panic!("unexpected lane primitive"),
+                }).collect()
+        };
+        super::super::set_pointer_hover_widget(Some(node.widget_id));
+        set_hovered_point(node.widget_id, None);
+        let normal = colors(&node);
+        let revision = super::super::widget_state_revision(node.widget_id);
+        let outcome = AUTOMATION_LANE_WIDGET.mouse_event(
+            &node, MouseEventKind::Moved, 15.5, 6.0, None, None, KeyModifiers::NONE, 8.0, 16.0,
+        );
+        assert!(matches!(outcome, MouseEventOutcome::Consume), "hover never writes a value");
+        assert!(super::super::widget_state_revision(node.widget_id) > revision);
+        assert_eq!(hovered_step(node.widget_id), Some(4));
+        let highlighted = colors(&node);
+        assert_eq!(normal[0], highlighted[0], "background unchanged");
+        assert_eq!(normal[1], highlighted[1], "other bar unchanged");
+        assert_ne!(normal[2], highlighted[2], "hovered bar changes");
+        assert_eq!(normal[3], highlighted[3], "other dot unchanged");
+        assert_ne!(normal[4], highlighted[4], "associated dot changes");
+        super::super::set_pointer_hover_widget(None);
+        assert_eq!(colors(&node), normal, "leaving the lane removes feedback");
+        super::super::set_pointer_hover_widget(Some(node.widget_id));
+        AUTOMATION_LANE_WIDGET.mouse_event(
+            &node, MouseEventKind::Moved, 23.0, 6.0, None, None, KeyModifiers::NONE, 8.0, 16.0,
+        );
+        assert_eq!(colors(&node), normal, "empty lane space clears hover");
+        super::super::set_pointer_hover_widget(None);
     }
 
     #[test]

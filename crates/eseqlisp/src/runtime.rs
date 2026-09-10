@@ -852,6 +852,9 @@ pub(crate) struct PendingModeDefinition {
     pub live_keys: bool,
     pub on_enter: Option<String>,
     pub on_key: Option<String>,
+    /// Parent mode whose keymap, on-key handler and live-keys opt-in this
+    /// mode inherits (`define-mode … :inherit "parent"`).
+    pub inherit: Option<String>,
 }
 
 /// Buffer metadata mirrored into the runtime for `buffer-info-list`.
@@ -1054,6 +1057,7 @@ impl NativeContext {
         live_keys: bool,
         on_enter: Option<String>,
         on_key: Option<String>,
+        inherit: Option<String>,
     ) {
         // Registry auto-qualification (spec §5): a declared module's mode
         // name AND its late-bound handler strings capture the module
@@ -1061,6 +1065,10 @@ impl NativeContext {
         let name = self.qualify_registration_name(&name);
         let on_enter = on_enter.map(|h| self.qualify_registration_name(&h));
         let on_key = on_key.map(|h| self.qualify_registration_name(&h));
+        // The parent reference resolves like a mode-bind-key target: module
+        // first, flat fallback in the editor (resolve_mode_name), lazily at
+        // lookup time so a parent declared later still links.
+        let inherit = inherit.map(|m| self.qualify_registration_name(&m));
         self.shared
             .borrow_mut()
             .pending_mode_defs
@@ -1070,6 +1078,7 @@ impl NativeContext {
                 live_keys,
                 on_enter,
                 on_key,
+                inherit,
             });
     }
 
@@ -3571,6 +3580,7 @@ impl Runtime {
             tree,
             viewport,
             self.layout_frame_viewport,
+            self.layout_content_scroll,
             widget_id_offset,
         )
     }
@@ -3580,6 +3590,7 @@ impl Runtime {
         tree: &Value,
         viewport: Option<(f32, f32)>,
         frame_viewport: Option<crate::layout::Rect>,
+        content_scroll: (f32, f32),
         widget_id_offset: u64,
     ) -> Option<Arc<LayoutNode>> {
         let saved_tree = self.current_widget_tree.clone();
@@ -3595,6 +3606,7 @@ impl Runtime {
         let saved_cols = self.layout_cols;
         let saved_rows = self.layout_rows;
         let saved_frame_viewport = self.layout_frame_viewport;
+        let saved_content_scroll = self.layout_content_scroll;
         let saved_widget_id_offset = self.widget_id_offset;
 
         if let Some((cols, rows)) = viewport {
@@ -3602,6 +3614,7 @@ impl Runtime {
             self.layout_rows = rows;
         }
         self.layout_frame_viewport = frame_viewport;
+        self.layout_content_scroll = content_scroll;
         self.widget_id_offset = widget_id_offset;
 
         // Snapshotting an arbitrary buffer/tree should not try to reuse against
@@ -3634,6 +3647,7 @@ impl Runtime {
         self.layout_cols = saved_cols;
         self.layout_rows = saved_rows;
         self.layout_frame_viewport = saved_frame_viewport;
+        self.layout_content_scroll = saved_content_scroll;
         self.widget_id_offset = saved_widget_id_offset;
         snapshot
     }
@@ -3645,6 +3659,7 @@ impl Runtime {
         child_path: &[usize],
         viewport: Option<(f32, f32)>,
         frame_viewport: Option<crate::layout::Rect>,
+        content_scroll: (f32, f32),
         dirty_widget_ids: &mut Vec<u64>,
     ) -> Result<LayoutNode, String> {
         let (cols, rows) = viewport.unwrap_or((self.layout_cols, self.layout_rows));
@@ -3661,7 +3676,7 @@ impl Runtime {
             LayoutEngine::new_exact(cols, rows, self.layout_aspect)
         };
         engine.frame_viewport = frame_viewport;
-        engine.content_scroll = self.layout_content_scroll;
+        engine.content_scroll = content_scroll;
         relayout_subtree_path_result(existing, tree, child_path, dirty_widget_ids, &engine)
     }
 
@@ -3677,6 +3692,7 @@ impl Runtime {
         tree: &Value,
         viewport: Option<(f32, f32)>,
         frame_viewport: Option<crate::layout::Rect>,
+        content_scroll: (f32, f32),
         dirty_widget_ids: &mut Vec<u64>,
     ) -> Result<(LayoutNode, usize), String> {
         let (cols, rows) = viewport.unwrap_or((self.layout_cols, self.layout_rows));
@@ -3693,7 +3709,7 @@ impl Runtime {
             LayoutEngine::new_exact(cols, rows, self.layout_aspect)
         };
         engine.frame_viewport = frame_viewport;
-        engine.content_scroll = self.layout_content_scroll;
+        engine.content_scroll = content_scroll;
         crate::layout::reconcile_layout_node(existing, tree, &engine, dirty_widget_ids)
     }
 
@@ -3949,6 +3965,7 @@ impl Runtime {
                         child_path,
                         None,
                         self.layout_frame_viewport,
+                        self.layout_content_scroll,
                         &mut dirty_widget_ids,
                     )
                     .map_err(|relayout_reason| {

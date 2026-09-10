@@ -1,0 +1,39 @@
+{
+  "file": "249113__clarinet_pablo_proj__overall-quality-of-single-note-clarinet-d4.wav",
+  "sha256": "73f370193929f3b7ba6ae915ae4864865bfa137682fcf7e2fba628fd36ed2fc3",
+  "sample_rate": 48000,
+  "seconds": 6.4828125,
+  "peak": 0.08830404281616211,
+  "fundamental_hz": 295.60856920664327,
+  "midi_note": 62.11421481238488,
+  "sustain_window_seconds": [
+    1,
+    5.5
+  ],
+  "harmonics_db": [
+    -8.457173437002716,
+    -30.943465233683703,
+    -0.8701492354841668,
+    -19.268368312151317,
+    -17.72646881407739,
+    -25.155417907339643,
+    -22.393362032515665,
+    -45.08539657317787,
+    -36.03563209166606,
+    -42.44155940177306,
+    -37.51060117367074,
+    -49.15146770776004,
+    -44.326913234382175,
+    -51.53838003902055,
+    -54.92261369414038,
+    -55.36020456164941
+  ],
+  "odd_to_even_db": 17.94404052508569,
+  "onset_seconds": 0.48470833333333335,
+  "active_end_seconds": 5.976541666666667,
+  "attack_10_90_ms": 61.70833333333333,
+  "sustain_rms": 0.03302280338880347,
+  "pitch_motion_3_9_hz_peak_cents": 0.44427046910005036,
+  "pitch_motion_dominant_hz": 3.50189208984375,
+  "pitch_motion_note": "Band-limited pitch variation, not proof of intentional periodic vibrato."
+}

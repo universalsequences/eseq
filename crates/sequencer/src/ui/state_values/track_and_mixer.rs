@@ -375,7 +375,32 @@ pub(crate) fn sync_track_bus_send_binding_field(
             &track_bus_send_field(track, bus_idx),
             Value::Number(amount as f64),
         );
+        sync_track_bus_send_plock_fields(rt, app, state, track, bus_idx, None);
     }
+}
+
+pub(crate) fn sync_track_bus_send_plock_fields(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    bus_idx: usize,
+    display_step: Option<usize>,
+) -> bool {
+    let bus = &app.buses[bus_idx];
+    let locks = state.pattern.track_send_plocks[track].snapshot();
+    let any = locks.iter().flatten().any(|send| send.destination == bus.id);
+    let active = display_step.and_then(|step| locks.get(step))
+        .is_some_and(|row| row.iter().any(|send| send.destination == bus.id));
+    let baseline = track_bus_send_amount(app, state, track, bus_idx).unwrap_or(0.0);
+    let field = track_bus_send_field(track, bus_idx);
+    let mut dirty = false;
+    for (suffix, value) in [("plock-any", any as u8 as f64),
+        ("plock-active", active as u8 as f64), ("plock-default", baseline as f64)] {
+        dirty |= rt.set_reactive("SEQ", &format!("{field}-{suffix}"), Value::Number(value))
+            .effects_dirty;
+    }
+    dirty
 }
 
 pub(crate) fn sync_track_bus_send_binding_fields(
@@ -442,6 +467,7 @@ pub(crate) fn sync_selected_track_bus_send_binding_fields(
         let Some(baseline) = track_bus_send_amount(app, state, track, bus_idx) else {
             continue;
         };
+        dirty |= sync_track_bus_send_plock_fields(rt, app, state, track, bus_idx, display_step);
         let amount = display_step
             .and_then(|step| locks.as_ref()?.get(step))
             .and_then(|row| row.iter().find(|send| send.destination == bus.id))

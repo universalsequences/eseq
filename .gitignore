@@ -32,3 +32,5 @@ spring_reverb_impulse.wav
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+build-signed-binary.sh
+samples-to-analyze

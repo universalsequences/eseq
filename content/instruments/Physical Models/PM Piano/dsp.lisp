@@ -43,6 +43,11 @@
 (param tremolo_hz @group motion @default 4 @min 0.1 @max 16 @unit Hz @mod true @mod-mode additive)
 (param pan @group motion @default 0 @min 0 @max 1 @mod true @mod-mode additive)
 (param pan_hz @group motion @default 0.5 @min 0.05 @max 8 @unit Hz @mod true @mod-mode additive)
+;; Length/curve/tail are sampled at note onset; amount remains live.
+(param amount @group swell @default 0 @min 0 @max 1 @mod true @mod-mode additive)
+(param length_s @group swell @default 1 @min 0.05 @max 8 @unit s @mod true @mod-mode additive)
+(param curve @group swell @default 1 @min 0.25 @max 4 @mod true @mod-mode additive)
+(param tail @group swell @default 0 @min 0 @max 1 @mod true @mod-mode additive)
 (param drive @group output @default 0 @min 0 @max 1 @mod true @mod-mode additive)
 (param tone_hz @group output @default 18000 @min 500 @max 20000 @unit Hz @mod true @mod-mode additive)
 (param gain @group output @default 0.85 @min 0 @max 1 @mod true @mod-mode additive)
@@ -287,9 +292,10 @@
 (def damper_rate (* (piano-control (* damper_contact (/ 6.907755 (clip (mod release_s) 0.02 20))))
   (+ 0.6 (* 0.4 (sqrt mode_number)))))
 (def loss_scale (/ (pow (+ 1 (* frequencies 0.0004)) (- damping_v 1)) decay_v))
-(def fast_rate (+ (* (peek-row fast_rate_table row) loss_scale) damper_rate))
-(def slow_rate (+ (* (peek-row slow_rate_table row) (gather loss_scale aftersound_indices))
-  (gather damper_rate aftersound_indices)))
+(def fast_natural_rate (* (peek-row fast_rate_table row) loss_scale))
+(def fast_rate (+ fast_natural_rate damper_rate))
+(def slow_natural_rate (* (peek-row slow_rate_table row) (gather loss_scale aftersound_indices)))
+(def slow_rate (+ slow_natural_rate (gather damper_rate aftersound_indices)))
 (def fast_weight (* excitation (peek-row fast_amp_table row)))
 (def slow_weight (* (gather excitation aftersound_indices) (peek-row slow_amp_table row)
   (piano-control (clip (mod aftersound) 0 3)) 0.5))
@@ -298,8 +304,79 @@
 (def center (piano-modes [64] frequencies fast_rate fast_weight force))
 (def left_string (piano-modes [32] (* slow_frequencies (pow 2 (/ (- detune) 1200))) slow_rate slow_weight force))
 (def right_string (piano-modes [32] (* slow_frequencies (pow 2 (/ detune 1200))) slow_rate slow_weight force))
-(def string_mid (+ center left_string right_string))
-(def string_side (* (- left_string right_string) (clip (mod width) 0 1)))
+;; Reverse the calibrated modal energy contours, not the string feedback.
+;; exp(-loss * remaining_time) restores fast/bright modes near the crest even
+;; on long treble swells. The exponent is never positive. No audio buffer,
+;; lookahead, pre-render, or anti-damping is needed on the real-time thread.
+(def swell_mix (piano-smooth (clip (mod amount) 0 1) 8))
+(def swell_length (latch (clip (mod length_s) 0.05 8) onset))
+(def swell_curve (latch (clip (mod curve) 0.25 4) onset))
+(def swell_tail (latch (clip (mod tail) 0 1) onset))
+(make-history swell_clock)
+(make-history swell_seconds)
+(make-history swell_started)
+(make-history swell_damper)
+;; Keep the fractional clock in integer samples so long-held notes neither
+;; lose sub-second timing precision nor freeze their natural decay.
+(def swell_next_sample (gswitch onset 0 (+ (read-history swell_clock) 1)))
+(def swell_second_tick (gte swell_next_sample samplerate))
+(def swell_sample (gswitch swell_second_tick 0 swell_next_sample))
+(def swell_whole_seconds (gswitch onset 0 (+ (read-history swell_seconds) swell_second_tick)))
+(def swell_active (max onset (read-history swell_started)))
+(def swell_damper_age (gswitch onset 0 (min 100
+  (+ (read-history swell_damper) (/ (* damper_contact 6.907755) (* samplerate (clip (mod release_s) 0.02 20)))))))
+(write-history swell_clock swell_sample)
+(write-history swell_seconds swell_whole_seconds)
+(write-history swell_started swell_active)
+(write-history swell_damper swell_damper_age)
+(def swell_age (+ swell_whole_seconds (/ swell_sample samplerate)))
+(def swell_progress (clip (/ swell_age (max 0.05 swell_length)) 0 1))
+(def swell_remaining (* swell_length (- 1 (pow swell_progress (max 0.25 swell_curve)))))
+(def swell_after (max 0 (- swell_age swell_length)))
+(def swell_distance (piano-control (+ swell_remaining swell_after)))
+(def swell_end_loss (* swell_after (/ 6.907755 0.035) (pow (- 1 swell_tail) 2)))
+(def swell_level (piano-control (* swell_active hit_gain
+  (clip (/ swell_age 0.008) 0 1) (pow swell_progress (max 0.25 swell_curve))
+  (exp (- swell_end_loss)))))
+(def swell_contact_pole (piano-control hammer_pole))
+(def swell_damper_loss (* (piano-control swell_damper_age) (+ 0.6 (* 0.4 (sqrt mode_number)))))
+
+;; A normalized complex oscillator keeps each carrier on the unit circle
+;; through long swells and pitch changes, without per-sample trigonometry.
+;; Continuous phase avoids phase resets when a voice is retriggered. Five-ms residue smoothing declicks retriggers and live timbre
+;; edits without low-passing the audio. This reverses the modal envelope and
+;; spectral evolution; it does not claim sample-identical phase reversal.
+(defmacro piano-swell-modes (shape frequency rate weight damper_loss)
+  (make-tensor-history real_h @shape shape)
+  (make-tensor-history imag_h @shape shape)
+  (make-history ready)
+  (def x (gswitch (read-history ready) (read-tensor-history real_h) 1))
+  (def y (read-tensor-history imag_h))
+  (write-history ready 1)
+  (make-tensor-history level_h @shape shape)
+  (def omega (* twopi (/ (min frequency (* 0.48 samplerate)) samplerate)))
+  (def c (piano-audio (cos omega)))
+  (def s (piano-audio (sin omega)))
+  (def norm (sqrt (max 0.25 (+ (* x x) (* y y)))))
+  (def xn (/ (- (* c x) (* s y)) norm))
+  (def yn (/ (+ (* s x) (* c y)) norm))
+  (write-tensor-history real_h xn)
+  (write-tensor-history imag_h yn)
+  (def contact_mag (pow (/ (- 1 swell_contact_pole)
+    (sqrt (+ (* (- 1 swell_contact_pole) (- 1 swell_contact_pole))
+      (* 2 swell_contact_pole (- 1 (cos omega)))))) 3))
+  (def target (piano-audio (* weight contact_mag swell_level
+    (exp (- (+ (* rate swell_distance) damper_loss))))))
+  (def level (mix target (read-tensor-history level_h) (exp (/ -1 (* 0.005 samplerate)))))
+  (write-tensor-history level_h level)
+  (sum (* level yn)))
+(def reverse_center (piano-swell-modes [64] frequencies fast_natural_rate fast_weight swell_damper_loss))
+(def reverse_left (piano-swell-modes [32] (* slow_frequencies (pow 2 (/ (- detune) 1200)))
+  slow_natural_rate slow_weight (gather swell_damper_loss aftersound_indices)))
+(def reverse_right (piano-swell-modes [32] (* slow_frequencies (pow 2 (/ detune 1200)))
+  slow_natural_rate slow_weight (gather swell_damper_loss aftersound_indices)))
+(def string_mid (mix (+ center left_string right_string) (+ reverse_center reverse_left reverse_right) swell_mix))
+(def string_side (* (mix (- left_string right_string) (- reverse_left reverse_right) swell_mix) (clip (mod width) 0 1)))
 
 ;; A fresh, short noise impulse excites the broad soundboard/key mechanism.
 ;; It is intentionally synthesized; recording noise and mic rumble are absent.
@@ -309,7 +386,7 @@
 (def key_env (gswitch key_up hit_gain (* (read-history key_h) (exp (/ -1 (* samplerate 0.014))))))
 (write-history knock_h knock_env)
 (write-history key_h key_env)
-(def noise_hit (* (noise) (+ (* knock_env (clip (mod knock) 0 1)) (* key_env (clip (mod key_noise) 0 1))) 0.012))
+(def noise_hit (* (- 1 swell_mix) (noise) (+ (* knock_env (clip (mod knock) 0 1)) (* key_env (clip (mod key_noise) 0 1))) 0.012))
 (def size_v (piano-smooth (clip (mod size) 0.5 2) 8))
 (def low_mode (/ (clip (mod low_hz) 60 600) size_v))
 (def high_mode (/ (clip (mod high_hz) 300 6000) size_v))
@@ -330,8 +407,8 @@
 ;; Key/hammer motion also strikes the soundboard. These broad, short modes
 ;; become audible below the pitch in the treble, where few string modes remain.
 (def knock_register (clip (/ (- key_note 42) 66) 0.12 1))
-(def wood_impulse (+ (* force (clip (mod knock) 0 1) knock_register 0.7)
-  (* key_up hit_gain (clip (mod key_noise) 0 1) 0.04)))
+(def wood_impulse (* (- 1 swell_mix) (+ (* force (clip (mod knock) 0 1) knock_register 0.7)
+  (* key_up hit_gain (clip (mod key_noise) 0 1) 0.04))))
 (def wood_knock (+ (piano-knock-mode wood_impulse low_mode 0.18)
   (* 0.3 (piano-knock-mode wood_impulse (* low_mode 2.73) 0.09))
   (* 0.15 (piano-knock-mode wood_impulse high_mode 0.04))))

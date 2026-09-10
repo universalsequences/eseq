@@ -1,43 +1,34 @@
-# Navigation and controls
+# Navigation and keys
 
-eseq's panels are called **buffers**, and the screen areas displaying them are **tiles**. You can use ordinary view controls without learning the buffer system. Keyboard commands provide another route to the same tools.
+Panels in eseq are **buffers** and the areas that show them are **tiles**. The view controls handle the common layouts; the keyboard reaches everything else.
 
-## Focus first
+## Focus
 
-Click the panel you intend to operate before using a shortcut. A browser search needs letters for text; an armed track needs them for notes; a piano roll needs deletion to affect its note selection. The same key can mean different things in these contexts.
+A key does what the focused panel says. In a search box, letters type. On an armed track, letters play notes. In the piano roll, Delete removes notes. When a shortcut does nothing, leave the text field, disarm the track, and click the panel you mean.
 
-When a shortcut appears not to work, leave the text field, check whether a track is armed, and click the intended music panel.
+## Shortcuts
 
-## Common macOS gestures
+- Space: play and stop
+- Period: record
+- Tab: session and arrangement
+- Shift-Tab: devices and piano roll
+- Command-Z, Command-Shift-Z: undo, redo
+- Command-D: duplicate the pattern in the mixer, or the selection in the arrangement
+- Command-G: group the selected tracks
+- Command-P: place a pattern in the arrangement
 
-- Space toggles playback in a music view.
-- The red transport control toggles Record; period is also a record shortcut in appropriate music contexts.
-- Tab switches session and arrangement views.
-- Shift-Tab switches the lower main/device panel and piano roll.
-- Command-Z undoes; Command-Shift-Z redoes.
-- Command-G groups two or more selected tracks.
-- Command-D duplicates the active track pattern in the mixer or the selection in the arrangement.
-- Command-P starts pattern placement in the arrangement.
+## Commands and buffers
 
-The track's R button arms input. It is not the same as pressing the letter R, which can be an editor shortcut. Use visible controls while learning.
+In command help, `C-` is Control, `M-` is Option, `S-` is Shift, and `s-` is Command. A space between chords means press them in turn.
 
-## Buffer and command notation
+`C-x b` switches the current tile to another buffer. `M-x` opens the command prompt; type a command name and press Return. The music buffers are `*sequencer*`, `*mixer*`, `*fx*`, `*piano-roll*`, and `*arrangement*`.
 
-In command help, `C-` means Control, `M-` means Meta/Option, `S-` means Shift, and `s-` means Super, which is Command on macOS. A space between chords means press them in sequence.
+## This manual
 
-`C-x b` opens buffer switching: press Control-X, then B, and choose a buffer. `M-x` opens the command prompt: press Option-X, type a command name, and confirm. Named commands do not require writing code.
+**File > Help** opens it. Links are clickable and pages scroll.
 
-Music buffers include `*sequencer*`, `*mixer*`, `*fx*`, `*piano-roll*`, and `*arrangement*`. Prefer view controls to restore the normal multi-panel layout; switching one tile's buffer changes only that tile.
-
-## Read the manual
-
-Open Help from the File menu. Links are clickable and long pages scroll. Inside the manual:
-
-- `n` goes to the next chapter in the parent menu.
-- `p` goes to the previous chapter.
-- `u` goes up to the parent page.
-- `l` goes back through reading history.
-- `t` returns to the top page.
-- `q` leaves the manual and restores the previous buffer.
-
-Chapter order comes from the menu. Return to [eseq Manual](index) to choose another topic.
+- `n` and `p`: next and previous chapter
+- `u`: up to the parent page
+- `l`: back
+- `t`: top page
+- `q`: close the manual

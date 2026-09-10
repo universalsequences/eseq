@@ -1,60 +1,52 @@
 # Troubleshooting
 
-Start with the selected track, current pattern, current scene, and Record state. Many surprises come from editing or playing a different scope than intended.
+Most surprises come from editing a different track, pattern, scene, or step selection than you meant to. Check those four first.
 
-## A silent pattern
+## Nothing plays
 
-- Confirm the instrument finished loading or the sampler has a sample.
-- Check active steps and Play.
-- Check track enable/mute, solo elsewhere, level, and output route.
-- Check group, bus, and Main levels too.
-- Bypass MIDI effects to check whether input is suppressed or routed elsewhere.
-- In arrangement view, confirm a track clip covers the playback position. A scene marker alone does not place notes.
+- The instrument finished loading, or the sampler has a sample.
+- The pattern has active steps and Play is on.
+- The track is not muted, nothing else is soloed, and the fader is up.
+- The group, bus, and Main faders are up.
+- MIDI effects are bypassed, in case one is eating the notes.
+- In the arrangement, a clip covers the cursor. A scene marker alone is silent.
 
-A moving track meter with no Main signal suggests checking downstream routing. No track response suggests notes, loading, envelopes, or voice settings.
+A moving track meter with a silent Main means a routing problem downstream.
 
-## Keys do not play notes
+## Keys do not play
 
-Arm with the track's R control, leave search/text fields, and click a music panel. Check the octave with Z/X and use a known playable preset. Selecting a track alone does not arm it.
+Arm the track with **R**, leave any text field, and click a music panel. Try `Z` and `X` for the octave. On a drum rack, arm the header for pads or one member for pitches.
 
-For a drum rack, check whether the rack header or an individual member is armed. Rack arming selects pads by note; member arming plays one sound chromatically. A key aimed at an empty pad stays silent.
+If letters play notes when you want to edit, disarm the track.
 
-If letters play notes while you want to edit, disarm the track.
+## Recording landed in the wrong place
 
-## Recording went to the wrong place
+Session view records into the looping pattern. Arrangement view records a take. The choice is made when you press Record and does not change with the view. For knob recording, deselect all steps first.
 
-Start in session view for looping overdubs and arrangement view for takes and launch capture. Recording kind remains fixed through a pass even when views change.
+## An edit only changed one step
 
-Clear step selection for knob recording. Selected steps retain deliberate p-lock editing rather than becoming a moving target. Check Record and Play are both active. Stop before undoing a pass.
+Steps were selected. Command-click them to deselect, or check the inspector count, then edit again.
 
-## An edit changes only one step
+## A knob jumps back
 
-Check the selected-step count. Selection persists while you edit device controls, and clicking the same track again may leave it intact. Command-click selected steps to deselect them, or switch to another track and back. Confirm zero selected before editing the pattern's base sound.
+The parameter has p-locks; look for the marker. Edit or clear the locks. Also check what was launched: track values follow patterns, bus and group values follow scenes.
 
-## A knob returns to another value
+## A parameter is missing from the Lane menu
 
-Check its p-lock marker. Playback may be recalling a step value. Edit the locks, or right-click and choose Clear p-locks. Moving the base setting does not erase automation.
-
-Also check launches: track values follow patterns, while bus/group values follow scenes. Loading a preset does not mean all locks disappeared.
-
-## A device parameter is absent from Lane
-
-The piano-roll menu lists device parameters after they have at least one lock. Create one on a step or record a short gesture, then reopen the selector. Removing the last lock can remove the entry again.
+Device parameters appear after their first p-lock. Lock a step or record a short knob move, then reopen the menu.
 
 ## The timeline ignores a clip
 
-Check Back to Arrangement: manual launches can still override the timeline while arrangement view is visible. Inspect the source, offset, and placement too. Moving a clip and editing source notes are separate operations.
+**Back to Arrangement** is lit. Click it. Then check the clip's Offset and its source.
 
-## A synth replaced a rack or track
+## A synth replaced my rack
 
-Sidebar activation can replace the selected compatible track. Use the empty-track drop area for a separate track and the rack container for a layer. Undo, then choose the destination explicitly.
+Double-clicking in the sidebar replaces the selected track. Undo, then drag to **Drop sounds here** for a new track or into the rack's drop area for a layer.
 
-## An audio export is empty or cuts off early
+## The export is empty or cut short
 
-Check that clips occupy the requested arrangement range. A scene marker alone does not supply notes. Beat-range fields count from zero in beats, not bars. Increase Tail if the final delay or reverb has not decayed. For a live WAV capture, turn WAV off to finish the file. See [Saving and audio export](saving-and-export).
+Clips must cover the exported range. Beat range counts beats from zero. Raise **Tail** if the ending is clipped. For WAV, turn it off to finish the file.
 
-## The wrong object was deleted or duplicated
+## The wrong thing was deleted
 
-Shortcuts follow context and selection. A device header, pattern cell, note selection, and arrangement region are different targets. Undo, click the intended object, confirm its selection, and repeat once.
-
-Use File > Save As for milestones before major edits. Named versions are easier to revisit than reconstructing an exploratory session.
+Delete acts on the selected object: an effect header, a pattern cell, notes, or an arrangement region. Undo, click the object you mean, and try again.

@@ -99,6 +99,14 @@ mod inner {
             let size_tenths = (font_size * 10.0).round() as u16;
             self.fonts.borrow_mut().cap_height(size_tenths)
         }
+        fn descent_px(&self, font_size: f32) -> f32 {
+            let size_tenths = (font_size * 10.0).round() as u16;
+            self.fonts.borrow_mut().descent(size_tenths)
+        }
+        fn text_ink_extents_px(&self, text: &str, font_size: f32) -> (f32, f32) {
+            let size_tenths = (font_size * 10.0).round() as u16;
+            self.fonts.borrow().text_ink_extents(text, size_tenths)
+        }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

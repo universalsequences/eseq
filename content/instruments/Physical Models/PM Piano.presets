@@ -40,7 +40,11 @@
         "motion.pan_hz": 0.5,
         "output.drive": 0.0,
         "output.tone_hz": 18000.0,
-        "output.gain": 0.85
+        "output.gain": 0.85,
+        "swell.amount": 0,
+        "swell.length_s": 1,
+        "swell.curve": 1,
+        "swell.tail": 0
       }
     },
     {
@@ -80,7 +84,11 @@
         "motion.pan_hz": 0.5,
         "output.drive": 0.0,
         "output.tone_hz": 18000.0,
-        "output.gain": 0.85
+        "output.gain": 0.85,
+        "swell.amount": 0,
+        "swell.length_s": 1,
+        "swell.curve": 1,
+        "swell.tail": 0
       }
     },
     {
@@ -120,7 +128,11 @@
         "motion.pan_hz": 0.5,
         "output.drive": 0.0,
         "output.tone_hz": 18000.0,
-        "output.gain": 0.65
+        "output.gain": 0.65,
+        "swell.amount": 0,
+        "swell.length_s": 1,
+        "swell.curve": 1,
+        "swell.tail": 0
       }
     },
     {
@@ -160,7 +172,11 @@
         "motion.pan_hz": 0.5,
         "output.drive": 0.0,
         "output.tone_hz": 18000.0,
-        "output.gain": 0.85
+        "output.gain": 0.85,
+        "swell.amount": 0,
+        "swell.length_s": 1,
+        "swell.curve": 1,
+        "swell.tail": 0
       }
     },
     {
@@ -200,7 +216,11 @@
         "motion.pan_hz": 0.5,
         "output.drive": 0.0,
         "output.tone_hz": 18000.0,
-        "output.gain": 0.65
+        "output.gain": 0.65,
+        "swell.amount": 0,
+        "swell.length_s": 1,
+        "swell.curve": 1,
+        "swell.tail": 0
       }
     },
     {
@@ -240,7 +260,11 @@
         "motion.pan_hz": 0.22,
         "output.drive": 0.0,
         "output.tone_hz": 18000.0,
-        "output.gain": 0.85
+        "output.gain": 0.85,
+        "swell.amount": 0,
+        "swell.length_s": 1,
+        "swell.curve": 1,
+        "swell.tail": 0
       }
     },
     {
@@ -280,7 +304,143 @@
         "motion.pan_hz": 0.5,
         "output.drive": 0.25,
         "output.tone_hz": 18000.0,
-        "output.gain": 0.6
+        "output.gain": 0.6,
+        "swell.amount": 0,
+        "swell.length_s": 1,
+        "swell.curve": 1,
+        "swell.tail": 0
+      }
+    },
+    {
+      "id": "reverse-dust",
+      "name": "Reverse Dust",
+      "base_note_offset": 0,
+      "params": {
+        "hammer.hardness": 0.4,
+        "hammer.contact": 1.25,
+        "hammer.position": 0.14,
+        "hammer.knock": 0.12,
+        "hammer.velocity_tone": 0.7,
+        "hammer.velocity_curve": 1.5,
+        "string.decay": 1.0,
+        "string.damping": 1.0,
+        "string.stiffness": 1.0,
+        "string.aftersound": 1.0,
+        "voicing.register": 0.0,
+        "voicing.lid": 0.8,
+        "voicing.balance": 0.0,
+        "body.color": 0.0,
+        "body.size": 1.0,
+        "body.resonance": 0.0,
+        "body.low_hz": 125.0,
+        "body.high_hz": 1200.0,
+        "tuning.tune": 0.0,
+        "tuning.stretch": 0.3,
+        "tuning.unison": 1.5,
+        "tuning.width": 0.65,
+        "damper.release_s": 4,
+        "damper.pedal": 0.0,
+        "damper.upper_free": 0.0,
+        "damper.key_noise": 0,
+        "motion.tremolo": 0.0,
+        "motion.tremolo_hz": 4.0,
+        "motion.pan": 0.0,
+        "motion.pan_hz": 0.5,
+        "output.drive": 0.0,
+        "output.tone_hz": 8500,
+        "output.gain": 0.85,
+        "swell.amount": 1,
+        "swell.length_s": 0.75,
+        "swell.curve": 0.8,
+        "swell.tail": 0
+      }
+    },
+    {
+      "id": "blooming-felt",
+      "name": "Blooming Felt",
+      "base_note_offset": 0,
+      "params": {
+        "hammer.hardness": 0.2,
+        "hammer.contact": 1.9,
+        "hammer.position": 0.14,
+        "hammer.knock": 0.08,
+        "hammer.velocity_tone": 0.7,
+        "hammer.velocity_curve": 1.5,
+        "string.decay": 1.2,
+        "string.damping": 1.15,
+        "string.stiffness": 1.0,
+        "string.aftersound": 1.0,
+        "voicing.register": 0.0,
+        "voicing.lid": 0.65,
+        "voicing.balance": 0.3,
+        "body.color": -0.25,
+        "body.size": 1.0,
+        "body.resonance": 0.0,
+        "body.low_hz": 125.0,
+        "body.high_hz": 1200.0,
+        "tuning.tune": 0.0,
+        "tuning.stretch": 0.5,
+        "tuning.unison": 1.5,
+        "tuning.width": 0.85,
+        "damper.release_s": 8,
+        "damper.pedal": 0.0,
+        "damper.upper_free": 0.0,
+        "damper.key_noise": 0,
+        "motion.tremolo": 0.0,
+        "motion.tremolo_hz": 4.0,
+        "motion.pan": 0.0,
+        "motion.pan_hz": 0.5,
+        "output.drive": 0.0,
+        "output.tone_hz": 18000.0,
+        "output.gain": 0.85,
+        "swell.amount": 1,
+        "swell.length_s": 2.4,
+        "swell.curve": 0.65,
+        "swell.tail": 1
+      }
+    },
+    {
+      "id": "reverse-shadow",
+      "name": "Reverse Shadow",
+      "base_note_offset": 0,
+      "params": {
+        "hammer.hardness": 0.3,
+        "hammer.contact": 1.4,
+        "hammer.position": 0.14,
+        "hammer.knock": 0.12,
+        "hammer.velocity_tone": 0.7,
+        "hammer.velocity_curve": 1.5,
+        "string.decay": 1.6,
+        "string.damping": 1.0,
+        "string.stiffness": 1.0,
+        "string.aftersound": 1.0,
+        "voicing.register": 0.0,
+        "voicing.lid": 0.7,
+        "voicing.balance": 0.3,
+        "body.color": -0.15,
+        "body.size": 1.0,
+        "body.resonance": 0.0,
+        "body.low_hz": 125.0,
+        "body.high_hz": 1200.0,
+        "tuning.tune": 0.0,
+        "tuning.stretch": 0.5,
+        "tuning.unison": 1.5,
+        "tuning.width": 0.65,
+        "damper.release_s": 6,
+        "damper.pedal": 0.0,
+        "damper.upper_free": 0.0,
+        "damper.key_noise": 0.08,
+        "motion.tremolo": 0.2,
+        "motion.tremolo_hz": 4.2,
+        "motion.pan": 0.55,
+        "motion.pan_hz": 0.22,
+        "output.drive": 0.0,
+        "output.tone_hz": 18000.0,
+        "output.gain": 0.7,
+        "swell.amount": 0.65,
+        "swell.length_s": 1.5,
+        "swell.curve": 1.5,
+        "swell.tail": 0.7
       }
     }
   ]

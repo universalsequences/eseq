@@ -1,0 +1,1778 @@
+{
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "compiler_sha256": "14d5d11d8259d0803a5335b3712aae38eea793a52b39a87e746b04fc91ac6777",
+  "source_sha256": "59cce810c2185e7d808bfeddfa31f59754c32e1b9cff972fc43ebea83b7edc94",
+  "presets_sha256": "3a6b4736edd9019a87cd2c81846b13ea7de249529dc68f84d0b5a40917938d85",
+  "reference_sha256": "73f370193929f3b7ba6ae915ae4864865bfa137682fcf7e2fba628fd36ed2fc3",
+  "parameter_count": 25,
+  "modulation_destination_count": 19,
+  "fusion_checked_builds": 7,
+  "checks": [
+    {
+      "case": "reference-reed 55 Hz",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "reference-reed 146.83 Hz",
+      "peak": 0.20693747699260712,
+      "rms": 0.05876307755445409
+    },
+    {
+      "case": "reference-reed 295.608569 Hz",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "reference-reed 587.33 Hz",
+      "peak": 0.19073991477489471,
+      "rms": 0.08396990212847143
+    },
+    {
+      "case": "reference-reed 1174.66 Hz",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "reference-reed preview",
+      "peak": 0.2476353645324707,
+      "rms": 0.10100524668434989
+    },
+    {
+      "case": "chalumeau 55 Hz",
+      "peak": 0.30274853110313416,
+      "rms": 0.09904795882678273
+    },
+    {
+      "case": "chalumeau 146.83 Hz",
+      "peak": 0.2636261582374573,
+      "rms": 0.1131076854460986
+    },
+    {
+      "case": "chalumeau 295.608569 Hz",
+      "peak": 0.24524013698101044,
+      "rms": 0.12050674853356243
+    },
+    {
+      "case": "chalumeau 587.33 Hz",
+      "peak": 0.30047518014907837,
+      "rms": 0.16844703215364554
+    },
+    {
+      "case": "chalumeau 1174.66 Hz",
+      "peak": 0.15779396891593933,
+      "rms": 0.07866021912896645
+    },
+    {
+      "case": "chalumeau preview",
+      "peak": 0.2726094424724579,
+      "rms": 0.12118972379708981
+    },
+    {
+      "case": "soft-vibrato 55 Hz",
+      "peak": 0.22925801575183868,
+      "rms": 0.04169477954159466
+    },
+    {
+      "case": "soft-vibrato 146.83 Hz",
+      "peak": 0.216215118765831,
+      "rms": 0.05782147269565986
+    },
+    {
+      "case": "soft-vibrato 295.608569 Hz",
+      "peak": 0.26298776268959045,
+      "rms": 0.09115710776192393
+    },
+    {
+      "case": "soft-vibrato 587.33 Hz",
+      "peak": 0.19747264683246613,
+      "rms": 0.08278091433116906
+    },
+    {
+      "case": "soft-vibrato 1174.66 Hz",
+      "peak": 0.28423061966896057,
+      "rms": 0.1388101642039983
+    },
+    {
+      "case": "soft-vibrato preview",
+      "peak": 0.26298776268959045,
+      "rms": 0.09979667457146096
+    },
+    {
+      "case": "breathy-wood 55 Hz",
+      "peak": 0.31499457359313965,
+      "rms": 0.08005963518527069
+    },
+    {
+      "case": "breathy-wood 146.83 Hz",
+      "peak": 0.28188449144363403,
+      "rms": 0.09611580991553452
+    },
+    {
+      "case": "breathy-wood 295.608569 Hz",
+      "peak": 0.28923162817955017,
+      "rms": 0.11491302123469066
+    },
+    {
+      "case": "breathy-wood 587.33 Hz",
+      "peak": 0.26473307609558105,
+      "rms": 0.12531434613320544
+    },
+    {
+      "case": "breathy-wood 1174.66 Hz",
+      "peak": 0.34082263708114624,
+      "rms": 0.17421594405272295
+    },
+    {
+      "case": "breathy-wood preview",
+      "peak": 0.28923162817955017,
+      "rms": 0.12561439362864782
+    },
+    {
+      "case": "reed-bass 55 Hz",
+      "peak": 0.2985258102416992,
+      "rms": 0.1280243273913958
+    },
+    {
+      "case": "reed-bass 146.83 Hz",
+      "peak": 0.25226888060569763,
+      "rms": 0.13356520566952346
+    },
+    {
+      "case": "reed-bass 295.608569 Hz",
+      "peak": 0.24811707437038422,
+      "rms": 0.13410667630245177
+    },
+    {
+      "case": "reed-bass 587.33 Hz",
+      "peak": 0.23328278958797455,
+      "rms": 0.12877251992316477
+    },
+    {
+      "case": "reed-bass 1174.66 Hz",
+      "peak": 0.2506412863731384,
+      "rms": 0.12788804194493114
+    },
+    {
+      "case": "reed-bass preview",
+      "peak": 0.2615143954753876,
+      "rms": 0.1443840361221691
+    },
+    {
+      "case": "warped-glass 55 Hz",
+      "peak": 0.2994266450405121,
+      "rms": 0.11383360487678792
+    },
+    {
+      "case": "warped-glass 146.83 Hz",
+      "peak": 0.24127845466136932,
+      "rms": 0.11806391633960087
+    },
+    {
+      "case": "warped-glass 295.608569 Hz",
+      "peak": 0.23248635232448578,
+      "rms": 0.11810521022810011
+    },
+    {
+      "case": "warped-glass 587.33 Hz",
+      "peak": 0.22753819823265076,
+      "rms": 0.11835329359683924
+    },
+    {
+      "case": "warped-glass 1174.66 Hz",
+      "peak": 0.21666136384010315,
+      "rms": 0.11115163418265764
+    },
+    {
+      "case": "warped-glass preview",
+      "peak": 0.23248635232448578,
+      "rms": 0.12809947352648518
+    },
+    {
+      "case": "reference harmonic comparison",
+      "peak": 0.2476353645324707,
+      "rms": 0.1163610818026245,
+      "harmonics_db": [
+        -6.719352543892815,
+        -28.52052715291844,
+        -1.2076354857531104,
+        -23.778532462190473,
+        -16.76677234161118,
+        -33.454707654703604,
+        -26.69701853866396,
+        -38.83209235781101,
+        -34.24386655084324,
+        -43.61711116136885,
+        -41.09040342571142,
+        -48.587176212960024,
+        -47.47693002009433,
+        -53.876581776302345,
+        -53.50228145030658,
+        -59.10401008162097
+      ],
+      "weighted_spectral_mse": 10.604891970492673
+    },
+    {
+      "case": "natural tuning 44100/110",
+      "peak": 0.21230807900428772,
+      "rms": 0.0539759631686759,
+      "pitch_error_cents": 0.5252213251877391
+    },
+    {
+      "case": "natural tuning 44100/220",
+      "peak": 0.19396726787090302,
+      "rms": 0.06336046667553703,
+      "pitch_error_cents": 0.9814102037805643
+    },
+    {
+      "case": "natural tuning 44100/295.60856920664327",
+      "peak": 0.2486332505941391,
+      "rms": 0.092817889725006,
+      "pitch_error_cents": 1.3186205889835703
+    },
+    {
+      "case": "natural tuning 44100/587.33",
+      "peak": 0.19102561473846436,
+      "rms": 0.08412110433511902,
+      "pitch_error_cents": 2.1771376389833414
+    },
+    {
+      "case": "natural tuning 44100/1174.66",
+      "peak": 0.2784370481967926,
+      "rms": 0.13950843239879243,
+      "pitch_error_cents": 0.5781055572094934
+    },
+    {
+      "case": "natural tuning 44100/1760",
+      "peak": 0.06218121945858002,
+      "rms": 0.030548904629657616,
+      "pitch_error_cents": -0.21659943966023318
+    },
+    {
+      "case": "natural tuning 48000/110",
+      "peak": 0.21103417873382568,
+      "rms": 0.05378474748770177,
+      "pitch_error_cents": 0.5044194132593712
+    },
+    {
+      "case": "natural tuning 48000/220",
+      "peak": 0.1938396394252777,
+      "rms": 0.06334277242734715,
+      "pitch_error_cents": 0.9847082806525734
+    },
+    {
+      "case": "natural tuning 48000/295.60856920664327",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717,
+      "pitch_error_cents": 1.3015612623532906
+    },
+    {
+      "case": "natural tuning 48000/587.33",
+      "peak": 0.19073991477489471,
+      "rms": 0.08396990212847143,
+      "pitch_error_cents": 1.9602917060266187
+    },
+    {
+      "case": "natural tuning 48000/1174.66",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528,
+      "pitch_error_cents": 0.715987851314612
+    },
+    {
+      "case": "natural tuning 48000/1760",
+      "peak": 0.0663171038031578,
+      "rms": 0.03154887419216509,
+      "pitch_error_cents": -0.40476770871714196
+    },
+    {
+      "case": "natural tuning 96000/110",
+      "peak": 0.2118847519159317,
+      "rms": 0.05395799998448943,
+      "pitch_error_cents": 0.5259643302104221
+    },
+    {
+      "case": "natural tuning 96000/220",
+      "peak": 0.1944817304611206,
+      "rms": 0.0635844291688741,
+      "pitch_error_cents": 1.016444899138064
+    },
+    {
+      "case": "natural tuning 96000/295.60856920664327",
+      "peak": 0.2488158792257309,
+      "rms": 0.09279557991338229,
+      "pitch_error_cents": 1.3188133123011747
+    },
+    {
+      "case": "natural tuning 96000/587.33",
+      "peak": 0.19112734496593475,
+      "rms": 0.08415445514458597,
+      "pitch_error_cents": 2.105263468871649
+    },
+    {
+      "case": "natural tuning 96000/1174.66",
+      "peak": 0.2820223271846771,
+      "rms": 0.14149116772797365,
+      "pitch_error_cents": 0.6182153545730669
+    },
+    {
+      "case": "natural tuning 96000/1760",
+      "peak": 0.06720183789730072,
+      "rms": 0.03192197516270798,
+      "pitch_error_cents": -0.39294269242215135
+    },
+    {
+      "case": "55 reed.pressure min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "55 reed.pressure max",
+      "peak": 0.3557738959789276,
+      "rms": 0.07292735190503623
+    },
+    {
+      "case": "55 reed.stiffness min",
+      "peak": 0.008602702058851719,
+      "rms": 0.0008381963403472439
+    },
+    {
+      "case": "55 reed.stiffness max",
+      "peak": 0.22427105903625488,
+      "rms": 0.03596853164118591
+    },
+    {
+      "case": "55 reed.closure min",
+      "peak": 0.009798936545848846,
+      "rms": 0.0007707026231605463
+    },
+    {
+      "case": "55 reed.closure max",
+      "peak": 0.0012220964999869466,
+      "rms": 0.00015718723183335743
+    },
+    {
+      "case": "55 reed.curve min",
+      "peak": 0.0022781703155487776,
+      "rms": 0.00019461762361741987
+    },
+    {
+      "case": "55 reed.curve max",
+      "peak": 0.23060794174671173,
+      "rms": 0.04519126125229728
+    },
+    {
+      "case": "55 reed.air min",
+      "peak": 0.2185293734073639,
+      "rms": 0.0424700972275074
+    },
+    {
+      "case": "55 reed.air max",
+      "peak": 0.26668286323547363,
+      "rms": 0.0523381373415204
+    },
+    {
+      "case": "55 reed.vel_blow min",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 reed.vel_blow max",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 bore.damping_hz min",
+      "peak": 0.061900291591882706,
+      "rms": 0.03112045457733592
+    },
+    {
+      "case": "55 bore.damping_hz max",
+      "peak": 0.24143534898757935,
+      "rms": 0.045347519381938775
+    },
+    {
+      "case": "55 bore.loss min",
+      "peak": 0.24371488392353058,
+      "rms": 0.04802217321551285
+    },
+    {
+      "case": "55 bore.loss max",
+      "peak": 0.007807099260389805,
+      "rms": 0.0027242632821437985
+    },
+    {
+      "case": "55 bore.warp min",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 bore.warp max",
+      "peak": 0.20871998369693756,
+      "rms": 0.04145243432714093
+    },
+    {
+      "case": "55 bore.tune min",
+      "peak": 0.22209759056568146,
+      "rms": 0.04227316140415081
+    },
+    {
+      "case": "55 bore.tune max",
+      "peak": 0.22007331252098083,
+      "rms": 0.04333193672414762
+    },
+    {
+      "case": "55 color.bell_hz min",
+      "peak": 0.16032882034778595,
+      "rms": 0.0376974119572018
+    },
+    {
+      "case": "55 color.bell_hz max",
+      "peak": 0.22116389870643616,
+      "rms": 0.042984621651389394
+    },
+    {
+      "case": "55 color.body min",
+      "peak": 0.6685922145843506,
+      "rms": 0.3192182122237253
+    },
+    {
+      "case": "55 color.body max",
+      "peak": 0.2196841537952423,
+      "rms": 0.042258760852159946
+    },
+    {
+      "case": "55 color.body_hz min",
+      "peak": 0.21958531439304352,
+      "rms": 0.07206439976515645
+    },
+    {
+      "case": "55 color.body_hz max",
+      "peak": 0.08071738481521606,
+      "rms": 0.033062998516167834
+    },
+    {
+      "case": "55 color.body_q min",
+      "peak": 0.5933374762535095,
+      "rms": 0.08786572828528397
+    },
+    {
+      "case": "55 color.body_q max",
+      "peak": 0.17332491278648376,
+      "rms": 0.03961446242049468
+    },
+    {
+      "case": "55 expression.vib_cent min",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 expression.vib_cent max",
+      "peak": 0.22286687791347504,
+      "rms": 0.04299259861444397
+    },
+    {
+      "case": "55 expression.vib_hz min",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 expression.vib_hz max",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 expression.vib_wait min",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 expression.vib_wait max",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 expression.vib_air min",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 expression.vib_air max",
+      "peak": 0.26616689562797546,
+      "rms": 0.0342864551807696
+    },
+    {
+      "case": "55 expression.growl min",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 expression.growl max",
+      "peak": 0.0362231507897377,
+      "rms": 0.007913048459089139
+    },
+    {
+      "case": "55 expression.growl_hz min",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 expression.growl_hz max",
+      "peak": 0.22115670144557953,
+      "rms": 0.04298124765808054
+    },
+    {
+      "case": "55 gain min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "55 gain max",
+      "peak": 0.3685944974422455,
+      "rms": 0.07163540987739828
+    },
+    {
+      "case": "295.608569 reed.pressure min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "295.608569 reed.pressure max",
+      "peak": 0.40102526545524597,
+      "rms": 0.15325868433984574
+    },
+    {
+      "case": "295.608569 reed.stiffness min",
+      "peak": 0.007164020091295242,
+      "rms": 0.0007897745476237301
+    },
+    {
+      "case": "295.608569 reed.stiffness max",
+      "peak": 0.012299376539885998,
+      "rms": 0.0005084224704248856
+    },
+    {
+      "case": "295.608569 reed.closure min",
+      "peak": 0.007683674804866314,
+      "rms": 0.0007204319305367856
+    },
+    {
+      "case": "295.608569 reed.closure max",
+      "peak": 0.0006843750597909093,
+      "rms": 3.742698609506283e-05
+    },
+    {
+      "case": "295.608569 reed.curve min",
+      "peak": 0.00130530446767807,
+      "rms": 0.00010983376618474747
+    },
+    {
+      "case": "295.608569 reed.curve max",
+      "peak": 0.2598409354686737,
+      "rms": 0.09711222277339769
+    },
+    {
+      "case": "295.608569 reed.air min",
+      "peak": 0.2444414496421814,
+      "rms": 0.09123001436487295
+    },
+    {
+      "case": "295.608569 reed.air max",
+      "peak": 0.3078596293926239,
+      "rms": 0.11126056491840385
+    },
+    {
+      "case": "295.608569 reed.vel_blow min",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 reed.vel_blow max",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 bore.damping_hz min",
+      "peak": 0.005035419017076492,
+      "rms": 0.0004211639294586248
+    },
+    {
+      "case": "295.608569 bore.damping_hz max",
+      "peak": 0.27231064438819885,
+      "rms": 0.10288267231901324
+    },
+    {
+      "case": "295.608569 bore.loss min",
+      "peak": 0.27427107095718384,
+      "rms": 0.10313973568445699
+    },
+    {
+      "case": "295.608569 bore.loss max",
+      "peak": 0.021555311977863312,
+      "rms": 0.006170751938903732
+    },
+    {
+      "case": "295.608569 bore.warp min",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 bore.warp max",
+      "peak": 0.23101721704006195,
+      "rms": 0.08572099008753749
+    },
+    {
+      "case": "295.608569 bore.tune min",
+      "peak": 0.22226066887378693,
+      "rms": 0.07999893607248718
+    },
+    {
+      "case": "295.608569 bore.tune max",
+      "peak": 0.2656467854976654,
+      "rms": 0.10329924090813936
+    },
+    {
+      "case": "295.608569 color.bell_hz min",
+      "peak": 0.16744054853916168,
+      "rms": 0.06584248437283076
+    },
+    {
+      "case": "295.608569 color.bell_hz max",
+      "peak": 0.24758116900920868,
+      "rms": 0.09244078114688323
+    },
+    {
+      "case": "295.608569 color.body min",
+      "peak": 0.5108524560928345,
+      "rms": 0.33495938810981923
+    },
+    {
+      "case": "295.608569 color.body max",
+      "peak": 0.2469039410352707,
+      "rms": 0.09208118376586602
+    },
+    {
+      "case": "295.608569 color.body_hz min",
+      "peak": 0.20786921679973602,
+      "rms": 0.10320041454382044
+    },
+    {
+      "case": "295.608569 color.body_hz max",
+      "peak": 0.06023784354329109,
+      "rms": 0.035625814191296235
+    },
+    {
+      "case": "295.608569 color.body_q min",
+      "peak": 0.580083429813385,
+      "rms": 0.2087097907801511
+    },
+    {
+      "case": "295.608569 color.body_q max",
+      "peak": 0.19913624227046967,
+      "rms": 0.07861351052825602
+    },
+    {
+      "case": "295.608569 expression.vib_cent min",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 expression.vib_cent max",
+      "peak": 0.26514220237731934,
+      "rms": 0.09263410822057852
+    },
+    {
+      "case": "295.608569 expression.vib_hz min",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 expression.vib_hz max",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 expression.vib_wait min",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 expression.vib_wait max",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 expression.vib_air min",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 expression.vib_air max",
+      "peak": 0.33850333094596863,
+      "rms": 0.07539849281691886
+    },
+    {
+      "case": "295.608569 expression.growl min",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 expression.growl max",
+      "peak": 0.1207527443766594,
+      "rms": 0.016274484123948284
+    },
+    {
+      "case": "295.608569 expression.growl_hz min",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 expression.growl_hz max",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "295.608569 gain min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "295.608569 gain max",
+      "peak": 0.4127255976200104,
+      "rms": 0.15404495880301985
+    },
+    {
+      "case": "1174.66 reed.pressure min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "1174.66 reed.pressure max",
+      "peak": 0.4601913392543793,
+      "rms": 0.24345970094503497
+    },
+    {
+      "case": "1174.66 reed.stiffness min",
+      "peak": 0.007102360017597675,
+      "rms": 0.0007889014099792095
+    },
+    {
+      "case": "1174.66 reed.stiffness max",
+      "peak": 0.2803645730018616,
+      "rms": 0.15216695576619868
+    },
+    {
+      "case": "1174.66 reed.closure min",
+      "peak": 0.007559186313301325,
+      "rms": 0.0007181437377131554
+    },
+    {
+      "case": "1174.66 reed.closure max",
+      "peak": 0.000636023934930563,
+      "rms": 3.213950675128834e-05
+    },
+    {
+      "case": "1174.66 reed.curve min",
+      "peak": 0.0012381102424114943,
+      "rms": 0.00010915936939133865
+    },
+    {
+      "case": "1174.66 reed.curve max",
+      "peak": 0.30488714575767517,
+      "rms": 0.15384389421288913
+    },
+    {
+      "case": "1174.66 reed.air min",
+      "peak": 0.2739209234714508,
+      "rms": 0.1372864166859897
+    },
+    {
+      "case": "1174.66 reed.air max",
+      "peak": 0.34683606028556824,
+      "rms": 0.17878894982343915
+    },
+    {
+      "case": "1174.66 reed.vel_blow min",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 reed.vel_blow max",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 bore.damping_hz min",
+      "peak": 0.004945140331983566,
+      "rms": 0.0004175344473024149
+    },
+    {
+      "case": "1174.66 bore.damping_hz max",
+      "peak": 0.3317578434944153,
+      "rms": 0.17437771120554502
+    },
+    {
+      "case": "1174.66 bore.loss min",
+      "peak": 0.3215233087539673,
+      "rms": 0.1654902771608091
+    },
+    {
+      "case": "1174.66 bore.loss max",
+      "peak": 0.005111816804856062,
+      "rms": 0.00045017408052242013
+    },
+    {
+      "case": "1174.66 bore.warp min",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 bore.warp max",
+      "peak": 0.2702116072177887,
+      "rms": 0.1378561067478112
+    },
+    {
+      "case": "1174.66 bore.tune min",
+      "peak": 0.3493233919143677,
+      "rms": 0.18000740367907067
+    },
+    {
+      "case": "1174.66 bore.tune max",
+      "peak": 0.22605781257152557,
+      "rms": 0.11196679035662983
+    },
+    {
+      "case": "1174.66 color.bell_hz min",
+      "peak": 0.1124473288655281,
+      "rms": 0.05864764857231837
+    },
+    {
+      "case": "1174.66 color.bell_hz max",
+      "peak": 0.2790733575820923,
+      "rms": 0.14085969460484601
+    },
+    {
+      "case": "1174.66 color.body min",
+      "peak": 0.5154910087585449,
+      "rms": 0.26000232161518133
+    },
+    {
+      "case": "1174.66 color.body max",
+      "peak": 0.27901479601860046,
+      "rms": 0.1407082218774307
+    },
+    {
+      "case": "1174.66 color.body_hz min",
+      "peak": 0.06074219197034836,
+      "rms": 0.029221082545757976
+    },
+    {
+      "case": "1174.66 color.body_hz max",
+      "peak": 0.06617574393749237,
+      "rms": 0.03219229338470109
+    },
+    {
+      "case": "1174.66 color.body_q min",
+      "peak": 0.4888531267642975,
+      "rms": 0.2536586864345127
+    },
+    {
+      "case": "1174.66 color.body_q max",
+      "peak": 0.20125307142734528,
+      "rms": 0.10082814736727526
+    },
+    {
+      "case": "1174.66 expression.vib_cent min",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 expression.vib_cent max",
+      "peak": 0.3315995931625366,
+      "rms": 0.1439103009916146
+    },
+    {
+      "case": "1174.66 expression.vib_hz min",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 expression.vib_hz max",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 expression.vib_wait min",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 expression.vib_wait max",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 expression.vib_air min",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 expression.vib_air max",
+      "peak": 0.38273411989212036,
+      "rms": 0.1292360501376485
+    },
+    {
+      "case": "1174.66 expression.growl min",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 expression.growl max",
+      "peak": 0.25471875071525574,
+      "rms": 0.029666400958201472
+    },
+    {
+      "case": "1174.66 expression.growl_hz min",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 expression.growl_hz max",
+      "peak": 0.27943331003189087,
+      "rms": 0.14081267418157528
+    },
+    {
+      "case": "1174.66 gain min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "1174.66 gain max",
+      "peak": 0.46572214365005493,
+      "rms": 0.2346877808307981
+    },
+    {
+      "case": "joint corners min/min/min/min/min/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/min/min/min/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/min/min/max/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/min/min/max/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/min/max/min/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/min/max/min/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/min/max/max/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/min/max/max/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/max/min/min/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/max/min/min/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/max/min/max/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/max/min/max/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/max/max/min/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/max/max/min/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/max/max/max/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/min/max/max/max/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/min/min/min/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/min/min/min/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/min/min/max/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/min/min/max/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/min/max/min/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/min/max/min/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/min/max/max/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/min/max/max/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/max/min/min/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/max/min/min/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/max/min/max/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/max/min/max/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/max/max/min/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/max/max/min/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/max/max/max/min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners min/max/max/max/max/max",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "joint corners max/min/min/min/min/min",
+      "peak": 0.003907084930688143,
+      "rms": 0.00042482569368657746
+    },
+    {
+      "case": "joint corners max/min/min/min/min/max",
+      "peak": 0.0041565620340406895,
+      "rms": 0.0004539223607663775
+    },
+    {
+      "case": "joint corners max/min/min/min/max/min",
+      "peak": 0.003917798865586519,
+      "rms": 0.0004251980419515081
+    },
+    {
+      "case": "joint corners max/min/min/min/max/max",
+      "peak": 0.004170185420662165,
+      "rms": 0.0004543182593981484
+    },
+    {
+      "case": "joint corners max/min/min/max/min/min",
+      "peak": 0.01587783358991146,
+      "rms": 0.0017184146758052418
+    },
+    {
+      "case": "joint corners max/min/min/max/min/max",
+      "peak": 0.01650356873869896,
+      "rms": 0.001804024913460885
+    },
+    {
+      "case": "joint corners max/min/min/max/max/min",
+      "peak": 0.015927573665976524,
+      "rms": 0.0017198194682758155
+    },
+    {
+      "case": "joint corners max/min/min/max/max/max",
+      "peak": 0.01655483804643154,
+      "rms": 0.0018054801961484962
+    },
+    {
+      "case": "joint corners max/min/max/min/min/min",
+      "peak": 0.00033141905441880226,
+      "rms": 2.465617284666702e-05
+    },
+    {
+      "case": "joint corners max/min/max/min/min/max",
+      "peak": 0.0003033369721379131,
+      "rms": 1.9512510518562265e-05
+    },
+    {
+      "case": "joint corners max/min/max/min/max/min",
+      "peak": 0.0003415537648834288,
+      "rms": 2.4629045954850122e-05
+    },
+    {
+      "case": "joint corners max/min/max/min/max/max",
+      "peak": 0.0003080453025177121,
+      "rms": 1.950985521140769e-05
+    },
+    {
+      "case": "joint corners max/min/max/max/min/min",
+      "peak": 0.0021834159269928932,
+      "rms": 0.00013253723087234564
+    },
+    {
+      "case": "joint corners max/min/max/max/min/max",
+      "peak": 0.001908954349346459,
+      "rms": 0.00011094340766853238
+    },
+    {
+      "case": "joint corners max/min/max/max/max/min",
+      "peak": 0.0022699744440615177,
+      "rms": 0.00013252723478903653
+    },
+    {
+      "case": "joint corners max/min/max/max/max/max",
+      "peak": 0.0019638659432530403,
+      "rms": 0.00011095544820985482
+    },
+    {
+      "case": "joint corners max/max/min/min/min/min",
+      "peak": 0.0031435454729944468,
+      "rms": 0.0001863604272350268
+    },
+    {
+      "case": "joint corners max/max/min/min/min/max",
+      "peak": 0.002748071914538741,
+      "rms": 0.00016664015637611734
+    },
+    {
+      "case": "joint corners max/max/min/min/max/min",
+      "peak": 0.003279820317402482,
+      "rms": 0.00018646832586079006
+    },
+    {
+      "case": "joint corners max/max/min/min/max/max",
+      "peak": 0.002810648176819086,
+      "rms": 0.00016665994607726478
+    },
+    {
+      "case": "joint corners max/max/min/max/min/min",
+      "peak": 0.10409963876008987,
+      "rms": 0.00269215954340863
+    },
+    {
+      "case": "joint corners max/max/min/max/min/max",
+      "peak": 0.04487589746713638,
+      "rms": 0.001324499347114297
+    },
+    {
+      "case": "joint corners max/max/min/max/max/min",
+      "peak": 0.1022329106926918,
+      "rms": 0.0026520205883376847
+    },
+    {
+      "case": "joint corners max/max/min/max/max/max",
+      "peak": 0.04409550502896309,
+      "rms": 0.0013225633375683493
+    },
+    {
+      "case": "joint corners max/max/max/min/min/min",
+      "peak": 0.00019861327018588781,
+      "rms": 2.4691214977787943e-05
+    },
+    {
+      "case": "joint corners max/max/max/min/min/max",
+      "peak": 0.00018225137318950146,
+      "rms": 5.794249595275273e-06
+    },
+    {
+      "case": "joint corners max/max/max/min/max/min",
+      "peak": 0.00019840430468320847,
+      "rms": 2.468776543100527e-05
+    },
+    {
+      "case": "joint corners max/max/max/min/max/max",
+      "peak": 0.00018207493121735752,
+      "rms": 5.793871330268799e-06
+    },
+    {
+      "case": "joint corners max/max/max/max/min/min",
+      "peak": 0.0011122379219159484,
+      "rms": 0.00014506514300919733
+    },
+    {
+      "case": "joint corners max/max/max/max/min/max",
+      "peak": 0.0010269073536619544,
+      "rms": 3.3321203013819746e-05
+    },
+    {
+      "case": "joint corners max/max/max/max/max/min",
+      "peak": 0.0011109070619568229,
+      "rms": 0.00014503252004543658
+    },
+    {
+      "case": "joint corners max/max/max/max/max/max",
+      "peak": 0.0010254946537315845,
+      "rms": 3.3318073541284914e-05
+    },
+    {
+      "case": "reed.pressure moving/retrigger",
+      "peak": 0.39796459674835205,
+      "rms": 0.10240633603644643
+    },
+    {
+      "case": "reed.stiffness moving/retrigger",
+      "peak": 0.4462778568267822,
+      "rms": 0.08453074035284429
+    },
+    {
+      "case": "reed.closure moving/retrigger",
+      "peak": 0.25556066632270813,
+      "rms": 0.050708796067861946
+    },
+    {
+      "case": "reed.curve moving/retrigger",
+      "peak": 0.2593193054199219,
+      "rms": 0.0752145769073223
+    },
+    {
+      "case": "reed.air moving/retrigger",
+      "peak": 0.30041027069091797,
+      "rms": 0.1068568357147227
+    },
+    {
+      "case": "reed.vel_blow moving/retrigger",
+      "peak": 0.2476353645324707,
+      "rms": 0.09208209988695593
+    },
+    {
+      "case": "bore.damping_hz moving/retrigger",
+      "peak": 0.2722488343715668,
+      "rms": 0.09727676575156424
+    },
+    {
+      "case": "bore.loss moving/retrigger",
+      "peak": 0.27300477027893066,
+      "rms": 0.06392974966090335
+    },
+    {
+      "case": "bore.warp moving/retrigger",
+      "peak": 0.24915966391563416,
+      "rms": 0.08959869394390951
+    },
+    {
+      "case": "bore.tune moving/retrigger",
+      "peak": 0.2655808925628662,
+      "rms": 0.09565821889357251
+    },
+    {
+      "case": "color.bell_hz moving/retrigger",
+      "peak": 0.24773211777210236,
+      "rms": 0.09165446455278438
+    },
+    {
+      "case": "color.body moving/retrigger",
+      "peak": 0.4959176480770111,
+      "rms": 0.18534622993617342
+    },
+    {
+      "case": "color.body_hz moving/retrigger",
+      "peak": 0.5141608119010925,
+      "rms": 0.057761913515133524
+    },
+    {
+      "case": "color.body_q moving/retrigger",
+      "peak": 0.5734339356422424,
+      "rms": 0.0991558163355319
+    },
+    {
+      "case": "expression.vib_cent moving/retrigger",
+      "peak": 0.26500892639160156,
+      "rms": 0.09245813937796879
+    },
+    {
+      "case": "expression.vib_hz moving/retrigger",
+      "peak": 0.2476353645324707,
+      "rms": 0.09208209988695593
+    },
+    {
+      "case": "expression.vib_wait moving/retrigger",
+      "peak": 0.2476353645324707,
+      "rms": 0.09208209988695593
+    },
+    {
+      "case": "expression.vib_air moving/retrigger",
+      "peak": 0.3369567096233368,
+      "rms": 0.08532920483271444
+    },
+    {
+      "case": "expression.growl moving/retrigger",
+      "peak": 0.2580763101577759,
+      "rms": 0.057880851758539235
+    },
+    {
+      "case": "expression.growl_hz moving/retrigger",
+      "peak": 0.2476353645324707,
+      "rms": 0.09208209988695593
+    },
+    {
+      "case": "gain moving/retrigger",
+      "peak": 0.4126216471195221,
+      "rms": 0.1137118387561244
+    },
+    {
+      "case": "joint moving controls and pitch",
+      "peak": 0.14102846384048462,
+      "rms": 0.01587906182776437
+    },
+    {
+      "case": "amp.attack response min",
+      "peak": 0.28868719935417175,
+      "rms": 0.0899389613981729
+    },
+    {
+      "case": "amp.attack response max",
+      "peak": 0.003060396993532777,
+      "rms": 0.00034941592834614486
+    },
+    {
+      "case": "amp.decay response min",
+      "peak": 0.2886912524700165,
+      "rms": 0.08755553761038967
+    },
+    {
+      "case": "amp.decay response max",
+      "peak": 0.29410284757614136,
+      "rms": 0.08975693751250789
+    },
+    {
+      "case": "amp.sustain response min",
+      "peak": 0.004670091904699802,
+      "rms": 0.0003879692311300467
+    },
+    {
+      "case": "amp.sustain response max",
+      "peak": 0.30825716257095337,
+      "rms": 0.10013295154977103
+    },
+    {
+      "case": "amp.release response min",
+      "peak": 0.28871962428092957,
+      "rms": 0.08742248278578088
+    },
+    {
+      "case": "amp.release response max",
+      "peak": 0.28871962428092957,
+      "rms": 0.08845056662822906
+    },
+    {
+      "case": "reed.pressure response min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "reed.pressure response max",
+      "peak": 0.44165733456611633,
+      "rms": 0.15292696858832816
+    },
+    {
+      "case": "reed.stiffness response min",
+      "peak": 0.008469291031360626,
+      "rms": 0.0011631669423938992
+    },
+    {
+      "case": "reed.stiffness response max",
+      "peak": 0.27047115564346313,
+      "rms": 0.08649486837526175
+    },
+    {
+      "case": "reed.closure response min",
+      "peak": 0.007970876060426235,
+      "rms": 0.0007381993665475098
+    },
+    {
+      "case": "reed.closure response max",
+      "peak": 0.0007238180842250586,
+      "rms": 3.955338128986625e-05
+    },
+    {
+      "case": "reed.curve response min",
+      "peak": 0.001273351488634944,
+      "rms": 0.0001259839980004811
+    },
+    {
+      "case": "reed.curve response max",
+      "peak": 0.3002380430698395,
+      "rms": 0.0923980286048434
+    },
+    {
+      "case": "reed.air response min",
+      "peak": 0.2865706980228424,
+      "rms": 0.0862507761271416
+    },
+    {
+      "case": "reed.air response max",
+      "peak": 0.33254432678222656,
+      "rms": 0.11114446623064057
+    },
+    {
+      "case": "reed.vel_blow response min",
+      "peak": 0.28871962428092957,
+      "rms": 0.0875215717024178
+    },
+    {
+      "case": "reed.vel_blow response max",
+      "peak": 0.28871962428092957,
+      "rms": 0.0875215717024178
+    },
+    {
+      "case": "reed.vel_blow response min quiet",
+      "peak": 0.12381768226623535,
+      "rms": 0.05818054090131225
+    },
+    {
+      "case": "reed.vel_blow response max quiet",
+      "peak": 0.0016438639722764492,
+      "rms": 0.00013646628615644366
+    },
+    {
+      "case": "bore.damping_hz response min",
+      "peak": 0.004706274718046188,
+      "rms": 0.0005138969830596743
+    },
+    {
+      "case": "bore.damping_hz response max",
+      "peak": 0.3076219856739044,
+      "rms": 0.09720277414476013
+    },
+    {
+      "case": "bore.loss response min",
+      "peak": 0.3131914734840393,
+      "rms": 0.10096617820316414
+    },
+    {
+      "case": "bore.loss response max",
+      "peak": 0.0166214257478714,
+      "rms": 0.002283218384206764
+    },
+    {
+      "case": "bore.warp response min",
+      "peak": 0.28871962428092957,
+      "rms": 0.0875215717024178
+    },
+    {
+      "case": "bore.warp response max",
+      "peak": 0.27925777435302734,
+      "rms": 0.08243268144932588
+    },
+    {
+      "case": "bore.tune response min",
+      "peak": 0.25754237174987793,
+      "rms": 0.07587164331753156
+    },
+    {
+      "case": "bore.tune response max",
+      "peak": 0.3057381510734558,
+      "rms": 0.09663877943292927
+    },
+    {
+      "case": "color.bell_hz response min",
+      "peak": 0.19233198463916779,
+      "rms": 0.062260426834528156
+    },
+    {
+      "case": "color.bell_hz response max",
+      "peak": 0.28858181834220886,
+      "rms": 0.08753484763228557
+    },
+    {
+      "case": "color.body response min",
+      "peak": 0.552866518497467,
+      "rms": 0.31724180405601593
+    },
+    {
+      "case": "color.body response max",
+      "peak": 0.2879565954208374,
+      "rms": 0.08719399497477252
+    },
+    {
+      "case": "color.body_hz response min",
+      "peak": 0.23512722551822662,
+      "rms": 0.09812456400685181
+    },
+    {
+      "case": "color.body_hz response max",
+      "peak": 0.09814082831144333,
+      "rms": 0.03388326382334478
+    },
+    {
+      "case": "color.body_q response min",
+      "peak": 0.6718940138816833,
+      "rms": 0.19757521476074108
+    },
+    {
+      "case": "color.body_q response max",
+      "peak": 0.23715585470199585,
+      "rms": 0.07486042620479687
+    },
+    {
+      "case": "expression.vib_cent response min",
+      "peak": 0.28288623690605164,
+      "rms": 0.08694172761237641
+    },
+    {
+      "case": "expression.vib_cent response max",
+      "peak": 0.3046490252017975,
+      "rms": 0.0888635442581405
+    },
+    {
+      "case": "expression.vib_hz response min",
+      "peak": 0.28472191095352173,
+      "rms": 0.09613793406068419
+    },
+    {
+      "case": "expression.vib_hz response max",
+      "peak": 0.2867527902126312,
+      "rms": 0.08743721562354026
+    },
+    {
+      "case": "expression.vib_wait response min",
+      "peak": 0.2887401580810547,
+      "rms": 0.08734693729305415
+    },
+    {
+      "case": "expression.vib_wait response max",
+      "peak": 0.2591215670108795,
+      "rms": 0.08801278932567255
+    },
+    {
+      "case": "expression.vib_air response min",
+      "peak": 0.2640253007411957,
+      "rms": 0.08822600595182682
+    },
+    {
+      "case": "expression.vib_air response max",
+      "peak": 0.36170706152915955,
+      "rms": 0.0750427762505869
+    },
+    {
+      "case": "expression.growl response min",
+      "peak": 0.27589231729507446,
+      "rms": 0.09036766069916084
+    },
+    {
+      "case": "expression.growl response max",
+      "peak": 0.1540209800004959,
+      "rms": 0.023337286140537088
+    },
+    {
+      "case": "expression.growl_hz response min",
+      "peak": 0.3056696355342865,
+      "rms": 0.08536625206451996
+    },
+    {
+      "case": "expression.growl_hz response max",
+      "peak": 0.27560222148895264,
+      "rms": 0.09033379510964427
+    },
+    {
+      "case": "gain response min",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "gain response max",
+      "peak": 0.48119935393333435,
+      "rms": 0.1458692802683341
+    },
+    {
+      "case": "normal gain",
+      "peak": 0.2476353645324707,
+      "rms": 0.1163610818026245
+    },
+    {
+      "case": "half gain",
+      "peak": 0.12381768226623535,
+      "rms": 0.05818054090131225
+    },
+    {
+      "case": "zero gain",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "quarter velocity",
+      "peak": 0.0011403588578104973,
+      "rms": 8.260690992869667e-05
+    },
+    {
+      "case": "zero velocity",
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    {
+      "case": "zero depth alternate motion rates",
+      "peak": 0.2476353645324707,
+      "rms": 0.1163610818026245
+    },
+    {
+      "case": "reed.curve host modulation",
+      "peak": 0.25850531458854675,
+      "rms": 0.12138271814786646
+    },
+    {
+      "case": "bore.warp host modulation",
+      "peak": 0.2464103102684021,
+      "rms": 0.11561901778799162
+    },
+    {
+      "case": "gain host modulation",
+      "peak": 0.4127255976200104,
+      "rms": 0.1939351286836681
+    },
+    {
+      "case": "partition reference",
+      "peak": 0.28871962428092957,
+      "rms": 0.0875215717024178
+    },
+    {
+      "case": "partition 32",
+      "peak": 0.28871962428092957,
+      "rms": 0.0875215717024178,
+      "partition_max_error": 0.0
+    },
+    {
+      "case": "partition 64",
+      "peak": 0.28871962428092957,
+      "rms": 0.0875215717024178,
+      "partition_max_error": 0.0
+    },
+    {
+      "case": "partition 256",
+      "peak": 0.28871962428092957,
+      "rms": 0.0875215717024178,
+      "partition_max_error": 0.0
+    },
+    {
+      "case": "reference-reed authored source",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717
+    },
+    {
+      "case": "reference-reed graph save",
+      "peak": 0.2476353645324707,
+      "rms": 0.09242697893459717,
+      "roundtrip_max_error": 0.0
+    },
+    {
+      "case": "chalumeau authored source",
+      "peak": 0.24524013698101044,
+      "rms": 0.12050674853356243
+    },
+    {
+      "case": "chalumeau graph save",
+      "peak": 0.24524013698101044,
+      "rms": 0.12050674853356243,
+      "roundtrip_max_error": 0.0
+    },
+    {
+      "case": "soft-vibrato authored source",
+      "peak": 0.26298776268959045,
+      "rms": 0.09115710776192393
+    },
+    {
+      "case": "soft-vibrato graph save",
+      "peak": 0.26298776268959045,
+      "rms": 0.09115710776192393,
+      "roundtrip_max_error": 0.0
+    },
+    {
+      "case": "breathy-wood authored source",
+      "peak": 0.28923162817955017,
+      "rms": 0.11491302123469066
+    },
+    {
+      "case": "breathy-wood graph save",
+      "peak": 0.28923162817955017,
+      "rms": 0.11491302123469066,
+      "roundtrip_max_error": 0.0
+    },
+    {
+      "case": "reed-bass authored source",
+      "peak": 0.24811707437038422,
+      "rms": 0.13410667630245177
+    },
+    {
+      "case": "reed-bass graph save",
+      "peak": 0.24811707437038422,
+      "rms": 0.13410667630245177,
+      "roundtrip_max_error": 0.0
+    },
+    {
+      "case": "warped-glass authored source",
+      "peak": 0.23248635232448578,
+      "rms": 0.11810521022810011
+    },
+    {
+      "case": "warped-glass graph save",
+      "peak": 0.23248635232448578,
+      "rms": 0.11810521022810011,
+      "roundtrip_max_error": 0.0
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-;; A shared rose display and section identity for physical instruments.
+;; A shared teal display and section identity for physical instruments.
 ;; Instrument files choose their controls and mechanism views explicitly.
 (module eseq.effects.physical-model-surface)
 (export panel bind envelope reed-view curved-reed-view bore-loss-view column-view flutter-view vibrato-view body-view)
@@ -322,7 +322,7 @@
     (caption "Player tuning / center note +/-55 cents")
     (pm-string-section :debug-name "pm-section-spread" :amount (bind "section.blend") :spread (bind "section.spread"))))
 
-(export piano-hammer-view piano-string-view piano-body-view piano-tuning-view piano-damper-view piano-motion-view piano-output-view)
+(export piano-hammer-view piano-string-view piano-body-view piano-tuning-view piano-damper-view piano-motion-view piano-swell-view piano-output-view)
 
 (defwidget pm-piano-hammer
   :width 35.3 :height 3.1 :state (hardness contact position) :bindable (hardness contact position)
@@ -449,6 +449,32 @@
 (def piano-output-view ()
   (v-stack :gap 0.15 (caption "Output drive / transfer curve")
     (pm-piano-output :debug-name "pm-piano-output" :drive (bind "output.drive") :gain (bind "output.gain"))))
+
+
+(defwidget pm-piano-swell
+  :width 35.3 :height 3.1 :state (amount duration curve tail) :bindable (amount duration curve tail)
+  :shader
+  (let ((u (* 0.5 (+ 1 (/ x aspect))))
+        (span (+ duration 1))
+        (time (* u span))
+        (progress (clamp (/ time duration) 0 1))
+        (remaining (* duration (- 1 (pow progress curve))))
+        (after (max 0 (- time duration)))
+        (end-loss (* after 197.3644 (- 1 tail) (- 1 tail)))
+        (rise (* (min 1 (/ time 0.008)) (pow progress curve) (pow 2.7182818 (- (+ remaining after end-loss)))))
+        (normal (pow 2.7182818 (- time)))
+        (a (mix normal rise amount))
+        (edge (- 0.8 (* 1.55 a)))
+        (crest (* aspect (- (* 2 (/ duration span)) 1))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (max (- y 0.8) (- edge y)) (rgba 0.16 0.06 0.11 0.14))
+      (sdf/paint (- (abs (- x crest)) 0.01) (rgba 0.16 0.06 0.11 0.3))
+      (sdf/paint (- (abs (- y edge)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
+(def piano-swell-view ()
+  (v-stack :gap 0.15 (caption "Reverse contour / rise to marker, then ringing tail")
+    (pm-piano-swell :debug-name "pm-piano-swell" :amount (bind "swell.amount")
+      :duration (bind "swell.length_s") :curve (bind "swell.curve") :tail (bind "swell.tail"))))
 
 (export saron-mallet-view saron-bar-view saron-tuning-view saron-damper-view saron-output-view)
 

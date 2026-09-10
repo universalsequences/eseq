@@ -78,6 +78,21 @@ fn check_factory_sidecars(names: &[&str]) {
 }
 
 #[test]
+fn factory_woodwind_sidecars_preserve_executable_controls() {
+    check_factory_sidecars(&["PM Flute", "PM Saxophone", "PM Clarinet"]);
+}
+
+#[test]
+fn factory_cello_sidecar_preserves_executable_controls() {
+    check_factory_sidecars(&["PM Cello"]);
+}
+
+#[test]
+fn factory_piano_sidecar_preserves_executable_controls() {
+    check_factory_sidecars(&["PM Piano"]);
+}
+
+#[test]
 fn factory_saron_sidecar_preserves_executable_controls() {
     check_factory_sidecars(&["PM Saron"]);
 }

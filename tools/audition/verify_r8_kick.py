@@ -18,7 +18,7 @@ import numpy as np
 from audition import Instrument
 
 ROOT = Path(__file__).resolve().parents[2]
-INSTRUMENT = ROOT / 'content/instruments/Drums/R8 Kick 03'
+INSTRUMENT = ROOT / 'crates/sequencer/tests/fixtures/instruments/drums/R8 Kick 03'
 
 
 def float_wav(path, samples, sr):

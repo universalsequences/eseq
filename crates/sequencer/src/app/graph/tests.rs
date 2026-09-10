@@ -1266,6 +1266,71 @@
     }
 
     #[test]
+    fn rack_macro_name_editing_accepts_empty_and_untrimmed_text() {
+        let graph = TestLiveGraph::new("rack-macro-name-editing-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_empty_layer_rack_track().unwrap();
+        let id = crate::sequencer::RackMacroId::from_index(0).unwrap();
+        let before = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref().unwrap().macros[0].clone();
+        // Select-all + Backspace, replacement typing (including a space),
+        // and individual Backspaces all publish on-change values verbatim.
+        for text in ["", "M", "Ma", "Macro", "Macro ", "Macro Q", "M", ""] {
+            assert!(app.rename_rack_macro(0, id, text.to_string()));
+            let actual = app.state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref().unwrap().macros[0].clone();
+            let mut expected = before.clone();
+            expected.name = text.to_string();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn rack_macro_names_survive_project_save_and_load() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        app.graph_controller().add_empty_layer_rack_track().unwrap();
+        let macros = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref().unwrap().macros.clone();
+        for rack_macro in &macros {
+            let name = if rack_macro.id.index() == 0 {
+                String::new()
+            } else {
+                format!("Tone {}", rack_macro.id.index())
+            };
+            assert!(app.rename_rack_macro(0, rack_macro.id, name));
+        }
+        let expected = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref().unwrap().macros.clone();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let name = format!("__test-rack-macro-names-{}-{nonce}", std::process::id());
+        let project = app.capture_project(&name).unwrap();
+        let _cleanup = TestProjectFile(crate::project::save_project(&name, &project).unwrap());
+        app.queue_project_load_named(&name).unwrap();
+        for _ in 0..100 {
+            if app.editor.pending_project_load.is_none() {
+                break;
+            }
+            app.advance_pending_project_load().unwrap();
+            unsafe { crate::audiograph::prepare_graph_for_render(lg.0); }
+        }
+        assert!(app.editor.pending_project_load.is_none(), "project load should finish");
+        let restored = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref().unwrap().macros.clone();
+        assert_eq!(restored, expected);
+        let resaved = app.capture_project(&name).unwrap();
+        assert_eq!(
+            serde_json::to_value(&resaved.patterns[0].rack_tracks[0].as_ref().unwrap().macros).unwrap(),
+            serde_json::to_value(&project.patterns[0].rack_tracks[0].as_ref().unwrap().macros).unwrap(),
+        );
+        drop(app);
+        unsafe { crate::audiograph::destroy_live_graph(lg.0); }
+    }
+
+    #[test]
     fn rack_track_custom_name_survives_project_save_and_load() {
         let graph = TestLiveGraph::new("rack-track-name-project-roundtrip-test");
         let mut app = test_app_with_track_count(&graph, 0);
@@ -1646,6 +1711,48 @@
         assert!(arrangement.is_empty());
         assert!(app.state.committed_song().is_some());
         graph.process_block();
+    }
+
+    #[test]
+    fn default_project_seeds_fully_wet_bus_effects_on_startup_and_reset() {
+        let graph = TestLiveGraph::new("default-project-bus-effects-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        // The audio engine supplies these nodes before startup initialization.
+        for bus in app.buses.clone() {
+            app.graph_controller().ensure_bus_graph_node(bus.id, &bus.name);
+        }
+        app.initialize_default_project().expect("initialize startup project");
+
+        for reset in [false, true] {
+            if reset {
+                app.start_new_project();
+            }
+            assert_eq!(app.tracks.len(), 2);
+            assert_empty_track(&app, 0);
+            assert_empty_track(&app, 1);
+            for (id, name, wet_name) in [
+                (BusId::DEFAULT_A, "Reverb", "mix"),
+                (BusId::DEFAULT_B, "Str8 Delay", "wet"),
+            ] {
+                let bus = app.buses.iter().find(|bus| bus.id == id).unwrap();
+                assert_eq!(bus.effect_slots.iter().filter(|slot| slot.node_id != 0).count(), 1);
+                let desc = &bus.effect_descriptors[0];
+                assert_eq!(desc.name, name);
+                let wet = desc.params.iter().position(|param| param.name == wet_name).unwrap();
+                assert_eq!(bus.effect_slots[0].defaults[wet], 1.0);
+                let runtime = app.graph.bus_effect_runtime.lock().unwrap();
+                let bus_runtime = runtime.iter().find(|bus| bus.id == id).unwrap();
+                assert_eq!(bus_runtime.effect_slots[0].defaults[wet], 1.0);
+                if id == BusId::DEFAULT_A {
+                    let mode = desc.params.iter().position(|param| param.name == "mode").unwrap();
+                    assert_eq!(bus.effect_slots[0].defaults[mode], crate::effects::reverb::MODE_PLATE);
+                    assert_eq!(bus_runtime.effect_slots[0].defaults[mode], crate::effects::reverb::MODE_PLATE);
+                }
+            }
+            let mix = app.buses.iter().find(|bus| bus.id == BusId::MIX).unwrap();
+            assert!(mix.effect_slots.iter().all(|slot| slot.node_id == 0));
+            graph.process_block();
+        }
     }
 
     fn assert_empty_track(app: &App, track: usize) {

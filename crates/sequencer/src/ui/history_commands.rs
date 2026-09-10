@@ -649,6 +649,7 @@ pub(super) fn apply_piano_roll_gesture_update(
     let touched = piano_roll_gesture_touched_steps(&lanes, move_state, &action)?;
     if active.is_none() {
         let label = match kind {
+            PianoRollDragKind::Automation => "Edit piano-roll automation",
             PianoRollDragKind::Move => "Move piano-roll notes",
             PianoRollDragKind::Resize => "Resize piano-roll notes",
         };

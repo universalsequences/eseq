@@ -167,6 +167,8 @@ fn check_woodwind_surface(instrument: &str, pages: usize) {
     assert_eq!(seen, expected, "Every factory parameter is reachable in a visible control");
 }
 
+#[test]
+fn flute_surface_controls_and_pages() { check_woodwind_surface("PM Flute", 4); }
 
 #[test]
 fn slenthem_surface_controls_and_pages() { check_woodwind_surface("PM Slenthem", 5); }
@@ -183,9 +185,17 @@ fn kempyang_surface_controls_and_pages() { check_woodwind_surface("PM Kempyang",
 #[test]
 fn kethuk_surface_controls_and_pages() { check_woodwind_surface("PM Kethuk", 5); }
 
+#[test]
+fn saxophone_surface_controls_and_pages() { check_woodwind_surface("PM Saxophone", 6); }
 
+#[test]
+fn clarinet_surface_controls_and_pages() { check_woodwind_surface("PM Clarinet", 5); }
 
+#[test]
+fn cello_surface_controls_and_pages() { check_woodwind_surface("PM Cello", 8); }
 
+#[test]
+fn piano_surface_controls_and_pages() { check_woodwind_surface("PM Piano", 8); }
 
 #[test]
 fn saron_surface_controls_and_pages() { check_woodwind_surface("PM Saron", 5); }

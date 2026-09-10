@@ -500,6 +500,11 @@ pub enum AppCommand {
         track: usize,
         sends: Vec<TrackSendSnapshot>,
     },
+    ClearTrackBusSendPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        destination: BusId,
+    },
     SetTrackBusSendPlock {
         track: usize,
         step: usize,
@@ -1007,6 +1012,7 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::SetTrackSwingResolutionPlockMulti { .. }
         | AppCommand::ClearTrackSwingResolutionPlockMulti { .. }
         | AppCommand::SetTrackBusSendPlock { .. }
+        | AppCommand::ClearTrackBusSendPlockMulti { .. }
         | AppCommand::ClearEffectPlockMulti { .. }
         | AppCommand::ClearEffectTensorPlockMulti { .. }
         | AppCommand::ClearMidiFxPlockMulti { .. }
@@ -3371,6 +3377,12 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
         AppCommand::SetTrackSends { track, sends } => {
             app.state.pattern.track_params[track].set_sends(sends);
             app.graph_controller().apply_track_bus_sends(track);
+        }
+
+        AppCommand::ClearTrackBusSendPlockMulti { track, steps, destination } => {
+            for step in steps {
+                app.state.pattern.track_send_plocks[track].clear(step, destination);
+            }
         }
 
         AppCommand::SetTrackBusSendPlock {

@@ -1,9 +1,8 @@
 use crate::*;
 use sequencer::bounce::{
-    job::{ExportJob, WorkerStatus},
-    worker::ExportOptions,
+    job::{ExportJob, ExportJobSettings, WorkerStatus},
 };
-use std::{cell::RefCell, path::PathBuf};
+use std::cell::RefCell;
 
 pub(super) const COMMANDS: &[&str] = &[
     "export-song-open",
@@ -12,7 +11,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "export-song-reveal",
 ];
 thread_local! {
-    static SOURCE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static JOB: RefCell<Option<ExportJob>> = const { RefCell::new(None) };
     static LAST_POLL: RefCell<Option<Instant>> = const { RefCell::new(None) };
 }
@@ -73,32 +71,19 @@ pub(super) fn handle(
             "export-song-open" => {
                 let running = JOB.with(|job| job.borrow().as_ref().is_some_and(ExportJob::running));
                 if !running {
-                    let name = app
-                        .current_project_name
-                        .as_ref()
-                        .ok_or("Save your project before exporting")?;
+                    let name = app.current_project_name.as_deref().unwrap_or("Untitled");
                     let paths = sequencer::app_paths::app_paths();
-                    let source = paths.projects_dir().join(format!(
-                        "{}.json",
-                        sequencer::project::sanitize_project_name(name)
-                    ));
-                    let project = sequencer::project::load_project_from_path(&source)
-                        .map_err(|e| e.to_string())?;
-                    let end = project
-                        .arrangement
-                        .as_ref()
-                        .ok_or("Saved project has no arrangement")?
-                        .end_beat;
+                    let end = app.state.committed_arrangement()
+                        .ok_or("Project has no arrangement")?.end_beat;
                     let folder = paths.recordings_dir();
                     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
                     let filename = sequencer::bounce::job::next_name(&folder, name)
                         .map_err(|e| e.to_string())?;
-                    SOURCE.with(|value| *value.borrow_mut() = Some(source));
                     JOB.with(|value| *value.borrow_mut() = None);
                     let rt = editor.runtime_mut();
                     for (key, value) in [
                         ("export-default-name", Value::String(filename)),
-                        ("export-project", Value::String(name.clone())),
+                        ("export-project", Value::String(name.to_owned())),
                         ("export-folder", Value::String(folder.display().to_string())),
                         ("export-end", Value::Number(end)),
                         ("export-busy", Value::Bool(false)),
@@ -155,9 +140,8 @@ pub(super) fn handle(
                 } else {
                     None
                 };
-                let project = SOURCE
-                    .with(|value| value.borrow().clone())
-                    .ok_or("Open the export dialog first")?;
+                pull_named_scratch_buffer_into_project(editor, app);
+                let project = app.capture_export_project()?;
                 let destination = sequencer::bounce::job::destination(
                     &sequencer::app_paths::app_paths().recordings_dir(),
                     &filename,
@@ -165,14 +149,12 @@ pub(super) fn handle(
                 .map_err(|e| e.to_string())?;
                 let job = ExportJob::start(
                     &std::env::current_exe().map_err(|e| e.to_string())?,
-                    ExportOptions {
-                        project,
+                    &project,
+                    ExportJobSettings {
                         destination,
                         sample_rate: rate,
                         tail_seconds: tail,
                         selection,
-                        replace: false,
-                        cancel_path: None,
                     },
                 )
                 .map_err(|e| e.to_string())?;

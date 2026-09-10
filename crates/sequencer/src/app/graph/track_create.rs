@@ -72,19 +72,6 @@ impl GraphController<'_> {
         Ok(idx)
     }
 
-    /// Shared startup/New Project topology. Loading an existing project does
-    /// not use this initializer: its saved track list remains authoritative.
-    pub fn add_default_project_tracks(&mut self) -> Result<(), String> {
-        if !self.app.tracks.is_empty() || self.app.state.active_track_count() != 0 {
-            return Err("Default project tracks require an empty project".to_string());
-        }
-        for _ in 0..2 {
-            self.add_empty_track()?;
-        }
-        self.app.ui.cursor_track = 0;
-        Ok(())
-    }
-
     /// Register only the track shell: no sample buffer, voices, or engine.
     pub fn add_empty_track(&mut self) -> Result<usize, String> {
         let idx = self.app.state.active_track_count();

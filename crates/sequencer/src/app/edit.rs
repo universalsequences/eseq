@@ -5397,6 +5397,7 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
         | AppCommand::SetTrackOutput { .. }
         | AppCommand::SetTrackSends { .. }
         | AppCommand::SetTrackBusSendPlock { .. }
+        | AppCommand::ClearTrackBusSendPlockMulti { .. }
         | AppCommand::SetBusVolume { .. }
         | AppCommand::ToggleBusMute { .. }
         | AppCommand::ToggleBusSolo { .. }
@@ -5459,6 +5460,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::ClearTimebasePlockMulti { track, steps }
         | AppCommand::SetTrackSwingPlockMulti { track, steps, .. }
         | AppCommand::ClearTrackSwingPlockMulti { track, steps }
+        | AppCommand::ClearTrackBusSendPlockMulti { track, steps, .. }
         | AppCommand::SetTrackSwingResolutionPlockMulti { track, steps, .. }
         | AppCommand::ClearTrackSwingResolutionPlockMulti { track, steps }
         | AppCommand::SetEffectPlockMulti { track, steps, .. }
@@ -5890,6 +5892,14 @@ fn resolve_step_command(cmd: &AppCommand) -> Result<(usize, ResolvedStepCommand<
             *track,
             ResolvedStepCommand::SwingPlock {
                 steps: normalized_steps(steps),
+                value: None,
+            },
+        ),
+        AppCommand::ClearTrackBusSendPlockMulti { track, steps, destination } => (
+            *track,
+            ResolvedStepCommand::BusSendPlock {
+                steps: normalized_steps(steps),
+                destination: *destination,
                 value: None,
             },
         ),

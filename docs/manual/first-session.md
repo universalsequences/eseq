@@ -1,41 +1,36 @@
 # Your first session
 
-This walkthrough makes a short synth pattern, gives one note a different tone, adds an effect, and saves the project. Digi Drift is the example; another installed synth also works.
+Make a four-note synth pattern, give one note its own tone, add a delay, and save. Digi Drift is the example; any synth works.
 
 ## Choose a sound
 
-1. Save any project you want to keep, then choose **File > New Project**.
-2. Open **Instruments** in the sidebar and expand **Synths** under Factory.
-3. Select an empty MIDI track and double-click **Digi Drift**. Wait for loading to finish. Its name should appear on the track and its controls below.
-4. Open **Presets** and click a preset, such as Acid Squelch. Its values appear in the instrument panel.
+1. **File > New Project**.
+2. In the sidebar, open **Instruments > Factory > Synths**.
+3. Select an empty track and double-click **Digi Drift**. Its name appears on the track and its panel appears below.
+4. Open **Presets** and click one, such as Acid Squelch.
 
-Double-clicking a saved synth can replace the selected track's instrument. To add a separate track, drag the instrument to **Drop sounds here** instead. See [Instruments and presets](instruments).
+Double-clicking replaces the selected track's instrument. To make a new track instead, drag the instrument onto **Drop sounds here**.
 
-## Punch in notes
+## Enter notes
 
-1. Click empty steps 1, 5, 9, and 13 on the synth row. Four lit steps should appear.
-2. Click Play. The pattern repeats and the track/output meters should move.
-3. Click Stop, then click the already active step 9 once. Check that the inspector says **1 selected**.
-4. Change Transpose to give that note a different pitch. The other notes keep their pitch.
+1. Click steps 1, 5, 9, and 13 on the synth row.
+2. Press Play. The meters move and the pattern loops.
+3. Click step 9 once. The inspector shows **1 selected**.
+4. Change **Transpose**. Only that note moves.
 
-On the default 16-step straight-sixteenth pattern, these steps mark the four beats of a bar. Changing length or timebase changes that relationship.
+## Lock one note's tone
 
-## Give one note a different tone
+1. With step 9 still selected, turn the synth's cutoff.
+2. Play. Step 9 uses its own cutoff; the others keep the base value.
+3. Command-click step 9 to deselect it. The inspector shows zero selected.
 
-1. Keep step 9 selected and turn the synth's filter cutoff.
-2. Play the pattern. That step uses the locked cutoff value.
-3. Look for the parameter's p-lock marker. Right-clicking the parameter exposes **Clear p-locks**.
-4. Stop, then Command-click selected step 9 to deselect it. Verify that the selected-step count is zero before editing the overall sound. Clicking the same track again does not necessarily clear its selected steps.
-
-Selected steps receive parameter locks. An ordinary edit with no step selection changes the pattern's base value. [Parameter locks](parameter-locks) covers this and recording knob gestures.
+Edits with steps selected become parameter locks. Edits with nothing selected change the pattern's base sound. See [Parameter locks](parameter-locks).
 
 ## Add delay and save
 
-1. Select the synth track, open **Audio FX**, and double-click **Str8 Delay**.
-2. Find the delay in the lower chain. Play and adjust its wet amount and feedback.
-3. Use the small enabled control in its header to compare processing with bypass.
-4. Choose **File > Save As**, enter a project name, and press Save.
+1. Open **Audio FX** and double-click **Str8 Delay**.
+2. Play and set its wet amount and feedback.
+3. Toggle the enable button in its header to compare with bypass.
+4. **File > Save As**, name the project, Save.
 
-The project is saved into the app's projects folder. Use File > Save for later changes, and Projects in the sidebar or File > Open Project to reopen it.
-
-Continue with [Recording](recording) to play notes instead of clicking, or [Arrangement](arrangement) to put the pattern on a timeline.
+Next: [Recording](recording) to play notes instead of clicking them, or [Arrangement](arrangement) to put the pattern on the timeline.

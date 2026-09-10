@@ -150,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eng.keyboard_tx,
     );
 
-    app.graph_controller().add_default_project_tracks()?;
+    app.initialize_default_project()?;
     let track_names = app.tracks.clone();
 
     // Collect node IDs for param pushing to audiograph

@@ -167,6 +167,15 @@ pub trait TextMeasurer {
     fn cap_height_px(&self, font_size: f32) -> f32 {
         self.line_height_px(font_size) * 0.7
     }
+    /// Positive distance below the baseline, excluding inter-line leading.
+    fn descent_px(&self, font_size: f32) -> f32 {
+        self.line_height_px(font_size) * 0.2
+    }
+    /// Ink above and below the baseline, both positive distances. Unlike
+    /// line metrics, these bounds exclude leading and unused descender space.
+    fn text_ink_extents_px(&self, _text: &str, font_size: f32) -> (f32, f32) {
+        (self.cap_height_px(font_size), self.descent_px(font_size))
+    }
 }
 
 /// Context passed to `WidgetDefinition::measure()` for proportional text support.

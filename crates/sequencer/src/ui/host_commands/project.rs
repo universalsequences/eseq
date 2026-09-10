@@ -1,5 +1,9 @@
 use crate::*;
 
+#[cfg(test)]
+#[path = "project_tests.rs"]
+mod tests;
+
 pub(super) const COMMANDS: &[&str] = &[
     "move-saved-instrument",
     "load-instrument-preset",
@@ -211,11 +215,11 @@ pub(super) fn handle(
             current_track.store(0, Ordering::Relaxed);
             {
                 let mut pan_ids = track_pan_ids.lock().unwrap();
-                pan_ids.clear();
+                *pan_ids = app.graph.track_node_ids.iter().map(|ids| ids.pan_id).collect();
                 push_solo_mutes(lg_raw, app, &state);
             }
             *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
-            *record_armed.lock().unwrap() = Vec::new();
+            *record_armed.lock().unwrap() = app.graph.record_armed.clone();
             // Keep the shared bus mirror in sync so pull_shared_bus_state
             // can't restore the previous project's buses.
             *bus_state.lock().unwrap() = app.buses.clone();
@@ -224,7 +228,8 @@ pub(super) fn handle(
             *track_groups.lock().unwrap() = app.groups.clone();
             selected_tracks.lock().unwrap().clear();
             *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-            ctx.meters.cached_track_peak_levels.clear();
+            ctx.meters.cached_track_peak_levels =
+                read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
             ctx.meters.cached_bus_peak_levels =
                 read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
             (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
@@ -249,32 +254,21 @@ pub(super) fn handle(
             sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
             sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
             sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
-            rt.set_reactive("SEQ", "num-tracks", Value::Number(0.0));
-            set_current_track_reactive(rt, 0, 0);
-            rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
-            rt.set_reactive("SEQ", "track-names", Value::List(vec![]));
-            rt.set_reactive("SEQ", "record-armed", Value::List(vec![]));
+            // New projects have default tracks; publish their real topology,
+            // rather than leaving live input and the UI with empty mirrors.
+            sync_track_topology_state(
+                rt,
+                app,
+                &state,
+                ctx.track_names,
+                0,
+                &selected_steps,
+                &piano_roll_selection,
+                &accumulator_names,
+                &record_armed,
+                &ctx.meters.cached_track_peak_levels,
+            );
             rt.set_reactive("SEQ", "selected-steps", Value::List(vec![]));
-            sync_playhead_fields(rt, 0, 1);
-            rt.set_reactive("SEQ", "steps", Value::List(vec![]));
-            rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
-            rt.set_reactive("SEQ", "durations", Value::List(vec![]));
-            rt.set_reactive("SEQ", "transposes", Value::List(vec![]));
-            rt.set_reactive("SEQ", "pans", Value::List(vec![]));
-            rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
-            rt.set_reactive("SEQ", "delays", Value::List(vec![]));
-            rt.set_reactive("SEQ", "retrigs", Value::List(vec![]));
-            rt.set_reactive("SEQ", "retrig-rates", Value::List(vec![]));
-            sync_track_mixer_empty_state(rt);
-            rt.set_reactive("SEQ", "effects", Value::List(vec![]));
-            rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
-            rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
-            rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
-            rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
-            rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
-            rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
-            rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
-            rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
             sync_sidebar_browser(rt, &app, 0);
             rt.clear_subtree_effects_for_named_target("*sequencer*");
             rt.run_reactive_cycle();

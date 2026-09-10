@@ -6,4 +6,7 @@
   (track :sampler :name "T1" :steps (0 (2 3) 4 (6 -2) 8 12)))
 
 (def capture-after-sync ()
-  (eseq.seq-panels/seq-open-piano-roll-bottom-for-track 0))
+  (eseq.seq-panels/seq-open-piano-roll-bottom-for-track 0)
+  ;; Exercise the live readout through the lane callback, not a state write.
+  (eseq.piano-roll/automation-action :set 0 0.25)
+  (eseq.piano-roll/automation-action :finish 0 0.25))

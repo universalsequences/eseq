@@ -1,93 +1,62 @@
 # Arrangement
 
-The arrangement puts music on a timeline: a scene lane for project-wide recall and track lanes for pattern and take clips. Build it with the mouse or capture a live performance.
+The arrangement is a timeline. The scene lane at the top recalls scenes; the track lanes below hold clips. Build it with the mouse or capture a performance.
 
-## Orient yourself
-
-Use the upper-right arrangement view control or Tab from a music view. The ruler shows bars, track names are at the left, and the thin lane above the tracks is the scene lane.
-
-Click the ruler to set the arrangement cursor, which is the playback starting position. Check this, the selected track, and Record state before a pass.
+Switch views with the upper-right control or Tab. Click the ruler to set the cursor, which is where playback and recording start.
 
 ## Place a pattern
 
-1. Select the destination track.
-2. Choose its pattern in the small selector beside **Place**.
-3. Click Place. The interface prompts for a location.
-4. Click the desired start in that track's lane.
-5. Confirm the colored clip appears with the expected source.
+1. Select the track.
+2. Pick a pattern in the selector beside **Place**, then click Place, or press Command-P.
+3. Click where the clip should start in that track's lane. Escape cancels.
 
-Escape cancels before placement. Command-P is the macOS shortcut. The selector chooses a track pattern, not a project-wide scene.
+You can also drag a pattern cell from the mixer into its lane. Either way the clip plays the same pattern; edit the pattern and every clip changes.
 
-You can also drag a track's pattern launch cell into its lane. It remains a use of the same source pattern: editing the source affects other uses too.
+## Edit clips
 
-## Edit clips and sections
+Drag a clip to move it and its edge to resize it. A pattern clip loops its source to fill its length. A take clip is linear and does not loop. Double-click a clip's title bar to open its source in the piano roll.
 
-Select a clip to inspect it. Drag its body to move it and its edge to resize it. Double-click its title bar for the source piano roll. Placement Start/End and source Offset are separate from the underlying notes.
+Drag across lanes and time to select a region. Command-C, Command-V, and Command-D copy, paste, and duplicate it. Delete removes it. A region can cut through the middle of a clip.
 
-A longer pattern clip repeats its source. A take remains linear; placing it does not turn it into a repeating pattern. Duplicate the source pattern when another clip needs independent notes.
+## Scenes on the timeline
 
-Select a region across the intended lanes and time span for section edits. Command-C, Command-V, and Command-D copy, paste, and duplicate arrangement selections on macOS. Check the selected region: it can include only part of a clip.
+**Set starting scene** picks the scene at bar 1. Right-click the scene lane for **Set Scene Here**; right-click an existing span for **Change Scene**, **Place Scene Patterns**, and **Remove Scene**.
 
-Delete acts on selected arrangement content. Undo reverses an edit; named project versions are useful before restructuring a song.
+A scene marker recalls bus and group settings only. **Place Scene Patterns** writes the scene's patterns into the track lanes and replaces whatever was there. This split lets a bass clip run underneath while the reverb changes above it.
 
-## Set scene state
+## An eight-bar section
 
-**Set starting scene** chooses scene state at the beginning, including bus and group settings. It does not populate empty track lanes with notes.
+1. Place a one-bar pattern at bar 1.
+2. Drag its right edge to bar 9.
+3. Do the same on the other tracks.
+4. Set the starting scene.
+5. Play from the top.
 
-Right-click the scene lane for **Set Scene Here**. An existing span also offers **Change Scene**, **Place Scene Patterns**, and **Remove Scene**.
-
-Place Scene Patterns writes that scene's track-pattern choices into the lanes. Treat it as a clip edit that can replace content in the affected span. Merely changing or removing a marker changes scene recall without deleting independent track clips.
-
-For example, keep a long bass clip continuous while scene changes above it recall different group reverb settings.
-
-## Build an eight-bar section
-
-For a first arrangement, use a one-bar pattern whose notes you already know.
-
-1. Place it at the beginning of its track lane.
-2. Drag the clip's right edge to the start of bar 9. Its one-bar source repeats across eight bars.
-3. Repeat placement on the other tracks you want in the section.
-4. Set the starting scene for the intended bus and group state.
-5. Start playback at the beginning and check all eight bars.
-
-To make the second half different, duplicate the source pattern first and edit that copy. Shorten the original placement to four bars, then place the variation at bar 5 and extend it to bar 9. Editing the original source alone would change every clip using it.
-
-When this sounds right, save the project and use [Saving and audio export](saving-and-export) to make an audio file.
+For a different second half, duplicate the pattern, edit the copy, shorten the first clip to four bars, and place the copy at bar 5.
 
 ## Record a take
 
-1. Open arrangement view before engaging recording.
-2. Set the cursor at the desired start.
-3. Arm the track and audition its sound.
-4. Engage Record and Play, then perform with the computer keyboard or configured note input.
-5. Stop to finish and turn Record off.
-6. Find the new **Take** clip and open it in the piano roll.
+1. In arrangement view, set the cursor and arm the track.
+2. Enable Record, press Play, and perform.
+3. Stop. A **Take** clip appears in the lane.
 
-The take starts at the punch-in position and has a linear length. Its panel identifies the take and shows Loop off. It is editable notes, not the finished audio waveform.
+A take replaces what was in the recorded region and leaves the rest alone. It is editable notes, not audio.
 
-Recording edits the punched region while preserving content outside it. An overlapping pass is not an automatic stack of alternate comping lanes. Undo or return to a saved version if you want the previous result.
+## Capture launches
 
-## Capture scene and pattern launches
+Start recording in arrangement view, then launch scenes or pattern cells while it plays. Each launch lands on the timeline at its quantized position. Switch to session view to reach the cells; the pass stays an arrangement recording.
 
-Begin the recording pass in arrangement view, then launch scenes or individual track patterns as playback runs. Launches are captured at their musical positions; launch quantization still determines when queued changes happen.
-
-Switching to session view during the pass lets you reach its launch cells. Recording remains arrangement capture because its kind was selected at the start. Stop to commit, then inspect scene and track lanes.
-
-For a first trial, use two scenes and no armed note-input tracks. Begin capture, launch the first section, launch the second a few bars later, and stop. Replay from the beginning. Add live note takes once launch capture is familiar.
+Try it first with two scenes and no armed tracks.
 
 ## Back to Arrangement
 
-Manually launching scenes or patterns while the timeline plays can override scheduled content. The highlighted Back to Arrangement control near the transport indicates manual control. Click it to follow the timeline again.
+A manual launch during timeline playback overrides the timeline and lights **Back to Arrangement** by the transport. Click it to follow the timeline again. Changing views does not clear the override.
 
-Changing views alone does not cancel an override. If a clip seems ignored, check this control before editing the clip.
+Playback runs past the last clip, so a moving cursor does not mean something is placed there.
 
-Starting on silence can automatically launch the selected scene for jamming. Playback can continue past arranged material, so a running clock does not prove a clip exists there.
+## Four objects
 
-## Four different objects
-
-- A **pattern** is a track's reusable looping content and settings.
-- A **scene** coordinates track-pattern choices and shared bus/group state.
-- A **take** is a linear recorded note performance on one track.
-- A **clip** is a placement referring to a pattern or take.
-
-See [Recording](recording) for typing and quantization, and [Piano roll](piano-roll) for note and automation edits.
+- A **pattern** loops and belongs to a track.
+- A **scene** picks patterns and holds bus and group state.
+- A **take** is a linear recorded performance.
+- A **clip** places a pattern or take on the timeline.

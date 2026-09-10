@@ -1,51 +1,36 @@
 # Piano roll
 
-The piano roll edits pitch, timing, and duration. It is useful for melodies, chords, recorded performances, and p-lock automation.
+The piano roll edits pitch, timing, duration, and automation.
 
-## Open the right content
+## Open it
 
-Double-click a track's colored name badge in the mixer. The lower panel shows a keyboard, notes, source information, and an automation lane. Shift-Tab also switches the lower main/device panel and piano roll.
+Double-click a track's name badge in the mixer, or press Shift-Tab to swap the lower panel. In the arrangement, double-click a clip's title bar.
 
-In arrangement view, double-click the clip's title bar to edit. Read the source panel first: it distinguishes patterns from takes and shows length and loop state. Editing a shared pattern changes its other uses too.
+The side panel names the source, a pattern or a take, and shows its length. **Loop on** means a pattern; **Loop off** means a take. Editing a pattern here changes every clip that uses it.
 
-## Edit notes
+## Notes
 
-Pitch runs vertically beside the keyboard; time runs horizontally. Each bar is a note, with its left edge at the start and its width representing duration. Notes at the same time form a chord.
+Pitch runs up the keyboard; time runs left to right. A note's left edge is its start and its width is its duration.
 
-- Double-click empty space to create a note.
-- Drag its body to change pitch or timing.
-- Drag an edge to change duration.
-- Select notes individually or with a selection rectangle, then use Backspace or Delete to remove them.
-- Command-A selects notes in the focused piano roll on macOS, rather than step cells in the grid.
+- Double-click empty space to add a note.
+- Drag a note to change pitch or time. Drag its edge to change duration.
+- Click or drag a rectangle to select. Backspace or Delete removes.
+- Command-A selects all notes when the piano roll has focus.
 
-Zoom and scroll to give short notes enough space. For recorded performances, inspect starts and ends rather than assuming all bars are aligned to the grid.
+## Clip window
 
-## Patterns and clip windows
-
-A pattern loops; a take is linear. The side panel shows **Loop on** for a pattern and **Loop off** for a take. Arrangement clips can expose Start, End, and Offset: placement in the song and position within the source are separate.
-
-Changing Offset changes which part of the source plays first. Changing source notes changes the music itself. Keep the operations separate when a phrase appears to begin in the middle.
+An arrangement clip shows Start, End, and Offset. Start and End are the placement in the song. Offset is where in the source the clip begins. Change Offset to start a phrase mid-way; change the notes to change the music.
 
 ## Automation lane
 
-The **Lane** selector below the notes chooses a parameter. Basic choices include Velocity, Duration, Delay, Transpose, Pan, Retrig, and Rate. Device parameters appear after they have at least one p-lock in the current pattern.
+The **Lane** selector below the notes picks a parameter: Velocity, Duration, Delay, Transpose, Pan, Retrig, Rate, and any device parameter that already has a p-lock in this pattern.
 
-To edit a cutoff missing from the menu:
+To automate a device parameter that is not listed, lock it once from the device panel or record a short knob move. It then appears in the menu, named as the engine names it, such as `inst lp_freq`.
 
-1. Return to the synth controls.
-2. Select a step and change cutoff to create a lock, or record a short cutoff gesture.
-3. Reopen the piano roll and Lane menu.
-4. Choose the cutoff entry. It may use a parameter name such as `inst lp_freq` rather than the panel's friendlier label.
-5. Edit its values in the lane.
+A point marks each note's step and a segment spans its duration. Drag vertically to change the value.
 
-This first-lock requirement keeps the list focused on parameters actually in use. An absent device parameter is not necessarily unautomatable.
+- Colored points are locks. Gray points show the base value; dragging one creates a lock.
+- Double-click a point to clear it.
+- Chord notes on one step share one value. Locks belong to steps, not to voices.
 
-## Change and clear lane values
-
-A point marks a note onset and a horizontal segment spans its duration. Drag the point or segment vertically to change the value. This edits the parameter at that step; it does not move the note's pitch.
-
-Colored device points represent locks. Gray points show the base value where no lock exists. Dragging a gray value creates a lock. Double-click a point to clear it. For a basic step parameter such as velocity, clearing resets the default instead.
-
-P-locks belong to steps. Chord notes on one step share step-level automation; the lane is not an independent synth-parameter envelope per chord voice.
-
-To remove every lock for a parameter, use **Clear p-locks** on its device control. Removing its last lock can remove the device parameter from the Lane menu. See [Parameter locks](parameter-locks).
+Right-click the device control and choose **Clear p-locks** to remove every lock for a parameter. See [Parameter locks](parameter-locks).

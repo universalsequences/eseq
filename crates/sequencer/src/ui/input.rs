@@ -160,7 +160,16 @@ fn focused_number_picker_is_editing(editor: &Editor) -> bool {
 /// Either way focus supersedes mode: prompts and focused text or numeric
 /// editors retain ownership of keys, including inside a UiOnly buffer.
 fn editor_accepts_live_keyboard_input(editor: &Editor) -> bool {
-    (editor.active_mode_accepts_live_keys() || active_buffer_accepts_global_ui_shortcuts(editor))
+    let mode_policy = if editor.active_buffer_has_named_mode() {
+        // A declared mode is the authority: its :live-keys (own or
+        // inherited) decides. The shared sequencer keymap opts in, so
+        // every factory view keeps musical typing; a package view that
+        // declares its own mode without :live-keys keeps its letters.
+        editor.active_mode_accepts_live_keys()
+    } else {
+        active_buffer_accepts_global_ui_shortcuts(editor)
+    };
+    mode_policy
         && editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
         && !focused_widget_captures_text_input(editor)
@@ -213,13 +222,6 @@ pub(crate) fn sequencer_history_shortcut(
     })
 }
 
-fn global_sequencer_navigation_available(editor: &Editor) -> bool {
-    editor.minibuffer_prompt().is_none()
-        && editor.prompt_text().is_none()
-        && active_buffer_accepts_global_ui_shortcuts(editor)
-        && editor.focused_widget_id().is_none()
-        && !focused_widget_captures_text_input(editor)
-}
 
 fn fx_plock_row_selected(editor: &mut Editor) -> bool {
     let Some(callable) = editor.runtime_mut().global_value("eseq.effects.track-panels/plock-row-selected?") else {
@@ -231,61 +233,8 @@ fn fx_plock_row_selected(editor: &mut Editor) -> bool {
     )
 }
 
-fn selected_steps_delete_shortcut_available(
-    editor: &mut Editor,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-) -> bool {
-    let has_selected_steps = !selected_steps.lock().unwrap().is_empty();
-    has_selected_steps && !fx_plock_row_selected(editor)
-}
 
-fn select_track_for_edit(editor: &mut Editor, track: usize) {
-    if let Some(callable) = editor
-        .runtime_mut()
-        .global_value("eseq.sequencer/select-track-for-edit")
-    {
-        let _ = editor
-            .runtime_mut()
-            .invoke(callable, vec![Value::Number(track as f64)]);
-    } else {
-        let _ = editor.runtime_mut().eval_str(&format!(
-            "(do (set! eseq.seq-core-state/selected-bus -1) (seq-set-track {track}))"
-        ));
-    }
-}
 
-fn select_track_relative(
-    editor: &mut Editor,
-    current: usize,
-    delta: isize,
-    track_count: usize,
-) {
-    if let Some(callable) = editor
-        .runtime_mut()
-        .global_value("eseq.drum-rack-v2/track-relative")
-    {
-        let next = editor.runtime_mut().invoke(
-            callable,
-            vec![
-                Value::Number(current as f64),
-                Value::Number(delta as f64),
-            ],
-        );
-        if let Ok(Some(Value::Number(next))) = next {
-            if next.is_finite() && next >= 0.0 && next.fract() == 0.0 && next < track_count as f64 {
-                select_track_for_edit(editor, next as usize);
-            }
-        }
-        return;
-    }
-
-    let next = if delta < 0 {
-        if current == 0 { track_count - 1 } else { current - 1 }
-    } else {
-        (current + 1) % track_count
-    };
-    select_track_for_edit(editor, next);
-}
 
 fn focused_widget_is(editor: &Editor, stable_key: &str, widget_type: &str) -> bool {
     editor.focused_widget_node().is_some_and(|node| {
@@ -1480,70 +1429,10 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         return true;
     }
 
-    if editor.minibuffer_prompt().is_none()
-        && editor.prompt_text().is_none()
-        && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
-        && key.modifiers == KeyModifiers::NONE
-        // Defer to a focused widget (e.g. an arrangement lane with a selected
-        // clip, a text input, a number picker mid-edit) only when that widget
-        // actually handles this key. Gating on "anything is focused" meant a
-        // click on any button — which consumes only Enter and Space — silently
-        // disarmed Cmd+A followed by Backspace.
-        && !editor.focused_widget_consumes_key(key.code, key.modifiers)
-        && selected_steps_delete_shortcut_available(editor, selected_steps)
-    {
-        let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/delete-selected-steps)");
-        editor.refresh_runtime_side_effects();
-        return true;
-    }
-
-    if global_sequencer_navigation_available(editor) {
-        match (key.code, key.modifiers) {
-            (KeyCode::Left, KeyModifiers::SHIFT) => {
-                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-select-left)");
-                editor.refresh_runtime_side_effects();
-                editor.mark_needs_redraw();
-                return true;
-            }
-            (KeyCode::Right, KeyModifiers::SHIFT) => {
-                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-select-right)");
-                editor.refresh_runtime_side_effects();
-                editor.mark_needs_redraw();
-                return true;
-            }
-            (KeyCode::Left, KeyModifiers::NONE) => {
-                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-left)");
-                editor.refresh_runtime_side_effects();
-                editor.mark_needs_redraw();
-                return true;
-            }
-            (KeyCode::Right, KeyModifiers::NONE) => {
-                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-right)");
-                editor.refresh_runtime_side_effects();
-                editor.mark_needs_redraw();
-                return true;
-            }
-            (KeyCode::Enter, KeyModifiers::NONE) => {
-                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-toggle)");
-                editor.refresh_runtime_side_effects();
-                editor.mark_needs_redraw();
-                return true;
-            }
-            (KeyCode::Up | KeyCode::Down, KeyModifiers::NONE) => {
-                let track_count = state.active_track_count();
-                if track_count == 0 {
-                    return true;
-                }
-                let current = current_track.load(Ordering::Relaxed).min(track_count - 1);
-                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
-                select_track_relative(editor, current, delta, track_count);
-                editor.refresh_runtime_side_effects();
-                editor.mark_needs_redraw();
-                return true;
-            }
-            _ => {}
-        }
-    }
+    // Bare navigation and step-delete keys (arrows, RET, BS/Delete, UP/DOWN)
+    // are no longer matched here: they live in the shared Lisp keymap
+    // `eseq.sequencer-keys/sequencer-keys`, which every sequencer view
+    // inherits, and dispatch through the editor's mode chain.
 
     let vim_normal_plain_tab = is_plain_tab_shortcut(key)
         && editor.active_vim_input_mode() == Some(eseqlisp::editor::VimInputMode::Normal);
@@ -1561,12 +1450,14 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 if has_sequencer_shortcut_modifier(modifiers)
                     && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
-                let command = if editor.active_buffer().name == "*sequencer*" {
-                    "eseq.sequencer/select-all-current-track-steps"
-                } else {
-                    "eseq.step-grid-interactions/select-all-steps"
-                };
-                let _ = editor.runtime_mut().invoke_global(command, Vec::new());
+                // Host-owned only so it outranks a focused timeline lane's own
+                // Cmd+A (one lane) and the editor's text select-all. WHAT gets
+                // selected is decided in Lisp (bead eseq-vmg8): the active or
+                // visible surface — arrangement clips, piano-roll notes, steps.
+                let _ = editor.runtime_mut().invoke_global(
+                    "eseq.step-grid-interactions/seq-global-select-all",
+                    Vec::new(),
+                );
                 editor.refresh_runtime_side_effects();
                 editor.mark_needs_redraw();
                 return true;
@@ -1643,34 +1534,14 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         return true;
     }
 
-    if editor.minibuffer_prompt().is_none()
+    // The step clipboard is a widget-only-buffer shortcut with no focused
+    // widget, like the chords above.
+    if !(editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
         && active_buffer_accepts_global_ui_shortcuts(editor)
         && editor.focused_widget_id().is_none()
-        && !focused_widget_captures_text_input(editor)
+        && !focused_widget_captures_text_input(editor))
     {
-        match (key.code, key.modifiers) {
-            (KeyCode::Left, KeyModifiers::NONE) => {
-                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-left)");
-                editor.refresh_runtime_side_effects();
-                return true;
-            }
-            (KeyCode::Right, KeyModifiers::NONE) => {
-                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-right)");
-                editor.refresh_runtime_side_effects();
-                return true;
-            }
-            (KeyCode::Backspace | KeyCode::Delete, KeyModifiers::NONE) => {
-                if !selected_steps_delete_shortcut_available(editor, selected_steps) {
-                    return false;
-                }
-                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/delete-selected-steps)");
-                editor.refresh_runtime_side_effects();
-                return true;
-            }
-            _ => {}
-        }
-    } else {
         return false;
     }
 
@@ -2818,8 +2689,15 @@ mod live_keyboard_tests {
 
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         assert!(
+            !should_route_to_live_keyboard(&editor, &note_key, &held, false),
+            "a declared mode is the authority: :live-keys false holds even in a widget-only buffer",
+        );
+
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        assert!(
             should_route_to_live_keyboard(&editor, &note_key, &held, false),
-            "widget-only buffers route live keys without a mode opt-in",
+            "mode-less widget-only buffers route live keys by host default",
         );
 
         editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
@@ -3393,70 +3271,53 @@ mod live_keyboard_tests {
         );
     }
 
-    #[test]
-    fn up_down_switch_tracks_outside_piano_roll() {
-        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
-        editor
-            .runtime_mut()
-            .eval_str("(defstate eseq.seq-core-state/selected-bus -1)")
-            .expect("install selected bus state");
-        let current_track = Arc::new(AtomicUsize::new(0));
-        let native_track = Arc::clone(&current_track);
-        editor
-            .runtime_mut()
-            .register_native("seq-set-track", move |args, _ctx| {
-                let Some(eseqlisp::vm::Value::Number(track)) = args.first() else {
-                    return Err("expected track".to_string());
-                };
-                native_track.store(*track as usize, Ordering::Relaxed);
-                Ok(eseqlisp::vm::Value::Number(*track))
-            });
-        let state = Arc::new(SequencerState::new(3, vec![]));
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
-            Arc::new(Mutex::new(None));
-
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(current_track.load(Ordering::Relaxed), 1);
-
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(current_track.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn up_down_uses_lisp_visual_track_order_for_non_contiguous_group_members() {
-        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    /// Load the shared sequencer keymap module into a bare editor and make
+    /// the active buffer use it, with the cross-module hooks it dispatches to
+    /// stubbed as counters. Mirrors what main.lisp does for every view.
+    fn install_sequencer_keys_mode(editor: &mut Editor) {
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         editor
             .runtime_mut()
             .eval_str(
                 r#"
                 (defstate eseq.seq-core-state/selected-bus -1)
-                (def eseq.drum-rack-v2/track-relative (track delta)
-                  (if (= track 7)
-                    (if (> delta 0) 10 1)
-                    (if (= track 10)
-                      (if (< delta 0) 7 11)
-                      nil)))
+                (defstate cursor-left-count 0)
+                (defstate cursor-right-count 0)
+                (defstate cursor-select-left-count 0)
+                (defstate cursor-select-right-count 0)
+                (defstate cursor-toggle-count 0)
+                (defstate delete-count 0)
+                (defstate plock-row-selected false)
+                (defstate selected-track-via-seqv -1)
+                (def eseq.step-grid-interactions/cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
+                (def eseq.step-grid-interactions/cursor-right () (set! cursor-right-count (+ cursor-right-count 1)))
+                (def eseq.step-grid-interactions/cursor-select-left () (set! cursor-select-left-count (+ cursor-select-left-count 1)))
+                (def eseq.step-grid-interactions/cursor-select-right () (set! cursor-select-right-count (+ cursor-select-right-count 1)))
+                (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+                (def eseq.step-grid-interactions/delete-selected-steps () (set! delete-count (+ delete-count 1)))
+                (def eseq.effects.track-panels/plock-row-selected? () plock-row-selected)
+                (def eseq.drum-rack-v2/track-relative (track delta) nil)
+                (def eseq.sequencer/select-track-for-edit (track)
+                  (do
+                    (set! eseq.seq-core-state/selected-bus -1)
+                    (set! selected-track-via-seqv track)
+                    (seq-set-track track)))
                 "#,
             )
-            .expect("install visual-order navigation fixture");
-        let current_track = Arc::new(AtomicUsize::new(7));
+            .expect("install sequencer key hooks");
+        editor
+            .runtime_mut()
+            .eval_str(include_str!("../../../../content/ui/sequencer-keys.lisp"))
+            .expect("load the sequencer keymap module");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-buffer-mode "eseq.sequencer-keys/sequencer-keys")"#)
+            .expect("adopt the sequencer keymap");
+        editor.refresh_runtime_side_effects();
+    }
+
+    fn install_track_selection(editor: &mut Editor, track_count: usize, current: usize) -> Arc<AtomicUsize> {
+        let current_track = Arc::new(AtomicUsize::new(current));
         let native_track = Arc::clone(&current_track);
         editor
             .runtime_mut()
@@ -3467,35 +3328,112 @@ mod live_keyboard_tests {
                 native_track.store(*track as usize, Ordering::Relaxed);
                 Ok(Value::Number(*track))
             });
-        let state = Arc::new(SequencerState::new(12, vec![]));
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
-            Arc::new(Mutex::new(None));
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(current as f64));
+        current_track
+    }
 
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
+    fn count(editor: &mut Editor, name: &str) -> f64 {
+        match editor.runtime_mut().eval_str(name).unwrap() {
+            Some(Value::Number(n)) => n,
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_mode_without_live_keys_keeps_letters_from_musical_typing() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do (def owner-handle-key (key text) true)
+                     (define-mode \"owner-mode\" :live-keys false :on-key \"owner-handle-key\")
+                     (set-buffer-mode \"owner-mode\"))",
+            )
+            .expect("install owner mode");
+        editor.refresh_runtime_side_effects();
+        let held = Arc::new(Mutex::new(Vec::new()));
+        assert!(
+            !should_route_to_live_keyboard(
+                &editor,
+                &KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+                &held,
+                false,
+            ),
+            "a declared mode without :live-keys is the authority even in a widget-only buffer"
+        );
+        // Inheriting the shared sequencer keymap opts back in.
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do (define-mode \"parent-mode\" :live-keys true)
+                     (define-mode \"child-mode\" :on-key \"owner-handle-key\" :inherit \"parent-mode\")
+                     (set-buffer-mode \"child-mode\"))",
+            )
+            .expect("install inheriting mode");
+        editor.refresh_runtime_side_effects();
+        assert!(should_route_to_live_keyboard(
+            &editor,
+            &KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            &held,
+            false,
         ));
+    }
+
+    #[test]
+    fn up_down_switch_tracks_through_the_sequencer_keymap() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        install_sequencer_keys_mode(&mut editor);
+        let current_track = install_track_selection(&mut editor, 3, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(current_track.load(Ordering::Relaxed), 1);
+        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(1.0));
+        editor.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(current_track.load(Ordering::Relaxed), 0);
+        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(0.0));
+        editor.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(current_track.load(Ordering::Relaxed), 2, "UP wraps from the first track");
+    }
+
+    #[test]
+    fn up_down_uses_lisp_visual_track_order_for_non_contiguous_group_members() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        install_sequencer_keys_mode(&mut editor);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.drum-rack-v2/track-relative (track delta)
+                  (if (= track 7)
+                    (if (> delta 0) 10 1)
+                    (if (= track 10)
+                      (if (< delta 0) 7 11)
+                      nil)))
+                "#,
+            )
+            .expect("install visual-order navigation fixture");
+        let current_track = install_track_selection(&mut editor, 12, 7);
+        editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 10);
-
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
+        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(10.0));
+        editor.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 7);
     }
 
     #[test]
-    fn open_modal_blocks_global_track_navigation_shortcuts() {
+    fn open_modal_blocks_track_navigation_keys() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        install_sequencer_keys_mode(&mut editor);
+        let current_track = install_track_selection(&mut editor, 3, 0);
         let tree = editor
             .runtime_mut()
             .eval_str(
@@ -3510,28 +3448,86 @@ mod live_keyboard_tests {
             .active_buffer_mut()
             .set_widget_tree(Some(tree.clone()), None);
         editor.runtime_mut().set_widget_tree(tree);
-        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         editor.set_layout_viewport(40, 20);
         assert!(editor.modal_is_open());
-
-        let current_track = Arc::new(AtomicUsize::new(0));
-        let state = Arc::new(SequencerState::new(3, vec![]));
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
-            Arc::new(Mutex::new(None));
-
-        assert!(
-            !handle_metal_command_shortcut(
-                &mut editor,
-                &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-                &state,
-                &current_track,
-                &selected_steps,
-                &step_clipboard,
-            ),
-            "the app shortcut layer must yield to the open modal"
+        editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            current_track.load(Ordering::Relaxed),
+            0,
+            "the mode keymap must yield to the open modal"
         );
+    }
+
+    #[test]
+    fn selected_plock_row_blocks_selected_step_delete_key() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        install_sequencer_keys_mode(&mut editor);
+        let _current_track = install_track_selection(&mut editor, 1, 0);
+        editor
+            .runtime_mut()
+            .eval_str("(set! plock-row-selected true)")
+            .expect("select plock row");
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(
+            count(&mut editor, "delete-count"),
+            0.0,
+            "step deletion must not run while a plock row is selected"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(set! plock-row-selected false)")
+            .expect("clear plock row selection");
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(count(&mut editor, "delete-count"), 1.0);
+        editor.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(count(&mut editor, "delete-count"), 2.0);
+    }
+
+    #[test]
+    fn plain_arrows_navigate_from_a_buffer_inheriting_the_sequencer_keymap() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*piano-roll*", "");
+        install_sequencer_keys_mode(&mut editor);
+        let current_track = install_track_selection(&mut editor, 3, 0);
+        editor.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(count(&mut editor, "cursor-left-count"), 1.0);
+        assert_eq!(count(&mut editor, "cursor-right-count"), 1.0);
+        assert_eq!(count(&mut editor, "cursor-select-left-count"), 1.0);
+        assert_eq!(count(&mut editor, "cursor-select-right-count"), 1.0);
+        assert_eq!(count(&mut editor, "cursor-toggle-count"), 1.0);
+        editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(current_track.load(Ordering::Relaxed), 1);
+        assert_eq!(count(&mut editor, "selected-track-via-seqv"), 1.0);
+    }
+
+    #[test]
+    fn a_mode_that_does_not_inherit_the_sequencer_keymap_keeps_its_arrows() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        install_sequencer_keys_mode(&mut editor);
+        let current_track = install_track_selection(&mut editor, 3, 0);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate own-keys 0)
+                (def own-handle-key (key text) (do (set! own-keys (+ own-keys 1)) true))
+                (define-mode "own-mode" :on-key "own-handle-key")
+                (set-buffer-mode "own-mode")
+                "#,
+            )
+            .expect("install a standalone mode");
+        editor.refresh_runtime_side_effects();
+        editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(current_track.load(Ordering::Relaxed), 0);
+        assert_eq!(count(&mut editor, "cursor-left-count"), 0.0);
+        assert_eq!(count(&mut editor, "cursor-toggle-count"), 0.0);
+        assert_eq!(count(&mut editor, "own-keys"), 3.0);
     }
 
     fn sample_browser_keyboard_editor() -> Editor {
@@ -3958,63 +3954,6 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn selected_plock_row_blocks_global_selected_step_delete_shortcut() {
-        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def delete-count (state 0))
-                (def plock-row-selected (state false))
-                (def eseq.step-grid-interactions/delete-selected-steps ()
-                  (set! delete-count (+ delete-count 1)))
-                (def eseq.effects.track-panels/plock-row-selected? () plock-row-selected)
-                "#,
-            )
-            .expect("install step/plock delete hooks");
-
-        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
-        selected_steps.lock().unwrap().insert(3);
-
-        editor
-            .runtime_mut()
-            .eval_str("(set! plock-row-selected true)")
-            .expect("select plock row");
-        assert!(!handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(
-            editor.runtime_mut().eval_str("delete-count").unwrap(),
-            Some(Value::Number(0.0)),
-            "global step deletion must not run while a plock row is selected"
-        );
-
-        editor
-            .runtime_mut()
-            .eval_str("(set! plock-row-selected false)")
-            .expect("clear plock row selection");
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(
-            editor.runtime_mut().eval_str("delete-count").unwrap(),
-            Some(Value::Number(1.0)),
-            "global step deletion should still work once no plock row is selected"
-        );
-    }
-
-    #[test]
     fn slash_does_not_steal_focused_search_or_text_only_buffers() {
         let mut editor = sample_browser_keyboard_editor();
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
@@ -4145,226 +4084,6 @@ mod live_keyboard_tests {
                 .eval_str("sbrowser-modified-label")
                 .unwrap(),
             Some(Value::String("kick.wav".to_string()))
-        );
-    }
-
-    #[test]
-    fn plain_arrows_navigate_from_piano_roll_ui_buffer() {
-        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-        editor.open_scratch_buffer("*piano-roll*", "");
-        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
-        let current_track = Arc::new(AtomicUsize::new(0));
-        let native_track = Arc::clone(&current_track);
-        editor
-            .runtime_mut()
-            .register_native("seq-set-track", move |args, _ctx| {
-                let Some(Value::Number(track)) = args.first() else {
-                    return Err("expected track".to_string());
-                };
-                native_track.store(*track as usize, Ordering::Relaxed);
-                Ok(Value::Number(*track))
-            });
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (defstate eseq.seq-core-state/selected-bus 1)
-                (defstate cursor-left-count 0)
-                (defstate cursor-right-count 0)
-                (defstate cursor-select-left-count 0)
-                (defstate cursor-select-right-count 0)
-                (defstate cursor-toggle-count 0)
-                (defstate selected-track-via-seqv -1)
-                (def eseq.step-grid-interactions/cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
-                (def eseq.step-grid-interactions/cursor-right () (set! cursor-right-count (+ cursor-right-count 1)))
-                (def eseq.step-grid-interactions/cursor-select-left () (set! cursor-select-left-count (+ cursor-select-left-count 1)))
-                (def eseq.step-grid-interactions/cursor-select-right () (set! cursor-select-right-count (+ cursor-select-right-count 1)))
-                (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
-                (def eseq.sequencer/select-track-for-edit (track)
-                  (do
-                    (set! eseq.seq-core-state/selected-bus -1)
-                    (set! selected-track-via-seqv track)
-                    (seq-set-track track)))
-                "#,
-            )
-            .expect("install arrow navigation handlers");
-        let state = Arc::new(SequencerState::new(3, vec![]));
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
-            Arc::new(Mutex::new(None));
-
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(
-            editor.runtime_mut().eval_str("cursor-left-count").unwrap(),
-            Some(Value::Number(1.0))
-        );
-
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(
-            editor.runtime_mut().eval_str("cursor-right-count").unwrap(),
-            Some(Value::Number(1.0))
-        );
-
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("cursor-select-left-count")
-                .unwrap(),
-            Some(Value::Number(1.0))
-        );
-
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("cursor-select-right-count")
-                .unwrap(),
-            Some(Value::Number(1.0))
-        );
-
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("cursor-toggle-count")
-                .unwrap(),
-            Some(Value::Number(1.0))
-        );
-
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(current_track.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
-            Some(Value::Number(-1.0))
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("selected-track-via-seqv")
-                .unwrap(),
-            Some(Value::Number(1.0))
-        );
-    }
-
-    #[test]
-    fn plain_arrows_do_not_navigate_while_widget_is_focused() {
-        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
-        editor.set_layout_viewport(80, 20);
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (defstate cursor-left-count 0)
-                (defstate cursor-toggle-count 0)
-                (def eseq.step-grid-interactions/cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
-                (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
-                (effect
-                  (timeline
-                    :height 8
-                    :focusable true
-                    :tool :draw
-                    :lanes (list (dict :id 0 :label "L0"))
-                    :items ()
-                    :view-start 0
-                    :view-duration 16
-                    :on-action |e| e))
-                "#,
-            )
-            .expect("install focused widget fixture");
-        editor.handle_mouse_precise(
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 10,
-                row: 3,
-                modifiers: KeyModifiers::NONE,
-            },
-            0,
-            0,
-            80,
-            20,
-            10.0,
-            3.0,
-        );
-        assert!(
-            editor.focused_widget_id().is_some(),
-            "fixture should focus a widget before testing global arrow routing"
-        );
-        let state = Arc::new(SequencerState::new(1, vec![]));
-        let current_track = Arc::new(AtomicUsize::new(0));
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
-            Arc::new(Mutex::new(None));
-
-        assert!(!handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(
-            editor.runtime_mut().eval_str("cursor-left-count").unwrap(),
-            Some(Value::Number(0.0))
-        );
-        assert!(!handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("cursor-toggle-count")
-                .unwrap(),
-            Some(Value::Number(0.0))
         );
     }
 
@@ -4840,6 +4559,12 @@ mod live_keyboard_tests {
                     (set! eseq.seq-core-state/selected-bus -1)
                     (set! select-all-count (+ select-all-count 1))
                     (seq-select-all-steps)))
+                ;; The host forwards to the Lisp dispatcher; stub the buffer
+                ;; branch it takes for *sequencer*.
+                (def eseq.step-grid-interactions/seq-global-select-all ()
+                  (if (= (current-buffer-name) "*sequencer*")
+                    (eseq.sequencer/select-all-current-track-steps)
+                    false))
                 "#,
             )
             .expect("install select-all handler");

@@ -36,6 +36,11 @@
         :controls (lambda () '(("motion.tremolo" "Tremolo" 2) ("motion.tremolo_hz" "Tremolo Hz" 2)
           ("motion.pan" "Auto pan" 2) ("motion.pan_hz" "Pan Hz" 2)))
         :hint "Tremolo and pan add independent rhythmic movement.")
+      (dict :title "Swell"
+        :view (lambda () (eseq.effects.physical-model-surface/piano-swell-view))
+        :controls (lambda () '(("swell.amount" "Reverse blend" 2) ("swell.length_s" "Reverse seconds" 2)
+          ("swell.curve" "Rise curve" 2) ("swell.tail" "Ringing tail" 2)))
+        :hint "Hold or lift pedal; shape changes start next note.")
       (dict :title "Output"
         :view (lambda () (eseq.effects.physical-model-surface/piano-output-view))
         :controls (lambda () '(("output.drive" "Drive" 2) ("output.tone_hz" "Tone Hz" 0) ("output.gain" "Output" 2)))

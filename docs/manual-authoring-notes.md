@@ -2,7 +2,9 @@
 
 Date: 2026-09-09. Content bead: `eseq-ug3m.5`. Human review: `eseq-ug3m.8`.
 
-The first pass is 18 pages, approximately 10,000 words, under `docs/manual/`.
+The first pass is 18 pages under `docs/manual/`, about 10,000 words; a
+simplicity pass on 2026-09-09 cut it to about 5,800 words in the terse,
+declarative style of hardware manuals such as the Cirklon's.
 It replaces the placeholder chapters and covers the graphical music-making
 scope requested by the user. Packages, custom scripts, custom sequencers,
 scripting, and patcher authoring are excluded. The existing `customization`

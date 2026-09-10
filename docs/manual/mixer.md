@@ -1,49 +1,37 @@
 # Mixer
 
-The mixer balances tracks and routes them through groups and buses. Select a track or bus strip to show its devices. The colored name badge identifies the part; meters show signal level.
+The mixer balances tracks and routes them to groups, buses, and Main. Select a strip to show its devices.
 
-## Track controls
+## Track strip
 
-- The fader sets output level; Pan positions the track in stereo.
-- Sends feed shared buses, such as A and B.
-- The numbered button enables or mutes the track.
-- **S** solos it; **R** arms it for live input and recording.
-- The output selector chooses the destination, such as Main or an available group/bus route.
+- Fader and Pan set level and position.
+- Sends feed buses A and B.
+- The numbered button mutes. **S** solos. **R** arms.
+- The output selector routes to Main or a group.
+- The colored cells launch the track's patterns. Double-click the name badge for the piano roll.
 
-The cells higher in the strip launch track patterns. They are separate from mute, solo, and arm. Double-click the colored name badge for the piano roll.
-
-Track mix values belong to patterns. After balancing one section, launch another pattern to check its own level and sends. A quiet variation can be intentional.
+Level, pan, and sends belong to the pattern. Launch each variation and check its own balance.
 
 ## Sends and buses
 
-A send feeds some track signal to a shared bus. Several tracks can use one reverb or delay while retaining their direct output.
+A send copies part of a track to a shared bus while the track still plays dry.
 
-1. Select Bus A or B and inspect its effect chain.
-2. Add or adjust the desired effect.
-3. Return to a track and raise its corresponding send gradually.
-4. Check bus and Main meters while listening.
+1. Select Bus A or B and add an effect, usually reverb or delay set fully wet.
+2. Back on a track, raise the matching send.
+3. Watch the bus and Main meters.
 
-A fully wet ambience return is often useful because the track already supplies dry sound. An insert on the track has a different wet/dry relationship.
+## Groups
 
-## Group tracks
+1. Select a track. Shift-click for a range or Command-click to add strips.
+2. Press Command-G, or choose **Group Tracks** from the context menu.
+3. Select the group to see its strip and devices.
 
-1. Select the first track in the mixer.
-2. Shift-click another for a range, or Command-click strips/badges on macOS to toggle individual tracks into the selection.
-3. With at least two tracks selected, press Command-G. The context menu also offers **Group Tracks** for suitable multi-selections.
-4. Select the new group to inspect its strip and devices.
-
-Groups combine member audio and provide shared processing and level. Collapsing hides members without deleting them. Members keep their own notes, patterns, and devices.
-
-Use the group context menu to rename or ungroup. A group is not a layered instrument: its members remain independent sequencer parts.
+A group sums its members and adds shared level and processing. Members keep their own patterns and devices. Collapse a group to hide them. Right-click the group to rename or ungroup.
 
 ## Group effects
 
-Select the group itself, open Audio FX, and add processing. Confirm that the lower panel shows the group rather than the last member you edited. A group compressor hears the combined signal; a member compressor hears only that track.
+Select the group itself, then add from Audio FX. A compressor on the group hears the whole kit; a compressor on a member hears one drum. Balance the members before compressing the group.
 
-Balance kick, snare, and hats before processing a drum group. If one drum dominates the compressor, reconsider member levels first.
+## Who recalls what
 
-## Scene-owned settings
-
-Bus and group parameters are recalled by scenes. Track parameters are recalled by patterns. To give a chorus different group processing, select its scene before editing the group. To change one bass variation's level, edit its track pattern.
-
-The arrangement scene lane recalls shared values while track clips follow their own lanes. See [Patterns and scenes](patterns-and-scenes).
+Track settings follow patterns. Bus and group settings follow scenes. To give the chorus a different group sound, select the chorus scene first. See [Patterns and scenes](patterns-and-scenes).

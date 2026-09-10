@@ -326,7 +326,7 @@ pub(crate) fn reactive_tick_and_render(
         let epoch = ctx.shared.state.transport.pattern_epoch.load(Ordering::Relaxed);
         let metal_visible = editor_has_visible_buffer(&editor, "*metal*");
         let mixer_visible = editor_has_visible_mixer_buffer(&editor);
-        let sequencer_visible = editor_has_visible_buffer(&editor, "*sequencer*");
+        let sequencer_visible = editor_has_visible_sequencer_view(&mut editor);
         let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
         let step_visible = editor_has_visible_buffer(&editor, "*step*");
         let transport_visible = editor_has_visible_buffer(&editor, "*transport*");

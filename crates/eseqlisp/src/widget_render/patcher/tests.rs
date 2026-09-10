@@ -22910,6 +22910,23 @@ fn tensor_data_attribute_survives_writeback_round_trip() {
 }
 
 #[test]
+fn tensor_scientific_coefficients_survive_writeback_round_trip() {
+    let source = "(def t (tensor @shape [6] @data [8.9480539e-05 -2.5E+4 .5e2 -.5e-2 +4E0 1e-30]))\n";
+    let patch = parse(source);
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .expect("generate").source;
+    let start = generated.find("@data [").expect("tensor data") + "@data [".len();
+    let end = generated[start..].find(']').unwrap() + start;
+    let coefficients: Vec<f64> = generated[start..end].split_whitespace()
+        .map(|value| value.parse().expect("one numeric literal per coefficient"))
+        .collect();
+    assert_eq!(coefficients, vec![0.000089480539, -25000.0, 50.0, -0.005, 4.0, 1e-30]);
+    let saved_again = super::generate::generate_patch_source(&parse(&generated), PatcherIntent::Instrument)
+        .expect("generate again").source;
+    assert_eq!(saved_again, generated);
+}
+
+#[test]
 fn tensor_param_options_attribute_projects_as_a_cable_and_round_trips() {
     let source = "(def bank (tensor @shape [512 4] @file \"waves/basic.json\"))\n\
 (param table @options bank @default 0)\n";

@@ -1,41 +1,35 @@
 # Audio effects
 
-Audio effects process the output of an instrument or sampler. They can sit on a track, rack layer, group, or bus. The selected destination determines which chain is visible and where a new effect goes.
+Audio effects process a track, a rack layer, a group, or a bus. The selected strip decides which chain you see and where a new effect lands.
 
 ## Add an effect
 
-1. Select the track or bus you want to process.
-2. Open **Audio FX** in the sidebar.
-3. Double-click an effect to add it to the selected destination, or drag it into the intended chain drop area.
-4. Confirm that its panel appears below.
-5. Play and adjust the effect.
+1. Select a track or bus.
+2. Open **Audio FX** and double-click an effect, or drag it into the chain.
+3. Play and adjust.
 
-Try Str8 Delay with modest wet amount and feedback, Filter or EQ8 for tone, or reverb on a shared send bus. Add one effect at a time so its contribution remains clear.
+Str8 Delay, Filter, and EQ8 are good first choices. Put reverb on a send bus so several tracks can share it. Add one effect at a time.
 
-## Order and bypass
+## Order, bypass, remove
 
-Audio flows through the chain in order. A filter before a delay shapes the input to the echoes; a filter after it shapes the resulting delayed sound too. Drag effect headers to rearrange the chain. Dropping a library effect onto an existing effect inserts it before that effect; dropping into the end area appends it.
+Audio flows through the chain in order. Drag effect headers to reorder. Dropping a new effect on an existing one inserts before it; dropping on the end area appends.
 
-Existing track audio effects can move between track audio chains. Bus effects reorder within their own bus, and rack-layer effects within their own layer. To use processing on another bus or layer, add an effect directly at that destination. MIDI effects belong to their separate note-processing chains.
+The enable button in each header bypasses the effect without removing it. Compare at matched loudness.
 
-The small enabled control in an effect header bypasses it without removing it. Compare at a similar perceived loudness: louder is not automatically better.
+To remove an effect, click its header and press Delete or Backspace.
 
-To remove an effect, select its header so the effect is the deletion target, then use Delete or Backspace. Check the selection first: deletion keys can also act on notes or other objects in their own contexts.
+Track effects can drag between tracks. Bus and layer effects stay in their own chain; add a new one at the other destination instead.
 
-## Choose the processing scope
+## Scope
 
-A track effect processes one track. In an instrument rack, a layer effect processes one selected layer; **Track FX** processes the combined rack output. A group effect processes all its member tracks after they are combined.
+- **Track** effect: one track.
+- **Layer** effect: one rack layer. **Track FX**: the summed rack.
+- **Group** or **bus** effect: everything routed there.
 
-For example, distort one bass layer and compress the complete rack gently, or group several drum tracks and process the whole kit. See [Instrument racks](racks) and [Mixer](mixer).
+Distort one bass layer and compress the whole rack, or group the drums and process the kit together. See [Racks](racks) and [Mixer](mixer).
 
-## Parameter locks
+## Locks and recall
 
-Select steps and change a parameter to lock its value on those steps. With zero steps selected, engage Record and Play and move a supported control to print values onto passing steps. The parameter marker indicates that locks exist somewhere in the pattern.
+Effect parameters take p-locks like synth parameters: select steps and turn the control, or record a knob move. See [Parameter locks](parameter-locks).
 
-Right-click a marked parameter and choose **Clear p-locks** to remove its locks. Moving the base value alone does not erase them. See [Parameter locks](parameter-locks).
-
-## Recall across sections
-
-Track effect parameter values follow the track's pattern. Bus and group effect values follow scenes. A scene change can alter a shared reverb or group processor even while you are concentrating on one track.
-
-Some device headers provide **Copy current values to all scenes**. Use it deliberately when you want consistent settings across variations; it differs from editing only the currently recalled values.
+Track effect values follow the pattern. Bus and group effect values follow the scene. **Copy current values to all scenes** in a device header makes one setting global.

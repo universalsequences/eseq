@@ -935,6 +935,39 @@ impl App {
         }
     }
 
+    /// Shared startup/New Project topology; saved projects bypass these defaults.
+    pub fn initialize_default_project(&mut self) -> Result<(), String> {
+        if !self.tracks.is_empty() || self.state.active_track_count() != 0
+            || self.buses.iter().any(|bus| bus.effect_slots.iter().any(|slot| slot.node_id != 0))
+        {
+            return Err("Default project initialization requires an empty project".to_string());
+        }
+        for _ in 0..2 {
+            self.graph_controller().add_empty_track()?;
+        }
+        for (bus_id, name, wet_node_param) in [
+            (BusId::DEFAULT_A, "Reverb", crate::effects::reverb::REVERB_PARAM_MIX),
+            (BusId::DEFAULT_B, "Str8 Delay", crate::effects::str8_delay::STR8_DELAY_PARAM_WET),
+        ] {
+            let bus_idx = self.buses.iter().position(|bus| bus.id == bus_id)
+                .ok_or_else(|| format!("Missing default bus for {name}"))?;
+            let slot_idx = self.add_builtin_bus_effect_sync(bus_idx, name)?;
+            let param_idx = self.buses[bus_idx].effect_descriptors[slot_idx].params.iter()
+                .position(|param| param.node_param_idx == wet_node_param as u32)
+                .ok_or_else(|| format!("Missing wet parameter for {name}"))?;
+            self.set_bus_effect_param(bus_idx, slot_idx, param_idx, 1.0)?;
+            if bus_id == BusId::DEFAULT_A {
+                let mode_idx = self.buses[bus_idx].effect_descriptors[slot_idx].params.iter()
+                    .position(|param| param.node_param_idx == crate::effects::reverb::REVERB_PARAM_MODE as u32)
+                    .ok_or_else(|| "Missing mode parameter for Reverb".to_string())?;
+                self.set_bus_effect_param(bus_idx, slot_idx, mode_idx, crate::effects::reverb::MODE_PLATE)?;
+            }
+        }
+        self.publish_bus_effect_runtime();
+        self.ui.cursor_track = 0;
+        Ok(())
+    }
+
     pub fn start_new_project(&mut self) {
         self.editor.pending_project_load = None;
         self.groups.clear();
@@ -1033,7 +1066,7 @@ impl App {
 
         self.history.reset();
         self.device_registry.clear();
-        if let Err(error) = self.graph_controller().add_default_project_tracks() {
+        if let Err(error) = self.initialize_default_project() {
             self.editor.status_message = Some((format!("New project: {error}"), Instant::now()));
             return;
         }
@@ -2230,6 +2263,13 @@ impl App {
         };
         sound.metadata.name = preset_name.to_string();
         crate::project::save_sound_preset(preset_name, &sound).map_err(|error| error.to_string())
+    }
+
+    /// Capture current authoring state for an isolated export without saving the
+    /// project, assigning a name, or marking the edit history as saved.
+    pub fn capture_export_project(&mut self) -> Result<ProjectFile, String> {
+        let name = self.current_project_name.clone().unwrap_or_else(|| "Untitled".into());
+        self.capture_project(&name)
     }
 
     pub(crate) fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
@@ -3539,6 +3579,22 @@ impl App {
                             // (docs/drum-rack-v2-spec.md).
                             self.graph_controller()
                                 .add_rack_track("Layer Rack", build_specs)?;
+                            // Scene restoration intentionally preserves live macro
+                            // labels. Seed those authoring-level labels from the
+                            // project before restoring any scene, rather than
+                            // preserving the freshly built rack's default names.
+                            if let Some(saved_rack) = &rack_pattern {
+                                let mut racks = self.state.pattern.rack_tracks.lock().unwrap();
+                                let live_rack = racks[track_idx].as_mut()
+                                    .ok_or_else(|| "Loaded rack disappeared".to_string())?;
+                                for live_macro in &mut live_rack.macros {
+                                    if let Some(saved_macro) = saved_rack.macros.iter()
+                                        .find(|saved| saved.id as usize == live_macro.id.index())
+                                    {
+                                        live_macro.name = saved_macro.name.clone();
+                                    }
+                                }
+                            }
                             let saved_rack_effects = rack_pattern
                                 .as_ref()
                                 .into_iter()
@@ -5068,6 +5124,36 @@ mod tests {
             let error = result.unwrap_err();
             assert!(error.contains(&missing) && error.contains("could not be resolved"), "{error}");
         }
+        drop(app);
+        unsafe { engine.destroy(); }
+    }
+
+    #[test]
+    fn export_snapshot_includes_unsaved_edits_without_saving_project() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let mut app = App::new(Arc::clone(&engine.state), engine.lg_ptr, engine.sample_rate,
+            engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let initial = app.capture_export_project().unwrap();
+        assert_eq!(initial.name, "Untitled");
+        assert!(app.current_project_name.is_none());
+
+        let folder = tempfile::tempdir().unwrap();
+        let saved_path = folder.path().join("song.json");
+        let saved_bytes = serde_json::to_vec(&initial).unwrap();
+        std::fs::write(&saved_path, &saved_bytes).unwrap();
+        app.current_project_name = Some("Song".into());
+        app.state.pattern.patterns[0].set_step_active(7, true);
+        let saved_revision = app.history.saved_revision();
+        let edited = app.capture_export_project().unwrap();
+        assert_eq!(app.history.saved_revision(), saved_revision);
+        assert_eq!(edited.name, "Song");
+        assert_eq!(edited.patterns[0].track_bits[0][0] & (1 << 7), 1 << 7);
+        assert_eq!(initial.patterns[0].track_bits[0][0] & (1 << 7), 0);
+        assert_eq!(std::fs::read(&saved_path).unwrap(), saved_bytes);
+        assert_eq!(app.current_project_name.as_deref(), Some("Song"));
+        app.state.pattern.patterns[0].set_step_active(7, false);
+        assert_eq!(edited.patterns[0].track_bits[0][0] & (1 << 7), 1 << 7);
         drop(app);
         unsafe { engine.destroy(); }
     }

@@ -127,8 +127,12 @@ pub(super) fn sync_after_instrument_track_apply_with_selection(
 }
 
 pub(super) fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
+    // Registered sequencer views (custom step tabs) relayout alongside the
+    // factory buffers so a package view stays current after topology edits.
+    for buffer_name in super::edit_sessions::registered_sequencer_view_buffers(editor) {
+        editor.refresh_visible_layouts_for_buffer_named(&buffer_name);
+    }
     for buffer_name in [
-        "*sequencer*",
         "*samples*",
         "*mixer*",
         "*patch-mixer*",
@@ -429,6 +433,35 @@ pub(super) fn sync_rack_slot_instrument_authoring_display(
     );
     dirty |= sync_track_plock_any_field(rt, app, state, track);
     flush_reactive_display_edit(editor, dirty);
+}
+
+/// Per-track list publishes for consumers that read the whole-project step
+/// lists by index (`(nth SEQ.track-steps track)` and friends) — package views
+/// such as a tracker. The factory grid binds per-slot projection fields
+/// instead, so these lists used to refresh only on a full resync, which made
+/// a step edit invisible to such a view until the next play/epoch bump.
+pub(super) fn sync_track_step_list_publishes(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+) -> bool {
+    let mut dirty = rt
+        .set_reactive_list_index("SEQ", "track-steps", track, build_steps_value(state, track))
+        .effects_dirty;
+    for param in [StepParam::Transpose, StepParam::Velocity] {
+        let Some((_, track_field, _)) = step_param_fields(param) else {
+            continue;
+        };
+        dirty |= rt
+            .set_reactive_list_index(
+                "SEQ",
+                track_field,
+                track,
+                build_param_list(state, track, param),
+            )
+            .effects_dirty;
+    }
+    dirty
 }
 
 pub(super) fn step_param_fields(param: StepParam) -> Option<(&'static str, &'static str, usize)> {
@@ -840,6 +873,16 @@ pub(super) fn sync_step_batch_structural_bindings(
         .min(MAX_STEPS);
     let selected = selected_steps.lock().unwrap();
     let mut dirty = false;
+    let display_step = if track == current_track_idx {
+        displayed_plock_step(state, track, selected.iter().copied().min())
+    } else {
+        None
+    };
+    for (bus_idx, bus) in app.buses.iter().enumerate() {
+        if bus.id != sequencer::sequencer::BusId::MIX {
+            dirty |= sync_track_bus_send_plock_fields(rt, app, state, track, bus_idx, display_step);
+        }
+    }
     let render_values = plock_variant_step_render_values(state, track);
     for &step in steps {
         if step >= MAX_STEPS {
@@ -2041,6 +2084,9 @@ pub(super) fn apply_ui_invalidations(
                         selected_steps,
                         expanded_step_projection,
                     );
+                    if sequencer_visible {
+                        needs_reactive_cycle |= sync_track_step_list_publishes(rt, state, track);
+                    }
                 }
             },
             UiInvalidation::StepBatch { track, steps } => {
@@ -2054,6 +2100,9 @@ pub(super) fn apply_ui_invalidations(
                     selected_steps,
                     expanded_step_projection,
                 );
+                if sequencer_visible {
+                    needs_reactive_cycle |= sync_track_step_list_publishes(rt, state, track);
+                }
             }
             UiInvalidation::StepSelection {
                 track,
