@@ -15,9 +15,9 @@ glibc_floor 2.35
 container_image swift:6.3.3-jammy
 
 target macos-arm64
-version dgenlisp-v0.1.17
-url https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.17/DGenLisp-macos-arm64.tar.gz
-sha256 9ebe690b65a61ffb2818d173e3c727dba0ab70d1b0812eaa58514b41ff0589ea
+version dgenlisp-v0.1.18
+url https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.18/DGenLisp-macos-arm64.tar.gz
+sha256 2ada17c8c96abfd78ab398cfd0c48c4a034dfa5ddd8c854f29011b103afe233f
 format tar.gz
 executable_path dgenlisp-macos-arm64/DGenLisp
-upstream_commit a82e0cb425d6b2931b02c90330fc7570e3ec0bc3
+upstream_commit c10559edb4097eb84c3b765bce36fd61e9e38a22
