@@ -26,6 +26,17 @@ Try it: select every other hi-hat, lower the velocity, then give the last snare 
 
 Expand a track for parameter lanes and more room. Use the [Piano roll](piano-roll) for chords and precise lengths.
 
+## Expanded track
+
+Expanding a track turns its row into a lane editor: one slider per step for the parameter chosen on the tabs above the grid, with the step toggles and numbers underneath.
+
+- Click a tab (**vel**, **dur**, **tpose**, **pan**, **sync**, **delay**, **rtrg**, **rate**) to choose the lane. The dropdown at the end of the tabs opens a process lane instead; see [Process lanes](process-lanes).
+- Drag a slider to set that step. With steps selected, dragging a selected step sets all of them.
+- The number picker in the track header edits the cursor step, or every selected step when there is a selection. Type digits while the row has focus to enter a value, Return commits, Escape cancels. When another number picker has focus, typing goes there instead.
+- Left and Right move the cursor along the row; the picker follows.
+
+Lanes draw in the track colour. A process lane draws in amber and adds a strip of its own controls to the right of the grid.
+
 ## Length and timing
 
 Track settings hold the timing controls.

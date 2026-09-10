@@ -14,6 +14,7 @@ This edition covers the graphical workflow on macOS. Packages, scripting, and cu
 - [Racks](racks) — layered instruments and drum kits
 - [Recording](recording) — arm a track and play the keyboard
 - [Parameter locks](parameter-locks) — per-step values and knob recording
+- [Process lanes](process-lanes) — accumulators, random values, and grabs per step
 - [Piano roll](piano-roll) — pitch, length, chords, and automation
 - [Patterns and scenes](patterns-and-scenes) — variations and project-wide recall
 - [Mixer](mixer) — levels, sends, buses, and groups
