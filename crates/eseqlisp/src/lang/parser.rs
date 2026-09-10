@@ -332,7 +332,7 @@ impl Parser {
             self.profile.borrow_mut().parse_number_calls += 1;
         }
         let start = self.pos;
-        if matches!(self.peek(), Some(b'-')) {
+        if matches!(self.peek(), Some(b'-' | b'+')) {
             self.next();
         }
         let mut saw_digit = false;
@@ -350,6 +350,19 @@ impl Parser {
         }
         if !saw_digit {
             return Err(ParserError::ErrorParsingNumber);
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.next();
+            if matches!(self.peek(), Some(b'-' | b'+')) {
+                self.next();
+            }
+            let exponent_start = self.pos;
+            while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+                self.next();
+            }
+            if self.pos == exponent_start {
+                return Err(ParserError::ErrorParsingNumber);
+            }
         }
         let text = &self.text[start..self.pos];
         Ok(Token::Number(
@@ -432,8 +445,10 @@ impl Parser {
                         tokens.push(SpannedToken::new(Token::Keyword(name), start, self.pos));
                     }
                     _ if next.is_ascii_digit()
-                        || (next == b'-'
-                            && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit()))
+                        || (matches!(next, b'-' | b'+')
+                            && (matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit())
+                                || (self.peek_nth(1) == Some(b'.')
+                                    && matches!(self.peek_nth(2), Some(ch) if ch.is_ascii_digit()))))
                         || (next == b'.'
                             && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit())) =>
                     {
@@ -1016,6 +1031,29 @@ mod tests {
     fn negative_float_literal() {
         let exprs = parse_str("-3.14");
         assert!(matches!(&exprs[0], Expression::Number(n) if (*n - -3.14).abs() < 0.001));
+    }
+
+    #[test]
+    fn scientific_number_literals_preserve_values_and_spans() {
+        let source = "8.9480539e-05 -2.5E+4 .5e2 -.5e-2 +4E0 1.e3 1e-300";
+        let tokens = Parser::new(source.into()).parse_spanned().unwrap();
+        let expected = [0.000089480539, -25000.0, 50.0, -0.005, 4.0, 1000.0, 1e-300];
+        assert_eq!(tokens.len(), expected.len());
+        for ((token, value), spelling) in tokens.iter().zip(expected).zip(source.split_whitespace()) {
+            assert_eq!(token.token, Token::Number(value));
+            assert_eq!(&source[token.span.start_byte..token.span.end_byte], spelling);
+        }
+        assert_eq!(parse_str("e exp + -"), vec![
+            Expression::Symbol("e".into()), Expression::Symbol("exp".into()),
+            Expression::Symbol("+".into()), Expression::Symbol("-".into()),
+        ]);
+    }
+
+    #[test]
+    fn incomplete_scientific_exponents_are_errors() {
+        for source in ["1e", "1E+", "-2.5e-", ".5e+)", "(+ 1e 2)"] {
+            assert_eq!(Parser::new(source.into()).parse(), Err(ParserError::ErrorParsingNumber), "{source}");
+        }
     }
 
     #[test]
