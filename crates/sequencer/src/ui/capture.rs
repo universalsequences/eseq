@@ -159,6 +159,7 @@ struct CaptureTrackSpec {
 #[derive(Debug, Clone, PartialEq)]
 struct CaptureProjectSpec {
     tracks: Vec<CaptureTrackSpec>,
+    rack_slot_macros: Vec<(usize, sequencer::sequencer::RackMacroId, sequencer::sequencer::RackMacroMapping)>,
     /// Source track, destination track, zero-based external modulation input.
     mod_routes: Vec<(usize, usize, usize)>,
     /// How many scenes the project should have. The headless capture project
@@ -249,9 +250,41 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
         return Err("capture-project must be a list".to_string());
     };
     let mut tracks = Vec::new();
+    let mut rack_slot_macros = Vec::new();
     let mut mod_routes = Vec::new();
     let mut scenes = 1usize;
     for (index, expression) in items.iter().skip(1).enumerate() {
+        if expression_name(expression_head_item(expression)) == Some("rack-slot-macro") {
+            use sequencer::sequencer::{RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotParam};
+            let Expression::List(items) = expression else { unreachable!() };
+            let error = "(rack-slot-macro TRACK MACRO SLOT PARAM MIN MAX) expects zero-based indices, a slot parameter name, and a finite range";
+            if items.len() != 7 {
+                return Err(error.to_string());
+            }
+            let mut indices = [0; 3];
+            for (index, item) in items.iter().skip(1).take(3).enumerate() {
+                let Expression::Number(value) = item else { return Err(error.to_string()) };
+                if !value.is_finite() || *value < 0.0 || value.fract() != 0.0
+                    || *value >= usize::MAX as f64 {
+                    return Err(error.to_string());
+                }
+                indices[index] = *value as usize;
+            }
+            let id = RackMacroId::from_index(indices[1]).ok_or_else(|| error.to_string())?;
+            let param = expression_name(items.get(4)).and_then(RackSlotParam::from_name)
+                .ok_or_else(|| error.to_string())?;
+            let range_min = expression_f32(&items[5]).filter(|value| value.is_finite())
+                .ok_or_else(|| error.to_string())?;
+            let range_max = expression_f32(&items[6]).filter(|value| value.is_finite())
+                .ok_or_else(|| error.to_string())?;
+            rack_slot_macros.push((indices[0], id, RackMacroMapping {
+                target: RackMacroTarget::SlotParam { slot: indices[2], param: param.name().to_string() },
+                range_min,
+                range_max,
+                curve: RackMacroCurve::Linear,
+            }));
+            continue;
+        }
         if expression_name(expression_head_item(expression)) == Some("mod-route") {
             let Expression::List(items) = expression else { unreachable!() };
             let error = "(mod-route SOURCE TRACK INPUT) expects three non-negative integers";
@@ -292,7 +325,15 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
             return Err(format!("invalid modulation route {source} -> {dest} input {input}"));
         }
     }
-    Ok(CaptureProjectSpec { tracks, mod_routes, scenes })
+    for (track, _, mapping) in &rack_slot_macros {
+        let sequencer::sequencer::RackMacroTarget::SlotParam { slot, .. } = mapping.target else { unreachable!() };
+        if !tracks.get(*track).is_some_and(|track| {
+            track.kind == CaptureTrackKind::LayerRack && slot < track.samples.len()
+        }) {
+            return Err(format!("rack-slot-macro requires a populated layer at track {track} slot {slot}"));
+        }
+    }
+    Ok(CaptureProjectSpec { tracks, rack_slot_macros, mod_routes, scenes })
 }
 
 /// The head item of a list expression, for dispatching `capture-project`
@@ -619,6 +660,11 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
                 .map_err(|error| format!("failed to select Filter Table editor frame: {error}"))?;
         }
     }
+    for (track, id, mapping) in &project.rack_slot_macros {
+        app.map_rack_macro(*track, *id, mapping.clone())
+            .map_err(|error| format!("failed to map rack slot macro on track {track}: {error}"))?;
+    }
+
     // :steps write the live pattern; persist them into the scene's pattern
     // pool through the production scene-launch path (capture current
     // snapshot, save, relaunch the same scene) so pool-derived read surfaces
@@ -1166,6 +1212,31 @@ mod tests {
             parsed.executable_source.lines().count(),
             "removing the declarative form should preserve diagnostic line numbers"
         );
+    }
+
+    #[test]
+    fn parses_rack_slot_macro_capture_targets_and_rejects_invalid_mappings() {
+        use sequencer::sequencer::RackMacroTarget;
+        let source = include_str!("../../ui/capture-fixtures/rack-slot-macro-indicators.lisp");
+        let parsed = parse_capture_source(source).expect("rack macro capture fixture");
+        assert_eq!(parsed.project.rack_slot_macros.len(), 2);
+        let (track, id, mapping) = &parsed.project.rack_slot_macros[0];
+        assert_eq!((*track, id.index()), (0, 0));
+        assert_eq!(mapping.target, RackMacroTarget::SlotParam { slot: 0, param: "gain".to_string() });
+        assert_eq!((mapping.range_min, mapping.range_max), (0.5, 1.5));
+        for invalid in [
+            "(rack-slot-macro 1 0 0 gain 0 1)",
+            "(rack-slot-macro 0 8 0 gain 0 1)",
+            "(rack-slot-macro 0 0 2 gain 0 1)",
+            "(rack-slot-macro 0 0 0 missing 0 1)",
+            "(rack-slot-macro 0 0 0.5 gain 0 1)",
+            "(rack-slot-macro 0 0 -1 gain 0 1)",
+            "(rack-slot-macro 0 0 0 gain huge 1)",
+            "(rack-slot-macro 0 0 0 gain 0)",
+        ] {
+            let invalid_source = source.replace("(rack-slot-macro 0 0 0 gain 0.5 1.5)", invalid);
+            assert!(parse_capture_source(&invalid_source).is_err(), "accepted {invalid}");
+        }
     }
 
     #[test]

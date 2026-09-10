@@ -43,6 +43,12 @@ route through the production graph controller after building the tracks, so
 mixer cable captures use real routing state. Self-routes and missing endpoints
 are rejected.
 
+Use `(rack-slot-macro TRACK MACRO SLOT PARAM MIN MAX)` to map a rack macro to a
+layer control in a capture. Indices are zero-based; the layer must be populated
+by the track's `:samples` list. `PARAM` is `gain`, `pan`, `base-note`,
+`max-polyphony`, `mute`, or `solo`. The range is linear. The
+`rack-slot-macro-indicators.lisp` fixture compares mapped and unmapped layers.
+
 Every track accepts an optional display `:name`, initial `:solo` boolean,
 `:midi-fx` list, and `:audio-fx` list (builtin or saved effect names). Builtin
 names take precedence; other names resolve through the normal saved-effect

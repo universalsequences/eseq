@@ -638,25 +638,8 @@ impl WidgetDefinition for BoxWidget {
             }
         }
 
-        if !has_rounded_corners {
-            let Some(color) = border_color else {
-                if let Some(Value::String(bg_type)) = node.props.get("background") {
-                    let has_scroll_child = node.children.iter().any(|c| c.widget_type == "scroll");
-                    let bg_rect = if has_scroll_child {
-                        node.rect
-                    } else {
-                        content_extent(node)
-                    };
-                    prims.extend(super::sdf_widget::sdf_widget_background_primitives(
-                        bg_type,
-                        node.widget_id,
-                        bg_rect,
-                        viewport,
-                        &node.props,
-                    ));
-                }
-                return prims;
-            };
+        // A borderless box still draws its background and state indicators below.
+        if !has_rounded_corners && let Some(color) = border_color {
             if color.a > 0.0 {
                 let px = border_width_px;
                 let bw_x = if viewport.cell_w > 0.0 {
@@ -760,6 +743,46 @@ impl WidgetDefinition for BoxWidget {
 mod tests {
     use super::*;
     use crate::theme;
+
+    #[test]
+    fn borderless_boxes_render_state_indicators() {
+        let mut node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "box".to_string(),
+            rect: Rect { col: 0.0, row: 0.0, width: 4.0, height: 2.0 },
+            props: std::collections::HashMap::new(),
+            children: Vec::new(),
+            focusable: false,
+            animation: Default::default(),
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 100.0,
+            vp_h: 100.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 5.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        for prop in ["macro-owned", "plock-any"] {
+            node.props.clear();
+            node.props.insert(prop.to_string(), Value::Number(1.0));
+            let primitives = BOX_WIDGET.build_primitives("box", &node, viewport);
+            assert!(primitives.iter().any(|primitive| matches!(primitive, GpuPrimitive::Circle(_))),
+                "borderless box must render its {prop} indicator");
+            node.props.insert(prop.to_string(), Value::Number(0.0));
+            assert!(BOX_WIDGET.build_primitives("box", &node, viewport).is_empty(),
+                "inactive {prop} should leave a plain borderless box empty");
+        }
+    }
 
     #[test]
     fn selected_state_color_takes_precedence_over_muted_and_default() {
