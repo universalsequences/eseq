@@ -5729,6 +5729,12 @@ impl Editor {
         self.completion = None;
     }
 
+    /// Whether input has queued a host mutation that must run before another
+    /// event is interpreted. Inspecting this does not consume the commands.
+    pub fn has_pending_host_commands(&self) -> bool {
+        self.runtime.has_pending_host_commands()
+    }
+
     pub fn drain_host_commands(&mut self) -> Vec<HostCommand> {
         self.runtime.drain_host_commands()
     }

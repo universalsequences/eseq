@@ -1,3 +1,6 @@
+    #[path = "live_input_probe.rs"]
+    mod live_input_probe;
+
     use super::{
         apply_bus_mixer_history_host_command,
         apply_piano_roll_gesture_update,
@@ -2544,8 +2547,15 @@
             .expect("project 92 triton adsr drag probe should pass");
     }
 
+    #[test]
+    #[ignore = "manual release-mode latency probe; ESEQ_LIVE_INPUT_PROJECT must name a saved drum-rack project"]
+    fn drum_rack_keyboard_dispatch_latency() {
+        project_92_ui_performance_probe_impl(Project92UiProbe::LiveKeyboardLatency);
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Project92UiProbe {
+        LiveKeyboardLatency,
         SceneSwitch,
         EscapeDeselect,
         RackMacroDrag,
@@ -2715,7 +2725,8 @@
         let _dir = SequencerDirGuard::enter();
         let full_layout = matches!(
             probe,
-            Project92UiProbe::StepInteractionsFullLayout
+            Project92UiProbe::LiveKeyboardLatency
+                | Project92UiProbe::StepInteractionsFullLayout
                 | Project92UiProbe::InstrumentPlockKnobDrag
                 | Project92UiProbe::ResponseCurveEditorDrag
                 | Project92UiProbe::StepBufferParamDrag
@@ -2740,13 +2751,19 @@
             Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke
         );
         let project_name = match probe {
+            Project92UiProbe::LiveKeyboardLatency => "live-input-probe",
             Project92UiProbe::PianoholdSelection => "pianohold",
             Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke => {
                 "drift-switch"
             }
             _ => "92",
         };
-        let project_fixture = perf_probe_project_fixture(project_name);
+        let project_fixture = if probe == Project92UiProbe::LiveKeyboardLatency {
+            PathBuf::from(std::env::var("ESEQ_LIVE_INPUT_PROJECT")
+                .expect("set ESEQ_LIVE_INPUT_PROJECT to an absolute saved-project path"))
+        } else {
+            perf_probe_project_fixture(project_name)
+        };
         // Project 92 references content-addressed samples from the author's
         // local library. The eseq-eeng probes measure pointer latency, not
         // sample content, and must run on any machine (the Linux workstation
@@ -2970,7 +2987,11 @@
         );
         // The drift-switch fixture is the reported project verbatim: one
         // scene. Every other probe fixture is multi-scene.
-        let required_scenes = if drift_switch { 1 } else { 2 };
+        let required_scenes = if drift_switch || probe == Project92UiProbe::LiveKeyboardLatency {
+            1
+        } else {
+            2
+        };
         assert!(
             app.state.scene_count() >= required_scenes,
             "project {project_name} should have at least {required_scenes} scene(s)"
@@ -3229,6 +3250,50 @@
         refresh_visible_track_topology_layouts(&mut editor);
         editor.update_tile_rects(vp_cols, vp_rows);
         let _ = editor.drain_host_commands();
+
+        if probe == Project92UiProbe::LiveKeyboardLatency {
+            let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+            let shared = SharedHandles {
+                state: state.clone(),
+                lg_raw,
+                current_track: current_track.clone(),
+                selected_tracks: selected_tracks.clone(),
+                selected_steps: selected_steps.clone(),
+                selected_neural_neurons: selected_neural_neurons.clone(),
+                piano_roll_selection: piano_roll_selection.clone(),
+                piano_roll_move_state: piano_roll_move_state.clone(),
+                piano_roll_focus: piano_roll_focus.clone(),
+                step_clipboard: Arc::new(Mutex::new(None)),
+                ui_epoch: ui_epoch.clone(),
+                fx_epoch: fx_epoch.clone(),
+                fx_value_epoch: fx_value_epoch.clone(),
+                ui_invalidations: ui_invalidations.clone(),
+                expanded_step_projection: expanded_step_projection.clone(),
+                active_delete_target: active_delete_target.clone(),
+                active_delete_target_version: active_delete_target_version.clone(),
+                auto_follow_override_until: auto_follow_override_until.clone(),
+                track_pan_ids: track_pan_ids.clone(),
+                track_collapsed: track_collapsed.clone(),
+                bus_state: bus_state.clone(),
+                bus_node_ids: bus_node_ids.clone(),
+                track_groups: track_groups.clone(),
+                record_armed: record_armed.clone(),
+                armed_rack: armed_rack.clone(),
+                recording: recording.clone(),
+                master_recording: master_recording.clone(),
+                held_notes: Arc::new(Mutex::new(Vec::new())),
+                roll_record: Arc::new(Mutex::new(RollRecordBuffer::default())),
+                step_print: Arc::new(Mutex::new(StepPrintState::default())),
+                keyboard_octave: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+                sample_browser: sample_browser.clone(),
+                keyboard_tx: probe_tx,
+                accumulator_names: accumulator_names.clone(),
+                piano_roll_clipboard: piano_roll_clipboard.clone(),
+                arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
+            };
+            live_input_probe::run(&mut editor, &mut app, &shared, probe_rx, vp_cols, vp_rows);
+            return;
+        }
 
         if probe == Project92UiProbe::PianoholdSelection {
             const TRACK: usize = 0;

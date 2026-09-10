@@ -3342,6 +3342,10 @@ impl Runtime {
         self.ui_work_counters
     }
 
+    pub(crate) fn has_pending_host_commands(&self) -> bool {
+        !self.shared.borrow().queued_commands.is_empty()
+    }
+
     pub(crate) fn drain_host_commands(&mut self) -> Vec<HostCommand> {
         let mut shared = self.shared.borrow_mut();
         std::mem::take(&mut shared.queued_commands)

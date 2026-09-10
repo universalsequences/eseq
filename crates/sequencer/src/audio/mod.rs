@@ -117,6 +117,8 @@ const SCHEDULED_BLOCK_SCRATCH_CAPACITY: usize =
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod live_input_tests;
 
 #[cfg(test)]
 pub(crate) fn resolve_snapshot_instrument_defaults_for_test(

@@ -84,6 +84,7 @@ mod agent_finalize;
 mod edit_sessions;
 mod history_commands;
 mod event_loop;
+mod live_input_batch;
 mod loop_ctx;
 mod midi_dispatch;
 mod scroll_inertia;
