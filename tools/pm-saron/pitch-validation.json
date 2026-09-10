@@ -1,0 +1,153 @@
+{
+  "source_sha256": "82ab68c738799553c69588dc7de4702100dadf4ebddb78c67180957ac47ae00b",
+  "compiler_sha256": "9ef1fe146cbcfb5a11d65461f7c2c9781011bd9f1c42fad25a83219fd9a132bd",
+  "checks": [
+    {
+      "sample_rate": 44100,
+      "midi": 74,
+      "expected_hz": 596.2576843830484,
+      "measured_hz": 596.2575601481633,
+      "cents_error": -0.00036071599774220413
+    },
+    {
+      "sample_rate": 44100,
+      "midi": 75,
+      "expected_hz": 639.0098479327423,
+      "measured_hz": 639.0097750509836,
+      "cents_error": -0.00019745453030611877
+    },
+    {
+      "sample_rate": 44100,
+      "midi": 77,
+      "expected_hz": 698.8538212260838,
+      "measured_hz": 698.8537440147104,
+      "cents_error": -0.0001912717109277754
+    },
+    {
+      "sample_rate": 44100,
+      "midi": 80,
+      "expected_hz": 814.9066250235035,
+      "measured_hz": 814.9066229745187,
+      "cents_error": -4.352979954293228e-06
+    },
+    {
+      "sample_rate": 44100,
+      "midi": 81,
+      "expected_hz": 881.1950779488105,
+      "measured_hz": 881.1950300685199,
+      "cents_error": -9.406769701090728e-05
+    },
+    {
+      "sample_rate": 44100,
+      "midi": 82,
+      "expected_hz": 933.7622531742459,
+      "measured_hz": 933.7622225439029,
+      "cents_error": -5.6789930506657615e-05
+    },
+    {
+      "sample_rate": 44100,
+      "midi": 84,
+      "expected_hz": 1032.208232483336,
+      "measured_hz": 1032.2081402460376,
+      "cents_error": -0.00015470169046717354
+    },
+    {
+      "sample_rate": 48000,
+      "midi": 74,
+      "expected_hz": 596.2576843830484,
+      "measured_hz": 596.2575744860311,
+      "cents_error": -0.0003190859937650827
+    },
+    {
+      "sample_rate": 48000,
+      "midi": 75,
+      "expected_hz": 639.0098479327423,
+      "measured_hz": 639.0097611693598,
+      "cents_error": -0.0002350632510017223
+    },
+    {
+      "sample_rate": 48000,
+      "midi": 77,
+      "expected_hz": 698.8538212260838,
+      "measured_hz": 698.8537557704917,
+      "cents_error": -0.00016214972523427711
+    },
+    {
+      "sample_rate": 48000,
+      "midi": 80,
+      "expected_hz": 814.9066250235035,
+      "measured_hz": 814.9065850473905,
+      "cents_error": -8.492753325671162e-05
+    },
+    {
+      "sample_rate": 48000,
+      "midi": 81,
+      "expected_hz": 881.1950779488105,
+      "measured_hz": 881.1950359314471,
+      "cents_error": -8.25491354232477e-05
+    },
+    {
+      "sample_rate": 48000,
+      "midi": 82,
+      "expected_hz": 933.7622531742459,
+      "measured_hz": 933.7622094520713,
+      "cents_error": -8.106273187271223e-05
+    },
+    {
+      "sample_rate": 48000,
+      "midi": 84,
+      "expected_hz": 1032.208232483336,
+      "measured_hz": 1032.2082889415508,
+      "cents_error": 9.46925032270261e-05
+    },
+    {
+      "sample_rate": 96000,
+      "midi": 74,
+      "expected_hz": 596.2576843830484,
+      "measured_hz": 596.2576310623406,
+      "cents_error": -0.00015481666978358266
+    },
+    {
+      "sample_rate": 96000,
+      "midi": 75,
+      "expected_hz": 639.0098479327423,
+      "measured_hz": 639.009705185414,
+      "cents_error": -0.00038673748714382604
+    },
+    {
+      "sample_rate": 96000,
+      "midi": 77,
+      "expected_hz": 698.8538212260838,
+      "measured_hz": 698.8537010354624,
+      "cents_error": -0.00029774197067996134
+    },
+    {
+      "sample_rate": 96000,
+      "midi": 80,
+      "expected_hz": 814.9066250235035,
+      "measured_hz": 814.9066152916348,
+      "cents_error": -2.067493617796379e-05
+    },
+    {
+      "sample_rate": 96000,
+      "midi": 81,
+      "expected_hz": 881.1950779488105,
+      "measured_hz": 881.195076724214,
+      "cents_error": -2.4058954206550644e-06
+    },
+    {
+      "sample_rate": 96000,
+      "midi": 82,
+      "expected_hz": 933.7622531742459,
+      "measured_hz": 933.7622020878935,
+      "cents_error": -9.471622446324826e-05
+    },
+    {
+      "sample_rate": 96000,
+      "midi": 84,
+      "expected_hz": 1032.208232483336,
+      "measured_hz": 1032.2082477365097,
+      "cents_error": 2.558283564914885e-05
+    }
+  ]
+}

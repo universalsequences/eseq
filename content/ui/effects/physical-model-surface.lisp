@@ -449,3 +449,171 @@
 (def piano-output-view ()
   (v-stack :gap 0.15 (caption "Output drive / transfer curve")
     (pm-piano-output :debug-name "pm-piano-output" :drive (bind "output.drive") :gain (bind "output.gain"))))
+
+(export saron-mallet-view saron-bar-view saron-tuning-view saron-damper-view saron-output-view)
+
+(defwidget pm-saron-mallet
+  :width 35.3 :height 3.1 :state (hardness contact spread) :bindable (hardness contact spread)
+  :shader
+  (let ((time (* 0.5 (+ 1 (/ x aspect))))
+        (tau (* 0.06 contact (pow 2 (* 3 (- 0.5 hardness)))))
+        (u (/ time tau))
+        (curve (- 0.8 (* 1.45 u (pow 2.7182818 (- 1 u))))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (max (- y 0.8) (- curve y)) (rgba 0.16 0.06 0.11 0.14))
+      (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (max (- (abs x) (* aspect (+ 0.03 (* spread 0.4))))
+        (- (abs (+ y 0.85)) 0.08)) (eseq.effects.physical-model-surface/screen-ink)))))
+(def saron-mallet-view ()
+  (v-stack :gap 0.15 (caption "Mallet force / contact pulse and footprint / 0-1 ms")
+    (pm-saron-mallet :debug-name "pm-saron-mallet" :hardness (bind "mallet.hardness")
+      :contact (bind "mallet.contact") :spread (bind "mallet.spread"))))
+
+(defwidget pm-saron-bar
+  :width 35.3 :height 3.1 :state (decay bloom loss) :bindable (decay bloom loss)
+  :shader
+  (let ((time (* 1.5 (+ 1 (/ x aspect))))
+        (rise (max 0.00005 (* 0.079 bloom)))
+        (a (* (pow 2.7182818 (/ (* -1.376 time) decay))
+          (- 1 (* 0.58 (pow 2.7182818 (/ (- time) rise))))))
+        (b (* 0.45 (pow 2.7182818 (/ (* -4.862 time (pow 2.969 (* 0.5 (- loss 1)))) decay))))
+        (curve (- 0.8 (* 1.55 a))) (upper (- 0.8 (* 1.55 b))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (max (- y 0.8) (- curve y)) (rgba 0.16 0.06 0.11 0.14))
+      (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (- (abs (- y upper)) 0.022) (rgba 0.16 0.06 0.11 0.45)))))
+(def saron-bar-view ()
+  (v-stack :gap 0.15 (caption "Bar 3 / fundamental bloom and upper-mode loss / 0-3 s")
+    (pm-saron-bar :debug-name "pm-saron-bar" :decay (bind "bar.decay")
+      :bloom (bind "bar.bloom") :loss (bind "bar.loss"))))
+
+(defwidget pm-saron-tuning
+  :width 35.3 :height 3.1 :state (amount tune) :bindable (amount tune)
+  :shader
+  (let ((u (* 0.5 (+ 1 (/ x aspect))))
+        (n (floor (* u 7))) (slot (- (* u 7) n))
+        (delta (if (< n 1) 26.12 (if (< n 2) 46.00 (if (< n 3) 0.98
+          (if (< n 4) -33.04 (if (< n 5) 2.35 (if (< n 6) 2.66 -23.81)))))))
+        (offset (* 0.005 (+ tune (* amount delta))))
+        (edge (- 0 offset)))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (- (abs y) 0.012) (rgba 0.16 0.06 0.11 0.25))
+      (sdf/paint (max (- (abs (- slot 0.5)) 0.2) (- (abs (- y edge)) 0.05))
+        (eseq.effects.physical-model-surface/screen-ink)))))
+(def saron-tuning-view ()
+  (v-stack :gap 0.15 (caption "Seven bars / tuning offsets from equal temperament")
+    (pm-saron-tuning :debug-name "pm-saron-tuning" :amount (bind "tuning.amount")
+      :tune (bind "tuning.tune"))))
+
+(defwidget pm-saron-damper
+  :width 35.3 :height 3.1 :state (touch release lift) :bindable (touch release lift)
+  :shader
+  (let ((time (* (+ release 0.6) 0.5 (+ 1 (/ x aspect))))
+        (key-up (max 0 (- time 0.25)))
+        (loss (+ (* time (+ 1.376 (* 100 touch touch)))
+          (* key-up (/ 6.907755 release) (- 1 lift) (- 1 lift))))
+        (curve (- 0.8 (* 1.55 (pow 2.7182818 (- loss))))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (max (- y 0.8) (- curve y)) (rgba 0.16 0.06 0.11 0.14))
+      (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (- (abs (- x (* aspect (- (/ 0.5 (+ release 0.6)) 1)))) 0.012)
+        (rgba 0.16 0.06 0.11 0.3)))))
+(def saron-damper-view ()
+  (v-stack :gap 0.15 (caption "Hand damping / marker = key-up / natural loss remains")
+    (pm-saron-damper :debug-name "pm-saron-damper" :touch (bind "damper.touch")
+      :release (bind "damper.release_s") :lift (bind "damper.lift"))))
+
+(defwidget pm-saron-output
+  :width 35.3 :height 3.1 :state (drive gain) :bindable (drive gain)
+  :shader
+  (let ((input (/ x aspect)) (v (* input (+ 1 (* drive 8))))
+        (e (pow 2.7182818 (* 2 v)))
+        (shaped (/ (/ (- e 1) (+ e 1)) (+ 1 (* drive 2))))
+        (curve (* -0.2 gain (mix input shaped drive))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (min (- (abs y) 0.005) (- (abs x) 0.012)) (rgba 0.16 0.06 0.11 0.2))
+      (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink)))))
+(def saron-output-view ()
+  (v-stack :gap 0.15 (caption "Output drive / transfer curve / full scale = 4x gain")
+    (pm-saron-output :debug-name "pm-saron-output" :drive (bind "output.drive") :gain (bind "output.gain"))))
+
+(export gamelan-mallet-view gamelan-body-view gamelan-tuning-view gamelan-damper-view)
+
+;; Shared diagrams take the current instrument's measured reference constants.
+;; Curves illustrate mechanisms; they are not live audio measurements.
+(defwidget pm-gamelan-mallet
+  :width 35.3 :height 3.1 :state (hardness contact spread) :bindable (hardness contact spread)
+  :shader
+  (let ((time (* 6 (+ 1 (/ x aspect))))
+        (tau (* contact (pow 2 (* 3 (- 0.5 hardness)))))
+        (u (/ time tau))
+        (curve (- 0.8 (* 1.45 u (pow 2.7182818 (- 1 u))))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (max (- y 0.8) (- curve y)) (rgba 0.16 0.06 0.11 0.14))
+      (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (max (- (abs x) (* aspect (+ 0.03 (* spread 0.4))))
+        (- (abs (+ y 0.85)) 0.08)) (eseq.effects.physical-model-surface/screen-ink)))))
+(def gamelan-mallet-view (span-ms)
+  (v-stack :gap 0.15 (caption (str "Mallet force and footprint / 0-" span-ms " ms"))
+    (pm-gamelan-mallet :debug-name "pm-gamelan-mallet" :hardness (bind "mallet.hardness")
+      :contact (bind "mallet.contact") :spread (bind "mallet.spread"))))
+
+(defwidget pm-gamelan-body
+  :width 35.3 :height 3.1
+  :state (decay bloom loss rate rise direct) :bindable (decay bloom loss rate rise direct)
+  :shader
+  (let ((time (* 2.5 (+ 1 (/ x aspect))))
+        (tau (max 0.00005 (* rise bloom)))
+        (a (* (pow 2.7182818 (/ (* (- rate) time) decay))
+          (- 1 (* (- 1 direct) (pow 2.7182818 (/ (- time) tau))))))
+        (b (* 0.45 (pow 2.7182818 (/ (* -3 rate time (pow 3 (* 0.5 (- loss 1)))) decay))))
+        (curve (- 0.8 (* 1.55 a))) (upper (- 0.8 (* 1.55 b))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (max (- y 0.8) (- curve y)) (rgba 0.16 0.06 0.11 0.14))
+      (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (- (abs (- y upper)) 0.022) (rgba 0.16 0.06 0.11 0.45)))))
+(def gamelan-body-view (rate rise direct)
+  (v-stack :gap 0.15 (caption "Reference resonance / bloom and upper-mode loss / 0-5 s")
+    (pm-gamelan-body :debug-name "pm-gamelan-body" :decay (bind "body.decay")
+      :bloom (bind "body.bloom") :loss (bind "body.loss") :rate rate :rise rise :direct direct)))
+
+(defwidget pm-gamelan-tuning
+  :width 35.3 :height 3.1 :state (amount tune offset) :bindable (amount tune offset)
+  :shader
+  (let ((position (* aspect (/ (+ tune (* amount offset)) 200))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (- (abs y) 0.012) (rgba 0.16 0.06 0.11 0.25))
+      (sdf/paint (- (abs x) 0.012) (rgba 0.16 0.06 0.11 0.25))
+      (sdf/paint (max (- (abs (- x position)) 0.08) (- (abs y) 0.55))
+        (eseq.effects.physical-model-surface/screen-ink)))))
+(def gamelan-tuning-view (offset)
+  (v-stack :gap 0.15 (caption "Reference key / tuning offset / -200 to +200 cents")
+    (pm-gamelan-tuning :debug-name "pm-gamelan-tuning" :amount (bind "tuning.amount")
+      :tune (bind "tuning.tune") :offset offset)))
+
+(defwidget pm-gamelan-damper
+  :width 35.3 :height 3.1 :state (touch release lift rate) :bindable (touch release lift rate)
+  :shader
+  (let ((time (* (+ release 0.6) 0.5 (+ 1 (/ x aspect))))
+        (key-up (max 0 (- time 0.25)))
+        (loss (+ (* time (+ rate (* 100 touch touch)))
+          (* key-up (/ 6.907755 release) (- 1 lift) (- 1 lift))))
+        (curve (- 0.8 (* 1.55 (pow 2.7182818 (- loss))))))
+    (sdf/layer
+      (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
+      (sdf/paint (max (- y 0.8) (- curve y)) (rgba 0.16 0.06 0.11 0.14))
+      (sdf/paint (- (abs (- y curve)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
+      (sdf/paint (- (abs (- x (* aspect (- (/ 0.5 (+ release 0.6)) 1)))) 0.012)
+        (rgba 0.16 0.06 0.11 0.3)))))
+(def gamelan-damper-view (rate)
+  (v-stack :gap 0.15 (caption "Hand damping / marker = key-up / natural loss remains")
+    (pm-gamelan-damper :debug-name "pm-gamelan-damper" :touch (bind "damper.touch")
+      :release (bind "damper.release_s") :lift (bind "damper.lift") :rate rate)))

@@ -1,0 +1,28 @@
+# PM Bonang reference material
+
+Calibrated from 39 **bonangbarung-slendro-bonangmalletwoodenside** recordings.
+Exact filenames and SHA256 hashes: `tools/pm-gamelan/bonang-analysis.json`.
+
+Source: **Latent Sonorities Sample Pack**, published by
+[memeshift on Freesound](https://freesound.org/people/memeshift/packs/40343/).
+Source project: [Latent Sonorities](https://www.latentsonorities.org/).
+
+- Performer: Bilawa Ade Respati.
+- Recordist: Rabih Beaini; recording assistant: Marcel.
+- Recording consultation: Rashad Becker.
+- Producers: Morgan Sully, Taïca Replansky and Jan Thedja.
+- Instruments: Rumah Budaya Indonesia / Haus der Indonesischen Kulturen, Berlin.
+- Recorded at Morphine Studio, Berlin.
+
+The source recordings are **CC BY-NC 4.0 (Attribution–NonCommercial)**:
+[license and terms](https://creativecommons.org/licenses/by-nc/4.0/).
+
+Changes: measurements were reduced to resonant frequencies, positive damping
+rates, radiation response and excitation coefficients, interpolated by pitch
+and strike strength. No recording, waveform, recorded phase or audio excerpt
+is embedded in the instrument. Synthesized stereo spread does not reproduce
+the microphone field.
+
+The calibration retains this source attribution and noncommercial notice.
+Commercial factory distribution has **not** been cleared. Local implementation
+and validation do not establish that permission. No endorsement is implied.

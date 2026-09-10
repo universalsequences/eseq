@@ -1,0 +1,182 @@
+[
+  {
+    "instrument": "PM Slenthem",
+    "preset": "reference",
+    "peak": 0.08991992383423227,
+    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+  },
+  {
+    "instrument": "PM Slenthem",
+    "preset": "open",
+    "peak": 0.15657382039353251,
+    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+  },
+  {
+    "instrument": "PM Slenthem",
+    "preset": "felt",
+    "peak": 0.05498500747250266,
+    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+  },
+  {
+    "instrument": "PM Slenthem",
+    "preset": "muted",
+    "peak": 0.05462832130475395,
+    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+  },
+  {
+    "instrument": "PM Slenthem",
+    "preset": "harmonic",
+    "peak": 0.09699930552190207,
+    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+  },
+  {
+    "instrument": "PM Slenthem",
+    "preset": "bloom",
+    "peak": 0.18290459737181664,
+    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+  },
+  {
+    "instrument": "PM Bonang",
+    "preset": "reference",
+    "peak": 0.24646327641313745,
+    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+  },
+  {
+    "instrument": "PM Bonang",
+    "preset": "open",
+    "peak": 0.2481239544285927,
+    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+  },
+  {
+    "instrument": "PM Bonang",
+    "preset": "felt",
+    "peak": 0.17773571197435103,
+    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+  },
+  {
+    "instrument": "PM Bonang",
+    "preset": "muted",
+    "peak": 0.23172012188023036,
+    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+  },
+  {
+    "instrument": "PM Bonang",
+    "preset": "harmonic",
+    "peak": 0.2541898531319985,
+    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+  },
+  {
+    "instrument": "PM Bonang",
+    "preset": "bloom",
+    "peak": 0.24908942793263122,
+    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+  },
+  {
+    "instrument": "PM Slenthem Slendro",
+    "preset": "reference",
+    "peak": 0.2950186372901348,
+    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+  },
+  {
+    "instrument": "PM Slenthem Slendro",
+    "preset": "open",
+    "peak": 0.289925322169438,
+    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+  },
+  {
+    "instrument": "PM Slenthem Slendro",
+    "preset": "felt",
+    "peak": 0.028315902762154843,
+    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+  },
+  {
+    "instrument": "PM Slenthem Slendro",
+    "preset": "muted",
+    "peak": 0.27222396137194915,
+    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+  },
+  {
+    "instrument": "PM Slenthem Slendro",
+    "preset": "harmonic",
+    "peak": 0.3034914950197079,
+    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+  },
+  {
+    "instrument": "PM Slenthem Slendro",
+    "preset": "bloom",
+    "peak": 0.2860897188074887,
+    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+  },
+  {
+    "instrument": "PM Kempyang",
+    "preset": "reference",
+    "peak": 0.1405683941998876,
+    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+  },
+  {
+    "instrument": "PM Kempyang",
+    "preset": "open",
+    "peak": 0.156122604099437,
+    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+  },
+  {
+    "instrument": "PM Kempyang",
+    "preset": "felt",
+    "peak": 0.05882131939521201,
+    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+  },
+  {
+    "instrument": "PM Kempyang",
+    "preset": "muted",
+    "peak": 0.12305380211364758,
+    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+  },
+  {
+    "instrument": "PM Kempyang",
+    "preset": "harmonic",
+    "peak": 0.1471626275258463,
+    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+  },
+  {
+    "instrument": "PM Kempyang",
+    "preset": "bloom",
+    "peak": 0.1694038981513586,
+    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+  },
+  {
+    "instrument": "PM Kethuk",
+    "preset": "reference",
+    "peak": 0.0759905988369969,
+    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+  },
+  {
+    "instrument": "PM Kethuk",
+    "preset": "open",
+    "peak": 0.07948498606128851,
+    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+  },
+  {
+    "instrument": "PM Kethuk",
+    "preset": "felt",
+    "peak": 0.03231694830101739,
+    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+  },
+  {
+    "instrument": "PM Kethuk",
+    "preset": "muted",
+    "peak": 0.04403130642500949,
+    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+  },
+  {
+    "instrument": "PM Kethuk",
+    "preset": "harmonic",
+    "peak": 0.09267087425075782,
+    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+  },
+  {
+    "instrument": "PM Kethuk",
+    "preset": "bloom",
+    "peak": 0.08145729176612804,
+    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+  }
+]

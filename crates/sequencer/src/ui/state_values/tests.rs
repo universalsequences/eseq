@@ -55585,3 +55585,6 @@ mod about_ui_tests;
 
 #[path = "application_menu_tests.rs"]
 mod application_menu_tests;
+
+#[path = "pm_woodwind_ui_tests.rs"]
+mod pm_woodwind_ui_tests;
