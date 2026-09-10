@@ -1879,6 +1879,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             state.publish_process_channel_values(process_runtime.channel_value_literals());
             *published_process_channel_epoch = Some(channel_epoch);
         }
+        if let Some(scopes) = process_runtime.take_step_process_scopes_if_changed() {
+            state.publish_process_scope_values(scopes);
+        }
         if !chunk_enqueued {
             break;
         }

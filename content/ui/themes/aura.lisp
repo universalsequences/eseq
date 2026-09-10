@@ -22,6 +22,8 @@
       :rack-row-border                     '(0.180 0.169 0.231 1.000)
       :rack-mapping-border                 '(0.380 1.000 0.792 0.900)
       :rack-mapping-bg                     '(0.380 1.000 0.792 1.000)
+      :process-lane-accent                 '(1.000 0.780 0.380 1.000)
+      :process-map-arm-bg                  '(0.550 0.420 0.200 1.000)
       :plock-base                          '(0.500 0.441 0.628 1.000)
       :eq8-active-text                     '(1.000 0.792 0.522 1.000)
       :eq8-badge-bg                        '(1.000 0.792 0.522 1.000)

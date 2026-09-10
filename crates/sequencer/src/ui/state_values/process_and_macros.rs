@@ -23,6 +23,8 @@ pub(super) struct ProcessLaneUiEntry {
     values: Vec<f32>,
     project: bool,
     forked: bool,
+    instance_name: Option<String>,
+    default_lane: bool,
 }
 
 pub(super) fn process_literal_as_f32(value: &sequencer::process::ProcessLiteral) -> Option<f32> {
@@ -594,6 +596,75 @@ pub(super) fn process_port_value(
             "target-kind",
             Value::String(process_target_kind_label(port.effective_target_kind())),
         ),
+        // Structured view of a manual binding for UI that names the target
+        // itself (the lane strip): the wired lane's instance id and inlet, or
+        // the step param name. Nil when the port follows its hint or is unbound.
+        (
+            "target-instance-id",
+            match binding {
+                Some(Some(sequencer::process::ParamTarget::ProcessInlet {
+                    instance_id: Some(id),
+                    ..
+                })) => Value::Number(id.0 as f64),
+                _ => Value::Nil,
+            },
+        ),
+        (
+            "target-inlet",
+            match binding {
+                Some(Some(sequencer::process::ParamTarget::ProcessInlet { inlet, .. })) => {
+                    Value::String(inlet.clone())
+                }
+                _ => Value::Nil,
+            },
+        ),
+        (
+            "target-step-param",
+            match binding {
+                Some(Some(sequencer::process::ParamTarget::StepParam { param })) => {
+                    Value::String(param.clone())
+                }
+                _ => Value::Nil,
+            },
+        ),
+        (
+            "fanout",
+            list_value(
+                slot.fanout
+                    .get(&port.name)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        map_value([
+                            ("index", Value::Number(index as f64)),
+                            ("target", Value::String(process_param_target_label(&entry.target))),
+                            (
+                                "target-step-param",
+                                match &entry.target {
+                                    sequencer::process::ParamTarget::StepParam { param } => {
+                                        Value::String(param.clone())
+                                    }
+                                    _ => Value::Nil,
+                                },
+                            ),
+                            (
+                                "target-instance-id",
+                                match &entry.target {
+                                    sequencer::process::ParamTarget::ProcessInlet {
+                                        instance_id: Some(id),
+                                        ..
+                                    } => Value::Number(id.0 as f64),
+                                    _ => Value::Nil,
+                                },
+                            ),
+                            ("lo", Value::Number(entry.lo as f64)),
+                            ("hi", Value::Number(entry.hi as f64)),
+                        ])
+                    }),
+            ),
+        ),
     ])
 }
 
@@ -691,7 +762,23 @@ pub(super) fn process_lane_entries_for_track(
                 .and_then(process_literal_as_f32)
                 .or_else(|| inlet.and_then(|entry| process_literal_as_f32(&entry.default)))
                 .unwrap_or(0.0);
-            let (min, max) = process_inlet_range(def, inlet, default);
+            let (mut min, mut max) = process_inlet_range(def, inlet, default);
+            // A slot with lo/hi knobs (the default accumulators and
+            // generators) ranges its value lane over them, so the sliders
+            // and number picker span what the lane can actually output.
+            let is_gate = inlet
+                .is_some_and(|entry| matches!(entry.kind, sequencer::process::ProcessInletKind::Gate));
+            if !is_gate {
+                if let (Some(lo), Some(hi)) = (
+                    slot.inlets.get("lo").and_then(process_literal_as_f32),
+                    slot.inlets.get("hi").and_then(process_literal_as_f32),
+                ) {
+                    if hi > lo {
+                        min = lo;
+                        max = hi;
+                    }
+                }
+            }
             let lane = slot.lanes.get(&inlet_name);
             let values = (0..MAX_STEPS)
                 .map(|step| {
@@ -700,13 +787,23 @@ pub(super) fn process_lane_entries_for_track(
                 })
                 .collect::<Vec<_>>();
             let map_ports = process_mappable_port_values(slot, def);
+            let default_lane = sequencer::process::is_default_lane_slot(slot);
+            // Default lanes read like the builtin step params: the instance
+            // name alone ("prob", "acc A"), never "N class/inlet".
+            let (label, short_label) = match slot.instance_name.as_deref() {
+                Some(name) if default_lane => (name.to_string(), name.to_string()),
+                _ => (
+                    format!("{} / {}", slot.class_name, inlet_name),
+                    process_short_label(&slot.class_name, &inlet_name),
+                ),
+            };
             entries.push(ProcessLaneUiEntry {
                 instance_id: slot.instance_id,
                 slot_index,
                 class_name: slot.class_name.clone(),
                 inlet_name: inlet_name.clone(),
-                label: format!("{} / {}", slot.class_name, inlet_name),
-                short_label: process_short_label(&slot.class_name, &inlet_name),
+                label,
+                short_label,
                 kind: inlet
                     .map(|entry| process_inlet_kind_name(&entry.kind).to_string())
                     .unwrap_or_else(|| "float".to_string()),
@@ -726,6 +823,8 @@ pub(super) fn process_lane_entries_for_track(
                         slot.instance_id,
                         &inlet_name,
                     ),
+                instance_name: slot.instance_name.clone(),
+                default_lane,
             });
         }
     }
@@ -747,6 +846,15 @@ pub(super) fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) 
         ("name", Value::String(entry.inlet_name.clone())),
         ("project", Value::Bool(entry.project)),
         ("forked", Value::Bool(entry.forked)),
+        ("default-lane", Value::Bool(entry.default_lane)),
+        (
+            "instance-name",
+            entry
+                .instance_name
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Nil),
+        ),
         ("label", Value::String(entry.label.clone())),
         ("short-label", Value::String(entry.short_label.clone())),
         ("kind", Value::String(entry.kind.clone())),
@@ -947,6 +1055,14 @@ pub(crate) fn build_process_slots_value(state: &Arc<SequencerState>, track: usiz
             ),
             ("enabled", Value::Bool(slot.enabled)),
             ("project", Value::Bool(slot.project_layer)),
+            ("default-lane", Value::Bool(sequencer::process::is_default_lane_slot(slot))),
+            (
+                "instance-name",
+                slot.instance_name
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Nil),
+            ),
             (
                 "target",
                 Value::String(
@@ -1013,6 +1129,50 @@ pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value 
             ),
         ])
     }))
+}
+
+/// `SEQ.track-process-scopes`: per track, one entry per composed chain slot
+/// with that slot's state history on this track (project slots have
+/// per-track runtime state, so the same lane scopes differently per track).
+/// `values` is the first declared state cell's history, `cells` the rest.
+pub(crate) fn build_track_process_scopes_value(state: &Arc<SequencerState>) -> Value {
+    let scopes = state.process_scope_values();
+    let published = state.published_process_authoring();
+    let tracks = (0..state.active_track_count()).map(|track| {
+        let Some(chain) = state.composed_track_process_chain(track) else {
+            return list_value(std::iter::empty());
+        };
+        let entries = chain.slots.iter().filter_map(|slot| {
+            let runtime_id =
+                sequencer::process::track_process_slot_runtime_id(slot, track).0;
+            let cells = scopes.get(&runtime_id)?;
+            let def = published.defs.iter().find(|def| def.name == slot.class_name);
+            let primary = def
+                .and_then(|def| def.state.first().map(|cell| cell.name.clone()))
+                .or_else(|| cells.keys().next().cloned())?;
+            let values = cells.get(&primary).cloned().unwrap_or_default();
+            let current = values.last().copied().unwrap_or(0.0);
+            Some(map_value([
+                ("instance-id", Value::Number(slot.instance_id.0 as f64)),
+                ("state", Value::String(primary)),
+                ("current", Value::Number(current as f64)),
+                (
+                    "values",
+                    list_value(values.iter().map(|value| Value::Number(*value as f64))),
+                ),
+            ]))
+        });
+        list_value(entries.collect::<Vec<_>>())
+    });
+    list_value(tracks.collect::<Vec<_>>())
+}
+
+pub(crate) fn sync_process_scope_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
+    rt.set_reactive(
+        "SEQ",
+        "track-process-scopes",
+        build_track_process_scopes_value(state),
+    );
 }
 
 pub(crate) fn sync_process_chain_state(

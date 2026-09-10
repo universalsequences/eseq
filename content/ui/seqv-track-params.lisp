@@ -217,7 +217,7 @@
                     :retrig-rate))))))))))
 
 (def seqv-param-color (mode)
-  (if (seqv-process-lane-mode? mode) :orange
+  (if (seqv-process-lane-mode? mode) :process-lane-accent
     (if (= mode 0) :blue
       (if (= mode 1) :green
         (if (= mode 2) :magenta

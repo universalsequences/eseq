@@ -4107,6 +4107,7 @@
                     "amount".to_string(),
                     crate::process::ProcessLane { values: vec![0.0, 1.0] },
                 )]),
+                fanout: Default::default(),
                 bindings: std::collections::BTreeMap::new(),
             }],
         };

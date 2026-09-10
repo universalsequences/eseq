@@ -1051,6 +1051,52 @@ pub(super) fn apply_process_target_writes(
                     process_resolve_hint_to_target(snapshot, midi_fx_descriptors, track, hint)
                 })
             });
+        // Fan-out entries run whether or not the primary target resolves:
+        // each sets its own rescaled copy of the port value.
+        if let Some(entries) = slot.and_then(|slot| slot.fanout.get(&write.port)) {
+            let source = slot
+                .map(crate::process::process_slot_output_range)
+                .unwrap_or((0.0, 1.0));
+            for entry in entries {
+                let scaled = crate::process::ProcessTargetWrite {
+                    port: write.port.clone(),
+                    target: None,
+                    op: crate::process::ProcessTargetOp::Set,
+                    value: entry.scaled(write.value, source),
+                };
+                process_trace(snapshot, || {
+                    format!(
+                        "fanout track={} step={} port={} -> {} value={}",
+                        track + 1,
+                        step,
+                        write.port,
+                        process_target_label(&entry.target),
+                        scaled.value
+                    )
+                });
+                if matches!(entry.target, crate::process::ParamTarget::ProcessInlet { .. }) {
+                    process_apply_inlet_write(
+                        snapshot,
+                        track,
+                        step,
+                        &entry.target,
+                        &scaled,
+                        process_inlet_context.as_deref_mut(),
+                    );
+                } else {
+                    process_apply_concrete_target_write(
+                        snapshot,
+                        midi_fx_descriptors,
+                        track,
+                        step,
+                        resolved,
+                        overlay,
+                        &entry.target,
+                        &scaled,
+                    );
+                }
+            }
+        }
         let Some(target) = target else {
             process_trace(snapshot, || {
                 format!(

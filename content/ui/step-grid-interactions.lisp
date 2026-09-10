@@ -64,6 +64,8 @@
         step-double-click
         seq-set-step-param-from-step
         seq-set-process-lane-from-step
+        seq-set-step-param-from-selection-or-step
+        seq-set-process-lane-from-selection-or-step
         select-all-steps
         seq-global-select-all
         seq-global-select-all-steps
@@ -397,6 +399,22 @@
       (do
         (if (seq-has-selection?) (seq-clear-selection) nil)
         (seq-set-process-lane-step-value track lane step value)))))
+
+;; Selection-first variants for the row-wide number picker: a live selection
+;; wins over the cursor step, whether or not the cursor sits inside it.
+(def seq-set-step-param-from-selection-or-step (step param value)
+  (if (seq-has-selection?)
+    (seq-set-step-param-plock param value)
+    (seq-set-step-param step param value)))
+
+(def seq-set-process-lane-from-selection-or-step (track mode step value)
+  (let ((lane (eseq.seqv-track-params/seqv-track-process-lane track mode)))
+    (if (seq-has-selection?)
+      (for-each
+        (lambda (selected-step)
+          (seq-set-process-lane-step-value track lane selected-step value))
+        (seq-selected-step-indexes))
+      (seq-set-process-lane-step-value track lane step value))))
 
 (def select-all-steps ()
   (do

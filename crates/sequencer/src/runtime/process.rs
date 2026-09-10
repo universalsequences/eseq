@@ -417,6 +417,43 @@ impl ProcessLane {
     }
 }
 
+/// One extra target for a process port: the port's value is rescaled from
+/// the slot's output range (its `lo`/`hi` inlets, else 0..1) into `lo..hi`
+/// and *set* on the target. Lets one generator drive several parameters
+/// with their own ranges ("rand → velocity 0.1..1 and → retrig 4..8").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessPortFanout {
+    pub target: ParamTarget,
+    pub lo: f32,
+    pub hi: f32,
+}
+
+impl ProcessPortFanout {
+    /// Rescale `value` from `source` (lo, hi) into this entry's range.
+    pub fn scaled(&self, value: f32, source: (f32, f32)) -> f32 {
+        let span = source.1 - source.0;
+        let norm = if span.abs() > f32::EPSILON {
+            ((value - source.0) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.lo + norm * (self.hi - self.lo)
+    }
+}
+
+/// The range a slot's port value spans, for fan-out scaling: its `lo`/`hi`
+/// inlets when both are numbers, else 0..1.
+pub fn process_slot_output_range(slot: &TrackProcessSlot) -> (f32, f32) {
+    let number = |name: &str| match slot.inlets.get(name) {
+        Some(ProcessLiteral::Number(value)) => Some(*value as f32),
+        _ => None,
+    };
+    match (number("lo"), number("hi")) {
+        (Some(lo), Some(hi)) if hi > lo => (lo, hi),
+        _ => (0.0, 1.0),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrackProcessSlot {
     pub instance_id: ProcessInstanceId,
@@ -436,6 +473,9 @@ pub struct TrackProcessSlot {
     pub lanes: BTreeMap<String, ProcessLane>,
     #[serde(default)]
     pub bindings: BTreeMap<String, Option<ParamTarget>>,
+    /// Extra scaled targets per port, applied after the port's binding.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fanout: BTreeMap<String, Vec<ProcessPortFanout>>,
 }
 
 fn default_true() -> bool {
@@ -449,7 +489,73 @@ pub struct TrackProcessChain {
 }
 
 /// Forked lanes for one track, keyed by durable project-slot identity and inlet.
-pub type ProjectLaneOverrides = BTreeMap<ProcessInstanceId, BTreeMap<String, ProcessLane>>;
+/// One track's copy-on-write view of a project-layer slot: any lane, scalar
+/// inlet or port binding set here shadows the shared slot on that track only
+/// (Cirklon-style per-track aux configuration). Absent keys fall through to
+/// the shared slot. Serialized as `{lanes, inlets, bindings}`; the pre-rev-2
+/// on-disk form was the bare lane map, which still loads.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "ProjectSlotOverrideCompat")]
+pub struct ProjectSlotOverride {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lanes: BTreeMap<String, ProcessLane>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inlets: BTreeMap<String, ProcessLiteral>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, Option<ParamTarget>>,
+    /// Whole-port fan-out lists this track owns (replace the shared list).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fanout: BTreeMap<String, Vec<ProcessPortFanout>>,
+}
+
+impl ProjectSlotOverride {
+    pub fn is_empty(&self) -> bool {
+        self.lanes.is_empty()
+            && self.inlets.is_empty()
+            && self.bindings.is_empty()
+            && self.fanout.is_empty()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectSlotOverrideFields {
+    #[serde(default)]
+    lanes: BTreeMap<String, ProcessLane>,
+    #[serde(default)]
+    inlets: BTreeMap<String, ProcessLiteral>,
+    #[serde(default)]
+    bindings: BTreeMap<String, Option<ParamTarget>>,
+    #[serde(default)]
+    fanout: BTreeMap<String, Vec<ProcessPortFanout>>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProjectSlotOverrideCompat {
+    Current(ProjectSlotOverrideFields),
+    Legacy(BTreeMap<String, ProcessLane>),
+}
+
+impl From<ProjectSlotOverrideCompat> for ProjectSlotOverride {
+    fn from(value: ProjectSlotOverrideCompat) -> Self {
+        match value {
+            ProjectSlotOverrideCompat::Current(fields) => Self {
+                lanes: fields.lanes,
+                inlets: fields.inlets,
+                bindings: fields.bindings,
+                fanout: fields.fanout,
+            },
+            ProjectSlotOverrideCompat::Legacy(lanes) => Self {
+                lanes,
+                ..Self::default()
+            },
+        }
+    }
+}
+
+/// Per-track project-slot overrides, keyed by durable project-slot identity.
+pub type ProjectLaneOverrides = BTreeMap<ProcessInstanceId, ProjectSlotOverride>;
 
 pub fn project_slot_identity_id(slot: &TrackProcessSlot) -> ProcessInstanceId {
     ProcessInstanceId(if let Some(name) = slot.instance_name.as_deref() {
@@ -464,12 +570,47 @@ pub fn apply_project_lane_overrides(
     overrides: &ProjectLaneOverrides,
 ) {
     for slot in &mut chain.slots {
-        let Some(lanes) = overrides.get(&project_slot_identity_id(slot)) else {
+        let Some(override_) = overrides.get(&project_slot_identity_id(slot)) else {
             continue;
         };
-        for (inlet, lane) in lanes {
+        for (inlet, lane) in &override_.lanes {
             slot.lanes.insert(inlet.clone(), lane.clone());
         }
+        for (inlet, value) in &override_.inlets {
+            slot.inlets.insert(inlet.clone(), value.clone());
+        }
+        for (port, target) in &override_.bindings {
+            slot.bindings.insert(port.clone(), target.clone());
+        }
+        for (port, entries) in &override_.fanout {
+            slot.fanout.insert(port.clone(), entries.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod project_slot_override_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_bare_lane_map_still_deserializes() {
+        let legacy = r#"{"amount":{"values":[0.5,1.0]}}"#;
+        let parsed: ProjectSlotOverride = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.lanes["amount"].values, vec![0.5, 1.0]);
+        assert!(parsed.inlets.is_empty() && parsed.bindings.is_empty());
+
+        let current = ProjectSlotOverride {
+            lanes: parsed.lanes.clone(),
+            inlets: BTreeMap::from([("lo".to_string(), ProcessLiteral::Number(2.0))]),
+            bindings: BTreeMap::from([(
+                "out".to_string(),
+                Some(ParamTarget::StepParam { param: "rate".to_string() }),
+            )]),
+            fanout: BTreeMap::new(),
+        };
+        let json = serde_json::to_string(&current).unwrap();
+        let back: ProjectSlotOverride = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, current);
     }
 }
 
@@ -1478,6 +1619,11 @@ pub struct ProcessRuntime {
     patches: Vec<AuthoredPatch>,
     pending_events: Vec<PendingProcessEvent>,
     step_process_states: HashMap<ProcessInstanceId, HashMap<String, Value>>,
+    /// Per-runtime-instance history of every numeric state cell, one sample
+    /// per fire, newest last. The UI's lane strip draws this as a scope.
+    step_process_scopes: HashMap<u64, HashMap<String, VecDeque<f32>>>,
+    step_process_scope_epoch: u64,
+    step_process_scope_published_epoch: u64,
     step_process_runtime_ids: HashSet<u64>,
     pending_step_inlet_writes: HashMap<(usize, ProcessInstanceId, String), Vec<ProcessInletWrite>>,
     resolved_track_history: Vec<ResolvedTrackHistory>,
@@ -1924,6 +2070,59 @@ impl ProcessRuntime {
     /// Thread-safe copy of the held value channels for the scheduler → UI
     /// mirror. Callable and host-only VM values cannot be displayed by an
     /// inline value widget and are omitted rather than crossing threads.
+    /// Push this fire's numeric state cells onto the instance's scope ring.
+    fn record_step_process_scope(&mut self, runtime_id: u64, state: &HashMap<String, Value>) {
+        const SCOPE_LEN: usize = 64;
+        let mut touched = false;
+        let scope = self.step_process_scopes.entry(runtime_id).or_default();
+        for (name, value) in state {
+            let sample = match value {
+                Value::Number(value) => *value as f32,
+                Value::Bool(value) => {
+                    if *value {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                _ => continue,
+            };
+            let ring = scope.entry(name.clone()).or_default();
+            if ring.len() >= SCOPE_LEN {
+                ring.pop_front();
+            }
+            ring.push_back(sample);
+            touched = true;
+        }
+        if touched {
+            self.step_process_scope_epoch = self.step_process_scope_epoch.wrapping_add(1);
+        }
+    }
+
+    /// The scope rings, when any fire has landed since the last take.
+    pub fn take_step_process_scopes_if_changed(
+        &mut self,
+    ) -> Option<HashMap<u64, HashMap<String, Vec<f32>>>> {
+        if self.step_process_scope_published_epoch == self.step_process_scope_epoch {
+            return None;
+        }
+        self.step_process_scope_published_epoch = self.step_process_scope_epoch;
+        Some(
+            self.step_process_scopes
+                .iter()
+                .map(|(id, cells)| {
+                    (
+                        *id,
+                        cells
+                            .iter()
+                            .map(|(name, ring)| (name.clone(), ring.iter().copied().collect()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     pub fn channel_value_literals(&self) -> HashMap<String, ProcessLiteral> {
         self.channels
             .iter()
@@ -2258,6 +2457,7 @@ impl ProcessRuntime {
                         state.insert(output.name, output.value);
                     }
                 }
+                self.record_step_process_scope(result.runtime_id, &state);
                 self.step_process_states
                     .insert(ProcessInstanceId(result.runtime_id), state);
                 for (channel, value) in channel_sends {
@@ -3271,7 +3471,7 @@ fn stable_mix64(mut value: u64) -> u64 {
 
 const NAMED_PROCESS_RUNTIME_ID_FLAG: u64 = 1 << 63;
 
-fn named_process_runtime_id(class_name: &str, name: &str) -> u64 {
+pub(crate) fn named_process_runtime_id(class_name: &str, name: &str) -> u64 {
     stable_process_id(&format!("process-instance:{class_name}:{name}"))
         | NAMED_PROCESS_RUNTIME_ID_FLAG
 }
@@ -3284,7 +3484,7 @@ fn runtime_instance_id(instance: &AuthoredProcessInstance) -> u64 {
     }
 }
 
-fn track_process_slot_runtime_id(slot: &TrackProcessSlot, track: usize) -> ProcessInstanceId {
+pub fn track_process_slot_runtime_id(slot: &TrackProcessSlot, track: usize) -> ProcessInstanceId {
     let base = if let Some(name) = slot.instance_name.as_deref() {
         named_process_runtime_id(&slot.class_name, name)
     } else {
@@ -3363,6 +3563,7 @@ mod tests {
                 project_layer: false,
                 inlets: BTreeMap::new(),
                 lanes: BTreeMap::new(),
+                fanout: Default::default(),
                 bindings: BTreeMap::from([
                     ("unique".to_string(), Some(ParamTarget::InstrumentParam {
                         param: "cutoff".to_string(), param_id: None,
@@ -3500,6 +3701,7 @@ mod tests {
             project_layer: false,
             inlets: BTreeMap::new(),
             lanes: BTreeMap::new(),
+            fanout: Default::default(),
             bindings: BTreeMap::new(),
         };
         let first = TrackProcessChain {
@@ -3969,6 +4171,7 @@ mod tests {
                     values: vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
                 },
             )]),
+            fanout: Default::default(),
             bindings: BTreeMap::new(),
         };
 
@@ -4027,5 +4230,263 @@ mod tests {
         let values = runtime.channel_values();
         assert_eq!(values.get("warp"), Some(&Value::Number(2.0)));
         assert!(!values.contains_key("retrig"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default project lanes (docs/default-process-lanes-spec.md)
+// ---------------------------------------------------------------------------
+
+/// Class names of the always-on project layer. The classes themselves are
+/// defined in `content/processes/builtin.lisp`.
+pub const DEFAULT_LANE_CLASSES: [&str; 6] = [
+    "lane-prob",
+    "lane-acc",
+    "lane-reset",
+    "lane-grab",
+    "lane-rand",
+    "lane-count",
+];
+
+/// One default lane as installed on every scene's project layer, in chain
+/// order. `name` doubles as the dropdown label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DefaultLaneSpec {
+    pub class_name: &'static str,
+    pub name: &'static str,
+}
+
+pub const DEFAULT_LANES: [DefaultLaneSpec; 8] = [
+    DefaultLaneSpec { class_name: "lane-prob", name: "prob" },
+    DefaultLaneSpec { class_name: "lane-reset", name: "reset" },
+    DefaultLaneSpec { class_name: "lane-rand", name: "rand" },
+    DefaultLaneSpec { class_name: "lane-count", name: "count" },
+    DefaultLaneSpec { class_name: "lane-acc", name: "tacc" },
+    DefaultLaneSpec { class_name: "lane-acc", name: "acc A" },
+    DefaultLaneSpec { class_name: "lane-acc", name: "acc B" },
+    DefaultLaneSpec { class_name: "lane-grab", name: "grab" },
+];
+
+/// Default lane slot ids sit in a fixed block below the UI handle base
+/// (`1 << 48`) and well inside f64's exact-integer range: instance ids cross
+/// into Lisp as numbers, so a 64-bit hash id would round and never match on
+/// the way back. Per-track lane overrides still key on the name-derived
+/// identity (`project_slot_identity_id`).
+const DEFAULT_LANE_INSTANCE_ID_BASE: u64 = 1 << 47;
+
+pub fn default_lane_instance_id(spec: &DefaultLaneSpec) -> ProcessInstanceId {
+    let index = DEFAULT_LANES
+        .iter()
+        .position(|entry| entry.name == spec.name && entry.class_name == spec.class_name)
+        .expect("default lane spec") as u64;
+    ProcessInstanceId(DEFAULT_LANE_INSTANCE_ID_BASE + index)
+}
+
+/// A project-layer slot that belongs to the default lane set.
+pub fn is_default_lane_slot(slot: &TrackProcessSlot) -> bool {
+    slot.project_layer
+        && slot.instance_name.as_deref().is_some_and(|name| {
+            DEFAULT_LANES
+                .iter()
+                .any(|spec| spec.name == name && spec.class_name == slot.class_name)
+        })
+}
+
+fn default_lane_slot(spec: &DefaultLaneSpec) -> TrackProcessSlot {
+    let instance_id = default_lane_instance_id(spec);
+    let mut bindings: BTreeMap<String, Option<ParamTarget>> = BTreeMap::new();
+    let mut inlets: BTreeMap<String, ProcessLiteral> = BTreeMap::new();
+    let acc_inlet = |name: &str| {
+        let target = DEFAULT_LANES
+            .iter()
+            .find(|entry| entry.name == name)
+            .expect("default accumulator lane");
+        Some(ParamTarget::ProcessInlet {
+            process: target.class_name.to_string(),
+            inlet: "reset".to_string(),
+            instance_id: Some(default_lane_instance_id(target)),
+        })
+    };
+    match spec.name {
+        "tacc" => {
+            bindings.insert(
+                "out".to_string(),
+                Some(ParamTarget::StepParam { param: "transpose".to_string() }),
+            );
+            bindings.insert("wire".to_string(), None);
+        }
+        "acc A" => {
+            bindings.insert(
+                "out".to_string(),
+                Some(ParamTarget::StepParam { param: "retrig".to_string() }),
+            );
+            bindings.insert("wire".to_string(), None);
+            inlets.insert("lo".to_string(), ProcessLiteral::Number(0.0));
+            inlets.insert("hi".to_string(), ProcessLiteral::Number(8.0));
+        }
+        "acc B" => {
+            bindings.insert(
+                "out".to_string(),
+                Some(ParamTarget::StepParam { param: "rate".to_string() }),
+            );
+            bindings.insert("wire".to_string(), None);
+            inlets.insert("lo".to_string(), ProcessLiteral::Number(0.0));
+            inlets.insert("hi".to_string(), ProcessLiteral::Number(8.0));
+        }
+        "reset" => {
+            bindings.insert("a".to_string(), acc_inlet("tacc"));
+            bindings.insert("b".to_string(), acc_inlet("acc A"));
+            bindings.insert("c".to_string(), acc_inlet("acc B"));
+        }
+        "rand" | "count" => {
+            bindings.insert("out".to_string(), None);
+            bindings.insert("wire".to_string(), None);
+        }
+        _ => {}
+    }
+    TrackProcessSlot {
+        instance_id,
+        instance_name: Some(spec.name.to_string()),
+        class_name: spec.class_name.to_string(),
+        enabled: true,
+        project_layer: true,
+        inlets,
+        lanes: BTreeMap::new(),
+        fanout: Default::default(),
+        bindings,
+    }
+}
+
+/// The complete default layer as a fresh chain.
+pub fn default_project_layer() -> TrackProcessChain {
+    TrackProcessChain {
+        slots: DEFAULT_LANES.iter().map(default_lane_slot).collect(),
+    }
+}
+
+/// Install every default lane that `chain` is missing, keeping any slot the
+/// chain already holds (lane edits, manual bindings, user reordering).
+/// Missing lanes are appended in default order after the existing slots so a
+/// user-authored layer keeps its own ordering. Returns true when the chain
+/// changed.
+pub fn ensure_default_project_layer(chain: &mut TrackProcessChain) -> bool {
+    let mut changed = false;
+    for spec in DEFAULT_LANES.iter() {
+        let expected_id = default_lane_instance_id(spec);
+        match chain.slots.iter_mut().find(|slot| {
+            slot.project_layer
+                && slot.class_name == spec.class_name
+                && slot.instance_name.as_deref() == Some(spec.name)
+        }) {
+            Some(slot) => {
+                // Projects saved with an earlier id scheme keep their lanes
+                // but take the current exact id, so Lisp lookups match.
+                if slot.instance_id != expected_id {
+                    slot.instance_id = expected_id;
+                    changed = true;
+                }
+            }
+            None => {
+                chain.slots.push(default_lane_slot(spec));
+                changed = true;
+            }
+        }
+    }
+    // The reset lane's wires must point at the accumulators' current ids.
+    let fresh_reset = default_lane_slot(&DEFAULT_LANES[1]);
+    if let Some(reset) = chain
+        .slots
+        .iter_mut()
+        .find(|slot| slot.project_layer && slot.instance_name.as_deref() == Some("reset"))
+    {
+        for (port, target) in &fresh_reset.bindings {
+            if reset.bindings.get(port) != Some(target) {
+                reset.bindings.insert(port.clone(), target.clone());
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+#[cfg(test)]
+mod default_lane_tests {
+    use super::*;
+
+    #[test]
+    fn ensure_default_project_layer_installs_once_and_keeps_edits() {
+        let mut chain = TrackProcessChain::default();
+        assert!(ensure_default_project_layer(&mut chain));
+        assert_eq!(chain.slots.len(), DEFAULT_LANES.len());
+        assert!(chain.slots.iter().all(is_default_lane_slot));
+        assert!(!ensure_default_project_layer(&mut chain));
+
+        // Edit a lane, drop one slot, reinstall: the edit survives and only
+        // the missing slot comes back, appended at the end.
+        chain.slots[0]
+            .lanes
+            .insert("prob".to_string(), ProcessLane { values: vec![0.5] });
+        let removed = chain.slots.remove(2);
+        assert!(ensure_default_project_layer(&mut chain));
+        assert_eq!(chain.slots.len(), DEFAULT_LANES.len());
+        assert_eq!(chain.slots[0].lanes["prob"].values, vec![0.5]);
+        assert_eq!(chain.slots.last().unwrap().instance_name, removed.instance_name);
+
+        // A slot saved under an older id scheme is renumbered and the reset
+        // lane's wires follow it.
+        let tacc = chain
+            .slots
+            .iter_mut()
+            .find(|slot| slot.instance_name.as_deref() == Some("tacc"))
+            .unwrap();
+        tacc.instance_id = ProcessInstanceId(u64::MAX);
+        assert!(ensure_default_project_layer(&mut chain));
+        let tacc_id = chain
+            .slots
+            .iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("tacc"))
+            .unwrap()
+            .instance_id;
+        assert_eq!(tacc_id, default_lane_instance_id(&DEFAULT_LANES[4]));
+        let reset = chain
+            .slots
+            .iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("reset"))
+            .unwrap();
+        assert!(matches!(
+            reset.bindings["a"],
+            Some(ParamTarget::ProcessInlet { instance_id: Some(id), .. }) if id == tacc_id
+        ));
+    }
+
+    #[test]
+    fn default_reset_lane_wires_every_accumulator_by_identity() {
+        let chain = default_project_layer();
+        let reset = chain
+            .slots
+            .iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("reset"))
+            .unwrap();
+        for (port, name) in [("a", "tacc"), ("b", "acc A"), ("c", "acc B")] {
+            let acc = chain
+                .slots
+                .iter()
+                .find(|slot| slot.instance_name.as_deref() == Some(name))
+                .unwrap();
+            assert_eq!(
+                reset.bindings[port],
+                Some(ParamTarget::ProcessInlet {
+                    process: "lane-acc".to_string(),
+                    inlet: "reset".to_string(),
+                    instance_id: Some(acc.instance_id),
+                })
+            );
+            // Slot ids stay exact through f64; override identity is name-derived.
+            assert!(acc.instance_id.0 < (1u64 << 53));
+            assert_eq!(
+                project_slot_identity_id(acc).0,
+                named_process_runtime_id("lane-acc", name)
+            );
+        }
     }
 }

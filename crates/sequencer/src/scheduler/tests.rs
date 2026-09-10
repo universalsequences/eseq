@@ -2419,6 +2419,8 @@
         sample_time: u64,
         transpose: f32,
         duration: f32,
+        retrig: f32,
+        retrig_rate: f32,
         sampler_speed: Option<f32>,
         has_speed_param: bool,
     }
@@ -2440,6 +2442,8 @@
                     sample_time: event.sample_time,
                     transpose: resolved.transpose,
                     duration: resolved.duration,
+                    retrig: resolved.retrig,
+                    retrig_rate: resolved.retrig_rate,
                     sampler_speed: None,
                     has_speed_param: instrument_params.iter().any(|param| {
                         param.target == ScheduledInstrumentParamTarget::Synth
@@ -2459,6 +2463,8 @@
                     sample_time: event.sample_time,
                     transpose: resolved.transpose,
                     duration: resolved.duration,
+                    retrig: resolved.retrig,
+                    retrig_rate: resolved.retrig_rate,
                     sampler_speed: Some(sampler_params.playback_speed),
                     has_speed_param: instrument_params.iter().any(|param| {
                         param.target == ScheduledInstrumentParamTarget::Synth
@@ -2926,6 +2932,7 @@
                                 values: vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
                             },
                         )]),
+                        fanout: Default::default(),
                         bindings: std::collections::BTreeMap::new(),
                     }],
                 },
@@ -3334,6 +3341,195 @@
             track_transposes(1),
             vec![11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0],
             "track 1 = project counter + its own accumulator"
+        );
+    }
+
+    /// The default lane layer (docs/default-process-lanes-spec.md) as a
+    /// project chain on a single 8-step track, with the builtin library
+    /// evaluated so every `lane-*` class exists.
+    fn default_lanes_fixture(
+        edit: impl FnOnce(&mut crate::process::TrackProcessChain),
+    ) -> Vec<ObservedTrigger> {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_num_steps(8);
+        for step in 0..8 {
+            state.pattern.patterns[0].set_step_active(step, true);
+        }
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new()],
+            vec![EffectDescriptor::builtin_sampler()],
+            0,
+            0,
+        );
+        scratch
+            .eval(&lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        let mut chain = crate::process::default_project_layer();
+        edit(&mut chain);
+        assert!(state.set_project_process_chain(chain));
+        schedule_process_observed_fixture(&state, scratch, 102_000)
+    }
+
+    fn default_lane_slot_mut<'a>(
+        chain: &'a mut crate::process::TrackProcessChain,
+        name: &str,
+    ) -> &'a mut crate::process::TrackProcessSlot {
+        chain
+            .slots
+            .iter_mut()
+            .find(|slot| slot.instance_name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("default lane {name}"))
+    }
+
+    fn lane(values: &[f32]) -> crate::process::ProcessLane {
+        crate::process::ProcessLane {
+            values: values.to_vec(),
+        }
+    }
+
+    #[test]
+    fn scheduler_default_lanes_tacc_accumulates_shared_reset_and_prob_vetoes() {
+        let events = run_with_scheduler_stack(|| {
+            default_lanes_fixture(|chain| {
+                default_lane_slot_mut(chain, "tacc")
+                    .lanes
+                    .insert("amount".to_string(), lane(&[1.0; 8]));
+                // The shared reset lane clears tacc through its wired `a`
+                // port before step 4 plays, so the ramp restarts there.
+                default_lane_slot_mut(chain, "reset")
+                    .lanes
+                    .insert("reset".to_string(), lane(&[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]));
+                // prob 0 on step 3 vetoes that step; the accumulator behind
+                // it still advances (state moves under a masked trig).
+                default_lane_slot_mut(chain, "prob")
+                    .lanes
+                    .insert("prob".to_string(), lane(&[1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0]));
+            })
+        });
+        let transposes = events
+            .iter()
+            .take(7)
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transposes,
+            vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0],
+            "step 3 vetoed, reset before step 4"
+        );
+    }
+
+    #[test]
+    fn scheduler_default_lanes_fanout_rescales_count_into_duration() {
+        let events = run_with_scheduler_stack(|| {
+            default_lanes_fixture(|chain| {
+                default_lane_slot_mut(chain, "tacc").enabled = false;
+                let count = default_lane_slot_mut(chain, "count");
+                count.lanes.insert("step".to_string(), lane(&[1.0; 8]));
+                count
+                    .inlets
+                    .insert("lo".to_string(), crate::process::ProcessLiteral::Number(0.0));
+                count
+                    .inlets
+                    .insert("hi".to_string(), crate::process::ProcessLiteral::Number(4.0));
+                // count 0..4 → transpose raw (primary), duration 0.1..0.5 (fan-out).
+                count.bindings.insert(
+                    "out".to_string(),
+                    Some(crate::process::ParamTarget::StepParam {
+                        param: "transpose".to_string(),
+                    }),
+                );
+                count.fanout.insert(
+                    "out".to_string(),
+                    vec![crate::process::ProcessPortFanout {
+                        target: crate::process::ParamTarget::StepParam {
+                            param: "duration".to_string(),
+                        },
+                        lo: 0.1,
+                        hi: 0.5,
+                    }],
+                );
+            })
+        });
+        let pairs = events
+            .iter()
+            .take(4)
+            .map(|event| (event.transpose, event.duration))
+            .collect::<Vec<(f32, f32)>>();
+        let expected = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .map(|count| (*count, 0.1 + (count / 4.0) * 0.4))
+            .collect::<Vec<(f32, f32)>>();
+        for ((transpose, duration), (want_t, want_d)) in pairs.iter().zip(expected.iter()) {
+            assert_eq!(transpose, want_t);
+            assert!((duration - want_d).abs() < 1e-5, "duration {duration} vs {want_d}");
+        }
+    }
+
+    #[test]
+    fn scheduler_default_lanes_are_inert_on_a_fresh_layer() {
+        // A fresh project: default layer installed, every lane untouched.
+        // Nothing may move: transpose stays 0 and retrig/rate keep their
+        // step defaults across two full cycles (the accumulators' `amount`
+        // lanes default to 0, so their state must stay 0).
+        let events = run_with_scheduler_stack(|| default_lanes_fixture(|_| {}));
+        assert!(events.len() >= 16, "two cycles of 8 steps, got {}", events.len());
+        for event in events.iter().take(16) {
+            assert_eq!(event.transpose, 0.0);
+            assert_eq!(event.retrig, StepParam::Retrig.default_value());
+            assert_eq!(event.retrig_rate, StepParam::RetrigRate.default_value());
+        }
+    }
+
+    #[test]
+    fn scheduler_default_lanes_count_wires_into_acc_pass_mode_onto_transpose() {
+        let events = run_with_scheduler_stack(|| {
+            default_lanes_fixture(|chain| {
+                // Silence tacc so transpose only carries acc A.
+                default_lane_slot_mut(chain, "tacc").enabled = false;
+                {
+                    let count = default_lane_slot_mut(chain, "count");
+                    count
+                        .lanes
+                        .insert("step".to_string(), lane(&[1.0; 8]));
+                    count
+                        .inlets
+                        .insert("lo".to_string(), crate::process::ProcessLiteral::Number(0.0));
+                    count
+                        .inlets
+                        .insert("hi".to_string(), crate::process::ProcessLiteral::Number(3.0));
+                }
+                let acc_id = default_lane_slot_mut(chain, "acc A").instance_id;
+                // The UI's OTHER LANES chip binds the writer's `wire` port to
+                // the reader's lane inlet.
+                default_lane_slot_mut(chain, "count").bindings.insert(
+                    "wire".to_string(),
+                    Some(crate::process::ParamTarget::ProcessInlet {
+                        process: "lane-acc".to_string(),
+                        inlet: "amount".to_string(),
+                        instance_id: Some(acc_id),
+                    }),
+                );
+                let acc = default_lane_slot_mut(chain, "acc A");
+                acc.inlets
+                    .insert("mode".to_string(), crate::process::ProcessLiteral::Number(1.0));
+                acc.bindings.insert(
+                    "out".to_string(),
+                    Some(crate::process::ParamTarget::StepParam {
+                        param: "transpose".to_string(),
+                    }),
+                );
+            })
+        });
+        let transposes = events
+            .iter()
+            .take(8)
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transposes,
+            vec![1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0],
+            "count wraps 0..3 and acc A passes it straight to transpose"
         );
     }
 

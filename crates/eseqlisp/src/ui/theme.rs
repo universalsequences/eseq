@@ -368,6 +368,12 @@ pub struct Theme {
     pub list_icon_preset: Color,
     pub list_icon_lfo: Color,
     pub list_icon_misc: Color,
+    /// Process lanes in the step editor: lane fill, strip accents, wire chips.
+    /// Distinct from the macro (green) and modulation hues.
+    pub process_lane_accent: Color,
+    /// Highlight painted on every target a process port can bind to while its
+    /// map button is armed (step-param tabs, other lanes, device params).
+    pub process_map_arm_bg: Color,
 }
 
 macro_rules! theme_slots {
@@ -450,6 +456,8 @@ theme_slots!(
     (rack_row_border, RACK_ROW_BORDER, Color::rgba(0.16, 0.17, 0.19, 1.0)),
     (rack_mapping_border, RACK_MAPPING_BORDER, Color::rgba(0.18, 0.85, 0.42, 0.9)),
     (rack_mapping_bg, RACK_MAPPING_BG, Color::rgba(0.18, 0.85, 0.42, 1.0)),
+    (process_lane_accent, PROCESS_LANE_ACCENT, Color::rgba(0.94, 0.63, 0.24, 1.0)),
+    (process_map_arm_bg, PROCESS_MAP_ARM_BG, Color::rgba(0.50, 0.34, 0.12, 1.0)),
     (plock_base, PLOCK_BASE, Color::rgba(0.54509807, 0.54509807, 0.5882353, 1.0)),
     (eq8_active_text, EQ8_ACTIVE_TEXT, Color::from_hex(0xc8, 0xff, 0x00)),
     (eq8_badge_bg, EQ8_BADGE_BG, Color::from_hex(0xc8, 0xff, 0x00)),

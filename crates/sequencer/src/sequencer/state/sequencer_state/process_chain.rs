@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use super::super::*;
 
 impl SequencerState {
@@ -164,6 +165,22 @@ impl SequencerState {
             self.process_channel_values_version
                 .fetch_add(1, Ordering::Release);
         }
+    }
+    /// Publish the scheduler's step-process state histories for the lane
+    /// strip scope. Called once per lookahead chunk that fired a process.
+    pub fn publish_process_scope_values(
+        &self,
+        values: HashMap<u64, HashMap<String, Vec<f32>>>,
+    ) {
+        *self.process_scope_values.lock().unwrap() = values;
+        self.process_scope_values_version
+            .fetch_add(1, Ordering::Release);
+    }
+    pub fn process_scope_values_version(&self) -> u64 {
+        self.process_scope_values_version.load(Ordering::Acquire)
+    }
+    pub fn process_scope_values(&self) -> HashMap<u64, HashMap<String, Vec<f32>>> {
+        self.process_scope_values.lock().unwrap().clone()
     }
     pub fn process_channel_values_version(&self) -> u64 {
         self.process_channel_values_version.load(Ordering::Acquire)
@@ -518,6 +535,7 @@ impl SequencerState {
             let lane = track_overrides
                 .entry(identity)
                 .or_default()
+                .lanes
                 .entry(inlet_name.clone())
                 .or_insert_with(|| {
                     project_slot
@@ -556,10 +574,10 @@ impl SequencerState {
         };
         let removed = track_overrides
             .get_mut(&identity)
-            .is_some_and(|lanes| lanes.remove(inlet_name).is_some());
+            .is_some_and(|override_| override_.lanes.remove(inlet_name).is_some());
         if track_overrides
             .get(&identity)
-            .is_some_and(|lanes| lanes.is_empty())
+            .is_some_and(|override_| override_.is_empty())
         {
             track_overrides.remove(&identity);
         }
@@ -589,7 +607,169 @@ impl SequencerState {
             .unwrap()
             .get(track)
             .and_then(|overrides| overrides.get(&crate::process::project_slot_identity_id(&slot)))
-            .is_some_and(|lanes| lanes.contains_key(inlet_name))
+            .is_some_and(|override_| override_.lanes.contains_key(inlet_name))
+    }
+    /// Edit one track's override record for a project slot. Returns None when
+    /// `instance_id` is not a project slot (or the track is out of range);
+    /// prunes the record when the edit leaves it empty.
+    fn edit_project_slot_override<R>(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        edit: impl FnOnce(&mut crate::process::ProjectSlotOverride) -> R,
+    ) -> Option<R> {
+        let slot = self
+            .project_process_chain()
+            .slots
+            .into_iter()
+            .find(|slot| slot.instance_id == instance_id)?;
+        let identity = crate::process::project_slot_identity_id(&slot);
+        let mut all = self.pattern.project_process_lane_overrides.lock().unwrap();
+        let track_overrides = all.get_mut(track)?;
+        let result = edit(track_overrides.entry(identity).or_default());
+        if track_overrides
+            .get(&identity)
+            .is_some_and(|override_| override_.is_empty())
+        {
+            track_overrides.remove(&identity);
+        }
+        Some(result)
+    }
+    /// Edit a port's fan-out list. Track slots edit in place; project slots
+    /// fork this track's list (starting from the effective composed list)
+    /// unless `all_tracks`, which edits the shared slot and drops every
+    /// track's fork of that port. Returns false when nothing matched.
+    pub fn edit_process_port_fanout(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        port_name: &str,
+        all_tracks: bool,
+        edit: impl FnOnce(&mut Vec<crate::process::ProcessPortFanout>),
+    ) -> bool {
+        if track >= self.active_track_count() {
+            return false;
+        }
+        let mut edit = Some(edit);
+        let edited_track_slot = {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            let Some(chain) = chains.get_mut(track) else {
+                return false;
+            };
+            chain
+                .slots
+                .iter_mut()
+                .find(|slot| slot.instance_id == instance_id)
+                .map(|slot| edit_fanout_list(&mut slot.fanout, port_name, edit.take().unwrap()))
+        };
+        let changed = match edited_track_slot {
+            Some(changed) => changed,
+            None => {
+                if all_tracks {
+                    let Some(changed) = self.edit_project_process_chain_slot(instance_id, |slot| {
+                        edit_fanout_list(&mut slot.fanout, port_name, edit.take().unwrap())
+                    }) else {
+                        return false;
+                    };
+                    let identity = self
+                        .project_process_chain()
+                        .slots
+                        .into_iter()
+                        .find(|slot| slot.instance_id == instance_id)
+                        .map(|slot| crate::process::project_slot_identity_id(&slot));
+                    if let Some(identity) = identity {
+                        let mut all = self.pattern.project_process_lane_overrides.lock().unwrap();
+                        for track_overrides in all.iter_mut() {
+                            if let Some(override_) = track_overrides.get_mut(&identity) {
+                                override_.fanout.remove(port_name);
+                                if override_.is_empty() {
+                                    track_overrides.remove(&identity);
+                                }
+                            }
+                        }
+                    }
+                    changed
+                } else {
+                    // Fork from what this track currently hears.
+                    let current = self
+                        .composed_track_process_chain(track)
+                        .and_then(|chain| {
+                            chain
+                                .slots
+                                .into_iter()
+                                .find(|slot| slot.instance_id == instance_id)
+                        })
+                        .map(|slot| slot.fanout.get(port_name).cloned().unwrap_or_default());
+                    let Some(current) = current else {
+                        return false;
+                    };
+                    let Some(changed) = self.edit_project_slot_override(track, instance_id, |override_| {
+                        let list = override_
+                            .fanout
+                            .entry(port_name.to_string())
+                            .or_insert(current);
+                        let before = list.clone();
+                        (edit.take().unwrap())(list);
+                        *list != before
+                    }) else {
+                        return false;
+                    };
+                    changed
+                }
+            }
+        };
+        if changed {
+            self.publish_process_chain_edit();
+        }
+        true
+    }
+    /// Remove a project port binding from the shared slot on every track.
+    pub fn clear_process_port_binding_for_instance(
+        &self,
+        instance_id: crate::process::ProcessInstanceId,
+        port_name: &str,
+    ) -> bool {
+        let mut changed = false;
+        {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            for chain in chains.iter_mut() {
+                for slot in chain
+                    .slots
+                    .iter_mut()
+                    .filter(|slot| slot.instance_id == instance_id)
+                {
+                    changed |= slot.bindings.remove(port_name).is_some();
+                }
+            }
+        }
+        if let Some(project_changed) = self.edit_project_process_chain_slot(instance_id, |slot| {
+            slot.bindings.remove(port_name).is_some()
+        }) {
+            changed |= project_changed;
+            // A shared clear also drops every track's own override of the
+            // port, otherwise the tracks would keep their forked targets.
+            let mut all = self.pattern.project_process_lane_overrides.lock().unwrap();
+            let identity = self
+                .project_process_chain()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_id == instance_id)
+                .map(|slot| crate::process::project_slot_identity_id(&slot));
+            if let Some(identity) = identity {
+                for track_overrides in all.iter_mut() {
+                    if let Some(override_) = track_overrides.get_mut(&identity) {
+                        changed |= override_.bindings.remove(port_name).is_some();
+                        if override_.is_empty() {
+                            track_overrides.remove(&identity);
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            self.publish_process_chain_edit();
+        }
+        changed
     }
     /// Replace a scalar inlet on every current-pattern chain slot owned by
     /// `instance_id`. This is the durable counterpart to authoring-handle knob
@@ -657,10 +837,13 @@ impl SequencerState {
                     changed
                 })
         };
+        // A project slot edited from one track's UI forks that track only
+        // (docs/default-process-lanes-spec.md); `set_process_inlet_value`
+        // is the every-track write.
         let Some(changed) = changed.or_else(|| {
-            self.edit_project_process_chain_slot(instance_id, |slot| {
-                let changed = slot.inlets.get(inlet_name) != Some(&value);
-                slot.inlets.insert(inlet_name.to_string(), value.clone());
+            self.edit_project_slot_override(track, instance_id, |override_| {
+                let changed = override_.inlets.get(inlet_name) != Some(&value);
+                override_.inlets.insert(inlet_name.to_string(), value.clone());
                 changed
             })
         }) else {
@@ -703,9 +886,21 @@ impl SequencerState {
                 .find(|slot| slot.instance_id == instance_id)
                 .map(apply)
         };
-        let Some(changed) =
-            changed.or_else(|| self.edit_project_process_chain_slot(instance_id, apply))
-        else {
+        // Project slots fork per track here; `set_process_port_binding_for_instance`
+        // is the every-track write.
+        let Some(changed) = changed.or_else(|| {
+            self.edit_project_slot_override(track, instance_id, |override_| {
+                let current = override_.bindings.get(port_name);
+                if matches!(current, Some(Some(existing)) if existing == &target) {
+                    false
+                } else {
+                    override_
+                        .bindings
+                        .insert(port_name.to_string(), Some(target.clone()));
+                    true
+                }
+            })
+        }) else {
             return false;
         };
         if changed {
@@ -784,9 +979,12 @@ impl SequencerState {
                 .find(|slot| slot.instance_id == instance_id)
                 .map(|slot| slot.bindings.remove(port_name).is_some())
         };
+        // Clearing a project port from one track reverts that track to the
+        // shared binding; `clear_process_port_binding_for_instance` clears
+        // the shared one everywhere.
         let Some(changed) = changed.or_else(|| {
-            self.edit_project_process_chain_slot(instance_id, |slot| {
-                slot.bindings.remove(port_name).is_some()
+            self.edit_project_slot_override(track, instance_id, |override_| {
+                override_.bindings.remove(port_name).is_some()
             })
         }) else {
             return false;
@@ -934,4 +1132,20 @@ impl SequencerState {
         }
         (all, tracks)
     }
+}
+
+/// Apply `edit` to `fanout[port]`, dropping the key when the list ends empty.
+fn edit_fanout_list(
+    fanout: &mut BTreeMap<String, Vec<crate::process::ProcessPortFanout>>,
+    port_name: &str,
+    edit: impl FnOnce(&mut Vec<crate::process::ProcessPortFanout>),
+) -> bool {
+    let list = fanout.entry(port_name.to_string()).or_default();
+    let before = list.clone();
+    edit(list);
+    let changed = *list != before;
+    if list.is_empty() {
+        fanout.remove(port_name);
+    }
+    changed
 }

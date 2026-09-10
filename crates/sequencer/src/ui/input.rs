@@ -1113,6 +1113,18 @@ pub(crate) fn handle_metal_soft_step_param_key(
     if focused_widget_captures_text_input(editor) {
         return false;
     }
+    // A focused number picker anywhere else (the lane strip's lo/hi, an
+    // inlet row, a panel knob) owns the digits: the row-wide soft edit only
+    // runs when the step picker itself is what has focus, or nothing does.
+    let focused_number_picker = editor
+        .focused_widget_node()
+        .filter(|node| node.widget_type == "number-picker")
+        .map(|node| node.widget_id);
+    if let Some(focused) = focused_number_picker {
+        if current_step_param_number_picker_id(editor) != Some(focused) {
+            return false;
+        }
+    }
 
     let soft_edit_key = number_picker_soft_edit_key(key, edit.is_active());
     if !soft_edit_key {

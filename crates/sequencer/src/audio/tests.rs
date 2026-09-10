@@ -2418,7 +2418,7 @@ fn retrig_cancel_preserves_scheduled_triggers_for_later_mute_group_winner() {
                 track_idx: 1,
                 step: 0,
                 gate: 16.0,
-                target: RetrigTarget::Step,
+                target: RetrigTarget::Step { transpose: 0.0, velocity: 1.0, speed: 1.0 },
             }),
         },
     ];
@@ -2431,7 +2431,7 @@ fn retrig_cancel_preserves_scheduled_triggers_for_later_mute_group_winner() {
                 track_idx: 1,
                 step: 0,
                 gate: 16.0,
-                target: RetrigTarget::Step,
+                target: RetrigTarget::Step { transpose: 0.0, velocity: 1.0, speed: 1.0 },
             }),
         },
     ];
@@ -2674,7 +2674,7 @@ fn retrig_infinite_keeps_scheduling_until_the_track_fires_again() {
             track_idx: 2,
             step: 0,
             gate: 128.0,
-            target: RetrigTarget::Step,
+            target: RetrigTarget::Step { transpose: 0.0, velocity: 1.0, speed: 1.0 },
         }),
     }];
     let mut block_events = vec![BlockEvent {
@@ -2684,7 +2684,7 @@ fn retrig_infinite_keeps_scheduling_until_the_track_fires_again() {
             track_idx: 2,
             step: 0,
             gate: 128.0,
-            target: RetrigTarget::Step,
+            target: RetrigTarget::Step { transpose: 0.0, velocity: 1.0, speed: 1.0 },
         }),
     }];
     super::cancel_retrigs_for_track(&mut countdown_events, &mut block_events, 2);
@@ -2741,7 +2741,7 @@ fn retrig_custom_track_refires_the_same_logical_voices() {
     };
     assert_eq!(super::armed_retrig_repeats(3, &empty), 0);
     // Sampler / modulator tracks always arm; they re-allocate from the step.
-    assert_eq!(super::armed_retrig_repeats(3, &RetrigTarget::Step), 3);
+    assert_eq!(super::armed_retrig_repeats(3, &RetrigTarget::Step { transpose: 0.0, velocity: 1.0, speed: 1.0 }), 3);
 }
 
 #[test]

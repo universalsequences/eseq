@@ -260,6 +260,16 @@ fn value_symbol_name(value: &Value) -> Option<String> {
     }
 }
 
+/// Optional trailing `:all` / "all" on the process edit natives: write the
+/// shared project slot on every track instead of forking this track.
+fn process_edit_scope_is_all(value: Option<&Value>) -> bool {
+    matches!(
+        value,
+        Some(Value::Keyword(scope)) | Some(Value::String(scope)) | Some(Value::Symbol(scope))
+            if scope.trim_start_matches(':') == "all"
+    )
+}
+
 fn process_slot_port_def(
     state: &SequencerState,
     track: usize,
@@ -4211,12 +4221,16 @@ pub(crate) fn init_runtime(
                 .into());
             }
         };
-        ctx.enqueue_command(process_history_command("set-inlet", vec![
+        let mut fields = vec![
             ("track", Value::Number(track as f64)),
             ("instance-id", Value::Number(instance_id as f64)),
             ("inlet", Value::String(inlet)),
             ("value", value.clone()),
-        ]));
+        ];
+        if process_edit_scope_is_all(args.get(4)) {
+            fields.push(("scope", Value::String("all".to_string())));
+        }
+        ctx.enqueue_command(process_history_command("set-inlet", fields));
         Ok(Value::Bool(true))
     });
 
@@ -4307,7 +4321,7 @@ pub(crate) fn init_runtime(
             )
             .into());
         };
-        if !port_def.is_mappable() {
+        if !port_def.is_mappable() && !port_def.is_connectable() {
             return Err(format!(
                 "seq-bind-process-port: process port {port:?} is not mappable"
             )
@@ -4316,7 +4330,10 @@ pub(crate) fn init_runtime(
         let target_value = target.clone();
         let target = param_target_from_value(&st, track, target)
             .map_err(|error| format!("seq-bind-process-port: {error}"))?;
-        if !port_def.allows_parameter_mapping_target(&target) {
+        // A mappable port takes parameter targets; a connectable (`wire`)
+        // port takes another process's inlet. The lane strip binds both
+        // through this one native (docs/default-process-lanes-spec.md).
+        if !port_def.allows_binding_target(&target) {
             let target_kind = port_def
                 .effective_target_kind()
                 .map(|kind| kind.as_str())
@@ -4335,12 +4352,105 @@ pub(crate) fn init_runtime(
                 target
             );
         }
-        ctx.enqueue_command(process_history_command("bind-port", vec![
+        let mut fields = vec![
             ("track", Value::Number(track as f64)),
             ("instance-id", Value::Number(instance_id.0 as f64)),
             ("port", Value::String(port)),
             ("target", target_value),
-        ]));
+        ];
+        if process_edit_scope_is_all(args.get(4)) {
+            fields.push(("scope", Value::String("all".to_string())));
+        }
+        ctx.enqueue_command(process_history_command("bind-port", fields));
+        Ok(Value::Bool(true))
+    });
+
+    // Fan-out: extra scaled targets on a port (docs/default-process-lanes-spec.md).
+    runtime.register_native("seq-add-process-port-fanout", move |args, ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(instance_id)),
+            Some(port),
+            Some(target),
+        ) = (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            return Err(
+                "seq-add-process-port-fanout: expected (track instance-id port target-map [scope])"
+                    .into(),
+            );
+        };
+        let port = value_symbol_name(port)
+            .ok_or_else(|| "seq-add-process-port-fanout: port must be a name".to_string())?;
+        let mut fields = vec![
+            ("track", Value::Number(*track)),
+            ("instance-id", Value::Number(*instance_id)),
+            ("port", Value::String(port)),
+            ("target", target.clone()),
+        ];
+        if process_edit_scope_is_all(args.get(4)) {
+            fields.push(("scope", Value::String("all".to_string())));
+        }
+        ctx.enqueue_command(process_history_command("add-fanout", fields));
+        Ok(Value::Bool(true))
+    });
+    runtime.register_native("seq-set-process-port-fanout-range", move |args, ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(instance_id)),
+            Some(port),
+            Some(Value::Number(index)),
+        ) = (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            return Err(
+                "seq-set-process-port-fanout-range: expected (track instance-id port index lo hi [scope])"
+                    .into(),
+            );
+        };
+        let port = value_symbol_name(port)
+            .ok_or_else(|| "seq-set-process-port-fanout-range: port must be a name".to_string())?;
+        let mut fields = vec![
+            ("track", Value::Number(*track)),
+            ("instance-id", Value::Number(*instance_id)),
+            ("port", Value::String(port)),
+            ("index", Value::Number(*index)),
+        ];
+        if let Some(Value::Number(lo)) = args.get(4) {
+            fields.push(("lo", Value::Number(*lo)));
+        }
+        if let Some(Value::Number(hi)) = args.get(5) {
+            fields.push(("hi", Value::Number(*hi)));
+        }
+        if process_edit_scope_is_all(args.get(6)) {
+            fields.push(("scope", Value::String("all".to_string())));
+        }
+        ctx.enqueue_command(process_history_command("set-fanout-range", fields));
+        Ok(Value::Bool(true))
+    });
+    runtime.register_native("seq-remove-process-port-fanout", move |args, ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(instance_id)),
+            Some(port),
+            Some(Value::Number(index)),
+        ) = (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            return Err(
+                "seq-remove-process-port-fanout: expected (track instance-id port index [scope])"
+                    .into(),
+            );
+        };
+        let port = value_symbol_name(port)
+            .ok_or_else(|| "seq-remove-process-port-fanout: port must be a name".to_string())?;
+        let mut fields = vec![
+            ("track", Value::Number(*track)),
+            ("instance-id", Value::Number(*instance_id)),
+            ("port", Value::String(port)),
+            ("index", Value::Number(*index)),
+        ];
+        if process_edit_scope_is_all(args.get(4)) {
+            fields.push(("scope", Value::String("all".to_string())));
+        }
+        ctx.enqueue_command(process_history_command("remove-fanout", fields));
         Ok(Value::Bool(true))
     });
 
@@ -4354,11 +4464,15 @@ pub(crate) fn init_runtime(
         let instance_id = sequencer::process::ProcessInstanceId(*instance_id as u64);
         let port = value_symbol_name(port)
             .ok_or_else(|| "seq-clear-process-port-binding: port must be a name".to_string())?;
-        ctx.enqueue_command(process_history_command("clear-port-binding", vec![
+        let mut fields = vec![
             ("track", Value::Number(track as f64)),
             ("instance-id", Value::Number(instance_id.0 as f64)),
             ("port", Value::String(port)),
-        ]));
+        ];
+        if process_edit_scope_is_all(args.get(3)) {
+            fields.push(("scope", Value::String("all".to_string())));
+        }
+        ctx.enqueue_command(process_history_command("clear-port-binding", fields));
         Ok(Value::Bool(true))
     });
 

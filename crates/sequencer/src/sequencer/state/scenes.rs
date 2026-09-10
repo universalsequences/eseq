@@ -378,7 +378,11 @@ impl ProjectScenes {
                 neural_networks: snapshot.neural_networks.clone(),
                 graph_overrides: snapshot.graph_overrides.clone(),
                 scene_slots: snapshot.scene_slots.clone(),
-                project_process_chain: snapshot.project_process_chain.clone(),
+                project_process_chain: {
+                    let mut chain = snapshot.project_process_chain.clone();
+                    crate::process::ensure_default_project_layer(&mut chain);
+                    chain
+                },
             });
         }
 
@@ -400,7 +404,7 @@ impl ProjectScenes {
                 neural_networks: Vec::new(),
                 graph_overrides: Vec::new(),
                 scene_slots: SceneSlotStore::default(),
-                project_process_chain: crate::process::TrackProcessChain::default(),
+                project_process_chain: crate::process::default_project_layer(),
             });
         }
 
@@ -1439,7 +1443,7 @@ impl ProjectScenes {
             neural_networks,
             graph_overrides,
             scene_slots,
-            project_process_chain,
+            mut project_process_chain,
         ) = source_scene
             .map(|scene| {
                 (
@@ -1452,6 +1456,8 @@ impl ProjectScenes {
                 )
             })
             .unwrap_or_default();
+        // Every scene carries the default lanes (docs/default-process-lanes-spec.md).
+        crate::process::ensure_default_project_layer(&mut project_process_chain);
         let next_id = self.next_scene_id;
         self.next_scene_id = self
             .next_scene_id

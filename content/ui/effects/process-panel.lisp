@@ -11,6 +11,7 @@
 (import eseq.effects.panel-frame :as pf)
 
 (export clear-selection
+        track-process-rows
         select-slot
         selected-slot
         open-selected-source
@@ -301,6 +302,9 @@
     :on-click (lambda (event) (clear-selection))
     :on-drop (lambda (event) (drop event))))
 
+(def track-process-rows ()
+  (filter (lambda (slot) (not (get slot :project))) SEQ.process-slots))
+
 (def process-chain-panel ()
   (box :width 26 :height st/fx-fixed-panel-height :padding 0
     :debug-name "process-chain-panel"
@@ -325,6 +329,9 @@
         :width :fill :flex 1
         :on-click (lambda (event) (clear-selection))
         (v-stack :width :fill :padding 0.24 :gap 0.16
-          (each SEQ.process-slots |slot index|
+          ;; Project-layer slots (the default lanes and any script-authored
+          ;; project layer) are edited from the lane strip in the step editor,
+          ;; not here: they are lanes, not effects.
+          (each (track-process-rows) |slot index|
             (slot-row slot index))
           (end-drop-zone))))))

@@ -983,6 +983,15 @@ impl<P> UndoManager<P> {
         Ok(())
     }
 
+    /// Keep an active gesture alive without staging a patch: sources that
+    /// apply their edits directly (process lane drags) call this per event so
+    /// the idle fallback does not close the gesture mid-drag.
+    pub fn touch_active_gesture(&mut self) {
+        if self.active_gesture.is_some() {
+            self.active_gesture_updated_at = Some(Instant::now());
+        }
+    }
+
     pub fn finish_gesture(&mut self, id: GestureId) -> Option<ActiveGesture> {
         if self.active_gesture.as_ref().map(|gesture| gesture.id) != Some(id) {
             return None;

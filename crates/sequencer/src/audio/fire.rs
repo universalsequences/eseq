@@ -244,7 +244,11 @@ pub(super) fn fire_resolved(
             retrig_repeats,
             retrig_interval_samples,
             hit_gate,
-            RetrigTarget::Step,
+            RetrigTarget::Step {
+                transpose: resolved.transpose,
+                velocity: resolved.velocity,
+                speed: resolved.speed,
+            },
         );
         data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
         return;
@@ -811,7 +815,11 @@ pub(super) fn fire_resolved(
             gated: gate_mode > 0.5,
         }
     } else {
-        RetrigTarget::Step
+        RetrigTarget::Step {
+            transpose: resolved.transpose,
+            velocity: resolved.velocity,
+            speed: resolved.speed,
+        }
     };
     let retrig_repeats = armed_retrig_repeats(retrig_repeats, &retrig_target);
     arm_step_retrig(
@@ -980,7 +988,10 @@ pub(super) fn dispatch_retrig_event(
             .plocks
             .get(event.step, 1)
             .unwrap_or_else(|| slot.defaults.get(1));
-        let velocity = data.state.pattern.step_data[track_idx].get(event.step, StepParam::Velocity);
+        let velocity = match event.target {
+            RetrigTarget::Step { velocity, .. } => velocity,
+            _ => data.state.pattern.step_data[track_idx].get(event.step, StepParam::Velocity),
+        };
         let seq = next_event_sequence_from(&mut data.event_seq);
         unsafe {
             params_push_wrapper(
@@ -1103,7 +1114,20 @@ pub(super) fn dispatch_retrig_event(
         data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
     );
     let sd = &data.state.pattern.step_data[track_idx];
-    let transpose = sd.get(event.step, StepParam::Transpose);
+    // The resolved values the initial hit played with; step data is the
+    // fallback only for a target that carries none.
+    let (transpose, velocity, speed) = match event.target {
+        RetrigTarget::Step {
+            transpose,
+            velocity,
+            speed,
+        } => (transpose, velocity, speed),
+        _ => (
+            sd.get(event.step, StepParam::Transpose),
+            sd.get(event.step, StepParam::Velocity),
+            sd.get(event.step, StepParam::Speed),
+        ),
+    };
     let host_value = |param_idx: usize, default: f32| {
         if param_idx >= chop_inst_slot.num_params.load(Ordering::Relaxed) as usize {
             return default;
@@ -1167,7 +1191,7 @@ pub(super) fn dispatch_retrig_event(
                 frame_offset,
                 gatepitch_seq,
                 custom_pitch_hz(trigger_transpose, 0.0),
-                sd.get(event.step, StepParam::Velocity),
+                velocity,
             );
         }
     }
@@ -1179,8 +1203,8 @@ pub(super) fn dispatch_retrig_event(
             lid,
             frame_offset,
             sampler_seq,
-            sd.get(event.step, StepParam::Velocity),
-            sd.get(event.step, StepParam::Speed) * chop_playback_speed,
+            velocity,
+            speed * chop_playback_speed,
             event.gate,
             attack_samples,
             release_samples,

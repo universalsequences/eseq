@@ -148,6 +148,7 @@ pub(crate) struct FrameDiffState {
     /// Scheduler → UI channel mirror generation last offered to a render
     /// frame. A change requests a frame so inline bindings are polled.
     pub(crate) prev_process_channel_values_version: u64,
+    pub(crate) prev_process_scope_values_version: u64,
     pub(crate) prev_track_tint:
         Option<(eseqlisp::backend::Color, [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS])>,
     pub(crate) prev_variant_tint:

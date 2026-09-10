@@ -171,6 +171,60 @@ fn apply_live_note_outcome(
     }
 }
 
+/// The production live-key gate and dispatch, shared by the event loop and latency probe.
+pub(crate) fn dispatch_live_keyboard_event(
+    editor: &mut Editor,
+    app: &mut app::App,
+    shared: &SharedHandles,
+    key: &crossterm::event::KeyEvent,
+) -> RecordingKeyOutcome {
+    // Hold-capable sequence roll resolves through the
+    // *sequencer* mode keymap on both press and release, even
+    // when a transport/mixer click owns the active tile. The
+    // named command is semantic; user lisp can move its key.
+    let sequence_roll_binding = editor.buffer_mode_keybinding("*sequencer*", *key)
+        == Some("eseq.seq-grid-mode/sequence-roll-hold");
+    // Sequence roll and its rate keys are transport-wide:
+    // neither requires an armed track. The active mode must opt
+    // in, and editor focus still wins, through the gate below.
+    let roll_rate_key = is_active_roll_rate_key(&shared.state, key);
+    // An armed drum rack is an arm target too: with only the
+    // rack armed the keys must still reach the live keyboard,
+    // where they resolve to pads.
+    let any_armed = shared.record_armed.lock().unwrap().iter().any(|a| *a)
+        || shared.armed_rack.lock().unwrap().is_some();
+    let recording_key_outcome = if (sequence_roll_binding
+        || roll_rate_key
+        || any_armed
+        || held_note_for_key(&shared.held_notes, key))
+        && should_route_to_live_keyboard(
+            editor,
+            key,
+            &shared.held_notes,
+            sequence_roll_binding,
+        )
+    {
+        handle_recording_key(
+            key,
+            app,
+            &shared.state,
+            &shared.record_armed,
+            &shared.armed_rack,
+            &shared.recording,
+            &shared.keyboard_tx,
+            &shared.keyboard_octave,
+            &shared.held_notes,
+            &shared.roll_record,
+            &shared.ui_invalidations,
+            sequence_roll_binding,
+        )
+    } else {
+        RecordingKeyOutcome::Ignored
+    };
+    apply_live_note_outcome(recording_key_outcome, true, app, editor);
+    recording_key_outcome
+}
+
 pub(crate) fn run_event_loop(
     mut app: app::App,
     mut editor: Editor,
@@ -282,6 +336,7 @@ pub(crate) fn run_event_loop(
         prev_track_button_states: track_button_state_snapshot(&shared.state),
         prev_current_track_playhead_visible: false,
         prev_process_channel_values_version: shared.state.process_channel_values_version(),
+        prev_process_scope_values_version: shared.state.process_scope_values_version(),
         prev_track_tint: None,
         prev_variant_tint: None,
         prev_ui_epoch: 0,
@@ -346,7 +401,7 @@ pub(crate) fn run_event_loop(
     let mut lisp_consumed_midi_notes: std::collections::HashSet<LiveNoteSource> =
         std::collections::HashSet::new();
 
-    loop {
+    'app_loop: loop {
         application_menu::sync_context(&menu_state, &mut editor);
         let mut pointer_released_this_loop = false;
         for result in app.drain_due_pattern_launches() {
@@ -704,29 +759,34 @@ pub(crate) fn run_event_loop(
         } else {
             Duration::from_millis(50)
         };
-        // During a macOS live resize the poll blocks inside AppKit's modal
-        // tracking loop, so this outer loop cannot render; the backend invokes
-        // this callback on each resize tick to keep the frame matching the
-        // window instead of letting the compositor stretch the previous one.
-        let mut live_resize_redraw = |backend: &mut AppBackend| {
-            let (cols, rows) = backend.viewport_size();
-            editor.update_tile_rects(cols as u16, rows as u16);
-            let tiled_frame =
-                eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
-            match backend.render_tiled(&tiled_frame) {
-                Ok(TiledRenderStatus::Presented) => {
-                    editor.clear_needs_redraw();
-                    last_render_at = Instant::now();
+        let mut input_batch = live_input_batch::LiveInputBatch::new();
+        loop {
+            // During a macOS live resize the poll blocks inside AppKit's modal
+            // tracking loop, so this outer loop cannot render; the backend invokes
+            // this callback on each resize tick to keep the frame matching the
+            // window instead of letting the compositor stretch the previous one.
+            let mut live_resize_redraw = |backend: &mut AppBackend| {
+                let (cols, rows) = backend.viewport_size();
+                editor.update_tile_rects(cols as u16, rows as u16);
+                let tiled_frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
+                match backend.render_tiled(&tiled_frame) {
+                    Ok(TiledRenderStatus::Presented) => {
+                        editor.clear_needs_redraw();
+                        last_render_at = Instant::now();
+                    }
+                    Ok(TiledRenderStatus::NotPresented) => {
+                        eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
+                    }
+                    Err(_) => {}
                 }
-                Ok(TiledRenderStatus::NotPresented) => {
-                    eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
-                }
-                Err(_) => {}
-            }
-        };
-        if let Some(event) = backend.poll_backend_event_with_redraw(timeout, &mut live_resize_redraw)
-        {
+            };
+            let Some(event) = backend.poll_backend_event_with_redraw(
+                input_batch.poll_timeout(timeout), &mut live_resize_redraw,
+            ) else { break; };
             let event_started = Instant::now();
+            input_batch.begin_event(event_started);
+            let mut live_key_consumed = false;
             match event {
                 BackendEvent::Quit => editor.request_quit(),
                 BackendEvent::FileDrop(paths, drop_position) => {
@@ -787,7 +847,7 @@ pub(crate) fn run_event_loop(
                             let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
                             editor.refresh_runtime_side_effects();
                             ui_loop_stats.note_event(event_started.elapsed());
-                            continue;
+                            continue 'app_loop;
                         }
                         // Every other app-level shortcut yields to the modal.
                         // Editor routing sends the key to the modal's owning
@@ -795,7 +855,7 @@ pub(crate) fn run_event_loop(
                         // control handles it.
                         editor.handle_key(key);
                         ui_loop_stats.note_event(event_started.elapsed());
-                        continue;
+                        continue 'app_loop;
                     }
                     if raw_key.kind == crossterm::event::KeyEventKind::Press {
                         if raw_key.code == crossterm::event::KeyCode::Esc
@@ -815,7 +875,7 @@ pub(crate) fn run_event_loop(
                             pointer_is_down = false;
                             shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
                             ui_loop_stats.note_event(event_started.elapsed());
-                            continue;
+                            continue 'app_loop;
                         }
                         if let Some(gesture) = gesture.piano_roll_history_gesture.take() {
                             let track = gesture.track;
@@ -843,7 +903,7 @@ pub(crate) fn run_event_loop(
                                         "Could not finalize interrupted piano-roll gesture: {error:?}"
                                     )));
                                     ui_loop_stats.note_event(event_started.elapsed());
-                                    continue;
+                                    continue 'app_loop;
                                 }
                             }
                         }
@@ -1020,7 +1080,7 @@ pub(crate) fn run_event_loop(
                         editor.show_transient_message(message);
                         editor.mark_needs_redraw();
                         ui_loop_stats.note_event(event_started.elapsed());
-                        continue;
+                        continue 'app_loop;
                     }
                     if handle_metal_command_shortcut_with_ui_epoch(
                         &mut editor,
@@ -1037,7 +1097,7 @@ pub(crate) fn run_event_loop(
                         }
                         editor.mark_needs_redraw();
                         ui_loop_stats.note_event(event_started.elapsed());
-                        continue;
+                        continue 'app_loop;
                     }
                     let key = normalize_command_shortcuts(raw_key);
                     if key.kind == crossterm::event::KeyEventKind::Press
@@ -1050,7 +1110,7 @@ pub(crate) fn run_event_loop(
                         ), Ok(Some(Value::Bool(true)))) {
                             editor.refresh_runtime_side_effects();
                             editor.mark_needs_redraw();
-                            continue;
+                            continue 'app_loop;
                         }
                         let cleared_neural_selection = {
                             let mut selection = shared.selected_neural_neurons.lock().unwrap();
@@ -1085,14 +1145,14 @@ pub(crate) fn run_event_loop(
                             frame.prev_selected_neural_neurons = selection;
                             editor.mark_needs_redraw();
                             ui_loop_stats.note_event(event_started.elapsed());
-                            continue;
+                            continue 'app_loop;
                         }
                     }
                     if should_toggle_play_on_space(&editor, &key) {
                         let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
                         editor.refresh_runtime_side_effects();
                         ui_loop_stats.note_event(event_started.elapsed());
-                        continue;
+                        continue 'app_loop;
                     }
                     if handle_metal_soft_step_param_key(
                         &mut editor,
@@ -1103,53 +1163,12 @@ pub(crate) fn run_event_loop(
                         &mut soft_step_param_edit,
                     ) {
                         ui_loop_stats.note_event(event_started.elapsed());
-                        continue;
+                        continue 'app_loop;
                     }
-                    // Hold-capable sequence roll resolves through the
-                    // *sequencer* mode keymap on both press and release, even
-                    // when a transport/mixer click owns the active tile. The
-                    // named command is semantic; user lisp can move its key.
-                    let sequence_roll_binding = editor.buffer_mode_keybinding("*sequencer*", key)
-                        == Some("eseq.seq-grid-mode/sequence-roll-hold");
-                    // Sequence roll and its rate keys are transport-wide:
-                    // neither requires an armed track. The active mode must opt
-                    // in, and editor focus still wins, through the gate below.
-                    let roll_rate_key = is_active_roll_rate_key(&shared.state, &key);
-                    // An armed drum rack is an arm target too: with only the
-                    // rack armed the keys must still reach the live keyboard,
-                    // where they resolve to pads.
-                    let any_armed = shared.record_armed.lock().unwrap().iter().any(|a| *a)
-                        || shared.armed_rack.lock().unwrap().is_some();
-                    let recording_key_outcome = if (sequence_roll_binding
-                        || roll_rate_key
-                        || any_armed
-                        || held_note_for_key(&shared.held_notes, &key))
-                        && should_route_to_live_keyboard(
-                            &editor,
-                            &key,
-                            &shared.held_notes,
-                            sequence_roll_binding,
-                        )
-                    {
-                        handle_recording_key(
-                            &key,
-                            &mut app,
-                            &shared.state,
-                            &shared.record_armed,
-                            &shared.armed_rack,
-                            &shared.recording,
-                            &shared.keyboard_tx,
-                            &shared.keyboard_octave,
-                            &shared.held_notes,
-                            &shared.roll_record,
-                            &shared.ui_invalidations,
-                            sequence_roll_binding,
-                        )
-                    } else {
-                        RecordingKeyOutcome::Ignored
-                    };
-                    apply_live_note_outcome(recording_key_outcome, true, &mut app, &mut editor);
+                    let recording_key_outcome =
+                        dispatch_live_keyboard_event(&mut editor, &mut app, &shared, &key);
                     let intercepted = recording_key_outcome.consumed();
+                    live_key_consumed = intercepted;
                     // Only pass Press events to the editor (Release is only for note-off)
                     if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
                         let should_reload_custom_ui = should_reload_custom_ui_after_key(&key);
@@ -1209,6 +1228,11 @@ pub(crate) fn run_event_loop(
                 _ => {}
             }
             ui_loop_stats.note_event(event_started.elapsed());
+            if !input_batch.should_drain(
+                live_key_consumed, editor.has_pending_host_commands(), Instant::now(),
+            ) {
+                break;
+            }
         }
         // Hardware MIDI notes queued since the last iteration (bead
         // eseq-egs6). Note-ons need an arm target; a note-off always goes

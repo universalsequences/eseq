@@ -671,6 +671,11 @@ pub struct SequencerState {
     /// Incremented only when `process_channel_values` changes, so the
     /// event-driven UI can request a frame that polls inline bindings.
     pub(super) process_channel_values_version: AtomicU64,
+    /// Scheduler → UI mirror of each step process instance's state history
+    /// (runtime id → state cell → samples, newest last). The lane strip
+    /// draws it as a scope; read-only on the UI side.
+    pub(super) process_scope_values: Mutex<HashMap<u64, HashMap<String, Vec<f32>>>>,
+    pub(super) process_scope_values_version: AtomicU64,
     pub(super) scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     pub(super) scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
     pub(super) process_trace_enabled: AtomicBool,

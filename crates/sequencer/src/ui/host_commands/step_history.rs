@@ -196,6 +196,49 @@ pub(super) fn handle(
                 ));
                 return;
             };
+            // Lane step writes arrive per drag event: they ride one history
+            // gesture (captured once, committed once) instead of the full
+            // scene-structure capture below, which stalls the scheduler.
+            if op == "set-lane-step" {
+                let result = (|| -> Result<(), String> {
+                    let inlet = field("inlet")
+                        .and_then(|value| match value {
+                            Value::String(value) => Some(value),
+                            _ => None,
+                        })
+                        .ok_or_else(|| "Process lane inlet is missing".to_string())?;
+                    let step = field("step")
+                        .and_then(|value| match value {
+                            Value::Number(value) if value >= 0.0 => Some(value as usize),
+                            _ => None,
+                        })
+                        .ok_or_else(|| "Process lane step is missing".to_string())?;
+                    let value = field("value")
+                        .and_then(|value| match value {
+                            Value::Number(value) => Some(value as f32),
+                            _ => None,
+                        })
+                        .ok_or_else(|| "Process lane value is missing".to_string())?;
+                    app::edit::apply_process_lane_drag_step(
+                        &mut app,
+                        track,
+                        instance_id,
+                        &inlet,
+                        step,
+                        value,
+                    )
+                })();
+                match result {
+                    Ok(()) => ui_invalidations.push(UiInvalidation::ProcessChain { track }),
+                    Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                        "Process edit failed: {error}"
+                    ))),
+                }
+                return;
+            }
+            // `scope: "all"` writes the shared project slot (every track);
+            // the default forks the slot for this track only.
+            let all_tracks = matches!(field("scope"), Some(Value::String(scope)) if scope == "all");
             let result = app.apply_recorded_scene_structure_mutation("Edit process chain", |app| {
                 let changed = match op.as_str() {
                     "set-lane-step" => {
@@ -256,8 +299,12 @@ pub(super) fn handle(
                             Value::Nil => sequencer::process::ProcessLiteral::Nil,
                             _ => return Err("Unsupported process inlet literal".to_string()),
                         };
-                        app.state
-                            .set_track_process_inlet_value(track, instance_id, &inlet, literal)
+                        if all_tracks {
+                            app.state.set_process_inlet_value(instance_id, &inlet, literal) > 0
+                        } else {
+                            app.state
+                                .set_track_process_inlet_value(track, instance_id, &inlet, literal)
+                        }
                     }
                     "set-enabled" => {
                         let enabled = field("enabled")
@@ -291,8 +338,16 @@ pub(super) fn handle(
                         let target = field("target")
                             .ok_or_else(|| "Process binding target is missing".to_string())?;
                         let target = natives::param_target_from_value(&app.state, track, &target)?;
-                        app.state
-                            .set_process_port_binding(track, instance_id, &port, target)
+                        if all_tracks {
+                            app.state.set_process_port_binding_for_instance(
+                                instance_id,
+                                &port,
+                                target,
+                            ) > 0
+                        } else {
+                            app.state
+                                .set_process_port_binding(track, instance_id, &port, target)
+                        }
                     }
                     "clear-port-binding" => {
                         let port = field("port")
@@ -301,8 +356,122 @@ pub(super) fn handle(
                                 _ => None,
                             })
                             .ok_or_else(|| "Process port is missing".to_string())?;
-                        app.state
-                            .clear_process_port_binding(track, instance_id, &port)
+                        if all_tracks {
+                            app.state
+                                .clear_process_port_binding_for_instance(instance_id, &port)
+                        } else {
+                            app.state
+                                .clear_process_port_binding(track, instance_id, &port)
+                        }
+                    }
+                    "add-fanout" => {
+                        let port = field("port")
+                            .and_then(|value| match value {
+                                Value::String(value) => Some(value),
+                                _ => None,
+                            })
+                            .ok_or_else(|| "Process port is missing".to_string())?;
+                        let target = field("target")
+                            .ok_or_else(|| "Process fan-out target is missing".to_string())?;
+                        let target = natives::param_target_from_value(&app.state, track, &target)?;
+                        let (lo, hi) = (
+                            field("lo").and_then(|value| match value {
+                                Value::Number(value) => Some(value as f32),
+                                _ => None,
+                            }),
+                            field("hi").and_then(|value| match value {
+                                Value::Number(value) => Some(value as f32),
+                                _ => None,
+                            }),
+                        );
+                        // Default to the slot's own output range: identity
+                        // scaling until the user narrows it.
+                        let source = app
+                            .state
+                            .composed_track_process_chain(track)
+                            .and_then(|chain| {
+                                chain
+                                    .slots
+                                    .into_iter()
+                                    .find(|slot| slot.instance_id == instance_id)
+                            })
+                            .map(|slot| sequencer::process::process_slot_output_range(&slot))
+                            .unwrap_or((0.0, 1.0));
+                        let entry = sequencer::process::ProcessPortFanout {
+                            target,
+                            lo: lo.unwrap_or(source.0),
+                            hi: hi.unwrap_or(source.1),
+                        };
+                        app.state.edit_process_port_fanout(
+                            track,
+                            instance_id,
+                            &port,
+                            all_tracks,
+                            |list| list.push(entry),
+                        )
+                    }
+                    "set-fanout-range" => {
+                        let port = field("port")
+                            .and_then(|value| match value {
+                                Value::String(value) => Some(value),
+                                _ => None,
+                            })
+                            .ok_or_else(|| "Process port is missing".to_string())?;
+                        let index = field("index")
+                            .and_then(|value| match value {
+                                Value::Number(value) if value >= 0.0 => Some(value as usize),
+                                _ => None,
+                            })
+                            .ok_or_else(|| "Process fan-out index is missing".to_string())?;
+                        let lo = field("lo").and_then(|value| match value {
+                            Value::Number(value) => Some(value as f32),
+                            _ => None,
+                        });
+                        let hi = field("hi").and_then(|value| match value {
+                            Value::Number(value) => Some(value as f32),
+                            _ => None,
+                        });
+                        app.state.edit_process_port_fanout(
+                            track,
+                            instance_id,
+                            &port,
+                            all_tracks,
+                            |list| {
+                                if let Some(entry) = list.get_mut(index) {
+                                    if let Some(lo) = lo {
+                                        entry.lo = lo;
+                                    }
+                                    if let Some(hi) = hi {
+                                        entry.hi = hi;
+                                    }
+                                }
+                            },
+                        )
+                    }
+                    "remove-fanout" => {
+                        let port = field("port")
+                            .and_then(|value| match value {
+                                Value::String(value) => Some(value),
+                                _ => None,
+                            })
+                            .ok_or_else(|| "Process port is missing".to_string())?;
+                        let index = field("index")
+                            .and_then(|value| match value {
+                                Value::Number(value) if value >= 0.0 => Some(value as usize),
+                                _ => None,
+                            })
+                            .ok_or_else(|| "Process fan-out index is missing".to_string())?;
+                        app.state.edit_process_port_fanout(
+                            track,
+                            instance_id,
+                            &port,
+                            all_tracks,
+                            |list| {
+                                if index < list.len() {
+                                    list.remove(index);
+                                }
+                            },
+                        )
                     }
                     _ => return Err(format!("Unknown process history operation {op}")),
                 };

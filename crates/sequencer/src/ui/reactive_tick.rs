@@ -187,17 +187,16 @@ pub(super) fn sync_fx_panel_state(
 
 /// Post-event reactive sync + render: diffs sequencer/transport state against
 /// the previous frame, republishes reactives, and renders when dirty.
+/// Production control/UI synchronization, independent of presentation. Keeping
+/// this separate lets headless input probes measure the actual per-frame work.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn reactive_tick_and_render(
+pub(crate) fn sync_reactive_tick(
     mut app: &mut app::App,
     mut editor: &mut Editor,
-    backend: &mut AppBackend,
     ctx: &mut LoopCtx<'_>,
-    inputs: TickInputs,
-    last_render_at: &mut Instant,
-    stub_animation_cache: &mut StubAnimationRenderCache,
+    inputs: &TickInputs,
     ui_loop_stats: &mut UiLoopStats,
-) -> Result<TickFlow, Box<dyn std::error::Error>> {
+) {
     host_commands::export::poll(editor);
     poll_pending_compile_status(
         &mut app,
@@ -248,6 +247,18 @@ pub(crate) fn reactive_tick_and_render(
         ctx.shared.state.process_channel_values_version();
     if process_channel_values_version != ctx.frame.prev_process_channel_values_version {
         ctx.frame.prev_process_channel_values_version = process_channel_values_version;
+        editor.mark_needs_redraw();
+    }
+    // Lane strip scopes: republish the state histories whenever the
+    // scheduler fired a step process since the last frame.
+    let process_scope_values_version = ctx.shared.state.process_scope_values_version();
+    if process_scope_values_version != ctx.frame.prev_process_scope_values_version {
+        ctx.frame.prev_process_scope_values_version = process_scope_values_version;
+        state_values::sync_process_scope_state(
+            editor.runtime_mut(),
+            &ctx.shared.state,
+        );
+        editor.runtime_mut().run_reactive_cycle();
         editor.mark_needs_redraw();
     }
 
@@ -1924,6 +1935,19 @@ pub(crate) fn reactive_tick_and_render(
     if inputs.playing_now && !ctx.shared.selected_steps.lock().unwrap().is_empty() {
         editor.mark_needs_redraw();
     }
+}
+
+pub(crate) fn reactive_tick_and_render(
+    app: &mut app::App,
+    mut editor: &mut Editor,
+    backend: &mut AppBackend,
+    ctx: &mut LoopCtx<'_>,
+    inputs: TickInputs,
+    last_render_at: &mut Instant,
+    stub_animation_cache: &mut StubAnimationRenderCache,
+    ui_loop_stats: &mut UiLoopStats,
+) -> Result<TickFlow, Box<dyn std::error::Error>> {
+    sync_reactive_tick(app, editor, ctx, &inputs, ui_loop_stats);
 
     stub_animation_cache.update_size(inputs.viewport_size);
 

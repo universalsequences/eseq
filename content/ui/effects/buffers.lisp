@@ -212,7 +212,7 @@
 (defmacro track-selection-panel ()
   `(v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
-      (if (> (len SEQ.process-slots) 0)
+      (if (> (len (pp/track-process-rows)) 0)
         (pp/process-chain-panel))
       (each SEQ.instrument-panel |inst inst-idx|
         (if (= (get inst :type) "rack")

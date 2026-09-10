@@ -4062,6 +4062,7 @@ mod tests {
                                     values: vec![0.0, 1.0, 0.0, 2.0],
                                 },
                             )]),
+                            fanout: Default::default(),
                             bindings: std::collections::BTreeMap::from([(
                                 "shape".to_string(),
                                 Some(crate::process::ParamTarget::InstrumentParam {
@@ -4088,6 +4089,7 @@ mod tests {
                                 values: vec![1.0, 0.5],
                             },
                         )]),
+                        fanout: Default::default(),
                         bindings: std::collections::BTreeMap::new(),
                     }],
                 },
@@ -5002,12 +5004,25 @@ mod tests {
         project.patterns[0].project_process_lane_overrides =
             vec![std::collections::BTreeMap::from([(
                 identity,
-                std::collections::BTreeMap::from([(
-                    "prob".to_string(),
-                    crate::process::ProcessLane {
-                        values: vec![0.25, 0.75],
-                    },
-                )]),
+                crate::process::ProjectSlotOverride {
+                    lanes: std::collections::BTreeMap::from([(
+                        "prob".to_string(),
+                        crate::process::ProcessLane {
+                            values: vec![0.25, 0.75],
+                        },
+                    )]),
+                    inlets: std::collections::BTreeMap::from([(
+                        "lo".to_string(),
+                        crate::process::ProcessLiteral::Number(3.0),
+                    )]),
+                    bindings: std::collections::BTreeMap::from([(
+                        "out".to_string(),
+                        Some(crate::process::ParamTarget::StepParam {
+                            param: "rate".to_string(),
+                        }),
+                    )]),
+                    fanout: std::collections::BTreeMap::new(),
+                },
             )])];
         let json = serde_json::to_string(&project).expect("serialize current project");
         let restored: ProjectFile =

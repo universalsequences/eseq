@@ -307,6 +307,7 @@
                 project_layer: false,
                 inlets: Default::default(),
                 lanes: Default::default(),
+                fanout: Default::default(),
                 bindings: std::collections::BTreeMap::from([
                     (
                         "survives".to_string(),
@@ -2959,6 +2960,7 @@
                         values: vec![0.0, 1.0],
                     },
                 )]),
+                fanout: Default::default(),
                 bindings: std::collections::BTreeMap::new(),
             }],
         }
@@ -2979,6 +2981,7 @@
                 project_layer: false,
                 inlets: std::collections::BTreeMap::new(),
                 lanes: std::collections::BTreeMap::new(),
+                fanout: Default::default(),
                 bindings: std::collections::BTreeMap::from([(
                     port.to_string(),
                     Some(crate::process::ParamTarget::EffectParam {
@@ -2996,10 +2999,31 @@
         chain: &crate::process::TrackProcessChain,
         port: &str,
     ) -> Option<ParamNodeId> {
-        let binding = chain.slots.first()?.bindings.get(port)?.as_ref()?;
+        // Every scene carries the default lane slots ahead of the pattern's
+        // own; the binding under test lives on the first non-default slot.
+        let slot = chain
+            .slots
+            .iter()
+            .find(|slot| !crate::process::is_default_lane_slot(slot))?;
+        let binding = slot.bindings.get(port)?.as_ref()?;
         match binding {
             crate::process::ParamTarget::EffectParam { param_id, .. } => *param_id,
             _ => None,
+        }
+    }
+
+    /// The chain with the always-installed default lanes stripped, so tests
+    /// about a pattern's own project layer compare only what they authored.
+    fn without_default_lanes(
+        chain: &crate::process::TrackProcessChain,
+    ) -> crate::process::TrackProcessChain {
+        crate::process::TrackProcessChain {
+            slots: chain
+                .slots
+                .iter()
+                .filter(|slot| !crate::process::is_default_lane_slot(slot))
+                .cloned()
+                .collect(),
         }
     }
 
@@ -3152,9 +3176,12 @@
             .resize(5, 0.0);
         expected.slots[0].lanes.get_mut("amount").unwrap().values[4] = 2.0;
 
-        assert_eq!(state.track_process_chain(0), Some(expected.clone()));
         assert_eq!(
-            SequencerSnapshot::capture(&state).tracks[0].process_chain,
+            state.track_process_chain(0).map(|chain| without_default_lanes(&chain)),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            without_default_lanes(&SequencerSnapshot::capture(&state).tracks[0].process_chain),
             expected
         );
 
@@ -3237,15 +3264,17 @@
             Some(&crate::process::ProcessLiteral::Number(4.0))
         );
         assert!(
-            state
-                .track_process_chain(1)
-                .expect("track 2 process chain")
-                .slots
-                .is_empty(),
+            without_default_lanes(
+                &state
+                    .track_process_chain(1)
+                    .expect("track 2 process chain")
+            )
+            .slots
+            .is_empty(),
             "slot edits must not leak to another track"
         );
         assert_eq!(
-            state.latest_scheduler_snapshot().tracks[0].process_chain,
+            without_default_lanes(&state.latest_scheduler_snapshot().tracks[0].process_chain),
             edited,
             "every successful slot edit must publish to the scheduler snapshot"
         );
@@ -3328,6 +3357,64 @@
     }
 
     #[test]
+    fn project_slot_edits_fork_per_track_unless_written_for_every_track() {
+        let state = make_state_with_tracks(2);
+        let rand = state
+            .project_process_chain()
+            .slots
+            .into_iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("rand"))
+            .expect("rand default lane");
+        let binding = |track: usize| {
+            state
+                .composed_track_process_chain(track)
+                .unwrap()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_id == rand.instance_id)
+                .unwrap()
+                .bindings
+                .get("out")
+                .cloned()
+                .flatten()
+        };
+        let velocity = crate::process::ParamTarget::StepParam {
+            param: "velocity".to_string(),
+        };
+        assert!(state.set_process_port_binding(0, rand.instance_id, "out", velocity.clone()));
+        assert_eq!(binding(0), Some(velocity.clone()));
+        assert_eq!(binding(1), None, "track 1 keeps the shared (unbound) port");
+        assert!(state.set_track_process_inlet_value(
+            1,
+            rand.instance_id,
+            "hi",
+            crate::process::ProcessLiteral::Number(3.0)
+        ));
+        let hi = |track: usize| {
+            state
+                .composed_track_process_chain(track)
+                .unwrap()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_id == rand.instance_id)
+                .unwrap()
+                .inlets
+                .get("hi")
+                .cloned()
+        };
+        assert_eq!(hi(1), Some(crate::process::ProcessLiteral::Number(3.0)));
+        assert_eq!(hi(0), None);
+        let rate = crate::process::ParamTarget::StepParam {
+            param: "rate".to_string(),
+        };
+        assert!(state.set_process_port_binding_for_instance(rand.instance_id, "out", rate.clone()) > 0);
+        assert_eq!(binding(0), Some(velocity.clone()), "track 0's fork still wins");
+        assert_eq!(binding(1), Some(rate.clone()), "track 1 inherits the shared bind");
+        assert!(state.clear_process_port_binding(0, rand.instance_id, "out"));
+        assert_eq!(binding(0), Some(rate), "clearing the fork reverts to shared");
+    }
+
+    #[test]
     fn project_process_chain_is_scene_scoped_and_survives_scene_switching() {
         let state = make_state_with_tracks(2);
         let mut project_chain = sample_process_chain();
@@ -3344,42 +3431,45 @@
         state.replace_pattern_repository(vec![first, second], 0);
         state.restore_current_pattern_from_repository().unwrap();
 
-        assert_eq!(state.project_process_chain(), project_chain);
+        assert_eq!(without_default_lanes(&state.project_process_chain()), project_chain);
         // Every track's effective chain starts with the shared project slot.
         for track in 0..2 {
-            let composed = state
-                .composed_track_process_chain(track)
-                .expect("composed chain");
+            let composed = without_default_lanes(
+                &state
+                    .composed_track_process_chain(track)
+                    .expect("composed chain"),
+            );
             assert_eq!(composed.slots.len(), 1);
             assert!(composed.slots[0].project_layer);
         }
         // The scheduler snapshot sees the composed chain on every track.
         let snapshot = state.publish_scheduler_snapshot();
         for track in 0..2 {
-            assert_eq!(snapshot.tracks[track].process_chain.slots.len(), 1);
-            assert!(snapshot.tracks[track].process_chain.slots[0].project_layer);
+            let chain = without_default_lanes(&snapshot.tracks[track].process_chain);
+            assert_eq!(chain.slots.len(), 1);
+            assert!(chain.slots[0].project_layer);
         }
 
         // Settings are pattern-scoped: scene 2 has its own (empty) layer.
         state
             .switch_pattern(1, 2, &buffer_ids, &sample_rates, &names, &instrument_types)
             .expect("switch to scene 2");
-        assert!(state.project_process_chain().slots.is_empty());
+        assert!(without_default_lanes(&state.project_process_chain()).slots.is_empty());
         let snapshot = state.latest_scheduler_snapshot();
-        assert!(snapshot.tracks[0].process_chain.slots.is_empty());
+        assert!(without_default_lanes(&snapshot.tracks[0].process_chain).slots.is_empty());
 
         state
             .switch_pattern(0, 2, &buffer_ids, &sample_rates, &names, &instrument_types)
             .expect("switch back to scene 1");
-        assert_eq!(state.project_process_chain(), project_chain);
+        assert_eq!(without_default_lanes(&state.project_process_chain()), project_chain);
 
         // Whole-layer replace + export roundtrip.
         assert!(state.set_project_process_chain(crate::process::TrackProcessChain::default()));
-        assert!(state.project_process_chain().slots.is_empty());
+        assert!(without_default_lanes(&state.project_process_chain()).slots.is_empty());
         assert!(state.set_project_process_chain(project_chain.clone()));
         let bank = state.export_pattern_repository();
-        assert_eq!(bank[0].project_process_chain, project_chain);
-        assert!(bank[1].project_process_chain.slots.is_empty());
+        assert_eq!(without_default_lanes(&bank[0].project_process_chain), project_chain);
+        assert!(without_default_lanes(&bank[1].project_process_chain).slots.is_empty());
     }
 
     #[test]

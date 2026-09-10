@@ -38,9 +38,15 @@ pub(super) struct RetrigCustomVoice {
 /// How a retrig repeat re-fires the track.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum RetrigTarget {
-    /// Sampler and modulator tracks: the repeat re-allocates from the step's
-    /// stored parameters (the path the retired `Chop` param used).
-    Step,
+    /// Sampler and modulator tracks: the repeat re-allocates from the step,
+    /// carrying the values the initial hit *resolved* (post p-lock, post
+    /// process writes) so a process-accumulated transpose or velocity reaches
+    /// every repeat, not just the first hit.
+    Step {
+        transpose: f32,
+        velocity: f32,
+        speed: f32,
+    },
     /// Custom (dgen) tracks: re-trigger the logical voices the initial hit
     /// allocated, with the gate left held.
     Custom {
