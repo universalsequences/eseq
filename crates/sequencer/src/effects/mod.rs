@@ -2295,22 +2295,38 @@ mod tests {
     }
 
     #[test]
-    fn builtin_reverb_insert_is_stereo_in_and_stereo_out() {
+    fn builtin_reverb_insert_is_stereo_plus_modulators_in_and_stereo_out() {
         let desc = EffectDescriptor::builtin_insert("Reverb").unwrap();
-        assert_eq!(desc.input_channels, 2);
+        assert_eq!(
+            desc.input_channels,
+            2 + crate::instruments::voice_modulator::NUM_OUTPUTS
+        );
         assert_eq!(desc.output_channels, 2);
     }
 
     #[test]
     fn builtin_reverb_pins_param_order_within_state_bounds() {
         let desc = EffectDescriptor::builtin_insert("Reverb").unwrap();
-        assert!(desc.instrument_modulators.is_empty());
-        assert!(desc.instrument_modulation_targets.is_empty());
+        assert_eq!(
+            desc.input_channels,
+            2 + crate::instruments::voice_modulator::NUM_OUTPUTS
+        );
+        assert_eq!(
+            desc.instrument_modulators.len(),
+            crate::instruments::voice_modulator::SLOT_COUNT
+        );
+        assert_eq!(
+            desc.instrument_modulation_targets.len(),
+            crate::instruments::voice_modulator::SLOT_COUNT * 4
+        );
         // Param order is append-only (plocks persist by descriptor index).
-        // 0-4 are the pre-mode block; this list may only ever grow at the end.
+        // 0-4 are the pre-mode block, 5-20 the multi-mode block, then the
+        // voice-modulator params and the depth targets; this list may only
+        // ever grow at the end.
+        let base = crate::effects::reverb::BASE_PARAM_COUNT;
         let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
-            names,
+            names[..base],
             [
                 "mix",
                 "size",
@@ -2342,18 +2358,24 @@ mod tests {
         ));
         assert!(!mode.is_host_modulatable());
         assert!(!desc.params[4].is_host_modulatable());
-        for param in &desc.params {
-            assert!(
-                (param.node_param_idx as usize) < crate::effects::reverb::REVERB_STATE_SIZE,
-                "{} writes outside the reverb state",
-                param.name
-            );
+        assert_eq!(names[base], "mod1_source");
+        for (i, param) in desc.params.iter().enumerate() {
+            if !crate::instruments::voice_modulator::is_source_param(param.node_param_idx) {
+                assert!(
+                    (param.node_param_idx as usize) < crate::effects::reverb::REVERB_STATE_SIZE,
+                    "{} writes outside the reverb state",
+                    param.name
+                );
+            }
             assert!(
                 param.default >= param.min && param.default <= param.max,
                 "{} default out of range",
                 param.name
             );
-            if matches!(param.kind, ParamKind::Continuous { .. }) && param.name != "enabled" {
+            if i < base
+                && matches!(param.kind, ParamKind::Continuous { .. })
+                && param.name != "enabled"
+            {
                 assert!(
                     param.is_host_modulatable(),
                     "{} should be macro-mappable",
@@ -2361,10 +2383,17 @@ mod tests {
                 );
             }
         }
-        // The legacy fill covers exactly the appended block with exact-bypass
-        // values, each inside its param's range.
+        // Every depth target lands on a base knob and its own depth param.
+        for target in &desc.instrument_modulation_targets {
+            assert!(target.base_param_idx < base);
+            assert!(target.depth_param_idx >= base);
+            assert!((1..=4).contains(&target.modulator_slot));
+        }
+        // The legacy fill covers exactly the multi-mode block with exact-bypass
+        // values, each inside its param's range; the modulator params after it
+        // take descriptor defaults, which are bypass too.
         let legacy = crate::effects::reverb::LEGACY_BYPASS_DEFAULTS;
-        assert_eq!(legacy.len(), desc.params.len() - 5);
+        assert_eq!(legacy.len(), base - 5);
         for (param, value) in desc.params.iter().skip(5).zip(legacy) {
             assert!(value >= param.min && value <= param.max, "{}", param.name);
         }
@@ -2384,7 +2413,10 @@ mod tests {
             Some(&legacy[..]),
             "a five-param slot must get the bypass fill"
         );
-        assert!(desc.legacy_append_defaults(21).is_none());
+        assert!(desc
+            .legacy_append_defaults(crate::effects::reverb::BASE_PARAM_COUNT)
+            .is_none());
+        assert!(desc.legacy_append_defaults(desc.params.len()).is_none());
     }
 
     /// A pre-mode Reverb slot (5 params, as saved by every project before the
@@ -2423,6 +2455,16 @@ mod tests {
         assert_eq!(snapshot.plocks[2][1], Some(0.8));
         for (i, value) in crate::effects::reverb::LEGACY_BYPASS_DEFAULTS.iter().enumerate() {
             assert_eq!(snapshot.defaults[5 + i], *value, "{}", desc.params[5 + i].name);
+        }
+        // The voice-modulator block after the legacy fill takes descriptor
+        // defaults: every source off, every depth zero.
+        for (i, param) in desc
+            .params
+            .iter()
+            .enumerate()
+            .skip(crate::effects::reverb::BASE_PARAM_COUNT)
+        {
+            assert_eq!(snapshot.defaults[i], param.default, "{}", param.name);
         }
         assert_eq!(
             snapshot.param_node_indices,
@@ -3211,7 +3253,10 @@ impl EffectDescriptor {
     /// saved.
     pub fn legacy_append_defaults(&self, saved_param_count: usize) -> Option<Vec<f32>> {
         match self.name.as_str() {
-            "Reverb" if saved_param_count == 5 && self.params.len() == 21 => {
+            "Reverb"
+                if saved_param_count == 5
+                    && self.params.len() >= crate::effects::reverb::BASE_PARAM_COUNT =>
+            {
                 Some(crate::effects::reverb::LEGACY_BYPASS_DEFAULTS.to_vec())
             }
             _ => None,
@@ -6604,11 +6649,16 @@ impl EffectDescriptor {
         let lin = ParamScaling::Linear;
         let exp = ParamScaling::Exponential;
 
-        Self {
+        let mut desc = Self {
             name: "Reverb".to_string(),
-            input_channels: 2,
+            input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: Vec::new(),
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -6732,7 +6782,101 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        }
+        };
+        debug_assert_eq!(desc.params.len(), rv::BASE_PARAM_COUNT);
+
+        // ── appended (21..): four-slot voice modulator, the Multiverb pattern ──
+        // Slots saved with the 21-param layout take these defaults (source
+        // off, depth 0), which is exact bypass.
+        desc.params
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
+
+        let param_idx = |name: &str| {
+            desc.params
+                .iter()
+                .position(|param| param.name == name)
+                .unwrap_or_else(|| panic!("built-in Reverb {name} param should exist"))
+        };
+        let decay_idx = param_idx("decay");
+        let size_idx = param_idx("size");
+        let mod_depth_idx = param_idx("mod depth");
+        let mix_idx = param_idx("mix");
+
+        let mut append_depth_targets =
+            |base_param_idx: usize,
+             destination_name: &str,
+             depth_params: [u64; crate::instruments::voice_modulator::SLOT_COUNT]| {
+                for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {destination_name} slot {} amt", slot + 1),
+                        min: -1.0,
+                        max: 1.0,
+                        default: 0.0,
+                        kind: ParamKind::Continuous { unit: None },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: node_param_idx as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min: -1.0,
+                            depth_max: 1.0,
+                            depth_unit: None,
+                            mod_mode: ModulationMode::Additive,
+                        });
+                }
+            };
+
+        append_depth_targets(
+            decay_idx,
+            "decay",
+            [
+                rv::REVERB_PARAM_MOD_DECAY_DEPTH_1,
+                rv::REVERB_PARAM_MOD_DECAY_DEPTH_2,
+                rv::REVERB_PARAM_MOD_DECAY_DEPTH_3,
+                rv::REVERB_PARAM_MOD_DECAY_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            size_idx,
+            "size",
+            [
+                rv::REVERB_PARAM_MOD_SIZE_DEPTH_1,
+                rv::REVERB_PARAM_MOD_SIZE_DEPTH_2,
+                rv::REVERB_PARAM_MOD_SIZE_DEPTH_3,
+                rv::REVERB_PARAM_MOD_SIZE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            mod_depth_idx,
+            "depth",
+            [
+                rv::REVERB_PARAM_MOD_DEPTH_DEPTH_1,
+                rv::REVERB_PARAM_MOD_DEPTH_DEPTH_2,
+                rv::REVERB_PARAM_MOD_DEPTH_DEPTH_3,
+                rv::REVERB_PARAM_MOD_DEPTH_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            mix_idx,
+            "mix",
+            [
+                rv::REVERB_PARAM_MOD_MIX_DEPTH_1,
+                rv::REVERB_PARAM_MOD_MIX_DEPTH_2,
+                rv::REVERB_PARAM_MOD_MIX_DEPTH_3,
+                rv::REVERB_PARAM_MOD_MIX_DEPTH_4,
+            ],
+        );
+
+        desc
     }
 
     /// Multi-mode vintage reverb (Plate / Hall / Quad / Mod) as a stereo

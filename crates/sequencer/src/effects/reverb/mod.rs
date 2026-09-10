@@ -74,7 +74,16 @@ const ST_CHORUS_PHASE: usize = 35;
 const ST_WET_GAIN_DB: usize = 36;
 const ST_MIX_LAW: usize = 37; // 0 = Galactic cube law (legacy), 1 = linear crossfade
 
-const GALAXY_RT: usize = 40;
+// Host-modulation depths (four-slot voice modulator, the Multiverb pattern).
+// Descriptor order is append-only, so these come after `mix law` in
+// EffectDescriptor. Each destination has one depth per modulator slot; the
+// modulator outputs arrive as inputs 2..=5 of the node.
+const ST_MOD_DECAY_DEPTH_1: usize = 38;
+const ST_MOD_SIZE_DEPTH_1: usize = 42;
+const ST_MOD_DEPTH_DEPTH_1: usize = 46;
+const ST_MOD_MIX_DEPTH_1: usize = 50;
+
+const GALAXY_RT: usize = 56;
 const PLATE_RT: usize = GALAXY_RT + galaxy::RUNTIME_SLOTS;
 const HALL_RT: usize = PLATE_RT + plate::STATE_SLOTS;
 const ST_WRITE_IDX: usize = HALL_RT + hall::STATE_SLOTS;
@@ -105,6 +114,27 @@ pub const REVERB_PARAM_MOD_DEPTH: u64 = ST_MOD_DEPTH as u64;
 pub const REVERB_PARAM_ENABLED: u64 = ST_ENABLED as u64;
 pub const REVERB_PARAM_WET_GAIN_DB: u64 = ST_WET_GAIN_DB as u64;
 pub const REVERB_PARAM_MIX_LAW: u64 = ST_MIX_LAW as u64;
+pub const REVERB_PARAM_MOD_DECAY_DEPTH_1: u64 = ST_MOD_DECAY_DEPTH_1 as u64;
+pub const REVERB_PARAM_MOD_DECAY_DEPTH_2: u64 = ST_MOD_DECAY_DEPTH_1 as u64 + 1;
+pub const REVERB_PARAM_MOD_DECAY_DEPTH_3: u64 = ST_MOD_DECAY_DEPTH_1 as u64 + 2;
+pub const REVERB_PARAM_MOD_DECAY_DEPTH_4: u64 = ST_MOD_DECAY_DEPTH_1 as u64 + 3;
+pub const REVERB_PARAM_MOD_SIZE_DEPTH_1: u64 = ST_MOD_SIZE_DEPTH_1 as u64;
+pub const REVERB_PARAM_MOD_SIZE_DEPTH_2: u64 = ST_MOD_SIZE_DEPTH_1 as u64 + 1;
+pub const REVERB_PARAM_MOD_SIZE_DEPTH_3: u64 = ST_MOD_SIZE_DEPTH_1 as u64 + 2;
+pub const REVERB_PARAM_MOD_SIZE_DEPTH_4: u64 = ST_MOD_SIZE_DEPTH_1 as u64 + 3;
+pub const REVERB_PARAM_MOD_DEPTH_DEPTH_1: u64 = ST_MOD_DEPTH_DEPTH_1 as u64;
+pub const REVERB_PARAM_MOD_DEPTH_DEPTH_2: u64 = ST_MOD_DEPTH_DEPTH_1 as u64 + 1;
+pub const REVERB_PARAM_MOD_DEPTH_DEPTH_3: u64 = ST_MOD_DEPTH_DEPTH_1 as u64 + 2;
+pub const REVERB_PARAM_MOD_DEPTH_DEPTH_4: u64 = ST_MOD_DEPTH_DEPTH_1 as u64 + 3;
+pub const REVERB_PARAM_MOD_MIX_DEPTH_1: u64 = ST_MOD_MIX_DEPTH_1 as u64;
+pub const REVERB_PARAM_MOD_MIX_DEPTH_2: u64 = ST_MOD_MIX_DEPTH_1 as u64 + 1;
+pub const REVERB_PARAM_MOD_MIX_DEPTH_3: u64 = ST_MOD_MIX_DEPTH_1 as u64 + 2;
+pub const REVERB_PARAM_MOD_MIX_DEPTH_4: u64 = ST_MOD_MIX_DEPTH_1 as u64 + 3;
+
+/// Descriptor params before the voice-modulator block: the five pre-mode
+/// params plus the sixteen appended by the multi-mode fold. Slots saved with
+/// this many params predate host modulation.
+pub const BASE_PARAM_COUNT: usize = 21;
 
 pub const MIX_LAW_CUBE: f32 = 0.0;
 pub const MIX_LAW_LINEAR: f32 = 1.0;
@@ -166,6 +196,26 @@ fn clamp4(x: f32) -> f32 {
 #[inline(always)]
 fn clamp1(x: f32) -> f32 {
     x.clamp(-1.0, 1.0)
+}
+
+/// Modulator output as the node sees it: unipolar, non-finite reads as 0.
+#[inline(always)]
+fn modulation_signal(x: f32) -> f32 {
+    if x.is_finite() {
+        x.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Per-slot depth, bipolar so a source can pull a destination down.
+#[inline(always)]
+fn modulation_depth(x: f32) -> f32 {
+    if x.is_finite() {
+        x.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 #[inline(always)]
@@ -288,6 +338,11 @@ unsafe extern "C" fn reverb_process(
         return;
     }
 
+    // Four voice-modulator outputs (unipolar 0..1) ride on inputs 2..=5;
+    // the descriptor declares `2 + NUM_OUTPUTS` input channels so the graph
+    // always provides them.
+    let mod_inputs = [*inp.add(2), *inp.add(3), *inp.add(4), *inp.add(5)];
+
     let mut fs = *s.add(ST_SAMPLE_RATE);
     if !(8000.0..=192_000.0).contains(&fs) {
         fs = 44_100.0;
@@ -315,6 +370,37 @@ unsafe extern "C" fn reverb_process(
     let mod_depth = (*s.add(ST_MOD_DEPTH)).clamp(0.0, 1.0);
     let wet_gain_db = (*s.add(ST_WET_GAIN_DB)).clamp(WET_GAIN_MIN_DB, WET_GAIN_MAX_DB);
     let cube_law = (*s.add(ST_MIX_LAW)).round() <= 0.5;
+
+    let read_depths = |base: usize| -> [f32; 4] {
+        [
+            modulation_depth(*s.add(base)),
+            modulation_depth(*s.add(base + 1)),
+            modulation_depth(*s.add(base + 2)),
+            modulation_depth(*s.add(base + 3)),
+        ]
+    };
+    let mod_decay_depths = read_depths(ST_MOD_DECAY_DEPTH_1);
+    let mod_size_depths = read_depths(ST_MOD_SIZE_DEPTH_1);
+    let mod_depth_depths = read_depths(ST_MOD_DEPTH_DEPTH_1);
+    let mod_mix_depths = read_depths(ST_MOD_MIX_DEPTH_1);
+    // Σ slot signal × depth for one destination at sample `i`.
+    let mod_sum = |i: usize, depths: &[f32; 4]| -> f32 {
+        let mut acc = 0.0f32;
+        for slot in 0..4 {
+            if depths[slot] != 0.0 {
+                acc += modulation_signal(*mod_inputs[slot].add(i)) * depths[slot];
+            }
+        }
+        acc
+    };
+    let any_mod = |depths: &[f32; 4]| depths.iter().any(|d| *d != 0.0);
+    let decay_modulated = any_mod(&mod_decay_depths);
+    let size_modulated = any_mod(&mod_size_depths);
+    let depth_modulated = any_mod(&mod_depth_depths);
+    let mix_modulated = any_mod(&mod_mix_depths);
+    // Galaxy reads its size once per block; the plate/hall tanks and the mix
+    // stage apply modulation per sample below.
+    let galaxy_bigness = (bigness + mod_sum(0, &mod_size_depths)).clamp(0.0, 1.0);
 
     // ── Derived (per block) ──
     // Exact-bypass gates: these compare against the descriptor's own range
@@ -410,15 +496,19 @@ unsafe extern "C" fn reverb_process(
     // ── Tank: `out` (tank input) → `out` (raw wet) ──
     match active_mode {
         1 | 2 => {
-            let target_scale = (fs / DATTORRO_FS) * tank_size_scale(bigness);
+            let mut target_scale = (fs / DATTORRO_FS) * tank_size_scale(bigness);
             let decay_g = (0.25 + 0.75 * decay.powf(1.4)).min(1.0);
             let walk_coef = one_pole_coef((chorus_rate * 0.5).max(0.05), fs);
+            // Host modulation of decay / size / mod depth is applied per
+            // sample: the size glide already smooths scale changes, and the
+            // decay and excursion terms are cheap enough to re-derive.
+            let tank_modulated = decay_modulated || size_modulated || depth_modulated;
             if active_mode == 1 {
                 // Diffusion drives the tank allpasses, not just the input
                 // diffusers — knob at 0.7 = exact paper gains.
                 let dscale = (diffusion / 0.7).min(1.13);
-                let p = plate::PlateParams {
-                    decay_g,
+                let plate_params = |decay: f32, mod_depth: f32| plate::PlateParams {
+                    decay_g: (0.25 + 0.75 * decay.powf(1.4)).min(1.0),
                     ap1_g: diffusion.min(0.9),
                     ap2_g: ((decay + 0.15).clamp(0.25, 0.50) * (0.4 + 0.857 * diffusion)).min(0.6),
                     in_g1: (0.75 * dscale).min(0.85),
@@ -428,8 +518,16 @@ unsafe extern "C" fn reverb_process(
                     walk_coef,
                     shelves,
                 };
+                let mut p = plate_params(decay, mod_depth);
                 let mut st = plate::PlateState::load(s, PLATE_RT);
                 for i in 0..nf {
+                    if tank_modulated {
+                        let d = (decay + mod_sum(i, &mod_decay_depths)).clamp(0.0, 1.0);
+                        let md = (mod_depth + mod_sum(i, &mod_depth_depths)).clamp(0.0, 1.0);
+                        p = plate_params(d, md);
+                        let sz = (bigness + mod_sum(i, &mod_size_depths)).clamp(0.0, 1.0);
+                        target_scale = (fs / DATTORRO_FS) * tank_size_scale(sz);
+                    }
                     sm_scale += scale_coef * (target_scale - sm_scale);
                     lfo_phase += lfo_inc;
                     let mut wrapped = false;
@@ -447,18 +545,27 @@ unsafe extern "C" fn reverb_process(
                 st.store(s, PLATE_RT);
             } else {
                 let dscale = (diffusion / 0.7).min(1.13);
-                let p = hall::HallParams {
+                let hall_walk_coef = one_pole_coef((chorus_rate * 0.35).max(0.05), fs);
+                let hall_params = |decay_g: f32, mod_depth: f32| hall::HallParams {
                     sect_g: decay_g.powf(0.25),
                     in_g: (0.75 * dscale).min(0.85),
                     dscale: (diffusion / 0.7).min(1.04),
                     // Steeper curve than the plate: the default depth should
                     // breathe, the top opens to the full 30 ms 224 wander.
                     exc_samps: (mod_depth.powi(2) * 0.030 * fs).min(HALL_EXC_CAP as f32),
-                    walk_coef: one_pole_coef((chorus_rate * 0.35).max(0.05), fs),
+                    walk_coef: hall_walk_coef,
                     shelves,
                 };
+                let mut p = hall_params(decay_g, mod_depth);
                 let mut st = hall::HallState::load(s, HALL_RT);
                 for i in 0..nf {
+                    if tank_modulated {
+                        let d = (decay + mod_sum(i, &mod_decay_depths)).clamp(0.0, 1.0);
+                        let md = (mod_depth + mod_sum(i, &mod_depth_depths)).clamp(0.0, 1.0);
+                        p = hall_params((0.25 + 0.75 * d.powf(1.4)).min(1.0), md);
+                        let sz = (bigness + mod_sum(i, &mod_size_depths)).clamp(0.0, 1.0);
+                        target_scale = (fs / DATTORRO_FS) * tank_size_scale(sz);
+                    }
                     sm_scale += scale_coef * (target_scale - sm_scale);
                     let q_before = ((lfo_phase * 4.0) as usize).min(3);
                     lfo_phase += lfo_inc;
@@ -499,13 +606,13 @@ unsafe extern "C" fn reverb_process(
                 replace,
                 bright,
                 detune,
-                bigness,
+                bigness: galaxy_bigness,
                 shelves: galaxy_shelves,
             };
             galaxy::process_block(s, out_l, out_r, out_l, out_r, nf, &p);
             // Keep the size glide primed so a switch into plate/hall starts
             // at the right scale instead of gliding from wherever it was.
-            sm_scale = (fs / DATTORRO_FS) * tank_size_scale(bigness);
+            sm_scale = (fs / DATTORRO_FS) * tank_size_scale(galaxy_bigness);
         }
     }
 
@@ -517,14 +624,23 @@ unsafe extern "C" fn reverb_process(
     // runs well under unity, so `wet gain` is the makeup that lets 100% wet
     // meter like the dry.
     let galaxy_mix = active_mode == 0 && cube_law;
-    let g_wet = 1.0 - (1.0 - mix) * (1.0 - mix) * (1.0 - mix);
-    let g_dry = 1.0 - g_wet;
-    let lin_dry = 1.0 - mix;
+    let mut g_wet = 1.0 - (1.0 - mix) * (1.0 - mix) * (1.0 - mix);
+    let mut g_dry = 1.0 - g_wet;
+    let mut lin_dry = 1.0 - mix;
+    let mut mix = mix;
+    let base_mix = mix;
     let makeup_on = wet_gain_db != 0.0;
     let makeup = 10.0_f32.powf(wet_gain_db / 20.0);
     for i in 0..nf {
         let mut wl = *out_l.add(i);
         let mut wr = *out_r.add(i);
+
+        if mix_modulated {
+            mix = (base_mix + mod_sum(i, &mod_mix_depths)).clamp(0.0, 1.0);
+            g_wet = 1.0 - (1.0 - mix) * (1.0 - mix) * (1.0 - mix);
+            g_dry = 1.0 - g_wet;
+            lin_dry = 1.0 - mix;
+        }
 
         if chorus_on {
             // Pitch-wobble the tail (no comb: the delayed read replaces the
@@ -695,8 +811,26 @@ mod tests {
     }
 
     fn process(state: &mut [f32], in_l: &mut [f32], in_r: &mut [f32]) -> (Vec<f32>, Vec<f32>) {
+        let mut mods = std::array::from_fn(|_| vec![0.0f32; in_l.len()]);
+        process_with_mod(state, in_l, in_r, &mut mods)
+    }
+
+    fn process_with_mod(
+        state: &mut [f32],
+        in_l: &mut [f32],
+        in_r: &mut [f32],
+        mods: &mut [Vec<f32>; 4],
+    ) -> (Vec<f32>, Vec<f32>) {
         let nf = in_l.len();
-        let inputs = [in_l.as_mut_ptr(), in_r.as_mut_ptr()];
+        let [mod_1, mod_2, mod_3, mod_4] = mods;
+        let inputs = [
+            in_l.as_mut_ptr(),
+            in_r.as_mut_ptr(),
+            mod_1.as_mut_ptr(),
+            mod_2.as_mut_ptr(),
+            mod_3.as_mut_ptr(),
+            mod_4.as_mut_ptr(),
+        ];
         let mut out_l = vec![0.0f32; nf];
         let mut out_r = vec![0.0f32; nf];
         let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
@@ -714,6 +848,15 @@ mod tests {
 
     /// Render an impulse then silence; returns (out_l, out_r) over `secs`.
     fn impulse_render(state: &mut [f32], secs: f32, fs: usize) -> (Vec<f32>, Vec<f32>) {
+        impulse_render_with_mod(state, secs, fs, [0.0; 4])
+    }
+
+    fn impulse_render_with_mod(
+        state: &mut [f32],
+        secs: f32,
+        fs: usize,
+        mod_values: [f32; 4],
+    ) -> (Vec<f32>, Vec<f32>) {
         let total = (secs * fs as f32) as usize;
         let mut acc_l = Vec::with_capacity(total);
         let mut acc_r = Vec::with_capacity(total);
@@ -729,7 +872,8 @@ mod tests {
                 in_r[0] = 1.0;
                 first = false;
             }
-            let (ol, or) = process(state, &mut in_l, &mut in_r);
+            let mut mods = std::array::from_fn(|slot| vec![mod_values[slot]; n]);
+            let (ol, or) = process_with_mod(state, &mut in_l, &mut in_r, &mut mods);
             acc_l.extend_from_slice(&ol);
             acc_r.extend_from_slice(&or);
             done += n;
@@ -999,9 +1143,72 @@ mod tests {
         }
     }
 
+    /// A modulator driving `mix` with depth -1 pulls the wet fully out: the
+    /// output becomes the untouched dry signal in every mode. Depth 0 nulls
+    /// against the unmodulated render, so an idle routing is exact bypass.
+    #[test]
+    fn mix_modulation_reaches_full_dry_and_zero_depth_is_exact_bypass() {
+        let fs = 44_100;
+        for mode in [MODE_GALAXY, MODE_PLATE, MODE_HALL] {
+            let mut reference = init_state(fs);
+            reference[ST_MODE] = mode;
+            reference[ST_MIX] = 0.6;
+            reference[ST_MIX_LAW] = MIX_LAW_LINEAR;
+            let mut idle = reference.clone();
+            let mut pulled = reference.clone();
+            pulled[ST_MOD_MIX_DEPTH_1 + 2] = -1.0;
+
+            let mut in_l: Vec<f32> = (0..512).map(|i| ((i * 7919) % 97) as f32 / 97.0 - 0.5).collect();
+            let mut in_r: Vec<f32> = in_l.iter().map(|x| -x * 0.5).collect();
+            let mut zero_mods = std::array::from_fn(|_| vec![0.0f32; in_l.len()]);
+            let mut hot_mods = std::array::from_fn(|_| vec![1.0f32; in_l.len()]);
+            for _ in 0..8 {
+                let (rl, rr) = process_with_mod(&mut reference, &mut in_l.clone(), &mut in_r.clone(), &mut zero_mods);
+                let (il, ir) = process_with_mod(&mut idle, &mut in_l.clone(), &mut in_r.clone(), &mut hot_mods);
+                let (pl, pr) = process_with_mod(&mut pulled, &mut in_l.clone(), &mut in_r.clone(), &mut hot_mods);
+                assert_eq!(rl, il, "mode {mode}: depth 0 must null");
+                assert_eq!(rr, ir, "mode {mode}: depth 0 must null");
+                for i in 0..in_l.len() {
+                    assert!((pl[i] - in_l[i]).abs() < 1e-6, "mode {mode}: L {i}");
+                    assert!((pr[i] - in_r[i]).abs() < 1e-6, "mode {mode}: R {i}");
+                }
+                in_l.rotate_left(13);
+                in_r.rotate_left(29);
+            }
+        }
+    }
+
+    /// Modulating `decay` upward with a held source holds more late energy
+    /// in the plate and hall tanks, like turning the knob itself.
+    #[test]
+    fn decay_modulation_lengthens_the_plate_and_hall_tail() {
+        let fs = 44_100;
+        for mode in [MODE_PLATE, MODE_HALL] {
+            let mut short = init_state(fs);
+            short[ST_MODE] = mode;
+            short[ST_DECAY] = 0.2;
+            short[ST_MIX] = 1.0;
+            short[ST_MIX_LAW] = MIX_LAW_LINEAR;
+            let mut modulated = short.clone();
+            modulated[ST_MOD_DECAY_DEPTH_1] = 0.7;
+            let (sl, _) = impulse_render_with_mod(&mut short, 2.0, fs as usize, [0.0; 4]);
+            let (ml, _) = impulse_render_with_mod(&mut modulated, 2.0, fs as usize, [1.0, 0.0, 0.0, 0.0]);
+            let late = fs as usize;
+            assert!(
+                energy(&ml[late..]) > energy(&sl[late..]) * 4.0,
+                "mode {mode}: modulated late energy {} vs {}",
+                energy(&ml[late..]),
+                energy(&sl[late..])
+            );
+            assert!(ml.iter().all(|x| x.is_finite()));
+        }
+    }
+
     #[test]
     fn state_layout_stays_inside_the_state_array() {
         assert!(ST_CHORUS_PHASE < GALAXY_RT);
+        assert!(ST_MIX_LAW < ST_MOD_DECAY_DEPTH_1);
+        assert!(ST_MOD_MIX_DEPTH_1 + 4 <= GALAXY_RT);
         assert!(ST_WRITE_IDX + NRING == ST_BUFS);
         for b in 0..NRING {
             assert!(RING_OFFSETS[b] + ring_cap(b) <= GALAXY_BUF_BASE);

@@ -5840,6 +5840,73 @@ mod tests {
         assert_eq!(app.graph.bus_node_ids[1].volume_id, 105);
     }
 
+    /// The builtin Reverb carries the four-slot voice modulator like
+    /// Multiverb did, so a Reverb on a group/bus can be modulated too: every
+    /// host gets a real modulator node, and a bus slot's source + depth edits
+    /// reach the modulator and the reverb node state.
+    #[test]
+    fn reverb_installs_a_modulator_on_all_hosts_and_bus_routings_reach_the_node() {
+        let graph = TestLiveGraph::new("reverb-host-modulation", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_sampler_rack_track(&[
+            std::path::PathBuf::from("../../content/impulses/lexicon-300-rich-plate.wav"),
+        ]).expect("sampler rack");
+        let track_slot = app.add_builtin_effect_sync(0, "Reverb").unwrap();
+        let rack_slot = app.add_builtin_rack_slot_effect_sync(0, 0, "Reverb").unwrap();
+        let bus_id = app.add_bus_channel("Reverb mod test");
+        let bus = app.buses.iter().position(|b| b.id == bus_id).unwrap();
+        let bus_slot = app.add_builtin_bus_effect_sync(bus, "Reverb").unwrap();
+        let source_nodes = [
+            app.state.pattern.effect_chains[0][track_slot].modulator_node_id.load(Ordering::Relaxed),
+            app.rack_slot_effect_snapshot(0, 0).unwrap().effect_slots[rack_slot].modulator_node_id,
+            app.buses[bus].effect_slots[bus_slot].modulator_node_id,
+        ];
+        assert!(source_nodes.iter().all(|node| *node > 0), "all hosts need a real effect modulator node: {source_nodes:?}");
+
+        let desc = EffectDescriptor::builtin_insert("Reverb").unwrap();
+        let bus_node = app.buses[bus].effect_slots[bus_slot].node_id;
+        assert!(bus_node > 0);
+        assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, bus_node as i32) });
+        assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, source_nodes[2] as i32) });
+        let decay_idx = desc.params.iter().position(|p| p.name == "decay").unwrap();
+        for slot in 1..=4 {
+            let source_idx = desc.params.iter().position(|p| p.name == format!("mod{slot}_source")).unwrap();
+            app.set_bus_effect_param(bus, bus_slot, source_idx, 1.0).unwrap();
+            let target = desc.instrument_modulation_targets.iter()
+                .find(|t| t.base_param_idx == decay_idx && t.modulator_slot == slot).unwrap();
+            app.set_bus_effect_param(bus, bus_slot, target.depth_param_idx, 0.25).unwrap();
+        }
+
+        let size = crate::effects::reverb::REVERB_STATE_SIZE * 4;
+        let mut memory = vec![0.0f32; crate::effects::reverb::REVERB_STATE_SIZE];
+        let mut source_memory = vec![0.0f32; crate::instruments::voice_modulator::STATE_SIZE];
+        let mut routed = false;
+        for _ in 0..16 {
+            graph.process_block();
+            let mut written = 0;
+            let copied = unsafe { crate::audiograph::get_node_state_into(
+                graph.ptr.0, bus_node as i32, memory.as_mut_ptr().cast(), size, &mut written,
+            ) };
+            if !copied { continue; }
+            assert_eq!(written, size);
+            let mut written = 0;
+            let copied = unsafe { crate::audiograph::get_node_state_into(
+                graph.ptr.0, source_nodes[2] as i32, source_memory.as_mut_ptr().cast(),
+                source_memory.len() * 4, &mut written,
+            ) };
+            if !copied { continue; }
+            let sources_on = (0..4).all(|slot| {
+                source_memory[crate::instruments::voice_modulator::slot_source_param_idx(slot)] == 1.0
+            });
+            let depths_on = desc.instrument_modulation_targets.iter()
+                .filter(|t| t.base_param_idx == decay_idx)
+                .all(|t| memory[desc.params[t.depth_param_idx].node_param_idx as usize] == 0.25);
+            if sources_on && depths_on { routed = true; break; }
+        }
+        assert!(routed, "bus Reverb source + depth edits must reach the modulator and reverb nodes");
+        assert!(memory.iter().all(|x| x.is_finite()));
+    }
+
     #[test]
     fn slowdown_installs_on_all_hosts_and_receives_tempo_and_macro_values() {
         let graph = TestLiveGraph::new("slowdown-host-routing", 64, 44_100, 2);

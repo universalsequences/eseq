@@ -2,6 +2,8 @@
 mod poseidon_ui_tests;
 #[path = "drift_waveform_tests.rs"]
 mod drift_waveform_tests;
+#[path = "rack_slot_indicator_tests.rs"]
+mod rack_slot_indicator_tests;
 
     use super::*;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
@@ -8962,6 +8964,12 @@ mod drift_waveform_tests;
             Value::Number(0.8_f32 as f64),
         );
 
+        let field = track_bus_send_field(0, bus_idx);
+        for (suffix, expected) in [("plock-any", 1.0), ("plock-active", 1.0),
+            ("plock-default", 0.2_f32 as f64)] {
+            assert_eq!(reactive_field_value(&runtime, "SEQ", &format!("{field}-{suffix}")),
+                Value::Number(expected));
+        }
         selected.lock().unwrap().clear();
         sync_selected_track_bus_send_binding_fields(
             &mut runtime,
@@ -9000,6 +9008,26 @@ mod drift_waveform_tests;
             reactive_field_value(&runtime, "SEQ", &current_track_bus_send_field(bus_idx)),
             Value::Number(0.2_f32 as f64),
         );
+    }
+
+    #[test]
+    fn mixer_send_plock_presence_is_track_specific_and_retires_after_clear() {
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        let app = test_app_for_track_visual_state(state.clone());
+        let destination = sequencer::sequencer::BusId::DEFAULT_A;
+        let bus = app.buses.iter().position(|bus| bus.id == destination).unwrap();
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], false);
+        state.pattern.track_send_plocks[1].set(40, destination, 0.8);
+        sync_track_bus_send_binding_fields(&mut runtime, &app, &state);
+        for (track, expected) in [(0, 0.0), (1, 1.0)] {
+            assert_eq!(reactive_field_value(&runtime, "SEQ",
+                &format!("{}-plock-any", track_bus_send_field(track, bus))), Value::Number(expected));
+        }
+        state.pattern.track_send_plocks[1].clear(40, destination);
+        sync_track_bus_send_binding_fields(&mut runtime, &app, &state);
+        assert_eq!(reactive_field_value(&runtime, "SEQ",
+            &format!("{}-plock-any", track_bus_send_field(1, bus))), Value::Number(0.0));
     }
 
     #[test]
@@ -13931,8 +13959,8 @@ mod drift_waveform_tests;
             find_layout_node_by_debug_name(&compact_list_layout, "rack-view-toolbar")
                 .expect("rack toolbar should remain visible when the slot list is collapsed");
         let compact_header =
-            find_layout_node_by_debug_name(&compact_list_layout, "rack-compact-header-content")
-                .expect("compact rack header");
+            find_layout_node_by_debug_name(&compact_list_layout, "rack-expanded-header-content")
+                .expect("device-only rack retains expanded header");
         let compact_chain_toggle =
             find_layout_node_by_debug_name(&compact_list_layout, "rack-chain-view-toggle")
                 .expect("selected-chain toggle should remain visible");
@@ -13943,11 +13971,10 @@ mod drift_waveform_tests;
             find_layout_node_by_debug_name(&compact_list_layout, "rack-chain-list").is_none(),
             "collapsed rack must not retain the slot list in its render tree"
         );
-        assert!(
-            compact_rack.rect.width < 5.0,
-            "rack should collapse to its toolbar width, got {:?}",
-            compact_rack.rect
-        );
+        let save = find_layout_node_by_debug_name(&compact_list_layout, "rack-preset-button")
+            .expect("device-only rack retains preset save");
+        assert_finite_nonzero_rect(save, "device-only preset save");
+        assert_layout_inside(save, compact_rack, "device-only preset save");
         assert_finite_nonzero_rect(compact_toolbar, "compact rack toolbar");
         assert_finite_nonzero_rect(compact_header, "compact rack header");
         assert_finite_nonzero_rect(compact_chain_toggle, "compact selected-chain toggle");
@@ -13983,6 +14010,10 @@ mod drift_waveform_tests;
         ] {
             assert_finite_nonzero_rect(node, label);
         }
+        let save = find_layout_node_by_debug_name(&macro_layout, "rack-preset-button")
+            .expect("macro view retains preset save without the list");
+        assert_finite_nonzero_rect(save, "macro-view preset save");
+        assert_layout_inside(save, macro_rack, "macro-view preset save");
         assert_layout_inside(macro_bank, macro_rack, "rack macro bank");
         assert_layout_inside(first_macro, macro_bank, "first rack macro");
         assert_layout_inside(last_macro, macro_bank, "last rack macro");
@@ -14054,10 +14085,26 @@ mod drift_waveform_tests;
             "track-plock-variants",
             build_track_plock_variants_value(&app.state, 0, &selected),
         );
+        editor.runtime_mut().register_reactive("SEQV", vec![], true);
+        editor.runtime_mut().set_reactive("SEQ", "track-plock-any",
+            Value::List(vec![plock_key_row("rack-macro", None, None, Some(0))]));
         sync_rack_macro_value_fields(editor.runtime_mut(), &app, 0, Some(15));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let updated_macro_layout = editor.widget_layout().expect("updated rack macro layout");
+        let wrapper = find_layout_node_by_debug_name(&updated_macro_layout, "rack-macro-control-0")
+            .expect("macro lock wrapper");
+        assert_eq!(layout_prop_number(wrapper, "plock-any"), Some(1.0));
+        let on_right_click = wrapper.props.get("on-right-click").unwrap().clone();
+        editor.runtime_mut().invoke(on_right_click, vec![Value::Map([
+            ("col".into(), value_cell(Value::Number(10.0))),
+            ("row".into(), value_cell(Value::Number(4.0))),
+        ].into_iter().collect())]).expect("open rack macro lock menu");
+        assert_eq!(editor.runtime_mut().eval_str(
+            "(get eseq.effects.param-controls/param-plock-menu :target)"),
+            Ok(Some(Value::String("rack-macro".into()))));
+        editor.runtime_mut().eval_str("(eseq.effects.param-controls/close-param-plock-menu)")
+            .expect("close macro menu");
         let updated_first_macro =
             find_layout_node_by_debug_name(&updated_macro_layout, "rack-macro-knob-0")
                 .expect("updated first rack macro knob");
@@ -14097,6 +14144,10 @@ mod drift_waveform_tests;
             .widget_layout()
             .expect("rack layout with list and selected chain collapsed");
         assert_finite_layout_tree(&toolbar_only_layout);
+        assert!(find_layout_node_by_debug_name(&toolbar_only_layout, "rack-preset-button").is_none());
+        assert_finite_nonzero_rect(
+            find_layout_node_by_debug_name(&toolbar_only_layout, "rack-compact-header-content")
+                .expect("all views hidden uses compact header"), "compact header");
         assert!(
             find_layout_node_by_debug_name(&toolbar_only_layout, "rack-view-toolbar").is_some(),
             "rack toolbar must remain visible when both views are collapsed"
@@ -15356,6 +15407,11 @@ mod drift_waveform_tests;
     }
 
     fn register_full_grid_test_natives(editor: &mut eseqlisp::Editor) {
+        // The shared sequencer keymap's BS/Delete binding asks the host for
+        // the step selection; tests that need one re-register this native.
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
         editor
             .runtime_mut()
             .eval_str(
@@ -16152,6 +16208,13 @@ mod drift_waveform_tests;
             .expect("tracker buffer")
             .id;
         editor.set_active_buffer(tracker_id);
+        // The tracker replaces *sequencer* in its tile, so the per-frame
+        // sequencer publishes (step lists, playhead fields) must treat the
+        // registered tab as a visible sequencer view or the tracker starves.
+        assert!(
+            super::super::edit_sessions::editor_has_visible_sequencer_view(&mut editor),
+            "a registered step tab counts as a visible sequencer view"
+        );
         let layout = {
             let tree = editor
                 .buffers
@@ -16167,8 +16230,58 @@ mod drift_waveform_tests;
         assert!(find_layout_node_by_text(&layout, "--- ..").is_some(), "empty step cell");
         assert!(find_layout_node_by_text(&layout, "0F").is_some(), "hex row numbers");
 
+        // Host publishes the tracker must react to without a full resync: a
+        // per-track step list index write (what a step toggle emits) and the
+        // per-step playhead field while playing.
+        let mut steps = vec![Value::Bool(false); 64];
+        steps[1] = Value::Bool(true);
+        let steps = test_list(steps);
+        editor
+            .runtime_mut()
+            .set_reactive_list_index("SEQ", "track-steps", 0, steps);
+        editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-playhead-active-0-1", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = {
+            let tree = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*tracker*")
+                .and_then(|buffer| buffer.widget_tree.as_ref())
+                .expect("tracker widget tree");
+            eseqlisp::layout::LayoutEngine::new(120, 80, 1.0)
+                .layout(tree)
+                .expect("tracker layout")
+        };
+        fn find_layout_node_by_key_early<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if matches!(node.props.get("key"), Some(Value::String(value)) if value == key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_layout_node_by_key_early(child, key))
+        }
+        let playhead_cell =
+            find_layout_node_by_key_early(&layout, "tracker-cell-0-1").expect("playhead cell");
+        assert!(
+            layout_node_contains_text_fragment(playhead_cell, "C-"),
+            "a track-steps index publish must re-render the toggled cell (velocity seed varies)"
+        );
+        assert!(
+            matches!(playhead_cell.props.get("background-color"), Some(Value::Keyword(k)) if k == "dark-gray"),
+            "the per-step playhead field must tint the cell: {:?}",
+            playhead_cell.props.get("background-color")
+        );
+
         // Keyboard: DOWN moves the cursor to row 1, RET toggles it, `a` enters
-        // C of the current octave (transpose 0) and activates the step.
+        // C of the current octave (transpose 0); the step is already active
+        // from the publish above, so `a` does not toggle it again.
         let press = |editor: &mut eseqlisp::Editor, code: KeyCode| {
             editor.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
         };
@@ -16179,7 +16292,6 @@ mod drift_waveform_tests;
         assert_eq!(
             calls,
             vec![
-                "seq-toggle-track-step 0 1".to_string(),
                 "seq-toggle-track-step 0 1".to_string(),
                 "seq-set-step-param 1 :transpose 0".to_string(),
             ],
@@ -22704,57 +22816,34 @@ mod drift_waveform_tests;
                 "#,
             )
             .expect("install step edit shortcut hooks");
+        let has_selection = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let selection_flag = Arc::clone(&has_selection);
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", move |_args, _ctx| {
+                Ok(Value::Bool(selection_flag.load(Ordering::Relaxed)))
+            });
         editor.refresh_runtime_side_effects();
 
-        let state = Arc::new(SequencerState::new(1, vec![]));
-        let current_track = Arc::new(AtomicUsize::new(0));
-        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
-        let step_clipboard = Arc::new(Mutex::new(None));
-
+        // The fx panel inherits the shared sequencer keymap, so the step keys
+        // work there without any host table.
         editor
             .runtime_mut()
             .eval_str(r#"(set-window-buffer "*fx*")"#)
             .expect("switch to fx buffer");
         editor.refresh_runtime_side_effects();
 
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-        assert!(!handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
+        editor.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(
             editor.runtime_mut().eval_str("delete-count").unwrap(),
-            Some(Value::Number(0.0))
+            Some(Value::Number(0.0)),
+            "no selected steps: the parent binding declines"
         );
 
-        selected_steps.lock().unwrap().insert(3);
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
+        has_selection.store(true, Ordering::Relaxed);
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
 
         assert_eq!(
             editor.runtime_mut().eval_str("cursor-left-count").unwrap(),
@@ -22769,44 +22858,34 @@ mod drift_waveform_tests;
             Some(Value::Number(1.0))
         );
 
+        // The mixer's own on-key handler declines BS when no delete target is
+        // armed, so the inherited keymap deletes the selected steps; an armed
+        // target takes the key instead.
+        let target_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let armed_flag = Arc::clone(&target_armed);
         editor
             .runtime_mut()
-            .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
-            .expect("switch to piano roll buffer");
+            .register_native("seq-delete-active-target", move |_args, _ctx| {
+                Ok(Value::Bool(armed_flag.load(Ordering::Relaxed)))
+            });
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*mixer*")"#)
+            .expect("switch to mixer buffer");
         editor.refresh_runtime_side_effects();
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
-
-        editor.open_scratch_buffer("*editable*", "");
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(
             editor.runtime_mut().eval_str("delete-count").unwrap(),
             Some(Value::Number(2.0)),
-            "selected steps should be deleted even when an editable/source buffer tile is active"
+            "Backspace in *mixer* with selected steps deletes the steps"
         );
-
-        selected_steps.lock().unwrap().clear();
-        assert!(!handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
+        target_armed.store(true, Ordering::Relaxed);
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(
+            editor.runtime_mut().eval_str("delete-count").unwrap(),
+            Some(Value::Number(2.0)),
+            "an armed mixer delete target takes Backspace before the step deletion"
+        );
     }
 
     #[test]
@@ -28640,6 +28719,39 @@ mod drift_waveform_tests;
     }
 
     #[test]
+    fn metal_seq_browser_device_activation_reveals_fx_panel() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        for (action, command) in [
+            (r#"(eseq.browser/activate-instrument "test-synth")"#, "add-track-instrument"),
+            (r#"(eseq.browser/activate-builtin-instrument "modulator")"#, "add-track-modulator"),
+            (r#"(eseq.browser/activate-audio-effect (dict :kind "builtin-audio-effect" :name "reverb"))"#, "add-builtin-effect"),
+            (r#"(eseq.browser/activate-audio-effect (dict :kind "custom-audio-effect" :name "test-effect"))"#, "add-effect"),
+            (r#"(eseq.browser/activate-midi-effect (dict :kind "midi-effect" :name "arp"))"#, "add-midi-fx"),
+            (r#"(eseq.browser/load-preset "test-preset")"#, "load-instrument-preset"),
+        ] {
+            editor.runtime_mut().eval_str(
+                "(eseq.seq-panels/seq-open-arrangement-piano-roll-bottom-for-track 0)",
+            ).unwrap();
+            editor.refresh_runtime_side_effects();
+            let _ = editor.drain_host_commands();
+            editor.runtime_mut().eval_str(action).unwrap();
+            assert!(editor.drain_host_commands().iter().any(|entry| matches!(entry,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == command
+            )), "missing {command} for {action}");
+            assert_eq!(editor.runtime_mut().eval_str(
+                "eseq.seq-step-tabs/lower-panel-buffer",
+            ).unwrap(), Some(Value::String("*fx*".to_string())), "{action}");
+            assert_eq!(editor.runtime_mut().eval_str(
+                "eseq.seq-core-state/lower-panel-visible",
+            ).unwrap(), Some(Value::Bool(true)), "{action}");
+            assert_eq!(editor.runtime_mut().eval_str(
+                "(eseq.piano-roll/piano-roll-arrangement-mode?)",
+            ).unwrap(), Some(Value::Bool(false)), "{action}");
+            editor.refresh_runtime_side_effects();
+        }
+    }
+
+    #[test]
     fn metal_seq_arrangement_clip_selection_follows_explicit_lower_panel_mode() {
         // Tracks 0 and 1 have clips; track 2 is intentionally empty.
         let mut editor = arrangement_region_editor(3, &[]);
@@ -29249,9 +29361,13 @@ mod drift_waveform_tests;
                 KeyCode::Backspace,
                 crossterm::event::KeyModifiers::NONE,
             )),
-            None,
-            "priority-sensitive deletion must remain in the host dispatcher",
+            Some("eseq.sequencer-keys/delete-selected-steps"),
+            "the arrangement inherits selected-step deletion from the shared keymap; \
+             the marquee delete stays in the host so it can outrank it",
         );
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
         assert_eq!(
             editor.runtime_mut().eval_str("SEQ.song-bound-clip").unwrap(),
             Some(Value::Nil),
@@ -29311,17 +29427,19 @@ mod drift_waveform_tests;
             .runtime_mut()
             .set_reactive("SEQ", "song-region", Value::Nil);
         editor.runtime_mut().run_reactive_cycle();
-        assert!(handle_metal_command_shortcut(
-            &mut editor,
-            &KeyEvent::new(
-                KeyCode::Backspace,
-                crossterm::event::KeyModifiers::NONE,
+        let backspace = KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::NONE);
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &backspace,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
             ),
-            &state,
-            &current_track,
-            &selected_steps,
-            &step_clipboard,
-        ));
+            "without a marquee region the host declines and the keymap runs"
+        );
+        editor.handle_key(backspace);
         assert_eq!(
             editor.runtime_mut().eval_str("arrangement-step-delete-count").unwrap(),
             Some(Value::Number(1.0)),
@@ -30600,6 +30718,50 @@ mod drift_waveform_tests;
             (restored_piano_roll_ratio - resized_piano_roll_ratio).abs() < f32::EPSILON,
             "reopened piano roll should restore its resized ratio: resized={resized_piano_roll_ratio}, restored={restored_piano_roll_ratio}"
         );
+    }
+
+    #[test]
+    fn metal_seq_mixer_send_lock_marker_and_menu_target_clicked_track() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        let mixer = editor.buffers.iter().find(|buffer| buffer.name == "*mixer*").unwrap().id;
+        editor.set_active_buffer(mixer);
+        editor.set_layout_viewport(140, 30);
+        editor.runtime_mut().set_reactive("SEQ", "track-bus-sends", test_list(vec![
+            test_list(vec![test_track_bus_send(0, "Bus A", 0.2)]),
+            test_list(vec![test_track_bus_send(0, "Bus A", 0.3)]),
+        ]));
+        for (field, value) in [("track-1-bus-0-send", 0.8),
+            ("track-1-bus-0-send-plock-any", 1.0),
+            ("track-1-bus-0-send-plock-active", 1.0),
+            ("track-1-bus-0-send-plock-default", 0.3)] {
+            editor.runtime_mut().set_reactive("SEQ", field, Value::Number(value));
+        }
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.drain_host_commands();
+        let layout = editor.widget_layout().expect("mixer send layout");
+        let wrapper = find_layout_node_by_debug_name(&layout, "track-1-send-0-plock").unwrap();
+        assert_finite_nonzero_rect(wrapper, "send wrapper");
+        assert_eq!(layout_prop_number(wrapper, "plock-any"), Some(1.0));
+        let knob = find_layout_node_by_widget_type(wrapper, "knob-number")
+            .expect("send knob accepts reactive p-lock props");
+        assert_finite_nonzero_rect(knob, "send knob");
+        assert_layout_inside(knob, wrapper, "send knob");
+        assert_eq!(layout_prop_number(knob, "plock-active"), Some(1.0));
+        assert_eq!(layout_prop_number(knob, "plock-default"), Some(0.3));
+        editor.runtime_mut().invoke(wrapper.props["on-right-click"].clone(), vec![map_value([
+            ("col", Value::Number(10.0)), ("row", Value::Number(4.0)),
+        ])]).expect("right-click send");
+        editor.runtime_mut().eval_str("(eseq.effects.param-controls/clear-param-plocks \"all\")")
+            .expect("clear send locks");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }]
+                if name == "clear-param-plocks"
+                    && *payload["track"].borrow() == Value::Number(1.0)
+                    && *payload["target"].borrow() == Value::String("bus-send".into())
+                    && *payload["param-idx"].borrow() == Value::Number(0.0)), "{commands:?}");
     }
 
     #[test]
@@ -46327,180 +46489,105 @@ mod drift_waveform_tests;
 
     #[test]
     fn metal_seq_fx_lisp_lays_out_id808_clap_columns() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
+        fn control<'a>(node: &'a eseqlisp::layout::LayoutNode, field: &str) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if matches!(node.widget_type.as_str(), "knob-number" | "number-picker" | "dropdown")
+                && ["value", "value-index"].iter().any(|key| matches!(node.props.get(*key),
+                    Some(Value::ReactiveRef { field: bound, .. }) if bound == field)) {
                 return Some(node);
             }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
+            node.children.iter().find_map(|child| control(child, field))
         }
-
-        fn count_stable_key_suffix(
-            node: &eseqlisp::layout::LayoutNode,
-            suffix: &str,
-            count: &mut usize,
-        ) {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                *count += 1;
-                return;
-            }
-            for child in &node.children {
-                count_stable_key_suffix(child, suffix, count);
-            }
+        let root = sequencer::app_paths::app_paths().instruments_dir().join("Drums/808 Clap");
+        let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
+        let params: Vec<_> = dsp.lines().map(|line| line.split(';').next().unwrap().trim())
+            .filter(|line| line.starts_with("(param ")).enumerate().map(|(index, line)| {
+                let words: Vec<_> = line.trim_end_matches(')').split_whitespace().collect();
+                let number = |key| words[words.iter().position(|word| *word == key).unwrap() + 1].parse::<f64>().unwrap();
+                (index, words[1].to_string(), number("@default"), number("@min"), number("@max"))
+            }).collect();
+        let mut instrument = test_instrument_map();
+        instrument.insert("synth".into(), Rc::new(RefCell::new(test_list(params.iter().map(|(index, name, value, min, max)| {
+            let mut param = test_param_map(name, *index, *value, *min, *max);
+            param.insert("value-field".into(), Rc::new(RefCell::new(Value::String(format!("clap-test-{name}")))));
+            Value::Map(param)
+        }).collect()))));
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive("SEQ", vec![
+            ("num-tracks", Value::Number(1.0)), ("compiling", Value::Bool(false)),
+            ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
+            ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
+            ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
+            ("instrument-panel", test_list(vec![Value::Map(instrument)])), ("bus-effects", test_list(vec![])),
+        ], true);
+        for (_, name, value, _, _) in &params {
+            editor.runtime_mut().set_reactive("SEQ", &format!("clap-test-{name}"), Value::Number(*value));
         }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let clap_ui = std::fs::read_to_string(
-            sequencer::app_paths::app_paths()
-                .instruments_dir()
-                .join("Drums/808 Clap/ui.lisp"),
-        )
-        .expect("read 808 Clap ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/Drums/808 Clap/ui.lisp".to_string(),
-            clap_ui,
+        editor.runtime_mut().eval_str(r#"
+            (def eseq.seq-core-state/selected-bus-name () "Mix")
+            (def seq-has-selection? () false)
+            (def eseq.browser/sbrowser-editor-name "")
+            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+            (def custom-midi-fx-ui (fx) false)
+            (def custom-audio-fx-ui (fx) false)
+            (defstate eseq.seq-core-state/selected-bus -1)
+        "#).unwrap();
+        register_test_delete_target_natives(&mut editor, 1);
+        let custom = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(), "instruments/Drums/808 Clap/ui.lisp".to_string(),
+            std::fs::read_to_string(root.join("ui.lisp")).unwrap(),
         )));
-        // Every dsp.lisp param, in declaration order, so each engine column can
-        // resolve whatever it shows.
-        let params: [(&str, f64, f64, f64); 34] = [
-            ("tune", 0.0, -24.0, 24.0), ("flam", 1.0, 0.25, 4.0), ("snap", 1.0, 0.0, 4.0),
-            ("body", 1.0, 0.0, 4.0), ("decay", 1.0, 0.1, 6.0), ("bright", 1.0, 0.0, 6.0),
-            ("drive", 1.0, 0.2, 6.0), ("level", 1.0, 0.0, 1.5),
-            ("fc1", 1114.0, 300.0, 3000.0), ("q1", 2.49, 0.5, 6.0), ("fc2", 2454.0, 800.0, 6000.0),
-            ("q2", 0.77, 0.5, 6.0), ("g2", 1.46, 0.0, 4.0), ("sp1", 8.98, 4.0, 16.0),
-            ("sp2", 11.8, 4.0, 16.0), ("sp3", 8.15, 4.0, 16.0), ("bdecay", -316.0, -1500.0, -100.0),
-            ("l2", 1.66, 0.0, 3.0), ("l3", 0.98, 0.0, 1.5), ("l4", 0.18, 0.0, 1.5),
-            ("sub_delay", 1.74, 1.5, 6.0), ("sub_gain", 1.12, 0.0, 2.0), ("burst_amp", 0.455, 0.05, 20.0),
-            ("tail_a1", 0.57, 0.0, 10.0), ("tail_d1", -37.3, -150.0, -10.0), ("tail_a2", 0.49, 0.0, 10.0),
-            ("tail_d2", -14.4, -40.0, -4.0), ("tail_lpf", 12000.0, 500.0, 12000.0), ("hp_fc", 743.0, 500.0, 10000.0),
-            ("b_hp", 0.0, 0.0, 1.5), ("t_hp", 0.06, 0.0, 1.5), ("out_hp", 655.0, 20.0, 2000.0),
-            ("out_drive", 0.8, 0.5, 4.0), ("out_gain", 1.85, 0.05, 2.0),
-        ];
-
-        // one engine; every param is a control and must be laid out exactly once
-        let engine_columns: [(f64, &[&str]); 1] = [(1.0, &[])];
-        for (engine, engine_controls) in engine_columns {
-            let mut clap_inst = test_instrument_map();
-            clap_inst.insert(
-                "synth".to_string(),
-                Rc::new(RefCell::new(test_list(
-                    params
-                        .iter()
-                        .enumerate()
-                        .map(|(index, (name, default, min, max))| {
-                            let value = if *name == "engine" { engine } else { *default };
-                            Value::Map(test_param_map(name, index, value, *min, *max))
-                        })
-                        .collect(),
-                ))),
-            );
-
-            let mut editor =
-                eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-            editor.set_layout_viewport(180, 18);
-            editor.runtime_mut().register_reactive(
-                "SEQ",
-                vec![
-                    ("num-tracks", Value::Number(1.0)),
-                    ("compiling", Value::Bool(false)),
-                    ("available-effects", test_list(vec![])),
-                    ("available-builtin-effects", test_list(vec![])),
-                    ("available-midi-effects", test_list(vec![])),
-                    ("bus-names", test_list(vec![])),
-                    ("effects", test_list(vec![])),
-                    ("midi-effects", test_list(vec![])),
-                    ("instrument-panel", test_list(vec![Value::Map(clap_inst)])),
-                    ("bus-effects", test_list(vec![])),
-                ],
-                true,
-            );
-            editor
-                .runtime_mut()
-                .eval_str(
-                    r#"
-                    (def eseq.seq-core-state/selected-bus-name () "Mix")
-                    (def seq-has-selection? () false)
-                    (def eseq.browser/sbrowser-editor-name "")
-                    (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                    (def custom-midi-fx-ui (fx) false)
-                    (def custom-audio-fx-ui (fx) false)
-                    (defstate eseq.seq-core-state/selected-bus -1)
-                    "#,
-                )
-                .expect("install fx test helpers");
-            register_test_delete_target_natives(&mut editor, 1);
-            editor
-                .runtime_mut()
-                .eval_str(&custom_ui_source)
-                .expect("load 808 Clap custom instrument ui");
-            editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.runtime_mut().eval_str(&custom).unwrap();
+        editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
+        editor.refresh_runtime_side_effects();
+        let fx = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
+        editor.set_active_buffer(fx);
+        let mut seen = std::collections::HashSet::new();
+        for page in 0..6 {
+            editor.runtime_mut().eval_str(&format!("((eseq.effects.custom-ui-sections/ui-section-select-callback {page}) false)")).unwrap();
             editor.refresh_runtime_side_effects();
-            if let Some(status) = editor.runtime_mut().take_status_message() {
-                panic!("808 Clap fx lisp status after refresh (engine {engine}): {status}");
+            let layout = editor.widget_layout().unwrap();
+            let panel = find_layout_node_by_debug_name(&layout, "instrument-panel").unwrap();
+            assert_finite_nonzero_rect(panel, "clap panel");
+            if page >= 4 {
+                let envelope = find_layout_node_by_debug_name(panel, "clap-bank-envelope").unwrap();
+                assert_finite_nonzero_rect(envelope, "bank envelope");
+                for prop in ["floor", "depth", "duration"] {
+                    assert!(matches!(envelope.props.get(prop), Some(Value::ReactiveRef { .. })), "{prop} must be reactive");
+                }
+                for locked in [false, true] {
+                    editor.runtime_mut().register_native("seq-has-selection?", move |_args, _ctx| Ok(Value::Bool(locked)));
+                    editor.drain_host_commands();
+                    for (event, x, y) in [("on-mouse-down", 0.0, 0.0), ("on-drag", 0.2, -0.2), ("on-mouse-up", 0.2, -0.2)] {
+                        editor.runtime_mut().invoke(envelope.props[event].clone(), vec![
+                            Value::Number(x), Value::Number(y), Value::Keyword("curve".into()),
+                        ]).unwrap();
+                    }
+                    let expected = if locked { "set-instrument-plock" } else { "set-instrument-param" };
+                    assert_eq!(editor.drain_host_commands().iter().filter(|command| matches!(command,
+                        eseqlisp::host::HostCommand::Custom { name, .. } if name == expected)).count(), 2);
+                }
             }
-
-            let fx_id = editor
-                .buffers
-                .iter()
-                .find(|buffer| buffer.name == "*fx*")
-                .expect("fx lisp should create the *fx* buffer")
-                .id;
-            editor.set_active_buffer(fx_id);
-            editor.set_layout_viewport(180, 18);
-            let layout = editor
-                .widget_layout()
-                .expect("808 Clap layout should build");
-
-            let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-                .expect("instrument panel layout node");
-            assert!(
-                instrument_panel.rect.width > 50.0 && instrument_panel.rect.height > 8.0,
-                "instrument panel should occupy visible measured space, got {:?}",
-                instrument_panel.rect
-            );
-
-            // Shared panels plus the selected machine's column: every control
-            // present, inside the visible panel, and laid out exactly once —
-            // the engine column must not repeat the shared panels' knobs.
-            let shared: Vec<&str> = params.iter().map(|(name, _, _, _)| *name).collect();
-            for suffix in shared.iter().chain(engine_controls.iter()) {
-                let node = find_stable_key_suffix(&layout, suffix).unwrap_or_else(|| {
-                    panic!("{suffix} control should be present in layout (engine {engine})")
-                });
-                assert!(
-                    node.rect.width > 1.0 && node.rect.height > 0.0,
-                    "{suffix} should have a finite nonzero rect, got {:?}",
-                    node.rect
-                );
-                assert!(
-                    node.rect.row >= instrument_panel.rect.row
-                        && node.rect.row + node.rect.height
-                            <= instrument_panel.rect.row + instrument_panel.rect.height,
-                    "{suffix} should be vertically inside the visible instrument panel (engine {engine}), got {:?}; panel={:?}",
-                    node.rect,
-                    instrument_panel.rect
-                );
-                let mut count = 0usize;
-                count_stable_key_suffix(&layout, &format!("-{suffix}"), &mut count);
-                assert_eq!(
-                    count, 1,
-                    "{suffix} should be laid out exactly once (engine {engine}), got {count}"
-                );
+            for (_, name, _, _, max) in &params {
+                if let Some(node) = control(panel, &format!("clap-test-{name}")) {
+                    assert_finite_nonzero_rect(node, name);
+                    assert!(node.rect.row >= panel.rect.row && node.rect.row + node.rect.height <= panel.rect.row + panel.rect.height,
+                        "{name} must be inside the visible panel");
+                    seen.insert(name.clone());
+                    if name.starts_with("bank") || name == "smoothing" {
+                        for locked in [false, true] {
+                            editor.runtime_mut().register_native("seq-has-selection?", move |_args, _ctx| Ok(Value::Bool(locked)));
+                            editor.drain_host_commands();
+                            editor.runtime_mut().invoke(node.props["on-change"].clone(), vec![Value::Number(*max)]).unwrap();
+                            let expected = if locked { "set-instrument-plock" } else { "set-instrument-param" };
+                            assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+                                eseqlisp::host::HostCommand::Custom { name, .. } if name == expected)), "{name} callback");
+                        }
+                    }
+                }
             }
         }
+        for (_, name, _, _, _) in params { assert!(seen.contains(&name), "missing clap control {name}"); }
     }
 
     #[test]
@@ -47111,187 +47198,6 @@ mod drift_waveform_tests;
                 node.rect.row >= instrument_panel.rect.row
                     && node.rect.row + node.rect.height
                         <= instrument_panel.rect.row + instrument_panel.rect.height,
-                "{suffix} should be inside the visible instrument panel, got {:?}; panel={:?}",
-                node.rect,
-                instrument_panel.rect
-            );
-            let mut count = 0usize;
-            count_stable_key_suffix(&layout, &format!("-{suffix}"), &mut count);
-            assert_eq!(count, 1, "{suffix} should be laid out exactly once, got {count}");
-        }
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_r8_kick03_controls() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        fn count_stable_key_suffix(
-            node: &eseqlisp::layout::LayoutNode,
-            suffix: &str,
-            count: &mut usize,
-        ) {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                *count += 1;
-                return;
-            }
-            for child in &node.children {
-                count_stable_key_suffix(child, suffix, count);
-            }
-        }
-
-        let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let instrument_ui = std::fs::read_to_string(
-            sequencer::app_paths::app_paths()
-                .instruments_dir()
-                .join("Drums/R8 Kick 03/ui.lisp"),
-        )
-        .expect("read R8 Kick 03 ui");
-        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "test-instrument".to_string(),
-            "instruments/Drums/R8 Kick 03/ui.lisp".to_string(),
-            instrument_ui,
-        )));
-        // Generated from the shipping DSP's param declarations.
-        let params: [(&str, f64, f64, f64); 24] = [
-            ("tune", 0.0, -24.0, 24.0),
-            ("weight", 1.0, 0.0, 2.0),
-            ("head", 1.0, 0.0, 2.0),
-            ("decay", 1.0, 0.2, 4.0),
-            ("damp", 0.0, 0.0, 1.0),
-            ("stretch", 0.0, -0.3, 0.3),
-            ("bend", 1.0, 0.0, 2.0),
-            ("bend_time", 1.0, 0.25, 3.0),
-            ("attack", 1.0, 0.25, 20.0),
-            ("length", 180.514, 40.0, 1200.0),
-            ("punch", 0.0, 0.0, 1.0),
-            ("dynamics", 0.5, 0.0, 1.0),
-            ("knock", 0.0466918, 0.0, 3.0),
-            ("shell_tune", 0.0, -12.0, 12.0),
-            ("ring", 1.0, 0.2, 4.0),
-            ("beater", 1.0, 0.0, 3.0),
-            ("hardness", 0.0, -1.0, 1.0),
-            ("contact", 1.0, 0.2, 4.0),
-            ("air", 1.0, 0.0, 3.0),
-            ("track", 1.0, 0.0, 1.0),
-            ("drive", 0.0, 0.0, 1.0),
-            ("tone", 0.0, -1.0, 1.0),
-            ("crush", 0.0, 0.0, 1.0),
-            ("level", 1.0, 0.0, 1.5),
-        ];
-
-        let mut instrument = test_instrument_map();
-        instrument.insert(
-            "synth".to_string(),
-            Rc::new(RefCell::new(test_list(
-                params
-                    .iter()
-                    .enumerate()
-                    .map(|(index, (name, default, min, max))| {
-                        Value::Map(test_param_map(name, index, *default, *min, *max))
-                    })
-                    .collect(),
-            ))),
-        );
-
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(180, 18);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(instrument)])),
-                ("bus-effects", test_list(vec![])),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor
-            .runtime_mut()
-            .eval_str(&custom_ui_source)
-            .expect("load R8 Kick 03 custom instrument ui");
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("R8 Kick 03 fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(180, 18);
-        let layout = editor.widget_layout().expect("R8 Kick 03 layout should build");
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel layout node");
-        assert!(
-            instrument_panel.rect.width.is_finite()
-                && instrument_panel.rect.height.is_finite()
-                && instrument_panel.rect.width > 50.0
-                && instrument_panel.rect.height > 8.0,
-            "instrument panel should occupy visible measured space, got {:?}",
-            instrument_panel.rect
-        );
-
-        for (suffix, _, _, _) in params {
-            let node = find_stable_key_suffix(&layout, &format!("-{suffix}"))
-                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
-            assert!(
-                node.rect.width.is_finite()
-                    && node.rect.height.is_finite()
-                    && node.rect.width > 1.0
-                    && node.rect.height > 0.0,
-                "{suffix} should have a finite nonzero rect, got {:?}",
-                node.rect
-            );
-            assert!(
-                node.rect.row >= instrument_panel.rect.row
-                    && node.rect.row + node.rect.height
-                        <= instrument_panel.rect.row + instrument_panel.rect.height
-                    && node.rect.col >= instrument_panel.rect.col
-                    && node.rect.col + node.rect.width
-                        <= instrument_panel.rect.col + instrument_panel.rect.width,
                 "{suffix} should be inside the visible instrument panel, got {:?}; panel={:?}",
                 node.rect,
                 instrument_panel.rect
@@ -48836,7 +48742,7 @@ mod drift_waveform_tests;
     }
 
     #[test]
-    fn builtin_reverb_params_are_host_modulatable_without_depth_slots() {
+    fn builtin_reverb_params_are_host_modulatable_with_depth_slots_on_mod_targets() {
         fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
             let Value::Map(map) = value else {
                 return None;
@@ -48872,7 +48778,16 @@ mod drift_waveform_tests;
             let has_targets = map_get(&param, "mod-targets").is_some();
             seen.insert(name, (modulatable, has_targets));
         }
-        for name in ["mix", "size", "decay", "hi shelf gain", "chorus amount", "mod depth"] {
+        // The four voice-modulator destinations carry depth-slot targets and
+        // stay macro-mappable; the other knobs are macro-mappable only.
+        for name in ["mix", "size", "decay", "mod depth"] {
+            assert_eq!(
+                seen.get(name),
+                Some(&(true, true)),
+                "{name} should be macro-mappable with depth-slot targets: {seen:?}"
+            );
+        }
+        for name in ["hi shelf gain", "chorus amount", "diffusion", "predelay"] {
             assert_eq!(
                 seen.get(name),
                 Some(&(true, false)),
@@ -48881,6 +48796,26 @@ mod drift_waveform_tests;
         }
         for name in ["mode", "enabled"] {
             assert_eq!(seen.get(name), Some(&(false, false)), "{name} must not be modulatable");
+        }
+        // The mods tab's per-slot source dropdown reads `source-param`; a
+        // Reverb without it showed four dead "off" dropdowns.
+        let sources = map_get(&first_slot, "sources").expect("effect should expose sources");
+        let Value::List(sources) = &*sources else {
+            panic!("sources should be a list: {sources:?}");
+        };
+        assert_eq!(sources.len(), 4);
+        for source in sources {
+            let source = source.borrow();
+            let source_param = map_get(&source, "source-param").expect("each mod slot needs a source param");
+            let options = map_get(&source_param, "options").expect("source param should list its options");
+            let Value::List(options) = &*options else {
+                panic!("options should be a list: {options:?}");
+            };
+            let labels: Vec<String> = options.iter().map(|o| match &*o.borrow() {
+                Value::String(s) => s.clone(),
+                other => panic!("option: {other:?}"),
+            }).collect();
+            assert!(labels.iter().any(|l| l == "lfo"), "{labels:?}");
         }
     }
 
@@ -55568,6 +55503,9 @@ mod drum_rollout_ui_tests;
 #[path = "fm_formant_ui_tests.rs"]
 mod fm_formant_ui_tests;
 
+#[path = "pm_woodwind_ui_tests.rs"]
+mod pm_woodwind_ui_tests;
+
 #[path = "melt_ui_tests.rs"]
 mod melt_ui_tests;
 
@@ -55585,6 +55523,3 @@ mod about_ui_tests;
 
 #[path = "application_menu_tests.rs"]
 mod application_menu_tests;
-
-#[path = "pm_woodwind_ui_tests.rs"]
-mod pm_woodwind_ui_tests;
