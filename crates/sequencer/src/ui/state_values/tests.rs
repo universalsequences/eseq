@@ -55315,6 +55315,47 @@ mod rack_slot_indicator_tests;
             )),
             "a pad click no longer triggers the pad"
         );
+
+        // A double-click opens the pad's member track in the *fx* panel: the
+        // bus selection drops and the member becomes the track under edit.
+        let opened = Arc::new(Mutex::new(Vec::<f64>::new()));
+        {
+            let opened = Arc::clone(&opened);
+            editor.runtime_mut().register_native("seq-set-track", move |args, _ctx| {
+                if let Some(Value::Number(track)) = args.first() {
+                    opened.lock().unwrap().push(*track);
+                }
+                Ok(Value::Nil)
+            });
+            // The perf fixture registers no selection natives; the double-click
+            // path clears the step selection on the way to the member track.
+            for native in ["seq-clear-selection", "sync-track-cursor-to-global"] {
+                editor.runtime_mut().register_native(native, |_args, _ctx| Ok(Value::Nil));
+            }
+        }
+        assert!(
+            matches!(empty.props.get("on-double-click"), None | Some(Value::Nil))
+                || {
+                    let dbl = empty.props.get("on-double-click").cloned().unwrap();
+                    editor.runtime_mut().invoke(dbl, vec![Value::Number(0.0); 3]).is_ok()
+                        && opened.lock().unwrap().is_empty()
+                },
+            "an empty cell has no track to open"
+        );
+        let dbl = occupied.props.get("on-double-click").cloned().expect("pad cell double-click");
+        editor
+            .runtime_mut()
+            .invoke(dbl, vec![Value::Number(0.0); 3])
+            .expect("pad double-click should evaluate");
+        assert_eq!(*opened.lock().unwrap(), vec![1.0], "the pad on note 36 opens member track 1");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.seq-core-state/selected-bus")
+                .expect("selected bus should evaluate"),
+            Some(Value::Number(-1.0)),
+            "opening a pad drops the rack bus selection so *fx* shows the member"
+        );
     }
 
     #[test]

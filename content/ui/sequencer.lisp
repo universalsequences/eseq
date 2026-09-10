@@ -2489,6 +2489,9 @@
       ;; A click focuses the pad; it no longer auditions it (the pad keys and
       ;; the sequencer play it), so a click that turns into a drag is silent.
       :on-click |x y r| (if (= pad nil) nil (select-pad gidx pad))
+      ;; A double-click opens the pad: its member track becomes the track under
+      ;; edit, which swaps the *fx* panel to that member's own chain.
+      :on-double-click |x y r| (if (= pad nil) nil (open-pad-member-fx gidx pad))
       (v-stack :width :fill :height :fill :gap 0.05
         ;; The note is the cell's own, so an empty cell still says which note
         ;; a drop here would claim.
