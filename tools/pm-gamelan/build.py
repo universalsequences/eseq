@@ -7,12 +7,16 @@ factory loading and patch editing independent of these offline Python tools.
 import argparse
 import hashlib
 import json
+import sys
 from string import Template
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from families import FACTORY, FAMILIES, HERE, ROOT
+
+sys.path.insert(0, str(ROOT / "tools/audition"))
+from modal_reduction import compact_modes
 
 
 def coefficients(family, data):
@@ -70,18 +74,31 @@ def coordinate(values, symbol):
     return '(+ '+' '.join(terms)+')' if terms else '0'
 
 
+def replace_once(text, original, replacement):
+    if text.count(original) != 1:
+        raise ValueError(f'Single-pot specialization no longer matches the template: {original}')
+    return text.replace(original, replacement)
+
+
 def source(family, data, analysis_bytes):
-    arrays = coefficients(family, data)
+    arrays, _ = compact_modes(coefficients(family, data), family.runtime_modes)
+    if len(family.units) == 1:
+        for name in ['ratio', 'rate', 'rise', 'direct']:
+            arrays[name] = arrays[name].reshape(-1)
     text = Template((HERE/'engine.lisp.in').read_text()).substitute(
         name=family.name, body=family.body.lower(), tables=table_source(arrays, analysis_bytes),
         row_expression=coordinate([u['midi'] for u in data['units']], 'note'),
         velocity_expression=coordinate(family.velocities, 'strength'),
         minimum_velocity=family.velocities[0], last_row=len(data['units'])-1,
-        layers=len(family.velocities), contact_seconds=family.contact_seconds, modes=family.modes)
+        layers=len(family.velocities), contact_seconds=family.contact_seconds, modes=family.runtime_modes)
     if len(family.units) == 1:
         text = '\n'.join(line for line in text.split('\n') if not line.startswith('(param register '))
         text = text.replace('(gamelan-row (+ key_note (gamelan-smooth (clip (mod register) -24 24) 8)))', '0')
         text = text.replace('(def row (gamelan-hold 0 update_tick))', '(def row 0)')
+        for field in ['ratio', 'rate', 'rise', 'direct']:
+            text = replace_once(text, f'(gamelan-row-mix {field}_table low_indices high_indices row_mix)', f'{field}_table')
+        text = replace_once(text, '(def amplitude (mix\n  (gamelan-row-mix amplitude_table a00 a01 velocity_mix)\n  (gamelan-row-mix amplitude_table a10 a11 velocity_mix) row_mix))',
+                            '(def amplitude (gamelan-row-mix amplitude_table a00 a01 velocity_mix))')
     return text
 
 
@@ -153,7 +170,9 @@ def outputs(slug):
     attribution = f'# {family.name} reference material\n\n'
     attribution += f'Calibrated from {sum(len(u["recordings"]) for u in data["units"])} **{family.prefix}** recordings.\n'
     attribution += f'Exact filenames and SHA256 hashes: `tools/pm-gamelan/{slug}-analysis.json`.\n\n'+credits
-    result = {family.source: source(family, data, analysis_bytes),
+    _, reduction = compact_modes(coefficients(family, data), family.runtime_modes)
+    result = {HERE/f'{slug}-reduction.json': json.dumps(reduction, indent=2)+'\n',
+              family.source: source(family, data, analysis_bytes),
               family.source.parent/'ui.lisp': ui_source(family, data),
               family.source.parent/'ATTRIBUTION.md': attribution,
               FACTORY/(family.name+'.presets'): json.dumps(presets(family), indent=2)+'\n'}

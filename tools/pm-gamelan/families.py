@@ -16,7 +16,8 @@ class Family:
     units: tuple
     strengths: tuple = ('medium', 'harder', 'hardest')
     velocities: tuple = (.6, .8, 1.)
-    modes: int = 32
+    modes: int = 32  # Offline identification capacity.
+    runtime_modes: int = 24
     contact_seconds: float = .00006
     fit_seconds: float = 5.
     spectrum_seconds: float = .6
@@ -32,7 +33,7 @@ FAMILIES = {
     'slenthem': Family('PM Slenthem', 'slenthem-pelog-slenthemmalletpaddedside',
         tuple(zip(map(str, range(1, 8)), (50, 52, 53, 56, 57, 58, 60),
                   (148.4, 163.1, 174.2, 203.5, 221.5, 236.5, 263.1))),
-        modes=16, contact_seconds=.0003, fit_seconds=8., body='Bar & tube'),
+        modes=16, runtime_modes=6, contact_seconds=.0003, fit_seconds=8., body='Bar & tube'),
     'bonang': Family('PM Bonang', 'bonangbarung-slendro-bonangmalletwoodenside',
         # The pack includes an additional damaged pot. It gets its own adjacent
         # key, not a replacement for intact pot 2 or an averaged calibration.
@@ -42,11 +43,11 @@ FAMILIES = {
     'slenthem-slendro': Family('PM Slenthem Slendro', 'slenthem-slendro-slenthemmalletwoodenside',
         tuple(zip(('6l', '1', '2', '3', '5', '6', '1h'), (46, 48, 51, 53, 56, 58, 60),
                   (117.5, 134.6, 155.1, 177.1, 203.6, 235.4, 270.))),
-        modes=24, fit_seconds=8., body='Bar & tube', resolve_attack=True),
+        modes=24, runtime_modes=24, fit_seconds=8., body='Bar & tube', resolve_attack=True),
     'kempyang': Family('PM Kempyang', 'kempyang-slendro-bonangmalletwoodenside',
-        (('', 82, 927.7),), modes=24),
+        (('', 82, 927.7),), modes=24, runtime_modes=12),
     'kethuk': Family('PM Kethuk', 'kethuk-slendro-bonangmalletwoodenside',
-        (('', 58, 238.3),)),
+        (('', 58, 238.3),), runtime_modes=18),
 }
 
 

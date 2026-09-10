@@ -7,11 +7,11 @@ recorded envelopes are deployed.
 
 | Factory instrument | Exact reference group | Recordings | Modal slots |
 | --- | --- | ---: | ---: |
-| PM Slenthem | `slenthem-pelog-slenthemmalletpaddedside` | 21 | 16 |
-| PM Bonang | `bonangbarung-slendro-bonangmalletwoodenside` | 39 | 32 |
+| PM Slenthem | `slenthem-pelog-slenthemmalletpaddedside` | 21 | 6 |
+| PM Bonang | `bonangbarung-slendro-bonangmalletwoodenside` | 39 | 24 |
 | PM Slenthem Slendro | `slenthem-slendro-slenthemmalletwoodenside` | 21 | 24 |
-| PM Kempyang | `kempyang-slendro-bonangmalletwoodenside` | 3 | 24 |
-| PM Kethuk | `kethuk-slendro-bonangmalletwoodenside` | 3 | 32 |
+| PM Kempyang | `kempyang-slendro-bonangmalletwoodenside` | 3 | 12 |
+| PM Kethuk | `kethuk-slendro-bonangmalletwoodenside` | 3 | 18 |
 
 All **87 recordings** in these groups participate. The bonang includes the
 three recordings labelled **2-broken**, kept as an additional pot on MIDI 74
@@ -129,11 +129,11 @@ use the same recordings; no independent performances were available.
 
 | Instrument | Median absolute RMS error, 25 ms–1 s | Maximum in those windows | Median secondary-mode error |
 | --- | ---: | ---: | ---: |
-| PM Slenthem | 0.81 dB | 3.31 dB | 2.19 dB |
-| PM Bonang | 0.39 dB | 3.69 dB | 0.73 dB |
+| PM Slenthem | 0.81 dB | 3.31 dB | 2.20 dB |
+| PM Bonang | 0.39 dB | 3.72 dB | 1.41 dB |
 | PM Slenthem Slendro | 0.32 dB | 2.78 dB | 0.98 dB |
-| PM Kempyang | 0.34 dB | 0.73 dB | 0.77 dB |
-| PM Kethuk | 0.22 dB | 0.99 dB | 0.47 dB |
+| PM Kempyang | 0.34 dB | 0.75 dB | 0.89 dB |
+| PM Kethuk | 0.22 dB | 1.01 dB | 0.82 dB |
 
 `*-comparison.json` contains raw RMS, spectral-cell error, secondary-mode
 error and energy outside modal cells for every recording and time window.
@@ -144,7 +144,7 @@ impact, level and secondary-mode checks. Those envelopes are not listening
 acceptance criteria.
 
 The first 25 ms remains less exact: maximum level errors are about 6.18,
-4.80, 4.04, 1.74 and 3.86 dB, respectively. Individual weak upper modes differ
+4.80, 4.04, 1.73 and 3.88 dB, respectively. Individual weak upper modes differ
 more than the summary medians. Recording phase, microphone field, room noise,
 individual strike irregularity and full nonlinear structural coupling are
 not reconstructed. Late 3–5 s discrepancies reach roughly 29 dB in one
@@ -169,9 +169,10 @@ older compiler pin has not been validated for these instruments.
   combined extremes, presets, key-up/hand damping, automation and modulation.
 - 87 reference-pitch checks at 44.1, 48 and 96 kHz.
 - All 16 strike-clock phases and process partitions of 1, 7, 31, 64, 127 and
-  128 samples agree within the recorded tolerances; clock/partition errors
-  are zero in the validated runs.
-- Actual compiled patch-editor writeback is compared with authored DSP.
+  128 samples agree within the recorded tolerances; maximum clock/partition
+  differences are below 0.000000053 peak per sample.
+- Actual compiled patch-editor writeback is compared with authored DSP;
+  maximum difference is 0.0000186 peak per sample, below the existing 0.00002 gate.
 - Five factory UI tests exercise every parameter and parameter lock, page
   callbacks, reactive diagrams and finite visible geometry on all 25 pages.
 - Production Metal captures cover every instrument and every shared page
@@ -180,10 +181,54 @@ older compiler pin has not been validated for these instruments.
   including Open Ring preset loading. Thirty preset phrases are rendered.
 - Generated-C fusion auditing runs after every audition compilation.
 
-The measured one-voice cost at 48 kHz / 128 frames is about 5–7% of one core
-for four models and about **19% for Bonang**. These are offline measurements,
-not guaranteed real-time polyphony limits. Bonang coefficient-evaluation
-profiling is tracked as **eseq-vqh7**; strike correctness must be preserved.
+The original six-model implementation is preserved in commit `7e439b47`.
+The performance pass keeps a compact, common subset of its modal slots,
+including the pitch-reference mode. Wooden Slenthem keeps its full 24 modes
+to preserve its short upper-mode clank. `tools/audition/modal_reduction.py` ranks
+slots over every register, strike strength and six attack-to-tail windows,
+weighting total energy and energy excluding the strongest mode equally.
+`*-reduction.json` records the selected slots and the energy proxy; source
+comparisons remain the acceptance check for quiet overtones.
+Retained frequencies, losses, excitation levels, pan positions and register
+interpolation are unchanged. No per-clip gain compensation is applied. The
+full identification tables remain reproducible from the original analyses.
+
+The shared runtime gathers table entries using shared integer row/velocity
+indices, avoiding repeated wrapped fractional lookups for each field.
+Single-pot structural coefficients are direct vectors. It reuses sine/cosine
+for contact and modal rotation, and
+removes redundant coefficient latches whose inputs already hold on the same
+update event. Immediate strike updates and all physical recurrences remain.
+
+`performance.json` records paired native-ABI timings against that commit at
+48 kHz / 128 frames, with seven alternating repetitions of five playing
+conditions per instrument. Compilation, Python, allocation and file I/O are
+outside the timed region. It also records phase-aligned waveform differences
+and raw window levels for every recorded key/strength and the presets. These
+are acoustic comparisons, not a numeric measurement of musical character or
+a guarantee of full-project CPU savings. Listening A/Bs are generated under
+`output/performance/`; each plays the baseline first, then the optimized model.
+
+Conservative results on the validation Mac (minimum speedup across the five
+conditions, using each condition's seven-run medians):
+
+| Instrument | Speedup | CPU saved | Maximum waveform NRMSE, references + presets |
+| --- | ---: | ---: | ---: |
+| PM Saron | 2.24× | 55.4% | 0.983% |
+| PM Slenthem | 2.91× | 65.6% | 0.528% |
+| PM Bonang | 4.19× | 76.2% | 9.975% |
+| PM Slenthem Slendro | 1.67× | 40.1% | 0.001% |
+| PM Kempyang | 2.55× | 60.8% | 8.694% |
+| PM Kethuk | 2.34× | 57.3% | 5.590% |
+
+All 206 reference/preset waveform comparisons have normalized RMS difference
+below 10%; waveform correlation is at least 0.995. NRMSE measures error
+relative to baseline RMS, not the percentage of musical character retained.
+All 122 recording comparisons also pass their original level and overtone
+gates without threshold changes. Wooden Slenthem exceeds the requested 30%
+CPU saving but falls short of the ideal 2× speedup; further exact optimization
+is tracked in **eseq-0km2**. The native timing driver includes the vendored
+production ABI header; its declarations were checked against that contract.
 
 Run from the repository root with dependencies in `requirements.txt`:
 
@@ -196,6 +241,7 @@ ESEQ_PM_VERIFY_DIR=/tmp/eseq-gamelan-roundtrip cargo nextest run -p eseqlisp --t
 PYTHONDONTWRITEBYTECODE=1 python tools/pm-gamelan/verify.py --roundtrip /tmp/eseq-gamelan-roundtrip
 PYTHONDONTWRITEBYTECODE=1 python tools/pm-gamelan/compare.py
 PYTHONDONTWRITEBYTECODE=1 python tools/pm-gamelan/demo.py
+PYTHONDONTWRITEBYTECODE=1 python tools/pm-gamelan/performance.py --baseline 7e439b47
 cargo nextest run -p sequencer --bin metal_seq -E 'test(/state_values::tests::pm_woodwind_ui_tests::(slenthem|slenthem_slendro|bonang|kempyang|kethuk)_surface_controls_and_pages/)'
 cargo run --bin instrument_probe -- 'factory:Physical Models/PM Bonang' --sample-rate 48000 --midi-note 72 --frames 96000 --gate-frames 12000 --min-peak 0.01 --min-rms 0.001 --json
 cargo run -p sequencer --bin metal_seq -- capture --script crates/sequencer/ui/capture-fixtures/pm-bonang-0.lisp --buffer fx --track 0 --width 1800 --height 600 --out tools/pm-gamelan/output/bonang/panel-0.png

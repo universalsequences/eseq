@@ -77,8 +77,8 @@ window, and a positive loss floor prevents an endless fitted noise tail.
 
 `calibrate.py` matches modal slots between adjacent registers by frequency
 and prominence. Missing modes fade to zero excitation; their frequencies
-continue from identified neighbors. The runtime has 24 modal slots, with
-9–23 identified lines per reference bar. Coefficients interpolate across
+continue from identified neighbors. The offline bank has 24 modal slots, with
+9–23 identified lines per reference bar; the runtime retains 16 shared slots. Coefficients interpolate across
 seven registers and five excitation strengths. No recorded envelope arrays
 or per-recording oscillator programs are selected at runtime.
 
@@ -197,10 +197,18 @@ On macOS ARM64 with the repository's pinned **DGenLisp v0.1.17**:
 - Five production host probes pass, including preset loading. The generated-C
   fusion audit runs after every audition compilation.
 
-The measured one-voice cost at 48 kHz / 128 frames was about **6.9% of one
-core** on the recorded Mac. This is offline process CPU time, not a certified
-polyphony limit or worst-case real-time guarantee. Linux uses an independent
-older compiler pin and has not been validated for this instrument.
+The performance pass retains 16 of the original 24 modal slots, selected
+across every bar/strength and six attack-to-tail windows. The retained poles,
+excitation levels, stereo positions and interpolation paths are unchanged.
+Shared integer gather indices replace repeated wrapped table lookups; sine
+and cosine serve both contact and modal rotation. Redundant downstream
+coefficient latches are removed while immediate strike updates remain.
+The full 24-slot calibration remains reproducible. Paired native-ABI timing
+and audio comparisons against baseline commit `7e439b47` are recorded in
+`../pm-gamelan/performance.json`; see that README for the method and listening
+A/Bs. These timings are not a certified polyphony limit or a worst-case
+real-time guarantee. Linux uses an independent older compiler pin and has not
+been validated for this instrument.
 
 ## Listening files
 

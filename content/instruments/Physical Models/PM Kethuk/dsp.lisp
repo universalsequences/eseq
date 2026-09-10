@@ -34,28 +34,28 @@
 ;; BEGIN GENERATED CALIBRATION
 ;; Latent Sonorities / memeshift, CC BY-NC 4.0; see ATTRIBUTION.md.
 ;; Analysis SHA256: ee6222960325ec138e5b27b2e9e8ab73da21965992fc76bd28c7ac63b9907809
-(def ratio_table (tensor @shape [1 32] @data [
-  1 4.3097438 3.52522916 6.69282169 7.86450899 4.77392383 6.83153833 8.56125332 9.01126393 1.67336879 7.26501869 7.47294774 8.26586822 6.25395662 1.73383887 12.2082535 8.81907218 4.69479176 7.12622046 9.71787115 10.2877934 9.98391941 12.3794583 6.00323231 12.5215147 24.3501813 5.83231048 10.8846588 15.3918188 5.98232847 14.9766117 10.3977815
+(def ratio_table (tensor @shape [18] @data [
+  1 4.3097438 3.52522916 6.69282169 7.86450899 4.77392383 6.83153833 8.56125332 9.01126393 1.67336879 7.26501869 7.47294774 8.26586822 6.25395662 1.73383887 8.81907218 4.69479176 7.12622046
 ]))
-(def rate_table (tensor @shape [1 32] @data [
-  2.31201656 6.29587934 7.47204894 20.0692486 5.82527088 4.69332998 2.51240856 3.26710884 4.99265546 0.797723863 2.14890052 2.13140098 3.05126816 2.50126607 1.04944785 9.49307617 3.56250485 5.23867494 2.45185149 4.39310602 4.69030599 3.57583505 10.4029651 2.59191898 7.79774578 9.82480142 6.60517227 7.0093343 8.31253276 4.29275101 5.15386909 2.20700916
+(def rate_table (tensor @shape [18] @data [
+  2.31201656 6.29587934 7.47204894 20.0692486 5.82527088 4.69332998 2.51240856 3.26710884 4.99265546 0.797723863 2.14890052 2.13140098 3.05126816 2.50126607 1.04944785 3.56250485 5.23867494 2.45185149
 ]))
-(def rise_table (tensor @shape [1 32] @data [
-  0.00199369809 0.107395539 0.0332470726 0.721155686 0.193168257 0.050844136 0.04387159 0.190756935 0.0364563714 0.00100131497 0.0147458729 0.0283709343 0.0402242496 0.00120413364 0.555194284 0.8 0.0727975893 0.0235279777 0.108750488 0.0056315013 0.0523643963 0.00100452838 0.0478599633 0.126864119 0.0223506292 0.0428052478 0.00186391533 0.00148406821 0.00106614575 0.00100020982 0.0888024753 0.00119706526
+(def rise_table (tensor @shape [18] @data [
+  0.00199369809 0.107395539 0.0332470726 0.721155686 0.193168257 0.050844136 0.04387159 0.190756935 0.0364563714 0.00100131497 0.0147458729 0.0283709343 0.0402242496 0.00120413364 0.555194284 0.0727975893 0.0235279777 0.108750488
 ]))
-(def direct_table (tensor @shape [1 32] @data [
-  0.881449121 0.337156524 5.47872858e-12 0.0539586845 0.49310218 2.42722468e-07 0.426150351 0.144646286 6.22162322e-11 0.99999704 3.90839805e-10 0.0910942469 0.259830516 0.917126454 0.551508972 0.162161366 0.366878949 2.01394457e-13 0.43787875 0.118122085 1.89848137e-14 0.997339087 1.58505431e-11 0.807947379 0.891662306 1.11022302e-16 0.23909082 0.963844133 0.734895421 1 2.40918396e-14 0.750230982
+(def direct_table (tensor @shape [18] @data [
+  0.881449121 0.337156524 5.47872858e-12 0.0539586845 0.49310218 2.42722468e-07 0.426150351 0.144646286 6.22162322e-11 0.99999704 3.90839805e-10 0.0910942469 0.259830516 0.917126454 0.551508972 0.366878949 2.01394457e-13 0.43787875
 ]))
-(def amplitude_table (tensor @shape [3 32] @data [
-  0.00530151667 0.0109204508 0.012391595 0.00966432664 0.002028317 0.00407353815 0.00140331007 0.00103937797 0.00113278939 0.000758841771 0.00101141172 0.000339445802 0.000229408917 0.000403847581 0.000194524525 0.000181603194 0.000484549584 0.000252276157 0.000357406442 0.00012430182 4.26160728e-05 0.0001512602 0.000231160294 0.000242934084 6.47884505e-05 6.47940188e-05 3.2790489e-05 3.32032998e-05 1.91677702e-05 6.55189105e-05 1.26123102e-05 3.04320632e-06
-  0.0095385351 0.0256319237 0.0323167244 0.0334827059 0.0130873759 0.008449093 0.00540436616 0.00360136635 0.0048174228 0.00107348893 0.0026100002 0.00194905749 0.00165286727 0.000556315779 0.00070551676 0.00152057229 0.000881417484 0.00166526771 0.000553665564 0.00037067833 0.000493064939 0.000597492095 0.000903860589 0.000540624095 0.000776636148 0.000507723747 0.000231536316 0.000319313468 0.000227664298 0.000179727573 0.00018814529 7.48037177e-05
-  0.015764678 0.0468247346 0.040466201 0.0354140568 0.0170826623 0.0163532587 0.0119560442 0.00707948681 0.00598465204 0.00185324088 0.00241712751 0.00234033462 0.00317925147 0.00242504841 0.00115715949 0.00323361848 0.00128141267 0.000696847878 0.000965397033 0.00132735533 0.0012968496 0.000928065606 0.00159715921 0.000451896485 0.0008393013 0.00103395782 0.000894011313 0.00085514309 0.000918449735 0.000543912734 0.000398590148 0.000158487311
+(def amplitude_table (tensor @shape [3 18] @data [
+  0.00530151667 0.0109204508 0.012391595 0.00966432664 0.002028317 0.00407353815 0.00140331007 0.00103937797 0.00113278939 0.000758841771 0.00101141172 0.000339445802 0.000229408917 0.000403847581 0.000194524525 0.000484549584 0.000252276157 0.000357406442
+  0.0095385351 0.0256319237 0.0323167244 0.0334827059 0.0130873759 0.008449093 0.00540436616 0.00360136635 0.0048174228 0.00107348893 0.0026100002 0.00194905749 0.00165286727 0.000556315779 0.00070551676 0.000881417484 0.00166526771 0.000553665564
+  0.015764678 0.0468247346 0.040466201 0.0354140568 0.0170826623 0.0163532587 0.0119560442 0.00707948681 0.00598465204 0.00185324088 0.00241712751 0.00234033462 0.00317925147 0.00242504841 0.00115715949 0.00128141267 0.000696847878 0.000965397033
 ]))
 (def tuning_table (tensor @shape [1] @data [
   36.0306819
 ]))
-(def mode_pan_table (tensor @shape [32] @data [
-  0 0.472843206 -0.697319729 0.555520526 -0.121927366 -0.375709636 0.676000552 -0.621213901 0.240127043 0.267089484 -0.63401399 0.667914885 -0.350985309 -0.150303598 0.5726437 -0.694195687 0.45111289 0.0289224751 -0.493765956 0.699252824 -0.537448584 0.0933428954 0.399792292 -0.682931683 0.607352846 -0.212754491 -0.293595766 0.645731252 -0.658688492 0.325661537 0.178423128 -0.58878886
+(def mode_pan_table (tensor @shape [18] @data [
+  0 0.472843206 -0.697319729 0.555520526 -0.121927366 -0.375709636 0.676000552 -0.621213901 0.240127043 0.267089484 -0.63401399 0.667914885 -0.350985309 -0.150303598 0.5726437 0.45111289 0.0289224751 -0.493765956
 ]))
 ;; END GENERATED CALIBRATION
 
@@ -97,16 +97,30 @@
 (def row_low (floor row))
 (def row_high (min 0 (+ row_low 1)))
 (def row_mix (- row row_low))
+;; Row coordinates are already clamped. Share integer gather indices across
+;; fields instead of repeating wrapped fractional lookups inside each mode.
+(def mode_indices (iota 18))
+(def low_indices (+ mode_indices (* row_low 18)))
+(def high_indices (+ mode_indices (* row_high 18)))
+(def velocity_low (floor velocity_row))
+(def velocity_high (min (- 3 1) (+ velocity_low 1)))
+(def velocity_mix (- velocity_row velocity_low))
+(def a00 (+ mode_indices (* (+ (* row_low 3) velocity_low) 18)))
+(def a01 (+ mode_indices (* (+ (* row_low 3) velocity_high) 18)))
+(def a10 (+ mode_indices (* (+ (* row_high 3) velocity_low) 18)))
+(def a11 (+ mode_indices (* (+ (* row_high 3) velocity_high) 18)))
+(defmacro gamelan-row-mix (table lower upper fraction)
+  (mix (gather table lower) (gather table upper) fraction))
+
 (def base_hz (* (clip pitch 32.703196 8372.018)
   (pow 2 (/ (+ (clip (mod tune) -100 100)
     (* (clip (mod amount) 0 1) (peek tuning_table (gamelan-row key_note)))) 1200))))
-(def ratio (peek-row ratio_table row))
+(def ratio ratio_table)
 (def harmonic_ratio (max 1 (floor (+ ratio 0.5))))
 (def live_ratio (max 0.1 (mix harmonic_ratio ratio (gamelan-hold (gamelan-smooth (clip (mod inharmonicity) 0 1.8) 8) update_tick))))
 (def frequencies (* (gamelan-hold base_hz update_tick) live_ratio))
 (def band (clip (/ (- (* samplerate 0.47) frequencies) (* samplerate 0.07)) 0 1))
-(def amplitude (mix (peek-row amplitude_table (+ (* row_low 3) velocity_row))
-  (peek-row amplitude_table (+ (* row_high 3) velocity_row)) row_mix))
+(def amplitude (gamelan-row-mix amplitude_table a00 a01 velocity_mix))
 
 ;; A normalized two-pole contact force; measured modal residues are deconvolved
 ;; by its reference response. Hardness/contact alter the force, not the decay.
@@ -117,8 +131,10 @@
 (def force1 (gamelan-pole (* onset velocity_gain) contact_pole))
 (def force (gamelan-pole force1 contact_pole))
 (def omega (* twopi (/ (min frequencies (* 0.48 samplerate)) samplerate)))
+(def rotation_cos (cos omega))
+(def rotation_sin (sin omega))
 (def inverse_contact (/ (+ (* (- 1 reference_pole) (- 1 reference_pole))
-  (* 2 reference_pole (- 1 (cos omega)))) (* (- 1 reference_pole) (- 1 reference_pole))))
+  (* 2 reference_pole (- 1 rotation_cos))) (* (- 1 reference_pole) (- 1 reference_pole))))
 ;; A finite mallet footprint suppresses shorter spatial wavelengths. Its width
 ;; is a timbral control: spatial mode shapes cannot be recovered from one mic.
 (def footprint (exp (* -0.8 (max 0 (- ratio 1)) (gamelan-hold (clip (mod spread) 0 1) update_tick))))
@@ -128,7 +144,7 @@
 ;; unknown), not a claim to measured impact joules. Soft contacts may dissipate
 ;; energy; hard contacts cannot manufacture unbounded extra modal energy.
 (def live_contact (/ (* (- 1 contact_pole) (- 1 contact_pole))
-  (+ (* (- 1 contact_pole) (- 1 contact_pole)) (* 2 contact_pole (- 1 (cos omega))))))
+  (+ (* (- 1 contact_pole) (- 1 contact_pole)) (* 2 contact_pole (- 1 rotation_cos)))))
 (def reference_residue (* amplitude band))
 (def colored_residue (* reference_residue inverse_contact live_contact footprint color_weight))
 (def reference_energy (sum (* reference_residue reference_residue)))
@@ -140,29 +156,31 @@
 (def hand_loss (* 100 (pow (gamelan-smooth (clip (mod touch) 0 1) 4) 2)))
 (def release_loss (* (- 1 held) (pow (- 1 (clip (mod lift) 0 1)) 2)
   (/ 6.907755 (clip (mod release_s) 0.02 12))))
-(def rate (+ (/ (* (peek-row rate_table row) loss_scale) decay_scale)
+(def rate (+ (/ (* rate_table loss_scale) decay_scale)
   (* (gamelan-hold (+ hand_loss release_loss) update_tick) (sqrt ratio))))
-(def rise (max 0.00005 (* (peek-row rise_table row)
+(def rise (max 0.00005 (* rise_table
   (gamelan-hold (gamelan-smooth (clip (mod bloom) 0 2) 8) update_tick))))
-(def direct (gamelan-hold (peek-row direct_table row) update_tick))
+(def direct direct_table)
 
 ;; A passive modal reduction followed by a radiation pole at each mode.
 ;; Its impulse envelope is exp(-rate*t) * (1 - (1-direct)*exp(-t/rise)).
 ;; This is a causal recurrence, not a recorded or scheduled amplitude envelope.
 ;; Both complex rotations remain contractive during pitch/damping automation.
-(defmacro gamelan-resonator (omega rate rise direct weight force tick)
-  (make-tensor-history bar_r @shape [32])
-  (make-tensor-history bar_i @shape [32])
-  (make-tensor-history radiation_r @shape [32])
-  (make-tensor-history radiation_i @shape [32])
+;; Their inputs already hold until update_tick, so coefficients need no second
+;; tensor latch. Shared sine/cosine also serve the contact response above.
+(defmacro gamelan-resonator (rotation_cos rotation_sin rate rise direct weight force)
+  (make-tensor-history bar_r @shape [18])
+  (make-tensor-history bar_i @shape [18])
+  (make-tensor-history radiation_r @shape [18])
+  (make-tensor-history radiation_i @shape [18])
   (def x (read-tensor-history bar_r))
   (def y (read-tensor-history bar_i))
   (def xr (read-tensor-history radiation_r))
   (def yr (read-tensor-history radiation_i))
   (def radius (exp (/ (- rate) samplerate)))
-  (def c (gamelan-hold (* radius (cos omega)) tick))
-  (def s (gamelan-hold (* radius (sin omega)) tick))
-  (def coupling (gamelan-hold (exp (/ -1 (* rise samplerate))) tick))
+  (def c (* radius rotation_cos))
+  (def s (* radius rotation_sin))
+  (def coupling (exp (/ -1 (* rise samplerate))))
   (def next_r (+ (- (* c x) (* s y)) (* force weight)))
   (def next_i (+ (* s x) (* c y)))
   (def radiated_r (+ (* coupling (- (* c xr) (* s yr))) (* (- 1 coupling) next_r)))
@@ -173,7 +191,7 @@
   (write-tensor-history radiation_i radiated_i)
   (mix radiated_i next_i direct))
 
-(def modes (gamelan-resonator omega rate rise direct weight force update_tick))
+(def modes (gamelan-resonator rotation_cos rotation_sin rate rise direct weight force))
 (def stereo (gamelan-smooth (clip (mod width) 0 1) 8))
 (def left (sum (* modes (sqrt (+ 1 (* mode_pan_table stereo))))))
 (def right (sum (* modes (sqrt (- 1 (* mode_pan_table stereo))))))

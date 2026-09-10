@@ -3,15 +3,18 @@
 import argparse
 import hashlib
 import json
+import re
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from common import HERE, SOURCE
+from modal_reduction import compact_modes
 
 START = ';; BEGIN GENERATED CALIBRATION'
 END = ';; END GENERATED CALIBRATION'
 MODES = 24
+RUNTIME_MODES = 16
 KEYS = [74, 75, 77, 80, 81, 82, 84]
 
 
@@ -64,10 +67,12 @@ def coefficients():
 def tables():
     result = [START,
               ';; Latent Sonorities / memeshift: source CC BY-NC 4.0; see ATTRIBUTION.md.',
-              ';; Seven bars, five ordinal strike strengths, one 24-mode passive system.',
+              f';; Seven bars, five ordinal strike strengths, one {RUNTIME_MODES}-mode passive system.',
               ';; No PCM, recorded phases, or per-frame spectral data.',
-              f';; Analysis SHA256: {hashlib.sha256((HERE/"reference-analysis.json").read_bytes()).hexdigest()}']
-    for name, a in coefficients().items():
+              f';; Analysis SHA256: {hashlib.sha256((HERE/"reference-analysis.json").read_bytes()).hexdigest()}',
+              f'(def mode_count {RUNTIME_MODES})']
+    arrays, _ = compact_modes(coefficients(), RUNTIME_MODES)
+    for name, a in arrays.items():
         assert np.isfinite(a).all()
         shape = ' '.join(str(n) for n in a.shape)
         result.append(f'(def {name}_table (tensor @shape [{shape}] @data [')
@@ -83,11 +88,21 @@ def main():
     args = parser.parse_args()
     source = SOURCE.read_text()
     a, b = source.index(START), source.index(END)+len(END)
-    updated = source[:a]+tables()+source[b:]
+    runtime = source[b:]
+    for name in ['bar_r', 'bar_i', 'radiation_r', 'radiation_i']:
+        runtime, count = re.subn(rf'(make-tensor-history {name} @shape )\[\d+\]',
+                                rf'\g<1>[{RUNTIME_MODES}]', runtime)
+        assert count == 1, f'Missing modal state declaration: {name}'
+    updated = source[:a]+tables()+runtime
+    _, reduction = compact_modes(coefficients(), RUNTIME_MODES)
+    reduction_text = json.dumps(reduction, indent=2)+'\n'
+    reduction_path = HERE/'modal-reduction.json'
     if args.check:
         assert updated == source, 'Regenerate the saron calibration tables'
+        assert reduction_path.read_text() == reduction_text, 'Stale modal reduction report'
     else:
         SOURCE.write_text(updated)
+        reduction_path.write_text(reduction_text)
 
 
 if __name__ == '__main__':

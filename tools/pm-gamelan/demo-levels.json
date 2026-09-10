@@ -2,181 +2,181 @@
   {
     "instrument": "PM Slenthem",
     "preset": "reference",
-    "peak": 0.08991992383423227,
-    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+    "peak": 0.08986588542158064,
+    "source_sha256": "36cf77232983d3917507a145442532d3292a058773e69a637705c56e26731e85"
   },
   {
     "instrument": "PM Slenthem",
     "preset": "open",
-    "peak": 0.15657382039353251,
-    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+    "peak": 0.15673521580174565,
+    "source_sha256": "36cf77232983d3917507a145442532d3292a058773e69a637705c56e26731e85"
   },
   {
     "instrument": "PM Slenthem",
     "preset": "felt",
-    "peak": 0.05498500747250266,
-    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+    "peak": 0.0550208820180784,
+    "source_sha256": "36cf77232983d3917507a145442532d3292a058773e69a637705c56e26731e85"
   },
   {
     "instrument": "PM Slenthem",
     "preset": "muted",
-    "peak": 0.05462832130475395,
-    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+    "peak": 0.05437607288924634,
+    "source_sha256": "36cf77232983d3917507a145442532d3292a058773e69a637705c56e26731e85"
   },
   {
     "instrument": "PM Slenthem",
     "preset": "harmonic",
-    "peak": 0.09699930552190207,
-    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+    "peak": 0.09701961175198776,
+    "source_sha256": "36cf77232983d3917507a145442532d3292a058773e69a637705c56e26731e85"
   },
   {
     "instrument": "PM Slenthem",
     "preset": "bloom",
-    "peak": 0.18290459737181664,
-    "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe"
+    "peak": 0.18335188552737236,
+    "source_sha256": "36cf77232983d3917507a145442532d3292a058773e69a637705c56e26731e85"
   },
   {
     "instrument": "PM Bonang",
     "preset": "reference",
-    "peak": 0.24646327641313745,
-    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+    "peak": 0.24521389440840274,
+    "source_sha256": "adb6de524f3d9344e2feba4f18154b47957c9836114470a348fbaa984b94a32e"
   },
   {
     "instrument": "PM Bonang",
     "preset": "open",
-    "peak": 0.2481239544285927,
-    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+    "peak": 0.24728240148397163,
+    "source_sha256": "adb6de524f3d9344e2feba4f18154b47957c9836114470a348fbaa984b94a32e"
   },
   {
     "instrument": "PM Bonang",
     "preset": "felt",
-    "peak": 0.17773571197435103,
-    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+    "peak": 0.17683907447176053,
+    "source_sha256": "adb6de524f3d9344e2feba4f18154b47957c9836114470a348fbaa984b94a32e"
   },
   {
     "instrument": "PM Bonang",
     "preset": "muted",
-    "peak": 0.23172012188023036,
-    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+    "peak": 0.22535451033034878,
+    "source_sha256": "adb6de524f3d9344e2feba4f18154b47957c9836114470a348fbaa984b94a32e"
   },
   {
     "instrument": "PM Bonang",
     "preset": "harmonic",
-    "peak": 0.2541898531319985,
-    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+    "peak": 0.24672123165263782,
+    "source_sha256": "adb6de524f3d9344e2feba4f18154b47957c9836114470a348fbaa984b94a32e"
   },
   {
     "instrument": "PM Bonang",
     "preset": "bloom",
-    "peak": 0.24908942793263122,
-    "source_sha256": "fd7450a7d84def63306abb652483e39fd6b003e5673a13937d5e71e4b16591dc"
+    "peak": 0.24633024772629142,
+    "source_sha256": "adb6de524f3d9344e2feba4f18154b47957c9836114470a348fbaa984b94a32e"
   },
   {
     "instrument": "PM Slenthem Slendro",
     "preset": "reference",
-    "peak": 0.2950186372901348,
-    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+    "peak": 0.295018637421102,
+    "source_sha256": "52938d0c507a1683858e9c920789515eb6805e3853cc5d35ecaca66cf5d3b6b1"
   },
   {
     "instrument": "PM Slenthem Slendro",
     "preset": "open",
-    "peak": 0.289925322169438,
-    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+    "peak": 0.2899253147188574,
+    "source_sha256": "52938d0c507a1683858e9c920789515eb6805e3853cc5d35ecaca66cf5d3b6b1"
   },
   {
     "instrument": "PM Slenthem Slendro",
     "preset": "felt",
-    "peak": 0.028315902762154843,
-    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+    "peak": 0.02831590648744514,
+    "source_sha256": "52938d0c507a1683858e9c920789515eb6805e3853cc5d35ecaca66cf5d3b6b1"
   },
   {
     "instrument": "PM Slenthem Slendro",
     "preset": "muted",
-    "peak": 0.27222396137194915,
-    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+    "peak": 0.2722239315695131,
+    "source_sha256": "52938d0c507a1683858e9c920789515eb6805e3853cc5d35ecaca66cf5d3b6b1"
   },
   {
     "instrument": "PM Slenthem Slendro",
     "preset": "harmonic",
     "peak": 0.3034914950197079,
-    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+    "source_sha256": "52938d0c507a1683858e9c920789515eb6805e3853cc5d35ecaca66cf5d3b6b1"
   },
   {
     "instrument": "PM Slenthem Slendro",
     "preset": "bloom",
-    "peak": 0.2860897188074887,
-    "source_sha256": "fcd9fcd793c586afa53fd9491ea58d021537d9eff2948ff11aea7532316b61b5"
+    "peak": 0.28608974104281515,
+    "source_sha256": "52938d0c507a1683858e9c920789515eb6805e3853cc5d35ecaca66cf5d3b6b1"
   },
   {
     "instrument": "PM Kempyang",
     "preset": "reference",
-    "peak": 0.1405683941998876,
-    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+    "peak": 0.1353466595121822,
+    "source_sha256": "f4afe063bed69945eb1814264c1ba55cb78070341ea9f2e01b1fac5920677b0b"
   },
   {
     "instrument": "PM Kempyang",
     "preset": "open",
-    "peak": 0.156122604099437,
-    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+    "peak": 0.15033226416562684,
+    "source_sha256": "f4afe063bed69945eb1814264c1ba55cb78070341ea9f2e01b1fac5920677b0b"
   },
   {
     "instrument": "PM Kempyang",
     "preset": "felt",
-    "peak": 0.05882131939521201,
-    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+    "peak": 0.05882140156031676,
+    "source_sha256": "f4afe063bed69945eb1814264c1ba55cb78070341ea9f2e01b1fac5920677b0b"
   },
   {
     "instrument": "PM Kempyang",
     "preset": "muted",
-    "peak": 0.12305380211364758,
-    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+    "peak": 0.1212824416113016,
+    "source_sha256": "f4afe063bed69945eb1814264c1ba55cb78070341ea9f2e01b1fac5920677b0b"
   },
   {
     "instrument": "PM Kempyang",
     "preset": "harmonic",
-    "peak": 0.1471626275258463,
-    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+    "peak": 0.1289391204258093,
+    "source_sha256": "f4afe063bed69945eb1814264c1ba55cb78070341ea9f2e01b1fac5920677b0b"
   },
   {
     "instrument": "PM Kempyang",
     "preset": "bloom",
-    "peak": 0.1694038981513586,
-    "source_sha256": "8c3ed9a9d802885bdabfbde4b71045b806a63f39308145c231b88f50d64dd4f5"
+    "peak": 0.1657112218090333,
+    "source_sha256": "f4afe063bed69945eb1814264c1ba55cb78070341ea9f2e01b1fac5920677b0b"
   },
   {
     "instrument": "PM Kethuk",
     "preset": "reference",
-    "peak": 0.0759905988369969,
-    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+    "peak": 0.07738879199217873,
+    "source_sha256": "97d162e32d28436ceeddfa0a08a4d9575e8b5bbdd273460cb84d6fe26dacd47e"
   },
   {
     "instrument": "PM Kethuk",
     "preset": "open",
-    "peak": 0.07948498606128851,
-    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+    "peak": 0.08082559274043888,
+    "source_sha256": "97d162e32d28436ceeddfa0a08a4d9575e8b5bbdd273460cb84d6fe26dacd47e"
   },
   {
     "instrument": "PM Kethuk",
     "preset": "felt",
-    "peak": 0.03231694830101739,
-    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+    "peak": 0.032523307111844944,
+    "source_sha256": "97d162e32d28436ceeddfa0a08a4d9575e8b5bbdd273460cb84d6fe26dacd47e"
   },
   {
     "instrument": "PM Kethuk",
     "preset": "muted",
-    "peak": 0.04403130642500949,
-    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+    "peak": 0.04410343398745199,
+    "source_sha256": "97d162e32d28436ceeddfa0a08a4d9575e8b5bbdd273460cb84d6fe26dacd47e"
   },
   {
     "instrument": "PM Kethuk",
     "preset": "harmonic",
-    "peak": 0.09267087425075782,
-    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+    "peak": 0.08938172192280458,
+    "source_sha256": "97d162e32d28436ceeddfa0a08a4d9575e8b5bbdd273460cb84d6fe26dacd47e"
   },
   {
     "instrument": "PM Kethuk",
     "preset": "bloom",
-    "peak": 0.08145729176612804,
-    "source_sha256": "d9c3c6b34de55eefa76675997dfd09fa0b65534ef3bb7bce3aa9889798c02e42"
+    "peak": 0.07799402995442506,
+    "source_sha256": "97d162e32d28436ceeddfa0a08a4d9575e8b5bbdd273460cb84d6fe26dacd47e"
   }
 ]

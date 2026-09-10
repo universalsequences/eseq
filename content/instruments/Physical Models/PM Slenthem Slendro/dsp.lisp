@@ -140,16 +140,32 @@
 (def row_low (floor row))
 (def row_high (min 6 (+ row_low 1)))
 (def row_mix (- row row_low))
+;; Row coordinates are already clamped. Share integer gather indices across
+;; fields instead of repeating wrapped fractional lookups inside each mode.
+(def mode_indices (iota 24))
+(def low_indices (+ mode_indices (* row_low 24)))
+(def high_indices (+ mode_indices (* row_high 24)))
+(def velocity_low (floor velocity_row))
+(def velocity_high (min (- 3 1) (+ velocity_low 1)))
+(def velocity_mix (- velocity_row velocity_low))
+(def a00 (+ mode_indices (* (+ (* row_low 3) velocity_low) 24)))
+(def a01 (+ mode_indices (* (+ (* row_low 3) velocity_high) 24)))
+(def a10 (+ mode_indices (* (+ (* row_high 3) velocity_low) 24)))
+(def a11 (+ mode_indices (* (+ (* row_high 3) velocity_high) 24)))
+(defmacro gamelan-row-mix (table lower upper fraction)
+  (mix (gather table lower) (gather table upper) fraction))
+
 (def base_hz (* (clip pitch 32.703196 8372.018)
   (pow 2 (/ (+ (clip (mod tune) -100 100)
     (* (clip (mod amount) 0 1) (peek tuning_table (gamelan-row key_note)))) 1200))))
-(def ratio (peek-row ratio_table row))
+(def ratio (gamelan-row-mix ratio_table low_indices high_indices row_mix))
 (def harmonic_ratio (max 1 (floor (+ ratio 0.5))))
 (def live_ratio (max 0.1 (mix harmonic_ratio ratio (gamelan-hold (gamelan-smooth (clip (mod inharmonicity) 0 1.8) 8) update_tick))))
 (def frequencies (* (gamelan-hold base_hz update_tick) live_ratio))
 (def band (clip (/ (- (* samplerate 0.47) frequencies) (* samplerate 0.07)) 0 1))
-(def amplitude (mix (peek-row amplitude_table (+ (* row_low 3) velocity_row))
-  (peek-row amplitude_table (+ (* row_high 3) velocity_row)) row_mix))
+(def amplitude (mix
+  (gamelan-row-mix amplitude_table a00 a01 velocity_mix)
+  (gamelan-row-mix amplitude_table a10 a11 velocity_mix) row_mix))
 
 ;; A normalized two-pole contact force; measured modal residues are deconvolved
 ;; by its reference response. Hardness/contact alter the force, not the decay.
@@ -160,8 +176,10 @@
 (def force1 (gamelan-pole (* onset velocity_gain) contact_pole))
 (def force (gamelan-pole force1 contact_pole))
 (def omega (* twopi (/ (min frequencies (* 0.48 samplerate)) samplerate)))
+(def rotation_cos (cos omega))
+(def rotation_sin (sin omega))
 (def inverse_contact (/ (+ (* (- 1 reference_pole) (- 1 reference_pole))
-  (* 2 reference_pole (- 1 (cos omega)))) (* (- 1 reference_pole) (- 1 reference_pole))))
+  (* 2 reference_pole (- 1 rotation_cos))) (* (- 1 reference_pole) (- 1 reference_pole))))
 ;; A finite mallet footprint suppresses shorter spatial wavelengths. Its width
 ;; is a timbral control: spatial mode shapes cannot be recovered from one mic.
 (def footprint (exp (* -0.8 (max 0 (- ratio 1)) (gamelan-hold (clip (mod spread) 0 1) update_tick))))
@@ -171,7 +189,7 @@
 ;; unknown), not a claim to measured impact joules. Soft contacts may dissipate
 ;; energy; hard contacts cannot manufacture unbounded extra modal energy.
 (def live_contact (/ (* (- 1 contact_pole) (- 1 contact_pole))
-  (+ (* (- 1 contact_pole) (- 1 contact_pole)) (* 2 contact_pole (- 1 (cos omega))))))
+  (+ (* (- 1 contact_pole) (- 1 contact_pole)) (* 2 contact_pole (- 1 rotation_cos)))))
 (def reference_residue (* amplitude band))
 (def colored_residue (* reference_residue inverse_contact live_contact footprint color_weight))
 (def reference_energy (sum (* reference_residue reference_residue)))
@@ -183,17 +201,19 @@
 (def hand_loss (* 100 (pow (gamelan-smooth (clip (mod touch) 0 1) 4) 2)))
 (def release_loss (* (- 1 held) (pow (- 1 (clip (mod lift) 0 1)) 2)
   (/ 6.907755 (clip (mod release_s) 0.02 12))))
-(def rate (+ (/ (* (peek-row rate_table row) loss_scale) decay_scale)
+(def rate (+ (/ (* (gamelan-row-mix rate_table low_indices high_indices row_mix) loss_scale) decay_scale)
   (* (gamelan-hold (+ hand_loss release_loss) update_tick) (sqrt ratio))))
-(def rise (max 0.00005 (* (peek-row rise_table row)
+(def rise (max 0.00005 (* (gamelan-row-mix rise_table low_indices high_indices row_mix)
   (gamelan-hold (gamelan-smooth (clip (mod bloom) 0 2) 8) update_tick))))
-(def direct (gamelan-hold (peek-row direct_table row) update_tick))
+(def direct (gamelan-row-mix direct_table low_indices high_indices row_mix))
 
 ;; A passive modal reduction followed by a radiation pole at each mode.
 ;; Its impulse envelope is exp(-rate*t) * (1 - (1-direct)*exp(-t/rise)).
 ;; This is a causal recurrence, not a recorded or scheduled amplitude envelope.
 ;; Both complex rotations remain contractive during pitch/damping automation.
-(defmacro gamelan-resonator (omega rate rise direct weight force tick)
+;; Their inputs already hold until update_tick, so coefficients need no second
+;; tensor latch. Shared sine/cosine also serve the contact response above.
+(defmacro gamelan-resonator (rotation_cos rotation_sin rate rise direct weight force)
   (make-tensor-history bar_r @shape [24])
   (make-tensor-history bar_i @shape [24])
   (make-tensor-history radiation_r @shape [24])
@@ -203,9 +223,9 @@
   (def xr (read-tensor-history radiation_r))
   (def yr (read-tensor-history radiation_i))
   (def radius (exp (/ (- rate) samplerate)))
-  (def c (gamelan-hold (* radius (cos omega)) tick))
-  (def s (gamelan-hold (* radius (sin omega)) tick))
-  (def coupling (gamelan-hold (exp (/ -1 (* rise samplerate))) tick))
+  (def c (* radius rotation_cos))
+  (def s (* radius rotation_sin))
+  (def coupling (exp (/ -1 (* rise samplerate))))
   (def next_r (+ (- (* c x) (* s y)) (* force weight)))
   (def next_i (+ (* s x) (* c y)))
   (def radiated_r (+ (* coupling (- (* c xr) (* s yr))) (* (- 1 coupling) next_r)))
@@ -216,7 +236,7 @@
   (write-tensor-history radiation_i radiated_i)
   (mix radiated_i next_i direct))
 
-(def modes (gamelan-resonator omega rate rise direct weight force update_tick))
+(def modes (gamelan-resonator rotation_cos rotation_sin rate rise direct weight force))
 (def stereo (gamelan-smooth (clip (mod width) 0 1) 8))
 (def left (sum (* modes (sqrt (+ 1 (* mode_pan_table stereo))))))
 (def right (sum (* modes (sqrt (- 1 (* mode_pan_table stereo))))))

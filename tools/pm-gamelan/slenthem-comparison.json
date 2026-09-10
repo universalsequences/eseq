@@ -1,23 +1,23 @@
 {
-  "source_sha256": "bc8c0cff3a44b3066a71ee5f32901c0b0e4ac8e3dce615993402821294ac06fe",
+  "source_sha256": "36cf77232983d3917507a145442532d3292a058773e69a637705c56e26731e85",
   "compiler_sha256": "9ef1fe146cbcfb5a11d65461f7c2c9781011bd9f1c42fad25a83219fd9a132bd",
   "group": "slenthem-pelog-slenthemmalletpaddedside",
   "metric_note": "Raw levels, no gain matching. Spectral cell errors are not perceptual similarity. Secondary metric excludes the strongest peak, not necessarily the pitch mode. Each source recording is compared; no withheld independent recordings exist.",
   "summary": {
     "early_absolute_level_error_db": {
-      "median": 0.8063127775740706,
-      "p90": 2.394641513313171,
-      "maximum": 3.3086985595408835
+      "median": 0.8063531283413545,
+      "p90": 2.394651704774431,
+      "maximum": 3.308711143367198
     },
     "early_modal_error_db": {
-      "median": 0.0005228246518038816,
-      "p90": 0.11844586430038485,
-      "maximum": 1.0879381774747143
+      "median": 0.0005921175939947067,
+      "p90": 0.11845985207098061,
+      "maximum": 1.087989022924564
     },
     "early_secondary_mode_error_db": {
-      "median": 2.194427959926063,
-      "p90": 7.0814113004186625,
-      "maximum": 11.047793783814608
+      "median": 2.202109760058473,
+      "p90": 7.081406956775557,
+      "maximum": 28.431789845642626
     }
   },
   "comparisons": [
@@ -31,16 +31,16 @@
             0,
             0.025
           ],
-          "level_error_db": 1.1739571632092738,
+          "level_error_db": 1.1739684665619683,
           "rms_reference_model": [
             0.0046660395932455155,
-            0.005341291470999814
+            0.005341298421875676
           ],
-          "modal_error_db": 0.0126201055429527,
-          "secondary_mode_error_db": 3.5040557943197284,
+          "modal_error_db": 0.012736673581170596,
+          "secondary_mode_error_db": 5.28891366280391,
           "modal_energy_fraction_reference_model": [
             0.8469923589544328,
-            0.9997419128261277
+            0.999741822360818
           ]
         },
         {
@@ -48,16 +48,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": 1.521636677569832,
+          "level_error_db": 1.5217779370983116,
           "rms_reference_model": [
             0.007815305599636327,
-            0.009311674764488881
+            0.009311826202457517
           ],
-          "modal_error_db": 0.0006962963344817096,
-          "secondary_mode_error_db": 2.7376852007735097,
+          "modal_error_db": 0.000723554638271988,
+          "secondary_mode_error_db": 2.737684799295405,
           "modal_energy_fraction_reference_model": [
             0.9907018802313117,
-            0.9995714581603738
+            0.9995714626489027
           ]
         },
         {
@@ -65,16 +65,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": 0.8622125932994884,
+          "level_error_db": 0.8620788675573743,
           "rms_reference_model": [
             0.008968566110511049,
-            0.009904524793843097
+            0.00990437230747868
           ],
-          "modal_error_db": 3.389106202239533e-05,
-          "secondary_mode_error_db": 1.1704145774380479,
+          "modal_error_db": 5.467106287212771e-05,
+          "secondary_mode_error_db": 1.170414316977038,
           "modal_energy_fraction_reference_model": [
             0.9952204269288535,
-            0.9999884531058436
+            0.9999884531003289
           ]
         },
         {
@@ -82,16 +82,16 @@
             0.4,
             1
           ],
-          "level_error_db": 0.6162535756409903,
+          "level_error_db": 0.6162815518922494,
           "rms_reference_model": [
             0.007107988266263072,
-            0.007630612172242252
+            0.007630636749605778
           ],
-          "modal_error_db": 0.00014793912043316012,
-          "secondary_mode_error_db": 1.2990197502226029,
+          "modal_error_db": 0.0001307117285765055,
+          "secondary_mode_error_db": 1.2990192580823057,
           "modal_energy_fraction_reference_model": [
             0.9987930164022185,
-            0.9999997357636061
+            0.9999997357622153
           ]
         },
         {
@@ -99,16 +99,16 @@
             1,
             2
           ],
-          "level_error_db": 0.7980712265272694,
+          "level_error_db": 0.7980388632531971,
           "rms_reference_model": [
             0.004276338204867836,
-            0.0046878705050526015
+            0.004687853038268927
           ],
-          "modal_error_db": 0.00019199195682040844,
-          "secondary_mode_error_db": 1.4987982418293275,
+          "modal_error_db": 0.00017775159802854297,
+          "secondary_mode_error_db": 1.4987983264715474,
           "modal_energy_fraction_reference_model": [
             0.9983158187145637,
-            0.999999979225103
+            0.9999999792249642
           ]
         },
         {
@@ -116,16 +116,16 @@
             2,
             3
           ],
-          "level_error_db": 0.5475840013918805,
+          "level_error_db": 0.5475786982212627,
           "rms_reference_model": [
             0.002327158291339741,
-            0.0024785924627820323
+            0.0024785909494776663
           ],
-          "modal_error_db": 0.00015739443010035723,
-          "secondary_mode_error_db": 1.0865321220344772,
+          "modal_error_db": 0.00014439664884608047,
+          "secondary_mode_error_db": 1.0865318945038702,
           "modal_energy_fraction_reference_model": [
             0.9755813772441776,
-            0.9999999792165836
+            0.9999999792164429
           ]
         },
         {
@@ -133,22 +133,22 @@
             3,
             5
           ],
-          "level_error_db": -1.1236972863696952,
+          "level_error_db": -1.1237185172213848,
           "rms_reference_model": [
             0.0011956950040410289,
-            0.0010505955340076767
+            0.001050592966048419
           ],
-          "modal_error_db": 0.0001059512913293551,
-          "secondary_mode_error_db": 0.4570644955158462,
+          "modal_error_db": 0.00011872244619988012,
+          "secondary_mode_error_db": 0.45706500816916507,
           "modal_energy_fraction_reference_model": [
             0.8661828046279749,
-            0.9999999990004388
+            0.9999999990004328
           ]
         }
       ],
       "peak_reference_model": [
         0.014291167259216309,
-        0.014810079708695412
+        0.0148164052516222
       ]
     },
     {
@@ -161,16 +161,16 @@
             0,
             0.025
           ],
-          "level_error_db": -3.03957734163484,
+          "level_error_db": -3.039694461480851,
           "rms_reference_model": [
             0.020309065831972468,
-            0.014312354356109872
+            0.014312161370761581
           ],
-          "modal_error_db": 0.00603500548444484,
-          "secondary_mode_error_db": 3.1235265133771577,
+          "modal_error_db": 0.0063564864228032635,
+          "secondary_mode_error_db": 3.5549033473966234,
           "modal_energy_fraction_reference_model": [
             0.9466547325829415,
-            0.999741774374983
+            0.9997415942307539
           ]
         },
         {
@@ -178,16 +178,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -0.6445933276329886,
+          "level_error_db": -0.6444129439197808,
           "rms_reference_model": [
             0.026870710477578084,
-            0.024948789755054383
+            0.02494930788298996
           ],
-          "modal_error_db": 0.0007656658079284539,
-          "secondary_mode_error_db": 1.6995217928436603,
+          "modal_error_db": 0.0008546638098431639,
+          "secondary_mode_error_db": 1.6995202363824171,
           "modal_energy_fraction_reference_model": [
             0.9969563078092268,
-            0.9995714853232591
+            0.9995714926204627
           ]
         },
         {
@@ -195,16 +195,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -0.631801145823436,
+          "level_error_db": -0.6320469920883992,
           "rms_reference_model": [
             0.028541928863906437,
-            0.026539532115473913
+            0.026538780948606715
           ],
-          "modal_error_db": 0.0002135848472833646,
+          "modal_error_db": 0.0002746922230587587,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9993234113534137,
-            0.9999884533458212
+            0.9999884533180183
           ]
         },
         {
@@ -212,16 +212,16 @@
             0.4,
             1
           ],
-          "level_error_db": -0.7749903028580787,
+          "level_error_db": -0.7749680225775772,
           "rms_reference_model": [
             0.022354693533632525,
-            0.020446510752643206
+            0.020446563200302352
           ],
-          "modal_error_db": 1.0148524574736383e-05,
+          "modal_error_db": 6.090321768442696e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9998380015215912,
-            0.9999997357754818
+            0.9999997357728793
           ]
         },
         {
@@ -229,16 +229,16 @@
             1,
             2
           ],
-          "level_error_db": -0.16660099341700055,
+          "level_error_db": -0.1666754602922813,
           "rms_reference_model": [
             0.012804471605167404,
-            0.012561213917808229
+            0.012561106227015522
           ],
-          "modal_error_db": 6.908633568078891e-06,
+          "modal_error_db": 3.484414094352229e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9994339912901353,
-            0.999999979220973
+            0.999999979220748
           ]
         },
         {
@@ -246,16 +246,16 @@
             2,
             3
           ],
-          "level_error_db": 0.4606522825446973,
+          "level_error_db": 0.46062760500490996,
           "rms_reference_model": [
             0.006298248552564917,
-            0.006641289464921143
+            0.006641270596335538
           ],
-          "modal_error_db": 3.255791430475951e-05,
+          "modal_error_db": 5.19154297299998e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9995569750643521,
-            0.9999999792209028
+            0.9999999792206093
           ]
         },
         {
@@ -263,22 +263,22 @@
             3,
             5
           ],
-          "level_error_db": 0.6266933346091235,
+          "level_error_db": 0.6266421845532356,
           "rms_reference_model": [
             0.002619090543447843,
-            0.002815043947016816
+            0.0028150273696439443
           ],
-          "modal_error_db": 3.5802412243144874e-05,
+          "modal_error_db": 9.920390156468009e-07,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9990830302751033,
-            0.9999999990005541
+            0.9999999990005477
           ]
         }
       ],
       "peak_reference_model": [
         0.04285597801208496,
-        0.03937453776597977
+        0.03939449042081833
       ]
     },
     {
@@ -291,16 +291,16 @@
             0,
             0.025
           ],
-          "level_error_db": -3.699046667535908,
+          "level_error_db": -3.6994986770473535,
           "rms_reference_model": [
             0.04765038944929081,
-            0.03112534121455831
+            0.031123721508944047
           ],
-          "modal_error_db": 0.0451326782261566,
-          "secondary_mode_error_db": 4.004409294170046,
+          "modal_error_db": 0.045727809018581554,
+          "secondary_mode_error_db": 6.014219371539105,
           "modal_energy_fraction_reference_model": [
             0.971474111636662,
-            0.9997424207072488
+            0.9997422130045496
           ]
         },
         {
@@ -308,16 +308,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -1.149585515134071,
+          "level_error_db": -1.1493782039776597,
           "rms_reference_model": [
             0.06184786009091198,
-            0.05418079860289066
+            0.054182091782809645
           ],
-          "modal_error_db": 0.03364048963204588,
-          "secondary_mode_error_db": 5.813889844584482,
+          "modal_error_db": 0.03373524528411991,
+          "secondary_mode_error_db": 5.813887974299751,
           "modal_energy_fraction_reference_model": [
             0.9959488812726006,
-            0.9995713579210919
+            0.999571369144888
           ]
         },
         {
@@ -325,16 +325,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -1.2292847580594486,
+          "level_error_db": -1.229562650436238,
           "rms_reference_model": [
             0.06636805459498671,
-            0.057609598662767554
+            0.05760775555712479
           ],
-          "modal_error_db": 0.011111160254993029,
-          "secondary_mode_error_db": 3.7250611141950647,
+          "modal_error_db": 0.011190964709255341,
+          "secondary_mode_error_db": 3.725061315805605,
           "modal_energy_fraction_reference_model": [
             0.9995793187067997,
-            0.9999884516961699
+            0.9999884517082281
           ]
         },
         {
@@ -342,16 +342,16 @@
             0.4,
             1
           ],
-          "level_error_db": -1.2441906512139653,
+          "level_error_db": -1.2441831457290253,
           "rms_reference_model": [
             0.051212281624778415,
-            0.044377679827343725
+            0.04437771817415279
           ],
-          "modal_error_db": 0.0005228246518038816,
-          "secondary_mode_error_db": 1.215335752500095,
+          "modal_error_db": 0.0005921175939947067,
+          "secondary_mode_error_db": 1.2153357527409019,
           "modal_energy_fraction_reference_model": [
             0.9999215525632469,
-            0.9999997357458699
+            0.9999997357434471
           ]
         },
         {
@@ -359,16 +359,16 @@
             1,
             2
           ],
-          "level_error_db": -0.6599260885127213,
+          "level_error_db": -0.6600271560934188,
           "rms_reference_model": [
             0.029410169895133446,
-            0.02725845452087249
+            0.027258137347832216
           ],
-          "modal_error_db": 0.0004391172227053109,
-          "secondary_mode_error_db": 1.025740833319991,
+          "modal_error_db": 0.00038015311124527053,
+          "secondary_mode_error_db": 1.0257409749668107,
           "modal_energy_fraction_reference_model": [
             0.9999613541830644,
-            0.9999999792161478
+            0.9999999792159737
           ]
         },
         {
@@ -376,16 +376,16 @@
             2,
             3
           ],
-          "level_error_db": 0.2652338433367655,
+          "level_error_db": 0.26519333871974093,
           "rms_reference_model": [
             0.01397803503877067,
-            0.01441145456750931
+            0.014411387363214609
           ],
-          "modal_error_db": 0.0004279005099238747,
-          "secondary_mode_error_db": 2.6858693923144745,
+          "modal_error_db": 0.0003748497935606919,
+          "secondary_mode_error_db": 2.6858694192412376,
           "modal_energy_fraction_reference_model": [
             0.9999680095111756,
-            0.9999999792203601
+            0.9999999792201378
           ]
         },
         {
@@ -393,22 +393,22 @@
             3,
             5
           ],
-          "level_error_db": 1.2993301038468166,
+          "level_error_db": 1.2992612388005966,
           "rms_reference_model": [
             0.005259795835677575,
-            0.006108511447487405
+            0.00610846301707059
           ],
-          "modal_error_db": 0.00040616145533254856,
-          "secondary_mode_error_db": 2.222906731748912,
+          "modal_error_db": 0.0003561149241656622,
+          "secondary_mode_error_db": 2.2229064427627083,
           "modal_energy_fraction_reference_model": [
             0.999429276656201,
-            0.9999999990004071
+            0.9999999990003873
           ]
         }
       ],
       "peak_reference_model": [
         0.1063389778137207,
-        0.08727222681045532
+        0.0873149037361145
       ]
     },
     {
@@ -421,16 +421,16 @@
             0,
             0.025
           ],
-          "level_error_db": -1.7656735214500638,
+          "level_error_db": -1.765900427085232,
           "rms_reference_model": [
             0.002313213621870877,
-            0.0018876960410611752
+            0.0018876467285218292
           ],
-          "modal_error_db": 0.0016480098520325285,
-          "secondary_mode_error_db": 3.8881452823621045,
+          "modal_error_db": 0.0016751478423736893,
+          "secondary_mode_error_db": 3.7187089239962017,
           "modal_energy_fraction_reference_model": [
             0.806624013374934,
-            0.99950871455677
+            0.9995086866157062
           ]
         },
         {
@@ -438,16 +438,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": 0.33499265701890146,
+          "level_error_db": 0.33500314020960487,
           "rms_reference_model": [
             0.0054150926584857605,
-            0.005628018614174609
+            0.005628025406757807
           ],
-          "modal_error_db": 0.00017850832631787327,
+          "modal_error_db": 0.00018272115879935512,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9838617998092911,
-            0.9995578544575049
+            0.9995578475872804
           ]
         },
         {
@@ -455,16 +455,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": 0.5200076660425199,
+          "level_error_db": 0.5199997879939839,
           "rms_reference_model": [
             0.007165973706034933,
-            0.00760808916148837
+            0.0076080822610013745
           ],
-          "modal_error_db": 1.533764358294305e-05,
+          "modal_error_db": 1.643379022567739e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9987052675516696,
-            0.9999893441369807
+            0.99998934349392
           ]
         },
         {
@@ -472,16 +472,16 @@
             0.4,
             1
           ],
-          "level_error_db": 0.3175759753599007,
+          "level_error_db": 0.3176075733854573,
           "rms_reference_model": [
             0.006351424836591662,
-            0.006587944954011543
+            0.006587968920057663
           ],
-          "modal_error_db": 3.025806748742757e-06,
+          "modal_error_db": 2.4563546373700513e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.999209506808057,
-            0.9999997470121544
+            0.9999997469501317
           ]
         },
         {
@@ -489,16 +489,16 @@
             1,
             2
           ],
-          "level_error_db": 0.25311313578456657,
+          "level_error_db": 0.25317582318161175,
           "rms_reference_model": [
             0.004553740948058977,
-            0.0046883926642416395
+            0.004688426501212321
           ],
-          "modal_error_db": 1.323829021807801e-07,
+          "modal_error_db": 2.8271489154805216e-07,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9993897636965029,
-            0.99999998106932
+            0.9999999810704571
           ]
         },
         {
@@ -506,16 +506,16 @@
             2,
             3
           ],
-          "level_error_db": 0.14750721724904628,
+          "level_error_db": 0.14758105808046168,
           "rms_reference_model": [
             0.0029783103225965242,
-            0.0030293210843556047
+            0.003029346837450293
           ],
-          "modal_error_db": 4.109171140622325e-06,
+          "modal_error_db": 4.437743749490164e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9992875754899824,
-            0.9999999810706435
+            0.9999999810650413
           ]
         },
         {
@@ -523,22 +523,22 @@
             3,
             5
           ],
-          "level_error_db": 0.00815811593901925,
+          "level_error_db": 0.00818597623729896,
           "rms_reference_model": [
             0.0016460259092411264,
-            0.0016475726452698253
+            0.0016475779299258437
           ],
-          "modal_error_db": 9.472646801954996e-06,
+          "modal_error_db": 9.729105222102586e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9983944484850712,
-            0.9999999992450792
+            0.9999999992457084
           ]
         }
       ],
       "peak_reference_model": [
         0.01089334487915039,
-        0.011017260141670704
+        0.01102327462285757
       ]
     },
     {
@@ -551,16 +551,16 @@
             0,
             0.025
           ],
-          "level_error_db": -6.075941281529264,
+          "level_error_db": -6.077537382392576,
           "rms_reference_model": [
             0.018941083943415808,
-            0.009410393081470847
+            0.009408664006244733
           ],
-          "modal_error_db": 0.003617236216301718,
-          "secondary_mode_error_db": 5.238820042219232,
+          "modal_error_db": 0.004062093077924798,
+          "secondary_mode_error_db": 5.289841694135572,
           "modal_energy_fraction_reference_model": [
             0.9522161273332215,
-            0.9995092131110699
+            0.9995090428059612
           ]
         },
         {
@@ -568,16 +568,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -0.6423024921615421,
+          "level_error_db": -0.6423368120783528,
           "rms_reference_model": [
             0.030188422065385117,
-            0.028036596324634018
+            0.028036485545912128
           ],
-          "modal_error_db": 0.002095347167452615,
-          "secondary_mode_error_db": 7.182807566984765,
+          "modal_error_db": 0.0021506226517143657,
+          "secondary_mode_error_db": 7.1828061557638385,
           "modal_energy_fraction_reference_model": [
             0.9972598748748637,
-            0.9995578479506226
+            0.9995578478450731
           ]
         },
         {
@@ -585,16 +585,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -0.7147670333310302,
+          "level_error_db": -0.7147936333599798,
           "rms_reference_model": [
             0.041150619732572544,
-            0.03789989689150534
+            0.037899780825465725
           ],
-          "modal_error_db": 0.0004145378202148381,
+          "modal_error_db": 0.0004308880473845046,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.99969463191526,
-            0.9999893436082958
+            0.999989343634705
           ]
         },
         {
@@ -602,16 +602,16 @@
             0.4,
             1
           ],
-          "level_error_db": -0.5368687884541969,
+          "level_error_db": -0.5368758604235787,
           "rms_reference_model": [
             0.03491020671870943,
-            0.03281776350655069
+            0.0328177367866482
           ],
-          "modal_error_db": 1.433590860101957e-05,
+          "modal_error_db": 4.6134070079039005e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.999959624498643,
-            0.9999997471933424
+            0.9999997471932909
           ]
         },
         {
@@ -619,16 +619,16 @@
             1,
             2
           ],
-          "level_error_db": -0.28974174468744346,
+          "level_error_db": -0.28974933866966834,
           "rms_reference_model": [
             0.024147119112979416,
-            0.023354912104415593
+            0.02335489168546978
           ],
-          "modal_error_db": 4.8096166624488995e-05,
+          "modal_error_db": 4.12157471746525e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999647053809658,
-            0.9999999810679296
+            0.9999999810678676
           ]
         },
         {
@@ -636,16 +636,16 @@
             2,
             3
           ],
-          "level_error_db": 0.12083722936683872,
+          "level_error_db": 0.12083632523872784,
           "rms_reference_model": [
             0.014881960779582648,
-            0.015090443968157403
+            0.015090442397369097
           ],
-          "modal_error_db": 4.447036801643127e-05,
+          "modal_error_db": 3.944110837589904e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999685857870516,
-            0.9999999810735737
+            0.9999999810736645
           ]
         },
         {
@@ -653,22 +653,22 @@
             3,
             5
           ],
-          "level_error_db": 0.5334031519179283,
+          "level_error_db": 0.5333964549703031,
           "rms_reference_model": [
             0.00771848311560444,
-            0.008207334161168173
+            0.008207327833196242
           ],
-          "modal_error_db": 1.894605041514768e-05,
+          "modal_error_db": 1.5362195035749632e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9987977575518757,
-            0.9999999992455342
+            0.9999999992455354
           ]
         }
       ],
       "peak_reference_model": [
         0.06393885612487793,
-        0.055348191410303116
+        0.055421922355890274
       ]
     },
     {
@@ -681,16 +681,16 @@
             0,
             0.025
           ],
-          "level_error_db": -4.540817871520773,
+          "level_error_db": -4.544869652464509,
           "rms_reference_model": [
             0.025501170748304006,
-            0.015118866269443693
+            0.015111815287775
           ],
-          "modal_error_db": 0.018040135840708436,
-          "secondary_mode_error_db": 5.566311449523778,
+          "modal_error_db": 0.019791949796487903,
+          "secondary_mode_error_db": 16.16444773471246,
           "modal_energy_fraction_reference_model": [
             0.9690023847647783,
-            0.9995092459214964
+            0.9995089306263413
           ]
         },
         {
@@ -698,16 +698,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": 0.394713435882221,
+          "level_error_db": 0.3945334835333069,
           "rms_reference_model": [
             0.043042356818876776,
-            0.04504345708774994
+            0.04504252389699129
           ],
-          "modal_error_db": 0.005083948058321798,
-          "secondary_mode_error_db": 10.028737591164605,
+          "modal_error_db": 0.005306240201073294,
+          "secondary_mode_error_db": 28.431789845642626,
           "modal_energy_fraction_reference_model": [
             0.9952834441038165,
-            0.9995578374787352
+            0.9995578372937222
           ]
         },
         {
@@ -715,16 +715,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -0.26972575206365135,
+          "level_error_db": -0.26981334799152956,
           "rms_reference_model": [
             0.062808114677302,
-            0.06088768606066023
+            0.06088707202033905
           ],
-          "modal_error_db": 0.0010468033105688424,
-          "secondary_mode_error_db": 5.627657922048421,
+          "modal_error_db": 0.0011112718679318597,
+          "secondary_mode_error_db": 5.627658976734615,
           "modal_energy_fraction_reference_model": [
             0.9998047246228569,
-            0.99998934370972
+            0.9999893438176294
           ]
         },
         {
@@ -732,16 +732,16 @@
             0.4,
             1
           ],
-          "level_error_db": -0.22049357467470754,
+          "level_error_db": -0.22052732047856594,
           "rms_reference_model": [
             0.054078361436501576,
-            0.052722845970571953
+            0.05272264113589906
           ],
-          "modal_error_db": 8.91076138115156e-05,
+          "modal_error_db": 0.0001269772013411449,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999666220160512,
-            0.9999997469935645
+            0.999999746993882
           ]
         },
         {
@@ -749,16 +749,16 @@
             1,
             2
           ],
-          "level_error_db": -0.1156771678329499,
+          "level_error_db": -0.1157055601864878,
           "rms_reference_model": [
             0.038023436032754196,
-            0.037520403607635505
+            0.037520280961497066
           ],
-          "modal_error_db": 2.9391210970982932e-05,
+          "modal_error_db": 2.2815246907588633e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999880654499582,
-            0.9999999810679209
+            0.9999999810678257
           ]
         },
         {
@@ -766,16 +766,16 @@
             2,
             3
           ],
-          "level_error_db": 0.10594656999980828,
+          "level_error_db": 0.1059354075260906,
           "rms_reference_model": [
             0.02394897433974389,
-            0.0242428819755296
+            0.024242850820360665
           ],
-          "modal_error_db": 2.9961485198275668e-05,
+          "modal_error_db": 9.935369550601684e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999882759769868,
-            0.9999999810710498
+            0.9999999810710254
           ]
         },
         {
@@ -783,22 +783,22 @@
             3,
             5
           ],
-          "level_error_db": 0.3949836347492097,
+          "level_error_db": 0.3949622836527608,
           "rms_reference_model": [
             0.01259893913011565,
-            0.013185091847721297
+            0.013185059437014571
           ],
-          "modal_error_db": 5.537160300562071e-05,
+          "modal_error_db": 4.100673550950719e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999131382873547,
-            0.9999999992456877
+            0.9999999992456945
           ]
         }
       ],
       "peak_reference_model": [
         0.09952199459075928,
-        0.08894982933998108
+        0.08893252164125443
       ]
     },
     {
@@ -811,16 +811,16 @@
             0,
             0.025
           ],
-          "level_error_db": 4.254391723329294,
+          "level_error_db": 4.254222194926685,
           "rms_reference_model": [
             0.005373876950936977,
-            0.008770155708636387
+            0.008769984537226131
           ],
-          "modal_error_db": 0.0003650269294873956,
-          "secondary_mode_error_db": 12.102993345789116,
+          "modal_error_db": 0.0003609379382312638,
+          "secondary_mode_error_db": 12.102914670092837,
           "modal_energy_fraction_reference_model": [
             0.9438256409623772,
-            0.9995098571648733
+            0.9995098214395643
           ]
         },
         {
@@ -828,16 +828,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -1.429321727870467,
+          "level_error_db": -1.4293273009521648,
           "rms_reference_model": [
             0.01438472471711843,
-            0.01220212497481064
+            0.012202117145627862
           ],
-          "modal_error_db": 0.0007714893254602677,
+          "modal_error_db": 0.0007697128542130231,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9923326994493766,
-            0.999517539681081
+            0.9995175397158583
           ]
         },
         {
@@ -845,16 +845,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -0.9378708881797505,
+          "level_error_db": -0.9378699825420612,
           "rms_reference_model": [
             0.016282563749188954,
-            0.014616023842192299
+            0.014616025366137837
           ],
-          "modal_error_db": 0.0002163052021250294,
+          "modal_error_db": 0.00021560858830780563,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9990069232698084,
-            0.9999896017906935
+            0.999989601951443
           ]
         },
         {
@@ -862,16 +862,16 @@
             0.4,
             1
           ],
-          "level_error_db": -0.18009425038313825,
+          "level_error_db": -0.18010618738338394,
           "rms_reference_model": [
             0.01063786463102127,
-            0.010419568809110475
+            0.010419554489528355
           ],
-          "modal_error_db": 0.00010942005505256193,
+          "modal_error_db": 0.00010900634064496432,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9991968167882446,
-            0.9999997232840212
+            0.9999997232855561
           ]
         },
         {
@@ -879,16 +879,16 @@
             1,
             2
           ],
-          "level_error_db": 0.10207551637641697,
+          "level_error_db": 0.10207524321124171,
           "rms_reference_model": [
             0.004193669610000375,
-            0.0042432438286710075
+            0.0042432436952239486
           ],
-          "modal_error_db": 0.00018667337514375476,
+          "modal_error_db": 0.00018638872742053175,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9972392206334663,
-            0.9999999688327753
+            0.9999999688331352
           ]
         },
         {
@@ -896,16 +896,16 @@
             2,
             3
           ],
-          "level_error_db": 0.371238577719967,
+          "level_error_db": 0.37123848652106667,
           "rms_reference_model": [
             0.0011610063652527276,
-            0.0012117039668166258
+            0.0012117039540941446
           ],
-          "modal_error_db": 0.00022868338338827496,
-          "secondary_mode_error_db": 0.5731981813031266,
+          "modal_error_db": 0.0002288621250164274,
+          "secondary_mode_error_db": 0.5731980664451858,
           "modal_energy_fraction_reference_model": [
             0.9940388965082264,
-            0.9999999687061113
+            0.9999999687060878
           ]
         },
         {
@@ -913,22 +913,22 @@
             3,
             5
           ],
-          "level_error_db": 0.6457579723653494,
+          "level_error_db": 0.6457578061057998,
           "rms_reference_model": [
             0.00023615642723176278,
-            0.0002543827561522934
+            0.0002543827512830671
           ],
-          "modal_error_db": 0.026506673235147556,
-          "secondary_mode_error_db": 3.458510630554169,
+          "modal_error_db": 0.026506725222056274,
+          "secondary_mode_error_db": 3.4585035470178394,
           "modal_energy_fraction_reference_model": [
             0.7909761446684301,
-            0.9999999973314818
+            0.9999999973314837
           ]
         }
       ],
       "peak_reference_model": [
         0.02617180347442627,
-        0.02112697623670101
+        0.021121660247445107
       ]
     },
     {
@@ -941,16 +941,16 @@
             0,
             0.025
           ],
-          "level_error_db": 3.2914293552416645,
+          "level_error_db": 3.290992827797168,
           "rms_reference_model": [
             0.016438617557016016,
-            0.02401246581085548
+            0.024011259044781103
           ],
-          "modal_error_db": 0.0003181237666176841,
-          "secondary_mode_error_db": 0.8740077136530948,
+          "modal_error_db": 0.00028950178136906136,
+          "secondary_mode_error_db": 0.8740111544896513,
           "modal_energy_fraction_reference_model": [
             0.9816750788997316,
-            0.9995101802331993
+            0.9995100887254781
           ]
         },
         {
@@ -958,16 +958,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -0.33087839185861445,
+          "level_error_db": -0.3309031987713246,
           "rms_reference_model": [
             0.034690187796287485,
-            0.03339356083047028
+            0.03339346545855097
           ],
-          "modal_error_db": 0.00018101856918754114,
-          "secondary_mode_error_db": 0.18091062037834454,
+          "modal_error_db": 0.00019343027609981857,
+          "secondary_mode_error_db": 0.18091021008210717,
           "modal_energy_fraction_reference_model": [
             0.9957228150421085,
-            0.9995175353217904
+            0.9995175354421201
           ]
         },
         {
@@ -975,16 +975,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -0.2749933244798393,
+          "level_error_db": -0.27499876577294763,
           "rms_reference_model": [
             0.04128613630951828,
-            0.03999950122070118
+            0.039999476162940695
           ],
-          "modal_error_db": 0.00046033894714108775,
-          "secondary_mode_error_db": 1.7498802403337534,
+          "modal_error_db": 0.00046519452905788056,
+          "secondary_mode_error_db": 1.7498800921675506,
           "modal_energy_fraction_reference_model": [
             0.9996983502444089,
-            0.99998960143503
+            0.9999896014394877
           ]
         },
         {
@@ -992,16 +992,16 @@
             0.4,
             1
           ],
-          "level_error_db": 0.107606430232363,
+          "level_error_db": 0.10760320221679387,
           "rms_reference_model": [
             0.028163969841292973,
-            0.028515053589181584
+            0.028515042991876797
           ],
-          "modal_error_db": 1.832224051635191e-05,
-          "secondary_mode_error_db": 0.12527403927105976,
+          "modal_error_db": 2.1205346403543536e-05,
+          "secondary_mode_error_db": 0.125273798697761,
           "modal_energy_fraction_reference_model": [
             0.9998192070948358,
-            0.9999997232966776
+            0.9999997232967025
           ]
         },
         {
@@ -1009,16 +1009,16 @@
             1,
             2
           ],
-          "level_error_db": -0.048989240326980314,
+          "level_error_db": -0.048990618850244555,
           "rms_reference_model": [
             0.011678748296894633,
-            0.01161306445589725
+            0.01161306261280703
           ],
-          "modal_error_db": 0.0003565594711529176,
-          "secondary_mode_error_db": 0.7849473066385732,
+          "modal_error_db": 0.00035459783832350773,
+          "secondary_mode_error_db": 0.7849472410302415,
           "modal_energy_fraction_reference_model": [
             0.999667980539779,
-            0.9999999689038439
+            0.9999999689038479
           ]
         },
         {
@@ -1026,16 +1026,16 @@
             2,
             3
           ],
-          "level_error_db": -0.0750527786629834,
+          "level_error_db": -0.0750538505504567,
           "rms_reference_model": [
             0.003346090984928038,
-            0.0033173027362083714
+            0.0033173023268346425
           ],
-          "modal_error_db": 0.0010937152276321107,
-          "secondary_mode_error_db": 0.8337746259803437,
+          "modal_error_db": 0.0010924744380902869,
+          "secondary_mode_error_db": 0.8337745799698871,
           "modal_energy_fraction_reference_model": [
             0.9992881503718495,
-            0.9999999687220208
+            0.9999999687220513
           ]
         },
         {
@@ -1043,22 +1043,22 @@
             3,
             5
           ],
-          "level_error_db": -0.47915930423882735,
+          "level_error_db": -0.47916035378120014,
           "rms_reference_model": [
             0.0007378030466794967,
-            0.0006982042355305344
+            0.0006982041511644054
           ],
-          "modal_error_db": 0.010341240857177358,
-          "secondary_mode_error_db": 0.40239551889083663,
+          "modal_error_db": 0.010341893370422626,
+          "secondary_mode_error_db": 0.40239550972956467,
           "modal_energy_fraction_reference_model": [
             0.6471668177738772,
-            0.9999999973510462
+            0.9999999973510472
           ]
         }
       ],
       "peak_reference_model": [
         0.0649482011795044,
-        0.05771436169743538
+        0.05767200142145157
       ]
     },
     {
@@ -1071,16 +1071,16 @@
             0,
             0.025
           ],
-          "level_error_db": 2.8291181306134328,
+          "level_error_db": 2.8277705599743013,
           "rms_reference_model": [
             0.03435121818402921,
-            0.047577109066648325
+            0.04756972829798073
           ],
-          "modal_error_db": 0.49851345153228854,
-          "secondary_mode_error_db": 5.774329863294851,
+          "modal_error_db": 0.49860823003689986,
+          "secondary_mode_error_db": 6.029362469444577,
           "modal_energy_fraction_reference_model": [
             0.9841721238818762,
-            0.9995141434220854
+            0.9995139316615839
           ]
         },
         {
@@ -1088,16 +1088,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": 1.0715058422225785,
+          "level_error_db": 1.071477483284031,
           "rms_reference_model": [
             0.05813120151777148,
-            0.06576345046610431
+            0.06576323575250748
           ],
-          "modal_error_db": 0.774352098016644,
-          "secondary_mode_error_db": 9.235737150241125,
+          "modal_error_db": 0.774393586290395,
+          "secondary_mode_error_db": 9.23573699005872,
           "modal_energy_fraction_reference_model": [
             0.9918168930806099,
-            0.9995173117896996
+            0.9995173121857015
           ]
         },
         {
@@ -1105,16 +1105,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": 0.7480051656727831,
+          "level_error_db": 0.7479803862513619,
           "rms_reference_model": [
             0.07216521232936528,
-            0.07865532901573379
+            0.07865510462527457
           ],
-          "modal_error_db": 0.1220920965769117,
-          "secondary_mode_error_db": 5.837906778478888,
+          "modal_error_db": 0.12211050842356415,
+          "secondary_mode_error_db": 5.837906687639671,
           "modal_energy_fraction_reference_model": [
             0.9987749598142088,
-            0.9999895888926214
+            0.9999895889066849
           ]
         },
         {
@@ -1122,16 +1122,16 @@
             0.4,
             1
           ],
-          "level_error_db": 0.26544914010948406,
+          "level_error_db": 0.2654365865056234,
           "rms_reference_model": [
             0.05437568756808422,
-            0.0560631142290696
+            0.05606303320183486
           ],
-          "modal_error_db": 0.014630405999331646,
-          "secondary_mode_error_db": 1.6521397610564892,
+          "modal_error_db": 0.014642041911290687,
+          "secondary_mode_error_db": 1.6521397266909215,
           "modal_energy_fraction_reference_model": [
             0.9998886034083928,
-            0.9999997232958984
+            0.9999997232961255
           ]
         },
         {
@@ -1139,16 +1139,16 @@
             1,
             2
           ],
-          "level_error_db": -0.3487804127751057,
+          "level_error_db": -0.34878997683337765,
           "rms_reference_model": [
             0.0237923369914769,
-            0.02285588708698971
+            0.022855861920320006
           ],
-          "modal_error_db": 0.014573739627686778,
-          "secondary_mode_error_db": 1.513811143647189,
+          "modal_error_db": 0.01456512507893493,
+          "secondary_mode_error_db": 1.5138111363235167,
           "modal_energy_fraction_reference_model": [
             0.9998117718254063,
-            0.9999999689136118
+            0.9999999689136628
           ]
         },
         {
@@ -1156,16 +1156,16 @@
             2,
             3
           ],
-          "level_error_db": -0.6141872577847759,
+          "level_error_db": -0.614192668661244,
           "rms_reference_model": [
             0.007041852368818966,
-            0.006561113536225661
+            0.00656110944898011
           ],
-          "modal_error_db": 0.07313032145125499,
-          "secondary_mode_error_db": 3.3513630333868463,
+          "modal_error_db": 0.07312435080046499,
+          "secondary_mode_error_db": 3.3513630296539243,
           "modal_energy_fraction_reference_model": [
             0.9996806559350973,
-            0.9999999688817673
+            0.9999999688817953
           ]
         },
         {
@@ -1173,22 +1173,22 @@
             3,
             5
           ],
-          "level_error_db": -0.6241557299299466,
+          "level_error_db": -0.6241591875216781,
           "rms_reference_model": [
             0.00153060860739129,
-            0.0014244800286364685
+            0.0014244794615938749
           ],
-          "modal_error_db": 0.4603990904670762,
-          "secondary_mode_error_db": 3.014521118381174,
+          "modal_error_db": 0.4603961091774204,
+          "secondary_mode_error_db": 3.0145211148557958,
           "modal_energy_fraction_reference_model": [
             0.9942181504208341,
-            0.9999999975661927
+            0.999999997566195
           ]
         }
       ],
       "peak_reference_model": [
         0.13536536693572998,
-        0.11536761373281479
+        0.11530111730098724
       ]
     },
     {
@@ -1201,16 +1201,16 @@
             0,
             0.025
           ],
-          "level_error_db": 6.179592695370578,
+          "level_error_db": 6.179407201893076,
           "rms_reference_model": [
             0.004257513318208223,
-            0.008672327097402042
+            0.008672141895540006
           ],
-          "modal_error_db": 0.713024763401925,
-          "secondary_mode_error_db": 1.4644204190713999,
+          "modal_error_db": 0.7130203734223111,
+          "secondary_mode_error_db": 1.4879251288566706,
           "modal_energy_fraction_reference_model": [
             0.6751145801575088,
-            0.9994507370767574
+            0.9994507393022319
           ]
         },
         {
@@ -1218,16 +1218,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -0.5412372936119281,
+          "level_error_db": -0.5412460688686749,
           "rms_reference_model": [
             0.018154906292477718,
-            0.01705815855871771
+            0.01705814132506041
           ],
-          "modal_error_db": 0.8926398194170627,
-          "secondary_mode_error_db": 1.8212249054639884,
+          "modal_error_db": 0.8926446318428608,
+          "secondary_mode_error_db": 1.821223410714455,
           "modal_energy_fraction_reference_model": [
             0.9986545916881645,
-            0.9996388350743254
+            0.9996388331349665
           ]
         },
         {
@@ -1235,16 +1235,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": 0.6976763768798881,
+          "level_error_db": 0.697631173432556,
           "rms_reference_model": [
             0.02074633989192306,
-            0.02248150118806099
+            0.022481384189255705
           ],
-          "modal_error_db": 0.011469196690860061,
-          "secondary_mode_error_db": 0.03589065709229297,
+          "modal_error_db": 0.011458734095347568,
+          "secondary_mode_error_db": 0.03588742304201311,
           "modal_energy_fraction_reference_model": [
             0.9994417608288838,
-            0.999994287835595
+            0.9999942880351602
           ]
         },
         {
@@ -1252,16 +1252,16 @@
             0.4,
             1
           ],
-          "level_error_db": 0.5778130060104815,
+          "level_error_db": 0.5777763947170821,
           "rms_reference_model": [
             0.013731671846024881,
-            0.0146762150416469
+            0.01467615318107707
           ],
-          "modal_error_db": 0.10386093519427712,
-          "secondary_mode_error_db": 6.168844901323748,
+          "modal_error_db": 0.10385722666064612,
+          "secondary_mode_error_db": 6.168814165881039,
           "modal_energy_fraction_reference_model": [
             0.9999421771644805,
-            0.9999998544802163
+            0.999999854483898
           ]
         },
         {
@@ -1269,16 +1269,16 @@
             1,
             2
           ],
-          "level_error_db": 1.0680507178807113,
+          "level_error_db": 1.0680173585727923,
           "rms_reference_model": [
             0.005569741508453303,
-            0.006298506413839529
+            0.006298482223639082
           ],
-          "modal_error_db": 0.018495619105905928,
-          "secondary_mode_error_db": 15.657022225157196,
+          "modal_error_db": 0.018495208971494405,
+          "secondary_mode_error_db": 15.656962932765756,
           "modal_energy_fraction_reference_model": [
             0.9999160509012277,
-            0.999999982167395
+            0.9999999821640503
           ]
         },
         {
@@ -1286,16 +1286,16 @@
             2,
             3
           ],
-          "level_error_db": 0.831604518011298,
+          "level_error_db": 0.8316100321827089,
           "rms_reference_model": [
             0.0018194125753297795,
-            0.0020022182611506376
+            0.002002219532244176
           ],
-          "modal_error_db": 0.008439084296346641,
-          "secondary_mode_error_db": 12.50092975706219,
+          "modal_error_db": 0.008438926440900604,
+          "secondary_mode_error_db": 12.500854754616675,
           "modal_energy_fraction_reference_model": [
             0.9992058208279073,
-            0.999999983764886
+            0.9999999837674762
           ]
         },
         {
@@ -1303,22 +1303,22 @@
             3,
             5
           ],
-          "level_error_db": -0.6015764252145386,
+          "level_error_db": -0.6015879326925186,
           "rms_reference_model": [
             0.0005070843212375066,
-            0.0004731527421186921
+            0.0004731521152639448
           ],
-          "modal_error_db": 0.004978928669423776,
-          "secondary_mode_error_db": 2.5418628950897233,
+          "modal_error_db": 0.004978941896923085,
+          "secondary_mode_error_db": 2.541875344953692,
           "modal_energy_fraction_reference_model": [
             0.9880986108817743,
-            0.9999999987282406
+            0.9999999987284109
           ]
         }
       ],
       "peak_reference_model": [
         0.03320026397705078,
-        0.03703750669956207
+        0.037039440125226974
       ]
     },
     {
@@ -1331,16 +1331,16 @@
             0,
             0.025
           ],
-          "level_error_db": 1.800181502975258,
+          "level_error_db": 1.7999981027539524,
           "rms_reference_model": [
             0.017234079314593136,
-            0.021202992633961276
+            0.0212025449432065
           ],
-          "modal_error_db": 0.3084504864522338,
-          "secondary_mode_error_db": 0.6342847939696262,
+          "modal_error_db": 0.3084472614767469,
+          "secondary_mode_error_db": 0.6342849493374935,
           "modal_energy_fraction_reference_model": [
             0.9655697400868334,
-            0.9994520898959925
+            0.999452092226192
           ]
         },
         {
@@ -1348,16 +1348,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -1.9888459563097203,
+          "level_error_db": -1.9888469477846544,
           "rms_reference_model": [
             0.05201528917655451,
-            0.04137030468930877
+            0.04137029996698101
           ],
-          "modal_error_db": 0.9501054514229154,
-          "secondary_mode_error_db": 1.9330735791633915,
+          "modal_error_db": 0.9501104423995286,
+          "secondary_mode_error_db": 1.9330735888611603,
           "modal_energy_fraction_reference_model": [
             0.9992595712121295,
-            0.9996383328535563
+            0.9996383329430233
           ]
         },
         {
@@ -1365,16 +1365,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": 0.09759668827926658,
+          "level_error_db": 0.09757572947688009,
           "rms_reference_model": [
             0.053993393679594,
-            0.054603497298810186
+            0.054603365542297444
           ],
-          "modal_error_db": 0.5718255502595438,
-          "secondary_mode_error_db": 1.534337732453568,
+          "modal_error_db": 0.5718330800810654,
+          "secondary_mode_error_db": 1.534337744887062,
           "modal_energy_fraction_reference_model": [
             0.9998252330867612,
-            0.9999942931397949
+            0.9999942931716144
           ]
         },
         {
@@ -1382,16 +1382,16 @@
             0.4,
             1
           ],
-          "level_error_db": -0.2175601593418927,
+          "level_error_db": -0.21756935398890356,
           "rms_reference_model": [
             0.0365478297151585,
-            0.03564376607552606
+            0.03564372834402273
           ],
-          "modal_error_db": 0.070556219685591,
-          "secondary_mode_error_db": 2.42243049651474,
+          "modal_error_db": 0.07055333140552915,
+          "secondary_mode_error_db": 2.422430504726642,
           "modal_energy_fraction_reference_model": [
             0.9998813719070083,
-            0.9999998542792751
+            0.9999998542795664
           ]
         },
         {
@@ -1399,16 +1399,16 @@
             1,
             2
           ],
-          "level_error_db": 0.41025815390056586,
+          "level_error_db": 0.41025660359064864,
           "rms_reference_model": [
             0.014590994523840708,
-            0.015296701859823993
+            0.015296699129576721
           ],
-          "modal_error_db": 0.018975300403557126,
-          "secondary_mode_error_db": 14.395776686002218,
+          "modal_error_db": 0.018975147335638674,
+          "secondary_mode_error_db": 14.395776750483513,
           "modal_energy_fraction_reference_model": [
             0.9999542210621213,
-            0.9999999821556967
+            0.9999999821556934
           ]
         },
         {
@@ -1416,16 +1416,16 @@
             2,
             3
           ],
-          "level_error_db": 1.1498028699272536,
+          "level_error_db": 1.1498027658417727,
           "rms_reference_model": [
             0.00425942589759746,
-            0.004862293950295637
+            0.004862293892029388
           ],
-          "modal_error_db": 0.008826902222638431,
-          "secondary_mode_error_db": 13.124076048852785,
+          "modal_error_db": 0.0088268992491615,
+          "secondary_mode_error_db": 13.124076024815905,
           "modal_energy_fraction_reference_model": [
             0.9988432316158385,
-            0.9999999837866813
+            0.9999999837866604
           ]
         },
         {
@@ -1433,22 +1433,22 @@
             3,
             5
           ],
-          "level_error_db": 0.573688624455184,
+          "level_error_db": 0.5736886033618848,
           "rms_reference_model": [
             0.0010756470431122214,
-            0.0011490904596744612
+            0.0011490904568839458
           ],
-          "modal_error_db": 0.0016595137084181467,
-          "secondary_mode_error_db": 1.419054533059062,
+          "modal_error_db": 0.0016595137135599768,
+          "secondary_mode_error_db": 1.4190545700698265,
           "modal_energy_fraction_reference_model": [
             0.997436770660226,
-            0.9999999987300213
+            0.9999999987300195
           ]
         }
       ],
       "peak_reference_model": [
         0.08898556232452393,
-        0.08997826278209686
+        0.08992268890142441
       ]
     },
     {
@@ -1461,16 +1461,16 @@
             0,
             0.025
           ],
-          "level_error_db": 1.7839092109111965,
+          "level_error_db": 1.7832056314621143,
           "rms_reference_model": [
             0.029093034277153405,
-            0.035726007016320616
+            0.03572311323486983
           ],
-          "modal_error_db": 0.425758097497954,
-          "secondary_mode_error_db": 0.8813965727120193,
+          "modal_error_db": 0.425731390355075,
+          "secondary_mode_error_db": 0.9443082194218196,
           "modal_energy_fraction_reference_model": [
             0.9687505952609762,
-            0.9994661942329127
+            0.999466210332372
           ]
         },
         {
@@ -1478,16 +1478,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -2.5869747217486596,
+          "level_error_db": -2.587306408057459,
           "rms_reference_model": [
             0.08622587557799404,
-            0.06401605055449187
+            0.06401360603320651
           ],
-          "modal_error_db": 1.0734988272622883,
-          "secondary_mode_error_db": 2.181241441975539,
+          "modal_error_db": 1.073537433891964,
+          "secondary_mode_error_db": 2.1966048944795014,
           "modal_energy_fraction_reference_model": [
             0.9990996482335381,
-            0.999632684426238
+            0.9996326845866103
           ]
         },
         {
@@ -1495,16 +1495,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -0.2932564092266641,
+          "level_error_db": -0.29342360067604834,
           "rms_reference_model": [
             0.0887391093404891,
-            0.0857930771510862
+            0.08579142576804258
           ],
-          "modal_error_db": 1.0879381774747143,
-          "secondary_mode_error_db": 2.626732888104289,
+          "modal_error_db": 1.087989022924564,
+          "secondary_mode_error_db": 2.626732880284292,
           "modal_energy_fraction_reference_model": [
             0.9998272033236508,
-            0.9999943469453245
+            0.9999943472296644
           ]
         },
         {
@@ -1512,16 +1512,16 @@
             0.4,
             1
           ],
-          "level_error_db": -0.5733966293469686,
+          "level_error_db": -0.5734489143211429,
           "rms_reference_model": [
             0.05978146040868333,
-            0.055962446060867116
+            0.05596210919425213
           ],
-          "modal_error_db": 0.0129501615816629,
-          "secondary_mode_error_db": 0.2498013886459319,
+          "modal_error_db": 0.012975304090463675,
+          "secondary_mode_error_db": 0.24980143347072484,
           "modal_energy_fraction_reference_model": [
             0.9999409459084511,
-            0.9999998506122222
+            0.9999998506150508
           ]
         },
         {
@@ -1529,16 +1529,16 @@
             1,
             2
           ],
-          "level_error_db": 0.07717508725730322,
+          "level_error_db": 0.07716847826993031,
           "rms_reference_model": [
             0.02379675097918851,
-            0.02400912984341396
+            0.02400911157516716
           ],
-          "modal_error_db": 0.02647779706786841,
-          "secondary_mode_error_db": 13.646276407060501,
+          "modal_error_db": 0.026476419516585185,
+          "secondary_mode_error_db": 13.646276424318593,
           "modal_energy_fraction_reference_model": [
             0.9999124364948405,
-            0.9999999820161851
+            0.9999999820162264
           ]
         },
         {
@@ -1546,16 +1546,16 @@
             2,
             3
           ],
-          "level_error_db": 1.0788715938086801,
+          "level_error_db": 1.078871247300746,
           "rms_reference_model": [
             0.006732972133911555,
-            0.007623429646472255
+            0.007623429342349255
           ],
-          "modal_error_db": 0.012518342468092003,
-          "secondary_mode_error_db": 6.940293273220057,
+          "modal_error_db": 0.012518316345874182,
+          "secondary_mode_error_db": 6.940293360537369,
           "modal_energy_fraction_reference_model": [
             0.9999270922328719,
-            0.9999999839713778
+            0.9999999839713837
           ]
         },
         {
@@ -1563,22 +1563,22 @@
             3,
             5
           ],
-          "level_error_db": 1.2630792443741532,
+          "level_error_db": 1.2630791727854316,
           "rms_reference_model": [
             0.0015566729052084467,
-            0.0018003267255079954
+            0.0018003267106697814
           ],
-          "modal_error_db": 0.004502194934583571,
-          "secondary_mode_error_db": 1.2396335000976615,
+          "modal_error_db": 0.0045021948029876895,
+          "secondary_mode_error_db": 1.2396335356157024,
           "modal_energy_fraction_reference_model": [
             0.9994082627055084,
-            0.9999999987432036
+            0.9999999987432001
           ]
         }
       ],
       "peak_reference_model": [
         0.15698277950286865,
-        0.14450059831142426
+        0.14429333806037903
       ]
     },
     {
@@ -1591,16 +1591,16 @@
             0,
             0.025
           ],
-          "level_error_db": 2.795568168516642,
+          "level_error_db": 2.7953136950154835,
           "rms_reference_model": [
             0.0026692138889025476,
-            0.003682661354622252
+            0.00368255346400427
           ],
-          "modal_error_db": 0.12016943654064667,
-          "secondary_mode_error_db": 22.855308824113667,
+          "modal_error_db": 0.12017126788550522,
+          "secondary_mode_error_db": 24.41066718838396,
           "modal_energy_fraction_reference_model": [
             0.7358515162502633,
-            0.9995037047430125
+            0.9995036679976173
           ]
         },
         {
@@ -1608,16 +1608,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": 2.3036429407537273,
+          "level_error_db": 2.303640816578771,
           "rms_reference_model": [
             0.0029583887709429308,
-            0.0038568912399705823
+            0.003856890296749897
           ],
-          "modal_error_db": 0.0011329283316385934,
-          "secondary_mode_error_db": 2.55060665892439,
+          "modal_error_db": 0.0011343527679055826,
+          "secondary_mode_error_db": 2.550607512398568,
           "modal_energy_fraction_reference_model": [
             0.8682729099991243,
-            0.9994970289813233
+            0.9994970221529542
           ]
         },
         {
@@ -1625,16 +1625,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": 1.7975877217050233,
+          "level_error_db": 1.79756966257355,
           "rms_reference_model": [
             0.0030921423918389727,
-            0.0038031098587732954
+            0.0038031019516051863
           ],
-          "modal_error_db": 5.63379876159259e-05,
+          "modal_error_db": 5.5559622385606514e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9660668226430013,
-            0.9999882365363352
+            0.9999882368643997
           ]
         },
         {
@@ -1642,16 +1642,16 @@
             0.4,
             1
           ],
-          "level_error_db": 1.5073768452318763,
+          "level_error_db": 1.5072858746802977,
           "rms_reference_model": [
             0.002699947343840543,
-            0.0032116198730511285
+            0.0032115862367382664
           ],
-          "modal_error_db": 0.000692956530055796,
-          "secondary_mode_error_db": 6.104957918560194,
+          "modal_error_db": 0.0006932151633040612,
+          "secondary_mode_error_db": 6.104901691834639,
           "modal_energy_fraction_reference_model": [
             0.991023311136106,
-            0.9999997148762014
+            0.9999997149088168
           ]
         },
         {
@@ -1659,16 +1659,16 @@
             1,
             2
           ],
-          "level_error_db": 1.1661662823935437,
+          "level_error_db": 1.1660482695628127,
           "rms_reference_model": [
             0.0020211258439735602,
-            0.0023115413648875835
+            0.0023115099588142825
           ],
-          "modal_error_db": 0.0005995637423686906,
+          "modal_error_db": 0.0005996019089738721,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.999021464577435,
-            0.9999999806066783
+            0.9999999806024189
           ]
         },
         {
@@ -1676,16 +1676,16 @@
             2,
             3
           ],
-          "level_error_db": 0.19759517657080453,
+          "level_error_db": 0.19747285428149586,
           "rms_reference_model": [
             0.001479765750876939,
-            0.0015138147419444256
+            0.0015137934232322778
           ],
-          "modal_error_db": 5.0209362815572704e-05,
+          "modal_error_db": 5.0206817272145996e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9972354183341828,
-            0.999999980608159
+            0.9999999806034692
           ]
         },
         {
@@ -1693,22 +1693,22 @@
             3,
             5
           ],
-          "level_error_db": -1.1394235094353102,
+          "level_error_db": -1.139517701383389,
           "rms_reference_model": [
             0.0009545683305876081,
-            0.0008372127745087146
+            0.0008372036956143361
           ],
-          "modal_error_db": 1.5129936620287673e-05,
+          "modal_error_db": 1.5130150927384481e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9925187136105411,
-            0.9999999992461136
+            0.9999999992466455
           ]
         }
       ],
       "peak_reference_model": [
         0.006710171699523926,
-        0.005598228890448809
+        0.005598058924078941
       ]
     },
     {
@@ -1721,16 +1721,16 @@
             0,
             0.025
           ],
-          "level_error_db": 0.3601808795351492,
+          "level_error_db": 0.35733612101842976,
           "rms_reference_model": [
             0.01431792134014175,
-            0.014924129750205052
+            0.014919242675267782
           ],
-          "modal_error_db": 0.09136854838470923,
-          "secondary_mode_error_db": 20.74710816011999,
+          "modal_error_db": 0.09161240462645881,
+          "secondary_mode_error_db": 20.74688330742776,
           "modal_energy_fraction_reference_model": [
             0.944771505230344,
-            0.9995034539712029
+            0.9995030739996618
           ]
         },
         {
@@ -1738,16 +1738,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -1.257499353089169,
+          "level_error_db": -1.2576720303929243,
           "rms_reference_model": [
             0.01806222117308667,
-            0.015627740398148515
+            0.015627429718487084
           ],
-          "modal_error_db": 0.0006833826853006334,
-          "secondary_mode_error_db": 4.803263862751813,
+          "modal_error_db": 0.0008588275156271942,
+          "secondary_mode_error_db": 4.8032647547563325,
           "modal_energy_fraction_reference_model": [
             0.9954266287124215,
-            0.9994970286776095
+            0.9994970294913336
           ]
         },
         {
@@ -1755,16 +1755,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -1.494559139913059,
+          "level_error_db": -1.4946321227499546,
           "rms_reference_model": [
             0.018303941939462064,
-            0.01541049796738025
+            0.015410368481837446
           ],
-          "modal_error_db": 7.214331271396294e-05,
-          "secondary_mode_error_db": 2.708928265183157,
+          "modal_error_db": 1.3405814547011173e-05,
+          "secondary_mode_error_db": 2.7089281756864274,
           "modal_energy_fraction_reference_model": [
             0.9992600301578636,
-            0.9999882369821257
+            0.9999882370616199
           ]
         },
         {
@@ -1772,16 +1772,16 @@
             0.4,
             1
           ],
-          "level_error_db": -1.9862411203017827,
+          "level_error_db": -1.9862703908194423,
           "rms_reference_model": [
             0.01635709152137033,
-            0.01301349733998617
+            0.013013453485968014
           ],
-          "modal_error_db": 9.50732086628682e-05,
-          "secondary_mode_error_db": 0.6103057956537059,
+          "modal_error_db": 7.302142171703458e-05,
+          "secondary_mode_error_db": 0.6103055432133478,
           "modal_energy_fraction_reference_model": [
             0.9998810305119038,
-            0.9999997148957429
+            0.9999997148960731
           ]
         },
         {
@@ -1789,16 +1789,16 @@
             1,
             2
           ],
-          "level_error_db": -0.6879762711138611,
+          "level_error_db": -0.6879772149274643,
           "rms_reference_model": [
             0.010137781914045829,
-            0.009365783854076413
+            0.009365782836385181
           ],
-          "modal_error_db": 0.000524940335506633,
+          "modal_error_db": 0.0005227041157970258,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9998832589345991,
-            0.9999999806036698
+            0.999999980603618
           ]
         },
         {
@@ -1806,16 +1806,16 @@
             2,
             3
           ],
-          "level_error_db": 1.7390014335848913,
+          "level_error_db": 1.7390011641496363,
           "rms_reference_model": [
             0.005020624673884642,
-            0.006133492347749148
+            0.006133492157488953
           ],
-          "modal_error_db": 0.0001755868069487264,
-          "secondary_mode_error_db": 1.979721188449256,
+          "modal_error_db": 0.00017573852834804315,
+          "secondary_mode_error_db": 1.9797210945405272,
           "modal_energy_fraction_reference_model": [
             0.9994831238677199,
-            0.9999999806054387
+            0.999999980605469
           ]
         },
         {
@@ -1823,22 +1823,22 @@
             3,
             5
           ],
-          "level_error_db": 2.2293146172105534,
+          "level_error_db": 2.229314580521175,
           "rms_reference_model": [
             0.002624211653682973,
-            0.0033920683184877477
+            0.003392068304159581
           ],
-          "modal_error_db": 0.0007729521401386858,
-          "secondary_mode_error_db": 8.46675890628849,
+          "modal_error_db": 0.0007729576193052639,
+          "secondary_mode_error_db": 8.466759481892415,
           "modal_energy_fraction_reference_model": [
             0.996348250618047,
-            0.9999999992463018
+            0.9999999992463017
           ]
         }
       ],
       "peak_reference_model": [
         0.033408522605895996,
-        0.022690700367093086
+        0.022660287097096443
       ]
     },
     {
@@ -1851,16 +1851,16 @@
             0,
             0.025
           ],
-          "level_error_db": -0.8565649478516615,
+          "level_error_db": -0.8580996927378832,
           "rms_reference_model": [
             0.022007103533430362,
-            0.0199404355060312
+            0.01993691246128507
           ],
-          "modal_error_db": 0.039559905811999856,
-          "secondary_mode_error_db": 10.9861979584587,
+          "modal_error_db": 0.039624432152980435,
+          "secondary_mode_error_db": 17.045532599006133,
           "modal_energy_fraction_reference_model": [
             0.9585573605980445,
-            0.9995027849764768
+            0.9995025648809566
           ]
         },
         {
@@ -1868,16 +1868,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -2.850904334452024,
+          "level_error_db": -2.8509579806685306,
           "rms_reference_model": [
             0.028995089251723817,
-            0.02088234339747911
+            0.02088221442332652
           ],
-          "modal_error_db": 0.0020288485643252625,
-          "secondary_mode_error_db": 1.3642143039094172,
+          "modal_error_db": 0.001980276069859749,
+          "secondary_mode_error_db": 1.3642140124270155,
           "modal_energy_fraction_reference_model": [
             0.9951150330747109,
-            0.9994971086822696
+            0.99949710888719
           ]
         },
         {
@@ -1885,16 +1885,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -2.512799251124436,
+          "level_error_db": -2.512818588975097,
           "rms_reference_model": [
             0.027496018324858495,
-            0.020588743638524122
+            0.02058869780077771
           ],
-          "modal_error_db": 0.00011041546448359825,
-          "secondary_mode_error_db": 0.5946498209974426,
+          "modal_error_db": 0.00013791481906144732,
+          "secondary_mode_error_db": 0.5946497696991466,
           "modal_energy_fraction_reference_model": [
             0.9985102149962106,
-            0.9999882341765796
+            0.9999882341996912
           ]
         },
         {
@@ -1902,16 +1902,16 @@
             0.4,
             1
           ],
-          "level_error_db": -2.4173911564530313,
+          "level_error_db": -2.4174044268233454,
           "rms_reference_model": [
             0.022962166518450122,
-            0.017383743458660547
+            0.017383716899661235
           ],
-          "modal_error_db": 0.0006080685372300179,
-          "secondary_mode_error_db": 0.9594238503192565,
+          "modal_error_db": 0.0006179510636883955,
+          "secondary_mode_error_db": 0.9594238879492258,
           "modal_energy_fraction_reference_model": [
             0.9996989006106353,
-            0.9999997147925301
+            0.9999997147926599
           ]
         },
         {
@@ -1919,16 +1919,16 @@
             1,
             2
           ],
-          "level_error_db": -1.2642547611937904,
+          "level_error_db": -1.2642567386729002,
           "rms_reference_model": [
             0.014470012970967496,
-            0.012509967526893196
+            0.012509964678803056
           ],
-          "modal_error_db": 0.0008626844841769746,
+          "modal_error_db": 0.0008610093073867105,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.999856908312229,
-            0.9999999806043406
+            0.9999999806043779
           ]
         },
         {
@@ -1936,16 +1936,16 @@
             2,
             3
           ],
-          "level_error_db": 0.864063022281122,
+          "level_error_db": 0.8640630058259048,
           "rms_reference_model": [
             0.0074165362913499846,
-            0.008192270377519894
+            0.008192270361999826
           ],
-          "modal_error_db": 0.0004799437349113397,
+          "modal_error_db": 0.00047976796944183484,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.999558294531613,
-            0.9999999806026599
+            0.999999980602628
           ]
         },
         {
@@ -1953,22 +1953,22 @@
             3,
             5
           ],
-          "level_error_db": 2.724478289765746,
+          "level_error_db": 2.724478251430515,
           "rms_reference_model": [
             0.0033106900025070304,
-            0.004530461372062313
+            0.004530461352067092
           ],
-          "modal_error_db": 0.00045701264490198367,
-          "secondary_mode_error_db": 5.5267687897017845,
+          "modal_error_db": 0.00045702055821889893,
+          "secondary_mode_error_db": 5.526768829035603,
           "modal_energy_fraction_reference_model": [
             0.9996609320205514,
-            0.9999999992469587
+            0.9999999992469629
           ]
         }
       ],
       "peak_reference_model": [
         0.05447208881378174,
-        0.03080507554113865
+        0.030797887593507767
       ]
     },
     {
@@ -1981,16 +1981,16 @@
             0,
             0.025
           ],
-          "level_error_db": 0.7077464841137225,
+          "level_error_db": 0.7072709414586915,
           "rms_reference_model": [
             0.0013158897871971432,
-            0.001427600990224664
+            0.0014275228328211342
           ],
-          "modal_error_db": 0.539774223914832,
-          "secondary_mode_error_db": 30.793954154249548,
+          "modal_error_db": 0.7569529892411877,
+          "secondary_mode_error_db": 44.88642707567522,
           "modal_energy_fraction_reference_model": [
             0.1898763228662822,
-            0.9995024022632999
+            0.9995023235196405
           ]
         },
         {
@@ -1998,16 +1998,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": 1.0737204294556628,
+          "level_error_db": 1.073748372452787,
           "rms_reference_model": [
             0.0017756422455709072,
-            0.0020092847615484997
+            0.0020092912255413624
           ],
-          "modal_error_db": 0.001176680144347711,
-          "secondary_mode_error_db": 11.047793783814608,
+          "modal_error_db": 0.0011804635138708706,
+          "secondary_mode_error_db": 11.047858574836958,
           "modal_energy_fraction_reference_model": [
             0.7514186715674,
-            0.9995291951650299
+            0.9995291942920027
           ]
         },
         {
@@ -2015,16 +2015,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": 1.3243726057694436,
+          "level_error_db": 1.3243984212322122,
           "rms_reference_model": [
             0.001993797089225931,
-            0.002322199824587029
+            0.002322206726442187
           ],
-          "modal_error_db": 7.764066110493169e-05,
+          "modal_error_db": 7.982711201485267e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9340150785485792,
-            0.9999866943578991
+            0.9999866939979145
           ]
         },
         {
@@ -2032,16 +2032,16 @@
             0.4,
             1
           ],
-          "level_error_db": 0.8063127775740706,
+          "level_error_db": 0.8063531283413545,
           "rms_reference_model": [
             0.001947984192951074,
-            0.0021374751152710473
+            0.0021374850450496747
           ],
-          "modal_error_db": 6.424193175183482e-06,
+          "modal_error_db": 4.988016517149528e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9433874493396216,
-            0.999999822246007
+            0.9999998222423873
           ]
         },
         {
@@ -2049,16 +2049,16 @@
             1,
             2
           ],
-          "level_error_db": -0.019453765153409137,
+          "level_error_db": -0.01944440815521469,
           "rms_reference_model": [
             0.0017756933581290083,
-            0.0017717207925187833
+            0.0017717227011312428
           ],
-          "modal_error_db": 3.3556826830950213e-07,
+          "modal_error_db": 1.090593604327152e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.8338051236291514,
-            0.9999999814521275
+            0.9999999814434933
           ]
         },
         {
@@ -2066,16 +2066,16 @@
             2,
             3
           ],
-          "level_error_db": -0.4658023914548836,
+          "level_error_db": -0.4657847354265502,
           "rms_reference_model": [
             0.0014728500613041232,
-            0.001395945353870097
+            0.001395948191446534
           ],
-          "modal_error_db": 9.167300108087287e-07,
+          "modal_error_db": 1.285032435366457e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.8647086231602797,
-            0.9999999814437158
+            0.9999999814471094
           ]
         },
         {
@@ -2083,22 +2083,22 @@
             3,
             5
           ],
-          "level_error_db": -0.9590428433262334,
+          "level_error_db": -0.9589933878045453,
           "rms_reference_model": [
             0.0011057774532214327,
-            0.0009901832791056478
+            0.0009901889170048255
           ],
-          "modal_error_db": 2.966188591176517e-07,
+          "modal_error_db": 4.405288523146919e-07,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9474459734105909,
-            0.9999999993787626
+            0.9999999993788765
           ]
         }
       ],
       "peak_reference_model": [
         0.004261970520019531,
-        0.0033324696123600006
+        0.0033332225866615772
       ]
     },
     {
@@ -2111,16 +2111,16 @@
             0,
             0.025
           ],
-          "level_error_db": 0.27856973064442325,
+          "level_error_db": 0.27826032437137377,
           "rms_reference_model": [
             0.012179472107076733,
-            0.012576417657784278
+            0.012575969672215413
           ],
-          "modal_error_db": 0.004574225049202017,
-          "secondary_mode_error_db": 25.34282956217833,
+          "modal_error_db": 0.004577431998918418,
+          "secondary_mode_error_db": 25.34255069526185,
           "modal_energy_fraction_reference_model": [
             0.9384034834756018,
-            0.9995023271450123
+            0.9995022802075841
           ]
         },
         {
@@ -2128,16 +2128,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -0.9603827627796886,
+          "level_error_db": -0.9603744315874702,
           "rms_reference_model": [
             0.01977021902558176,
-            0.01770077748193017
+            0.01770079445988597
           ],
-          "modal_error_db": 2.358904341845176e-06,
+          "modal_error_db": 3.7911709857554563e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9874592874856908,
-            0.9995291932197068
+            0.9995291932852104
           ]
         },
         {
@@ -2145,16 +2145,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -0.8941180777640613,
+          "level_error_db": -0.8941220693408386,
           "rms_reference_model": [
             0.022675456979891234,
-            0.02045738621539687
+            0.020457376814263267
           ],
-          "modal_error_db": 1.2459776989069247e-05,
+          "modal_error_db": 1.3244087722376937e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9987047447972878,
-            0.9999866946898128
+            0.9999866946883826
           ]
         },
         {
@@ -2162,16 +2162,16 @@
             0.4,
             1
           ],
-          "level_error_db": -0.7173502459890391,
+          "level_error_db": -0.7173502052729381,
           "rms_reference_model": [
             0.020451389272508124,
-            0.01883021604639214
+            0.018830216134660932
           ],
-          "modal_error_db": 1.0840426142459698e-06,
+          "modal_error_db": 6.317422750621641e-07,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9998358044265182,
-            0.9999998222405088
+            0.9999998222406266
           ]
         },
         {
@@ -2179,16 +2179,16 @@
             1,
             2
           ],
-          "level_error_db": -0.03424944708319158,
+          "level_error_db": -0.034249670873507415,
           "rms_reference_model": [
             0.01566974961052123,
-            0.015608083669986398
+            0.015608083267847057
           ],
-          "modal_error_db": 3.7425865090569008e-06,
+          "modal_error_db": 3.931422018088391e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.999959187571878,
-            0.9999999814404624
+            0.9999999814404693
           ]
         },
         {
@@ -2196,16 +2196,16 @@
             2,
             3
           ],
-          "level_error_db": 0.44633624837235647,
+          "level_error_db": 0.4463360160501475,
           "rms_reference_model": [
             0.011681759628973512,
-            0.012297733521036816
+            0.012297733192108326
           ],
-          "modal_error_db": 3.708980590679563e-06,
+          "modal_error_db": 3.781670780245381e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999714187305341,
-            0.9999999814414287
+            0.9999999814414355
           ]
         },
         {
@@ -2213,22 +2213,22 @@
             3,
             5
           ],
-          "level_error_db": 0.6381807050973136,
+          "level_error_db": 0.6381807184550886,
           "rms_reference_model": [
             0.008105265203471927,
-            0.008723208735881076
+            0.008723208749296243
           ],
-          "modal_error_db": 2.1332615045200773e-07,
+          "modal_error_db": 2.3697125041134267e-07,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999689871308614,
-            0.999999999378988
+            0.9999999993789922
           ]
         }
       ],
       "peak_reference_model": [
         0.03506433963775635,
-        0.029354115948081017
+        0.029348518699407578
       ]
     },
     {
@@ -2241,16 +2241,16 @@
             0,
             0.025
           ],
-          "level_error_db": 0.5366525705088484,
+          "level_error_db": 0.5352892925071991,
           "rms_reference_model": [
             0.018453693599850905,
-            0.01962980267481782
+            0.019626721956631694
           ],
-          "modal_error_db": 0.1126677923037264,
-          "secondary_mode_error_db": 23.036645029160624,
+          "modal_error_db": 0.11273283880124872,
+          "secondary_mode_error_db": 24.807486475781438,
           "modal_energy_fraction_reference_model": [
             0.9702719356286172,
-            0.9995025940338922
+            0.9995024104233537
           ]
         },
         {
@@ -2258,16 +2258,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -1.2630234492943548,
+          "level_error_db": -1.2630123562980766,
           "rms_reference_model": [
             0.03194734200343621,
-            0.027623808747889923
+            0.027623844027062937
           ],
-          "modal_error_db": 0.0006691253743595286,
-          "secondary_mode_error_db": 8.426704921374716,
+          "modal_error_db": 0.000698947963974799,
+          "secondary_mode_error_db": 8.42670323975901,
           "modal_energy_fraction_reference_model": [
             0.991597817981684,
-            0.9995291910947709
+            0.9995291914376605
           ]
         },
         {
@@ -2275,16 +2275,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -1.5477141859553059,
+          "level_error_db": -1.5477406466520622,
           "rms_reference_model": [
             0.038152817636697076,
-            0.03192573521691874
+            0.0319256379584977
           ],
-          "modal_error_db": 9.861365707115581e-05,
+          "modal_error_db": 0.00011437104237693175,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9993394282367387,
-            0.9999866943080855
+            0.9999866943042416
           ]
         },
         {
@@ -2292,16 +2292,16 @@
             0.4,
             1
           ],
-          "level_error_db": -1.462103637347092,
+          "level_error_db": -1.4621118118071816,
           "rms_reference_model": [
             0.03477356594196286,
-            0.02938624173985786
+            0.02938621408390582
           ],
-          "modal_error_db": 2.1026813252347455e-05,
+          "modal_error_db": 1.281263689107218e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999168030908822,
-            0.9999998221129144
+            0.9999998221134612
           ]
         },
         {
@@ -2309,16 +2309,16 @@
             1,
             2
           ],
-          "level_error_db": -0.5806619161432953,
+          "level_error_db": -0.5806639876956473,
           "rms_reference_model": [
             0.02604196330468582,
-            0.024357943951077654
+            0.02435793814179937
           ],
-          "modal_error_db": 4.07250284520662e-06,
+          "modal_error_db": 1.418009361930134e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999499614991898,
-            0.9999999814428986
+            0.9999999814428802
           ]
         },
         {
@@ -2326,16 +2326,16 @@
             2,
             3
           ],
-          "level_error_db": 0.44810368217021845,
+          "level_error_db": 0.4481026947113473,
           "rms_reference_model": [
             0.01822672897390975,
-            0.019191720932012928
+            0.019191718750194507
           ],
-          "modal_error_db": 3.4962848322138143e-06,
+          "modal_error_db": 4.1321833154631675e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999039713388264,
-            0.9999999814447613
+            0.9999999814448062
           ]
         },
         {
@@ -2343,22 +2343,22 @@
             3,
             5
           ],
-          "level_error_db": 1.161200180323373,
+          "level_error_db": 1.1612000743302306,
           "rms_reference_model": [
             0.0119097575899899,
-            0.013613284819667277
+            0.013613284653545568
           ],
-          "modal_error_db": 1.1817087188392825e-06,
+          "modal_error_db": 1.268322004020785e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999158568090247,
-            0.9999999993796261
+            0.9999999993796275
           ]
         }
       ],
       "peak_reference_model": [
         0.05907773971557617,
-        0.045936137437820435
+        0.04590075463056564
       ]
     },
     {
@@ -2371,16 +2371,16 @@
             0,
             0.025
           ],
-          "level_error_db": 1.088916844062098,
+          "level_error_db": 1.0888396771149662,
           "rms_reference_model": [
             0.00422909548199261,
-            0.004793948152059654
+            0.004793905561983594
           ],
-          "modal_error_db": 0.06209137673786051,
-          "secondary_mode_error_db": 6.931613736144292,
+          "modal_error_db": 0.062097365181653146,
+          "secondary_mode_error_db": 8.789204559814992,
           "modal_energy_fraction_reference_model": [
             0.9048712584566623,
-            0.9994546614143275
+            0.9994546530898473
           ]
         },
         {
@@ -2388,16 +2388,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": 2.565867405680487,
+          "level_error_db": 2.565859634486178,
           "rms_reference_model": [
             0.007000190029150284,
-            0.009405961568398576
+            0.009405953152965574
           ],
-          "modal_error_db": 0.001602820947013755,
-          "secondary_mode_error_db": 3.741753356249313,
+          "modal_error_db": 0.0016041173916901813,
+          "secondary_mode_error_db": 3.74174013556055,
           "modal_energy_fraction_reference_model": [
             0.9783066942291246,
-            0.9995740986235123
+            0.9995740960368126
           ]
         },
         {
@@ -2405,16 +2405,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": 0.8540905763884814,
+          "level_error_db": 0.8540726130607551,
           "rms_reference_model": [
             0.009163458238878298,
-            0.010110297469519974
+            0.010110276560389576
           ],
-          "modal_error_db": 0.00011163032885278642,
+          "modal_error_db": 0.00011251326980164596,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9976644636316919,
-            0.9999860743177436
+            0.9999860742650317
           ]
         },
         {
@@ -2422,16 +2422,16 @@
             0.4,
             1
           ],
-          "level_error_db": 0.3826684007783713,
+          "level_error_db": 0.38265729982442154,
           "rms_reference_model": [
             0.007961646475454972,
-            0.008320248730481516
+            0.008320238096839731
           ],
-          "modal_error_db": 1.4039513484877211e-05,
+          "modal_error_db": 1.4725132183732639e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9997669914914532,
-            0.9999998234680076
+            0.9999998234624079
           ]
         },
         {
@@ -2439,16 +2439,16 @@
             1,
             2
           ],
-          "level_error_db": 0.5756848457431094,
+          "level_error_db": 0.5756701778881905,
           "rms_reference_model": [
             0.005411264065349602,
-            0.005782065005421255
+            0.0057820552412609265
           ],
-          "modal_error_db": 8.774136350520453e-06,
+          "modal_error_db": 8.331250390051595e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9997297317614193,
-            0.9999999798087922
+            0.9999999798129834
           ]
         },
         {
@@ -2456,16 +2456,16 @@
             2,
             3
           ],
-          "level_error_db": 0.563539724878689,
+          "level_error_db": 0.5635596659893369,
           "rms_reference_model": [
             0.0033907145096388597,
-            0.0036179970712525295
+            0.003618005377478575
           ],
-          "modal_error_db": 1.280869043406304e-06,
+          "modal_error_db": 1.541202678290249e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9998892982882739,
-            0.9999999798083418
+            0.9999999798042805
           ]
         },
         {
@@ -2473,22 +2473,22 @@
             3,
             5
           ],
-          "level_error_db": 0.02514856302430894,
+          "level_error_db": 0.02522791522797304,
           "rms_reference_model": [
             0.0018829401514950483,
-            0.0018883997945492025
+            0.0018884170465954331
           ],
-          "modal_error_db": 3.1218213851032934e-06,
+          "modal_error_db": 3.246504666325595e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9995200544259198,
-            0.9999999992036718
+            0.9999999992040424
           ]
         }
       ],
       "peak_reference_model": [
         0.014433979988098145,
-        0.014960006810724735
+        0.014965170063078403
       ]
     },
     {
@@ -2501,16 +2501,16 @@
             0,
             0.025
           ],
-          "level_error_db": -3.2403180516194507,
+          "level_error_db": -3.2405627429311865,
           "rms_reference_model": [
             0.012254995640784614,
-            0.008439121868345023
+            0.008438884132108464
           ],
-          "modal_error_db": 0.0074329550859141705,
-          "secondary_mode_error_db": 4.74948195453939,
+          "modal_error_db": 0.007424003620684188,
+          "secondary_mode_error_db": 4.749485652312851,
           "modal_energy_fraction_reference_model": [
             0.9261427514975185,
-            0.9994548768184681
+            0.9994548557515077
           ]
         },
         {
@@ -2518,16 +2518,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": 0.07734580393005755,
+          "level_error_db": 0.0773503211106657,
           "rms_reference_model": [
             0.016409238769470043,
-            0.016556011699898572
+            0.016556020310014238
           ],
-          "modal_error_db": 0.0004887796163401355,
-          "secondary_mode_error_db": 1.2608492556282236,
+          "modal_error_db": 0.000490688768537191,
+          "secondary_mode_error_db": 1.2608494738553295,
           "modal_energy_fraction_reference_model": [
             0.9878491982218355,
-            0.999574095272701
+            0.9995740953033957
           ]
         },
         {
@@ -2535,16 +2535,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -0.61571408527677,
+          "level_error_db": -0.6157170499324678,
           "rms_reference_model": [
             0.019103281330587456,
-            0.01779599467990477
+            0.017795988605801803
           ],
-          "modal_error_db": 0.000452688960849833,
-          "secondary_mode_error_db": 3.0098014723293565,
+          "modal_error_db": 0.0004538981220974047,
+          "secondary_mode_error_db": 3.009802527915273,
           "modal_energy_fraction_reference_model": [
             0.9984582487656933,
-            0.9999860744379037
+            0.9999860744425059
           ]
         },
         {
@@ -2552,16 +2552,16 @@
             0.4,
             1
           ],
-          "level_error_db": -0.5928432377469963,
+          "level_error_db": -0.5928438059369389,
           "rms_reference_model": [
             0.015679318543783113,
-            0.014644853161095683
+            0.014644852203098477
           ],
-          "modal_error_db": 0.00017379683054593423,
-          "secondary_mode_error_db": 2.0361119184956387,
+          "modal_error_db": 0.0001746013155054508,
+          "secondary_mode_error_db": 2.036111370334689,
           "modal_energy_fraction_reference_model": [
             0.9998110863544707,
-            0.9999998234594184
+            0.9999998234595168
           ]
         },
         {
@@ -2569,16 +2569,16 @@
             1,
             2
           ],
-          "level_error_db": 0.16494383899370704,
+          "level_error_db": 0.16494302865660349,
           "rms_reference_model": [
             0.009985484810450055,
-            0.01017691968951372
+            0.010176918740073239
           ],
-          "modal_error_db": 1.1905594322988666e-05,
+          "modal_error_db": 1.1495226355456203e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999568571182934,
-            0.9999999798111369
+            0.9999999798111271
           ]
         },
         {
@@ -2586,16 +2586,16 @@
             2,
             3
           ],
-          "level_error_db": 0.7634736205572465,
+          "level_error_db": 0.7634741519945344,
           "rms_reference_model": [
             0.005832038453810654,
-            0.0063678681112402415
+            0.006367868500851761
           ],
-          "modal_error_db": 4.1321158612617735e-06,
+          "modal_error_db": 3.939094333502031e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9997175070944405,
-            0.9999999798006908
+            0.9999999798006686
           ]
         },
         {
@@ -2603,22 +2603,22 @@
             3,
             5
           ],
-          "level_error_db": 0.7870037251874339,
+          "level_error_db": 0.7870034525591452,
           "rms_reference_model": [
             0.0030357578710498625,
-            0.003323665552717283
+            0.0033236654483957597
           ],
-          "modal_error_db": 8.836896682000938e-06,
+          "modal_error_db": 8.914541216225392e-06,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.997464463044321,
-            0.9999999992038642
+            0.9999999992038638
           ]
         }
       ],
       "peak_reference_model": [
         0.0295257568359375,
-        0.02633196860551834
+        0.026335300877690315
       ]
     },
     {
@@ -2631,16 +2631,16 @@
             0,
             0.025
           ],
-          "level_error_db": -4.171278261779837,
+          "level_error_db": -4.1739041123980325,
           "rms_reference_model": [
             0.030921526264722887,
-            0.019129208867750176
+            0.01912342674811131
           ],
-          "modal_error_db": 0.45455245135272415,
-          "secondary_mode_error_db": 9.834064598535,
+          "modal_error_db": 0.5203452160724352,
+          "secondary_mode_error_db": 14.095854249416321,
           "modal_energy_fraction_reference_model": [
             0.9358829461515878,
-            0.9994729876376394
+            0.9994728912003897
           ]
         },
         {
@@ -2648,16 +2648,16 @@
             0.025,
             0.12
           ],
-          "level_error_db": -3.3086985595408835,
+          "level_error_db": -3.308711143367198,
           "rms_reference_model": [
             0.05268653991168171,
-            0.035996870864894864
+            0.035996818713870435
           ],
-          "modal_error_db": 0.03357021378875588,
-          "secondary_mode_error_db": 2.641802605311983,
+          "modal_error_db": 0.03352711038252115,
+          "secondary_mode_error_db": 2.641802709918203,
           "modal_energy_fraction_reference_model": [
             0.9925410950975373,
-            0.9995719792108468
+            0.9995719800780252
           ]
         },
         {
@@ -2665,16 +2665,16 @@
             0.12,
             0.4
           ],
-          "level_error_db": -2.779047646778063,
+          "level_error_db": -2.7790831742018107,
           "rms_reference_model": [
             0.05305557186026129,
-            0.03852819094533441
+            0.0385280333558849
           ],
-          "modal_error_db": 0.004761141396911072,
-          "secondary_mode_error_db": 2.207614477876588,
+          "modal_error_db": 0.004787922394697647,
+          "secondary_mode_error_db": 2.2076146256374445,
           "modal_energy_fraction_reference_model": [
             0.9992352817855277,
-            0.9999860599848442
+            0.9999860599862201
           ]
         },
         {
@@ -2682,16 +2682,16 @@
             0.4,
             1
           ],
-          "level_error_db": -1.865918148664585,
+          "level_error_db": -1.8659338728403976,
           "rms_reference_model": [
             0.03928130135914528,
-            0.031687644692345245
+            0.03168758732785341
           ],
-          "modal_error_db": 0.0009412028902322383,
-          "secondary_mode_error_db": 0.8543844578274408,
+          "modal_error_db": 0.0009248321381331539,
+          "secondary_mode_error_db": 0.8543843531012624,
           "modal_energy_fraction_reference_model": [
             0.9996674960660263,
-            0.9999998233656692
+            0.9999998233663706
           ]
         },
         {
@@ -2699,16 +2699,16 @@
             1,
             2
           ],
-          "level_error_db": -0.40760271753326494,
+          "level_error_db": -0.40761178333556514,
           "rms_reference_model": [
             0.02307038508107036,
-            0.022012770601659702
+            0.02201274762608316
           ],
-          "modal_error_db": 0.0001601184879370834,
-          "secondary_mode_error_db": 2.6691879056375085,
+          "modal_error_db": 0.00016699503585643373,
+          "secondary_mode_error_db": 2.6691880542718867,
           "modal_energy_fraction_reference_model": [
             0.9999572301420279,
-            0.9999999798052032
+            0.9999999798052168
           ]
         },
         {
@@ -2716,16 +2716,16 @@
             2,
             3
           ],
-          "level_error_db": 0.959243177993372,
+          "level_error_db": 0.9592432619968536,
           "rms_reference_model": [
             0.012332337517037948,
-            0.013772334463808067
+            0.01377233459700387
           ],
-          "modal_error_db": 4.384470394495352e-05,
+          "modal_error_db": 4.142295886436264e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999723091980091,
-            0.999999979808524
+            0.9999999798085178
           ]
         },
         {
@@ -2733,22 +2733,22 @@
             3,
             5
           ],
-          "level_error_db": 1.888160940716888,
+          "level_error_db": 1.888159481686651,
           "rms_reference_model": [
             0.005783743522442615,
-            0.007188149038417589
+            0.007188147830973521
           ],
-          "modal_error_db": 1.974719660448209e-05,
+          "modal_error_db": 2.0412644628648814e-05,
           "secondary_mode_error_db": null,
           "modal_energy_fraction_reference_model": [
             0.9999448061831957,
-            0.9999999992038787
+            0.9999999992038806
           ]
         }
       ],
       "peak_reference_model": [
         0.09198260307312012,
-        0.060321662575006485
+        0.06045070290565491
       ]
     }
   ]
