@@ -549,7 +549,11 @@ impl SequencerState {
             }
             lane.values[step] = value;
         }
-        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        // Content, not topology: publish so the next fire reads the new
+        // value, but do not bump `pattern_epoch`. The epoch makes the
+        // playing scheduler clear its queue, re-seek and reset every
+        // accumulator; per-event during a slider drag that silenced the
+        // transport for as long as the mouse moved.
         self.publish_scheduler_snapshot();
         true
     }

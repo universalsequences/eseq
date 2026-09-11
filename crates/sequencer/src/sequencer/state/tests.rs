@@ -3418,6 +3418,44 @@
     }
 
     #[test]
+    fn lane_value_edits_publish_without_bumping_pattern_epoch() {
+        // A slider drag writes one lane step per mouse event. The scheduler
+        // treats a pattern_epoch bump as a destructive edit (queue clear,
+        // re-seek, accumulator reset), so lane values must publish the way
+        // p-lock drags do: new snapshot, same epoch.
+        let state = make_state_with_tracks(1);
+        let tacc = state
+            .project_process_chain()
+            .slots
+            .into_iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("tacc"))
+            .expect("tacc default lane");
+        let epoch_before = state.transport.pattern_epoch.load(Ordering::Relaxed);
+        let version_before = state.scheduler_snapshot_version();
+        assert!(state.set_process_lane_value(0, tacc.instance_id, "amount", 3, 2.0));
+        assert_eq!(
+            state.transport.pattern_epoch.load(Ordering::Relaxed),
+            epoch_before,
+            "lane content edits are not topology"
+        );
+        assert!(
+            state.scheduler_snapshot_version() > version_before,
+            "but the scheduler still gets a fresh snapshot"
+        );
+        let value = state
+            .composed_track_process_chain(0)
+            .unwrap()
+            .slots
+            .into_iter()
+            .find(|slot| slot.instance_id == tacc.instance_id)
+            .unwrap()
+            .lanes
+            .get("amount")
+            .map(|lane| lane.value_at(3, 0.0));
+        assert_eq!(value, Some(2.0));
+    }
+
+    #[test]
     fn unbinding_a_project_port_mutes_it_per_track_until_rebound() {
         let state = make_state_with_tracks(2);
         let rand = state

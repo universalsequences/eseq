@@ -162,7 +162,13 @@ Where the build differs from the rev 1 plan, and why.
   only the reader's `← writer` chip.
 - **Lane slider drags** ride one history gesture (`apply_process_lane_drag_step`):
   scene structure is captured once at the first drag event and committed once
-  when the gesture ends. Per-event capture stalled the scheduler.
+  when the gesture ends. Per-event capture stalled the scheduler. Since
+  2026-09-11 `set_process_lane_value` also publishes without bumping
+  `pattern_epoch`: the epoch is the scheduler's "destructive edit" signal
+  (queue clear, re-seek, accumulator reset), and firing it per mouse event
+  silenced playback for the whole drag. Lane values are content, read from
+  the fresh snapshot at the next fire like a p-lock drag; steps already in
+  the lookahead window keep the old value.
 - **Digit routing**: the row-wide soft number edit yields when any other
   number picker has focus; the row picker writes the whole selection when one
   exists. Lane ranges follow the slot's `lo`/`hi`. Track-typed inlets (grab's
