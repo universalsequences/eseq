@@ -85,7 +85,7 @@ impl WidgetDefinition for TransportClockWidget {
         let font_size = get_f32_prop(&node.props, "font-size", 15.0);
         let fg = resolve_named_color(&node.props, "color", theme::WIDGET_LABEL_FG());
         let bg = theme::BG();
-        let row = node.rect.row;
+        let row = node.rect.row + (node.rect.height - 1.0) * 0.5;
         let columns = [
             (bar, node.rect.col, 4.0),
             (beat, node.rect.col + 4.0, 3.0),

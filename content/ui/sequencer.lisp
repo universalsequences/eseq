@@ -2116,7 +2116,7 @@
 (def track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))
       (rows (max 1 (floor (/ (+ num-steps (- row-width 1)) row-width)))))
-    (box :padding 0.15
+    (box :key (str "track-step-grid-" track-idx) :padding 0.15
       (box :background-color :buffer-bg
         (v-stack :gap -0.04
           (box :width 0.1 :height 0.342 :bg :transparent)
@@ -2780,7 +2780,7 @@
         (track-row i true)))))
 
 (effect-buffer "*sequencer*"
-  (v-stack :width :fill :fill-content-style true :padding 0.00 :gap 0.0
+  (v-stack :key "sequencer-grid" :width :fill :fill-content-style true :padding 0.00 :gap 0.0
     ;; Sample import modal: opened by Rust after a file drop; renders as a
     ;; centered overlay (modal spec) with zero footprint here while closed.
     (subtree :key "seq-export-song"
@@ -2789,8 +2789,9 @@
       (eseq.file-dialogs/panel))
     (subtree :key "seq-sample-import"
       (eseq.sample-import/panel))
-    (each (eseq.drum-rack-v2/grid-render-items) |item|
-      (grid-render-item item))
+    (v-stack :key "sequencer-tracks" :width :fill :gap 0
+      (each (eseq.drum-rack-v2/grid-render-items) |item|
+        (grid-render-item item)))
 
      (box :key "new-track-drop-zone"
       :width :fill :height 2.4 :flex 1

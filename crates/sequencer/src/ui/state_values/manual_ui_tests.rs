@@ -26,7 +26,16 @@ fn label_texts(node: &LayoutNode, out: &mut Vec<String>) {
     }
 }
 
+fn manual_images<'a>(node: &'a LayoutNode, found: &mut Vec<&'a LayoutNode>) {
+    if node.widget_type == "image" { found.push(node); }
+    for child in &node.children { manual_images(child, found); }
+}
+
 fn manual_layout(editor: &mut eseqlisp::Editor) -> std::sync::Arc<LayoutNode> {
+    manual_layout_at(editor, 100)
+}
+
+fn manual_layout_at(editor: &mut eseqlisp::Editor, columns: u16) -> std::sync::Arc<LayoutNode> {
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -39,7 +48,7 @@ fn manual_layout(editor: &mut eseqlisp::Editor) -> std::sync::Arc<LayoutNode> {
         .expect("manual effect buffer")
         .id;
     editor.set_active_buffer(buffer_id);
-    editor.set_layout_viewport(100, 40);
+    editor.set_layout_viewport(columns, 40);
     let layout = editor.widget_layout().unwrap_or_else(|| {
         let tree = editor
             .buffers
@@ -50,6 +59,45 @@ fn manual_layout(editor: &mut eseqlisp::Editor) -> std::sync::Arc<LayoutNode> {
     });
     assert_finite_layout_tree(&layout);
     layout
+}
+
+#[test]
+fn manual_images_load_and_measure_at_wide_and_narrow_panel_sizes() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    eval(&mut editor, "(eseq.manual/open-manual)");
+    eval(&mut editor, r#"(set-layout (list :buf "*manual*" :hide-status true :min-width 25))"#);
+    // Fixed renderer contract with a real packaged asset, independent of the
+    // chapter's editorial copy and placement of its illustrations.
+    eval(&mut editor, r#"(set! eseq.manual/manual-page
+        (parse-manual-source "![Fixture caption](images/step-grid.png)"))"#);
+    let mut widths = Vec::new();
+    for columns in [100, 30] {
+        let layout = manual_layout_at(&mut editor, columns);
+        let mut found = Vec::new();
+        manual_images(&layout, &mut found);
+        assert_eq!(found.len(), 1, "image must build rather than returning a diagnostic");
+        let image = found[0];
+        assert_finite_nonzero_rect(image, "manual image");
+        assert!(image.rect.col >= 0.0 && image.rect.row >= 0.0);
+        assert!(image.rect.col + image.rect.width <= columns as f32);
+        assert!(image.rect.row + image.rect.height <= 40.0);
+        let Some(Value::String(src)) = image.props.get("src") else { panic!("image source"); };
+        assert!(std::path::Path::new(src).is_absolute());
+        let (width, height) = eseqlisp::manual::image_info(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/manual/index.md"),
+            "images/step-grid.png").map(|(_, w, h)| (w, h)).unwrap();
+        assert_eq!(image.props.get("aspect"), Some(&Value::Number(width as f64 / height as f64)));
+        widths.push(image.rect.width);
+    }
+    assert!(widths[1] < widths[0], "image must shrink with a narrower panel");
+    eval(&mut editor, r#"(set! eseq.manual/manual-page
+        (parse-manual-source "![Fixture caption](images/not-present.png)"))"#);
+    let layout = manual_layout(&mut editor);
+    let mut found = Vec::new();
+    manual_images(&layout, &mut found);
+    assert!(found.is_empty(), "unavailable image uses a visible text fallback");
+    let figure = find_layout_node_by_debug_name(&layout, "manual-figure").unwrap();
+    assert_finite_nonzero_rect(figure, "missing image fallback");
 }
 
 fn eval(editor: &mut eseqlisp::Editor, form: &str) -> Value {
@@ -93,7 +141,8 @@ fn manual_authored_pages_have_visible_content() {
         &mut editor,
         r#"(set-layout (list :buf "*manual*" :hide-status true :min-width 25))"#,
     );
-    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/manual");
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/manual").canonicalize().unwrap();
     let mut pages = std::fs::read_dir(directory).unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
@@ -111,6 +160,19 @@ fn manual_authored_pages_have_visible_content() {
         assert_finite_nonzero_rect(content, node);
         let source = std::fs::read_to_string(&path).unwrap();
         let page = eseqlisp::manual::parse_manual_source(&source);
+        let sources = page.blocks.iter().filter_map(|block| match block {
+            eseqlisp::manual::Block::Image { src, .. } => Some(src),
+            _ => None,
+        }).collect::<Vec<_>>();
+        let mut images = Vec::new();
+        manual_images(content, &mut images);
+        assert_eq!(images.len(), sources.len(), "{node}: every authored image must render");
+        for (image, src) in images.into_iter().zip(sources) {
+            let (file, _, _) = eseqlisp::manual::image_info(&path, src)
+                .unwrap_or_else(|error| panic!("{node}: {error}"));
+            assert_eq!(image.props.get("src"), Some(&Value::String(file.to_string_lossy().into_owned())));
+            assert_finite_nonzero_rect(image, src);
+        }
         let title = page.title().expect("authored page title");
         assert_eq!(
             eval(&mut editor, "(eseq.manual/page-title eseq.manual/manual-page)"),

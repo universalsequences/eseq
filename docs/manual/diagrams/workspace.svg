@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="920" viewBox="0 0 1440 920" role="img" aria-labelledby="title description">
+  <title id="title">eseq session workspace map</title>
+  <desc id="description">Seven numbered panels shown as white outlines and labels. Transport across the top. Browser at left beside the sequencer and mixer. Step inspector and track settings at upper right. Devices across the bottom.</desc>
+  <!-- Panel relationships follow content/ui/seq-layout.lisp: lower-panel-layout-spec,
+       main-and-mixer-layout-spec, and step-and-track-panel-layout-spec.
+       This is an orientation diagram, not an exact scale drawing. -->
+  <style>
+    rect { fill: none; stroke: white; stroke-width: 2; }
+    text { font-family: Helvetica, Arial, sans-serif; font-size: 32px; fill: white; text-anchor: middle; }
+  </style>
+
+  <rect x="24" y="24" width="1392" height="110" rx="8"/>
+  <text x="720" y="90">1  Transport</text>
+
+  <rect x="24" y="150" width="260" height="520" rx="8"/>
+  <text x="154" y="421">2  Browser</text>
+
+  <rect x="300" y="150" width="776" height="310" rx="8"/>
+  <text x="688" y="316">3  Step sequencer</text>
+
+  <rect x="1092" y="150" width="324" height="180" rx="8"/>
+  <text x="1254" y="251">4  Step inspector</text>
+
+  <rect x="1092" y="346" width="324" height="114" rx="8"/>
+  <text x="1254" y="414">5  Track settings</text>
+
+  <rect x="300" y="476" width="1116" height="194" rx="8"/>
+  <text x="858" y="584">6  Mixer</text>
+
+  <rect x="24" y="686" width="1392" height="210" rx="8"/>
+  <text x="720" y="802">7  Devices</text>
+</svg>

@@ -12,6 +12,8 @@ Open **Samples** and search, or click tag chips such as kick, snare, or a collec
 
 Selecting a sample shows its waveform. The headphone button auditions samples as you move through them.
 
+![The Samples browser combines collection tags, a file list, and waveform preview.](images/sample-browser.png)
+
 ## Load a sampler
 
 Drag a sample onto **Drop sounds here** for a new track, or onto a track to replace its sound. Dropping a sample on a synth track turns it into a sampler.
@@ -25,6 +27,8 @@ Enter a step and play. Transpose changes pitch; the sampler's envelope and playb
 3. Add a batch tag for the whole import, such as the collection name.
 4. Select a folder or file to give it extra tags or a title.
 5. Click **Import**.
+
+![Review the staged files and their tags before importing.](images/sample-import.png)
 
 Importing adds files to the library. Loading is a separate step. For several drums, build a [Drum Rack](racks) rather than replacing one sampler repeatedly.
 

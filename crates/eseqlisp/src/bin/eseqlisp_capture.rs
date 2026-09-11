@@ -81,8 +81,20 @@ fn run() -> Result<(), String> {
     if args.synthetic_spectrogram {
         publish_synthetic_spectrograms(&frame);
     }
+    if args.list_keys {
+        let layout = frame.widget_layout.as_ref().ok_or("capture buffer has no widget layout")?;
+        for key in eseqlisp::ui::capture::layout_keys(layout) { println!("{key}"); }
+        return Ok(());
+    }
+    if args.padding != 0 && args.key.is_none() {
+        return Err("--padding requires --key".to_string());
+    }
+    let region = args.key.as_deref().map(|key|
+        eseqlisp::ui::capture::keyed_region(&frame, key, (cell_w, cell_h),
+            (args.width, args.height), args.padding)
+    ).transpose()?;
     backend
-        .render_frame_to_png(&frame, args.width, args.height, &args.out)
+        .render_frame_region_to_png(&frame, args.width, args.height, region, !args.hide_status, &args.out)
         .map_err(|_| "failed to render capture PNG".to_string())?;
 
     println!("{}", args.out.display());
@@ -128,6 +140,10 @@ struct CaptureArgs {
     click: Option<(f32, f32)>,
     super_y: bool,
     synthetic_spectrogram: bool,
+    key: Option<String>,
+    padding: u32,
+    list_keys: bool,
+    hide_status: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -148,10 +164,19 @@ impl CaptureArgs {
             click: None,
             super_y: false,
             synthetic_spectrogram: false,
+            key: None,
+            padding: 0,
+            list_keys: false,
+            hide_status: false,
         };
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--key" => parsed.key = Some(next_value(&mut args, "--key")?),
+                "--padding" => parsed.padding = next_value(&mut args, "--padding")?.parse::<u32>()
+                    .map_err(|_| "--padding expects a non-negative pixel count".to_string())?,
+                "--list-keys" => parsed.list_keys = true,
+                "--hide-status" => parsed.hide_status = true,
                 "--source" => parsed.source = Some(next_value(&mut args, "--source")?),
                 "--source-file" => {
                     parsed.source_file = Some(std::path::PathBuf::from(next_value(
@@ -208,7 +233,7 @@ impl CaptureArgs {
     }
 
     fn usage() -> String {
-        "usage: eseqlisp_capture (--source LISP | --source-file PATH) [--width PX] [--height PX] [--patcher-zoom ZOOM] [--patcher-fit] [--touchpad-scroll DX DY] [--click COL ROW] [--super-y] [--synthetic-spectrogram] --out PATH"
+        "usage: eseqlisp_capture (--source LISP | --source-file PATH) [--width PX] [--height PX] [--patcher-zoom ZOOM] [--patcher-fit] [--touchpad-scroll DX DY] [--click COL ROW] [--super-y] [--synthetic-spectrogram] [--key KEY] [--padding PX] [--list-keys] [--hide-status] --out PATH"
             .to_string()
     }
 }

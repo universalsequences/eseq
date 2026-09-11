@@ -19,6 +19,8 @@ Arm the track with **R**, leave any text field, and click a music panel. Try `Z`
 
 If letters play notes when you want to edit, disarm the track.
 
+![Check R for live input, the numbered mute button, S for solo, and the fader for level.](images/armed-track.png)
+
 ## Recording landed in the wrong place
 
 Session view records into the looping pattern. Arrangement view records a take. The choice is made when you press Record and does not change with the view. For knob recording, deselect all steps first.
@@ -26,6 +28,8 @@ Session view records into the looping pattern. Arrangement view records a take. 
 ## An edit only changed one step
 
 Steps were selected. Command-click them to deselect, or check the inspector count, then edit again.
+
+![A nonzero selected count means device edits apply to those steps.](images/selected-step.png)
 
 ## A knob jumps back
 

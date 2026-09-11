@@ -2,6 +2,8 @@
 
 Three different things are called recording. The transport's red Record button records notes and knob moves. **WAV** records the audio output. Neither is track arming, which only decides where live notes go.
 
+![Stop, Play, Record, and WAV. Record captures notes and knob moves; WAV captures audio.](images/record-controls.png)
+
 ## Record notes into a pattern
 
 1. In session view, select the pattern to record into.
@@ -13,6 +15,8 @@ Three different things are called recording. The transport's red Record button r
 7. Stop, disable Record, and disarm the track.
 
 Each loop overdubs onto the last. Arm one track at a time until you want layered input.
+
+![The lit R button arms this track for live input.](images/armed-track.png)
 
 ## The computer keyboard
 
@@ -34,6 +38,8 @@ Use `Z` and `X` to reach the loaded pads. Recorded notes land on each member's o
 ## Record quantization
 
 Record quantization snaps performed notes to a grid; **off** keeps your timing. It is separate from launch quantization, which schedules pattern and scene changes, and from the quantizer MIDI effect, which alters playback.
+
+![This transport selector sets record quantization; off preserves your timing.](images/record-quantization.png)
 
 ## Record knob movements
 

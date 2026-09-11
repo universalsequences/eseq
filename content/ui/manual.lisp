@@ -252,6 +252,17 @@ Back to the [top page](index).")))
     (v-stack :width :fill :gap 0.15 :padding-left 0.5 :debug-name "manual-menu"
       (each (range 0 (len entries)) |i| (render-menu-entry (nth entries i))))))
 
+(def render-image (block)
+  (let ((alt (nth block 1))
+        (info (manual-image-info (node-path manual-node) (nth block 2))))
+    (v-stack :width :fill :gap 0.25 :debug-name "manual-figure"
+      (if (get info :error)
+        (render-inlines (list (list 'span (str "Image unavailable: " (get info :error)))))
+        (image :src (get info :path) :width :fill
+          :max-pixel-width (get info :width) :aspect (get info :aspect) :fit :contain))
+      (if (= alt "") (box :height 0)
+        (render-inlines (list (list 'em alt)))))))
+
 (def render-block (block)
   (let ((head (nth block 0)))
     (if (or (= head 'h1) (= head 'h2) (= head 'h3))
@@ -264,7 +275,9 @@ Back to the [top page](index).")))
             (render-list block)
             (if (= head 'menu)
               (render-menu block)
-              (box :height 0))))))))
+              (if (= head 'image)
+                (render-image block)
+                (box :height 0)))))))))
 
 (def nav-button (text key handler)
   (h-stack :gap 0.2 :align :center
@@ -273,7 +286,7 @@ Back to the [top page](index).")))
     (label key :font-size 10 :color :dimmer :bg :transparent)))
 
 (def render-nav-bar ()
-  (h-stack :width :fill :gap 1.0 :align :center :debug-name "manual-nav"
+  (h-stack :key "manual-navigation" :width :fill :gap 1.0 :align :center :debug-name "manual-nav"
     (label (str "eseq manual · " manual-node) :font-size 11 :color :dim :bg :transparent :flex 1)
     (nav-button "Top" "t" manual-top)
     (nav-button "Back" "l" manual-back)

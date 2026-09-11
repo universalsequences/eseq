@@ -4,6 +4,8 @@ The step grid is the fastest way to build rhythms. Each row is a track; each lit
 
 ## Steps
 
+![Lit cells contain notes; the other cells are empty.](images/step-grid.png)
+
 - Click an empty step to add a note.
 - Click an active step to select it. Double-click to remove it.
 - Shift-click selects a range. Command-click adds or removes single steps.
@@ -22,6 +24,8 @@ The inspector edits the selected steps.
 - **Pan** places the step in stereo.
 - **Retrig** repeats the note inside the step; **Rate** sets the spacing.
 
+![The step inspector shows the selection count and the values you are editing.](images/selected-step.png)
+
 Try it: select every other hi-hat, lower the velocity, then give the last snare a retrig.
 
 Expand a track for parameter lanes and more room. Use the [Piano roll](piano-roll) for chords and precise lengths.
@@ -36,6 +40,8 @@ Expanding a track turns its row into a lane editor: one slider per step for the 
 - Left and Right move the cursor along the row; the picker follows.
 
 Lanes draw in the track colour. A process lane draws in amber and adds a strip of its own controls to the right of the grid.
+
+![An expanded velocity lane: each slider sets the strength of its step.](images/expanded-steps.png)
 
 ## Length and timing
 

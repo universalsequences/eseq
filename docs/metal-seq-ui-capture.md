@@ -10,6 +10,63 @@ is evaluated. All remaining forms are ordinary sequencer Lisp, so process
 definitions, `processes`, `load`, and UI state changes use their normal runtime
 implementations.
 
+## Cropping a component after layout
+
+`--key KEY` selects a widget's authored `:key` or an explicit `subtree :key`.
+The buffer is laid out and rendered at `--width` / `--height` as usual. Only
+then is the selected rectangle read from the rendered texture. Siblings,
+parent constraints, wrapping and nested scroll offsets still determine its
+shape. This is a screenshot crop: pixels overlapping that rectangle remain.
+
+```sh
+cargo run -p sequencer --bin metal_seq -- capture \
+  --script crates/sequencer/ui/capture-fixtures/manual-components.lisp \
+  --buffer sequencer --width 1600 --height 500 \
+  --key track-step-grid-0 --padding 4 --out /tmp/step-grid.png
+```
+
+Use the same command with `--list-keys` to list keys after project setup and
+layout, without writing an image. Namespaced stable keys are listed too; short
+authored keys must match exactly one node. Missing or ambiguous keys, zero-size
+nodes and clipped/offscreen components fail explicitly. Enlarge the viewport
+or set scroll state in the fixture to show the whole component. Popup/modal
+overlay geometry is separate from buffer layout and currently cannot be
+selected by key; full-buffer captures still include overlays.
+
+`--padding` adds pixels around the crop, clamped at the image edges; the default
+is zero. Fractional layout edges round outward to avoid losing edge pixels.
+Both options and `--list-keys` also work in `eseqlisp_capture` for standalone
+widgets. Offscreen capture decodes referenced images before drawing its single
+frame, so illustrations are present in captures of the manual itself.
+
+`metal_seq capture --hide-status` lays out the isolated buffer without its
+mode line. The manual generator uses this for clean figures, including buffers
+whose root fills the viewport. `eseqlisp_capture` accepts this flag too.
+
+## Manual illustration assets
+
+Run `python3 scripts/capture_manual_images.py` from the repository root. It builds
+`metal_seq` and renders the fixtures listed in
+`crates/sequencer/ui/capture-fixtures/manual-images.json` to `docs/manual/images/`.
+The manifest records each image's project, buffer, key, and surrounding viewport.
+Pass image names to regenerate only those figures, for example
+`python3 scripts/capture_manual_images.py step-grid piano-roll`.
+Pass `--binary /path/to/metal_seq` to use an existing build.
+The script stops on a failed capture; inspect regenerated PNGs before accepting
+them. All manual chapters use these ordinary relative Markdown images, usable
+in the in-app reader and a future website. Captures open no interactive window
+and do not save projects, import staged samples, or export recordings.
+
+To inspect the result in the real manual:
+
+```sh
+cargo run -p sequencer --bin metal_seq -- capture \
+  --script crates/sequencer/ui/capture-fixtures/manual-first-session.lisp \
+  --buffer manual --width 1200 --height 1100 --out /tmp/manual-first-session.png
+```
+
+## Project fixtures
+
 ```lisp
 (capture-project
   (track :sampler
@@ -33,7 +90,6 @@ Supported track forms are:
 (track :sampler)
 (track :instrument "saved/instrument-name")
 (track :modulator)
-(track :drum-rack :samples ("path/to/kick.wav" "path/to/snare.wav"))
 (track :layer-rack :samples ("path/to/layer.wav"))
 ```
 
@@ -60,10 +116,9 @@ whole sampler/effect strip.
 `:num-steps` sets the initial
 pattern length from 1 through the sequencer's maximum pattern length. A saved
 instrument goes through the same compile/load/init path as an instrument added
-in the app, so its real custom UI can be captured. Drum and layer racks accept
-a `:samples` list through the production rack graph path. Drum-rack samples
-populate consecutive pads beginning at the first pad; layer-rack samples are
-added as broadcast layers. Sample paths are resolved relative to the capture
+in the app, so its real custom UI can be captured. Layer racks accept
+a `:samples` list through the production rack graph path, added as broadcast
+layers. Sample paths are resolved relative to the capture
 script.
 
 `:steps` authors pattern content: a list whose entries are either a step index
@@ -71,6 +126,24 @@ or a `(step transpose)` pair, e.g. `:steps (0 4 (8 12) 12)`. The steps are
 applied to the live pattern and then persisted into the scene's pattern pool
 through the production scene-launch path, so pool-derived read surfaces (such
 as the arrangement timeline's `song-lane-events` clip previews) observe them.
+
+`:step-params` authors step values, and `:instrument-locks` authors instrument
+p-locks by parameter name in the instrument's stored units:
+
+```lisp
+(track :instrument "factory:Synths/Digi Drift"
+  :steps (0 4 8 12)
+  :step-params ((4 :velocity 0.5) (12 :duration 2))
+  :instrument-locks ((8 "lp_freq" 650)))
+```
+
+Step parameter names use lowercase labels with hyphens, such as `:velocity`,
+`:duration`, `:transpose`, and `:rate`. Unknown names, nonfinite numbers and
+values outside the parameter range fail explicitly. These declarations use
+the production app edit commands and are saved into the same pattern pool as
+`:steps`. Expanded-lane projections are synchronized before the capture frame.
+Use these declarations for musical state; the UI's `seq-set-step-param`
+queues a live event-loop command, which the headless fixture does not dispatch.
 
 From the repository root:
 

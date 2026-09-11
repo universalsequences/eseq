@@ -1,6 +1,6 @@
 # Manual Format — markdown subset, link conventions, `docs/manual/` layout
 
-Status: rev 2, 2026-09-09 (rev 1 2026-08-28). Spec bead: `eseq-ug3m.1`. Parent epic:
+Status: rev 3, 2026-09-10 (images: `eseq-ug3m.9`). Spec bead: `eseq-ug3m.1`. Parent epic:
 `eseq-ug3m` (in-app manual + web export, Info-style).
 
 One markdown-subset source tree in `docs/manual/` is rendered three ways:
@@ -8,7 +8,8 @@ One markdown-subset source tree in `docs/manual/` is rendered three ways:
 1. **In-app** — `parse-manual-page` (Rust native, `eseq-ug3m.2`) returns a
    Lisp AST; `content/ui/manual.lisp` renders it to widgets in the
    `*manual*` buffer (`eseq-ug3m.3`).
-2. **Web** — a static-site exporter walks the same AST (`eseq-ug3m.6`).
+2. **Web** — `eseqlisp_manual_export` walks the same AST (`eseq-ug3m.6`);
+   see [HTML export](manual-web-export.md).
 3. **GitHub / plain markdown** — the files should remain readable as
    ordinary markdown with no custom tooling. Every extension below is
    chosen to degrade gracefully there.
@@ -24,7 +25,7 @@ but absent here, the fix is a spec revision, not a quiet parser feature.
   without extension, kebab-case, `[a-z0-9-]+` (e.g. `sequencer-tour`).
 - `index.md` is the root node ("Top" in Info terms). It is mostly a
   menu (§2.7) over the chapters.
-- The directory is **flat** — no subdirectories. The manual is a graph
+- The page namespace is **flat** — images live in `images/`. The manual is a graph
   of nodes linked by menus and cross-references, not a file hierarchy;
   a flat namespace keeps link targets unambiguous and renaming honest.
 - A page **must** begin with exactly one `# H1` line; it is the node's
@@ -101,9 +102,39 @@ If even one item of a list does not begin with a link, the whole list
 is an ordinary `ul`/`ol`. An ordinary link-only list being promoted to
 a menu is harmless: entries stay clickable either way.
 
-### 2.8 Explicitly excluded
+### 2.8 Images
 
-Images, tables, blockquotes, HTML (inline or block), thematic breaks,
+Use a standalone Markdown image, on its own line:
+
+```markdown
+![Lit cells contain notes; the other cells are empty.](images/step-grid.png)
+```
+
+The alt text is plain text and becomes a caption in the app. An empty alt
+string omits the caption. Paths are relative to the Markdown page, with
+normalized forward-slash components; absolute paths, parent traversal, URLs,
+query strings and fragments are excluded. Angle brackets support spaces in
+paths (`![Caption](<images/my figure.png>)`). Inline images, reference images,
+image titles and linked images are outside this subset.
+
+The AST keeps the relative source verbatim: `(image alt source)`. The reader
+resolves it beside the page using `manual-image-info`, reads its pixel
+dimensions, and uses the existing `image` widget. Images preserve aspect ratio,
+shrink with the panel, and never enlarge beyond their source pixel width
+(`:max-pixel-width`). Missing/unreadable assets show a visible diagnostic and
+caption. The parser remains total; malformed image syntax falls back to prose.
+
+Assets live under `docs/manual/images/` and ship with the manual (the app bundle
+copies that directory recursively). The web exporter copies the same
+assets, uses their relative URLs and alt text, and preserves aspect ratio. No
+application-specific markup or separate website images are needed.
+
+Regenerate the current illustrations with `python3 scripts/capture_manual_images.py`.
+The fixtures contain real project state; see [capture tooling](metal-seq-ui-capture.md).
+
+### 2.9 Explicitly excluded
+
+Tables, blockquotes, HTML (inline or block), thematic breaks,
 reference-style links, autolinks, footnotes, strikethrough, nested
 lists, nested inline styles, setext headings, indented code blocks.
 Wanting one of these = revising this spec first.
@@ -165,6 +196,7 @@ exact list shapes may be refined by `.2`/`.3` together:
      (code "p-locks")
      (span "."))
   (h2 "Rolls")
+  (image "A step pattern" "images/step-grid.png")
   (code-block "lisp" "(seq-roll …)")
   (ul (li (span "…")) …)
   (ol (li …) …)

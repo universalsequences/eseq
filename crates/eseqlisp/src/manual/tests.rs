@@ -265,6 +265,38 @@ fn empty_and_whitespace_sources() {
 }
 
 #[test]
+fn standalone_images_preserve_portable_sources_and_do_not_become_links() {
+    let page = parse_manual_source("Before\n![Steps 1 and 5](images/steps.png)\nAfter\n\n![](<images/a b.png>)");
+    assert_eq!(page.blocks, vec![
+        Block::Paragraph(vec![text("Before")]),
+        Block::Image { alt: "Steps 1 and 5".into(), src: "images/steps.png".into() },
+        Block::Paragraph(vec![text("After")]),
+        Block::Image { alt: "".into(), src: "images/a b.png".into() },
+    ]);
+    assert_eq!(sexpr("![Steps](images/steps.png)"),
+        "(page (image \"Steps\" \"images/steps.png\"))");
+    for source in ["![Broken](", "![Broken]()", "![Broken](a.png) trailing", "![Broken](a b.png)"] {
+        assert!(matches!(parse_manual_source(source).blocks[0], Block::Paragraph(_)), "{source}");
+    }
+}
+
+#[test]
+fn manual_images_resolve_beside_the_page_and_report_invalid_assets() {
+    let dir = std::env::temp_dir().join(format!("eseq-manual-image-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("images")).unwrap();
+    let path = dir.join("images/figure.png");
+    image::RgbaImage::new(32, 16).save(&path).unwrap();
+    let page = dir.join("page.md");
+    assert_eq!(image_info(&page, "images/figure.png").unwrap(), (path, 32, 16));
+    for src in ["", "../figure.png", "/figure.png", "https://example.com/a.png", "images/missing.png", "C:\\a.png"] {
+        assert!(image_info(&page, src).is_err(), "{src}");
+    }
+    std::fs::write(dir.join("images/broken.png"), "not an image").unwrap();
+    assert!(image_info(&page, "images/broken.png").is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn sexpr_shape_matches_spec() {
     let out = sexpr(
         "# Sequencer Tour\n\nSteps live in the [step buffer](step-buffer) with `p-locks`.\n\n## Rolls\n\n```lisp\n(seq-roll 1)\n```\n\n- **x** y\n\n1. z\n\n- [Mixer](mixer) — levels\n\n[open](action:switch-to-buffer *mixer*)\n",

@@ -1,6 +1,52 @@
 #![cfg(target_os = "macos")]
 
 #[test]
+fn keyed_image_capture_matches_the_full_frame_on_first_render() {
+    let directory = std::env::temp_dir().join(format!("eseq-keyed-capture-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let source_path = directory.join("source.png");
+    image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 30, 90, 255])).save(&source_path).unwrap();
+    // Run Metal on the executable's main thread, as required by macOS.
+    // Siblings position the figure away from both axes. This exercises the
+    // GPU readback origin as well as preserving the surrounding layout.
+    let source = format!(r#"(effect (v-stack (box :height 2)
+        (h-stack :align :start (box :width 3)
+            (image :key "figure" :src "{}" :width 8 :height 4 :fit :stretch)
+            (box :width 20 :height 6))))"#, source_path.display());
+    let capture = |name: &str, key: Option<&str>, hide_status: bool| {
+        let path = directory.join(name);
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_eseqlisp_capture"));
+        command.args(["--source", &source, "--width", "640", "--height", "480", "--out"])
+            .arg(&path);
+        if let Some(key) = key { command.args(["--key", key]); }
+        if hide_status { command.arg("--hide-status"); }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        image::open(path).unwrap().to_rgba8()
+    };
+    let cropped = capture("cropped.png", Some("figure"), false);
+    let full = capture("full.png", None, false);
+    let without_status = capture("without-status.png", None, true);
+    assert_ne!(full, without_status, "hiding the mode line must affect rendered pixels");
+    assert!(cropped.width() < full.width() && cropped.height() < full.height());
+    assert_eq!(*cropped.get_pixel(cropped.width() / 2, cropped.height() / 2), image::Rgba([200, 30, 90, 255]),
+        "the first frame must contain the decoded image");
+    let first_image_pixel = |image: &image::RgbaImage| image.enumerate_pixels()
+        .find(|(_, _, color)| **color == image::Rgba([200, 30, 90, 255]))
+        .map(|(x, y, _)| (x, y)).expect("decoded source pixels");
+    let (full_x, full_y) = first_image_pixel(&full);
+    let (crop_x, crop_y) = first_image_pixel(&cropped);
+    let origin = (full_x - crop_x, full_y - crop_y);
+    assert!(origin.0 > 0 && origin.1 > 0, "siblings must position the target away from the origin");
+    assert_eq!(cropped, image::imageops::crop_imm(&full,
+        origin.0, origin.1, cropped.width(), cropped.height()).to_image());
+    assert_eq!(cropped, image::imageops::crop_imm(&without_status,
+        origin.0, origin.1, cropped.width(), cropped.height()).to_image(),
+        "status visibility must not alter the figure's layout or pixels");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 #[ignore = "eseq-4tl: writes /tmp/eseqlisp-patcher-lexilush.png for visual inspection"]
 fn capture_patcher_lexilush_png() {
     let out = std::env::temp_dir().join("eseqlisp-patcher-lexilush.png");

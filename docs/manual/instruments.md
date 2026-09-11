@@ -2,6 +2,8 @@
 
 **Instruments** in the sidebar lists sound generators. Factory instruments are grouped as Drums, Physical Models, Synths, and so on. Library holds installed and user instruments. Search filters the list.
 
+![The Instruments browser lists factory generators and rack types.](images/instrument-browser.png)
+
 ## Add or replace
 
 - Drag an instrument onto **Drop sounds here** to make a new track.
@@ -19,6 +21,8 @@
 
 A preset sets the base sound. Existing p-locks still override it on their steps.
 
+![Presets follow the selected instrument; this list belongs to Digi Drift.](images/presets.png)
+
 ## Save a preset
 
 Click the save icon in the instrument header. **Save as New** creates a preset with the name you enter. **Overwrite** replaces the preset that is currently loaded, whatever name you typed.
@@ -28,5 +32,7 @@ Presets store the sound. The project stores the music that uses it; save both.
 ## Shape the sound
 
 Most instruments have a source, a filter, an amplitude envelope, and modulation. Shorten the envelope for a pluck, lower the cutoff for a darker tone, and add a little resonance to bring the filter forward. Change one thing at a time.
+
+![Digi Drift’s oscillator, filter, and envelope controls shape its base sound.](images/digi-drift.png)
 
 Tabs in a panel switch which controls are visible, not which instrument is loaded. If chords lose notes, raise the voice count. If notes ring after release, shorten the release.

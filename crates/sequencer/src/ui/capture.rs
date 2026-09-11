@@ -30,6 +30,10 @@ pub(crate) struct CaptureArgs {
     width: u32,
     height: u32,
     out: PathBuf,
+    key: Option<String>,
+    padding: u32,
+    list_keys: bool,
+    hide_status: bool,
 }
 
 impl CaptureArgs {
@@ -50,6 +54,10 @@ impl CaptureArgs {
         let mut width = DEFAULT_CAPTURE_WIDTH;
         let mut height = DEFAULT_CAPTURE_HEIGHT;
         let mut out = PathBuf::from(DEFAULT_CAPTURE_OUTPUT);
+        let mut key = None;
+        let mut padding = 0;
+        let mut list_keys = false;
+        let mut hide_status = false;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -59,6 +67,11 @@ impl CaptureArgs {
                 "--width" => width = parse_dimension_arg(&mut args, "--width")?,
                 "--height" => height = parse_dimension_arg(&mut args, "--height")?,
                 "--out" => out = PathBuf::from(next_arg(&mut args, "--out")?),
+                "--key" => key = Some(next_arg(&mut args, "--key")?),
+                "--padding" => padding = next_arg(&mut args, "--padding")?.parse::<u32>()
+                    .map_err(|_| "--padding expects a non-negative pixel count".to_string())?,
+                "--list-keys" => list_keys = true,
+                "--hide-status" => hide_status = true,
                 "-h" | "--help" => return Err(Self::usage()),
                 other => {
                     return Err(format!(
@@ -70,6 +83,9 @@ impl CaptureArgs {
         }
 
         let script = script.ok_or_else(Self::usage)?;
+        if padding != 0 && key.is_none() {
+            return Err("--padding requires --key".to_string());
+        }
         let script = absolute_path(&cwd, script);
         let out = absolute_path(&cwd, out);
         Ok(Some(Self {
@@ -79,11 +95,15 @@ impl CaptureArgs {
             width,
             height,
             out,
+            key,
+            padding,
+            list_keys,
+            hide_status,
         }))
     }
 
     fn usage() -> String {
-        "usage: metal_seq capture --script PATH [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--out PATH]"
+        "usage: metal_seq capture --script PATH [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH]"
             .to_string()
     }
 }
@@ -147,6 +167,8 @@ struct CaptureTrackSpec {
     /// applied to the live pattern and persisted into the scene's pattern
     /// pool so pool-derived read surfaces (song lane previews) see them.
     steps: Vec<(usize, f32)>,
+    step_params: Vec<(usize, StepParam, f32)>,
+    instrument_locks: Vec<(usize, String, f32)>,
     samples: Vec<String>,
     midi_fx: Vec<String>,
     audio_fx: Vec<String>,
@@ -376,6 +398,8 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     let mut solo = false;
     let mut num_steps = None;
     let mut steps = Vec::new();
+    let mut step_params = Vec::new();
+    let mut instrument_locks = Vec::new();
     let mut samples = Vec::new();
     let mut midi_fx = Vec::new();
     let mut audio_fx = Vec::new();
@@ -410,6 +434,19 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
                 num_steps = Some(steps);
             }
             "steps" => steps = parse_capture_steps(value)?,
+            "step-params" => {
+                step_params = parse_capture_param_values(value, ":step-params")?.into_iter()
+                    .map(|(step, name, value)| {
+                        let param = StepParam::ALL.into_iter().find(|param|
+                            param.label().to_lowercase().replace(' ', "-") == name)
+                            .ok_or_else(|| format!("unknown step parameter {name:?}"))?;
+                        if !(param.min()..=param.max()).contains(&value) {
+                            return Err(format!("step parameter {name:?} value {value} is out of range"));
+                        }
+                        Ok((step, param, value))
+                    }).collect::<Result<_, String>>()?;
+            }
+            "instrument-locks" => instrument_locks = parse_capture_param_values(value, ":instrument-locks")?,
             "samples" => samples = expression_string_list(value, ":samples")?,
             "midi-fx" => midi_fx = expression_string_list(value, ":midi-fx")?,
             "audio-fx" => audio_fx = expression_string_list(value, ":audio-fx")?,
@@ -428,6 +465,9 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     if !samples.is_empty() && kind != CaptureTrackKind::LayerRack {
         return Err(":samples is only supported for :layer-rack tracks".to_string());
     }
+    if !instrument_locks.is_empty() && !matches!(kind, CaptureTrackKind::Instrument(_)) {
+        return Err(":instrument-locks requires an :instrument track".to_string());
+    }
 
     Ok(CaptureTrackSpec {
         kind,
@@ -435,6 +475,8 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         solo,
         num_steps,
         steps,
+        step_params,
+        instrument_locks,
         samples,
         midi_fx,
         audio_fx,
@@ -457,9 +499,29 @@ fn expression_step_index(expression: &Expression) -> Option<usize> {
 
 fn expression_f32(expression: &Expression) -> Option<f32> {
     match expression {
-        Expression::Number(value) if value.is_finite() => Some(*value as f32),
+        Expression::Number(value) if value.is_finite() && (*value as f32).is_finite() => Some(*value as f32),
         _ => None,
     }
+}
+
+/// Authored values use parameter names, never unstable descriptor indices.
+fn parse_capture_param_values(value: &Expression, option: &str) -> Result<Vec<(usize, String, f32)>, String> {
+    let items = match value {
+        Expression::List(items) | Expression::QuoteList(items) => items,
+        _ => return Err(format!("{option} expects ((step parameter value) ...)")),
+    };
+    items.iter().map(|item| {
+        if let Expression::List(parts) | Expression::QuoteList(parts) = item {
+            if let [step, name, value] = parts.as_slice() {
+                if let (Some(step), Some(name), Some(value)) = (
+                    expression_step_index(step), expression_name(Some(name)), expression_f32(value),
+                ) {
+                    return Ok((step, name.to_string(), value));
+                }
+            }
+        }
+        Err(format!("{option} expects a valid (step parameter finite-value) entry"))
+    }).collect()
 }
 
 /// `:steps` entries are either a bare step index or a `(step transpose)` pair.
@@ -665,11 +727,32 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
             .map_err(|error| format!("failed to map rack slot macro on track {track}: {error}"))?;
     }
 
+    for (track, spec) in project.tracks.iter().enumerate() {
+        for &(step, param, value) in &spec.step_params {
+            app::try_apply_command(app, app::AppCommand::SetStepParam { track, step, param, value })
+                .map_err(|error| format!("capture step parameter: {error:?}"))?;
+        }
+        for (step, name, value) in &spec.instrument_locks {
+            let descriptor = app.graph.instrument_descriptors.get(track)
+                .ok_or_else(|| format!("track {track} has no instrument descriptor"))?;
+            let param_idx = descriptor.params.iter().position(|param| &param.name == name)
+                .ok_or_else(|| format!("track {track} has no instrument parameter {name:?}"))?;
+            let param = &descriptor.params[param_idx];
+            if *value < param.min || *value > param.max {
+                return Err(format!("instrument parameter {name:?} value {value} is out of range"));
+            }
+            app::try_apply_command(app, app::AppCommand::SetInstrumentPlock {
+                track, step: *step, param_idx, value: *value,
+            }).map_err(|error| format!("capture instrument lock: {error:?}"))?;
+        }
+    }
+
     // :steps write the live pattern; persist them into the scene's pattern
     // pool through the production scene-launch path (capture current
     // snapshot, save, relaunch the same scene) so pool-derived read surfaces
     // (song lane previews) observe them.
-    if project.tracks.iter().any(|spec| !spec.steps.is_empty()) {
+    if project.tracks.iter().any(|spec|
+        !spec.steps.is_empty() || !spec.step_params.is_empty() || !spec.instrument_locks.is_empty()) {
         let scene = app.state.current_scene_index();
         app.state
             .launch_scene(
@@ -1030,7 +1113,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&ui_epoch),
         fx_epoch,
         ui_invalidations,
-        expanded_step_projection,
+        Arc::clone(&expanded_step_projection),
         selected_neural_neurons,
         active_delete_target,
         active_delete_target_version,
@@ -1107,6 +1190,16 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 
+    // Expanded editors register their viewports while evaluating the fixture's
+    // UI state. The live reactive tick publishes these projections; headless
+    // capture must do the same before its first frame, or every slot stays zero.
+    reactive_sync::sync_all_expanded_step_viewports(
+        editor.runtime_mut(), &state, &app, &selected_steps,
+        current_track.load(std::sync::atomic::Ordering::Relaxed), &expanded_step_projection,
+    );
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
     // capture-after-sync may apply a theme after the initial project sync.
     // Mirror the live loop's display-color refresh before rendering.
     sync_track_color_state(editor.runtime_mut(), &app, &state);
@@ -1120,9 +1213,14 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         .map(|buffer| buffer.id)
         .ok_or_else(|| format!("capture buffer {:?} does not exist", args.buffer))?;
     editor.set_active_buffer(buffer_id);
+    let isolation = if args.hide_status {
+        format!("(set-layout (list :buf {} :hide-status true))", serde_json::to_string(&args.buffer)?)
+    } else {
+        "(delete-other-windows)".to_string()
+    };
     editor
         .runtime_mut()
-        .eval_str("(delete-other-windows)")
+        .eval_str(&isolation)
         .map_err(|error| format!("failed to isolate capture buffer: {error:?}"))?;
     editor.refresh_runtime_side_effects();
     editor.clear_minibuffer_message();
@@ -1139,11 +1237,22 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         frame = build_render_frame(&mut editor, columns, rows);
     }
 
+    if args.list_keys {
+        let layout = frame.widget_layout.as_ref().ok_or("capture buffer has no widget layout")?;
+        for key in eseqlisp::ui::capture::layout_keys(layout) {
+            println!("{key}");
+        }
+        return Ok(());
+    }
+    let region = args.key.as_deref().map(|key|
+        eseqlisp::ui::capture::keyed_region(&frame, key, (cell_width, cell_height),
+            (args.width, args.height), args.padding)
+    ).transpose()?;
     if let Some(parent) = args.out.parent() {
         std::fs::create_dir_all(parent)?;
     }
     backend
-        .render_frame_to_png(&frame, args.width, args.height, &args.out)
+        .render_frame_region_to_png(&frame, args.width, args.height, region, !args.hide_status, &args.out)
         .map_err(|_| "failed to render capture PNG")?;
     println!("{}", args.out.display());
     Ok(())
@@ -1152,6 +1261,27 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_parameter_values_validate_names_ranges_and_track_kinds() {
+        let parsed = parse_capture_source(r#"(capture-project
+            (track :instrument "factory:Synths/Digi Drift" :steps (0 4)
+                :step-params ((4 :velocity 0.5) (0 :duration 2))
+                :instrument-locks ((4 "lp_freq" 650))))"#).unwrap();
+        assert_eq!(parsed.project.tracks[0].step_params,
+            vec![(4, StepParam::Velocity, 0.5), (0, StepParam::Duration, 2.0)]);
+        assert_eq!(parsed.project.tracks[0].instrument_locks, vec![(4, "lp_freq".to_string(), 650.0)]);
+        for options in [
+            ":step-params ((0 :missing 1))", ":step-params ((0 :velocity 2))",
+            ":step-params ((-1 :velocity 0.5))", ":step-params ((0 :velocity))",
+            ":instrument-locks ((0 \"lp_freq\" 650))",
+        ] {
+            assert!(parse_capture_source(&format!("(capture-project (track :sampler {options}))")).is_err(), "{options}");
+        }
+        assert!(parse_capture_param_values(&Expression::List(vec![Expression::List(vec![
+            Expression::Number(0.0), Expression::String("param".into()), Expression::Number(f64::MAX),
+        ])]), ":instrument-locks").is_err(), "f32 overflow must be rejected");
+    }
 
     #[test]
     fn parses_modulation_routes_and_rejects_invalid_endpoints() {
@@ -1188,6 +1318,8 @@ mod tests {
                 solo: true,
                 num_steps: Some(8),
                 steps: vec![],
+                step_params: vec![],
+                instrument_locks: vec![],
                 samples: vec![],
                 midi_fx: vec!["arp".to_string()],
                 audio_fx: vec!["filter".to_string()],

@@ -4,6 +4,8 @@ The mixer balances tracks and routes them to groups, buses, and Main. Select a s
 
 ## Track strip
 
+![A Digi Drift track strip, with sends, pan, fader, pattern cells, and track buttons.](images/mixer-track.png)
+
 - Fader and Pan set level and position.
 - Sends feed buses A and B.
 - The numbered button mutes. **S** solos. **R** arms.

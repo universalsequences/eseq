@@ -8,6 +8,8 @@ A track is one musical part: a kick, a bass, a chord instrument. It has a sound 
 
 Selecting a track shows its devices in the lower panel. Selecting is not arming: the **R** button arms a track for live input, the numbered button mutes it, and **S** solos it.
 
+![Each row is a track. Its lit steps make a pattern; selecting a row reveals that track’s devices.](images/session-grid.png)
+
 ## Patterns
 
 A pattern belongs to one track. It holds notes, step settings, p-locks, and that pattern's instrument, effect, and mix values. A bass pattern can be dark and quiet while another is bright and loud, with the drums untouched.
@@ -17,6 +19,8 @@ The step grid and the piano roll edit the same pattern. Nothing is copied when y
 ## Scenes
 
 A scene is project-wide. It picks one pattern per track and recalls bus and group settings. Two scenes that share a pattern share its edits; duplicate the pattern when you want an independent variation.
+
+![The numbered scene buttons recall a pattern choice for every track.](images/scene-bank.png)
 
 ## Clips and takes
 
@@ -33,6 +37,8 @@ A clip is a placement on a track's arrangement lane. Its source is either a loop
 - **Arrangement view** replaces the grid with a scene lane and track lanes.
 
 The upper-left controls show and hide panels. The upper-right controls switch between session and arrangement. See [Navigation and keys](customization).
+
+![Position, tempo, transpose, and quantization share the transport.](images/transport-clock.png)
 
 ## One transport
 

@@ -25,6 +25,8 @@ In command help, `C-` is Control, `M-` is Option, `S-` is Shift, and `s-` is Com
 
 ## This manual
 
+![The manual’s navigation bar shows both clickable actions and their keyboard shortcuts.](images/manual-navigation.png)
+
 **File > Help** opens it. Links are clickable and pages scroll.
 
 - `n` and `p`: next and previous chapter

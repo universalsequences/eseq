@@ -987,7 +987,7 @@
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
 (set-buffer-mode-for "*transport*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*transport*"
-  (h-stack :width :fill :gap 0.5 :padding 0.5 :align :center
+  (h-stack :key "transport-bar" :width :fill :gap 0.5 :padding 0.5 :align :center
     
     (subtree :key "transport-samples-sidebar-button"
       (samples-sidebar-icon
@@ -1020,7 +1020,7 @@
             (application-menu-names)))))
 
     ;; Transport buttons in a shared rounded-rect container
-    (box :background-color :mixer-strip-bg :corner-radius 72 :padding 0.015 :height 1.4
+    (box :key "transport-playback-controls" :background-color :mixer-strip-bg :corner-radius 72 :padding 0.015 :height 1.4
       (h-stack :gap 0.2 :align :center
         (subtree :key "transport-stop-button"
           (box :width 2.5
@@ -1062,9 +1062,9 @@
     
     ;; Single continuous LED panel
     (box :background-color :mixer-strip-bg :corner-radius 64 :height 1.4 :width 77
-      (h-stack
+      (h-stack :align :center
         (subtree :key "transport-clock"
-          (h-stack :gap 0 :align :center :padding 0.5
+          (h-stack :gap 0 :align :center :padding-left 0.5 :padding-right 0.5
             (transport-clock
               ;; One transport (docs/unified-transport-spec.md 4/8): the
               ;; parked arrangement cursor while stopped, the live absolute

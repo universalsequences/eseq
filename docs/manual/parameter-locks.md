@@ -9,6 +9,8 @@ A parameter lock, or **p-lock**, gives one step its own value for a synth, effec
 3. Play and listen.
 4. Command-click the steps to deselect them before editing the base sound.
 
+![Check the selected count before turning a device control.](images/selected-step.png)
+
 Selection stays while you use device controls. If an edit only changes part of a pattern, check the selected count.
 
 ## Record a knob movement
@@ -23,6 +25,8 @@ Printed values are per step, not a continuous curve. Edit them afterward in the 
 ## The marker
 
 A small colored marker on a control means that parameter has locks somewhere in the pattern. The displayed value follows the selected step or the playhead, so a knob that jumps during playback is recall, not an edit.
+
+![Digi Drift with a cutoff lock on the selected step. The control’s marker identifies the locked parameter.](images/locked-cutoff.png)
 
 ## Clear locks
 

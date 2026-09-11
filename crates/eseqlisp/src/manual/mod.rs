@@ -33,6 +33,8 @@ pub enum Block {
         text: String,
     },
     Paragraph(Vec<Inline>),
+    /// Standalone Markdown image; the source stays relative to the page.
+    Image { alt: String, src: String },
     /// Fenced code; `info` is the info string (possibly empty), `code` is
     /// literal with lines joined by `\n` and no trailing newline.
     CodeBlock {
@@ -107,6 +109,7 @@ fn block_to_value(block: &Block) -> Value {
     match block {
         Block::Heading { level, text } => list([sym(&format!("h{level}")), string(text)]),
         Block::Paragraph(inlines) => inlines_to_values("p", inlines),
+        Block::Image { alt, src } => list([sym("image"), string(alt), string(src)]),
         Block::CodeBlock { info, code } => list([sym("code-block"), string(info), string(code)]),
         Block::List { ordered, items } => list(
             std::iter::once(sym(if *ordered { "ol" } else { "ul" }))
@@ -184,7 +187,46 @@ pub fn parse_manual_file(path: &str) -> Result<Page, String> {
     Ok(parse_manual_source(&source))
 }
 
+/// Resolve a portable image reference beside its Markdown page, independent
+/// of the process working directory. Read only the header for layout sizing.
+pub fn image_info(page: &std::path::Path, src: &str) -> Result<(std::path::PathBuf, u32, u32), String> {
+    use std::path::Component;
+    let relative = std::path::Path::new(src);
+    if src.is_empty() || src.contains([':', '\\', '?', '#'])
+        || relative.components().any(|part| !matches!(part, Component::Normal(_))) {
+        return Err("manual images require a normalized relative file path".to_string());
+    }
+    let path = page.parent().unwrap_or_else(|| std::path::Path::new(".")).join(relative);
+    let path = std::path::absolute(path).map_err(|error| error.to_string())?;
+    let (width, height) = image::image_dimensions(&path)
+        .map_err(|error| format!("cannot read manual image {}: {error}", path.display()))?;
+    if width == 0 || height == 0 {
+        return Err(format!("manual image {} is empty", path.display()));
+    }
+    Ok((path, width, height))
+}
+
 pub(crate) fn register_manual_natives(runtime: &mut Runtime) {
+    runtime.register_native_with_docs(
+        "manual-image-info",
+        "(manual-image-info page-path source)",
+        "Resolve a local image relative to a manual page. Returns path, pixel width, height and aspect, or an error field for a visible fallback.",
+        |args, _ctx| {
+            let [Value::String(page), Value::String(src)] = args.as_slice() else {
+                return Err("manual-image-info expects page and image path strings".to_string());
+            };
+            let entries = match image_info(std::path::Path::new(page), src) {
+                Ok((path, width, height)) => vec![
+                    ("path", string(&path.to_string_lossy())),
+                    ("width", Value::Number(width as f64)),
+                    ("height", Value::Number(height as f64)),
+                    ("aspect", Value::Number(width as f64 / height as f64)),
+                ],
+                Err(error) => vec![("error", string(&error))],
+            };
+            Ok(Value::Map(entries.into_iter().map(|(key, value)| (key.to_string(), cell(value))).collect()))
+        },
+    );
     runtime.register_native_with_docs(
         "parse-manual-page",
         "(parse-manual-page path)",

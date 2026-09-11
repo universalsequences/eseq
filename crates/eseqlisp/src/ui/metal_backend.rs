@@ -1906,15 +1906,8 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn decode_image_path(path: &PathBuf) -> Option<DecodedImageData> {
-        let mut decoded = image::ImageReader::open(path).ok()?.decode().ok()?;
-        let max_dimension = decoded.width().max(decoded.height());
-        if max_dimension > 640 {
-            let scale = 640.0 / max_dimension as f32;
-            let width = (decoded.width() as f32 * scale).round().max(1.0) as u32;
-            let height = (decoded.height() as f32 * scale).round().max(1.0) as u32;
-            decoded = decoded.resize(width, height, image::imageops::FilterType::Triangle);
-        }
-        let rgba = decoded.to_rgba8();
+        // Conservative 2D texture limit supported by macOS Metal devices.
+        let rgba = crate::widget_render::image::decode_image_file(path, 8192)?;
         let (width, height) = rgba.dimensions();
         if width == 0 || height == 0 {
             return None;
@@ -3815,7 +3808,26 @@ fragment float4 live_spectrogram_frag(
             height_px: u32,
             path: P,
         ) -> Result<(), BackendError> {
-            if width_px == 0 || height_px == 0 {
+            self.render_frame_region_to_png(frame, width_px, height_px, None, true, path)
+        }
+
+        /// Render at the original viewport size and read only the requested
+        /// pixel region. Cropping never changes widget measurement or layout.
+        pub fn render_frame_region_to_png<P: AsRef<std::path::Path>>(
+            &mut self,
+            frame: &RenderFrame,
+            width_px: u32,
+            height_px: u32,
+            region: Option<crate::ui::capture::PixelRegion>,
+            show_status: bool,
+            path: P,
+        ) -> Result<(), BackendError> {
+            let region = region.unwrap_or(crate::ui::capture::PixelRegion {
+                x: 0, y: 0, width: width_px, height: height_px,
+            });
+            if width_px == 0 || height_px == 0 || region.width == 0 || region.height == 0
+                || region.x.checked_add(region.width).is_none_or(|right| right > width_px)
+                || region.y.checked_add(region.height).is_none_or(|bottom| bottom > height_px) {
                 return Err(BackendError::MetalError);
             }
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
@@ -3835,20 +3847,20 @@ fragment float4 live_spectrogram_frag(
                 return Err(BackendError::MetalError);
             };
 
-            self.render_frame_into_texture(frame, &texture)?;
+            self.render_frame_into_texture(frame, &texture, show_status)?;
 
             let bytes_per_pixel = 4usize;
-            let bytes_per_row = width_px as usize * bytes_per_pixel;
-            let mut bgra = vec![0u8; bytes_per_row * height_px as usize];
+            let bytes_per_row = region.width as usize * bytes_per_pixel;
+            let mut bgra = vec![0u8; bytes_per_row * region.height as usize];
             unsafe {
                 texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
                     NonNull::new(bgra.as_mut_ptr().cast()).ok_or(BackendError::MetalError)?,
                     bytes_per_row,
                     MTLRegion {
-                        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                        origin: MTLOrigin { x: region.x as usize, y: region.y as usize, z: 0 },
                         size: MTLSize {
-                            width: width_px as usize,
-                            height: height_px as usize,
+                            width: region.width as usize,
+                            height: region.height as usize,
                             depth: 1,
                         },
                     },
@@ -3862,8 +3874,8 @@ fragment float4 live_spectrogram_frag(
             image::save_buffer_with_format(
                 path,
                 &rgba,
-                width_px,
-                height_px,
+                region.width,
+                region.height,
                 image::ColorType::Rgba8,
                 image::ImageFormat::Png,
             )
@@ -3874,6 +3886,7 @@ fragment float4 live_spectrogram_frag(
             &mut self,
             frame: &RenderFrame,
             texture: &ProtocolObject<dyn MTLTexture>,
+            show_status: bool,
         ) -> Result<(), BackendError> {
             let time_seconds = self.elapsed_time_seconds();
             let Some(pipeline) = self.pipeline.clone() else {
@@ -3893,7 +3906,7 @@ fragment float4 live_spectrogram_frag(
             self.upload_arena.begin_frame(&mut self.stats);
             self.prop_text_layout_cache.begin_frame();
             self.begin_compiled_widget_run_frame();
-            let max_rows_exact = (vp_h / cell_h - 1.0).max(0.0);
+            let max_rows_exact = (vp_h / cell_h - if show_status { 1.0 } else { 0.0 }).max(0.0);
             let max_rows = max_rows_exact.floor() as u16;
 
             let (primitive_scene, overlay_scene) = frame
@@ -3924,16 +3937,29 @@ fragment float4 live_spectrogram_frag(
                 })
                 .unwrap_or_default();
 
+            // Offscreen rendering has no later frame in which an asynchronous
+            // decoder can catch up. Decode the scene's images before drawing.
+            for primitive in primitive_scene.iter().chain(overlay_scene.iter()) {
+                if let widget_render::GpuPrimitive::Image(image) = widget_render::innermost_primitive(primitive) {
+                    let (path, modified) = Self::image_path_and_modified(&image.src)
+                        .ok_or(BackendError::MetalError)?;
+                    if self.image_textures.get(&path).is_none_or(|cached| cached.modified != modified) {
+                        let decoded = decode_image_path(&path).ok_or(BackendError::MetalError)?;
+                        self.upload_decoded_image(path, modified, decoded)?;
+                    }
+                }
+            }
+
             let text_atlas_texture = self
                 .text_atlas
                 .as_ref()
                 .map(|atlas| atlas.texture.clone())
                 .unwrap_or_else(|| atlas_texture.clone());
             let text_quads = if let Some(text_atlas) = self.text_atlas.as_mut() {
-                build_text_quads(frame, text_atlas, cell_w, cell_h, vp_w, vp_h)
+                build_text_quads(frame, text_atlas, cell_w, cell_h, vp_w, vp_h, show_status)
             } else {
                 let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
-                build_text_quads(frame, atlas, cell_w, cell_h, vp_w, vp_h)
+                build_text_quads(frame, atlas, cell_w, cell_h, vp_w, vp_h, show_status)
             };
             let render_desc = MTLRenderPassDescriptor::new();
             let attach = unsafe { render_desc.colorAttachments().objectAtIndexedSubscript(0) };
@@ -4161,43 +4187,52 @@ fragment float4 live_spectrogram_frag(
                     continue;
                 };
 
-                let desc = MTLTextureDescriptor::new();
-                unsafe {
-                    desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-                    desc.setWidth(decoded.width as usize);
-                    desc.setHeight(decoded.height as usize);
-                }
-                let Some(texture) = self.device.newTextureWithDescriptor(&desc) else {
-                    self.pending_image_loads = true;
-                    continue;
-                };
-                unsafe {
-                    texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                        MTLRegion {
-                            origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                            size: MTLSize {
-                                width: decoded.width as usize,
-                                height: decoded.height as usize,
-                                depth: 1,
-                            },
-                        },
-                        0,
-                        NonNull::new(decoded.bgra.as_ptr() as *mut core::ffi::c_void).unwrap(),
-                        decoded.width as usize * 4,
-                    );
-                }
-                self.image_textures.insert(
-                    result.path,
-                    ImageTextureResource {
-                        texture,
-                        width: decoded.width,
-                        height: decoded.height,
-                        modified: result.modified,
-                    },
-                );
+                let _ = self.upload_decoded_image(result.path, result.modified, decoded);
                 self.pending_image_loads = true;
                 upload_budget -= 1;
             }
+        }
+
+        fn upload_decoded_image(
+            &mut self,
+            path: PathBuf,
+            modified: Option<std::time::SystemTime>,
+            decoded: DecodedImageData,
+        ) -> Result<(), BackendError> {
+            let desc = MTLTextureDescriptor::new();
+            unsafe {
+                desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                desc.setWidth(decoded.width as usize);
+                desc.setHeight(decoded.height as usize);
+            }
+            let Some(texture) = self.device.newTextureWithDescriptor(&desc) else {
+                return Err(BackendError::MetalError);
+            };
+            unsafe {
+                texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                    MTLRegion {
+                        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                        size: MTLSize {
+                            width: decoded.width as usize,
+                            height: decoded.height as usize,
+                            depth: 1,
+                        },
+                    },
+                    0,
+                    NonNull::new(decoded.bgra.as_ptr() as *mut core::ffi::c_void).unwrap(),
+                    decoded.width as usize * 4,
+                );
+            }
+            self.image_textures.insert(
+                path,
+                ImageTextureResource {
+                    texture,
+                    width: decoded.width,
+                    height: decoded.height,
+                    modified,
+                },
+            );
+            Ok(())
         }
 
         /// Compile Metal pipelines for any SDF widgets that have been registered
@@ -4990,6 +5025,7 @@ fragment float4 live_spectrogram_frag(
                             vp_h,
                             offset,
                             tile_bg,
+                            false,
                         )
                     } else {
                         let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
@@ -5002,6 +5038,7 @@ fragment float4 live_spectrogram_frag(
                             vp_h,
                             offset,
                             tile_bg,
+                            false,
                         )
                     }
                 };
@@ -6818,9 +6855,9 @@ fragment float4 live_spectrogram_frag(
                 .unwrap_or_else(|| atlas_texture.clone());
             if self.cached_text_key != Some(frame.text_cache_key) {
                 self.cached_text_quads = if let Some(text_atlas) = self.text_atlas.as_mut() {
-                    build_text_quads(frame, text_atlas, cell_w, cell_h, vp_w, vp_h)
+                    build_text_quads(frame, text_atlas, cell_w, cell_h, vp_w, vp_h, true)
                 } else {
-                    build_text_quads(frame, atlas, cell_w, cell_h, vp_w, vp_h)
+                    build_text_quads(frame, atlas, cell_w, cell_h, vp_w, vp_h, true)
                 };
                 self.cached_text_key = Some(frame.text_cache_key);
                 self.cached_text_vertex_count = self.cached_text_quads.len();
@@ -7677,6 +7714,7 @@ fragment float4 live_spectrogram_frag(
         layout_cell_h: f32,
         vp_w: f32,
         vp_h: f32,
+        show_status: bool,
     ) -> Vec<Vertex> {
         build_text_quads_offset(
             frame,
@@ -7687,6 +7725,7 @@ fragment float4 live_spectrogram_frag(
             vp_h,
             TextOffset::default(),
             theme::BG(),
+            show_status,
         )
     }
 
@@ -7699,6 +7738,7 @@ fragment float4 live_spectrogram_frag(
         vp_h: f32,
         offset: TextOffset,
         default_bg: Color,
+        show_status: bool,
     ) -> Vec<Vertex> {
         let text_cell_w = (layout_cell_w * frame.text_cell_width_scale).max(1.0);
         let text_cell_h = (layout_cell_h * frame.text_cell_height_scale).max(1.0);
@@ -7786,7 +7826,7 @@ fragment float4 live_spectrogram_frag(
         // ── Status bar (placed at bottom of tile region) ─────────────────────
         let total_rows = (vp_h / layout_cell_h).floor() as usize;
         let status_row = if offset.origin_col == 0.0 && offset.origin_row == 0.0 {
-            total_rows.saturating_sub(1) // legacy single-tile: bottom of screen
+            total_rows.saturating_sub(usize::from(show_status))
         } else {
             // Skip status bar for offset tiles — handled by tiled renderer
             return verts;
@@ -7976,6 +8016,9 @@ fragment float4 live_spectrogram_frag(
                 }
             }
         }
+
+        // Tiled drawing owns its mode lines; offscreen callers can hide them.
+        if !show_status { return verts; }
 
         // Fill the whole status row with background first.
         let total_cols = (vp_w / cell_w).floor() as usize;

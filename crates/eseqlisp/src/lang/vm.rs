@@ -8247,35 +8247,20 @@ impl VM {
                             &mut self.subtree_render_cache,
                         );
                         freeze_widget_tree(&annotated_tree);
-                        if let Some((subtree_root_id, _stable_key)) =
-                            explicit_subtree_root_metadata(&annotated_tree)
-                        {
-                            let mut reactive_dependencies = self
-                                .current_subtree_reactive_reads
-                                .get(&subtree_root_id)
-                                .map(|reads| reads.iter().cloned().collect::<Vec<_>>())
-                                .unwrap_or_default();
-                            reactive_dependencies.sort();
-                            self.pending_widget_trees
-                                .push(PendingUiUpdate::ReplaceSubtree {
-                                    source_buffer_id: self.current_effect_source_buffer_id,
-                                    source_file: self.source_manager.current_source_file(),
-                                    target: self.current_effect_target.clone(),
-                                    subtree_root_id,
-                                    tree: annotated_tree,
-                                    reactive_dependencies,
-                                });
-                        } else {
-                            self.pending_widget_trees.push(PendingUiUpdate::FullTree(
-                                PendingWidgetTree {
-                                    source_buffer_id: self.current_effect_source_buffer_id,
-                                    source_file: self.source_manager.current_source_file(),
-                                    target: self.current_effect_target.clone(),
-                                    tree: annotated_tree,
-                                    reactive_dependencies: Vec::new(),
-                                },
-                            ));
-                        }
+                        // EmitTree terminates a whole view chunk (effect or
+                        // effect-buffer). A key on its root is an identity,
+                        // not evidence of a standalone subtree rerender.
+                        // Those rerenders enqueue ReplaceSubtree explicitly
+                        // in process_dirty_reactive above.
+                        self.pending_widget_trees.push(PendingUiUpdate::FullTree(
+                            PendingWidgetTree {
+                                source_buffer_id: self.current_effect_source_buffer_id,
+                                source_file: self.source_manager.current_source_file(),
+                                target: self.current_effect_target.clone(),
+                                tree: annotated_tree,
+                                reactive_dependencies: Vec::new(),
+                            },
+                        ));
                         frames.last_mut().unwrap().pc += 1;
                     }
                     None => return Err(VMError::StackUnderflow),
@@ -10496,6 +10481,29 @@ counter
             .expect("macro definition");
 
         assert!(vm.eval_str("(again 1)").is_err());
+    }
+
+    #[test]
+    fn keyed_view_roots_mount_as_full_trees_and_subtree_reruns_stay_local() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        crate::widgets::register_widget_natives(&mut vm);
+        vm.eval_str(r#"
+            (defstate level 2)
+            (effect (box :key "root" :width level :height 2))
+            (effect-buffer "*keyed*" (box :key "named-root" :width level :height 2))
+            (effect-buffer "*subtree*"
+                (subtree :key "owned-root" (box :width level :height 2)))
+        "#).unwrap();
+        assert_eq!(vm.pending_widget_trees.len(), 3);
+        assert!(vm.pending_widget_trees.iter().all(|update|
+            matches!(update, PendingUiUpdate::FullTree(_))), "first mounts must create whole trees");
+        vm.pending_widget_trees.clear();
+        vm.eval_str("(set! level 5)").unwrap();
+        assert_eq!(vm.pending_widget_trees.iter().filter(|update|
+            matches!(update, PendingUiUpdate::FullTree(_))).count(), 2);
+        assert_eq!(vm.pending_widget_trees.iter().filter(|update|
+            matches!(update, PendingUiUpdate::ReplaceSubtree { .. })).count(), 1);
     }
 
     #[test]

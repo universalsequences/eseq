@@ -15,6 +15,8 @@ The drop area adds a layer. Dropping on a selected layer's instrument area repla
 
 Select a layer row to edit its instrument and effects. Each row has **T** transpose, **G** gain, **P** pan, **V** voices, plus **M** mute and **S** solo. The small toggles in the rack header show or hide the layer list, the selected chain, and the macros.
 
+![A rack with two sample layers and its macro controls. Each row has its own gain, pan, voices, mute, and solo.](images/layer-rack.png)
+
 The track owns the pattern. Layers only decide what sounds.
 
 ## Layer effects and Track FX

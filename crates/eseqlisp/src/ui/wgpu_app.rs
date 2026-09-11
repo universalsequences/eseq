@@ -343,6 +343,7 @@ struct ImageTextureResource {
 struct ImageDecodeJob {
     path: PathBuf,
     modified: Option<std::time::SystemTime>,
+    max_dimension: u32,
 }
 
 struct DecodedImageData {
@@ -367,7 +368,7 @@ struct ImageRotationState {
 fn decode_image_job(job: ImageDecodeJob) -> ImageDecodeResult {
     let path = job.path;
     let modified = job.modified;
-    let image = decode_image_path(&path);
+    let image = decode_image_path(&path, job.max_dimension);
     ImageDecodeResult {
         path,
         modified,
@@ -375,16 +376,8 @@ fn decode_image_job(job: ImageDecodeJob) -> ImageDecodeResult {
     }
 }
 
-fn decode_image_path(path: &PathBuf) -> Option<DecodedImageData> {
-    let mut decoded = image::ImageReader::open(path).ok()?.decode().ok()?;
-    let max_dimension = decoded.width().max(decoded.height());
-    if max_dimension > 640 {
-        let scale = 640.0 / max_dimension as f32;
-        let width = (decoded.width() as f32 * scale).round().max(1.0) as u32;
-        let height = (decoded.height() as f32 * scale).round().max(1.0) as u32;
-        decoded = decoded.resize(width, height, image::imageops::FilterType::Triangle);
-    }
-    let rgba = decoded.to_rgba8();
+fn decode_image_path(path: &PathBuf, max_dimension: u32) -> Option<DecodedImageData> {
+    let rgba = crate::widget_render::image::decode_image_file(path, max_dimension)?;
     let (width, height) = rgba.dimensions();
     if width == 0 || height == 0 {
         return None;
@@ -956,6 +949,7 @@ impl WgpuAppBackend {
     }
 
     fn ensure_image_texture(&mut self, src: &str, load_budget: &mut usize) -> Option<PathBuf> {
+        let max_dimension = self.gpu.as_ref()?.device.limits().max_texture_dimension_2d;
         let (path, modified) = Self::image_path_and_modified(src)?;
         let should_reload = self
             .image_textures
@@ -973,6 +967,7 @@ impl WgpuAppBackend {
                     .send(ImageDecodeJob {
                         path: path.clone(),
                         modified,
+                        max_dimension,
                     })
                     .is_err()
             {

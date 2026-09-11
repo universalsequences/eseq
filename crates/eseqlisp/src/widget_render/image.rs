@@ -12,6 +12,19 @@ pub struct ImageWidget;
 
 pub static IMAGE_WIDGET: ImageWidget = ImageWidget;
 
+/// Shared GPU image decode policy. Keep UI screenshots at native resolution;
+/// the old 640-pixel album-thumbnail cap made document text unreadable.
+/// Bound uploads by the device limit and an 8192-pixel resource budget.
+pub(crate) fn decode_image_file(path: &std::path::Path, device_limit: u32) -> Option<image::RgbaImage> {
+    let limit = device_limit.min(8192);
+    if limit == 0 { return None; }
+    let mut decoded = image::ImageReader::open(path).ok()?.decode().ok()?;
+    if decoded.width().max(decoded.height()) > limit {
+        decoded = decoded.resize(limit, limit, image::imageops::FilterType::Triangle);
+    }
+    Some(decoded.to_rgba8())
+}
+
 fn image_fit(props: &HashMap<String, Value>) -> ImageFit {
     match props.get("fit") {
         Some(Value::Keyword(value)) | Some(Value::String(value)) => match value.as_str() {
@@ -64,7 +77,7 @@ impl WidgetDefinition for ImageWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["width", "height", "aspect"]
+        &["width", "height", "aspect", "max-pixel-width"]
     }
 
     fn measure(
@@ -98,6 +111,12 @@ impl WidgetDefinition for ImageWidget {
                 })
         };
 
+        // Optional native-resolution cap for document illustrations. Width
+        // still shrinks with the panel, and height follows the same aspect.
+        let width = get_prop_num(node, "max-pixel-width")
+            .filter(|value| value.is_finite() && *value > 0.0 && ctx.cell_w > 0.0)
+            .map(|pixels| width.min(pixels as f32 / ctx.cell_w))
+            .unwrap_or(width);
         let height = get_prop_num(node, "height")
             .map(f64_to_f32)
             .unwrap_or(width / pixel_aspect * cell_pixel_aspect);
@@ -155,5 +174,21 @@ impl WidgetDefinition for ImageWidget {
             rotation_speed: rotation_speed(&node.props),
             clip_circle: clip_circle(&node.props),
         })]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_images_keep_detail_and_respect_the_device_texture_limit() {
+        let path = std::env::temp_dir().join(format!("eseq-image-detail-{}.png", std::process::id()));
+        let source = image::RgbaImage::from_fn(1200, 100, |x, _|
+            image::Rgba([if x % 2 == 0 { 255 } else { 0 }, 0, 0, 255]));
+        source.save(&path).unwrap();
+        assert_eq!(decode_image_file(&path, 8192).unwrap(), source);
+        assert_eq!(decode_image_file(&path, 600).unwrap().dimensions(), (600, 50));
+        std::fs::remove_file(path).unwrap();
     }
 }

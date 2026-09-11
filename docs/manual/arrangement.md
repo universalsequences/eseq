@@ -4,6 +4,8 @@ The arrangement is a timeline. The scene lane at the top recalls scenes; the tra
 
 Switch views with the upper-right control or Tab. Click the ruler to set the cursor, which is where playback and recording start.
 
+![The scene lane sits above the track clips. Clip previews show the notes placed on the timeline.](images/arrangement.png)
+
 ## Place a pattern
 
 1. Select the track.

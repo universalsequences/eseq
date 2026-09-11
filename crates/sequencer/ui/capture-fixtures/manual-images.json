@@ -1,0 +1,218 @@
+[
+  {
+    "name": "step-pattern",
+    "script": "manual-components.lisp",
+    "buffer": "sequencer",
+    "key": "track-drop-0",
+    "width": 1600,
+    "height": 500
+  },
+  {
+    "name": "step-grid",
+    "script": "manual-components.lisp",
+    "buffer": "sequencer",
+    "key": "track-step-grid-0",
+    "width": 1600,
+    "height": 500
+  },
+  {
+    "name": "mixer-track",
+    "script": "manual-components.lisp",
+    "buffer": "mixer",
+    "key": "mixer-v2-track-0",
+    "width": 1600,
+    "height": 600
+  },
+  {
+    "name": "session-grid",
+    "script": "manual-overview.lisp",
+    "buffer": "sequencer",
+    "key": "sequencer-tracks",
+    "width": 1600,
+    "height": 560
+  },
+  {
+    "name": "transport-clock",
+    "script": "manual-overview.lisp",
+    "buffer": "transport",
+    "key": "transport-clock",
+    "width": 3600,
+    "height": 180
+  },
+  {
+    "name": "scene-bank",
+    "script": "manual-overview.lisp",
+    "buffer": "transport",
+    "key": "transport-pattern-pills",
+    "width": 3600,
+    "height": 180
+  },
+  {
+    "name": "record-controls",
+    "script": "manual-components.lisp",
+    "buffer": "transport",
+    "key": "transport-playback-controls",
+    "width": 3600,
+    "height": 180
+  },
+  {
+    "name": "record-quantization",
+    "script": "manual-components.lisp",
+    "buffer": "transport",
+    "key": "transport-record-quantize",
+    "width": 3600,
+    "height": 180
+  },
+  {
+    "name": "armed-track",
+    "script": "manual-armed.lisp",
+    "buffer": "mixer",
+    "key": "mixer-v2-track-0",
+    "width": 1600,
+    "height": 600
+  },
+  {
+    "name": "expanded-steps",
+    "script": "manual-expanded.lisp",
+    "buffer": "sequencer",
+    "key": "track-drop-0",
+    "width": 1800,
+    "height": 600
+  },
+  {
+    "name": "process-lane",
+    "script": "manual-process-lane.lisp",
+    "buffer": "sequencer",
+    "key": "track-drop-0",
+    "width": 2000,
+    "height": 650
+  },
+  {
+    "name": "first-sound-browser",
+    "script": "manual-first-sound.lisp",
+    "buffer": "samples",
+    "key": "tabbed-content",
+    "width": 640,
+    "height": 580
+  },
+  {
+    "name": "instrument-browser",
+    "script": "manual-instrument-browser.lisp",
+    "buffer": "samples",
+    "key": "tabbed-content",
+    "width": 520,
+    "height": 720
+  },
+  {
+    "name": "presets",
+    "script": "manual-presets.lisp",
+    "buffer": "samples",
+    "key": "tabbed-content",
+    "width": 520,
+    "height": 720
+  },
+  {
+    "name": "digi-drift",
+    "script": "manual-components.lisp",
+    "buffer": "fx",
+    "key": "instrument-panel-0",
+    "width": 2400,
+    "height": 650
+  },
+  {
+    "name": "delay",
+    "script": "manual-effects.lisp",
+    "buffer": "fx",
+    "key": "audio-fx-panel-0-Str8 Delay",
+    "width": 3200,
+    "height": 650
+  },
+  {
+    "name": "arpeggiator",
+    "script": "manual-midi-effects.lisp",
+    "buffer": "fx",
+    "key": "midi-fx-panel-0-arp",
+    "width": 3200,
+    "height": 650
+  },
+  {
+    "name": "locked-cutoff",
+    "script": "manual-locks.lisp",
+    "buffer": "fx",
+    "key": "instrument-panel-0",
+    "width": 2400,
+    "height": 650
+  },
+  {
+    "name": "selected-step",
+    "script": "manual-locks.lisp",
+    "buffer": "step",
+    "key": "step-parameters-panel",
+    "width": 1500,
+    "height": 650
+  },
+  {
+    "name": "piano-roll",
+    "script": "manual-piano-roll.lisp",
+    "buffer": "piano-roll",
+    "key": "piano-roll-panel",
+    "width": 1600,
+    "height": 680
+  },
+  {
+    "name": "arrangement",
+    "script": "arrangement-scene-changes.lisp",
+    "buffer": "arrangement",
+    "key": null,
+    "width": 1600,
+    "height": 650
+  },
+  {
+    "name": "sample-browser",
+    "script": "manual-sample-browser.lisp",
+    "buffer": "samples",
+    "key": "tabbed-content",
+    "width": 900,
+    "height": 720
+  },
+  {
+    "name": "sample-import",
+    "script": "sample-import.lisp",
+    "buffer": "sequencer",
+    "key": null,
+    "width": 1200,
+    "height": 850
+  },
+  {
+    "name": "layer-rack",
+    "script": "manual-rack.lisp",
+    "buffer": "fx",
+    "key": "rack-panel-0",
+    "width": 2000,
+    "height": 650
+  },
+  {
+    "name": "save-project",
+    "script": "project-save-modal.lisp",
+    "buffer": "sequencer",
+    "key": null,
+    "width": 1000,
+    "height": 600
+  },
+  {
+    "name": "export-settings",
+    "script": "export-song.lisp",
+    "buffer": "sequencer",
+    "key": null,
+    "width": 1200,
+    "height": 850
+  },
+  {
+    "name": "manual-navigation",
+    "script": "manual-first-session.lisp",
+    "buffer": "manual",
+    "key": "manual-navigation",
+    "width": 1200,
+    "height": 900
+  }
+]

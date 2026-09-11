@@ -16,9 +16,13 @@ The small colored cells in a mixer strip are that track's patterns. Click one to
 
 While stopped, clicking a cell sets the current scene's choice for that track. While the arrangement plays, a manual launch overrides the timeline until you press **Back to Arrangement**.
 
+![The colored cells above the track name launch patterns for this track.](images/mixer-track.png)
+
 ## Launch a scene
 
 The numbered buttons in the transport are scenes. Click one to recall every track's pattern and the bus settings. **+** duplicates the current scene; **-** removes it. Right-click the scene controls for more. The bank selector organizes larger projects.
+
+![Scene buttons recall the whole project. The plus button duplicates the current scene.](images/scene-bank.png)
 
 ## Make a variation
 

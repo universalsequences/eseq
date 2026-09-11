@@ -614,7 +614,7 @@
                     (label "Drop an Instrument or Sample"
                       :font-size 11 :color :dim :bg :transparent)))))
             (box :width 0 :height 0)))))
-    :debug-name "rack-panel"
+    :key (str "rack-panel-" (get inst :track)) :debug-name "rack-panel"
     :drop-types (list "sample" "instrument" "sound")
     :drop-meta (dict :track (get inst :track))
     :drop-hover-border-color :mixer-strip-selected-border
@@ -673,6 +673,9 @@
                 ))
             (pf/fx-panel-body "instrument-content-box"
               (pb/instrument-synth-panel-body inst)))
+          :key (if (= (get inst :rack-slot) nil)
+            (str "instrument-panel-" (get inst :track))
+            (str "rack-instrument-panel-" (get inst :track) "-" (get inst :rack-slot)))
           :debug-name "instrument-panel"
           :background "fx-panel-bg"
           :color :instrument-panel-bg

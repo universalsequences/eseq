@@ -20,6 +20,7 @@ pub fn editable_shader_overrides_enabled() -> bool {
 }
 
 pub mod backend;
+pub mod capture;
 pub mod drag_profile;
 pub mod frame;
 pub(crate) mod gpu_geometry;

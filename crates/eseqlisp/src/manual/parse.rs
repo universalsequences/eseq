@@ -40,6 +40,34 @@ fn fence(line: &str) -> Option<&str> {
     line.strip_prefix("```").map(str::trim)
 }
 
+/// Images are blocks, never inline links or menu entries. Keep the portable
+/// source in the AST; asset resolution belongs to the reader/exporter.
+fn image_block(line: &str) -> Option<Block> {
+    let rest = line.trim().strip_prefix("![")?;
+    let (alt, target) = rest.split_once("](")?;
+    let target = target.strip_suffix(')')?;
+    if alt.contains(['[', ']']) || target.is_empty() {
+        return None;
+    }
+    let src = if let Some(angled) = target.strip_prefix('<') {
+        angled.strip_suffix('>')?
+    } else {
+        if target.chars().any(char::is_whitespace) { return None; }
+        let mut depth = 0usize;
+        for ch in target.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth = depth.checked_sub(1)?,
+                _ => {},
+            }
+        }
+        if depth != 0 { return None; }
+        target
+    };
+    if src.is_empty() { return None; }
+    Some(Block::Image { alt: alt.to_string(), src: src.to_string() })
+}
+
 fn is_blank(line: &str) -> bool {
     line.trim().is_empty()
 }
@@ -131,6 +159,12 @@ pub fn parse_manual_source(source: &str) -> Page {
             continue;
         }
 
+        if let Some(image) = image_block(line) {
+            blocks.push(image);
+            i += 1;
+            continue;
+        }
+
         if let Some((marker, first)) = list_item(line) {
             let ordered = matches!(marker, Marker::Ordered);
             let mut items: Vec<Vec<Inline>> = Vec::new();
@@ -166,6 +200,7 @@ pub fn parse_manual_source(source: &str) -> Page {
                 || fence(next).is_some()
                 || heading(next).is_some()
                 || list_item(next).is_some()
+                || image_block(next).is_some()
             {
                 break;
             }

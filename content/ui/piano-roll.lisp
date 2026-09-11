@@ -743,5 +743,5 @@
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
 (set-buffer-mode-for "*piano-roll*" "eseq.sequencer-keys/sequencer-keys")
 (effect-buffer "*piano-roll*"
-  (box :width :fill :height :fill
+  (box :key "piano-roll-panel" :width :fill :height :fill
     (buffer-content)))

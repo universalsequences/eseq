@@ -8,6 +8,8 @@ Double-click a track's name badge in the mixer, or press Shift-Tab to swap the l
 
 The side panel names the source, a pattern or a take, and shows its length. **Loop on** means a pattern; **Loop off** means a take. Editing a pattern here changes every clip that uses it.
 
+![The same pattern in the piano roll: pitch above, velocity below, and source settings at the side.](images/piano-roll.png)
+
 ## Notes
 
 Pitch runs up the keyboard; time runs left to right. A note's left edge is its start and its width is its duration.

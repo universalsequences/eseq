@@ -10,6 +10,8 @@ Audio effects process a track, a rack layer, a group, or a bus. The selected str
 
 Str8 Delay, Filter, and EQ8 are good first choices. Put reverb on a send bus so several tracks can share it. Add one effect at a time.
 
+![Str8 Delay in the audio effect chain. Its header holds the enable control; the panel holds its parameters.](images/delay.png)
+
 ## Order, bypass, remove
 
 Audio flows through the chain in order. Drag effect headers to reorder. Dropping a new effect on an existing one inserts before it; dropping on the end area appends.

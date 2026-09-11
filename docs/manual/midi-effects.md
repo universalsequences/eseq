@@ -10,6 +10,8 @@ MIDI effects change the notes before they reach the instrument. Audio effects ch
 
 Give an arpeggiator a held chord. Give a repeater a simple rhythm. Very short notes leave no room for repeats.
 
+![The arp panel controls how held notes become an arpeggio before reaching the instrument.](images/arpeggiator.png)
+
 ## The effects
 
 - **arp** plays the held notes one at a time. Rate, Direction, Octaves, Gate, and Velocity shape the result. Generated notes are not written into the pattern.

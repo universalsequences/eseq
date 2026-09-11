@@ -29897,6 +29897,10 @@ mod rack_slot_indicator_tests;
             let control = find_layout_node_by_debug_name(&layout, debug_name)
                 .unwrap_or_else(|| panic!("{debug_name} control"));
             assert_finite_nonzero_rect(control, debug_name);
+            if let Some(Value::Number(height)) = control.props.get("height") {
+                assert!(control.rect.height + 0.001 >= *height as f32,
+                    "{debug_name}: transport padding must not squeeze the control below its requested height");
+            }
             assert!(
                 control.rect.col >= layout.rect.col
                     && control.rect.row >= layout.rect.row
@@ -31494,6 +31498,36 @@ mod rack_slot_indicator_tests;
             64,
             "sequencer should render step cells for all four expanded tracks"
         );
+    }
+
+    #[test]
+    fn metal_seq_keyed_track_group_keeps_visible_geometry_after_expansion() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.set_layout_aspect(2.0);
+        let id = editor.buffers.iter().find(|buffer| buffer.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(180, 40);
+        let mut row_heights = Vec::new();
+        for expanded in [false, true] {
+            editor.runtime_mut().eval_str(&format!(
+                "(eseq.sequencer/set-track-expanded 0 {expanded})",
+            )).unwrap();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().expect("keyed root must mount a full tree");
+            let group = find_layout_node_by_stable_key_suffix(&layout, "/sequencer-tracks")
+                .expect("capture group must contain the track rows");
+            let row = find_layout_node_by_stable_key(group, "sequencer-track-0")
+                .expect("track row remains inside the capture group");
+            assert_finite_nonzero_rect(group, "capture group");
+            assert_finite_nonzero_rect(row, "track row");
+            assert!(group.rect.row >= 0.0 && group.rect.col >= 0.0);
+            assert!(group.rect.col + group.rect.width <= 180.0);
+            assert!(row.rect.row + row.rect.height <= 40.0);
+            assert!(row.rect.row >= group.rect.row
+                && row.rect.row + row.rect.height <= group.rect.row + group.rect.height + 0.001);
+            row_heights.push(row.rect.height);
+        }
+        assert!(row_heights[1] > row_heights[0], "the keyed group must resize with its expanded row");
     }
 
     #[test]

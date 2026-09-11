@@ -4,6 +4,8 @@ Beside velocity, duration, and the other step parameters, every track carries ei
 
 The lanes are the same on every track, and each track keeps its own values and its own running state. If you know the Cirklon's accumulators and aux lanes, this is that idea with named lanes.
 
+![The tacc lane and its amber control strip. The strip sets the accumulation mode, output, and range.](images/process-lane.png)
+
 ## The lanes
 
 - **prob** — the chance, 0 to 1, that the step plays at all. A rejected step is silent but the lanes below it still advance.
