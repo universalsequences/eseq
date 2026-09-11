@@ -4454,6 +4454,28 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(true))
     });
 
+    runtime.register_native("seq-unbind-process-port", move |args, ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(instance_id)), Some(port)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Err("seq-unbind-process-port: expected (track instance-id port [scope])".into());
+        };
+        let track = *track as usize;
+        let instance_id = sequencer::process::ProcessInstanceId(*instance_id as u64);
+        let port = value_symbol_name(port)
+            .ok_or_else(|| "seq-unbind-process-port: port must be a name".to_string())?;
+        let mut fields = vec![
+            ("track", Value::Number(track as f64)),
+            ("instance-id", Value::Number(instance_id.0 as f64)),
+            ("port", Value::String(port)),
+        ];
+        if process_edit_scope_is_all(args.get(3)) {
+            fields.push(("scope", Value::String("all".to_string())));
+        }
+        ctx.enqueue_command(process_history_command("unbind-port", fields));
+        Ok(Value::Bool(true))
+    });
+
     runtime.register_native("seq-clear-process-port-binding", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(instance_id)), Some(port)) =
             (args.first(), args.get(1), args.get(2))
@@ -7532,6 +7554,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-bind-process-port",
             "(seq-bind-process-port track instance-id port target-map)",
             "Bind an attached process slot port to a live step, instrument, effect, or MIDI-FX parameter target.",
+        ),
+        (
+            "seq-unbind-process-port",
+            "(seq-unbind-process-port track instance-id port [scope])",
+            "Disconnect a process slot port outright: drop its binding and mute its authored target hint so it writes nothing. Pass :all to disconnect a project slot on every track.",
         ),
         (
             "seq-clear-process-port-binding",

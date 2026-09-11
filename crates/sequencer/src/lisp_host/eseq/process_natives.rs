@@ -2306,6 +2306,7 @@ pub(in crate::lisp_host) fn process_chain_slot_from_handle(
         inlets,
         lanes,
         fanout: Default::default(),
+        unbound_ports: Default::default(),
         bindings,
     })
 }

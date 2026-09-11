@@ -157,13 +157,14 @@
                          :steps-ago (in :lag))))))
 
 (def-process lane-rand
-  :doc "Random generator: on a high roll step, draw a new value between lo and hi; hold it otherwise. Writes the held value to its outputs every fire."
+  :doc "Random generator: on a high roll step, draw a new value between lo and hi and send it. Quiet steps send nothing, so a wired accumulator only moves on a roll; hold 1 keeps sending the last draw every fire (sample-and-hold)."
   :targets ((out :mappable)
             (wire :process-inlet))
   :in ((roll :gate :default 1 :lane true)
        (lo :float -128 128 :default 0)
        (hi :float -128 128 :default 12)
-       (whole :int 0 1 :default 1))
+       (whole :int 0 1 :default 1)
+       (hold :int 0 1 :default 0))
   :seed :per-cycle
   :state ((held 0))
   :run (do
@@ -175,20 +176,27 @@
          (if (and (> (in :roll) 0.5) (> (in :whole) 0.5))
            (set! held (floor (+ held 0.5)))
            nil)
-         (target-add! :out held)
-         (target-set! :wire held)))
+         (if (or (> (in :roll) 0.5) (> (in :hold) 0.5))
+           (do
+             (target-add! :out held)
+             (target-set! :wire held))
+           nil)))
 
 (def-process lane-count
-  :doc "Counter generator: each high step advances the count by step and wraps from hi back to lo. Writes the count to its outputs every fire."
+  :doc "Counter generator: each nonzero step advances the count by step and wraps from hi back to lo, then sends it. Zero steps send nothing, so a wired accumulator only moves when the count does; hold 1 sends the count every fire."
   :targets ((out :mappable)
             (wire :process-inlet))
   :in ((step :float -24 24 :default 0 :lane true)
        (lo :float -128 128 :default 0)
-       (hi :float -128 128 :default 8))
+       (hi :float -128 128 :default 8)
+       (hold :int 0 1 :default 0))
   :state ((count 0))
   :run (do
          (set! count (+ count (in :step)))
          (if (> count (in :hi)) (set! count (in :lo)) nil)
          (if (< count (in :lo)) (set! count (in :hi)) nil)
-         (target-add! :out count)
-         (target-set! :wire count)))
+         (if (or (> (in :step) 0) (< (in :step) 0) (> (in :hold) 0.5))
+           (do
+             (target-add! :out count)
+             (target-set! :wire count))
+           nil)))

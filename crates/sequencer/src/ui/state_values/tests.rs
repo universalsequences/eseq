@@ -19688,6 +19688,73 @@ mod rack_slot_indicator_tests;
     }
 
     #[test]
+    fn default_lane_wire_binding_and_disconnect_project_onto_the_slot_ports() {
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let lane = |name: &str| {
+            state
+                .project_process_chain()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("{name} default lane"))
+        };
+        let (acc_a, tacc) = (lane("acc A"), lane("tacc"));
+        assert!(state.set_process_port_binding(
+            0,
+            acc_a.instance_id,
+            "wire",
+            sequencer::process::ParamTarget::ProcessInlet {
+                process: "lane-acc".to_string(),
+                inlet: "amount".to_string(),
+                instance_id: Some(tacc.instance_id),
+            },
+        ));
+        assert!(state.unbind_process_port(0, acc_a.instance_id, "out"));
+        let port_field = |port_name: &str, field: &str| -> Value {
+            let Value::List(slots) = build_process_slots_value(&state, 0) else {
+                panic!("slots list");
+            };
+            let slot = slots
+                .iter()
+                .map(|entry| entry.borrow().clone())
+                .find(|entry| {
+                    let Value::Map(map) = entry else { return false };
+                    map.get("instance-name").map(|cell| cell.borrow().clone())
+                        == Some(Value::String("acc A".to_string()))
+                })
+                .expect("acc A slot");
+            let Value::Map(slot) = slot else { panic!("slot map") };
+            let Value::List(ports) = slot.get("ports").unwrap().borrow().clone() else {
+                panic!("ports list");
+            };
+            let port = ports
+                .iter()
+                .map(|entry| entry.borrow().clone())
+                .find(|entry| {
+                    let Value::Map(map) = entry else { return false };
+                    map.get("name").map(|cell| cell.borrow().clone())
+                        == Some(Value::String(port_name.to_string()))
+                })
+                .unwrap_or_else(|| panic!("port {port_name}"));
+            let Value::Map(port) = port else { panic!("port map") };
+            port.get(field).map(|cell| cell.borrow().clone()).unwrap_or(Value::Nil)
+        };
+        assert_eq!(port_field("wire", "status"), Value::String("bound".to_string()));
+        assert_eq!(
+            port_field("wire", "target-instance-id"),
+            Value::Number(tacc.instance_id.0 as f64)
+        );
+        assert_eq!(port_field("wire", "disconnectable"), Value::Bool(true));
+        assert_eq!(port_field("out", "status"), Value::String("unbound".to_string()));
+        assert_eq!(port_field("out", "target"), Value::String("unbound".to_string()));
+        assert_eq!(port_field("out", "disconnectable"), Value::Bool(false));
+        assert_eq!(port_field("out", "clearable"), Value::Bool(true));
+    }
+
+    #[test]
     fn process_chain_manifests_publish_lane_slots_and_library_defs() {
         let state = Arc::new(SequencerState::new(
             1,

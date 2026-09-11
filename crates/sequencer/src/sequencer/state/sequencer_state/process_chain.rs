@@ -724,6 +724,95 @@ impl SequencerState {
         true
     }
     /// Remove a project port binding from the shared slot on every track.
+    /// Disconnect a port outright: drop its manual binding and mute the
+    /// definition's target hint so the port writes nothing on fire. Track
+    /// slots edit in place; project slots fork this track only. Binding or
+    /// clearing the port reconnects it.
+    pub fn unbind_process_port(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        port_name: &str,
+    ) -> bool {
+        if track >= self.active_track_count() {
+            return false;
+        }
+        let changed = {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            let Some(chain) = chains.get_mut(track) else {
+                return false;
+            };
+            chain
+                .slots
+                .iter_mut()
+                .find(|slot| slot.instance_id == instance_id)
+                .map(|slot| {
+                    let had_binding = slot.bindings.remove(port_name).is_some();
+                    slot.unbound_ports.insert(port_name.to_string()) | had_binding
+                })
+        };
+        let Some(changed) = changed.or_else(|| {
+            self.edit_project_slot_override(track, instance_id, |override_| {
+                let had_binding = override_.bindings.remove(port_name).is_some();
+                override_.unbound_ports.insert(port_name.to_string()) | had_binding
+            })
+        }) else {
+            return false;
+        };
+        if changed {
+            self.publish_process_chain_edit();
+        }
+        true
+    }
+    /// Disconnect a project slot's port on every track: the shared slot is
+    /// muted and every track's fork of the port is dropped.
+    pub fn unbind_process_port_for_instance(
+        &self,
+        instance_id: crate::process::ProcessInstanceId,
+        port_name: &str,
+    ) -> bool {
+        let mut changed = false;
+        {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            for chain in chains.iter_mut() {
+                for slot in chain
+                    .slots
+                    .iter_mut()
+                    .filter(|slot| slot.instance_id == instance_id)
+                {
+                    changed |= slot.bindings.remove(port_name).is_some();
+                    changed |= slot.unbound_ports.insert(port_name.to_string());
+                }
+            }
+        }
+        if let Some(project_changed) = self.edit_project_process_chain_slot(instance_id, |slot| {
+            slot.bindings.remove(port_name).is_some() | slot.unbound_ports.insert(port_name.to_string())
+        }) {
+            changed |= project_changed;
+            let mut all = self.pattern.project_process_lane_overrides.lock().unwrap();
+            let identity = self
+                .project_process_chain()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_id == instance_id)
+                .map(|slot| crate::process::project_slot_identity_id(&slot));
+            if let Some(identity) = identity {
+                for track_overrides in all.iter_mut() {
+                    if let Some(override_) = track_overrides.get_mut(&identity) {
+                        changed |= override_.bindings.remove(port_name).is_some();
+                        changed |= override_.unbound_ports.remove(port_name);
+                        if override_.is_empty() {
+                            track_overrides.remove(&identity);
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            self.publish_process_chain_edit();
+        }
+        changed
+    }
     pub fn clear_process_port_binding_for_instance(
         &self,
         instance_id: crate::process::ProcessInstanceId,
@@ -739,11 +828,12 @@ impl SequencerState {
                     .filter(|slot| slot.instance_id == instance_id)
                 {
                     changed |= slot.bindings.remove(port_name).is_some();
+                    changed |= slot.unbound_ports.remove(port_name);
                 }
             }
         }
         if let Some(project_changed) = self.edit_project_process_chain_slot(instance_id, |slot| {
-            slot.bindings.remove(port_name).is_some()
+            slot.bindings.remove(port_name).is_some() | slot.unbound_ports.remove(port_name)
         }) {
             changed |= project_changed;
             // A shared clear also drops every track's own override of the
@@ -759,6 +849,7 @@ impl SequencerState {
                 for track_overrides in all.iter_mut() {
                     if let Some(override_) = track_overrides.get_mut(&identity) {
                         changed |= override_.bindings.remove(port_name).is_some();
+                        changed |= override_.unbound_ports.remove(port_name);
                         if override_.is_empty() {
                             track_overrides.remove(&identity);
                         }
@@ -867,8 +958,9 @@ impl SequencerState {
 
         let apply = |slot: &mut crate::process::TrackProcessSlot| {
             let current = slot.bindings.get(port_name);
+            let reconnected = slot.unbound_ports.remove(port_name);
             if matches!(current, Some(Some(existing)) if existing == &target) {
-                false
+                reconnected
             } else {
                 slot.bindings
                     .insert(port_name.to_string(), Some(target.clone()));
@@ -891,8 +983,9 @@ impl SequencerState {
         let Some(changed) = changed.or_else(|| {
             self.edit_project_slot_override(track, instance_id, |override_| {
                 let current = override_.bindings.get(port_name);
+                let reconnected = override_.unbound_ports.remove(port_name);
                 if matches!(current, Some(Some(existing)) if existing == &target) {
-                    false
+                    reconnected
                 } else {
                     override_
                         .bindings
@@ -930,6 +1023,7 @@ impl SequencerState {
                     .filter(|slot| slot.instance_id == instance_id)
                 {
                     updated += 1;
+                    changed |= slot.unbound_ports.remove(port_name);
                     let current = slot.bindings.get(port_name);
                     if !matches!(current, Some(Some(existing)) if existing == &target) {
                         slot.bindings
@@ -940,9 +1034,10 @@ impl SequencerState {
             }
         }
         if let Some(project_changed) = self.edit_project_process_chain_slot(instance_id, |slot| {
+            let reconnected = slot.unbound_ports.remove(port_name);
             let current = slot.bindings.get(port_name);
             if matches!(current, Some(Some(existing)) if existing == &target) {
-                false
+                reconnected
             } else {
                 slot.bindings
                     .insert(port_name.to_string(), Some(target.clone()));
@@ -977,7 +1072,9 @@ impl SequencerState {
                 .slots
                 .iter_mut()
                 .find(|slot| slot.instance_id == instance_id)
-                .map(|slot| slot.bindings.remove(port_name).is_some())
+                .map(|slot| {
+                    slot.bindings.remove(port_name).is_some() | slot.unbound_ports.remove(port_name)
+                })
         };
         // Clearing a project port from one track reverts that track to the
         // shared binding; `clear_process_port_binding_for_instance` clears
@@ -985,6 +1082,7 @@ impl SequencerState {
         let Some(changed) = changed.or_else(|| {
             self.edit_project_slot_override(track, instance_id, |override_| {
                 override_.bindings.remove(port_name).is_some()
+                    | override_.unbound_ports.remove(port_name)
             })
         }) else {
             return false;

@@ -1026,6 +1026,9 @@ pub(super) fn apply_process_target_writes(
                 .map(|slot| format!("{}#{}", slot.class_name, slot.instance_id.0))
                 .unwrap_or_else(|| "track-fire".to_string());
             let binding_label = match slot.and_then(|slot| slot.bindings.get(&write.port)) {
+                _ if slot.is_some_and(|slot| slot.unbound_ports.contains(&write.port)) => {
+                    "disconnected"
+                }
                 Some(Some(_)) => "manual",
                 Some(None) => "default",
                 None if write.target.is_some() => "default",
@@ -1043,14 +1046,20 @@ pub(super) fn apply_process_target_writes(
                 write.target
             )
         });
-        let target = slot
-            .and_then(|slot| slot.bindings.get(&write.port))
-            .and_then(|binding| binding.as_ref().cloned())
-            .or_else(|| {
-                write.target.as_ref().and_then(|hint| {
-                    process_resolve_hint_to_target(snapshot, midi_fx_descriptors, track, hint)
+        // A disconnected port writes nothing, hint or not; its fan-out
+        // rows below are separate targets and still run.
+        let unbound = slot.is_some_and(|slot| slot.unbound_ports.contains(&write.port));
+        let target = if unbound {
+            None
+        } else {
+            slot.and_then(|slot| slot.bindings.get(&write.port))
+                .and_then(|binding| binding.as_ref().cloned())
+                .or_else(|| {
+                    write.target.as_ref().and_then(|hint| {
+                        process_resolve_hint_to_target(snapshot, midi_fx_descriptors, track, hint)
+                    })
                 })
-            });
+        };
         // Fan-out entries run whether or not the primary target resolves:
         // each sets its own rescaled copy of the port value.
         if let Some(entries) = slot.and_then(|slot| slot.fanout.get(&write.port)) {

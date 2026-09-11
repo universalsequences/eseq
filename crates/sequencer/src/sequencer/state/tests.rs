@@ -308,6 +308,7 @@
                 inlets: Default::default(),
                 lanes: Default::default(),
                 fanout: Default::default(),
+                unbound_ports: Default::default(),
                 bindings: std::collections::BTreeMap::from([
                     (
                         "survives".to_string(),
@@ -2961,6 +2962,7 @@
                     },
                 )]),
                 fanout: Default::default(),
+                unbound_ports: Default::default(),
                 bindings: std::collections::BTreeMap::new(),
             }],
         }
@@ -2982,6 +2984,7 @@
                 inlets: std::collections::BTreeMap::new(),
                 lanes: std::collections::BTreeMap::new(),
                 fanout: Default::default(),
+                unbound_ports: Default::default(),
                 bindings: std::collections::BTreeMap::from([(
                     port.to_string(),
                     Some(crate::process::ParamTarget::EffectParam {
@@ -3412,6 +3415,72 @@
         assert_eq!(binding(1), Some(rate.clone()), "track 1 inherits the shared bind");
         assert!(state.clear_process_port_binding(0, rand.instance_id, "out"));
         assert_eq!(binding(0), Some(rate), "clearing the fork reverts to shared");
+    }
+
+    #[test]
+    fn unbinding_a_project_port_mutes_it_per_track_until_rebound() {
+        let state = make_state_with_tracks(2);
+        let rand = state
+            .project_process_chain()
+            .slots
+            .into_iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("rand"))
+            .expect("rand default lane");
+        let slot = |track: usize| {
+            state
+                .composed_track_process_chain(track)
+                .unwrap()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_id == rand.instance_id)
+                .unwrap()
+        };
+        let unbound = |track: usize| slot(track).unbound_ports.contains("out");
+
+        // Disconnect on track 0 only: the shared slot still follows its hint.
+        assert!(state.unbind_process_port(0, rand.instance_id, "out"));
+        assert!(unbound(0));
+        assert!(!unbound(1), "track 1 keeps the shared hint");
+
+        // Mapping the port again reconnects it and the binding wins.
+        let velocity = crate::process::ParamTarget::StepParam {
+            param: "velocity".to_string(),
+        };
+        assert!(state.set_process_port_binding(0, rand.instance_id, "out", velocity.clone()));
+        assert!(!unbound(0));
+        assert_eq!(slot(0).bindings.get("out").cloned().flatten(), Some(velocity));
+
+        // Disconnecting again drops the manual binding too, and a per-track
+        // clear reverts to the shared (connected) port.
+        assert!(state.unbind_process_port(0, rand.instance_id, "out"));
+        assert_eq!(slot(0).bindings.get("out").cloned().flatten(), None);
+        assert!(unbound(0));
+        assert!(state.clear_process_port_binding(0, rand.instance_id, "out"));
+        assert!(!unbound(0));
+
+        // A lane-to-lane wire is a binding like any other and reads back bound.
+        let tacc = state
+            .project_process_chain()
+            .slots
+            .into_iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("tacc"))
+            .expect("tacc default lane");
+        let wire = crate::process::ParamTarget::ProcessInlet {
+            process: "lane-acc".to_string(),
+            inlet: "amount".to_string(),
+            instance_id: Some(tacc.instance_id),
+        };
+        assert!(state.set_process_port_binding(0, rand.instance_id, "wire", wire.clone()));
+        assert_eq!(slot(0).bindings.get("wire").cloned().flatten(), Some(wire));
+
+        // A shared disconnect reaches every track and drops track forks.
+        let rate = crate::process::ParamTarget::StepParam {
+            param: "rate".to_string(),
+        };
+        assert!(state.set_process_port_binding(1, rand.instance_id, "out", rate));
+        assert!(state.unbind_process_port_for_instance(rand.instance_id, "out"));
+        assert!(unbound(0) && unbound(1));
+        assert_eq!(slot(1).bindings.get("out").cloned().flatten(), None);
     }
 
     #[test]

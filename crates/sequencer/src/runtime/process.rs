@@ -4,7 +4,7 @@
 //! state: process instances, clocks, channels, patches, and pending process
 //! emissions. It deliberately does not evaluate Lisp.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use eseqlisp::vm::Value;
@@ -476,6 +476,13 @@ pub struct TrackProcessSlot {
     /// Extra scaled targets per port, applied after the port's binding.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fanout: BTreeMap<String, Vec<ProcessPortFanout>>,
+    /// Ports the user disconnected outright. A port here writes nothing on
+    /// fire even when the definition declares a target hint (`bindings` can't
+    /// say this: an absent or `None` entry means "use the hint"). Binding or
+    /// clearing the port lifts it. Fan-out entries are separate rows and keep
+    /// running.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unbound_ports: BTreeSet<String>,
 }
 
 fn default_true() -> bool {
@@ -506,6 +513,9 @@ pub struct ProjectSlotOverride {
     /// Whole-port fan-out lists this track owns (replace the shared list).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fanout: BTreeMap<String, Vec<ProcessPortFanout>>,
+    /// Ports this track disconnected (see `TrackProcessSlot::unbound_ports`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unbound_ports: BTreeSet<String>,
 }
 
 impl ProjectSlotOverride {
@@ -514,6 +524,7 @@ impl ProjectSlotOverride {
             && self.inlets.is_empty()
             && self.bindings.is_empty()
             && self.fanout.is_empty()
+            && self.unbound_ports.is_empty()
     }
 }
 
@@ -528,6 +539,8 @@ struct ProjectSlotOverrideFields {
     bindings: BTreeMap<String, Option<ParamTarget>>,
     #[serde(default)]
     fanout: BTreeMap<String, Vec<ProcessPortFanout>>,
+    #[serde(default)]
+    unbound_ports: BTreeSet<String>,
 }
 
 #[derive(Deserialize)]
@@ -545,6 +558,7 @@ impl From<ProjectSlotOverrideCompat> for ProjectSlotOverride {
                 inlets: fields.inlets,
                 bindings: fields.bindings,
                 fanout: fields.fanout,
+                unbound_ports: fields.unbound_ports,
             },
             ProjectSlotOverrideCompat::Legacy(lanes) => Self {
                 lanes,
@@ -581,9 +595,17 @@ pub fn apply_project_lane_overrides(
         }
         for (port, target) in &override_.bindings {
             slot.bindings.insert(port.clone(), target.clone());
+            // A track that bound the port reconnects it even when the
+            // shared slot has it disconnected.
+            if target.is_some() {
+                slot.unbound_ports.remove(port);
+            }
         }
         for (port, entries) in &override_.fanout {
             slot.fanout.insert(port.clone(), entries.clone());
+        }
+        for port in &override_.unbound_ports {
+            slot.unbound_ports.insert(port.clone());
         }
     }
 }
@@ -607,6 +629,7 @@ mod project_slot_override_tests {
                 Some(ParamTarget::StepParam { param: "rate".to_string() }),
             )]),
             fanout: BTreeMap::new(),
+            unbound_ports: BTreeSet::from(["wire".to_string()]),
         };
         let json = serde_json::to_string(&current).unwrap();
         let back: ProjectSlotOverride = serde_json::from_str(&json).unwrap();
@@ -3564,6 +3587,7 @@ mod tests {
                 inlets: BTreeMap::new(),
                 lanes: BTreeMap::new(),
                 fanout: Default::default(),
+                unbound_ports: Default::default(),
                 bindings: BTreeMap::from([
                     ("unique".to_string(), Some(ParamTarget::InstrumentParam {
                         param: "cutoff".to_string(), param_id: None,
@@ -3702,6 +3726,7 @@ mod tests {
             inlets: BTreeMap::new(),
             lanes: BTreeMap::new(),
             fanout: Default::default(),
+            unbound_ports: Default::default(),
             bindings: BTreeMap::new(),
         };
         let first = TrackProcessChain {
@@ -4172,6 +4197,7 @@ mod tests {
                 },
             )]),
             fanout: Default::default(),
+            unbound_ports: Default::default(),
             bindings: BTreeMap::new(),
         };
 
@@ -4353,6 +4379,7 @@ fn default_lane_slot(spec: &DefaultLaneSpec) -> TrackProcessSlot {
         inlets,
         lanes: BTreeMap::new(),
         fanout: Default::default(),
+        unbound_ports: Default::default(),
         bindings,
     }
 }

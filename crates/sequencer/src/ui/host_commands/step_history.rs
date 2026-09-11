@@ -349,6 +349,19 @@ pub(super) fn handle(
                                 .set_process_port_binding(track, instance_id, &port, target)
                         }
                     }
+                    "unbind-port" => {
+                        let port = field("port")
+                            .and_then(|value| match value {
+                                Value::String(value) => Some(value),
+                                _ => None,
+                            })
+                            .ok_or_else(|| "Process port is missing".to_string())?;
+                        if all_tracks {
+                            app.state.unbind_process_port_for_instance(instance_id, &port)
+                        } else {
+                            app.state.unbind_process_port(track, instance_id, &port)
+                        }
+                    }
                     "clear-port-binding" => {
                         let port = field("port")
                             .and_then(|value| match value {

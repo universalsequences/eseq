@@ -4063,6 +4063,7 @@ mod tests {
                                 },
                             )]),
                             fanout: Default::default(),
+                            unbound_ports: Default::default(),
                             bindings: std::collections::BTreeMap::from([(
                                 "shape".to_string(),
                                 Some(crate::process::ParamTarget::InstrumentParam {
@@ -4090,6 +4091,7 @@ mod tests {
                             },
                         )]),
                         fanout: Default::default(),
+                        unbound_ports: Default::default(),
                         bindings: std::collections::BTreeMap::new(),
                     }],
                 },
@@ -5022,6 +5024,7 @@ mod tests {
                         }),
                     )]),
                     fanout: std::collections::BTreeMap::new(),
+                    unbound_ports: Default::default(),
                 },
             )])];
         let json = serde_json::to_string(&project).expect("serialize current project");

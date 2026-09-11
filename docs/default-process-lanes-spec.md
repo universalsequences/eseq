@@ -148,6 +148,18 @@ Where the build differs from the rev 1 plan, and why.
   `lo..hi` and *sets* the target. Mapping onto an already-bound port adds a
   fan-out entry; the strip lists them with editable lo/hi and a remove
   button. Per-track forks carry whole-port fan-out lists.
+- **Disconnect (rev 2 addendum).** `bindings` cannot say "drive nothing":
+  an absent or `None` entry means "follow the definition's target hint",
+  which is how the seeded lanes (`rand` → `instrument:sr`) get their default
+  target. `TrackProcessSlot::unbound_ports` (and the same set on
+  `ProjectSlotOverride`) is the explicit off switch: a port listed there
+  skips both its binding and its hint at fire time. Fan-out rows are
+  separate targets and keep running. `seq-unbind-process-port` sets it
+  (per track, or `:all` for the shared slot plus every fork); binding the
+  port again or clearing it lifts it. The lane strip's OUT row carries an ×
+  for this, and the `wire` port (what a lane-to-lane map binds) gets its own
+  WIRE row with an × while bound, so a writer shows where it goes and not
+  only the reader's `← writer` chip.
 - **Lane slider drags** ride one history gesture (`apply_process_lane_drag_step`):
   scene structure is captured once at the first drag event and committed once
   when the gesture ends. Per-event capture stalled the scheduler.
@@ -165,6 +177,13 @@ Where the build differs from the rev 1 plan, and why.
   `wire` (connectable). The strip's map button arms `out`; clicking an
   OTHER LANES chip binds `wire`. `seq-bind-process-port` now accepts
   connectable ports with process-inlet targets.
+- **Generators are triggers, not sample-and-hold (2026-09-10).** `lane-rand`
+  writes only on a roll step and `lane-count` only on a nonzero step; quiet
+  steps send nothing to either port. The old write-every-fire behaviour made
+  a wired accumulator add the held value on every step (rand roll
+  `0 0 0 1 0 0 0 0` → a staircase, not a spike). Both keep a `hold` inlet
+  (default 0) that restores sample-and-hold for a direct parameter target
+  that should keep the last value across quiet steps.
 - **Dropdown**: default lanes show as their instance name with no index; other
   lanes keep `N class/inlet`. The dropdown widget takes plain strings, so the
   planned section header and kind column are not there. `Add lane…` is not

@@ -557,14 +557,17 @@ pub(super) fn process_port_value(
     port: &sequencer::process::ProcessPortDef,
 ) -> Value {
     let binding = slot.bindings.get(&port.name);
+    let disconnected = slot.unbound_ports.contains(&port.name);
     let manual = matches!(binding, Some(Some(_)));
     let hint_label = process_target_hint_label(port.target.as_ref());
     let target_label = match binding {
+        _ if disconnected => "unbound".to_string(),
         Some(Some(target)) => process_param_target_label(target),
         _ if !hint_label.is_empty() => hint_label.clone(),
         _ => "unbound".to_string(),
     };
     let status = match binding {
+        _ if disconnected => "unbound",
         Some(Some(_)) => "bound",
         Some(None) | None if port.target.is_some() => "hint",
         Some(None) | None => "unbound",
@@ -588,7 +591,9 @@ pub(super) fn process_port_value(
         ("target", Value::String(target_label)),
         ("status", Value::String(status.to_string())),
         ("manual", Value::Bool(manual)),
-        ("clearable", Value::Bool(manual)),
+        ("clearable", Value::Bool(manual || disconnected)),
+        // A port that writes somewhere (manual or hint) can be disconnected.
+        ("disconnectable", Value::Bool(!disconnected && status != "unbound")),
         ("mappable", Value::Bool(port.is_mappable())),
         ("connectable", Value::Bool(port.is_connectable())),
         ("bindable", Value::Bool(bindable)),

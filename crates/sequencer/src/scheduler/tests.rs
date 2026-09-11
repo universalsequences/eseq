@@ -2933,6 +2933,7 @@
                             },
                         )]),
                         fanout: Default::default(),
+                        unbound_ports: Default::default(),
                         bindings: std::collections::BTreeMap::new(),
                     }],
                 },
@@ -3467,6 +3468,47 @@
     }
 
     #[test]
+    fn scheduler_disconnected_port_writes_nothing_but_fanout_still_runs() {
+        // Same setup as the fan-out test, but `out` is disconnected: the
+        // primary transpose write must stop while the duration fan-out row
+        // keeps rescaling. The disconnect also has to beat the hint path,
+        // so the binding is dropped the way `unbind_process_port` does.
+        let events = run_with_scheduler_stack(|| {
+            default_lanes_fixture(|chain| {
+                default_lane_slot_mut(chain, "tacc").enabled = false;
+                let count = default_lane_slot_mut(chain, "count");
+                count.lanes.insert("step".to_string(), lane(&[1.0; 8]));
+                count
+                    .inlets
+                    .insert("lo".to_string(), crate::process::ProcessLiteral::Number(0.0));
+                count
+                    .inlets
+                    .insert("hi".to_string(), crate::process::ProcessLiteral::Number(4.0));
+                count.bindings.remove("out");
+                count.unbound_ports.insert("out".to_string());
+                count.fanout.insert(
+                    "out".to_string(),
+                    vec![crate::process::ProcessPortFanout {
+                        target: crate::process::ParamTarget::StepParam {
+                            param: "duration".to_string(),
+                        },
+                        lo: 0.1,
+                        hi: 0.5,
+                    }],
+                );
+            })
+        });
+        let expected = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .map(|count| 0.1 + (count / 4.0) * 0.4)
+            .collect::<Vec<f32>>();
+        for (event, want_d) in events.iter().take(4).zip(expected.iter()) {
+            assert_eq!(event.transpose, 0.0, "disconnected port must not write");
+            assert!((event.duration - want_d).abs() < 1e-5, "duration {} vs {want_d}", event.duration);
+        }
+    }
+
+    #[test]
     fn scheduler_default_lanes_are_inert_on_a_fresh_layer() {
         // A fresh project: default layer installed, every lane untouched.
         // Nothing may move: transpose stays 0 and retrig/rate keep their
@@ -3479,6 +3521,100 @@
             assert_eq!(event.retrig, StepParam::Retrig.default_value());
             assert_eq!(event.retrig_rate, StepParam::RetrigRate.default_value());
         }
+    }
+
+    fn rand_spike_into_acc_fixture(hold: f64) -> Vec<f32> {
+        // rand roll 0 0 0 1 0 0 0 0 with lo = hi = 5 (a deterministic draw)
+        // wired into acc A (accumulate) on transpose.
+        let events = run_with_scheduler_stack(move || {
+            default_lanes_fixture(move |chain| {
+                default_lane_slot_mut(chain, "tacc").enabled = false;
+                let acc_id = default_lane_slot_mut(chain, "acc A").instance_id;
+                {
+                    let rand = default_lane_slot_mut(chain, "rand");
+                    rand.lanes.insert(
+                        "roll".to_string(),
+                        lane(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]),
+                    );
+                    rand.inlets
+                        .insert("lo".to_string(), crate::process::ProcessLiteral::Number(5.0));
+                    rand.inlets
+                        .insert("hi".to_string(), crate::process::ProcessLiteral::Number(5.0));
+                    rand.inlets
+                        .insert("hold".to_string(), crate::process::ProcessLiteral::Number(hold));
+                    rand.bindings.insert(
+                        "wire".to_string(),
+                        Some(crate::process::ParamTarget::ProcessInlet {
+                            process: "lane-acc".to_string(),
+                            inlet: "amount".to_string(),
+                            instance_id: Some(acc_id),
+                        }),
+                    );
+                }
+                let acc = default_lane_slot_mut(chain, "acc A");
+                // Wide range so the hold case does not wrap at acc A's 0..8.
+                acc.inlets
+                    .insert("hi".to_string(), crate::process::ProcessLiteral::Number(128.0));
+                acc.bindings.insert(
+                    "out".to_string(),
+                    Some(crate::process::ParamTarget::StepParam {
+                        param: "transpose".to_string(),
+                    }),
+                );
+            })
+        });
+        events.iter().take(8).map(|event| event.transpose).collect()
+    }
+
+    #[test]
+    fn scheduler_default_lanes_rand_spikes_once_into_an_accumulator() {
+        assert_eq!(
+            rand_spike_into_acc_fixture(0.0),
+            vec![0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+            "quiet roll steps send nothing, so acc only moves on the draw"
+        );
+    }
+
+    #[test]
+    fn scheduler_default_lanes_rand_hold_keeps_feeding_an_accumulator() {
+        assert_eq!(
+            rand_spike_into_acc_fixture(1.0),
+            vec![0.0, 0.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0],
+            "hold 1 is the old sample-and-hold: the draw is re-sent every fire"
+        );
+    }
+
+    #[test]
+    fn scheduler_default_lanes_count_sends_only_on_nonzero_steps() {
+        let events = run_with_scheduler_stack(|| {
+            default_lanes_fixture(|chain| {
+                default_lane_slot_mut(chain, "tacc").enabled = false;
+                let count = default_lane_slot_mut(chain, "count");
+                count.lanes.insert(
+                    "step".to_string(),
+                    lane(&[1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]),
+                );
+                count
+                    .inlets
+                    .insert("hi".to_string(), crate::process::ProcessLiteral::Number(8.0));
+                count.bindings.insert(
+                    "out".to_string(),
+                    Some(crate::process::ParamTarget::StepParam {
+                        param: "transpose".to_string(),
+                    }),
+                );
+            })
+        });
+        let transposes = events
+            .iter()
+            .take(8)
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transposes,
+            vec![1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0],
+            "zero steps write nothing, so transpose falls back to the step's own value"
+        );
     }
 
     #[test]

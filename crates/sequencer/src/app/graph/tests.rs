@@ -4108,6 +4108,7 @@
                     crate::process::ProcessLane { values: vec![0.0, 1.0] },
                 )]),
                 fanout: Default::default(),
+                unbound_ports: Default::default(),
                 bindings: std::collections::BTreeMap::new(),
             }],
         };

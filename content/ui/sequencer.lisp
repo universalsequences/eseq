@@ -1730,22 +1730,57 @@
         (and port (= (get port :status) "bound") true))
       false)))
 
+;; × on a port that writes somewhere: disconnects it outright (manual
+;; binding dropped, authored hint muted) so the lane drives nothing until
+;; it is mapped again. Fan-out rows have their own ×.
+(def lane-port-unbind-button (track slot port)
+  (if (get port :disconnectable)
+    (button "×"
+      :key (str "lane-unbind-" (get slot :instance-id) "-" (get port :name))
+      :width 1.2 :height 1.0 :padding 0 :font-size 9
+      :background-color :transparent :border-color :transparent :color :dim
+      :on-click (lambda (event)
+        (do
+          (if (lane-edit-all?)
+            (seq-unbind-process-port track (get slot :instance-id) (get port :name) :all)
+            (seq-unbind-process-port track (get slot :instance-id) (get port :name)))
+          (pc/process-map-clear)
+          (status (str "Disconnected " (slot-display-name slot) " " (get port :name)
+                       (if (lane-edit-all?) " (all tracks)" ""))))))
+    (box :width 1.2 :height 1.0)))
+
 (def lane-strip-out-row (track slot)
   (let ((port (slot-first-port-where slot :mappable))
         (armed (and port (pc/process-map-port-active? track slot port))))
     (if port
       (h-stack :width :fill :gap 0.3 :align :center
         (lane-strip-row-label "OUT")
-        (lane-chip (str "→ " (lane-target-label port)) (if (= (get port :status) "bound") 1 0) 0)
+        (lane-chip (str "→ " (lane-target-label port))
+          (if (= (get port :status) "unbound") 0 1)
+          (if (= (get port :status) "hint") 1 0))
         (box :flex 1 :height 0.1)
-        (button (if armed "mapping…" "map")
+        (button (if armed "mapping" "map")
           :key (str "lane-map-" (get slot :instance-id))
           :width 5.2 :height 1.1 :padding 0 :font-size 8.5
           :background-color (if armed :process-lane-accent :transparent)
           :border-color :process-lane-accent
           :color (if armed :black :process-lane-accent)
           :on-click (lambda (event)
-            (pc/process-map-arm-port track slot port))))
+            (pc/process-map-arm-port track slot port)))
+        (lane-port-unbind-button track slot port))
+      (box :height 0))))
+
+;; The `wire` port is what a lane-to-lane map binds (OTHER LANES while
+;; mapping): the raw value feeds another lane's inlet. It has no hint and
+;; is not the mappable OUT port, so it gets its own row while bound.
+(def lane-strip-wire-row (track slot)
+  (let ((port (slot-port-named slot "wire")))
+    (if (and port (= (get port :status) "bound"))
+      (h-stack :width :fill :gap 0.3 :align :center
+        (lane-strip-row-label "WIRE")
+        (lane-chip (str "→ " (lane-target-label port)) 1 0)
+        (box :flex 1 :height 0.1)
+        (lane-port-unbind-button track slot port))
       (box :height 0))))
 
 ;; Scalar inlets the strip edits in place. `mode` has its own row.
@@ -1889,6 +1924,7 @@
           (lane-strip-mode-row track slot)
           (lane-strip-out-row track slot)
           (lane-fanout-rows track slot)
+          (lane-strip-wire-row track slot)
           (lane-strip-scope-row track slot)
           (lane-strip-inlets track slot)))
       nil)))
