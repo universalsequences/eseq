@@ -1,4 +1,33 @@
     use super::*;
+
+    #[test]
+    fn publish_process_effective_params_merges_per_track_and_versions_on_change() {
+        let state = SequencerState::new(2, vec![default_empty_effect_chain(), default_empty_effect_chain()]);
+        let v0 = state.process_effective_params_version();
+        let a = crate::process::ProcessEffectiveParam {
+            param_idx: 3,
+            base: 0.2,
+            value: 0.7,
+            clamped: false,
+        };
+        state.publish_process_effective_params(0, &[a]);
+        assert_eq!(state.process_effective_params_version(), v0 + 1);
+        // A second track's write keeps the first track's entry.
+        let b = crate::process::ProcessEffectiveParam {
+            param_idx: 3,
+            base: 0.5,
+            value: 1.0,
+            clamped: true,
+        };
+        state.publish_process_effective_params(1, &[b]);
+        let published = state.process_effective_params();
+        assert_eq!(published.get(&(0, 3)), Some(&a));
+        assert_eq!(published.get(&(1, 3)), Some(&b));
+        assert_eq!(state.process_effective_params_version(), v0 + 2);
+        // Republishing an identical value does not bump the version.
+        state.publish_process_effective_params(1, &[b]);
+        assert_eq!(state.process_effective_params_version(), v0 + 2);
+    }
     use crate::effects::{
         EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind,
         ParamScaling, TensorParamDescriptor, BUILTIN_SLOT_COUNT,

@@ -417,6 +417,21 @@ impl ProcessLane {
     }
 }
 
+/// The value a process OUT port last wrote onto one instrument param, as
+/// resolved by the scheduler: `base` is what the step would have used without
+/// the process (the stored knob value, or the step's p-lock), `value` is what
+/// the instrument actually received, both in stored units. `clamped` is set
+/// when the write hit the param's range end, so the UI can mark that the
+/// displayed base plus the port value no longer predicts the result.
+/// Published for read-only UI display (knob dot / number-picker bar).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessEffectiveParam {
+    pub param_idx: usize,
+    pub base: f32,
+    pub value: f32,
+    pub clamped: bool,
+}
+
 /// One extra target for a process port: the port's value is rescaled from
 /// the slot's output range (its `lo`/`hi` inlets, else 0..1) into `lo..hi`
 /// and *set* on the target. Lets one generator drive several parameters
@@ -653,7 +668,7 @@ pub fn compose_effective_process_chain(
     TrackProcessChain { slots }
 }
 
-fn process_param_index_by_tag_or_name(
+pub fn process_param_index_by_tag_or_name(
     descriptor: &EffectDescriptor,
     tag_or_name: &str,
 ) -> Result<Option<usize>, Vec<String>> {

@@ -1172,6 +1172,41 @@ pub(crate) fn build_track_process_scopes_value(state: &Arc<SequencerState>) -> V
     list_value(tracks.collect::<Vec<_>>())
 }
 
+/// Descriptor indices of `track`'s instrument params that an *enabled*
+/// process slot currently writes to through a bound OUT port or a fan-out
+/// entry. Drives the panel's amber "process-mapped" tint and gates the
+/// effective-value overlay so a stale feed entry never draws on an unmapped
+/// control. Hint-only (unbound) targets resolve in the scheduler and are not
+/// counted here.
+pub(crate) fn process_bound_instrument_params(
+    state: &SequencerState,
+    descriptor: &sequencer::effects::EffectDescriptor,
+    track: usize,
+) -> HashSet<usize> {
+    let mut bound = HashSet::new();
+    let Some(chain) = state.composed_track_process_chain(track) else {
+        return bound;
+    };
+    let mut note = |target: &sequencer::process::ParamTarget| {
+        if let sequencer::process::ParamTarget::InstrumentParam { param, .. } = target {
+            if let Ok(Some(idx)) =
+                sequencer::process::process_param_index_by_tag_or_name(descriptor, param)
+            {
+                bound.insert(idx);
+            }
+        }
+    };
+    for slot in chain.slots.iter().filter(|slot| slot.enabled) {
+        for target in slot.bindings.values().flatten() {
+            note(target);
+        }
+        for entry in slot.fanout.values().flatten() {
+            note(&entry.target);
+        }
+    }
+    bound
+}
+
 pub(crate) fn sync_process_scope_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
     rt.set_reactive(
         "SEQ",

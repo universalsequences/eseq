@@ -20,12 +20,13 @@
     :debug-name (str "kick-panel-" section)
     :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section) body))
 (def drum-num (section name title width decimals)
-  (let ((p (drum-p name)))
+  (let ((p (drum-p name))
+        (ink (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white :black)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "kick-mod-" name)
       (subtree :key (str "kick-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (v-stack :width width :height 1.15 :gap 0.08
-          (label title :height 0.5 :v-align :center :font-size 8 :color :black :bg :transparent)
+          (label title :height 0.5 :v-align :center :font-size 8 :color ink :bg :transparent)
           (number-picker :width width :height 0.55 :noui true :font-size 8.5 :decimals decimals
             :step (if (= name "bank_harm") 0.5 (pow 10 (- 0 decimals)))
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
@@ -33,7 +34,7 @@
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-align :left
             :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :black)
+              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) ink)
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -348,14 +349,12 @@
     (h-stack :gap 0.35
       (drum-num 2 "click_decay" "Decay 1/s" 8.4 0)
     )
-    (label "Drag X: decay / Y: amp / 35 ms" :height 0.6 :v-align :center :font-size 7.6 :color :black :bg :transparent)
   ))
 (def drum-page-3 ()
   (v-stack :gap 0.15
     (h-stack :gap 0.35
       (drum-num 3 "noise_decay" "Decay 1/s" 8.4 2)
     )
-    (label "Drag X: decay / normalized noise / 250 ms" :height 0.6 :v-align :center :font-size 7.6 :color :black :bg :transparent)
   ))
 (def drum-page-4 ()
   (v-stack :gap 0.15

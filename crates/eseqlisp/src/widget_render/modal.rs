@@ -219,6 +219,7 @@ pub(crate) fn emit_modal_title(
             scale: 1.0,
             fg: resolve_named_color(props, "title-color", crate::theme::DROPDOWN_FG()),
             bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
+            mono: false,
         },
     ));
 }

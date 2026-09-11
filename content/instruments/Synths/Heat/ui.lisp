@@ -21,7 +21,8 @@
 (def heat-compact (section name title)
   (heat-readout section name title false 4.6 1.02 0.46 2 0.01 :dim))
 (def heat-readout (section name title labels width height label-height decimals step ink)
-  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (ink (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white ink)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "heat-num-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "heat-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
@@ -30,6 +31,7 @@
           (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+            :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-align :left
             :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
@@ -387,20 +389,22 @@
 
 ; Single-line readouts leave room for every global control in the display.
 (def heat-screen-value (name title decimals step labels)
-  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (ink (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white (heat-ink))))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
       (str "heat-screen-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "heat-screen-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (h-stack :width 10.5 :height 0.5 :gap 0.1 :align :center
-          (label title :width 6.2 :height 0.5 :v-align :center :font-size 8.6 :color (heat-ink) :bg :transparent)
+          (label title :width 6.2 :height 0.5 :v-align :center :font-size 8.6 :color ink :bg :transparent)
           (number-picker :width 4.1 :height 0.5 :noui true :font-size 8 :text-align :right
             :decimals decimals :step step :value-labels labels
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+            :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) (heat-ink))
+              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) ink)
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)

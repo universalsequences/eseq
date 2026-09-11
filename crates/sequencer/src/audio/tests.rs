@@ -1275,6 +1275,13 @@ fn dj_mixer_slots_carry_explicit_transport_phase_param() {
         crate::effects::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32
     );
 
+    let slowdown = EffectDescriptor::builtin_insert("slowdown").unwrap();
+    let slowdown_slot = EffectSlotState::new(&slowdown, 44);
+    assert_eq!(
+        slowdown_slot.transport_phase_param_idx.load(Ordering::Relaxed),
+        crate::effects::slowdown::PARAM_TRANSPORT_BEAT_PHASE as u32
+    );
+
     let str8 = EffectDescriptor::builtin_str8_delay();
     let str8_slot = EffectSlotState::new(&str8, 43);
     assert_eq!(

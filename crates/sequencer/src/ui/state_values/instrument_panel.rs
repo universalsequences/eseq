@@ -464,6 +464,7 @@ pub(crate) fn build_sampler_panel_value(
         }
     }
 
+    annotate_process_bound_params(&mut synth_params, &app.state, &desc, track);
     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
     for slot_number in 1..=sequencer::instruments::voice_modulator::SLOT_COUNT {
@@ -705,6 +706,48 @@ pub(crate) fn build_sampler_panel_value(
     );
 
     Value::List(vec![Rc::new(RefCell::new(Value::Map(panel_map)))])
+}
+
+/// Mark each param map whose descriptor index an enabled process port writes
+/// to: `process-mapped` for the amber tint, plus the effective-value fields
+/// the knob dot / number-picker bar bind (eseq-p1kg).
+fn annotate_process_bound_params(
+    params: &mut [Rc<RefCell<Value>>],
+    state: &SequencerState,
+    desc: &sequencer::effects::EffectDescriptor,
+    track: usize,
+) {
+    let bound = process_bound_instrument_params(state, desc, track);
+    if bound.is_empty() {
+        return;
+    }
+    for pmap in params.iter_mut() {
+        let mut pmap = pmap.borrow_mut();
+        let Value::Map(map) = &mut *pmap else {
+            continue;
+        };
+        let idx = match map.get("idx").map(|v| v.borrow().clone()) {
+            Some(Value::Number(idx)) => idx as usize,
+            _ => continue,
+        };
+        if !bound.contains(&idx) {
+            continue;
+        }
+        map.insert(
+            "process-mapped".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        insert_string_prop(
+            map,
+            "process-value-field",
+            instrument_proc_value_field(track, idx),
+        );
+        insert_string_prop(
+            map,
+            "process-clamped-field",
+            instrument_proc_clamped_field(track, idx),
+        );
+    }
 }
 
 pub(crate) fn build_instrument_panel_value(
@@ -1216,6 +1259,7 @@ pub(crate) fn build_instrument_panel_value(
         }
     }
 
+    annotate_process_bound_params(&mut synth_params, &app.state, desc, track);
     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
     for slot_number in 1..=sequencer::instruments::voice_modulator::SLOT_COUNT {

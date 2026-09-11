@@ -576,6 +576,7 @@ fn build_primitives(node: &LayoutNode) -> Vec<GpuPrimitive> {
                     scale: 1.0,
                     fg: ruler_fg,
                     bg: ruler_bg,
+                    mono: false,
                 },
             ));
         }

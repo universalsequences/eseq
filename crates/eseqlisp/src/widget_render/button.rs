@@ -938,6 +938,7 @@ impl WidgetDefinition for ButtonWidget {
                     scale: 1.0,
                     fg: variant_fg(&node.props),
                     bg,
+                    mono: false,
                 },
             ));
         }

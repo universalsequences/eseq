@@ -18,18 +18,20 @@
           :color :black :bg :transparent))
       body)))
 (def melt-num (name title decimals)
-  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (ink (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white :black)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "melt-mod-" name)
       (v-stack :width 8.4 :height 1.15 :gap 0.08
-        (label title :height 0.5 :font-size 8 :v-align :center :color :black :bg :transparent)
+        (label title :height 0.5 :font-size 8 :v-align :center :color ink :bg :transparent)
         (number-picker :debug-name (str "melt-num-" name) :width 8.4 :height 0.55
           :noui true :font-size 8.5 :decimals decimals :step (pow 10 (- 0 decimals))
           :value (melt-bind name)
           :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+          :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
           :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
           :text-align :left
           :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-            (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :black)
+            (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) ink)
           :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))
 (def melt-write (scope name value)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope name)))
@@ -99,6 +101,7 @@
               :noui true :font-size 8.5 :decimals 0 :step 1 :text-align :left :text-color :black
               :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
               :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
               :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p)))))))
 
@@ -178,7 +181,6 @@
         (label "OP 2" :width 11.5 :height 0.6 :h-align :center :color :black :bg :transparent)
         (label "OP 1" :width 11.5 :height 0.6 :h-align :center :color :black :bg :transparent)
         (label "CARRIER" :width 11.5 :height 0.6 :h-align :center :color :black :bg :transparent))
-      (melt-caption "Drag X: parallel / serial blend. Y: OP 1 feedback.")
       (melt-caption "Ratio quantization")
       (dropdown :debug-name "melt-snap" :width 16 :height 0.8 :font-size 8
         :options '("Free" "Half-step ratios") :value-index (melt-bind "ratio_snap")

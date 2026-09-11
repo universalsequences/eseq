@@ -1054,6 +1054,7 @@ fn build_primitives(
                     scale: 1.0,
                     fg: theme::FG_MUTED(),
                     bg: theme::STATUS_BG(),
+                    mono: false,
                 },
             ));
         }
@@ -1126,6 +1127,7 @@ fn build_primitives(
                         scale: 1.0,
                         fg: theme::FG_MUTED(),
                         bg: theme::STATUS_BG(),
+                        mono: false,
                     },
                 ));
             }
@@ -1269,6 +1271,7 @@ fn build_primitives(
                         } else {
                             sidebar_bg
                         },
+                        mono: false,
                     },
                 ));
             }
@@ -1654,6 +1657,7 @@ fn build_primitives(
                         scale: 1.0,
                         fg: view.item_label_color,
                         bg: item_color,
+                        mono: false,
                     },
                 ));
                 primitives.push(GpuPrimitive::PopClipRect);

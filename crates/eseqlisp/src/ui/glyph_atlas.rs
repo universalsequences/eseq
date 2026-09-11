@@ -912,10 +912,20 @@ pub struct SizedFontCache {
 
 impl SizedFontCache {
     pub fn new(scale: f64) -> Option<Self> {
+        Self::with_loaded(scale, load_system_ui_font()?)
+    }
+
+    /// The editor's monospace face at scalable sizes, for `label :mono true`.
+    /// Resolves the same name the text atlas uses so mono labels and buffer
+    /// text share one typeface.
+    pub fn new_mono(scale: f64) -> Option<Self> {
+        Self::with_loaded(scale, load_named_font(crate::text_capture::MONOSPACE_FONT_NAME)?.loaded)
+    }
+
+    fn with_loaded(scale: f64, loaded: LoadedFont) -> Option<Self> {
         if !scale.is_finite() || scale <= 0.0 {
             return None;
         }
-        let loaded = load_system_ui_font()?;
         Some(Self {
             face: loaded.face,
             line_metrics: HashMap::new(),
@@ -1015,8 +1025,12 @@ pub struct ProportionalGlyphEntry {
 pub struct ProportionalGlyphAtlas {
     pub bitmap: AtlasBitmap,
     allocator: AtlasAllocator,
-    glyphs: HashMap<(char, u16), ProportionalGlyphEntry>,
+    /// Keyed by (char, size tenths, mono face).
+    glyphs: HashMap<(char, u16, bool), ProportionalGlyphEntry>,
     pub fonts: SizedFontCache,
+    /// Monospace face sharing this atlas bitmap; `None` when no mono font
+    /// resolved, in which case mono runs fall back to the proportional face.
+    pub mono_fonts: Option<SizedFontCache>,
 }
 
 impl ProportionalGlyphAtlas {
@@ -1029,7 +1043,17 @@ impl ProportionalGlyphAtlas {
             )),
             glyphs: HashMap::new(),
             fonts: SizedFontCache::new(scale)?,
+            mono_fonts: SizedFontCache::new_mono(scale),
         })
+    }
+
+    /// The face a run draws with: the mono cache when asked for and
+    /// available, the proportional system face otherwise.
+    fn fonts_for(&mut self, mono: bool) -> &mut SizedFontCache {
+        match (mono, self.mono_fonts.as_mut()) {
+            (true, Some(fonts)) => fonts,
+            _ => &mut self.fonts,
+        }
     }
 
     pub fn line_height(&mut self, size_tenths: u16) -> f32 {
@@ -1052,21 +1076,44 @@ impl ProportionalGlyphAtlas {
         self.fonts.measure_text(text, size_tenths)
     }
 
+    pub fn line_height_face(&mut self, size_tenths: u16, mono: bool) -> f32 {
+        self.fonts_for(mono).line_height(size_tenths)
+    }
+
+    pub fn descent_face(&mut self, size_tenths: u16, mono: bool) -> f32 {
+        self.fonts_for(mono).descent(size_tenths)
+    }
+
+    pub fn cap_height_face(&mut self, size_tenths: u16, mono: bool) -> f32 {
+        self.fonts_for(mono).cap_height(size_tenths)
+    }
+
     pub fn get_or_rasterize(
         &mut self,
         ch: char,
         size_tenths: u16,
     ) -> Option<&ProportionalGlyphEntry> {
-        let key = (ch, size_tenths);
+        self.get_or_rasterize_face(ch, size_tenths, false)
+    }
+
+    pub fn get_or_rasterize_face(
+        &mut self,
+        ch: char,
+        size_tenths: u16,
+        mono: bool,
+    ) -> Option<&ProportionalGlyphEntry> {
+        let mono = mono && self.mono_fonts.is_some();
+        let key = (ch, size_tenths, mono);
         if !self.glyphs.contains_key(&key) {
-            self.rasterize(ch, size_tenths)?;
+            self.rasterize(ch, size_tenths, mono)?;
         }
         self.glyphs.get(&key)
     }
 
-    fn rasterize(&mut self, ch: char, size_tenths: u16) -> Option<()> {
-        let line_metrics = self.fonts.metrics(size_tenths)?;
-        let (glyph, glyph_pixels) = self.fonts.rasterize(ch, size_tenths);
+    fn rasterize(&mut self, ch: char, size_tenths: u16, mono: bool) -> Option<()> {
+        let fonts = self.fonts_for(mono);
+        let line_metrics = fonts.metrics(size_tenths)?;
+        let (glyph, glyph_pixels) = fonts.rasterize(ch, size_tenths);
         let advance = glyph.advance_width;
         let raster_h = line_metrics.line_height().max(1.0) as usize;
         let left = glyph.xmin.min(0) - GLYPH_PADDING as i32;
@@ -1092,7 +1139,7 @@ impl ProportionalGlyphAtlas {
         self.bitmap.write(x, y, raster_w, raster_h, &pixels);
         let size = PROP_ATLAS_SIZE as f32;
         self.glyphs.insert(
-            (ch, size_tenths),
+            (ch, size_tenths, mono),
             ProportionalGlyphEntry {
                 uv_min: [x as f32 / size, y as f32 / size],
                 uv_max: [
@@ -1195,8 +1242,21 @@ impl MetalProportionalGlyphAtlas {
         ch: char,
         size_tenths: u16,
     ) -> Option<&ProportionalGlyphEntry> {
+        self.get_or_rasterize_face(ch, size_tenths, false)
+    }
+
+    /// Rasterizes through the inner atlas and uploads any newly written
+    /// glyph to the Metal texture. Every Metal caller must come through here
+    /// (not the `Deref` target) or the glyph stays CPU-side and draws blank.
+    pub fn get_or_rasterize_face(
+        &mut self,
+        ch: char,
+        size_tenths: u16,
+        mono: bool,
+    ) -> Option<&ProportionalGlyphEntry> {
+        let mono = mono && self.atlas.mono_fonts.is_some();
         let previous_revision = self.atlas.bitmap.revision();
-        let entry = *self.atlas.get_or_rasterize(ch, size_tenths)?;
+        let entry = *self.atlas.get_or_rasterize_face(ch, size_tenths, mono)?;
         if self.atlas.bitmap.revision() != previous_revision {
             upload_entry(
                 &self.texture,
@@ -1206,7 +1266,7 @@ impl MetalProportionalGlyphAtlas {
                 entry.raster_h,
             );
         }
-        self.atlas.glyphs.get(&(ch, size_tenths))
+        self.atlas.glyphs.get(&(ch, size_tenths, mono))
     }
 }
 

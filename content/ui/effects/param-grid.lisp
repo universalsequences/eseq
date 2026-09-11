@@ -85,7 +85,9 @@
               (number-picker :value (pc/fx-param-value-for fx p)
                 :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
                 :decimals (if (get p :integer-option-fallback) 0 2)
-                :noui true :font-size 12 :text-color (pc/param-plock-text-color fx p)
+                :process-value (pc/param-process-value p)
+                :process-clamped (pc/param-process-clamped p)
+                :noui true :font-size 12 :text-color (pc/param-process-text-color fx p)
                 :plock-active (if (pc/param-plock-active? fx p) 1 0)
                 :plock-color-r (pc/param-plock-color-r)
                 :plock-color-g (pc/param-plock-color-g)
@@ -334,9 +336,10 @@
           :decimals (if (get p :integer-option-fallback) 0 2)
           :mod-offset (pc/param-mod-offset p)
           :mod-scale (pc/param-mod-scale p)
+          :process-value (pc/param-process-value p)
           :unit (pc/param-control-unit fx p)
           :font-size 10.0 :label-font-size 8.8
-          :text-color (pc/param-plock-text-color fx p) :label-color :dim
+          :text-color (pc/param-process-text-color fx p) :label-color :dim
           :plock-active (if (pc/param-plock-active? fx p) 1 0)
           :plock-default (pc/param-plock-default fx p)
           :plock-color-r (pc/param-plock-color-r)

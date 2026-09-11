@@ -438,6 +438,56 @@
     }
 
     #[test]
+    fn process_device_write_value_clamped_reports_range_end_hits() {
+        let descriptor = ParamDescriptor {
+            name: "cutoff".to_string(),
+            min: 100.0,
+            max: 300.0,
+            default: 200.0,
+            kind: ParamKind::Continuous { unit: None },
+            scaling: ParamScaling::Linear,
+            node_param_idx: 0,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        };
+        let add = crate::process::ProcessTargetOp::Add;
+        // Inside the range: base 200 (t=0.5) + 0.25 → 250, not clamped.
+        let (value, clamped) =
+            super::process_device_write_value_clamped(&descriptor, 200.0, add, 0.25);
+        assert!((value - 250.0).abs() < 1.0e-4, "{value}");
+        assert!(!clamped);
+        // Past the top: 0.5 + 0.75 = 1.25 → pinned at 300 and flagged.
+        let (value, clamped) =
+            super::process_device_write_value_clamped(&descriptor, 200.0, add, 0.75);
+        assert!((value - 300.0).abs() < 1.0e-4, "{value}");
+        assert!(clamped);
+        // Below the bottom likewise.
+        let (value, clamped) =
+            super::process_device_write_value_clamped(&descriptor, 200.0, add, -0.9);
+        assert!((value - 100.0).abs() < 1.0e-4, "{value}");
+        assert!(clamped);
+        // Exactly at the end is a legitimate value, not a clamp.
+        let (_, clamped) =
+            super::process_device_write_value_clamped(&descriptor, 200.0, add, 0.5);
+        assert!(!clamped);
+        // Set semantics use the normalized value directly.
+        let (value, clamped) = super::process_device_write_value_clamped(
+            &descriptor,
+            200.0,
+            crate::process::ProcessTargetOp::Set,
+            1.5,
+        );
+        assert!((value - 300.0).abs() < 1.0e-4, "{value}");
+        assert!(clamped);
+        // The plain helper still agrees with the clamped one.
+        assert_eq!(
+            process_device_write_value(&descriptor, 200.0, add, 0.75),
+            super::process_device_write_value_clamped(&descriptor, 200.0, add, 0.75).0
+        );
+    }
+
+    #[test]
     fn process_write_targets_stable_rack_macro_without_mutating_rack_state() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let mut macros = crate::sequencer::default_rack_macros();

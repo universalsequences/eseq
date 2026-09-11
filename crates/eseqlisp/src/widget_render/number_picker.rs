@@ -687,6 +687,8 @@ impl WidgetDefinition for NumberPickerWidget {
             "plock-color-r",
             "plock-color-g",
             "plock-color-b",
+            "process-value",
+            "process-clamped",
         ]
     }
 
@@ -730,6 +732,8 @@ impl WidgetDefinition for NumberPickerWidget {
             "plock-color-r",
             "plock-color-g",
             "plock-color-b",
+            "process-value",
+            "process-clamped",
         ]
     }
 
@@ -1257,6 +1261,75 @@ impl WidgetDefinition for NumberPickerWidget {
             }
         }
 
+        // ── Process effective-value bar (eseq-p1kg) ──
+        // A thin strip along the bottom edge, anchored at the base value and
+        // running to the value a step process last wrote onto this param.
+        // Drawn inside the widget's own bounds so mapping a param never
+        // reflows the panel, and drawn in `noui` mode too, since the compact
+        // grid picker is `noui`. Direction reads as sign; a brighter cap at
+        // the far end marks a write that hit the range end and clamped.
+        if let Some(process_value) = node.props.get("process-value").and_then(|v| match v {
+            Value::Number(n) if n.is_finite() => Some(*n as f32),
+            _ => None,
+        }) {
+            let min = get_f32_prop(&node.props, "min", 0.0);
+            let max = get_f32_prop(&node.props, "max", 100.0);
+            if (max - min).abs() > 0.000_001 && process_value.is_finite() {
+                let taper = knob_taper(&node.props);
+                let base_t = taper_normalize(taper, min, max, value).clamp(0.0, 1.0);
+                let proc_t = taper_normalize(taper, min, max, process_value).clamp(0.0, 1.0);
+                let accent = theme::PROCESS_LANE_ACCENT();
+                let inset = TEXT_PADDING_H.min(node.rect.width * 0.1);
+                let span_col = node.rect.col + inset;
+                let span_w = (node.rect.width - inset * 2.0).max(0.0);
+                let bar_h = (super::ui_design_px(2.0) / viewport.cell_h).min(node.rect.height * 0.2);
+                let px_w = |px: f32| super::ui_design_px(px) / viewport.cell_w;
+                let row = node.rect.row + node.rect.height - bar_h;
+                let x_of = |t: f32| span_col + t * span_w;
+                let (lo_t, hi_t) = if proc_t >= base_t { (base_t, proc_t) } else { (proc_t, base_t) };
+                if hi_t - lo_t > 0.002 {
+                    prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
+                        rect: Rect {
+                            row,
+                            col: x_of(lo_t),
+                            width: (x_of(hi_t) - x_of(lo_t)).max(px_w(1.0)),
+                            height: bar_h,
+                        },
+                        color: Color { a: accent.a * 0.8, ..accent },
+                    }));
+                }
+                // Anchor tick at the base, so a near-zero offset still shows
+                // where the strip grows from.
+                let tick_w = px_w(2.0);
+                prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
+                    rect: Rect {
+                        row,
+                        col: (x_of(base_t) - tick_w * 0.5).clamp(span_col, span_col + span_w - tick_w),
+                        width: tick_w,
+                        height: bar_h,
+                    },
+                    color: accent,
+                }));
+                if get_f32_prop(&node.props, "process-clamped", 0.0) >= 0.5 {
+                    let cap_w = px_w(3.0);
+                    prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
+                        rect: Rect {
+                            row: row - bar_h * 0.5,
+                            col: (x_of(proc_t) - cap_w * 0.5).clamp(span_col, span_col + span_w - cap_w),
+                            width: cap_w,
+                            height: bar_h * 1.5,
+                        },
+                        color: Color {
+                            r: (accent.r + 0.5).min(1.0),
+                            g: (accent.g + 0.5).min(1.0),
+                            b: (accent.b + 0.5).min(1.0),
+                            a: 1.0,
+                        },
+                    }));
+                }
+            }
+        }
+
         // ── Value text ──
         let base_text_col = if noui || slider_mode {
             node.rect.col + TEXT_PADDING_H
@@ -1308,6 +1381,7 @@ impl WidgetDefinition for NumberPickerWidget {
                     scale: 1.0,
                     fg,
                     bg: transparent,
+                    mono: false,
                 },
             ));
         }

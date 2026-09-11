@@ -2103,6 +2103,11 @@ pub(super) fn apply_ui_invalidations(
                 if sequencer_visible {
                     needs_reactive_cycle |= sync_track_step_list_publishes(rt, state, track);
                 }
+                // The tracker's step-major cell matrix (gated on its opt-in).
+                // With the tracker replacing the Seq tab nothing else in this
+                // branch publishes, so its dirtiness must drive the cycle.
+                needs_reactive_cycle |=
+                    super::piano_roll::sync_track_automation_state(rt, &*app, state);
             }
             UiInvalidation::StepSelection {
                 track,

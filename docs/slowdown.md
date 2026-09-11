@@ -35,9 +35,20 @@ units in the mods view. Display scaling does not alter stored parameter units.
 
 Speed, tone and mix slew over approximately 5 ms. Time, beats, sync, tempo and
 smooth changes latch at the next restart: editing them never teleports the
-currently audible read head. Timing is **tempo-relative, not song-position
-locked**; stopping/seeking the song does not reset the capture cycle. Supported
-sync tempo is 20–400 BPM (values outside this range are clamped internally).
+currently audible read head.
+
+With sync on, restarts are **locked to the transport's beat grid**, like
+Halftime: the host pushes the song's beat phase once per block (the same hidden
+input the DJ Mixer uses), and a new capture starts whenever the transport
+crosses a multiple of `beats`. Pressing play or seeking restarts the capture at
+once and the next restart falls on the grid, so a one-bar break with `beats` at
+4 is captured from its downbeat. The host phase wraps every eight beats, so a
+custom `beats` value that does not divide eight gets one short cycle at the
+wrap. While the transport is stopped (or with sync off) the cycle free-runs
+from tempo or milliseconds alone, so keyboard auditioning still works. A
+restart on the very first block after play from bar 1 can land one block late.
+Supported sync tempo is 20–400 BPM (values outside this range are clamped
+internally).
 Bypass ramps back to exact dry while continuing to record and advance history.
 
 ## DSP and storage

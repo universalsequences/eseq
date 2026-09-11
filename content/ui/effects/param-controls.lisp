@@ -60,6 +60,10 @@
         param-mod-offset
         param-effective-value
         param-mod-scale
+        param-process-value
+        param-process-clamped
+        param-process-mapped?
+        param-process-text-color
         param-base-min-prop
         param-base-max-prop
         param-selected-mod-slot-prop
@@ -1027,6 +1031,34 @@
 (def param-mod-scale (p)
   (let ((field (get p :mod-scale-field)))
     (if field (bind-seq field) false)))
+
+;; Process effective value (eseq-p1kg). When an enabled step process writes
+;; to this param through a bound OUT port, the host tags the param map
+;; `:process-mapped` and publishes the value the instrument actually received
+;; (base, or the step's p-lock, plus the port value, clamped to the range) in
+;; the param's display units. The knob draws it as a second dot in the process
+;; accent; the number picker as a strip anchored at the base. Read-only: the
+;; control keeps editing the base. `false` when the param is not mapped, so
+;; a stale feed entry never draws on an unmapped control.
+(def param-process-mapped? (p)
+  (if (get p :process-mapped) true false))
+
+(def param-process-value (p)
+  (let ((field (get p :process-value-field)))
+    (if (and (get p :process-mapped) field) (bind-seq field) false)))
+
+;; 1 when the last process write hit the range end and was clamped.
+(def param-process-clamped (p)
+  (let ((field (get p :process-clamped-field)))
+    (if (and (get p :process-mapped) field) (bind-seq field) 0)))
+
+;; P-lock colour wins (the step override is the more specific state); a
+;; process-mapped param otherwise reads in the process accent so the user can
+;; tell it is being generatively driven even while the offset is zero.
+(def param-process-text-color (fx p)
+  (if (param-plock-active? fx p)
+    (rgba (param-plock-color-r) (param-plock-color-g) (param-plock-color-b) 1.0)
+    (if (param-process-mapped? p) :process-lane-accent :dim)))
 
 (def param-base-value-prop (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))

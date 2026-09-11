@@ -10,7 +10,7 @@ fn check_woodwind_surface(instrument: &str, pages: usize) {
         &dsp, 48000, Some(&root)).expect("compile factory woodwind manifest");
     let mut values = Vec::new();
     let mut expected = std::collections::HashSet::new();
-    let params = compiled.manifest.params.iter().enumerate().filter(|(_, p)| !p.hidden)
+    let mut params: Vec<Value> = compiled.manifest.params.iter().enumerate().filter(|(_, p)| !p.hidden)
         .map(|(index, p)| {
             assert!(p.default >= p.min && p.default <= p.max, "{} default must be editable", p.name);
             expected.insert(p.name.clone());
@@ -20,6 +20,7 @@ fn check_woodwind_surface(instrument: &str, pages: usize) {
             values.push((field, Value::Number(p.default as f64)));
             Value::Map(param)
         }).collect();
+    params.push(Value::Map(test_base_note_param_map(compiled.manifest.params.len())));
     let mut inst = test_instrument_map();
     inst.insert("synth".into(), Rc::new(RefCell::new(test_list(params))));
     let ui = build_custom_instrument_ui_source_with_overlay(Some((
@@ -73,6 +74,14 @@ fn check_woodwind_surface(instrument: &str, pages: usize) {
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() { panic!("{instrument} page {section}: {status}"); }
         let layout = editor.widget_layout().unwrap();
+        let base_note = find_layout_node_by_debug_name(&layout, "instrument-base-note")
+            .expect("every instrument page exposes the host base note");
+        assert_finite_nonzero_rect(base_note, "base note");
+        editor.drain_host_commands();
+        editor.runtime_mut().invoke(base_note.props["on-change"].clone(), vec![Value::Number(12.0)]).unwrap();
+        assert!(editor.drain_host_commands().iter().any(|cmd| matches!(cmd,
+            eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }
+                if name == "set-instrument-base-note" && *payload["value"].borrow() == Value::Number(12.0))));
         let panel = find_layout_node_by_debug_name(&layout, "pm-surface").expect("physical model surface");
         let display = find_layout_node_by_debug_name(panel, "pm-display").expect("center display");
         assert_finite_nonzero_rect(panel, "physical model surface");

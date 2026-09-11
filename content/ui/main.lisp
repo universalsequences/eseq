@@ -15,6 +15,7 @@
 (load "@/ui/themes.lisp")
 (seq-theme-mac-osx-dark)
 (import eseq.materials)
+(import eseq.bindings)
 (import eseq.seq-core-state)
 ;; Hardware MIDI mapping table + dispatch entry point (pure data, no UI).
 (import eseq.midi)

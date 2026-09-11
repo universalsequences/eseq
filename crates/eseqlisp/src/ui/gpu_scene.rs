@@ -411,6 +411,7 @@ pub(crate) fn build_circle_quads(
 struct ProportionalTextLayoutKey {
     text: String,
     size_tenths: u16,
+    mono: bool,
 }
 
 struct CachedGlyphPlacement {
@@ -470,12 +471,14 @@ impl PropTextLayoutCache {
         let key = ProportionalTextLayoutKey {
             text: run.text.clone(),
             size_tenths: (run.font_size * 10.0).round() as u16,
+            mono: run.mono,
         };
         if !self.layouts.contains_key(&key) {
             let mut pen_x = 0.0_f32;
             let mut glyphs = Vec::new();
             for ch in key.text.chars() {
-                let Some(entry) = prop_atlas.get_or_rasterize(ch, key.size_tenths) else {
+                let Some(entry) = prop_atlas.get_or_rasterize_face(ch, key.size_tenths, key.mono)
+                else {
                     continue;
                 };
                 glyphs.push(CachedGlyphPlacement {
@@ -490,9 +493,9 @@ impl PropTextLayoutCache {
             }
             let layout = CachedProportionalTextLayout {
                 text_width_px: pen_x,
-                line_height_px: prop_atlas.line_height(key.size_tenths),
-                descent_px: prop_atlas.descent(key.size_tenths),
-                cap_height_px: prop_atlas.cap_height(key.size_tenths),
+                line_height_px: prop_atlas.line_height_face(key.size_tenths, key.mono),
+                descent_px: prop_atlas.descent_face(key.size_tenths, key.mono),
+                cap_height_px: prop_atlas.cap_height_face(key.size_tenths, key.mono),
                 glyphs,
                 last_used_frame: self.frame_index,
             };

@@ -1465,6 +1465,7 @@ impl WidgetDefinition for TreeWidget {
                     scale: 1.0,
                     fg,
                     bg: transparent,
+                    mono: false,
                 },
             ));
 
@@ -1481,6 +1482,7 @@ impl WidgetDefinition for TreeWidget {
                             scale: 1.0,
                             fg: detail_fg,
                             bg: transparent,
+                            mono: false,
                         },
                     ));
                 }

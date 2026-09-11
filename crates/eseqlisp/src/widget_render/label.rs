@@ -85,6 +85,14 @@ fn underline_rect(
     }
 }
 
+pub(crate) fn mono_enabled(props: &HashMap<String, Value>) -> bool {
+    matches!(props.get("mono"), Some(Value::Bool(true)))
+}
+
+fn node_mono_enabled(node: &Value) -> bool {
+    get_map(node).is_some_and(|props| mono_enabled(&props))
+}
+
 fn wrap_enabled(props: &HashMap<String, Value>) -> bool {
     matches!(props.get("wrap"), Some(Value::Bool(true)))
 }
@@ -405,7 +413,7 @@ impl WidgetDefinition for LabelWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["text", "width", "height", "font-size", "wrap"]
+        &["text", "width", "height", "font-size", "wrap", "mono"]
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
@@ -415,7 +423,7 @@ impl WidgetDefinition for LabelWidget {
     fn completion_props(&self) -> &'static [&'static str] {
         &[
             "text", "color", "active", "active-color", "hover-color", "bg", "font-size",
-            "width", "height", "wrap", "h-align", "v-align", "underline", "on-click",
+            "width", "height", "wrap", "h-align", "v-align", "underline", "on-click", "mono",
         ]
     }
 
@@ -454,6 +462,8 @@ impl WidgetDefinition for LabelWidget {
             let px_width = if let Some(explicit_w) = explicit_width {
                 // Explicit width is in cell units, convert to pixels.
                 explicit_w * ctx.cell_w
+            } else if node_mono_enabled(node) {
+                measurer.measure_mono_text_px(&text, font_size)
             } else {
                 measurer.measure_text_px(&text, font_size)
             };
@@ -490,10 +500,11 @@ impl WidgetDefinition for LabelWidget {
             }
             _ => 0.0,
         };
-        Some(super::proportional_text_baseline_offset(
+        Some(super::proportional_text_baseline_offset_face(
             font_size,
             row_offset,
             ctx,
+            node_mono_enabled(node),
         ))
     }
 
@@ -651,6 +662,7 @@ impl WidgetDefinition for LabelWidget {
         let start_row = label_text_row(&node.props, node.rect);
         let h_align = resolve_h_align(&node.props);
         let underline = underline_enabled(&node.props);
+        let mono = mono_enabled(&node.props);
         for (line_idx, line) in lines.into_iter().enumerate() {
             let row = start_row + line_idx as f32 * line_height;
             if row >= node.rect.row + node.rect.height {
@@ -681,6 +693,7 @@ impl WidgetDefinition for LabelWidget {
                     scale: 1.0,
                     fg,
                     bg,
+                    mono,
                 },
             ));
         }

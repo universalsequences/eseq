@@ -70,6 +70,11 @@
 ;; every piano-roll sync to build SEQ.piano-roll-automation.
 (def eseq.vanilla/piano-roll-automation-param "step-param:1")
 
+;; PINNED (hazard m), read flat by Rust: set true by any UI that shows
+;; SEQ.track-automation (per-track p-lock columns, e.g. the tracker package)
+;; so the host only builds that value while someone is looking at it.
+(def eseq.vanilla/track-automation-wanted false)
+
 ;; True only when the lower piano roll was entered from arrangement clip
 ;; gestures. Kept in a reactive channel rather than a source defstate because
 ;; activating the effect buffer evaluates its source; the entry mode must

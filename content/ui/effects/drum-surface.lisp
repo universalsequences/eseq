@@ -181,8 +181,7 @@
   (v-stack :gap 0.1
     (eseq-drum-pitch-trajectory :debug-name "drum-pitch"
       :base base :a1 a1 :a2 a2 :r1 r1 :r2 r2 :scale scale :tune tune :hold hold
-      :on-mouse-down (get g :down) :on-drag (get g :drag) :on-mouse-up (get g :up))
-    (label "Drag X: time / Y: tune / 0–250 ms" :height 0.4 :v-align :center :font-size 8.2 :color :black :bg :transparent))))
+      :on-mouse-down (get g :down) :on-drag (get g :drag) :on-mouse-up (get g :up)))))
 (defwidget eseq-drum-burst-timing
   :width 35.2 :height 4.1 :state (count spread decay tail snap body)
   :bindable (count spread decay tail snap body)
@@ -201,8 +200,7 @@
   (v-stack :gap 0.1
     (eseq-drum-burst-timing :debug-name "drum-bursts" :count (bind "bursts") :spread (bind "sprd")
       :decay (bind "bdec") :tail (bind "dec") :snap (bind "snap") :body (bind "body")
-      :on-mouse-down (get g :down) :on-drag (get g :drag) :on-mouse-up (get g :up))
-    (label "Drag X: spread / Y: burst decay / 0–500 ms" :height 0.4 :v-align :center :font-size 8.2 :color :black :bg :transparent))))
+      :on-mouse-down (get g :down) :on-drag (get g :drag) :on-mouse-up (get g :up)))))
 (defwidget eseq-drum-layer-cut
   :width 35.2 :height 1.5 :state (length scale) :bindable (length scale)
   :shader
@@ -244,8 +242,7 @@
   (let ((g (parameter-gesture "decay" "attack")))
   (v-stack :gap 0.1
     (eseq-drum-quadratic-envelope :attack attack :decay decay :linear linear :quadratic quadratic
-      :on-mouse-down (get g :down) :on-drag (get g :drag) :on-mouse-up (get g :up))
-    (label "Drag X: decay / Y: attack / 0–500 ms" :height 0.4 :v-align :center :font-size 8.2 :color :black :bg :transparent))))
+      :on-mouse-down (get g :down) :on-drag (get g :drag) :on-mouse-up (get g :up)))))
 
 
 ;; Held amplitude approaches Sustain; release starts at the note-off level.

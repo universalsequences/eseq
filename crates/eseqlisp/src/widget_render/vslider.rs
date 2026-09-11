@@ -365,6 +365,7 @@ impl WidgetDefinition for VerticalSliderWidget {
                             scale: 1.0,
                             fg,
                             bg: theme::BG(),
+                            mono: false,
                         },
                     ));
                 }

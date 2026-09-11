@@ -928,6 +928,7 @@ impl WidgetDefinition for DropdownWidget {
                     scale: 1.0,
                     fg: text_color,
                     bg: transparent,
+                    mono: false,
                 },
             ));
         } else {
@@ -954,6 +955,7 @@ impl WidgetDefinition for DropdownWidget {
                         scale: 1.0,
                         fg: text_color,
                         bg: transparent,
+                        mono: false,
                     },
                 ));
                 prims.push(GpuPrimitive::PopClipRect);
@@ -1133,6 +1135,7 @@ impl WidgetDefinition for DropdownWidget {
                         // Popup labels are chrome, not the trigger's colored value.
                         fg: theme::FG(),
                         bg: transparent,
+                        mono: false,
                     },
                 ));
             }

@@ -222,6 +222,7 @@ pub(super) fn build_primitives_for_patcher(
                     scale: 1.0,
                     fg: theme::PATCHER_TEXT_MUTED(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                    mono: false,
                 },
             ));
             if !patch.diagnostics.is_empty() {
@@ -239,6 +240,7 @@ pub(super) fn build_primitives_for_patcher(
                         scale: 1.0,
                         fg: theme::PATCHER_ERROR(),
                         bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                        mono: false,
                     },
                 ));
             }
@@ -256,6 +258,7 @@ pub(super) fn build_primitives_for_patcher(
                     scale: 1.0,
                     fg: theme::PATCHER_ERROR(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                    mono: false,
                 },
             ));
         }
@@ -643,6 +646,7 @@ fn draw_agentic_bubbles(
                 scale: zoom,
                 fg: theme::PATCHER_AGENTIC_HEADER_TEXT(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                mono: false,
             },
         ));
         // The model chip sits immediately after the status, on the left: the
@@ -699,6 +703,7 @@ fn draw_agentic_bubbles(
                         scale: zoom,
                         fg: theme::PATCHER_AGENTIC_HEADER_TEXT(),
                         bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                        mono: false,
                     },
                 ));
             }
@@ -735,6 +740,7 @@ fn draw_agentic_bubbles(
                     scale: zoom,
                     fg: body_fg,
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                    mono: false,
                 },
             ));
         }
@@ -857,6 +863,7 @@ fn push_agentic_follow_up(
                 scale: zoom,
                 fg,
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                mono: false,
             },
         ));
     }
@@ -1007,6 +1014,7 @@ fn push_agentic_send_chevron(
             scale: zoom,
             fg: theme::PATCHER_AGENTIC_SEND_GLYPH(),
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            mono: false,
         },
     ));
     disc
@@ -1059,6 +1067,7 @@ fn push_agentic_model_chip(
             scale: zoom,
             fg: theme::PATCHER_AGENTIC_CHIP_TEXT(),
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            mono: false,
         },
     ));
     Some(chip)
@@ -1588,6 +1597,7 @@ fn push_hovered_port_tooltip(
             scale: zoom,
             fg: theme::PATCHER_TOOLTIP_TEXT(),
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            mono: false,
         },
     ));
 }
@@ -1795,6 +1805,7 @@ fn push_autocomplete_panel(
                     theme::COMP_FG()
                 },
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                mono: false,
             },
         ));
         let Some(category) = suggestion
@@ -1823,6 +1834,7 @@ fn push_autocomplete_panel(
                 scale: zoom,
                 fg: theme::COMP_CATEGORY_FG(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                mono: false,
             },
         ));
     }
@@ -1947,6 +1959,7 @@ fn push_autocomplete_documentation_panel(
                     scale: zoom,
                     fg: theme::COMP_DOC_FG(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                    mono: false,
                 },
             ));
             visual_index += 1;
@@ -2282,6 +2295,7 @@ fn push_node(
                 scale: zoom,
                 fg: theme::PATCHER_ERROR(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                mono: false,
             },
         ));
     }
@@ -2523,6 +2537,7 @@ fn push_node_label(
                 scale: zoom,
                 fg: head_color,
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                mono: false,
             },
         ));
         if let Some(ghost) = autocomplete_ghost
@@ -2544,6 +2559,7 @@ fn push_node_label(
                     scale: zoom,
                     fg: theme::PATCHER_TEXT_MUTED(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                    mono: false,
                 },
             ));
         }
@@ -2563,6 +2579,7 @@ fn push_node_label(
             scale: zoom,
             fg: head_color,
             bg,
+            mono: false,
         },
     ));
     if tail.is_empty() {
@@ -2614,6 +2631,7 @@ fn push_node_label(
                 scale: zoom,
                 fg: color,
                 bg,
+                mono: false,
             },
         ));
     }

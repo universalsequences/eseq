@@ -11,6 +11,10 @@ pub(super) struct ProcessTargetOverlay {
     pub(super) instrument_params: ScheduledInstrumentParams,
     pub(super) midi_fx_params: Vec<ProcessMidiFxParamOverride>,
     pub(super) rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+    /// Per descriptor param index: what the instrument writes resolved to,
+    /// for the UI's effective-value display. Keyed by descriptor index (not
+    /// node param index) because that is what the panel knows.
+    pub(super) instrument_effective: Vec<crate::process::ProcessEffectiveParam>,
 }
 
 impl Default for ProcessTargetOverlay {
@@ -20,6 +24,7 @@ impl Default for ProcessTargetOverlay {
             instrument_params: ScheduledInstrumentParams::new(),
             midi_fx_params: Vec::new(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            instrument_effective: Vec::new(),
         }
     }
 }
@@ -256,12 +261,23 @@ pub(super) fn process_device_write_value(
     op: crate::process::ProcessTargetOp,
     value: f32,
 ) -> f32 {
-    match op {
-        crate::process::ProcessTargetOp::Set => descriptor.denormalize(value),
-        crate::process::ProcessTargetOp::Add => {
-            descriptor.denormalize((descriptor.normalize(current_stored) + value).clamp(0.0, 1.0))
-        }
-    }
+    process_device_write_value_clamped(descriptor, current_stored, op, value).0
+}
+
+/// Same as [`process_device_write_value`], also reporting whether the write
+/// ran past the param's normalized range and was clamped to an end.
+pub(super) fn process_device_write_value_clamped(
+    descriptor: &crate::effects::ParamDescriptor,
+    current_stored: f32,
+    op: crate::process::ProcessTargetOp,
+    value: f32,
+) -> (f32, bool) {
+    let normalized = match op {
+        crate::process::ProcessTargetOp::Set => value,
+        crate::process::ProcessTargetOp::Add => descriptor.normalize(current_stored) + value,
+    };
+    let clamped = normalized.is_finite() && !(0.0..=1.0).contains(&normalized);
+    (descriptor.denormalize(normalized.clamp(0.0, 1.0)), clamped)
 }
 
 pub(super) fn process_instrument_overlay_value(
@@ -331,9 +347,26 @@ pub(super) fn process_apply_instrument_write(
     else {
         return None;
     };
+    let base = current;
     let current = process_instrument_overlay_value(overlay, &scheduled, current);
-    scheduled.value = process_device_write_value(param_desc, current, op, value);
+    let (effective, clamped) =
+        process_device_write_value_clamped(param_desc, current, op, value);
+    scheduled.value = effective;
     upsert_instrument_params(&mut overlay.instrument_params, [scheduled.clone()]);
+    let record = crate::process::ProcessEffectiveParam {
+        param_idx,
+        base,
+        value: effective,
+        clamped,
+    };
+    match overlay
+        .instrument_effective
+        .iter_mut()
+        .find(|existing| existing.param_idx == param_idx)
+    {
+        Some(existing) => *existing = record,
+        None => overlay.instrument_effective.push(record),
+    }
     Some(scheduled)
 }
 

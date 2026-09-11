@@ -1938,6 +1938,7 @@ impl WidgetDefinition for KnobNumberWidget {
             "selected-mod-slot",
             "mod-offset",
             "mod-scale",
+            "process-value",
             "mod-range-0-slot",
             "mod-range-0-depth",
             "mod-range-1-slot",
@@ -2550,6 +2551,43 @@ impl WidgetDefinition for KnobNumberWidget {
             }
         }
 
+        // Process effective value (eseq-p1kg): a second dot in the process
+        // accent, at the absolute value a step process last wrote onto this
+        // param. Absolute rather than an offset because the scheduler
+        // publishes what the instrument received; the knob keeps showing the
+        // editable base and the dot rides the arc beside it.
+        if let Some(process_value) = node.props.get("process-value").and_then(value_as_f32)
+            && base_range.abs() > 0.000_001
+            && process_value.is_finite()
+        {
+            let base_t = taper_normalize(taper, base_min, base_max, base_value);
+            let proc_t = taper_normalize(taper, base_min, base_max, process_value);
+            if (proc_t - base_t).abs() > MOD_DOT_MIN_TRAVEL {
+                let color = theme::PROCESS_LANE_ACCENT();
+                prims.push(GpuPrimitive::WidgetInstance {
+                    widget_type: "knob-number-mod-dot".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t,
+                        orientation: 0.0,
+                        itime: viewport.time_seconds,
+                        uniform_a: [0.0; 4],
+                        uniform_b: [proc_t, MOD_DOT_RING_RADIUS, MOD_DOT_RADIUS, 0.0],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
+                        color_a: [color.r, color.g, color.b, color.a],
+                        color_b: [0.0; 4],
+                        color_c: [0.0; 4],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: false,
+                });
+            }
+        }
+
         if let Some(label_band) = component_layout.label_band
             && component_layout.label_font_size >= 0.5
         {
@@ -2569,6 +2607,7 @@ impl WidgetDefinition for KnobNumberWidget {
                         b: 0.0,
                         a: 0.0,
                     },
+                    mono: false,
                 },
             ));
         }
@@ -2594,6 +2633,7 @@ impl WidgetDefinition for KnobNumberWidget {
                         b: 0.0,
                         a: 0.0,
                     },
+                    mono: false,
                 },
             ));
         }

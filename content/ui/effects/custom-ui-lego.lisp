@@ -383,6 +383,7 @@
             :base-value (eseq.effects.custom-ui-runtime/custom-ui-param-base-value-prop p)
             :mod-offset (eseq.effects.custom-ui-runtime/custom-ui-param-mod-offset p)
             :mod-scale (eseq.effects.custom-ui-runtime/custom-ui-param-mod-scale p)
+            :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
             :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :base-min (eseq.effects.custom-ui-runtime/custom-ui-param-base-min-prop p) :base-max (eseq.effects.custom-ui-runtime/custom-ui-param-base-max-prop p)
             :mod-range-0-slot (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-depth-prop p 0)
@@ -427,6 +428,7 @@
             :base-value (eseq.effects.custom-ui-runtime/custom-ui-param-base-value-prop p)
             :mod-offset (eseq.effects.custom-ui-runtime/custom-ui-param-mod-offset p)
             :mod-scale (eseq.effects.custom-ui-runtime/custom-ui-param-mod-scale p)
+            :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
             :unit (eseq.effects.custom-ui-runtime/custom-ui-param-control-unit p)
             :base-min (eseq.effects.custom-ui-runtime/custom-ui-param-base-min-prop p) :base-max (eseq.effects.custom-ui-runtime/custom-ui-param-base-max-prop p)
             :mod-range-0-slot (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (eseq.effects.custom-ui-runtime/custom-ui-param-knob-mod-depth-prop p 0)
@@ -503,6 +505,8 @@
               :unit unit
               :noui true :font-size 10.2
               :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
+              :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -524,6 +528,8 @@
               :unit unit
               :noui true :font-size 10.2
               :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
+              :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -551,6 +557,8 @@
               :background-color :mixer-strip-bg
               :font-size 9.5
               :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
+              :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
               :active (if stage
                 (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding section stage)
                 false)
@@ -592,6 +600,8 @@
               :noui false 
               :font-size 9.5
               :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
+              :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
               :active false
               :active-color (ui-accent-cyan)
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
@@ -759,6 +769,8 @@
             :step 1
             :noui true :font-size 10.0
             :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
+              :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -781,6 +793,8 @@
               :noui true :font-size 10.2
               :text-align :left
               :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
+              :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
               :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -800,6 +814,8 @@
             :step 1
             :noui true :font-size 10.2
             :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
+              :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -822,6 +838,8 @@
               :noui true :font-size 10.5
               :text-align :center
               :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
+              :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
               :active (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding -1 stage)
               :active-color (ui-accent-cyan)
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
@@ -846,6 +864,8 @@
                 :noui true :font-size 10.5
                 :text-align :center
                 :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
+              :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
                 :active (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding section stage)
                 :active-color (ui-accent-cyan)
                 :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
@@ -1225,6 +1245,8 @@
           :unit unit
           :noui true :font-size 8.6
           :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
+              :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p)
+              :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
           :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
           :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
           :plock-color-g (eseq.effects.param-controls/param-plock-color-g)

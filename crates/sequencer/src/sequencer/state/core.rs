@@ -676,6 +676,11 @@ pub struct SequencerState {
     /// draws it as a scope; read-only on the UI side.
     pub(super) process_scope_values: Mutex<HashMap<u64, HashMap<String, Vec<f32>>>>,
     pub(super) process_scope_values_version: AtomicU64,
+    /// Last value each process OUT port wrote onto an instrument param, keyed
+    /// `(track, descriptor param index)`. Read-only UI display feed.
+    pub(super) process_effective_params:
+        Mutex<HashMap<(usize, usize), crate::process::ProcessEffectiveParam>>,
+    pub(super) process_effective_params_version: AtomicU64,
     pub(super) scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     pub(super) scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
     pub(super) process_trace_enabled: AtomicBool,

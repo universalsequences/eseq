@@ -4,6 +4,8 @@ mod poseidon_ui_tests;
 mod drift_waveform_tests;
 #[path = "rack_slot_indicator_tests.rs"]
 mod rack_slot_indicator_tests;
+#[path = "instrument_header_ui_tests.rs"]
+mod instrument_header_ui_tests;
 
     use super::*;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
@@ -14749,6 +14751,114 @@ mod rack_slot_indicator_tests;
         );
     }
 
+    fn process_chain_bound_to(param: &str, enabled: bool) -> sequencer::process::TrackProcessChain {
+        use std::collections::BTreeMap;
+        sequencer::process::TrackProcessChain {
+            slots: vec![sequencer::process::TrackProcessSlot {
+                instance_id: sequencer::process::ProcessInstanceId(1),
+                instance_name: None,
+                class_name: "rand".to_string(),
+                enabled,
+                project_layer: false,
+                inlets: BTreeMap::new(),
+                lanes: BTreeMap::new(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: BTreeMap::from([(
+                    "out".to_string(),
+                    Some(sequencer::process::ParamTarget::InstrumentParam {
+                        param: param.to_string(),
+                        param_id: None,
+                    }),
+                )]),
+            }],
+        }
+    }
+
+    #[test]
+    fn instrument_panel_marks_params_bound_by_an_enabled_process_port() {
+        // eseq-p1kg: a param an enabled process OUT port writes to carries
+        // `process-mapped` plus the effective-value fields; other params and
+        // disabled slots carry nothing, so the overlay never draws stale.
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let other = desc
+            .params
+            .iter()
+            .find(|param| param.name != "cutoff")
+            .map(|param| param.name.clone())
+            .expect("a second filter param");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+
+        assert!(app.state.set_track_process_chain(0, process_chain_bound_to("cutoff", true)));
+        let panel = build_instrument_panel_value(&app, 0, &selected);
+        assert!(value_param_has_key(&panel, "cutoff", "process-mapped"));
+        assert_eq!(
+            value_param_string(&panel, "cutoff", "process-value-field"),
+            Some(super::instrument_proc_value_field(0, cutoff_idx))
+        );
+        assert_eq!(
+            value_param_string(&panel, "cutoff", "process-clamped-field"),
+            Some(super::instrument_proc_clamped_field(0, cutoff_idx))
+        );
+        assert!(
+            !value_param_has_key(&panel, &other, "process-mapped"),
+            "{other} is not a process target"
+        );
+
+        assert!(app.state.set_track_process_chain(0, process_chain_bound_to("cutoff", false)));
+        let panel = build_instrument_panel_value(&app, 0, &selected);
+        assert!(
+            !value_param_has_key(&panel, "cutoff", "process-mapped"),
+            "a disabled slot's binding does not count as mapped"
+        );
+    }
+
+    #[test]
+    fn process_effective_param_fields_publish_display_units_once_per_change() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let pdesc = desc.params[cutoff_idx].clone();
+        let app = test_app_with_instrument_descriptor(desc);
+        let stored = pdesc.min + (pdesc.max - pdesc.min) * 0.5;
+        app.state.publish_process_effective_params(
+            0,
+            &[sequencer::process::ProcessEffectiveParam {
+                param_idx: cutoff_idx,
+                base: pdesc.min,
+                value: stored,
+                clamped: true,
+            }],
+        );
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], false);
+        let mut previous = std::collections::HashMap::new();
+        super::sync_process_effective_param_fields(&mut runtime, &app, &app.state, &mut previous);
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", &super::instrument_proc_value_field(0, cutoff_idx)),
+            Some(&Value::Number(pdesc.stored_to_user(stored) as f64)),
+            "the field carries the display-unit value the knob compares against"
+        );
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", &super::instrument_proc_clamped_field(0, cutoff_idx)),
+            Some(&Value::Number(1.0))
+        );
+        assert_eq!(previous.len(), 1);
+        // Same feed again: nothing new to publish.
+        let before = previous.clone();
+        super::sync_process_effective_param_fields(&mut runtime, &app, &app.state, &mut previous);
+        assert_eq!(previous, before);
+    }
+
     #[test]
     fn rack_slot_effect_params_carry_no_modulated_value_fields() {
         // eseq-hpc: only a rack slot's *instrument* is sampled
@@ -14974,6 +15084,214 @@ mod rack_slot_indicator_tests;
         assert_eq!(velocity(chunks[1]), before);
         app::edit::redo(&mut app);
         assert_eq!(velocity(chunks[1]), 0.25);
+    }
+
+    #[test]
+    fn track_automation_columns_follow_locks_and_gate_on_the_lisp_flag() {
+        use super::super::piano_roll::{
+            build_track_automation_value, build_track_lock_targets_value,
+            build_tracker_rows_value, sync_track_automation_state,
+        };
+        let instrument = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = instrument
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let effect = sequencer::effects::EffectDescriptor::builtin_filter();
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![vec![sequencer::effects::EffectSlotState::new(&effect, 0)]],
+        ));
+        state.pattern.track_params[0].set_num_steps(16);
+        state.pattern.instrument_slots[0].apply_descriptor(&instrument, 0);
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            state.clone(),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app.graph.instrument_descriptors = vec![instrument.clone()];
+        app.graph.effect_descriptors = vec![vec![effect.clone()]];
+
+        state.pattern.patterns[0].set_step_active(0, true);
+        state.pattern.patterns[0].set_step_active(4, true);
+        // Velocity and transpose are the tracker's own Note/Vol cells and
+        // must not become columns, however far they stray from default.
+        state.pattern.step_data[0].set(0, StepParam::Velocity, 0.5);
+        state.pattern.step_data[0].set(0, StepParam::Transpose, 7.0);
+        state.pattern.step_data[0].set(4, StepParam::Duration, 2.0);
+        state.pattern.instrument_slots[0].set_plock(4, cutoff_idx, 900.0);
+
+        let Value::List(tracks) = build_track_automation_value(&app, &state) else {
+            panic!("one list per track")
+        };
+        assert_eq!(tracks.len(), 1);
+        let rows = value_list_maps(&tracks[0].borrow());
+        let keys: Vec<String> = rows
+            .iter()
+            .map(|row| value_map_string(row, "key").unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                format!("step-param:{}", StepParam::Duration.index()),
+                format!("instrument:{cutoff_idx}"),
+            ],
+            "a step param leaving its default plus every locked device param"
+        );
+        assert_eq!(value_map_string(&rows[0], "target").as_deref(), Some("step-param"));
+        // Values live in the step-major matrix: (active transpose velocity col…).
+        let Value::List(matrix) = build_tracker_rows_value(&app, &state) else {
+            panic!("rows")
+        };
+        assert_eq!(matrix.len(), 16, "one entry per grid row");
+        let cell = |row: usize| -> Vec<Option<f64>> {
+            let row_value = matrix[row].borrow().clone();
+            let Value::List(tracks) = row_value else { panic!("row list") };
+            let cell_value = tracks[0].borrow().clone();
+            let Value::List(items) = cell_value else { panic!("cell list") };
+            items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::Number(n) => Some(*n),
+                    Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+                    _ => None,
+                })
+                .collect()
+        };
+        let row4 = cell(4);
+        assert_eq!(row4[0], Some(1.0), "active");
+        assert_eq!(row4[2], Some(1.0), "velocity at default on step 4");
+        assert_eq!(row4[3], Some(2.0), "duration column");
+        assert_eq!(
+            row4[4],
+            Some(instrument.params[cutoff_idx].stored_to_user(900.0) as f64),
+            "device locks print in user units, like the lane"
+        );
+        let row0 = cell(0);
+        assert_eq!(row0[2], Some(0.5), "velocity set on step 0");
+        assert_eq!(row0[3], Some(StepParam::Duration.default_value() as f64), "a typed default reads back");
+        assert_eq!(row0[4], None, "no lock on step 0");
+        let row1 = cell(1);
+        assert_eq!(row1[0], Some(0.0), "inactive step");
+        assert_eq!(row1[3], None, "inactive steps carry no step-param value");
+        assert_eq!(value_map_number(&rows[1], "param-idx"), Some(cutoff_idx as f64));
+
+        // Grid playhead per track: 4-step pattern under a 16-row grid, host
+        // on step 2, transport count 38 → row 6 (38 mod 16, and 6 mod 4 = 2)
+        // lights; a disagreeing count (37) lights the real row 2.
+        {
+            use super::super::piano_roll::sync_tracker_grid_playhead_fields;
+            let mut runtime = Runtime::new();
+            runtime.register_reactive("SEQ", vec![], false);
+            runtime.eval_str("(def track-automation-wanted true)").unwrap();
+            let grid_state = Arc::new(SequencerState::new(2, vec![vec![], vec![]]));
+            grid_state.pattern.track_params[0].set_num_steps(4);
+            grid_state.pattern.track_params[1].set_num_steps(16);
+            grid_state.transport.playing.store(true, Ordering::Relaxed);
+            grid_state.transport.track_playheads[0].store(2, Ordering::Relaxed);
+            grid_state.transport.playhead.store(38, Ordering::Relaxed);
+            let mut grid_app = test_app_for_track_visual_state(grid_state.clone());
+            grid_app.tracks = vec!["a".into(), "b".into()];
+            let lit_rows = |runtime: &Runtime| -> Vec<usize> {
+                match runtime.reactive_field_value("SEQ", "track-grid-playhead-0") {
+                    Some(Value::List(items)) => items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, v)| matches!(&*v.borrow(), Value::Number(n) if *n == 1.0))
+                        .map(|(i, _)| i)
+                        .collect(),
+                    other => panic!("grid list: {other:?}"),
+                }
+            };
+            sync_tracker_grid_playhead_fields(&mut runtime, &grid_state, &grid_app);
+            assert_eq!(lit_rows(&runtime), vec![6]);
+            assert!(
+                matches!(
+                    runtime.reactive_field_value("SEQ", "track-grid-playhead-row-0"),
+                    Some(Value::Number(n)) if *n == 6.0
+                ),
+                "the scalar row rides along for scroll following"
+            );
+            grid_state.transport.playhead.store(37, Ordering::Relaxed);
+            sync_tracker_grid_playhead_fields(&mut runtime, &grid_state, &grid_app);
+            assert_eq!(lit_rows(&runtime), vec![2], "clock disagrees: real row");
+            grid_state.transport.playing.store(false, Ordering::Relaxed);
+            sync_tracker_grid_playhead_fields(&mut runtime, &grid_state, &grid_app);
+            assert!(lit_rows(&runtime).is_empty(), "stopped: nothing lit");
+            assert!(
+                matches!(
+                    runtime.reactive_field_value("SEQ", "track-grid-playhead-row-0"),
+                    Some(Value::Number(n)) if *n == -1.0
+                ),
+                "stopped: no row request"
+            );
+        }
+
+        // The picker lists every bindable target grouped by device, locked
+        // or not, with the same scale fields.
+        let Value::List(target_tracks) = build_track_lock_targets_value(&app, &state) else {
+            panic!("one list per track")
+        };
+        let groups = value_list_maps(&target_tracks[0].borrow());
+        let group_names: Vec<String> = groups
+            .iter()
+            .map(|group| value_map_string(group, "group").unwrap())
+            .collect();
+        assert_eq!(group_names, vec!["Step", instrument.name.as_str(), &format!("FX 1 · {}", effect.name)]);
+        let step_items = value_list_maps(&groups[0]["items"].borrow());
+        assert!(
+            step_items.iter().all(|item| {
+                let key = value_map_string(item, "key").unwrap();
+                key != "step-param:1" && key != format!("step-param:{}", StepParam::Transpose.index())
+            }),
+            "velocity and transpose are never offered as columns"
+        );
+        let inst_items = value_list_maps(&groups[1]["items"].borrow());
+        assert_eq!(inst_items.len(), instrument.params.len());
+        assert_eq!(value_map_string(&inst_items[cutoff_idx], "label").as_deref(), Some("cutoff"));
+        assert_eq!(value_map_number(&inst_items[cutoff_idx], "param-idx"), Some(cutoff_idx as f64));
+
+        // The value is only published while a UI has opted in through the
+        // pinned Lisp flag.
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], false);
+        runtime.eval_str("(def track-automation-wanted false)").unwrap();
+        sync_track_automation_state(&mut runtime, &app, &state);
+        assert!(
+            runtime.reactive_field_value("SEQ", "track-automation").is_none(),
+            "not wanted: nothing published"
+        );
+        runtime.eval_str("(set! track-automation-wanted true)").unwrap();
+        sync_track_automation_state(&mut runtime, &app, &state);
+        assert!(
+            matches!(
+                reactive_field_value(&runtime, "SEQ", "track-automation"),
+                Value::List(tracks) if tracks.len() == 1
+            ),
+            "wanted: one list per track"
+        );
+        assert!(
+            matches!(
+                reactive_field_value(&runtime, "SEQ", "track-lock-targets"),
+                Value::List(tracks) if tracks.len() == 1
+            ),
+            "the picker list rides the same gate"
+        );
     }
 
     #[test]
@@ -16188,6 +16506,40 @@ mod rack_slot_indicator_tests;
     /// exported step-tab registry, selects it, and its major mode drives the
     /// factory step natives from the keyboard. No factory def is overridden.
     #[test]
+    fn lisp_bindings_pad_list_channels_to_their_longest_write() {
+        use eseqlisp::vm::format_lisp_value;
+        let main_source = read_ui_source("main.lisp").expect("read main");
+        let mut editor = full_grid_editor_with_post_factory_source(&main_source, None, None, None);
+        let run = |editor: &mut eseqlisp::Editor, src: &str| -> String {
+            format_lisp_value(&editor.runtime_mut().eval_str(src).unwrap().unwrap())
+        };
+        run(&mut editor, "(def eseq.vanilla/bt-scope (eseq.bindings/scope \"t\"))");
+        run(&mut editor, "(def eseq.vanilla/bt-ch (eseq.bindings/channel eseq.vanilla/bt-scope \"rows\"))");
+        assert_eq!(run(&mut editor, "(eseq.bindings/field eseq.vanilla/bt-ch)"), "\"t/rows\"");
+        run(&mut editor, "(eseq.bindings/one-hot! eseq.vanilla/bt-ch 4 1)");
+        assert_eq!(run(&mut editor, "(eseq.bindings/value eseq.vanilla/bt-ch)"), "(0 1 0 0)");
+        run(&mut editor, "(eseq.bindings/one-hot! eseq.vanilla/bt-ch 2 0)");
+        assert_eq!(
+            run(&mut editor, "(eseq.bindings/value eseq.vanilla/bt-ch)"),
+            "(1 0 0 0)",
+            "a shorter write pads to the longest length so no slot keeps a stale 1"
+        );
+        run(&mut editor, "(eseq.bindings/clear! eseq.vanilla/bt-ch)");
+        assert_eq!(run(&mut editor, "(eseq.bindings/value eseq.vanilla/bt-ch)"), "(0 0 0 0)");
+        run(&mut editor, "(eseq.bindings/write! eseq.vanilla/bt-ch 7)");
+        assert_eq!(run(&mut editor, "(eseq.bindings/value eseq.vanilla/bt-ch)"), "7");
+        let bound = editor
+            .runtime_mut()
+            .eval_str("(eseq.bindings/bound-nth eseq.vanilla/bt-ch 2)")
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&bound, Value::ReactiveRef { namespace, field, index: Some(2), .. } if namespace == "SEQV" && field == "t/rows"),
+            "{bound:?}"
+        );
+    }
+
+    #[test]
     fn tracker_package_import_installs_a_main_panel_tab_and_edits_steps_by_key() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use eseqlisp::vm::format_lisp_value;
@@ -16258,23 +16610,31 @@ mod rack_slot_indicator_tests;
                 .expect("tracker layout")
         };
         assert!(find_layout_node_by_text(&layout, "bd02").is_some(), "track header column");
-        assert!(find_layout_node_by_text(&layout, "--- ..").is_some(), "empty step cell");
-        assert!(find_layout_node_by_text(&layout, "0F").is_some(), "hex row numbers");
+        assert!(find_layout_node_by_text(&layout, "---").is_some(), "empty note cell");
+        assert!(find_layout_node_by_text(&layout, "15").is_some(), "decimal row numbers");
+        assert!(find_layout_node_by_text(&layout, "Note").is_some(), "note sub-column header");
+        assert!(find_layout_node_by_text(&layout, "Vol").is_some(), "vol sub-column header");
 
         // Host publishes the tracker must react to without a full resync: a
-        // per-track step list index write (what a step toggle emits) and the
-        // per-step playhead field while playing.
-        let mut steps = vec![Value::Bool(false); 64];
-        steps[1] = Value::Bool(true);
-        let steps = test_list(steps);
-        editor
-            .runtime_mut()
-            .set_reactive_list_index("SEQ", "track-steps", 0, steps);
-        editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(true));
-        let playback_state = Arc::new(SequencerState::new(1, vec![]));
-        playback_state.transport.track_playheads[0].store(1, Ordering::Relaxed);
-        let playback_app = test_app_for_track_visual_state(playback_state.clone());
-        sync_all_track_playhead_fields(editor.runtime_mut(), &playback_state, &playback_app);
+        // per-track step list index write (what a step toggle emits). The
+        // playhead is not a render input at all: rows bind their highlight
+        // and the gutter its `active` to SEQ.track-grid-playhead-<t> by row,
+        // so a tick moves floats without re-rendering (see the publisher
+        // test for which copy of a repeating step lights).
+        // Cells read the host's step-major matrix, SEQ.tracker-rows:
+        // (nth (nth rows step) track) = (active transpose velocity col…).
+        let matrix_row = |active: bool| {
+            test_list(vec![test_list(vec![
+                Value::Bool(active),
+                Value::Number(0.0),
+                Value::Number(1.0),
+            ])])
+        };
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "tracker-rows",
+            test_list((0..16).map(|row| matrix_row(row == 1)).collect()),
+        );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout = {
@@ -16299,50 +16659,54 @@ mod rack_slot_indicator_tests;
                 .iter()
                 .find_map(|child| find_layout_node_by_key_early(child, key))
         }
-        let playhead_cell =
-            find_layout_node_by_key_early(&layout, "tracker-cell-0-1").expect("playhead cell");
+        let toggled_cell =
+            find_layout_node_by_key_early(&layout, "tracker-cell-0-1-0").expect("toggled cell");
         assert!(
-            layout_node_contains_text_fragment(playhead_cell, "C-"),
-            "a track-steps index publish must re-render the toggled cell (velocity seed varies)"
+            layout_node_contains_text_fragment(toggled_cell, "C-"),
+            "a tracker-rows publish must re-render the toggled cell"
         );
-        let background = playhead_cell.props.get("background-color").expect("cell background");
-        let idle_cell = find_layout_node_by_key_early(&layout, "tracker-cell-0-2").unwrap();
-        assert_ne!(Some(background), idle_cell.props.get("background-color"));
-        if let Value::Keyword(name) = background {
-            assert!(eseqlisp::theme::named_color(name).is_some(), "unrenderable color: {name}");
-        }
-        let row = find_layout_node_by_key_early(&layout, "tracker-row-1").unwrap();
-        assert_eq!(row.props.get("active"), Some(&Value::Bool(true)));
-        for node in [playhead_cell, row] {
+        let track_row =
+            find_layout_node_by_key_early(&layout, "tracker-row-0-1").expect("track row");
+        assert!(
+            matches!(track_row.props.get("selected"), Some(Value::ReactiveRef { field, index: Some(1), .. }) if field == "track-grid-playhead-0"),
+            "row highlight is a bound float, not a rendered prop: {:?}",
+            track_row.props.get("selected")
+        );
+        let gutter = find_layout_node_by_key_early(&layout, "tracker-row-1").unwrap();
+        assert!(
+            matches!(gutter.props.get("active"), Some(Value::ReactiveRef { field, index: Some(1), .. }) if field == "track-grid-playhead-current"),
+            "gutter follows the current track's grid playhead by binding (the cursor sets the current track)"
+        );
+        assert!(
+            find_layout_node_by_key_early(&layout, "tracker-headers").is_some()
+                && find_layout_node_by_key_early(&layout, "tracker-rows").is_some(),
+            "headers are pinned outside the virtualized row stack"
+        );
+        let body = find_layout_node_by_key_early(&layout, "tracker-scroll").expect("body scroll");
+        assert!(
+            matches!(body.props.get("center-row"), Some(Value::ReactiveRef { namespace, field, .. }) if namespace == "SEQV" && field == "alez.tracker/center-row"),
+            "stopped: the scroll follows the Lisp-written cursor row binding: {:?}",
+            body.props.get("center-row")
+        );
+        editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let tree = editor.buffers.iter().find(|b| b.name == "*tracker*")
+            .and_then(|b| b.widget_tree.as_ref()).unwrap();
+        let playing = eseqlisp::layout::LayoutEngine::new(120, 80, 1.0).layout(tree).unwrap();
+        let body = find_layout_node_by_key_early(&playing, "tracker-scroll").expect("body scroll");
+        assert!(
+            matches!(body.props.get("center-row"), Some(Value::ReactiveRef { field, index: None, .. }) if field == "track-grid-playhead-row-current"),
+            "playing: the scroll follows the current track's playhead row by binding: {:?}",
+            body.props.get("center-row")
+        );
+        editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(false));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        for node in [toggled_cell, track_row, gutter] {
             assert!(node.rect.width.is_finite() && node.rect.width > 0.0);
             assert!(node.rect.height.is_finite() && node.rect.height > 0.0);
         }
-
-        // Exercise the production delta publisher, not a manually injected
-        // field: the old row must deactivate and the next one must activate.
-        let mut previous = vec![1];
-        playback_state.transport.track_playheads[0].store(2, Ordering::Relaxed);
-        sync_track_playhead_field_delta(
-            editor.runtime_mut(), &playback_state, &playback_app, &mut previous,
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let tree = editor.buffers.iter().find(|b| b.name == "*tracker*")
-            .and_then(|b| b.widget_tree.as_ref()).unwrap();
-        let moved = eseqlisp::layout::LayoutEngine::new(120, 80, 1.0).layout(tree).unwrap();
-        assert_eq!(find_layout_node_by_key_early(&moved, "tracker-row-1").unwrap()
-            .props.get("active"), Some(&Value::Bool(false)));
-        assert_eq!(find_layout_node_by_key_early(&moved, "tracker-row-2").unwrap()
-            .props.get("active"), Some(&Value::Bool(true)));
-        editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(false));
-        clear_all_track_playhead_fields(editor.runtime_mut(), &playback_app);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let tree = editor.buffers.iter().find(|b| b.name == "*tracker*")
-            .and_then(|b| b.widget_tree.as_ref()).unwrap();
-        let stopped = eseqlisp::layout::LayoutEngine::new(120, 80, 1.0).layout(tree).unwrap();
-        assert_eq!(find_layout_node_by_key_early(&stopped, "tracker-row-2").unwrap()
-            .props.get("active"), Some(&Value::Bool(false)));
 
         // Keyboard: DOWN moves the cursor to row 1, RET toggles it, `a` enters
         // C of the current octave (transpose 0); the step is already active
@@ -16353,9 +16717,9 @@ mod rack_slot_indicator_tests;
         press(&mut editor, KeyCode::Down);
         press(&mut editor, KeyCode::Enter);
         press(&mut editor, KeyCode::Char('a'));
-        let calls = calls.borrow().clone();
+        let key_calls = calls.borrow().clone();
         assert_eq!(
-            calls,
+            key_calls,
             vec![
                 "seq-toggle-track-step 0 1".to_string(),
                 "seq-set-step-param 1 :transpose 0".to_string(),
@@ -16386,11 +16750,30 @@ mod rack_slot_indicator_tests;
                 .layout(tree)
                 .expect("tracker layout")
         };
-        let cursor_cell = find_layout_node_by_key(&layout, "tracker-cell-0-2").expect("cursor cell");
+        // The cursor never re-renders the grid: cells bind `selected` to a
+        // SEQV one-hot per (track, row) that the key handler writes.
+        let cursor_cell =
+            find_layout_node_by_key(&layout, "tracker-cell-0-2-0").expect("cursor cell");
         assert!(
-            matches!(cursor_cell.props.get("background-color"), Some(Value::Keyword(k)) if k == "blue"),
-            "cursor cell must re-render under the cursor: {:?}",
-            cursor_cell.props.get("background-color")
+            matches!(cursor_cell.props.get("selected"), Some(Value::ReactiveRef { namespace, field, index: Some(0), .. }) if namespace == "SEQV" && field == "alez.tracker/cur-0-2"),
+            "cursor highlight is bound: {:?}",
+            cursor_cell.props.get("selected")
+        );
+        let cursor_row_flags = editor
+            .runtime_mut()
+            .eval_str("(reactive-get \"SEQV\" \"alez.tracker/cur-0-2\")")
+            .expect("read cursor flags")
+            .expect("flags");
+        assert_eq!(format_lisp_value(&cursor_row_flags), "(1 0)", "cursor at row 2, Note column");
+        let old_row_flags = editor
+            .runtime_mut()
+            .eval_str("(reactive-get \"SEQV\" \"alez.tracker/cur-0-1\")")
+            .expect("read old flags")
+            .expect("flags");
+        assert_eq!(
+            format_lisp_value(&old_row_flags),
+            "(0 0)",
+            "the row the cursor left is cleared with explicit zeros (a shorter list leaves slots lit)"
         );
         let cursor_row = editor
             .runtime_mut()
@@ -16398,6 +16781,128 @@ mod rack_slot_indicator_tests;
             .expect("read cursor row")
             .expect("cursor row");
         assert!(matches!(cursor_row, Value::Number(row) if row == 2.0), "{cursor_row:?}");
+
+        // Column picker: the host's per-track target groups and process
+        // lanes feed a nested menu; toggling a target adds an (empty) column
+        // whose header is the parameter's full label.
+        fn test_map(pairs: Vec<(&str, Value)>) -> Value {
+            Value::Map(
+                pairs
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), Rc::new(RefCell::new(v))))
+                    .collect(),
+            )
+        }
+        let column = |key: &str, label: &str| {
+            test_map(vec![
+                ("key", Value::String(key.into())),
+                ("label", Value::String(label.into())),
+                ("target", Value::String("instrument".into())),
+                ("param-idx", Value::Number(3.0)),
+                ("min", Value::Number(20.0)),
+                ("max", Value::Number(20000.0)),
+                ("default", Value::Number(1000.0)),
+                ("increment", Value::Number(0.0)),
+                ("values", test_list(vec![])),
+            ])
+        };
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-lock-targets",
+            test_list(vec![test_list(vec![test_map(vec![
+                ("group", Value::String("Digi Drift".into())),
+                ("items", test_list(vec![column("instrument:3", "lp_freq")])),
+            ])])]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-lanes",
+            test_list(vec![test_list(vec![test_map(vec![
+                ("instance-id", Value::Number(7.0)),
+                ("inlet", Value::String("prob".into())),
+                ("label", Value::String("Probability".into())),
+                ("short-label", Value::String("prob".into())),
+                ("min", Value::Number(0.0)),
+                ("max", Value::Number(1.0)),
+                ("default", Value::Number(1.0)),
+                ("decimals", Value::Number(2.0)),
+                ("values", test_list(vec![Value::Number(1.0); 16])),
+            ])])]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(alez.tracker.ui/open-column-menu 0 (dict :col 10 :row 4))")
+            .expect("open picker");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let tree = editor.buffers.iter().find(|b| b.name == "*tracker*")
+            .and_then(|b| b.widget_tree.as_ref()).unwrap();
+        let picker = eseqlisp::layout::LayoutEngine::new(120, 80, 1.0).layout(tree).unwrap();
+        assert!(
+            find_layout_node_by_key(&picker, "tracker-pick-0-Digi Drift-group").is_some(),
+            "one submenu per device group"
+        );
+        assert!(
+            find_layout_node_by_key(&picker, "tracker-pick-0-lanes-group").is_some(),
+            "process lanes get their own group"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(do (alez.tracker.ui/toggle-column 0 \"instrument:3\") (alez.tracker.ui/toggle-column 0 \"lane:7:prob\"))")
+            .expect("toggle columns");
+        let count = editor
+            .runtime_mut()
+            .eval_str("(len (alez.tracker.ui/track-columns 0))")
+            .expect("count")
+            .expect("number");
+        assert!(matches!(count, Value::Number(n) if n == 2.0), "{count:?}");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let tree = editor.buffers.iter().find(|b| b.name == "*tracker*")
+            .and_then(|b| b.widget_tree.as_ref()).unwrap();
+        let with_columns = eseqlisp::layout::LayoutEngine::new(120, 80, 1.0).layout(tree).unwrap();
+        assert!(
+            find_layout_node_by_text(&with_columns, "lp_freq").is_some(),
+            "the added column's header is the full parameter label"
+        );
+        assert!(find_layout_node_by_text(&with_columns, "prob").is_some(), "lane column header");
+        editor
+            .runtime_mut()
+            .eval_str("(alez.tracker.ui/toggle-column 0 \"instrument:3\")")
+            .expect("toggle off");
+        let count = editor
+            .runtime_mut()
+            .eval_str("(len (alez.tracker.ui/track-columns 0))")
+            .expect("count")
+            .expect("number");
+        assert!(matches!(count, Value::Number(n) if n == 1.0), "toggling again hides: {count:?}");
+
+        // Typing: on Vol, two hex digits set the velocity; on the lane
+        // column the first digit waits in `entry` and the second commits.
+        // (The picker is still open from above and would take the keys.)
+        editor.runtime_mut().eval_str("(set! alez.tracker.ui/column-menu nil)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        calls.borrow_mut().clear();
+        press(&mut editor, KeyCode::Right);
+        press(&mut editor, KeyCode::Char('4'));
+        let pending = editor.runtime_mut().eval_str("alez.tracker.ui/entry").unwrap().unwrap();
+        assert!(matches!(&pending, Value::String(s) if s == "4"), "{pending:?}");
+        press(&mut editor, KeyCode::Char('0'));
+        let pending = editor.runtime_mut().eval_str("alez.tracker.ui/entry").unwrap().unwrap();
+        assert!(matches!(&pending, Value::String(s) if s.is_empty()), "{pending:?}");
+        let typed = calls.borrow().clone();
+        assert!(
+            typed.iter().any(|c| c.starts_with("seq-set-step-param 2 :velocity 0.25")),
+            "0x40 / 255 ≈ 0.25: {typed:?}"
+        );
+        press(&mut editor, KeyCode::Right);
+        press(&mut editor, KeyCode::Char('f'));
+        let pending = editor.runtime_mut().eval_str("alez.tracker.ui/entry").unwrap().unwrap();
+        assert!(matches!(&pending, Value::String(s) if s == "F"), "a-f are hex digits on a column: {pending:?}");
+        press(&mut editor, KeyCode::Left);
+        let pending = editor.runtime_mut().eval_str("alez.tracker.ui/entry").unwrap().unwrap();
+        assert!(matches!(&pending, Value::String(s) if s.is_empty()), "moving drops a pending digit");
 
         // Note names follow the C4 = transpose 0 convention.
         let names = editor

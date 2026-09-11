@@ -25,13 +25,14 @@
           :font-size 8.5 :color (ink) :bg :transparent))
       (h-stack :gap 0.4 (knob (nth spec 1) section) (knob (nth spec 2) section)))))
 (def control (spec section)
-  (let ((name (nth spec 0)) (p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+  (let ((name (nth spec 0)) (p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (text-ink (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white (ink))))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
       (str "pm-detail-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "pm-detail-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (v-stack :width 11.3 :height 1.15 :gap 0.05
-          (label (nth spec 1) :height 0.5 :v-align :center :font-size 9 :color (ink) :bg :transparent)
+          (label (nth spec 1) :height 0.5 :v-align :center :font-size 9 :color text-ink :bg :transparent)
           (number-picker :debug-name (str "pm-value-" name)
             :width 11.3 :height 0.6 :noui true :decimals (nth spec 2) :font-size 10 :text-align :left
             :step (pow 10 (- 0 (nth spec 2)))
@@ -39,7 +40,7 @@
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) (ink))
+              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) text-ink)
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -78,7 +79,7 @@
 (def caption (text)
   (label text :width 35.3 :height 0.45 :v-align :center :font-size 8.5 :color (ink) :bg :transparent))
 (def envelope (section)
-  (envelope-titled section "Breath envelope / drag the contour"))
+  (envelope-titled section "Breath envelope"))
 (def envelope-titled (section title)
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (v-stack :gap 0.15

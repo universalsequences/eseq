@@ -1170,6 +1170,8 @@ pub(crate) fn sync_track_playhead_field_delta(
 
     if snapshot_changed {
         *previous = current;
+        effects_dirty |=
+            super::super::piano_roll::sync_tracker_grid_playhead_fields(rt, state, app);
     }
 
     effects_dirty
@@ -1381,6 +1383,7 @@ pub(super) fn sync_all_track_sequencer_state_inner(
         "track-process-lanes",
         build_all_track_process_lanes_value(state, app.tracks.len()),
     );
+    super::super::piano_roll::sync_track_automation_state(rt, app, state);
 
     if let Some(profile) = profile.as_deref_mut() {
         profile.step_bindings = sync_all_track_step_binding_fields_profiled(

@@ -211,6 +211,7 @@ impl WidgetDefinition for NumberLabelWidget {
                 scale: 1.0,
                 fg,
                 bg,
+                mono: false,
             },
         ));
         prims

@@ -8,6 +8,7 @@
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.panel-frame :as pf)
 (import eseq.effects.panel-bodies :as pb)
+(import eseq.effects.track-panels :as tp)
 ;; Mutual imports with the sampler/modulator panels (this file dispatches to
 ;; them; sampler-panel routes rack drops back through
 ;; rack-selected-instrument-drop). Load-once terminates the cycle.
@@ -639,6 +640,28 @@
       (rack-selected-instrument-panel inst)
       (box :width 0 :height 0))))
 
+(def instrument-polyphony-control ()
+  (button (if SEQ.tp-poly "poly" "mono")
+    :debug-name "instrument-polyphony" :width 4 :height 0.8 :padding 0
+    :font-size 9 :color :white :background-color :transparent :border-color :transparent
+    :on-click |x y r| (tp/toggle-polyphony)))
+
+;; Host-owned pitch reference is available on every custom instrument page,
+;; including selected rack-slot instruments, independently of the authored UI.
+(def instrument-base-note-control (inst)
+  (let ((p (find-by-key (get inst :synth) :control "base-note")))
+    (if p
+      (pc/instrument-param-mod-wrapper p
+        (str "instrument-header-base-note-" (get inst :track) "-" (get inst :rack-slot))
+        (h-stack :gap 0.3 :height 0.7 :align :center
+          (label "Base note" :height 0.7 :v-align :center :font-size 8 :color :dim :bg :transparent)
+          (number-picker :debug-name "instrument-base-note" :width 3.5 :height 0.7
+            :noui true :font-size 9 :decimals 0 :step 1
+            :value (pc/fx-param-value p) :min (get p :min) :max (get p :max)
+            :text-color (pc/param-plock-text-color false p)
+            :on-change (lambda (v) (pc/fx-set-instrument-value p v)))))
+      (box :width 0 :height 0))))
+
 (def instrument-panel (inst)
   (if (= (get inst :type) "sampler")
     (sp/sampler-panel inst)
@@ -661,6 +684,8 @@
                   ;(ep/instrument-sound-binding-badge inst)
                   )
                 (box :flex 1 :height 0.15)
+                (instrument-base-note-control inst)
+                (instrument-polyphony-control)
                 (pf/instrument-header-actions-menu inst)
                 (box :debug-name "instrument-preset-button" :padding 0.0 :width 2 :align :center
                   (v-stack

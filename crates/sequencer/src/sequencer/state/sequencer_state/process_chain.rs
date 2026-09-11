@@ -176,6 +176,37 @@ impl SequencerState {
         self.process_scope_values_version
             .fetch_add(1, Ordering::Release);
     }
+    /// Publish what the scheduler's process writes resolved to on one
+    /// track's instrument params. Merges per `(track, param)` so tracks that
+    /// did not fire this trigger keep their last value; bumps the version
+    /// only when a value actually changed.
+    pub fn publish_process_effective_params(
+        &self,
+        track: usize,
+        values: &[crate::process::ProcessEffectiveParam],
+    ) {
+        let mut published = self.process_effective_params.lock().unwrap();
+        let mut changed = false;
+        for value in values {
+            let key = (track, value.param_idx);
+            if published.get(&key) != Some(value) {
+                published.insert(key, *value);
+                changed = true;
+            }
+        }
+        if changed {
+            self.process_effective_params_version
+                .fetch_add(1, Ordering::Release);
+        }
+    }
+    pub fn process_effective_params_version(&self) -> u64 {
+        self.process_effective_params_version.load(Ordering::Acquire)
+    }
+    pub fn process_effective_params(
+        &self,
+    ) -> HashMap<(usize, usize), crate::process::ProcessEffectiveParam> {
+        self.process_effective_params.lock().unwrap().clone()
+    }
     pub fn process_scope_values_version(&self) -> u64 {
         self.process_scope_values_version.load(Ordering::Acquire)
     }

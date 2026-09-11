@@ -110,6 +110,7 @@ impl WidgetDefinition for TransportClockWidget {
                     scale: 1.0,
                     fg,
                     bg,
+                    mono: false,
                 },
             ));
         }

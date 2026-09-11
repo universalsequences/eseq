@@ -54,7 +54,8 @@
               (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p
                 (+ (get p :min) (eseq.effects.param-controls/custom-ui-option-index options v))))))))))
 (def tri-readout (section name title labels width height label-height decimals step ink)
-  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (ink (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white ink)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "tri-num-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "tri-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
@@ -63,6 +64,7 @@
           (number-picker :width width :height 0.50 :noui true :decimals decimals :step step :font-size 8.0 :value-labels labels
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+            :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-align :left
             :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)

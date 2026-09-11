@@ -3233,10 +3233,10 @@ impl EffectDescriptor {
     }
 
     pub fn transport_phase_param_idx(&self) -> Option<u32> {
-        if self.name == "DJ Mixer" {
-            Some(crate::effects::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32)
-        } else {
-            None
+        match self.name.as_str() {
+            "DJ Mixer" => Some(crate::effects::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32),
+            "Slowdown" => Some(slowdown::PARAM_TRANSPORT_BEAT_PHASE as u32),
+            _ => None,
         }
     }
 

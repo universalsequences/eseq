@@ -772,6 +772,9 @@ pub struct GpuProportionalTextPrimitive {
     pub scale: f32,
     pub fg: Color,
     pub bg: Color,
+    /// Draw with the editor's monospace face instead of the system UI font
+    /// (`label :mono true`); digits and note names then line up by column.
+    pub mono: bool,
 }
 
 #[derive(Clone)]
@@ -1343,10 +1346,27 @@ pub fn proportional_text_baseline_offset(
     row_offset: f32,
     ctx: &MeasureCtx<'_>,
 ) -> f32 {
+    proportional_text_baseline_offset_face(font_size, row_offset, ctx, false)
+}
+
+/// `proportional_text_baseline_offset` for either face; a mono label centers
+/// the mono face's cap band.
+pub fn proportional_text_baseline_offset_face(
+    font_size: f32,
+    row_offset: f32,
+    ctx: &MeasureCtx<'_>,
+    mono: bool,
+) -> f32 {
     let cell_h = ctx.cell_h.max(1.0);
     let cap_height = ctx
         .text_measurer
-        .map(|measurer| measurer.cap_height_px(font_size))
+        .map(|measurer| {
+            if mono {
+                measurer.mono_cap_height_px(font_size)
+            } else {
+                measurer.cap_height_px(font_size)
+            }
+        })
         .unwrap_or(cell_h * 0.7);
     row_offset + crate::ui::glyph_atlas::centered_text_baseline_px(cell_h, cap_height, 1.0) / cell_h
 }

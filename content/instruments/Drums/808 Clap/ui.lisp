@@ -17,19 +17,21 @@
     :debug-name (str "clap-panel-" section)
     :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section) body))
 (def idclap-num (section name title width decimals)
-  (let ((p (idclap-p name)))
+  (let ((p (idclap-p name))
+        (ink (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white :black)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "clap-mod-" name)
       (subtree :key (str "clap-num-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (v-stack :width width :height 1.15 :gap 0.08
-          (label title :height 0.5 :v-align :center :font-size 8 :color :black :bg :transparent)
+          (label title :height 0.5 :v-align :center :font-size 8 :color ink :bg :transparent)
           (number-picker :width width :height 0.55 :noui true :font-size 8.5 :decimals decimals
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+            :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-align :left
             :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :black)
+              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) ink)
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -134,6 +136,7 @@
           (number-picker :width 3 :height 0.6 :noui true :decimals 0 :step 1 :font-size 8
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+            :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))
       (h-stack :gap 0.12

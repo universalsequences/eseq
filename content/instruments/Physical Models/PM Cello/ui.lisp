@@ -44,7 +44,7 @@
           ("section.width" "Stereo width" 2)))
         :hint "Section adds two players of the same model with spread and stagger.")
       (dict :title "Amp"
-        :view (lambda () (eseq.effects.physical-model-surface/envelope-titled 7 "Bow speed envelope / drag the contour"))
+        :view (lambda () (eseq.effects.physical-model-surface/envelope-titled 7 "Bow speed envelope"))
         :controls (lambda () '(("amp.attack" "Attack ms" 1) ("amp.decay" "Decay ms" 1) ("amp.sustain" "Sustain" 2)
           ("amp.release" "Release ms" 1) ("gain" "Output" 2)))
         :hint "The contour drives the bow; String decay controls the free ring."))))

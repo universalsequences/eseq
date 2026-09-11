@@ -4443,6 +4443,30 @@ impl Editor {
                 }
             }
         }
+        // A scroll whose offset moved at render time (a `:center-row` follow)
+        // over a virtualizing child must lay out again: the virtual stack
+        // chose its live rows for the old offset, so without this the view
+        // scrolls into rows that were never built. Gestures schedule their
+        // own relayout and are not in this set.
+        let relayout_keys = crate::widget_render::scroll::take_relayout_scroll_keys();
+        if !relayout_keys.is_empty() {
+            let mut relayout = false;
+            if let Some(layout) = self.runtime.current_layout.as_deref() {
+                relayout |= dirty_scroll_needs_relayout(layout, &relayout_keys);
+            }
+            for tile_id in self.tile_root.leaf_ids() {
+                if let Some(layout) = self
+                    .tile_root
+                    .find_leaf(tile_id)
+                    .and_then(|leaf| leaf.cached_layout.as_deref())
+                {
+                    relayout |= dirty_scroll_needs_relayout(layout, &relayout_keys);
+                }
+            }
+            if relayout {
+                self.runtime.invalidate_layout_deferred();
+            }
+        }
         ids
     }
 
@@ -10616,6 +10640,21 @@ fn find_layout_node_by_stable_key<'a>(
 /// Map dirty scroll state keys (stable ids) to the layout widget ids of the
 /// scroll nodes that own them, so scroll changes ride the dirty-widget-id
 /// invalidation path scoped to the owning subtree.
+fn dirty_scroll_needs_relayout(
+    node: &crate::layout::LayoutNode,
+    keys: &std::collections::HashSet<u64>,
+) -> bool {
+    if node.widget_type == "scroll"
+        && keys.contains(&crate::widget_render::scroll::scroll_state_key(node))
+        && widget_interaction::scroll_layout_depends_on_offset(node)
+    {
+        return true;
+    }
+    node.children
+        .iter()
+        .any(|child| dirty_scroll_needs_relayout(child, keys))
+}
+
 fn collect_scroll_widget_ids_for_keys(
     node: &crate::layout::LayoutNode,
     keys: &std::collections::HashSet<u64>,

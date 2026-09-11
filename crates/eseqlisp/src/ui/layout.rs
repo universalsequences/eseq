@@ -176,6 +176,14 @@ pub trait TextMeasurer {
     fn text_ink_extents_px(&self, _text: &str, font_size: f32) -> (f32, f32) {
         (self.cap_height_px(font_size), self.descent_px(font_size))
     }
+    /// Monospace-face variants for `label :mono true`. Measurers without a
+    /// mono face answer with the proportional metrics.
+    fn measure_mono_text_px(&self, text: &str, font_size: f32) -> f32 {
+        self.measure_text_px(text, font_size)
+    }
+    fn mono_cap_height_px(&self, font_size: f32) -> f32 {
+        self.cap_height_px(font_size)
+    }
 }
 
 /// Context passed to `WidgetDefinition::measure()` for proportional text support.
@@ -3600,6 +3608,7 @@ mod tests {
                 content_height: 200.0,
                 viewport_height: 5.0,
                 synced_selection: None,
+                applied_center_bits: None,
             },
         );
         let layout = engine.layout(&tree).unwrap();

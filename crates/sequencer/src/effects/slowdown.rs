@@ -1,7 +1,9 @@
 //! Rolling-buffer varispeed insert. The read head falls behind live input at
 //! `1 - speed` samples/frame, then restarts through a complementary crossfade.
 //! Length/smooth changes latch at cycle boundaries; speed, tone and wet gain
-//! slew continuously. Timing is tempo-relative, not song-position locked.
+//! slew continuously. In beat-sync mode the host feeds the transport's beat
+//! phase every block and restarts land on the song's beat grid; while the
+//! transport is stopped (or in ms mode) the cycle free-runs from tempo alone.
 //!
 //! All storage (including a normalized windowed-sinc interpolation table) lives
 //! in the graph-owned state allocation. Processing never allocates or locks.
@@ -32,6 +34,12 @@ const BASE_DELAY: f64 = 17.0;
 const MAX_HISTORY_SECONDS: f32 = 12.2;
 const MOD_SLOTS: usize = voice_modulator::SLOT_COUNT;
 const DEPTH_BASE: usize = PARAM_COUNT;
+/// Hidden host input: transport beat phase in `[0, TRANSPORT_CYCLE_BEATS)`,
+/// pushed once per block by the audio callback (see `sync_dj_mixer_transport_phase`).
+/// It sits directly after the depth block so every saved index stays put.
+pub const PARAM_TRANSPORT_BEAT_PHASE: u64 = (DEPTH_BASE + 6 * MOD_SLOTS) as u64;
+/// The host wraps beat phase at eight beats (the DJ Mixer's longest division).
+const TRANSPORT_CYCLE_BEATS: f64 = 8.0;
 
 struct ModTarget {
     param: usize,
@@ -92,6 +100,16 @@ const MOD_TARGETS: [ModTarget; 6] = [
 struct State {
     params: [f32; PARAM_COUNT],
     mod_depths: [[f32; MOD_SLOTS]; MOD_TARGETS.len()],
+    /// `PARAM_TRANSPORT_BEAT_PHASE`; must directly follow `mod_depths`.
+    transport_phase: f32,
+    /// Last block-start phase the host pushed. A repeated value means the
+    /// transport is stopped (or nobody drives the input), so the cycle free-runs.
+    transport_seen: f32,
+    transport_driven: bool,
+    /// Cycle index `floor(phase / beats)` at the previous frame; -1 = unknown.
+    transport_cycle: i64,
+    /// Beat phase advanced per frame within the current block.
+    local_phase: f64,
     sample_rate: f32,
     capacity: usize,
     write: usize,
@@ -292,8 +310,20 @@ impl State {
         self.wet = 0.0;
         self.tone = finite(self.params[TONE], 200.0, 20000.0, 20000.0) as f64;
         self.lowpass = [0.0; 2];
+        self.transport_seen = self.transport_phase;
+        self.transport_driven = false;
+        self.transport_cycle = -1;
+        self.local_phase = 0.0;
         self.latch_cycle(&self.effective_params([0.0; MOD_SLOTS]));
         self.fade_age = self.fade_length;
+    }
+
+    fn restart(&mut self, params: &[f32; PARAM_COUNT]) {
+        self.outgoing_delay = self.delay;
+        self.delay = BASE_DELAY;
+        self.age = 0;
+        self.latch_cycle(params);
+        self.fade_age = 0;
     }
 
     unsafe fn read(&self, ring: *const f32, delay: f64) -> [f32; 2] {
@@ -344,6 +374,11 @@ unsafe extern "C" fn init(state: *mut c_void, sample_rate: c_int, _: c_int, _: *
         State {
             params: DEFAULTS,
             mod_depths: [[0.0; MOD_SLOTS]; MOD_TARGETS.len()],
+            transport_phase: 0.0,
+            transport_seen: 0.0,
+            transport_driven: false,
+            transport_cycle: -1,
+            local_phase: 0.0,
             sample_rate: sr,
             capacity: capacity(sr),
             write: 0,
@@ -402,6 +437,18 @@ unsafe extern "C" fn process(
     let outputs = [*out, *out.add(1)];
     let mod_inputs: [*mut f32; MOD_SLOTS] = std::array::from_fn(|slot| *inp.add(2 + slot));
     let coefficient = 1.0 - (-1.0 / (0.005 * s.sample_rate as f64)).exp();
+    // A fresh block-start phase means the transport advanced since the last
+    // block: lock restarts to its beat grid. An unchanged one means stopped
+    // (or undriven), and the cycle keeps free-running from tempo alone.
+    let pushed = finite(s.transport_phase, 0.0, TRANSPORT_CYCLE_BEATS as f32, 0.0);
+    if pushed.to_bits() != s.transport_seen.to_bits() {
+        s.transport_seen = pushed;
+        s.transport_driven = true;
+        s.local_phase = pushed as f64;
+    } else if s.transport_driven {
+        s.transport_driven = false;
+        s.transport_cycle = -1;
+    }
     for i in 0..nframes as usize {
         let dry = [*inputs[0].add(i), *inputs[1].add(i)];
         for ch in 0..2 {
@@ -414,12 +461,19 @@ unsafe extern "C" fn process(
         if s.age == 0 {
             s.latch_cycle(&params);
         }
-        if s.age >= s.period {
-            s.outgoing_delay = s.delay;
-            s.delay = BASE_DELAY;
-            s.age = 0;
-            s.latch_cycle(&params);
-            s.fade_age = 0;
+        let synced = finite(params[SYNC], 0.0, 1.0, 1.0) >= 0.5;
+        if s.transport_driven && synced {
+            let beats = finite(params[BEATS], 0.125, 4.0, 1.0) as f64;
+            let cycle = (s.local_phase / beats).floor() as i64;
+            if cycle != s.transport_cycle {
+                s.transport_cycle = cycle;
+                s.restart(&params);
+            }
+            let bpm = finite(params[PARAM_BPM as usize], 20.0, 400.0, 120.0) as f64;
+            s.local_phase =
+                (s.local_phase + bpm / (60.0 * s.sample_rate as f64)) % TRANSPORT_CYCLE_BEATS;
+        } else if s.age >= s.period {
+            s.restart(&params);
         }
         let wet = if finite(params[ENABLED], 0.0, 1.0, 1.0) >= 0.5 {
             params[MIX]

@@ -145,6 +145,7 @@ impl WidgetDefinition for MixerMeterWidget {
                     scale: 1.0,
                     fg: label_color,
                     bg: theme::BG(),
+                    mono: false,
                 },
             ));
         }

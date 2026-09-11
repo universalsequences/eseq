@@ -828,6 +828,65 @@ pub(crate) fn fx_instrument_mod_offset_field(param_idx: usize) -> String {
 
 /// Reactive field carrying one instrument param's absolute effective value,
 /// for curve visualizers.
+/// Reactive field carrying the value a process OUT port last wrote onto one
+/// instrument param, in the param's display units (what the knob shows).
+/// Track-keyed like the instrument panel's value fields. Only params the
+/// scheduler has actually written get a field; the panel gates the overlay
+/// on a live binding besides.
+pub(crate) fn instrument_proc_value_field(track: usize, param_idx: usize) -> String {
+    format!("inst-proc-value-{track}-{param_idx}")
+}
+
+/// `1` when that write hit the param's range end and was clamped, else `0`.
+pub(crate) fn instrument_proc_clamped_field(track: usize, param_idx: usize) -> String {
+    format!("inst-proc-clamped-{track}-{param_idx}")
+}
+
+/// Republish the scheduler's process effective-value feed as reactive fields,
+/// delta-only against `previous` (which is updated in place). Returns whether
+/// any reactive effect went dirty.
+pub(crate) fn sync_process_effective_param_fields(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &SequencerState,
+    previous: &mut HashMap<(usize, usize), (f32, bool)>,
+) -> bool {
+    let mut effects_dirty = false;
+    for ((track, param_idx), entry) in state.process_effective_params() {
+        let Some(pdesc) = app
+            .graph
+            .instrument_descriptors
+            .get(track)
+            .and_then(|desc| desc.params.get(param_idx))
+        else {
+            continue;
+        };
+        let value = pdesc.stored_to_user(entry.value);
+        let next = (value, entry.clamped);
+        if previous.get(&(track, param_idx)) == Some(&next) {
+            continue;
+        }
+        let was = previous.insert((track, param_idx), next);
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &instrument_proc_value_field(track, param_idx),
+                Value::Number(value as f64),
+            )
+            .effects_dirty;
+        if was.map(|(_, clamped)| clamped) != Some(entry.clamped) {
+            effects_dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &instrument_proc_clamped_field(track, param_idx),
+                    Value::Number(if entry.clamped { 1.0 } else { 0.0 }),
+                )
+                .effects_dirty;
+        }
+    }
+    effects_dirty
+}
+
 pub(crate) fn fx_instrument_mod_value_field(param_idx: usize) -> String {
     format!("fx-instrument-mod-value-{param_idx}")
 }

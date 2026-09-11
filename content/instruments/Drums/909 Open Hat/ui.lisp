@@ -82,9 +82,7 @@
         :on-mouse-down (get gesture :down) :on-drag (get gesture :drag) :on-mouse-up (get gesture :up)
         :tail (idhat-bind "d_tail") :fast (idhat-bind "d_fast") :amount (idhat-bind "a_fast")
         :decay (idhat-bind "decay") :wash (idhat-bind "wash") :gain (idhat-bind "wash_amp")
-        :attack (idhat-bind "atk") :hold (idhat-bind "hold")))
-      (label "Drag X: decay / Y: source level / 0–1 s" :height 0.5 :v-align :center
-        :font-size 7.3 :color :black :bg :transparent))))
+        :attack (idhat-bind "atk") :hold (idhat-bind "hold"))))))
 (defsynth-ui
   (h-stack :height 9.8 :gap 0.3 :align :start
     (v-stack :gap 0.2

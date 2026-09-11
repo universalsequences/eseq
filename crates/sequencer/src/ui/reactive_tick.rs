@@ -249,6 +249,21 @@ pub(crate) fn sync_reactive_tick(
         ctx.frame.prev_process_channel_values_version = process_channel_values_version;
         editor.mark_needs_redraw();
     }
+    // Process → instrument param effective values (knob dot / picker bar):
+    // republish when the scheduler resolved a new write since the last frame.
+    let process_effective_params_version = ctx.shared.state.process_effective_params_version();
+    if process_effective_params_version != ctx.frame.prev_process_effective_params_version {
+        ctx.frame.prev_process_effective_params_version = process_effective_params_version;
+        if state_values::sync_process_effective_param_fields(
+            editor.runtime_mut(),
+            app,
+            &ctx.shared.state,
+            &mut ctx.frame.prev_process_effective_params,
+        ) {
+            editor.runtime_mut().run_reactive_cycle();
+            editor.mark_needs_redraw();
+        }
+    }
     // Lane strip scopes: republish the state histories whenever the
     // scheduler fired a step process since the last frame.
     let process_scope_values_version = ctx.shared.state.process_scope_values_version();
@@ -506,13 +521,14 @@ pub(crate) fn sync_reactive_tick(
                     ctx.shared.state.pattern.track_params[ct].get_num_steps(),
                 );
             }
-            if transport_visible {
-                rt.set_reactive(
-                    "SEQ",
-                    "transport-playhead",
-                    Value::Number(transport_playhead as f64),
-                );
-            }
+            // Always published: the tracker package lights the playing copy
+            // of a repeating step from this count even with the transport
+            // bar hidden.
+            rt.set_reactive(
+                "SEQ",
+                "transport-playhead",
+                Value::Number(transport_playhead as f64),
+            );
             rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
             sync_piano_roll_state(
                 rt,
@@ -1626,7 +1642,9 @@ pub(crate) fn sync_reactive_tick(
             ctx.frame.prev_fx_value_epoch = fx_value_ep;
             needs_reactive_cycle = true;
         }
-        if transport_visible && transport_playhead != ctx.frame.prev_transport_playhead {
+        // Published whether or not *transport* is visible: the tracker's ghost
+        // rows read it, and it is one scalar per sixteenth.
+        if transport_playhead != ctx.frame.prev_transport_playhead {
             needs_reactive_cycle |= editor
                 .runtime_mut()
                 .set_reactive(
@@ -1635,9 +1653,6 @@ pub(crate) fn sync_reactive_tick(
                     Value::Number(transport_playhead as f64),
                 )
                 .effects_dirty;
-            ctx.frame.prev_transport_playhead = transport_playhead;
-        }
-        if !transport_visible && transport_playhead != ctx.frame.prev_transport_playhead {
             ctx.frame.prev_transport_playhead = transport_playhead;
         }
         {

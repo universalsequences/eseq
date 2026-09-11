@@ -1686,15 +1686,15 @@
   (number-picker
     :key (str "lane-fanout-" (get slot :instance-id) "-" (get port :name) "-" (get entry :index) "-" which)
     :value (get entry which)
-    :min -1000 :max 1000 :decimals 2
+    :min -1000 :max 1000 :decimals 1
     :noui true :font-size 8.5 :text-color :white :text-align :right
     :on-change (lambda (value)
       (let ((lo (if (= which :lo) value (get entry :lo)))
-            (hi (if (= which :hi) value (get entry :hi))))
+          (hi (if (= which :hi) value (get entry :hi))))
         (if (lane-edit-all?)
           (seq-set-process-port-fanout-range track (get slot :instance-id) (get port :name) (get entry :index) lo hi :all)
           (seq-set-process-port-fanout-range track (get slot :instance-id) (get port :name) (get entry :index) lo hi))))
-    :width 2.9 :height 1.0))
+    :width 3.5 :height 1.0))
 
 (def lane-fanout-row (track slot port entry)
   (h-stack :width :fill :gap 0.25 :align :center
@@ -1703,7 +1703,7 @@
     (lane-chip (str "→ " (lane-fanout-label entry)) 1 0)
     (box :flex 1 :height 0.1)
     (lane-fanout-range-picker track slot port entry :lo)
-    (label "…" :font-size 8 :color :dim :bg :transparent)
+    ;(label "…" :font-size 8 :color :dim :bg :transparent)
     (lane-fanout-range-picker track slot port entry :hi)
     (button "×"
       :key (str "lane-fanout-remove-" (get slot :instance-id) "-" (get port :name) "-" (get entry :index))
@@ -1905,7 +1905,7 @@
   (let ((lane (selected-process-lane track mode))
       (slot (if lane (track-process-slot track (get lane :instance-id)) nil)))
     (if (and lane slot)
-      (box :width 15 :padding 0.5 :corner-radius 10
+      (box :width 20 :padding 0.5 :corner-radius 10
         :key (str "lane-strip-" track-id "-" (get slot :instance-id))
         :background-color (rgba 1 1 1 0.04)
         :border-width 0.08 :border-color (rgba 1 1 1 0.08)

@@ -2270,7 +2270,10 @@ impl Editor {
             self.mark_needs_redraw();
             return true;
         }
-        if captures_scroll_gesture(&node) {
+        // A capturing widget that declined the event (a vertical `scroll`
+        // handed a sideways swipe) lets it reach the tile's own scroll.
+        let horizontal = delta_x != 0.0 && delta_x.abs() > delta_y.abs();
+        if captures_scroll_gesture(&node) && !horizontal {
             return true;
         }
 
@@ -2369,7 +2372,7 @@ fn find_scroll_ancestor_impl(
 /// scroll-key path already schedules) but not a relayout. Asking for one anyway
 /// cost a full `LayoutEngine` pass per raw scroll event — the dominant cost in
 /// the eseq-pzp scroll profile.
-fn scroll_layout_depends_on_offset(scroll_node: &LayoutNode) -> bool {
+pub(super) fn scroll_layout_depends_on_offset(scroll_node: &LayoutNode) -> bool {
     scroll_node
         .children
         .iter()

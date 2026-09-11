@@ -781,11 +781,24 @@ pub(crate) fn sync_all_track_playhead_fields(
     state: &Arc<SequencerState>,
     app: &app::App,
 ) {
+    super::super::piano_roll::sync_tracker_grid_playhead_fields(rt, state, app);
     for track in 0..app.tracks.len() {
         let active_step = track_active_playhead_step(state, track);
         let active_row = active_step / PAGE_SIZE;
         let active_col = active_step % PAGE_SIZE;
         let row_count = track_playhead_row_count(state, track);
+        rt.set_reactive(
+            "SEQ",
+            &track_playhead_page_field(track),
+            Value::Number(active_row as f64),
+        );
+        for step in 0..MAX_STEPS {
+            rt.set_reactive(
+                "SEQ",
+                &track_playhead_active_field(track, step),
+                Value::Bool(step == active_step),
+            );
+        }
         let max_rows = (MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE;
         for row in 0..max_rows {
             let active = row == active_row && row < row_count;
@@ -805,7 +818,29 @@ pub(crate) fn sync_all_track_playhead_fields(
 
 pub(crate) fn clear_all_track_playhead_fields(rt: &mut Runtime, app: &app::App) {
     let max_rows = (MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE;
+    // The tracker's per-row grid lists go dark with everything else.
+    if super::super::piano_roll::track_automation_wanted(rt) {
+        for track in 0..app.tracks.len() {
+            rt.set_reactive(
+                "SEQ",
+                &super::super::piano_roll::tracker_grid_playhead_field(track),
+                Value::List(vec![]),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &super::super::piano_roll::tracker_grid_playhead_row_field(track),
+                Value::Number(-1.0),
+            );
+        }
+    }
     for track in 0..app.tracks.len() {
+        for step in 0..MAX_STEPS {
+            rt.set_reactive(
+                "SEQ",
+                &track_playhead_active_field(track, step),
+                Value::Bool(false),
+            );
+        }
         for row in 0..max_rows {
             rt.set_reactive(
                 "SEQ",

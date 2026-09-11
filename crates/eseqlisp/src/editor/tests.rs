@@ -5240,6 +5240,7 @@ fn box_drag_drops_on_target_inside_scrolled_container() {
             viewport_height: 4.0,
             content_height: 10.0,
             synced_selection: None,
+            applied_center_bits: None,
         },
     );
 
@@ -5706,6 +5707,7 @@ fn scrolled_tree_double_click_and_drag_use_visible_row() {
             viewport_height: 4.0,
             content_height: 20.0,
             synced_selection: None,
+            applied_center_bits: None,
         },
     );
 

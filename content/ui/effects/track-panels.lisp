@@ -10,7 +10,8 @@
         plock-chip-click
         track-plocks-panel
         step-parameters-panel
-        track-parameters-panel)
+        track-parameters-panel
+        toggle-polyphony)
 
 ;; Aliases for unconverted lisp callers (effects/panel-frame.lisp,
 ;; effects/step-buffer.lisp), the production by-name read of
@@ -18,6 +19,16 @@
 ;; the old flat spellings (src/ui/state_values/tests.rs). The buffers.lisp
 ;; flat edges (fx-track-parameters-panel, fx-delete-selected-plock-row)
 ;; retired with eseq.effects.buffers, which imports this module.
+
+;; Both track settings and the instrument header edit the same selected owner.
+;; Rack playback uses the slot's voice count, not the parent track's poly flag.
+(def toggle-polyphony ()
+  (do
+    (eseq.seq-core-state/cool-off-follow)
+    (if SEQ.tp-is-rack
+      (host-command "set-rack-slot-max-polyphony"
+        (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
+      (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))))
 
 (def track-bus-send-field (bus)
   (str "tp-bus-" bus "-send"))
@@ -523,14 +534,7 @@
             :border-color :none
             :font-size 10
             :color (if SEQ.tp-poly :control-on-fg :poly-off-fg)
-            ;; Rack tracks: playback polyphony is per-slot (RackSlotSnapshot::max_polyphony),
-            ;; never the track-level param below — route there instead, or this control
-            ;; silently edits a value playback ignores.
-            :on-click |x y r| (do (eseq.seq-core-state/cool-off-follow)
-              (if SEQ.tp-is-rack
-                (host-command "set-rack-slot-max-polyphony"
-                  (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
-                (seq-set-track-param :poly (if SEQ.tp-poly 0 1))))
+            :on-click |x y r| (toggle-polyphony)
             )
           )
         (v-stack :gap 0.15 :align :center

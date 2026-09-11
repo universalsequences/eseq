@@ -101,7 +101,11 @@ fn descriptor_registers_persistent_modulation_controls() {
     assert_eq!(desc.bpm_param_idx(), Some(PARAM_BPM));
     for target in &desc.instrument_modulation_targets {
         let depth = &desc.params[target.depth_param_idx];
-        assert_eq!(depth.stored_to_user(0.25), 0.25, "depth values and bounds share native units");
+        assert_eq!(
+            depth.stored_to_user(0.25),
+            0.25,
+            "depth values and bounds share native units"
+        );
         assert_eq!(target.mod_mode, ModulationMode::Additive);
     }
 }
@@ -439,4 +443,106 @@ fn history_capacity_covers_extreme_timing_at_all_sample_rates() {
         let maximum_delay = BASE_DELAY + 0.75 * (s.period + s.fade_length) as f64;
         assert!(maximum_delay + (TAPS as f64) < s.capacity as f64);
     }
+}
+
+#[test]
+fn transport_phase_param_is_registered_and_lands_after_the_depth_block() {
+    let desc = descriptor();
+    assert_eq!(
+        desc.transport_phase_param_idx(),
+        Some(PARAM_TRANSPORT_BEAT_PHASE as u32)
+    );
+    assert!(
+        desc.params
+            .iter()
+            .all(|p| p.node_param_idx != PARAM_TRANSPORT_BEAT_PHASE as u32),
+        "the transport phase input is hidden, not a user parameter"
+    );
+    let mut h = Harness::new(48_000);
+    unsafe {
+        *h.ptr()
+            .cast::<f32>()
+            .add(PARAM_TRANSPORT_BEAT_PHASE as usize) = 3.25;
+    }
+    assert_eq!(h.state().transport_phase, 3.25);
+    assert_eq!(
+        h.state().params,
+        DEFAULTS,
+        "the phase slot must not alias a parameter"
+    );
+    assert!(h.state().mod_depths.iter().flatten().all(|d| *d == 0.0));
+}
+
+/// Drive the effect the way the audio callback does: one block-start beat phase
+/// per block, derived from an absolute transport sample position.
+fn run_transport(
+    h: &mut Harness,
+    start_sample: u64,
+    blocks: usize,
+    block: usize,
+    bpm: f64,
+    playing: bool,
+) -> Vec<usize> {
+    let sr = 48_000.0;
+    let input = sine(block, sr as f32, 220.0);
+    let mut restarts = Vec::new();
+    for b in 0..blocks {
+        let total = start_sample + (b * block) as u64;
+        let beats = if playing {
+            total as f64 * bpm / (60.0 * sr)
+        } else {
+            0.0
+        };
+        h.state().transport_phase = super::super::dj_mixer::transport_beat_phase(beats);
+        h.run(&input, block);
+        // A restart at frame 0 leaves age == block, so use <= and let callers
+        // warm the state past the first block before probing.
+        let age = h.state().age;
+        if age <= block {
+            restarts.push((b + 1) * block - age);
+        }
+    }
+    restarts
+}
+
+#[test]
+fn synced_restarts_lock_to_the_transport_bar_grid_after_a_seek() {
+    let mut h = Harness::new(48_000);
+    h.state().params[SYNC] = 1.0;
+    h.state().params[BEATS] = 4.0;
+    let bar = 96_000u64; // four beats at 120 BPM, 48 kHz
+    let seek = 7_000u64; // start mid-bar, not block aligned
+                         // Warm up undriven so the seek's immediate restart is observable.
+    h.run(&sine(4096, 48_000.0, 220.0), 512);
+    let restarts = run_transport(&mut h, seek, 600, 512, 120.0, true);
+    assert_eq!(restarts[0], 0, "a seek restarts the capture immediately");
+    assert!(restarts.len() >= 4, "{restarts:?}");
+    for (n, local) in restarts[1..].iter().enumerate() {
+        let expected = (bar * (n as u64 + 1) - seek) as usize;
+        assert!(
+            local.abs_diff(expected) <= 1,
+            "restart {n} at local {local}, expected bar boundary {expected}: {restarts:?}"
+        );
+    }
+}
+
+#[test]
+fn stopped_transport_free_runs_and_play_resumes_the_grid() {
+    let mut h = Harness::new(48_000);
+    h.state().params[SYNC] = 1.0;
+    h.state().params[BEATS] = 1.0;
+    // Stopped: the host keeps pushing phase 0, so the tempo-derived period rules.
+    let stopped = run_transport(&mut h, 0, 200, 512, 120.0, false);
+    assert!(
+        stopped.windows(2).all(|w| w[1] - w[0] == 24_000),
+        "free-run cadence while stopped: {stopped:?}"
+    );
+    // Play from sample 0: the first block cannot be told apart from stopped,
+    // then every restart sits on a beat in transport samples.
+    let played = run_transport(&mut h, 0, 200, 512, 120.0, true);
+    for local in &played[1..] {
+        let off = local % 24_000;
+        assert!(off <= 1 || off >= 23_999, "{played:?}");
+    }
+    assert!(played.len() >= 3, "{played:?}");
 }

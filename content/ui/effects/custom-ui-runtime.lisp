@@ -35,6 +35,9 @@
         custom-ui-param-base-value-prop
         custom-ui-param-mod-offset
         custom-ui-param-mod-scale
+        custom-ui-param-process-value
+        custom-ui-param-process-clamped
+        custom-ui-param-process-mapped?
         custom-ui-param-base-min-prop
         custom-ui-param-base-max-prop
         custom-ui-param-plock-active?
@@ -258,8 +261,21 @@
 (def custom-ui-param-plock-default (p)
   (pc/param-plock-default (current-fx) p))
 
+;; P-lock colour, else the process accent when a step process is mapped to
+;; this param (eseq-p1kg), else `:dim`.
 (def custom-ui-param-plock-text-color (p)
-  (pc/param-plock-text-color (current-fx) p))
+  (pc/param-process-text-color (current-fx) p))
+
+;; Process effective value / clamp flag for the knob dot and picker bar
+;; (eseq-p1kg); see `pc/param-process-value`.
+(def custom-ui-param-process-value (p)
+  (pc/param-process-value p))
+
+(def custom-ui-param-process-clamped (p)
+  (pc/param-process-clamped p))
+
+(def custom-ui-param-process-mapped? (p)
+  (pc/param-process-mapped? p))
 
 ;; True while the mods tab paints its dark highlight box behind this param,
 ;; so light-panel surfaces can swap their black ink for a legible color.

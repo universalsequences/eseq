@@ -7,8 +7,7 @@
         (v-stack :gap 0.4
           (eseq.effects.mnm-surface/mnm-caption "Keytracked sample-and-hold noise")
           (eseq.effects.mnm-surface/mnm-caption "The noise clock follows the note at eight times its frequency."))))
-    (eseq.effects.mnm-surface/mnm-option "osc_wave" '("Triangle" "Saw" "Pulse" "Saw x Pulse" "Clocked noise"))
-    (eseq.effects.mnm-surface/mnm-caption "Ideal source shape before sync/ring. Drag to change pulse width.")))
+    (eseq.effects.mnm-surface/mnm-option "osc_wave" '("Triangle" "Saw" "Pulse" "Saw x Pulse" "Clocked noise"))))
 (defwidget grit-interlace-view
   :width 35.2 :height 3.5 :state (rate depth) :bindable (rate depth)
   :shader
@@ -36,7 +35,6 @@
 (def grit-motion ()
   (v-stack :gap 0.3
     (grit-interlace)
-    (eseq.effects.mnm-surface/mnm-caption "Interlace gate / 250 ms. Drag X: rate, Y: depth.")
     (eseq.effects.mnm-surface/mnm-option "osc_mode" '("Free" "Sync" "Ring" "Sync + Ring"))
     (h-stack :gap 0.3
       (eseq.effects.mnm-surface/mnm-num "fine_cents" "Fine cents" 1)

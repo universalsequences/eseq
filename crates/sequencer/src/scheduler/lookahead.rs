@@ -897,6 +897,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     deferred.write,
                 );
             }
+            if !process_overlay.instrument_effective.is_empty() {
+                state.publish_process_effective_params(
+                    trigger.track,
+                    &process_overlay.instrument_effective,
+                );
+            }
             let track_fire_event = process_step_event_value(
                 trigger.track,
                 trigger.step,

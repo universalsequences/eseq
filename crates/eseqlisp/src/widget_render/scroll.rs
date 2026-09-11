@@ -18,6 +18,9 @@ pub struct ScrollState {
     pub content_height: f32,
     pub viewport_height: f32,
     pub synced_selection: Option<String>,
+    /// Last `:center-row` request honored (f32 bits), so a request only
+    /// moves the view when it changes and manual scrolling holds otherwise.
+    pub applied_center_bits: Option<u32>,
 }
 
 impl Default for ScrollState {
@@ -27,8 +30,58 @@ impl Default for ScrollState {
             content_height: 0.0,
             viewport_height: 0.0,
             synced_selection: None,
+            applied_center_bits: None,
         }
     }
+}
+
+/// `:center-row R` (cells, may be a bound float) asks the view to keep the
+/// band `[R, R + :center-span)` centered — the classic tracker follow: the
+/// offset is `R + span/2 - viewport/2`, clamped at 0 so the first half-screen
+/// of rows stays put, and at the bottom likewise. A negative R is "no
+/// request". Only a changed request scrolls, so a wheel or drag in between
+/// is not fought.
+/// Returns whether the offset moved.
+fn apply_center_request(state: &mut ScrollState, center: Option<f32>, span: f32) -> bool {
+    let Some(center) = center.filter(|c| *c >= 0.0 && c.is_finite()) else {
+        return false;
+    };
+    let bits = center.to_bits();
+    if state.applied_center_bits == Some(bits) {
+        return false;
+    }
+    state.applied_center_bits = Some(bits);
+    if state.viewport_height <= 0.0 {
+        return false;
+    }
+    let before = state.offset_y;
+    state.offset_y = center + span * 0.5 - state.viewport_height * 0.5;
+    clamp_offset(state);
+    state.offset_y != before
+}
+
+fn center_request_from_props(props: &HashMap<String, Value>) -> (Option<f32>, f32) {
+    let center = props
+        .contains_key("center-row")
+        .then(|| super::get_f32_prop(props, "center-row", -1.0));
+    (center, super::get_f32_prop(props, "center-span", 1.0))
+}
+
+fn center_request_from_value(node: &Value) -> (Option<f32>, f32) {
+    let Value::Map(map) = node else {
+        return (None, 1.0);
+    };
+    let read = |key: &str, default: f32| -> f32 {
+        match map.get(key).map(|cell| cell.borrow().clone()) {
+            Some(Value::Number(n)) => n as f32,
+            Some(Value::ReactiveRef { slot, .. }) => {
+                crate::reactive::read_float_slot(&slot) as f32
+            }
+            _ => default,
+        }
+    };
+    let center = map.contains_key("center-row").then(|| read("center-row", -1.0));
+    (center, read("center-span", 1.0))
 }
 
 thread_local! {
@@ -39,6 +92,14 @@ thread_local! {
     // flow through the dirty-widget-id path instead of bumping the global
     // widget state generation (which would invalidate every tile's caches).
     static DIRTY_SCROLL_KEYS: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
+    // Scroll state keys whose offset moved at RENDER time (a `:center-row`
+    // follow) rather than through a gesture. A gesture already schedules the
+    // relayout a virtualizing child needs; these did not, so the editor does.
+    static RELAYOUT_SCROLL_KEYS: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
+}
+
+pub fn take_relayout_scroll_keys() -> HashSet<u64> {
+    RELAYOUT_SCROLL_KEYS.with(|keys| std::mem::take(&mut *keys.borrow_mut()))
 }
 
 pub fn get_scroll_state(widget_id: u64) -> ScrollState {
@@ -156,6 +217,10 @@ pub(crate) fn sync_node_state(node: &LayoutNode) -> ScrollState {
     if stick_to_bottom_enabled(node) && (old_content_height <= 0.0 || was_at_bottom) {
         state.offset_y = (state.content_height - state.viewport_height).max(0.0);
     }
+    let (center, span) = center_request_from_props(&node.props);
+    if apply_center_request(&mut state, center, span) {
+        RELAYOUT_SCROLL_KEYS.with(|keys| keys.borrow_mut().insert(key));
+    }
     clamp_offset(&mut state);
     set_scroll_state(key, state.clone());
     state
@@ -179,6 +244,8 @@ fn sync_layout_state(node: &Value, content_height: f32, viewport_height: f32) ->
     if stick_to_bottom_enabled_value(node) && (old_content_height <= 0.0 || was_at_bottom) {
         state.offset_y = (state.content_height - state.viewport_height).max(0.0);
     }
+    let (center, span) = center_request_from_value(node);
+    apply_center_request(&mut state, center, span);
     clamp_offset(&mut state);
     set_scroll_state(key, state.clone());
     state
@@ -201,6 +268,10 @@ impl WidgetDefinition for ScrollWidget {
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["padding"]
+    }
+
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["center-row"]
     }
 
     fn measure(
@@ -301,9 +372,16 @@ impl WidgetDefinition for ScrollWidget {
         node: &LayoutNode,
         _local_col: f32,
         _local_row: f32,
-        _delta_x: f32,
+        delta_x: f32,
         delta_y: f32,
     ) -> Option<WidgetEvent> {
+        // This widget only scrolls vertically. A mostly-sideways gesture is
+        // not ours: returning None lets the editor fall through to the tile's
+        // smooth horizontal widget scroll, so a wide buffer (the tracker)
+        // pans under a pinned viewport instead of swallowing the swipe.
+        if delta_x != 0.0 && delta_x.abs() > delta_y.abs() {
+            return None;
+        }
         let key = scroll_state_key(node);
         let mut state = get_scroll_state(key);
 
@@ -453,3 +531,40 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     return result;
 }
 "#, super::wgsl::SCROLL_FRAGMENT_SHADER);
+
+#[cfg(test)]
+mod center_row_tests {
+    use super::*;
+
+    fn state(viewport: f32, content: f32) -> ScrollState {
+        ScrollState {
+            content_height: content,
+            viewport_height: viewport,
+            ..ScrollState::default()
+        }
+    }
+
+    #[test]
+    fn center_row_holds_the_top_until_the_row_passes_the_middle() {
+        let mut s = state(20.0, 64.0);
+        apply_center_request(&mut s, Some(3.0), 1.0);
+        assert_eq!(s.offset_y, 0.0, "row 3 is above the middle of a 20-row view");
+        apply_center_request(&mut s, Some(9.5), 1.0);
+        assert_eq!(s.offset_y, 0.0, "row 9.5 sits exactly on the middle");
+        apply_center_request(&mut s, Some(30.0), 1.0);
+        assert_eq!(s.offset_y, 20.5, "past the middle the row is kept centered");
+        apply_center_request(&mut s, Some(63.0), 1.0);
+        assert_eq!(s.offset_y, 44.0, "clamped at the bottom");
+    }
+
+    #[test]
+    fn a_repeated_center_request_does_not_fight_manual_scrolling() {
+        let mut s = state(20.0, 64.0);
+        apply_center_request(&mut s, Some(30.0), 1.0);
+        s.offset_y = 5.0;
+        apply_center_request(&mut s, Some(30.0), 1.0);
+        assert_eq!(s.offset_y, 5.0);
+        apply_center_request(&mut s, Some(-1.0), 1.0);
+        assert_eq!(s.offset_y, 5.0, "negative is no request");
+    }
+}

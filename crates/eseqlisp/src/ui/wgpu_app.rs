@@ -79,6 +79,7 @@ pub enum TiledRenderStatus {
 /// first measurement after a change.
 pub(crate) struct PropTextMeasurer {
     fonts: std::cell::RefCell<SizedFontCache>,
+    mono_fonts: std::cell::RefCell<Option<SizedFontCache>>,
     scale_bits: Arc<AtomicU64>,
     built_scale_bits: std::cell::Cell<u64>,
 }
@@ -89,6 +90,7 @@ impl PropTextMeasurer {
         let fonts = SizedFontCache::new(f64::from_bits(bits))?;
         Some(Self {
             fonts: std::cell::RefCell::new(fonts),
+            mono_fonts: std::cell::RefCell::new(SizedFontCache::new_mono(f64::from_bits(bits))),
             scale_bits,
             built_scale_bits: std::cell::Cell::new(bits),
         })
@@ -102,6 +104,7 @@ impl PropTextMeasurer {
         if let Some(fonts) = SizedFontCache::new(f64::from_bits(bits)) {
             *self.fonts.borrow_mut() = fonts;
         }
+        *self.mono_fonts.borrow_mut() = SizedFontCache::new_mono(f64::from_bits(bits));
         self.built_scale_bits.set(bits);
     }
 }
@@ -136,6 +139,25 @@ impl TextMeasurer for PropTextMeasurer {
         self.sync_scale();
         let size_tenths = (font_size * 10.0).round() as u16;
         self.fonts.borrow().text_ink_extents(text, size_tenths)
+    }
+    fn measure_mono_text_px(&self, text: &str, font_size: f32) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        self.sync_scale();
+        let size_tenths = (font_size * 10.0).round() as u16;
+        match self.mono_fonts.borrow_mut().as_mut() {
+            Some(fonts) => fonts.measure_text(text, size_tenths),
+            None => self.fonts.borrow_mut().measure_text(text, size_tenths),
+        }
+    }
+    fn mono_cap_height_px(&self, font_size: f32) -> f32 {
+        self.sync_scale();
+        let size_tenths = (font_size * 10.0).round() as u16;
+        match self.mono_fonts.borrow_mut().as_mut() {
+            Some(fonts) => fonts.cap_height(size_tenths),
+            None => self.fonts.borrow_mut().cap_height(size_tenths),
+        }
     }
 }
 
@@ -2085,6 +2107,7 @@ impl WgpuAppBackend {
                         } else {
                             group_bg
                         },
+                        mono: false,
                     },
                 ));
                 if tab.close_visible
@@ -2105,6 +2128,7 @@ impl WgpuAppBackend {
                             } else {
                                 group_bg
                             },
+                            mono: false,
                         },
                     ));
                 }
