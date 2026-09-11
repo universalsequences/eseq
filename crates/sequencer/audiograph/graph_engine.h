@@ -159,6 +159,10 @@ typedef struct Engine {
 
   _Atomic(LiveGraph *) workSession; // published at block start, NULL after
   _Atomic int sessionFrames;        // number of frames for current block
+  // Closed bit plus worker reference count. A worker must acquire a reference
+  // before reading workSession or any graph data. The render owner closes the
+  // gate and waits for all references before reusing or destroying the graph.
+  _Atomic uint32_t sessionUsers;
 
   // Block-start wake mechanism
   pthread_mutex_t sess_mtx; // protects sess_cv wait/signal
@@ -207,6 +211,9 @@ typedef struct EngineRtStatus {
 } EngineRtStatus;
 
 void engine_start_workers(int workers);
+// Stop rendering before stopping the pool. Completed render calls have already
+// released all worker graph references, so their graphs may be destroyed while
+// the pool remains alive. Pool lifecycle calls are serialized by the host.
 void engine_stop_workers(void);
 void apply_params(LiveGraph *g);
 

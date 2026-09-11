@@ -42,7 +42,7 @@ static inline void execute_and_fanout(LiveGraph *lg, int32_t nid, int nframes);
 static inline bool try_execute_ready_node(LiveGraph *lg, int32_t nid,
                                           int nframes);
 static inline void schedule_ready_node(LiveGraph *lg, int32_t nid, int nframes);
-static void wait_for_block_start_or_shutdown(void);
+static void wait_for_block_start_or_shutdown(int worker_index, int workgroup_version);
 static void rebuild_invalid_io_caches(LiveGraph *lg, int nframes);
 static int choose_active_worker_count(LiveGraph *lg);
 
@@ -73,6 +73,49 @@ _Atomic uint64_t g_block_event_push_fail_count = 0;
 
 #ifndef AUDIOGRAPH_WORKER_WAIT_TIMEOUT_US
 #define AUDIOGRAPH_WORKER_WAIT_TIMEOUT_US 50
+#endif
+
+#ifndef AUDIOGRAPH_CALLBACK_EMPTY_SPINS
+#define AUDIOGRAPH_CALLBACK_EMPTY_SPINS 64
+#endif
+
+#ifndef AUDIOGRAPH_CALLBACK_WAIT_TIMEOUT_US
+// macOS live measurements support a short completion-aware callback wait.
+// Retain Linux's existing policy until its realtime scheduling is measured.
+#ifdef __APPLE__
+#define AUDIOGRAPH_CALLBACK_WAIT_TIMEOUT_US 50
+#else
+#define AUDIOGRAPH_CALLBACK_WAIT_TIMEOUT_US 0
+#endif
+#endif
+
+#ifdef AUDIOGRAPH_EXPERIMENTS
+// Overrides are configured once, before starting the engine, and are absent
+// from ordinary builds. The benchmark always supplies all policy values.
+static int experiment_worker_spins = AUDIOGRAPH_WORKER_EMPTY_SPINS;
+static int experiment_worker_wait_us = AUDIOGRAPH_WORKER_WAIT_TIMEOUT_US;
+static int experiment_callback_spins = AUDIOGRAPH_CALLBACK_EMPTY_SPINS;
+static int experiment_callback_wait_us = AUDIOGRAPH_CALLBACK_WAIT_TIMEOUT_US;
+extern int audiograph_experiment_queue_hint;
+void audiograph_configure_experiment(int worker_spins, int worker_wait_us,
+                                    int callback_spins, int callback_wait_us,
+                                    int queue_hint) {
+  assert(worker_spins >= 1 && worker_wait_us >= 1 && callback_spins >= 1 &&
+         callback_wait_us >= 0);
+  experiment_worker_spins = worker_spins;
+  experiment_worker_wait_us = worker_wait_us;
+  experiment_callback_spins = callback_spins;
+  experiment_callback_wait_us = callback_wait_us;
+  audiograph_experiment_queue_hint = queue_hint;
+}
+#undef AUDIOGRAPH_WORKER_EMPTY_SPINS
+#undef AUDIOGRAPH_WORKER_WAIT_TIMEOUT_US
+#undef AUDIOGRAPH_CALLBACK_EMPTY_SPINS
+#undef AUDIOGRAPH_CALLBACK_WAIT_TIMEOUT_US
+#define AUDIOGRAPH_WORKER_EMPTY_SPINS experiment_worker_spins
+#define AUDIOGRAPH_WORKER_WAIT_TIMEOUT_US experiment_worker_wait_us
+#define AUDIOGRAPH_CALLBACK_EMPTY_SPINS experiment_callback_spins
+#define AUDIOGRAPH_CALLBACK_WAIT_TIMEOUT_US experiment_callback_wait_us
 #endif
 
 // RealtimeKit requires RLIMIT_RTTIME and Linux kills the entire process when an
@@ -608,17 +651,47 @@ static int deliver_block_events_for_slice(LiveGraph *lg, int start_index,
 // Legacy bind_and_run function removed - using port-based bind_and_run_live
 // only
 
-static void wait_for_block_start_or_shutdown(void) {
+// The high bit prevents new references while existing workers leave. Keeping
+// this gate in the engine lets a late worker reject a closed session without
+// dereferencing a graph that the render owner may already have destroyed.
+#define SESSION_CLOSED (UINT32_C(1) << 31)
+
+static bool acquire_work_session(void) {
+  uint32_t users = atomic_load_explicit(&g_engine.sessionUsers, memory_order_relaxed);
+  while (!(users & SESSION_CLOSED)) {
+    if (atomic_compare_exchange_weak_explicit(&g_engine.sessionUsers, &users, users + 1,
+                                              memory_order_acquire, memory_order_relaxed))
+      return true;
+  }
+  return false;
+}
+
+static void release_work_session(void) {
+  // No graph access is permitted after releasing this reference.
+  atomic_fetch_sub_explicit(&g_engine.sessionUsers, 1, memory_order_release);
+}
+
+static void close_work_session(LiveGraph *lg) {
+  atomic_fetch_or_explicit(&g_engine.sessionUsers, SESSION_CLOSED, memory_order_acq_rel);
+  rq_finish(lg->sched.readyQueue);
+  // Job completion precedes worker epilogues and departure from timed waits.
+  // Acquire the final reference release before any reset, edit, or reclamation.
+  while (atomic_load_explicit(&g_engine.sessionUsers, memory_order_acquire) != SESSION_CLOSED)
+    cpu_relax();
+  atomic_store_explicit(&g_engine.workSession, NULL, memory_order_release);
+}
+
+static void wait_for_block_start_or_shutdown(int worker_index, int workgroup_version) {
   pthread_mutex_lock(&g_engine.sess_mtx);
   for (;;) {
     if (!atomic_load_explicit(&g_engine.runFlag, memory_order_acquire))
       break;
     // Also wake if workgroup join is pending
-    if (atomic_load_explicit(&g_engine.oswg_join_pending, memory_order_acquire))
+    if (atomic_load_explicit(&g_engine.oswg_version, memory_order_acquire) != workgroup_version)
       break;
-    LiveGraph *lg =
-        atomic_load_explicit(&g_engine.workSession, memory_order_acquire);
-    if (lg && atomic_load_explicit(&lg->sched.jobsInFlight, memory_order_acquire) > 0)
+    // Only inspect engine-owned state here: no graph reference is held yet.
+    if (!(atomic_load_explicit(&g_engine.sessionUsers, memory_order_acquire) & SESSION_CLOSED) &&
+        worker_index < atomic_load_explicit(&g_engine.activeWorkerLimit, memory_order_acquire))
       break;
     pthread_cond_wait(&g_engine.sess_cv, &g_engine.sess_mtx);
   }
@@ -815,6 +888,16 @@ static void *worker_main(void *arg) {
   atomic_store_explicit(&g_engine.workerPriorities[worker_index], priority,
                         memory_order_relaxed);
 #endif
+#ifdef HAVE_OS_WORKGROUP
+  os_workgroup_t oswg = NULL;
+  os_workgroup_join_token_s oswg_token;  // Stack-allocated token struct (not pointer)
+  memset(&oswg_token, 0, sizeof(oswg_token));
+  bool oswg_joined = false;
+  // Snapshot before the startup acknowledgement. A restarted pool must not
+  // acknowledge a workgroup change completed by the previous pool; the host
+  // publishes new changes after engine_start_workers returns.
+  int oswg_local_version = atomic_load_explicit(&g_engine.oswg_version, memory_order_acquire);
+#endif
   // Starting workers is synchronous with respect to this initialization point,
   // so the host can truthfully report the achieved policy before continuing.
   pthread_mutex_lock(&g_engine.workerStartupMtx);
@@ -867,19 +950,16 @@ static void *worker_main(void *arg) {
   }
 #endif
 
-#ifdef HAVE_OS_WORKGROUP
-  os_workgroup_t oswg = NULL;
-  os_workgroup_join_token_s oswg_token;  // Stack-allocated token struct (not pointer)
-  memset(&oswg_token, 0, sizeof(oswg_token));
-  bool oswg_joined = false;
-  int oswg_local_version = 0; // Track which version we've joined
-#endif
   for (;;) {
     if (!atomic_load_explicit(&g_engine.runFlag, memory_order_acquire))
       break;
 
     // Park until a block is published
-    wait_for_block_start_or_shutdown();
+#ifdef HAVE_OS_WORKGROUP
+    wait_for_block_start_or_shutdown(worker_index, oswg_local_version);
+#else
+    wait_for_block_start_or_shutdown(worker_index, 0);
+#endif
     if (!atomic_load_explicit(&g_engine.runFlag, memory_order_acquire))
       break;
 
@@ -929,37 +1009,23 @@ static void *worker_main(void *arg) {
     }
 #endif
 
-    LiveGraph *lg =
-        atomic_load_explicit(&g_engine.workSession, memory_order_acquire);
-    if (!lg)
-      continue; // spurious wake or no work - but workgroup joining is done
+    if (!acquire_work_session())
+      continue;
+    LiveGraph *lg = atomic_load_explicit(&g_engine.workSession, memory_order_relaxed);
+    assert(lg != NULL);
 
-    // Adaptive worker limit: workers above the per-block limit stay out of the
-    // ready queue. Hosts can keep a high max worker count for complex graphs
-    // without paying wake/steal jitter on tiny or mostly-serial graphs.
-    int active_limit = atomic_load_explicit(&g_engine.activeWorkerLimit,
-                                            memory_order_acquire);
+    int active_limit = atomic_load_explicit(&g_engine.activeWorkerLimit, memory_order_relaxed);
     if (worker_index >= active_limit) {
-      while (atomic_load_explicit(&g_engine.runFlag, memory_order_acquire)) {
-        LiveGraph *cur =
-            atomic_load_explicit(&g_engine.workSession, memory_order_acquire);
-        if (cur != lg)
-          break;
-        if (atomic_load_explicit(&lg->sched.jobsInFlight, memory_order_acquire) == 0)
-          break;
-        usleep(50);
-      }
+      release_work_session();
       continue;
     }
 
-    // Hot loop: run until this block is complete
+    // The reference protects all graph accesses, including the queue wait and
+    // the last job's bookkeeping. Inactive workers stay parked on sess_cv.
     for (;;) {
-      // If the session ended or graph pointer changed, exit the hot loop.
-      LiveGraph *cur =
-          atomic_load_explicit(&g_engine.workSession, memory_order_acquire);
-      if (cur != lg)
-        break;
-      if (atomic_load_explicit(&lg->sched.jobsInFlight, memory_order_acquire) == 0)
+      if (!atomic_load_explicit(&g_engine.runFlag, memory_order_acquire) ||
+          (atomic_load_explicit(&g_engine.sessionUsers, memory_order_relaxed) & SESSION_CLOSED) ||
+          atomic_load_explicit(&lg->sched.jobsInFlight, memory_order_acquire) <= 0)
         break;
 
       int32_t nid;
@@ -972,8 +1038,7 @@ static void *worker_main(void *arg) {
         cpu_relax(); // brief pause
       }
       if (!got) {
-        (void)rq_wait_nonempty(lg->sched.readyQueue,
-                               /*timeout_us=*/AUDIOGRAPH_WORKER_WAIT_TIMEOUT_US);
+        rq_wait_for_work(lg->sched.readyQueue, AUDIOGRAPH_WORKER_WAIT_TIMEOUT_US);
         continue;
       }
 
@@ -999,6 +1064,7 @@ static void *worker_main(void *arg) {
       }
     }
 
+    release_work_session();
     // Loop back: will go to sleep on sess_cv until next block
   }
 
@@ -1053,6 +1119,8 @@ void engine_start_workers(int workers) {
   pthread_mutex_init(&g_engine.workerStartupMtx, NULL);
   pthread_cond_init(&g_engine.workerStartupCv, NULL);
 
+  atomic_store_explicit(&g_engine.workSession, NULL, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.sessionUsers, SESSION_CLOSED, memory_order_relaxed);
   atomic_store(&g_engine.runFlag, 1);
   for (int i = 0; i < workers; i++) {
     pthread_attr_t attr;
@@ -1087,15 +1155,15 @@ void engine_set_os_workgroup(void *oswg_ptr) {
   // Store opaque pointer; Swift side retains it.
   atomic_store_explicit(&g_engine.oswg, oswg_ptr, memory_order_release);
 
-  // Increment version to signal workers to re-join
-  int new_version = atomic_fetch_add_explicit(&g_engine.oswg_version, 1,
-                                              memory_order_acq_rel) + 1;
-
   // Set counter to number of workers, then set flag and broadcast
   // This ensures all workers see the flag before it's cleared
   atomic_store_explicit(&g_engine.oswg_join_remaining, g_engine.workerCount,
                         memory_order_release);
-  atomic_store_explicit(&g_engine.oswg_join_pending, 1, memory_order_release);
+  atomic_store_explicit(&g_engine.oswg_join_pending, g_engine.workerCount > 0,
+                        memory_order_release);
+  // Publish only after initializing the acknowledgement count.
+  int new_version = atomic_fetch_add_explicit(&g_engine.oswg_version, 1,
+                                              memory_order_acq_rel) + 1;
   pthread_mutex_lock(&g_engine.sess_mtx);
   pthread_cond_broadcast(&g_engine.sess_cv);
   pthread_mutex_unlock(&g_engine.sess_mtx);
@@ -1113,12 +1181,13 @@ void engine_clear_os_workgroup(void) {
 #ifdef HAVE_OS_WORKGROUP
   // First, signal workers to leave by setting NULL and incrementing version
   atomic_store_explicit(&g_engine.oswg, NULL, memory_order_release);
-  int new_version = atomic_fetch_add_explicit(&g_engine.oswg_version, 1,
-                                              memory_order_acq_rel) + 1;
-
   atomic_store_explicit(&g_engine.oswg_join_remaining, g_engine.workerCount,
                         memory_order_release);
-  atomic_store_explicit(&g_engine.oswg_join_pending, 1, memory_order_release);
+  atomic_store_explicit(&g_engine.oswg_join_pending, g_engine.workerCount > 0,
+                        memory_order_release);
+  // Publish only after initializing the acknowledgement count.
+  int new_version = atomic_fetch_add_explicit(&g_engine.oswg_version, 1,
+                                              memory_order_acq_rel) + 1;
   pthread_mutex_lock(&g_engine.sess_mtx);
   pthread_cond_broadcast(&g_engine.sess_cv);
   pthread_mutex_unlock(&g_engine.sess_mtx);
@@ -1202,16 +1271,15 @@ void engine_get_rt_status(EngineRtStatus *status) {
 }
 
 void engine_stop_workers(void) {
+  // The host must stop rendering before stopping the pool. Every completed
+  // render has already unregistered its queue waiters and worker references.
+  assert(atomic_load_explicit(&g_engine.sessionUsers, memory_order_acquire) == SESSION_CLOSED);
   atomic_store(&g_engine.runFlag, 0);
 
-  // Wake sleepers on both wait sites
+  // All workers are between blocks; only the session wait can remain.
   pthread_mutex_lock(&g_engine.sess_mtx);
   pthread_cond_broadcast(&g_engine.sess_cv);
   pthread_mutex_unlock(&g_engine.sess_mtx);
-
-  // Also wake any workers blocked in rq_wait_nonempty during a block
-  // We'll iterate through all potential live graphs, but since we're shutting
-  // down, we can just wait for threads to exit naturally
 
   for (int i = 0; i < g_engine.workerCount; i++) {
     pthread_join(g_engine.threads[i], NULL);
@@ -1415,7 +1483,8 @@ static inline void execute_and_fanout(LiveGraph *lg, int32_t nid, int nframes) {
                         memory_order_release);
   lg->sched.completed_this_block[nid] = true;
   atomic_fetch_add_explicit(&g_completed_jobs, 1, memory_order_release);
-  atomic_fetch_sub_explicit(&lg->sched.jobsInFlight, 1, memory_order_release);
+  int remaining_jobs = atomic_fetch_sub_explicit(&lg->sched.jobsInFlight, 1,
+                                                  memory_order_acq_rel) - 1;
   // Mark done AFTER accounting — a node with pending=-3 is now guaranteed
   // to have been fully counted in completed_jobs and jobsInFlight.
   atomic_store_explicit(&lg->sched.pending[nid], PENDING_DONE_SENTINEL,
@@ -1426,8 +1495,11 @@ static inline void execute_and_fanout(LiveGraph *lg, int32_t nid, int nframes) {
   // Publish this node's output writes before signaling global block completion.
   // The audio thread waits on jobsInFlight with acquire loads, so the final
   // transition to zero must carry release semantics.
-  atomic_fetch_sub_explicit(&lg->sched.jobsInFlight, 1, memory_order_release);
+  int remaining_jobs = atomic_fetch_sub_explicit(&lg->sched.jobsInFlight, 1,
+                                                  memory_order_acq_rel) - 1;
 #endif
+  if (remaining_jobs == 0)
+    rq_finish(lg->sched.readyQueue);
 }
 
 static inline bool try_execute_ready_node(LiveGraph *lg, int32_t nid,
@@ -2212,7 +2284,9 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
     // Publish session frames and graph
     atomic_store_explicit(&g_engine.sessionFrames, nframes,
                           memory_order_release);
-    atomic_store_explicit(&g_engine.workSession, lg, memory_order_release);
+    atomic_store_explicit(&g_engine.workSession, lg, memory_order_relaxed);
+    assert(atomic_load_explicit(&g_engine.sessionUsers, memory_order_relaxed) == SESSION_CLOSED);
+    atomic_store_explicit(&g_engine.sessionUsers, 0, memory_order_release);
 
     // wake workers
     pthread_mutex_lock(&g_engine.sess_mtx);
@@ -2246,8 +2320,12 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
         if (atomic_load_explicit(&lg->sched.jobsInFlight, memory_order_acquire) == 0)
           break;
         cpu_relax();
-        // This is the realtime callback thread; keep it runnable and poll
-        // lightly until workers publish more ready jobs or finish.
+        // Help with bursts first, then park briefly. Publication or completion
+        // wakes this wait; it does not depend only on the timeout for progress.
+        if (AUDIOGRAPH_CALLBACK_WAIT_TIMEOUT_US > 0 &&
+            (empty_spins + 1) % AUDIOGRAPH_CALLBACK_EMPTY_SPINS == 0) {
+          rq_wait_for_work(lg->sched.readyQueue, AUDIOGRAPH_CALLBACK_WAIT_TIMEOUT_US);
+        }
         if (++empty_spins > 4096) {
           empty_spins = 0;
 #ifdef __linux__
@@ -2280,7 +2358,6 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
                       lg->sched.dirty ? 1 : 0);
               atomic_store_explicit(&lg->sched.jobsInFlight, 0,
                                     memory_order_release);
-              rq_reset(lg->sched.readyQueue);
               break;
             }
           }
@@ -2327,8 +2404,7 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
     // writes from all worker threads.
     atomic_thread_fence(memory_order_acquire);
 
-    // Clear session
-    atomic_store_explicit(&g_engine.workSession, NULL, memory_order_release);
+    close_work_session(lg);
   } else {
     // Single-thread fallback
     int32_t nid;

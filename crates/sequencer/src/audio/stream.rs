@@ -129,6 +129,10 @@ fn start_cpal_output_stream(
                     }
                 }
                 blocks.serve(data, |block| audio_callback(&mut cb_data, block));
+                #[cfg(feature = "audio-experiments")]
+                if super::experiment::silence_device() {
+                    data.fill(0.0);
+                }
             },
             |err| eprintln!("Audio stream error: {err}"),
             None,

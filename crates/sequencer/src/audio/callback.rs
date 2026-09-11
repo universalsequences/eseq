@@ -925,6 +925,9 @@ pub(super) fn render_audio_block(
 
     publish_active_voice_counts(data, num_tracks);
 
+    #[cfg(feature = "audio-experiments")]
+    super::experiment::record_block(callback_start, data, output);
+
     if nframes > 0 {
         let elapsed_secs = callback_start.elapsed().as_secs_f32();
         let block_budget_secs = nframes as f32 / data.sample_rate as f32;

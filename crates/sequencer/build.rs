@@ -29,6 +29,9 @@ fn main() {
         audiograph.define("_GNU_SOURCE", None);
     }
 
+    if std::env::var_os("CARGO_FEATURE_AUDIO_EXPERIMENTS").is_some() {
+        audiograph.define("AUDIOGRAPH_EXPERIMENTS", None);
+    }
     audiograph.compile("audiograph");
 
     // On Apple platforms the DGen ABI v1 host-services table stays vDSP-backed,

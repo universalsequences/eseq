@@ -276,6 +276,7 @@ typedef struct {
   MPMCQueue *ring;            // Thread-safe node storage
   _Atomic int qlen;           // Logical queue length
   _Atomic int waiters;        // Number of threads waiting on items
+  _Atomic bool finished;     // Completion is a wake condition, even with no items
   dispatch_semaphore_t items; // Semaphore used for wakeups
 } ReadyQ;
 #else
@@ -284,6 +285,7 @@ typedef struct {
   MPMCQueue *ring;     // Thread-safe node storage
   _Atomic int qlen;    // Logical queue length
   _Atomic int waiters; // Number of threads waiting on items
+  _Atomic bool finished;
   sem_t items;         // Semaphore used for wakeups
 } ReadyQ;
 #endif
@@ -302,9 +304,12 @@ ReadyQ *rq_create(int capacity);
 void rq_destroy(ReadyQ *q);
 bool rq_push(ReadyQ *q, int32_t nid);
 bool rq_try_pop(ReadyQ *q, int32_t *out);
-bool rq_wait_nonempty(ReadyQ *q, int timeout_us);
-void rq_reset(ReadyQ *q); // Reset/drain queue for clean block start
+void rq_wait_for_work(ReadyQ *q, int timeout_us); // Work, completion, or timeout
+void rq_finish(ReadyQ *q); // Publish completion and wake every registered waiter
+// Reset and destruction require exclusive ownership: no producers, consumers,
+// or waiters. The engine's session reference barrier establishes this boundary.
+void rq_reset(ReadyQ *q);
 void rq_push_or_spin(ReadyQ *q, int32_t nid); // Retry until enqueue succeeds
-void rq_push_batch(ReadyQ *q, const int32_t *nids, int count); // Batch push with single signal
+void rq_push_batch(ReadyQ *q, const int32_t *nids, int count); // Publish batch, then notify waiters
 
 #endif // GRAPH_TYPES_H
