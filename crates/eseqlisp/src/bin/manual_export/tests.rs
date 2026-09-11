@@ -21,6 +21,17 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn discovers_unique_figures_without_existing_assets_or_code_examples() {
+    let fixture = Fixture::new();
+    fixture.write("index.md", "# Manual\n\n![New figure](<images/new figure.png>)\n\n```markdown\n![Example](images/example.png)\n```\n");
+    fixture.write("chapter.md", "# Chapter\n\n![Repeated](<images/new figure.png>)\n\n![Another](images/another.png)\n");
+    assert_eq!(referenced_images(&fixture.source()).unwrap(), BTreeSet::from([
+        "images/another.png".to_string(), "images/new figure.png".to_string(),
+    ]));
+    assert!(!fixture.source().join("images/new figure.png").exists());
+}
+
+#[test]
 fn exports_shared_ast_images_navigation_and_inert_actions() {
     let fixture = Fixture::new();
     fixture.write("index.md", "# Manual & <intro>\n\n- [Second](b) — start here\n- [First](a) — then here\n");

@@ -185,11 +185,9 @@ fn render_page(name: &str, pages: &BTreeMap<String, Chapter>, order: &[String]) 
     Ok(html)
 }
 
-fn export(source: &Path, output: &Path) -> Result<(usize, usize), String> {
-    let source = source.canonicalize().map_err(|error| error.to_string())?;
+fn load_pages(source: &Path) -> Result<BTreeMap<String, Page>, String> {
     let mut pages = BTreeMap::new();
-    let mut files = BTreeMap::<String, Vec<u8>>::new();
-    for entry in fs::read_dir(&source).map_err(|error| error.to_string())? {
+    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
         let path = entry.map_err(|error| error.to_string())?.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("md") { continue; }
         let name = path.file_stem().and_then(|stem| stem.to_str()).ok_or("invalid page filename")?;
@@ -201,6 +199,29 @@ fn export(source: &Path, output: &Path) -> Result<(usize, usize), String> {
             || page.blocks.iter().filter(|block| matches!(block, Block::Heading { level: 1, .. })).count() != 1 {
             return Err(format!("{name}: a manual page must start with exactly one H1"));
         }
+        pages.insert(name.to_string(), page);
+    }
+    if !pages.contains_key("index") { return Err("manual requires index.md".to_string()); }
+    Ok(pages)
+}
+
+/// Discover figures using the reader's parser, without requiring existing
+/// image files. A newly authored figure can therefore be generated first.
+fn referenced_images(source: &Path) -> Result<BTreeSet<String>, String> {
+    Ok(load_pages(source)?.into_values().flat_map(|page|
+        page.blocks.into_iter().filter_map(|block| match block {
+            Block::Image { src, .. } => Some(src),
+            _ => None,
+        })
+    ).collect())
+}
+
+fn export(source: &Path, output: &Path) -> Result<(usize, usize), String> {
+    let source = source.canonicalize().map_err(|error| error.to_string())?;
+    let mut pages = BTreeMap::new();
+    let mut files = BTreeMap::<String, Vec<u8>>::new();
+    for (name, page) in load_pages(&source)? {
+        let path = source.join(format!("{name}.md"));
         let mut images = BTreeMap::new();
         for block in &page.blocks {
             if let Block::Image { src, .. } = block {
@@ -212,9 +233,8 @@ fn export(source: &Path, output: &Path) -> Result<(usize, usize), String> {
                 images.insert(src.clone(), (width, height));
             }
         }
-        pages.insert(name.to_string(), Chapter { page, images });
+        pages.insert(name, Chapter { page, images });
     }
-    if !pages.contains_key("index") { return Err("manual needs an index.md page".to_string()); }
     for (name, chapter) in &pages {
         for target in menu_targets(&chapter.page) {
             if !pages.contains_key(target) { return Err(format!("{name}: missing menu page {target:?}")); }
@@ -273,18 +293,26 @@ fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let mut source = PathBuf::from("docs/manual");
     let mut output = None;
+    let mut list_images = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--source" => source = PathBuf::from(args.next().ok_or("--source requires a directory")?),
             "--out" => output = Some(PathBuf::from(args.next().ok_or("--out requires a directory")?)),
+            "--list-images" => list_images = true,
             "-h" | "--help" => {
-                println!("usage: eseqlisp_manual_export [--source docs/manual] --out WEBSITE/manual");
+                println!("usage: eseqlisp_manual_export [--source docs/manual] (--out WEBSITE/manual | --list-images)");
                 return Ok(());
             }
             _ => return Err(format!("unknown argument {arg:?}")),
         }
     }
-    let output = output.ok_or("--out is required")?;
+    if list_images {
+        if output.is_some() { return Err("--list-images cannot be combined with --out".to_string()); }
+        println!("{}", serde_json::to_string_pretty(&referenced_images(&source)?)
+            .map_err(|error| error.to_string())?);
+        return Ok(());
+    }
+    let output = output.ok_or("--out is required (or use --list-images)")?;
     let (pages, images) = export(&source, &output)?;
     println!("Exported {pages} pages and {images} images to {}", output.display());
     Ok(())

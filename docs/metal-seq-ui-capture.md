@@ -45,7 +45,11 @@ whose root fills the viewport. `eseqlisp_capture` accepts this flag too.
 
 ## Manual illustration assets
 
-Run `python3 scripts/capture_manual_images.py` from the repository root. It builds
+Run `./scripts/refresh_manual.py` to regenerate every referenced screenshot and
+diagram, update the in-app manual's PNGs, and export HTML to `../eseq-site/manual`.
+See [Manual HTML export](manual-web-export.md) for options and adding images.
+
+For screenshot-only work, run `python3 scripts/capture_manual_images.py`. It builds
 `metal_seq` and renders the fixtures listed in
 `crates/sequencer/ui/capture-fixtures/manual-images.json` to `docs/manual/images/`.
 The manifest records each image's project, buffer, key, and surrounding viewport.
@@ -54,7 +58,7 @@ Pass image names to regenerate only those figures, for example
 Pass `--binary /path/to/metal_seq` to use an existing build.
 The script stops on a failed capture; inspect regenerated PNGs before accepting
 them. All manual chapters use these ordinary relative Markdown images, usable
-in the in-app reader and a future website. Captures open no interactive window
+in the in-app reader and the HTML export. Captures open no interactive window
 and do not save projects, import staged samples, or export recordings.
 
 To inspect the result in the real manual:

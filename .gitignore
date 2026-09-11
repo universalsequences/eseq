@@ -16,6 +16,7 @@ crates/musicplayer/Music/
 crates/eseqlisp/profiles/
 
 # Build/profiling artifacts.
+__pycache__/
 /dist/out/
 *.o
 *.dylib
