@@ -1988,6 +1988,16 @@ impl ProcessRuntime {
         }
     }
 
+    /// Forget every def-process `:state` cell (lane accumulators' `value`,
+    /// rand's `held`, count's `count`, authored state). The next fire starts
+    /// each cell from its declared initial value. Called on the stop→play
+    /// transition and on an all-tracks accumulator reset; `reset_transport`
+    /// deliberately does not do this because scene and pattern switches
+    /// call it too and accumulators must ride across those.
+    pub fn reset_step_process_states(&mut self) {
+        self.step_process_states.clear();
+    }
+
     pub fn clear_scene_pending(&mut self) {
         self.pending_events.clear();
         self.pending_step_inlet_writes.clear();

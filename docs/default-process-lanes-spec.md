@@ -184,6 +184,15 @@ Where the build differs from the rev 1 plan, and why.
   `0 0 0 1 0 0 0 0` → a staircase, not a spike). Both keep a `hold` inlet
   (default 0) that restores sample-and-hold for a direct parameter target
   that should keep the last value across quiet steps.
+- **Play from stopped resets process state (2026-09-11).** Every def-process
+  `:state` cell (lane accumulators' `value`, rand's `held`, count's `count`,
+  authored state) is cleared on the scheduler's stop→play transition and on
+  an all-tracks accumulator reset, via
+  `ProcessRuntime::reset_step_process_states`. Before this only the legacy
+  per-track accumulator reset there; lane accumulators carried on from
+  wherever Stop caught them. `reset_transport` still leaves state alone on
+  purpose: scene and pattern switches call it and accumulators ride across
+  those.
 - **Dropdown**: default lanes show as their instance name with no index; other
   lanes keep `N class/inlet`. The dropdown widget takes plain strings, so the
   planned section header and kind column are not there. `Add lane…` is not

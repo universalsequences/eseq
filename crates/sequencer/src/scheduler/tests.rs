@@ -3216,6 +3216,18 @@
         scratch: lisp_host::ScratchControlRuntime,
         lookahead_target_samples: u64,
     ) -> Vec<ObservedTrigger> {
+        schedule_process_observed_fixture_with(state, scratch, lookahead_target_samples, |_| {})
+            .0
+    }
+
+    /// Like `schedule_process_observed_fixture`, but hands the scheduler
+    /// back so a test can drive a second pass (a transport restart).
+    fn schedule_process_observed_fixture_with(
+        state: &Arc<SequencerState>,
+        scratch: lisp_host::ScratchControlRuntime,
+        lookahead_target_samples: u64,
+        before_second_pass: impl FnOnce(&mut SchedulerLookaheadState),
+    ) -> (Vec<ObservedTrigger>, Vec<ObservedTrigger>) {
         state.transport.playing.store(true, Ordering::Relaxed);
         let snapshot = state.publish_scheduler_snapshot();
         let queue = ScheduledEventQueue::<64>::new();
@@ -3244,8 +3256,31 @@
             false,
             false,
         );
+        let first = observed_triggers(&queue);
 
-        observed_triggers(&queue)
+        // Second pass from sample 0 again, as the worker does after a
+        // stop→play transition (queue cleared, clock reset).
+        queue.clear();
+        scheduler.clock.reset();
+        before_second_pass(&mut scheduler);
+        schedule_playing_lookahead(
+            &mut scheduler,
+            state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            lookahead_target_samples,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+        (first, observed_triggers(&queue))
     }
 
     fn first_resolved_trigger(events: &[ScheduledEventKind]) -> &ScheduledEventKind {
@@ -3418,6 +3453,57 @@
             vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0],
             "step 3 vetoed, reset before step 4"
         );
+    }
+
+    fn tacc_ramp_restart_fixture(
+        before_second_pass: impl FnOnce(&mut SchedulerLookaheadState) + Send + 'static,
+    ) -> (Vec<f32>, Vec<f32>) {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(8);
+            for step in 0..8 {
+                state.pattern.patterns[0].set_step_active(step, true);
+            }
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("builtin process library");
+            let mut chain = crate::process::default_project_layer();
+            default_lane_slot_mut(&mut chain, "tacc")
+                .lanes
+                .insert("amount".to_string(), lane(&[1.0; 8]));
+            assert!(state.set_project_process_chain(chain));
+            let (first, second) =
+                schedule_process_observed_fixture_with(&state, scratch, 51_000, before_second_pass);
+            let ramp = |events: &[ObservedTrigger]| {
+                events.iter().take(4).map(|event| event.transpose).collect::<Vec<_>>()
+            };
+            (ramp(&first), ramp(&second))
+        })
+    }
+
+    #[test]
+    fn scheduler_play_from_stopped_restarts_lane_accumulators() {
+        // Without the reset the ramp carries on from where it stopped —
+        // the bug: accumulators survived Stop/Play.
+        let (first, carried) = tacc_ramp_restart_fixture(|_| {});
+        assert_eq!(first, vec![1.0, 2.0, 3.0, 4.0]);
+        assert!(
+            carried[0] > 4.0 && carried[1] == carried[0] + 1.0,
+            "state cells persist across passes: {carried:?}"
+        );
+
+        // What the worker now does on the stop→play transition.
+        let (_, restarted) = tacc_ramp_restart_fixture(|scheduler| {
+            scheduler.process_runtime.reset_step_process_states();
+        });
+        assert_eq!(restarted, vec![1.0, 2.0, 3.0, 4.0], "Play from stopped restarts at 0");
     }
 
     #[test]

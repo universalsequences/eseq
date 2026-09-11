@@ -618,6 +618,7 @@ impl SchedulerDriver {
 
         if reset_all {
             self.lookahead_state.midi_fx_quantizer_state.reset();
+            self.lookahead_state.process_runtime.reset_step_process_states();
             for track_idx in 0..MAX_TRACKS {
                 self.lookahead_state.pending_accum_reset[track_idx] = false;
                 if let Some(def) = ACCUMULATOR_REGISTRY.get(
@@ -681,6 +682,9 @@ impl SchedulerDriver {
             self.lookahead_state.pending_accum_reset = [true; MAX_TRACKS];
             self.lookahead_state.neural_runtime.reset_state(self.lookahead_state.clock.total_beats);
             self.lookahead_state.process_runtime.reset_transport(0.0);
+            // Play from stopped restarts every lane/process accumulator,
+            // like the legacy per-track accumulator above.
+            self.lookahead_state.process_runtime.reset_step_process_states();
             state.set_neural_visualization(self.lookahead_state.neural_runtime.visualization_snapshot());
         } else if self.last_topology_epoch != topology_epoch {
             reconcile_playing_topology_change(
