@@ -1,11 +1,12 @@
 """Explicit recording groups and reference-key conventions, not runtime assets."""
 from dataclasses import dataclass
 from pathlib import Path
+import os
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 SAMPLES = ROOT / 'samples-to-analyze/gamelan'
-FACTORY = ROOT / 'content/instruments/Physical Models'
+FACTORY = Path(os.environ.get('ESEQ_PM_FACTORY_DIR', ROOT / 'content/instruments/Physical Models'))
 
 
 @dataclass(frozen=True)

@@ -73,16 +73,19 @@ def dsp(slug, calibration):
         extra = []
     table_text = ';; Calibration SHA256: '+digest(HERE/f'{slug}-calibration.json')+'\n'
     table_text += '\n'.join(tables(rows, prefix) for prefix, rows in groups.items())
-    text = '(def character_v (latch (cymbal-smooth (clip (mod character) 0 1) 12) tick))\n'
+    text = '(def character_v (event-hold (cymbal-smooth (clip (mod character) 0 1) 12) tick))\n'
     text += '\n'.join(voicing(rows, prefix) for prefix, rows in groups.items())
     if slug == 'hihat':
-        text += '(def openness_v (latch (cymbal-smooth (clip (mod openness) 0 1) 2) tick))\n'
+        text += '(def openness_v (event-hold (cymbal-smooth (clip (mod openness) 0 1) 2) tick))\n'
     for field in FIELDS:
         expression = (f'(mix closed_{field}_v open_{field}_v openness_v)' if slug == 'hihat'
                       else f'voice_{field}_v')
         text += f'(def {field} {expression})\n'
     for i, name in enumerate([f'base_rate{i}' for i in range(6)]+['base_contact_s', 'base_direct']):
-        text += f'(def {name} (sample material {i/8:g}))\n'
+        value = f'(sample material {i/8:g})'
+        if name == 'base_direct':
+            value = f'(latch {value} tick)'
+        text += f'(def {name} {value})\n'
     # Default pickups favor diffuse shell motion over isolated modes.
     # Bell remains available across its full range for other striking positions.
     return source(NAMES[slug], table_text, text, extra_params=extra, hat=slug == 'hihat',

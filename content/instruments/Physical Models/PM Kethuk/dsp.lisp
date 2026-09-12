@@ -76,9 +76,11 @@
 
 ;; Coefficients latch on every strike as well as each periodic control tick.
 ;; A periodic-only hop would miss the beginning of an off-grid force pulse.
-;; These are frame-rate latches, so note events can update them immediately.
+;; Pure coefficient calculations execute only on those events. Final audio
+;; latches keep the modal recurrence running every sample.
 (def control_tick (eq (accum 1 0 0 16) 0))
-(defmacro gamelan-hold (value tick) (latch value tick))
+(defmacro gamelan-hold (value tick) (event-hold value tick))
+(defmacro gamelan-audio (value tick) (latch value tick))
 
 (defmacro gamelan-row (note)
   0)
@@ -127,9 +129,10 @@
 (def reference_pole (exp (/ -1 (* 6e-05 samplerate))))
 (def contact_tau (* 6e-05 (clip (mod contact) 0.3 3)
   (pow 2 (* 3 (- 0.5 (clip (mod hardness) 0 1))))))
-(def contact_pole (exp (/ -1 (* contact_tau samplerate))))
-(def force1 (gamelan-pole (* onset velocity_gain) contact_pole))
-(def force (gamelan-pole force1 contact_pole))
+(def contact_pole (exp (/ -1 (* (gamelan-hold contact_tau update_tick) samplerate))))
+(def force_pole (gamelan-audio contact_pole update_tick))
+(def force1 (gamelan-pole (* onset velocity_gain) force_pole))
+(def force (gamelan-pole force1 force_pole))
 (def omega (* twopi (/ (min frequencies (* 0.48 samplerate)) samplerate)))
 (def rotation_cos (cos omega))
 (def rotation_sin (sin omega))
@@ -166,9 +169,9 @@
 ;; Its impulse envelope is exp(-rate*t) * (1 - (1-direct)*exp(-t/rise)).
 ;; This is a causal recurrence, not a recorded or scheduled amplitude envelope.
 ;; Both complex rotations remain contractive during pitch/damping automation.
-;; Their inputs already hold until update_tick, so coefficients need no second
-;; tensor latch. Shared sine/cosine also serve the contact response above.
-(defmacro gamelan-resonator (rotation_cos rotation_sin rate rise direct weight force)
+;; Final coefficient latches cross from the event clock back to audio rate.
+;; Shared sine/cosine also serve the contact response above.
+(defmacro gamelan-resonator (rotation_cos rotation_sin rate rise direct weight force tick)
   (make-tensor-history bar_r @shape [18])
   (make-tensor-history bar_i @shape [18])
   (make-tensor-history radiation_r @shape [18])
@@ -178,10 +181,10 @@
   (def xr (read-tensor-history radiation_r))
   (def yr (read-tensor-history radiation_i))
   (def radius (exp (/ (- rate) samplerate)))
-  (def c (* radius rotation_cos))
-  (def s (* radius rotation_sin))
-  (def coupling (exp (/ -1 (* rise samplerate))))
-  (def next_r (+ (- (* c x) (* s y)) (* force weight)))
+  (def c (gamelan-audio (* radius rotation_cos) tick))
+  (def s (gamelan-audio (* radius rotation_sin) tick))
+  (def coupling (gamelan-audio (exp (/ -1 (* rise samplerate))) tick))
+  (def next_r (+ (- (* c x) (* s y)) (* force (gamelan-audio weight tick))))
   (def next_i (+ (* s x) (* c y)))
   (def radiated_r (+ (* coupling (- (* c xr) (* s yr))) (* (- 1 coupling) next_r)))
   (def radiated_i (+ (* coupling (+ (* s xr) (* c yr))) (* (- 1 coupling) next_i)))
@@ -189,12 +192,12 @@
   (write-tensor-history bar_i next_i)
   (write-tensor-history radiation_r radiated_r)
   (write-tensor-history radiation_i radiated_i)
-  (mix radiated_i next_i direct))
+  (mix radiated_i next_i (gamelan-audio direct tick)))
 
-(def modes (gamelan-resonator rotation_cos rotation_sin rate rise direct weight force))
-(def stereo (gamelan-smooth (clip (mod width) 0 1) 8))
-(def left (sum (* modes (sqrt (+ 1 (* mode_pan_table stereo))))))
-(def right (sum (* modes (sqrt (- 1 (* mode_pan_table stereo))))))
+(def modes (gamelan-resonator rotation_cos rotation_sin rate rise direct weight force update_tick))
+(def stereo (gamelan-hold (gamelan-smooth (clip (mod width) 0 1) 8) update_tick))
+(def left (sum (* modes (gamelan-audio (sqrt (+ 1 (* mode_pan_table stereo))) update_tick))))
+(def right (sum (* modes (gamelan-audio (sqrt (- 1 (* mode_pan_table stereo))) update_tick))))
 
 (def drive_v (gamelan-smooth (clip (mod drive) 0 1) 8))
 (def cutoff (min (gamelan-smooth (clip (mod tone_hz) 1000 20000) 8) (* samplerate 0.43)))

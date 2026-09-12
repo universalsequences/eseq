@@ -4,6 +4,7 @@
 ;; modal only receives pointer input through the active tile. Mounted by both
 ;; step-panel buffers (`*sequencer*` and `*arrangement*`), like export-song.
 (module eseq.file-dialogs)
+(import eseq.settings)
 (export open-confirm panel open-save close-save save-open? save-draft commit-save
         open-unsaved-prompt close-unsaved-prompt unsaved-prompt-open?
         unsaved-prompt-save unsaved-prompt-discard
@@ -139,6 +140,7 @@
 
 (def panel ()
   (v-stack :width 0 :height 0 :bg :transparent
+    (eseq.settings/panel)
     (modal :is-open confirm-open? :on-close close-confirm :width-px 520 :height-px 220
       (v-stack :width :fill :height :fill :padding 1 :gap 1
         (label confirm-message :key "menu-confirm-message" :font-size 14 :bg :transparent)

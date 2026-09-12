@@ -6,6 +6,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "open-help",
     "open-url",
     "about-open",
+    "settings-open",
+    "midi-refresh",
+    "midi-set-enabled",
 ];
 
 /// The Save / Save As / About modals are mounted in the step-panel buffers,
@@ -45,6 +48,28 @@ pub(super) fn handle(
 ) {
     let result = (|| -> Result<(), String> {
         match name {
+            "settings-open" => {
+                activate_dialog_tile(editor);
+                editor.runtime_mut().eval_str("(eseq.settings/open-settings)")
+                    .map_err(|e| format!("{e:?}"))?;
+                if let Some(commands) = &ctx.sessions.midi_commands {
+                    commands.send(sequencer::midi_input::service::Command::Refresh)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            "midi-refresh" | "midi-set-enabled" => {
+                use sequencer::midi_input::service::Command;
+                let command = if name == "midi-refresh" { Command::Refresh } else {
+                    let Value::Map(ref map) = payload else { return Err("Missing MIDI device".into()); };
+                    let id = map_string(map, "id").ok_or("Missing MIDI device ID")?;
+                    let enabled = map.get("enabled").and_then(|v| match &*v.borrow() {
+                        Value::Bool(value) => Some(*value), _ => None,
+                    }).ok_or("Missing MIDI enabled state")?;
+                    Command::SetEnabled { id, enabled }
+                };
+                ctx.sessions.midi_commands.as_ref().ok_or("MIDI service is unavailable")?
+                    .send(command).map_err(|e| e.to_string())?;
+            }
             "project-save-open" => {
                 let (mode, then) = match payload {
                     Value::Map(ref map) => (

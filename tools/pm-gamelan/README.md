@@ -269,3 +269,15 @@ Latent Sonorities / memeshift recordings, performed by Bilawa Ade Respati and
 recorded by Rabih Beaini. Commercial distribution clearance remains open in
 **eseq-uge6**, covering these five instruments and PM Saron. Local modeling
 and validation do not establish that permission.
+
+## Event-rate coefficient update
+
+DGenLisp v0.1.20 schedules the derived coefficient graph only on strikes and
+16-sample control ticks. Final ordinary latches feed the continuously running
+modal state. This retains all current modal slots and the existing onset
+response. See [the paired benchmark](../physical-models/README.md) for gains
+against v0.1.19 and the small coefficient-automation timing change.
+
+`ESEQ_PM_FACTORY_DIR` can point build/verification tools at a staging factory.
+Promote fresh sources with the `pm_factory_sidecars` example and check compiled
+editor writeback before copying sources and sidecars into the live factory.

@@ -256,10 +256,8 @@ pub(crate) fn run_event_loop(
     let mut lisp_hot_reload_source_revision = editor.runtime().lisp_source_revision();
     let mut last_lisp_hot_reload_path_scan = Instant::now();
 
-    // Hardware MIDI keyboards (bead eseq-egs6): every input port is opened
-    // once and drained below, right after the backend poll, so a note lands
-    // on the live-note path within one frame. The waker ends a blocked idle
-    // poll the moment a note is queued.
+    // Driver discovery and device settings run outside the UI/audio threads.
+    // The waker ends a blocked idle poll the moment a note is queued.
     let midi_input = {
         let waker = backend.event_loop_waker();
         let wake: Option<sequencer::midi_input::WakeFn> = waker.map(|waker| {
@@ -267,7 +265,14 @@ pub(crate) fn run_event_loop(
                 waker.wake();
             }) as sequencer::midi_input::WakeFn
         });
-        sequencer::midi_input::MidiInputPorts::open_all(wake)
+        match sequencer::midi_input::service::Service::start(wake) {
+            Ok(service) => Some(service),
+            Err(error) => {
+                editor.runtime_mut().set_reactive("MIDI", "error",
+                    Value::String(format!("Could not start MIDI service: {error}")));
+                None
+            }
+        }
     };
 
     let mut gesture = GestureState {
@@ -282,6 +287,7 @@ pub(crate) fn run_event_loop(
 
     // Inline editor session state (instrument/effect creation/editing)
     let mut sessions = EditSessionState {
+        midi_commands: midi_input.as_ref().map(|service| service.commands.clone()),
         editor_buffer_name: None,
         editor_mode: None,
         instrument_edit_session: None,
@@ -1242,6 +1248,22 @@ pub(crate) fn run_event_loop(
         if let Some(midi_input) = &midi_input {
             let mut dispatched_to_lisp = false;
             for event in midi_input.drain() {
+                use sequencer::midi_input::service::Event;
+                let event = match event {
+                    Event::Message(event) => event,
+                    Event::Snapshot(snapshot) => {
+                        midi_dispatch::sync_midi_devices(&mut editor, snapshot);
+                        dispatched_to_lisp = true;
+                        continue;
+                    }
+                    Event::ResetPort(port) => {
+                        for channel in 0..16 {
+                            let _ = shared.keyboard_tx.send(
+                                sequencer::sequencer::LiveInputEvent::ResetControllers { port, channel });
+                        }
+                        continue;
+                    }
+                };
                 let port = event.port;
                 let note_source = match event.message {
                     sequencer::midi_input::MidiMessage::Note { channel, note } => Some((

@@ -15756,6 +15756,7 @@ mod instrument_header_ui_tests;
     }
 
     fn register_full_grid_test_natives(editor: &mut eseqlisp::Editor) {
+        crate::midi_dispatch::register_device_state(editor.runtime_mut());
         // The shared sequencer keymap's BS/Delete binding asks the host for
         // the step selection; tests that need one re-register this native.
         editor
@@ -56214,6 +56215,76 @@ mod instrument_header_ui_tests;
         );
     }
     #[test]
+    fn metal_seq_midi_settings_devices_have_usable_controls() {
+        use sequencer::midi_input::service::{Device, Snapshot};
+        let mut editor = full_grid_editor_for_scroll_tests();
+        for buffer in ["*sequencer*", "*arrangement*"] {
+            let id = editor.buffers.iter().find(|b| b.name == buffer).unwrap().id;
+            editor.set_active_buffer(id);
+            editor.runtime_mut().eval_str(&format!(
+                "(set-layout (list :buf \"{buffer}\" :hide-status true))")).unwrap();
+            editor.refresh_runtime_side_effects();
+            super::super::midi_dispatch::sync_midi_devices(&mut editor, Snapshot::default());
+            editor.runtime_mut().eval_str("(eseq.settings/open-settings)").unwrap();
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 160, 60);
+            let layout = editor.widget_layout().unwrap();
+            assert_finite_nonzero_rect(
+                find_layout_node_by_stable_key_suffix(&layout, "/midi-empty").unwrap(), "empty inputs");
+            super::super::midi_dispatch::sync_midi_devices(&mut editor, Snapshot {
+                devices: vec![
+                    Device { id: "a".into(), name: "Keyboard".into(), enabled: true,
+                        connected: true, status: "Connected".into() },
+                    Device { id: "b".into(), name: "Keyboard".into(), enabled: false,
+                        connected: false, status: "Disabled".into() },
+                ], error: "Device connection error".into(),
+            });
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 160, 60);
+            let layout = editor.widget_layout().unwrap();
+            for key in ["/midi-name-a", "/midi-status-a", "/midi-toggle-a", "/midi-toggle-b",
+                "/midi-device-list", "/midi-refresh", "/midi-error", "/settings-done"]
+            {
+                let node = find_layout_node_by_stable_key_suffix(&layout, key)
+                    .unwrap_or_else(|| panic!("missing {key} in {buffer}"));
+                assert_finite_nonzero_rect(node, key);
+                assert_layout_inside(node, &layout, key);
+            }
+            editor.drain_host_commands();
+            eseqlisp::widget_render::clear_overlay();
+            let _ = eseqlisp::widget_render::collect_gpu_primitives(&layout,
+                eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0, cell_h: 16.0, vp_w: 1280.0, vp_h: 960.0,
+                    time_seconds: 0.0, focused_widget_id: None, focused_branch: false,
+                    overlay_viewport_bottom: 60.0, scroll_top: 0.0, scroll_left: 0.0,
+                    inherited_hover: false,
+                }, 0.0, 60);
+            let node = find_layout_node_by_stable_key_suffix(&layout, "/midi-toggle-b").unwrap();
+            let col = node.rect.col + node.rect.width * 0.5;
+            let row = node.rect.row + node.rect.height * 0.5;
+            for kind in [crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left)]
+            {
+                editor.handle_tiled_mouse_precise(crossterm::event::MouseEvent {
+                    kind, column: col as u16, row: row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                }, col, row, 0);
+            }
+            assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+                HostCommand::Custom { name, payload: Value::Map(map) } if name == "midi-set-enabled"
+                    && matches!(&*map.get("id").unwrap().borrow(), Value::String(id) if id == "b")
+                    && matches!(&*map.get("enabled").unwrap().borrow(), Value::Bool(true)))));
+            eseqlisp::widget_render::clear_overlay();
+            editor.runtime_mut().eval_str("(eseq.settings/close-settings)").unwrap();
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            assert!(find_layout_node_by_stable_key_suffix(&editor.widget_layout().unwrap(), "/midi-toggle-a").is_none());
+        }
+    }
+
+    #[test]
     fn metal_seq_file_menu_lists_commands_and_save_modal_cancels_or_saves() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -56258,6 +56329,7 @@ mod instrument_header_ui_tests;
             "/file-menu-save-as",
             "/file-menu-open-project",
             "/file-menu-export",
+            "/file-menu-settings",
             "/file-menu-help",
             "/file-menu-about",
         ] {

@@ -139,7 +139,8 @@
 ;; A periodic-only hop would miss the beginning of an off-grid force pulse.
 ;; These are frame-rate latches, so note events can update them immediately.
 (def control_tick (eq (accum 1 0 0 16) 0))
-(defmacro saron-hold (value tick) (latch value tick))
+(defmacro saron-hold (value tick) (event-hold value tick))
+(defmacro saron-audio (value tick) (latch value tick))
 
 ;; Native references use D5, Eb5, F5, Ab5, A5, Bb5 and C6. Intervening keys
 ;; interpolate continuously; outside the observed register the end bar scales
@@ -198,9 +199,10 @@
 (def reference_pole (exp (/ -1 (* 0.00006 samplerate))))
 (def contact_tau (* 0.00006 (clip (mod contact) 0.3 3)
   (pow 2 (* 3 (- 0.5 (clip (mod hardness) 0 1))))))
-(def contact_pole (exp (/ -1 (* contact_tau samplerate))))
-(def force1 (saron-pole (* onset velocity_gain) contact_pole))
-(def force (saron-pole force1 contact_pole))
+(def contact_pole (exp (/ -1 (* (saron-hold contact_tau update_tick) samplerate))))
+(def force_pole (saron-audio contact_pole update_tick))
+(def force1 (saron-pole (* onset velocity_gain) force_pole))
+(def force (saron-pole force1 force_pole))
 (def omega (* twopi (/ (min frequencies (* 0.48 samplerate)) samplerate)))
 (def rotation_cos (cos omega))
 (def rotation_sin (sin omega))
@@ -226,7 +228,7 @@
 ;; Its impulse envelope is exp(-rate*t) * (1 - (1-direct)*exp(-t/rise)).
 ;; This is a causal recurrence, not a recorded or scheduled amplitude envelope.
 ;; Both complex rotations remain contractive during pitch/damping automation.
-(defmacro saron-bar (rotation_cos rotation_sin rate rise direct weight force)
+(defmacro saron-bar (rotation_cos rotation_sin rate rise direct weight force tick)
   (make-tensor-history bar_r @shape [16])
   (make-tensor-history bar_i @shape [16])
   (make-tensor-history radiation_r @shape [16])
@@ -236,10 +238,10 @@
   (def xr (read-tensor-history radiation_r))
   (def yr (read-tensor-history radiation_i))
   (def radius (exp (/ (- rate) samplerate)))
-  (def c (* radius rotation_cos))
-  (def s (* radius rotation_sin))
-  (def coupling (exp (/ -1 (* rise samplerate))))
-  (def next_r (+ (- (* c x) (* s y)) (* force weight)))
+  (def c (saron-audio (* radius rotation_cos) tick))
+  (def s (saron-audio (* radius rotation_sin) tick))
+  (def coupling (saron-audio (exp (/ -1 (* rise samplerate))) tick))
+  (def next_r (+ (- (* c x) (* s y)) (* force (saron-audio weight tick))))
   (def next_i (+ (* s x) (* c y)))
   (def radiated_r (+ (* coupling (- (* c xr) (* s yr))) (* (- 1 coupling) next_r)))
   (def radiated_i (+ (* coupling (+ (* s xr) (* c yr))) (* (- 1 coupling) next_i)))
@@ -247,12 +249,12 @@
   (write-tensor-history bar_i next_i)
   (write-tensor-history radiation_r radiated_r)
   (write-tensor-history radiation_i radiated_i)
-  (mix radiated_i next_i direct))
+  (mix radiated_i next_i (saron-audio direct tick)))
 
-(def modes (saron-bar rotation_cos rotation_sin rate rise direct weight force))
-(def stereo (saron-smooth (clip (mod width) 0 1) 8))
-(def left (sum (* modes (sqrt (+ 1 (* mode_pan_table stereo))))))
-(def right (sum (* modes (sqrt (- 1 (* mode_pan_table stereo))))))
+(def modes (saron-bar rotation_cos rotation_sin rate rise direct weight force update_tick))
+(def stereo (saron-hold (saron-smooth (clip (mod width) 0 1) 8) update_tick))
+(def left (sum (* modes (saron-audio (sqrt (+ 1 (* mode_pan_table stereo))) update_tick))))
+(def right (sum (* modes (saron-audio (sqrt (- 1 (* mode_pan_table stereo))) update_tick))))
 
 (def drive_v (saron-smooth (clip (mod drive) 0 1) 8))
 (def cutoff (min (saron-smooth (clip (mod tone_hz) 1000 20000) 8) (* samplerate 0.43)))

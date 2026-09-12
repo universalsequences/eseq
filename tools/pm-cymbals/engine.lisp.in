@@ -26,11 +26,11 @@ $tables
 (write-history last_gate held)
 (def tick (max onset (eq (accum 1 0 0 16) 0)))
 (def strength (latch (clip velocity 0 1) onset))
-(def scale (latch (cymbal-smooth (/ (clip (mod size) 0.5 2)
+(def scale (event-hold (cymbal-smooth (/ (clip (mod size) 0.5 2)
   (pow (/ (clip pitch 65.406391 1046.50226) 261.625565) (clip tracking 0 1))) 12) tick))
-(def decay_v (latch (cymbal-smooth (clip (mod decay) 0.2 3) 8) tick))
-(def damping_v (latch (cymbal-smooth (clip (mod damping) 0.25 3) 8) tick))
-(def touch_v (cymbal-smooth (clip (mod touch) 0 1) 2))
+(def decay_v (event-hold (cymbal-smooth (clip (mod decay) 0.2 3) 8) tick))
+(def damping_v (event-hold (cymbal-smooth (clip (mod damping) 0.25 3) 8) tick))
+(def touch_v (event-hold (cymbal-smooth (clip (mod touch) 0 1) 2) tick))
 $voicing
 ;; Openness is a live loss condition, not an output envelope. Closed-hat
 ;; coefficients include contact losses; touch adds a choke to every wave path
@@ -41,12 +41,12 @@ $voicing
 ;; unresolved modes receive the compact, stochastic rough-contact force.
 ;; Randomness exists only while the stick contacts the metal; all subsequent
 ;; sound is the free response of the passive body.
-(def hardness_v (latch (clip (mod hardness) 0 1) tick))
-(def contact_s (latch (* base_contact_s (pow 2 (* 2 (- 0.5 hardness_v)))) tick))
+(def hardness_v (event-hold (clip (mod hardness) 0 1) tick))
+(def contact_s (event-hold (* base_contact_s (pow 2 (* 2 (- 0.5 hardness_v)))) tick))
 (def age (accum (/ 1 samplerate) onset 0 100000))
 (def pulse_phase (clip (/ age contact_s) 0 1))
 (def friction (* (noise) (sin (* pi pulse_phase)) (lt age contact_s)))
-(def force_pole (exp (/ -1 (* samplerate 0.000025 (pow 2 (* 3 (- 0.5 hardness_v)))))))
+(def force_pole (latch (exp (/ -1 (* samplerate 0.000025 (pow 2 (* 3 (- 0.5 hardness_v)))))) tick))
 (def force (cymbal-pole (cymbal-pole
   (* strength friction 0.23) force_pole) force_pole))
 (def point_force (cymbal-pole (cymbal-pole (* onset strength) force_pole) force_pole))

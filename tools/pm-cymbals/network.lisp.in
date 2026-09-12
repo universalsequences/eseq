@@ -1,0 +1,20 @@
+;; One lane per original wave path; six independent three-port junctions.
+$tables
+(def region_rates (+ (/ (* (gather material path_regions) (pow damping_v (/ path_regions 5))) decay_v) contact_loss))
+(def path_samples (max 8 (* path_lengths scale (/ samplerate 48000))))
+(def integer_delays (latch (- (floor path_samples) 2) tick))
+(def fractions (+ 1 (- path_samples (floor path_samples))))
+(def allpass_a (latch (/ (- 1 fractions) (+ 1 fractions)) tick))
+(def path_loss (latch (exp (* (- region_rates) (/ path_samples samplerate))) tick))
+(make-tensor-history path_outgoing @shape [18])
+(make-tensor-history path_ap_x @shape [18])
+(make-tensor-history path_ap_y @shape [18])
+(def incoming (delay (read-tensor-history path_outgoing) integer_delays @max-delay 88000))
+(def arrival (- (+ (* allpass_a incoming) (read-tensor-history path_ap_x)) (* allpass_a (read-tensor-history path_ap_y))))
+(write-tensor-history path_ap_x incoming)
+(write-tensor-history path_ap_y arrival)
+(def damped (* path_loss arrival))
+$contact
+$scattering
+(write-tensor-history path_outgoing (+ (- $junction scattered) (* force force_weights)))
+(def plates (+ (* force base_direct) $pickup))

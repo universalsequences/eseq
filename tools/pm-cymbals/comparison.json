@@ -4,17 +4,17 @@
     "articulation": "default",
     "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Crash_13.wav",
     "reference_sha256": "4e978dd3552f0dab1af66e98257de318418992ab85d8e6af5f0b8b7568a078c4",
-    "source_sha256": "c4da0dbd5b9cb9116888473c5d9d57d7331b9f9eca91409a442e6f6eb9b058d4",
-    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd",
+    "source_sha256": "52b9c29f81c36e8034529318336fe00d7936852a77d366ae402ec0dffb053980",
+    "compiler_sha256": "488a43450950646585bc808eecd6e48a0e5528503048b513c6fcba0aaa77a840",
     "reference_concentration": {
       "top_10_bin_power_fraction": 0.14580118169398248,
       "bins_for_90_percent_power": 697
     },
     "model_concentration": {
-      "top_10_bin_power_fraction": 0.20778549044882483,
+      "top_10_bin_power_fraction": 0.2077856572679792,
       "bins_for_90_percent_power": 333
     },
-    "model_peak": 0.35518747568130493,
+    "model_peak": 0.3551875352859497,
     "audition_order": "reference, model, reference, model; early RMS matched"
   },
   {
@@ -22,17 +22,17 @@
     "articulation": "default",
     "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_29.wav",
     "reference_sha256": "35dbceae162d764bb01376a11c8fd2dc40d531b6dd7a2068d7d9048705ca70d9",
-    "source_sha256": "5a1210bc240a6a802f8f71f005652db5fcdfaa4dedcfa1d93de57fdc417a11b3",
-    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd",
+    "source_sha256": "0e2068592b08e01fcfa745ab9489b37e0c09a0b34e94de819859d685f3f01c29",
+    "compiler_sha256": "488a43450950646585bc808eecd6e48a0e5528503048b513c6fcba0aaa77a840",
     "reference_concentration": {
       "top_10_bin_power_fraction": 0.13877081122667853,
       "bins_for_90_percent_power": 664
     },
     "model_concentration": {
-      "top_10_bin_power_fraction": 0.18901014514134384,
+      "top_10_bin_power_fraction": 0.1890102609864215,
       "bins_for_90_percent_power": 384
     },
-    "model_peak": 0.4712795615196228,
+    "model_peak": 0.47127965092658997,
     "audition_order": "reference, model, reference, model; early RMS matched"
   },
   {
@@ -40,17 +40,17 @@
     "articulation": "closed",
     "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Hihat - Close_8.wav",
     "reference_sha256": "93f1d94a59d45cd5ea16db5e2527804a5e7850401562c4a2319e213f6e58ddb4",
-    "source_sha256": "68ccee405e85a65ec6ec4db4c5ce466216eeca63f62b6c89dd7984333dcfef68",
-    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd",
+    "source_sha256": "3e410257143baf12ed6782d785e860312186643d62c693c8958a08bf2e24896a",
+    "compiler_sha256": "488a43450950646585bc808eecd6e48a0e5528503048b513c6fcba0aaa77a840",
     "reference_concentration": {
       "top_10_bin_power_fraction": 0.10463886462413308,
       "bins_for_90_percent_power": 1828
     },
     "model_concentration": {
-      "top_10_bin_power_fraction": 0.07490992231743933,
+      "top_10_bin_power_fraction": 0.07493170886435743,
       "bins_for_90_percent_power": 1914
     },
-    "model_peak": 0.6084383726119995,
+    "model_peak": 0.6084370613098145,
     "audition_order": "reference, model, reference, model; early RMS matched"
   },
   {
@@ -58,17 +58,17 @@
     "articulation": "open",
     "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Hihat - Open_3.wav",
     "reference_sha256": "17f71bbfb70e207103b5d94b6de5a5c3da9f3e25db9ca81300c648a74ef72fa8",
-    "source_sha256": "68ccee405e85a65ec6ec4db4c5ce466216eeca63f62b6c89dd7984333dcfef68",
-    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd",
+    "source_sha256": "3e410257143baf12ed6782d785e860312186643d62c693c8958a08bf2e24896a",
+    "compiler_sha256": "488a43450950646585bc808eecd6e48a0e5528503048b513c6fcba0aaa77a840",
     "reference_concentration": {
       "top_10_bin_power_fraction": 0.22270232929168093,
       "bins_for_90_percent_power": 362
     },
     "model_concentration": {
-      "top_10_bin_power_fraction": 0.18468048647780028,
+      "top_10_bin_power_fraction": 0.18468449517058633,
       "bins_for_90_percent_power": 376
     },
-    "model_peak": 0.460068017244339,
+    "model_peak": 0.46006813645362854,
     "audition_order": "reference, model, reference, model; early RMS matched"
   }
 ]

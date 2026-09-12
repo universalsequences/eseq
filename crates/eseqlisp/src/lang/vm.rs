@@ -6771,6 +6771,20 @@ impl VM {
             })
     }
 
+    /// Host writes without subscribers skip effect scheduling, but a retained
+    /// source still needs the new comparison baseline. Otherwise a later
+    /// reader sees B in the global while the source remembers A, and B -> A
+    /// incorrectly looks unchanged. Do not allocate sources for unread fields.
+    pub(crate) fn sync_unobserved_reactive_source(&mut self, namespace: &str, field: &str) {
+        let Some(id) = self.dag.find_namespace_field_source_node(namespace, field) else {
+            return;
+        };
+        if matches!(self.dag.nodes.get(&id), Some(ReactiveNode::Source { dependents, .. }) if dependents.is_empty()) {
+            let value = self.current_reactive_value(namespace, field);
+            self.mark_source_dependents_dirty(id, value);
+        }
+    }
+
     fn get_or_create_local_state_node(
         &mut self,
         node_id: NodeId,

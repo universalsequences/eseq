@@ -5,19 +5,19 @@
 # crates/sequencer/tools/ (gitignored) at DGenLisp-<target>.
 
 target linux-x86_64
-version dgenlisp-v0.1.5
-url https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.5/DGenLisp-linux-x86_64.tar.gz
-sha256 5bab458a33dc9ab2ffab621ba87ef7d72289cf91d1c19b386e487a45e532a087
+version dgenlisp-v0.1.20
+url https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.20/DGenLisp-linux-x86_64.tar.gz
+sha256 cdae00486e6a8779b3b8d824938f463dc6d775d8695bacabda965716727cc12b
 format tar.gz
 executable_path dgenlisp-linux-x86_64/DGenLisp
-upstream_commit 3fb5065c0976f10d2acb2043215efcfbddab88dc
+upstream_commit 6b49cfea3001a42bc3622ab4b7ecdb53dd5a5322
 glibc_floor 2.35
 container_image swift:6.3.3-jammy
 
 target macos-arm64
-version dgenlisp-v0.1.19
-url https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.19/DGenLisp-macos-arm64.tar.gz
-sha256 e41c5080bf21cc9f486d4563ddfd2a750e87799f1c14a699f06e06809eb412b7
+version dgenlisp-v0.1.20
+url https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.20/DGenLisp-macos-arm64.tar.gz
+sha256 dcdbc5f38d18449e0c789a77e3517884171e43dff5caef5f38e38e707576d622
 format tar.gz
 executable_path dgenlisp-macos-arm64/DGenLisp
-upstream_commit 9fb1e9d1b59e586191a96aeadfd2ab01ba016616
+upstream_commit 6b49cfea3001a42bc3622ab4b7ecdb53dd5a5322

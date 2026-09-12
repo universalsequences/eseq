@@ -2474,6 +2474,59 @@
     {
       "aliases": [],
       "arity": {
+        "maximum": 2,
+        "minimum": 2
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "stateful",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated"
+      },
+      "implementation": {
+        "function": "evalEventHold",
+        "source_file": "LispEvaluator.swift"
+      },
+      "input_count": {
+        "maximum": 2,
+        "minimum": 2
+      },
+      "inputs": [
+        {
+          "kind": "value",
+          "name": "value",
+          "required": true,
+          "summary": "Value."
+        },
+        {
+          "kind": "signal|float",
+          "name": "trigger",
+          "required": true,
+          "summary": "Trigger signal."
+        }
+      ],
+      "name": "event-hold",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(event-hold value trigger)"
+      ],
+      "summary": "Sample on positive trigger frames and schedule pure consumers on that event clock. Latch final coefficients back to audio rate. C forward rendering only."
+    },
+    {
+      "aliases": [],
+      "arity": {
         "maximum": 1,
         "minimum": 1
       },

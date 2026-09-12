@@ -1,0 +1,226 @@
+[
+  {
+    "name": "PM Bonang",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Bonang",
+    "candidate": true,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Bonang",
+    "candidate": true,
+    "block": 512,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Cello",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Clarinet",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Crash",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Crash",
+    "candidate": true,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Crash",
+    "candidate": true,
+    "block": 512,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Flute",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Hi-Hat",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Hi-Hat",
+    "candidate": true,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Hi-Hat",
+    "candidate": true,
+    "block": 512,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Kempyang",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Kempyang",
+    "candidate": true,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Kempyang",
+    "candidate": true,
+    "block": 512,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Kethuk",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Kethuk",
+    "candidate": true,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Kethuk",
+    "candidate": true,
+    "block": 512,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Piano",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": false
+  },
+  {
+    "name": "PM Ride",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Ride",
+    "candidate": true,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Ride",
+    "candidate": true,
+    "block": 512,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Saron",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Saron",
+    "candidate": true,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Saron",
+    "candidate": true,
+    "block": 512,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Saxophone",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Slenthem",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Slenthem",
+    "candidate": true,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Slenthem",
+    "candidate": true,
+    "block": 512,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Slenthem Slendro",
+    "candidate": false,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Slenthem Slendro",
+    "candidate": true,
+    "block": 128,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  },
+  {
+    "name": "PM Slenthem Slendro",
+    "candidate": true,
+    "block": 512,
+    "max_error": 0.0,
+    "identical_generated_c": true
+  }
+]

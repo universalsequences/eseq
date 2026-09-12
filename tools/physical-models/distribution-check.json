@@ -1,0 +1,119 @@
+{
+  "release": "dgenlisp-v0.1.20",
+  "source_commit": "6b49cfea3001a42bc3622ab4b7ecdb53dd5a5322",
+  "macos_arm64": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "compiler_sha256": "488a43450950646585bc808eecd6e48a0e5528503048b513c6fcba0aaa77a840",
+    "cases": [
+      {
+        "source": "PM Bonang.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "c81701aa310c4dd809e184d0ce216c7c75d2f6c6865ee63c40336c7d518e4b7e"
+      },
+      {
+        "source": "PM Crash.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "42f6acabdf0b4e78da37c95f9511c64b540a31e6bfe7c24a302bc627dd29c353"
+      },
+      {
+        "source": "PM Hi-Hat.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "4fe49b7b8e3d1324aa95c83edb2eb404a350c0b60c2c9709dfd3df9a9262e9e7"
+      },
+      {
+        "source": "PM Kempyang.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "09fb2f94010da0b49a8b7aa583b822138121f72ca2ced0367d67876070732c61"
+      },
+      {
+        "source": "PM Kethuk.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "f260590ec7f92d53042d3df61b5565de532ee1ea25e4a9bf1cb51109490685d6"
+      },
+      {
+        "source": "PM Ride.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "30741b53f5dbe2623327f26ca39e7e44e280aa7ff4a71f7d88c2686e75a94c19"
+      },
+      {
+        "source": "PM Saron.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "54905100b7cb05172a1777888b5801da96c0088c6335198080146c3b2d769464"
+      },
+      {
+        "source": "PM Slenthem Slendro.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "909f850955c863cdaedc404f44f192a985ab001f03b559dab299e2242f08cc5f"
+      },
+      {
+        "source": "PM Slenthem.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "68c6fdc81888ad8639ad591873c30f192f0f145f93ccc7e2ce334c61a1bcb435"
+      }
+    ],
+    "build": "Apple Swift 6.2.3, Xcode 26.2 (17C52), clean release build"
+  },
+  "linux_x86_64": {
+    "platform": "Linux-5.15.49-linuxkit-pr-x86_64-with-glibc2.35",
+    "compiler_sha256": "418952d3e277d5502a5636adbb469739762cb26b487a72c6cc8a9007eb6d2e4d",
+    "cases": [
+      {
+        "source": "PM Bonang.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "c81701aa310c4dd809e184d0ce216c7c75d2f6c6865ee63c40336c7d518e4b7e"
+      },
+      {
+        "source": "PM Crash.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "42f6acabdf0b4e78da37c95f9511c64b540a31e6bfe7c24a302bc627dd29c353"
+      },
+      {
+        "source": "PM Hi-Hat.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "4fe49b7b8e3d1324aa95c83edb2eb404a350c0b60c2c9709dfd3df9a9262e9e7"
+      },
+      {
+        "source": "PM Kempyang.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "09fb2f94010da0b49a8b7aa583b822138121f72ca2ced0367d67876070732c61"
+      },
+      {
+        "source": "PM Kethuk.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "f260590ec7f92d53042d3df61b5565de532ee1ea25e4a9bf1cb51109490685d6"
+      },
+      {
+        "source": "PM Ride.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "30741b53f5dbe2623327f26ca39e7e44e280aa7ff4a71f7d88c2686e75a94c19"
+      },
+      {
+        "source": "PM Saron.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "54905100b7cb05172a1777888b5801da96c0088c6335198080146c3b2d769464"
+      },
+      {
+        "source": "PM Slenthem Slendro.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "909f850955c863cdaedc404f44f192a985ab001f03b559dab299e2242f08cc5f"
+      },
+      {
+        "source": "PM Slenthem.lisp",
+        "max_partition_error": 0.0,
+        "source_sha256": "68c6fdc81888ad8639ad591873c30f192f0f145f93ccc7e2ce334c61a1bcb435"
+      }
+    ],
+    "build": "swift:6.3.3-jammy, --static-swift-stdlib, stripped; source 6b49cfea3001a42bc3622ab4b7ecdb53dd5a5322",
+    "build_image_digest": "swift@sha256:0c9411e2f70154a16f3e5660299d618a3642a445b446efe2aa637a4d01a83d54",
+    "runtime_environment": "Ubuntu 22.04 x86_64 container on Apple Silicon; Python/DSP executed via QEMU 8.2.2 CPU max. Functional results only, no emulated timing claims.",
+    "max_required_glibc": "2.35",
+    "dependencies": [
+      "libm.so.6",
+      "libstdc++.so.6",
+      "libgcc_s.so.1",
+      "libc.so.6",
+      "ld-linux-x86-64.so.2"
+    ],
+    "standalone_scalar_smoke": "Passed generated C, manifest, ELF audit and dgen-host-abi-v1"
+  }
+}

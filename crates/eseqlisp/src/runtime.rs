@@ -2699,6 +2699,9 @@ impl Runtime {
         if outcome.changed || !outcome.registered {
             self.vm
                 .update_reactive_global(namespace, field, value_for_vm);
+            if !enqueue_effect_dirty {
+                self.vm.sync_unobserved_reactive_source(namespace, field);
+            }
         }
         let widget_ids = outcome.widget_ids;
         let widgets_dirty = !widget_ids.is_empty();
@@ -2812,6 +2815,9 @@ impl Runtime {
         if outcome.changed || !outcome.registered {
             self.vm
                 .update_reactive_global_list_index(namespace, field, index, value_for_vm);
+            if !enqueue_effect_dirty {
+                self.vm.sync_unobserved_reactive_source(namespace, field);
+            }
         }
         let widget_ids = outcome.widget_ids;
         let widgets_dirty = !widget_ids.is_empty();
@@ -4590,6 +4596,38 @@ mod theme_shader_recompile_tests {
 #[cfg(test)]
 mod observer_tests {
     use super::*;
+
+    #[test]
+    fn resubscribed_reader_observes_return_to_value_before_unobserved_write() {
+        for (read, indexed) in [("INPUT.value", false),
+            ("(reactive-get \"INPUT\" \"value\")", false), ("(nth INPUT.value 0)", true)]
+        {
+            let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let writes = seen.clone();
+            let mut runtime = Runtime::new();
+            let initial = if indexed {
+                Value::List(vec![std::rc::Rc::new(std::cell::RefCell::new(Value::Number(1.0)))])
+            } else { Value::Number(1.0) };
+            runtime.register_reactive("INPUT", vec![("value", initial)], false);
+            runtime.register_native("record-value", move |args, _| {
+                writes.borrow_mut().push(args[0].clone());
+                Ok(Value::Nil)
+            });
+            runtime.eval_str(&format!(
+                "(defstate visible true) (observe (if visible (record-value {read}) nil))"
+            )).unwrap();
+            runtime.eval_str("(set! visible false)").unwrap();
+            assert!(!runtime.vm.has_reactive_subscribers("INPUT", "value"));
+            if indexed { runtime.set_reactive_list_index("INPUT", "value", 0, Value::Number(2.0)); }
+            else { runtime.set_reactive("INPUT", "value", Value::Number(2.0)); }
+            runtime.run_reactive_cycle();
+            runtime.eval_str("(set! visible true)").unwrap();
+            if indexed { runtime.set_reactive_list_index("INPUT", "value", 0, Value::Number(1.0)); }
+            else { runtime.set_reactive("INPUT", "value", Value::Number(1.0)); }
+            runtime.run_reactive_cycle();
+            assert_eq!(*seen.borrow(), vec![Value::Number(1.0), Value::Number(2.0), Value::Number(1.0)], "{read}");
+        }
+    }
 
     #[test]
     fn observer_tracks_changes_without_emitting_or_overwriting_widget_trees() {

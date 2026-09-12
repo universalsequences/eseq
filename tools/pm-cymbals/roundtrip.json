@@ -2,33 +2,33 @@
   {
     "family": "crash",
     "openness": 0,
-    "max_sample_error": 2.086162567138672e-07,
-    "source_sha256": "c4da0dbd5b9cb9116888473c5d9d57d7331b9f9eca91409a442e6f6eb9b058d4",
-    "roundtrip_sha256": "f9a15fb1cfa0467083a69bc72f0f46e108dfd64a341b5539c45f211a24f5382f",
-    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd"
+    "max_sample_error": 2.682209014892578e-07,
+    "source_sha256": "52b9c29f81c36e8034529318336fe00d7936852a77d366ae402ec0dffb053980",
+    "roundtrip_sha256": "23a0223a7db4635d8d1c15b43508c2fafe0c658e2ce44da9342fac79c273c683",
+    "compiler_sha256": "ea29e5c9c39ed4f55fc3f31a463364d24ed753c0b940fd2e833dd0a2ab3d7be0"
   },
   {
     "family": "ride",
     "openness": 0,
-    "max_sample_error": 3.725290298461914e-07,
-    "source_sha256": "5a1210bc240a6a802f8f71f005652db5fcdfaa4dedcfa1d93de57fdc417a11b3",
-    "roundtrip_sha256": "9662ee538f811fe057d28882d1ff4fe3c92d9f3d6447b4a2b12ef774ff59a043",
-    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd"
+    "max_sample_error": 1.8812716007232666e-07,
+    "source_sha256": "0e2068592b08e01fcfa745ab9489b37e0c09a0b34e94de819859d685f3f01c29",
+    "roundtrip_sha256": "ceafa67f243b76c2f8817c92469cf2ffb02526a793be28fb7d4055e6762d7002",
+    "compiler_sha256": "ea29e5c9c39ed4f55fc3f31a463364d24ed753c0b940fd2e833dd0a2ab3d7be0"
   },
   {
     "family": "hihat",
     "openness": 0,
-    "max_sample_error": 9.501352906227112e-06,
-    "source_sha256": "68ccee405e85a65ec6ec4db4c5ce466216eeca63f62b6c89dd7984333dcfef68",
-    "roundtrip_sha256": "4c1b7d3a43d350c9720d391bdcbc863b84e06961d33bfa86e6d58da5f5df56ce",
-    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd"
+    "max_sample_error": 1.7881393432617188e-07,
+    "source_sha256": "3e410257143baf12ed6782d785e860312186643d62c693c8958a08bf2e24896a",
+    "roundtrip_sha256": "2f69cb8bdb67ab41ab58a7742c46ee64e9a7e5589bae0044fb2a85af70b12d9f",
+    "compiler_sha256": "ea29e5c9c39ed4f55fc3f31a463364d24ed753c0b940fd2e833dd0a2ab3d7be0"
   },
   {
     "family": "hihat",
     "openness": 1,
-    "max_sample_error": 4.341010935604572e-06,
-    "source_sha256": "68ccee405e85a65ec6ec4db4c5ce466216eeca63f62b6c89dd7984333dcfef68",
-    "roundtrip_sha256": "4c1b7d3a43d350c9720d391bdcbc863b84e06961d33bfa86e6d58da5f5df56ce",
-    "compiler_sha256": "304372d125aecd56e010a7b5f4976c2e4c7f08da0b373be5a8d8e111546c76dd"
+    "max_sample_error": 2.086162567138672e-07,
+    "source_sha256": "3e410257143baf12ed6782d785e860312186643d62c693c8958a08bf2e24896a",
+    "roundtrip_sha256": "2f69cb8bdb67ab41ab58a7742c46ee64e9a7e5589bae0044fb2a85af70b12d9f",
+    "compiler_sha256": "ea29e5c9c39ed4f55fc3f31a463364d24ed753c0b940fd2e833dd0a2ab3d7be0"
   }
 ]

@@ -106,3 +106,7 @@ path = "examples/piano_roll_embed.rs"
 [[example]]
 name = "piano_roll_embed_metal"
 path = "examples/piano_roll_embed_metal.rs"
+
+[[example]]
+name = "pm_factory_sidecars"
+path = "examples/pm_factory_sidecars.rs"

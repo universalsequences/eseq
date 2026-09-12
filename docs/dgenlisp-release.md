@@ -3,7 +3,7 @@
 ## Linux x86_64
 
 This is the complete Linux build, verification, publication, and eseq re-pin
-recipe for DGenLisp. Run it from an x86_64 Linux host with Docker, `binutils`,
+recipe for DGenLisp. Run it from an x86_64 Linux host with Docker, `binutils`, `file`,
 `jq`, `gh`, and an authenticated GitHub CLI. The upstream checkout is
 [`universalsequences/dgen-audio`](https://github.com/universalsequences/dgen-audio).
 

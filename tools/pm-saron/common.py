@@ -8,7 +8,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 SAMPLES = ROOT / 'samples-to-analyze/gamelan'
-SOURCE = ROOT / 'content/instruments/Physical Models/PM Saron/dsp.lisp'
+SOURCE = Path(os.environ.get('ESEQ_PM_FACTORY_DIR', ROOT / 'content/instruments/Physical Models')) / 'PM Saron/dsp.lisp'
 STRENGTHS = ['softest', 'soft', 'medium', 'harder', 'hardest']
 VELOCITIES = [.2, .4, .6, .8, 1.0]
 sys.path.insert(0, str(ROOT / 'tools/audition'))

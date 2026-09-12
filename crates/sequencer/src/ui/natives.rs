@@ -3382,6 +3382,7 @@ pub(crate) fn init_runtime(
         false,
     );
     runtime.register_reactive("SEQV", vec![], true);
+    crate::midi_dispatch::register_device_state(&mut runtime);
     runtime.register_reactive("AGENT", vec![("generation", Value::Number(0.0))], false);
     if track_count > 0 {
         sync_fx_param_binding_fields(&mut runtime, app, &state, 0, &selected_steps);

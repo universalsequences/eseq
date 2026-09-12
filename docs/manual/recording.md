@@ -18,6 +18,17 @@ Each loop overdubs onto the last. Arm one track at a time until you want layered
 
 ![The lit R button arms this track for live input.](images/armed-track.png)
 
+## A MIDI keyboard or controller
+
+Connect the device while eseq is running. New MIDI inputs connect automatically,
+usually within a second. Arm a track or rack, then play a note.
+
+Open **File → Settings…** to see the input devices and their connection status.
+Use **Disable** or **Enable** beside a device to choose which inputs eseq accepts.
+Choices are saved between launches on macOS; Linux choices apply to the current
+session because its MIDI port IDs can change. **Refresh** checks the device list immediately.
+Unplugging or disabling an input releases its held notes.
+
 ## The computer keyboard
 
 ```

@@ -7,8 +7,35 @@ use sequencer::midi_input::{MidiInputEvent, MidiMessage};
 
 const DISPATCH_GLOBAL: &str = "eseq.midi/dispatch";
 
+pub(crate) fn register_device_state(runtime: &mut eseqlisp::Runtime) {
+    // Presentation state only. Device changes always go through host commands;
+    // writable fields also let authoring/capture scripts preview device states.
+    runtime.register_reactive("MIDI", vec![
+        ("devices", Value::List(vec![])),
+        ("error", Value::String(String::new())),
+        ("persistent", Value::Bool(sequencer::midi_input::service::persistent_device_ids())),
+    ], true);
+}
+
 fn cell(value: Value) -> Rc<RefCell<Value>> {
     Rc::new(RefCell::new(value))
+}
+
+pub(crate) fn sync_midi_devices(editor: &mut Editor, snapshot: sequencer::midi_input::service::Snapshot) {
+    let devices = snapshot.devices.into_iter().map(|device| {
+        Value::Map(HashMap::from([
+            ("id".into(), cell(Value::String(device.id))),
+            ("name".into(), cell(Value::String(device.name))),
+            ("enabled".into(), cell(Value::Bool(device.enabled))),
+            ("connected".into(), cell(Value::Bool(device.connected))),
+            ("status".into(), cell(Value::String(device.status))),
+        ]))
+    }).map(cell).collect();
+    editor.runtime_mut().set_reactive("MIDI", "devices", Value::List(devices));
+    editor.runtime_mut().set_reactive("MIDI", "error", Value::String(snapshot.error));
+    // Device discovery must repaint even while the transport and meters are idle.
+    editor.runtime_mut().run_reactive_cycle();
+    editor.mark_needs_redraw();
 }
 
 /// The message map `eseq.midi/dispatch` receives. Keys match the doc block

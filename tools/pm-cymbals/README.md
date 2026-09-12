@@ -168,3 +168,22 @@ recognizes the gather's internal loop. The formerly failing complete hi-hat
 now matches its equivalent scalar-table version sample for sample. The factory
 generator uses the corrected vector coefficient reads; it does not carry a
 source-level workaround for the compiler bugs.
+
+## Event scheduling and shared delay cursor
+
+The current forward engine requires DGenLisp v0.1.20. Pure coefficient graphs
+run on strike/16-sample events; final latches return coefficients to audio rate.
+All eighteen propagation paths now run as lanes of one tensor delay bank,
+sharing a cursor while retaining independent delay and allpass state. No
+physical regions or collision dynamics were removed. The measured gain is
+1.3–1.4×; details and automation tradeoffs are in the
+[paired benchmark](../physical-models/README.md).
+
+`calibration-basis.lisp` and `calibration-basis-hihat.lisp` preserve the exact
+engines used to identify the existing coefficients. Their SHA256 values still
+match the calibration records. Keeping these explicit reference fixtures
+separates a compiler scheduling change from a change to the identification
+model. Changing the physical equations requires updating the basis and
+refitting; never bypass the build-time basis hash check. Current runtime
+sources are checked against the earlier forward models across presets and
+against the existing reference-audio tests.
