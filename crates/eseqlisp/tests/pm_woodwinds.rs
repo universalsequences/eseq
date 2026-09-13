@@ -3,11 +3,39 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use eseqlisp::layout::{LayoutNode, Rect};
+use eseqlisp::parser::{ASTParser, Expression, Parser};
 use eseqlisp::vm::Value;
 use eseqlisp::widget_render::patcher::{
     PatcherIntent, emit_patch_writeback_source, emitted_source_buffer_snapshot,
     source_opens_in_patch_editor,
 };
+
+// Parameter and audio checks alone cannot detect a stale, nearly equivalent
+// but much more expensive DSP algorithm. Count operators inside each local
+// macro, independent of generated binding names and statement order.
+fn piano_macro_operators(source: &str) -> HashMap<String, HashMap<String, usize>> {
+    let tokens = Parser::new(source.to_string()).parse().unwrap();
+    let expressions = ASTParser::new(tokens).parse().unwrap();
+    let mut result = HashMap::new();
+    for expression in &expressions {
+        let Expression::List(items) = expression else { continue };
+        let [Expression::Symbol(op), Expression::Symbol(name), _, body @ ..] = items.as_slice()
+            else { continue };
+        if op != "defmacro" || !name.starts_with("piano-") { continue }
+        let mut operators = HashMap::new();
+        let mut pending: Vec<_> = body.iter().collect();
+        while let Some(expression) = pending.pop() {
+            if let Expression::List(items) = expression {
+                if let Some(Expression::Symbol(op)) = items.first() {
+                    if op != "def" { *operators.entry(op.clone()).or_insert(0) += 1; }
+                }
+                pending.extend(items.iter());
+            }
+        }
+        result.insert(name.clone(), operators);
+    }
+    result
+}
 
 fn check_factory_sidecars(names: &[&str]) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -75,6 +103,9 @@ fn check_factory_sidecars(names: &[&str]) {
         let expected_tables = tensor_tables(&expected);
         if *name == "PM Piano" {
             assert_eq!(expected_tables.len(), 9, "piano calibration tables");
+            let expected_macros = piano_macro_operators(&expected);
+            assert!(!expected_macros.is_empty(), "piano DSP macros");
+            assert_eq!(expected_macros, piano_macro_operators(&actual), "piano macro algorithms");
         }
         assert_eq!(expected_tables, tensor_tables(&actual), "{name} tensor coefficients");
     }

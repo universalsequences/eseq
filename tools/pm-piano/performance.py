@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate unchanged piano DSP under two compilers, then time the native ABI.
+"""Compare piano source/compiler pairs, then time the native ABI.
 
 Run after other builds/tests finish. No compilation, allocation or Python is
 inside the timed region. This measures one voice, not whole-project CPU.
@@ -29,6 +29,8 @@ def digest(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline-compiler', type=Path, required=True)
+    parser.add_argument('--baseline-source', type=Path, default=SOURCE,
+                        help='Saved baseline DSP; defaults to the current piano source')
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--params', type=Path, help='Optional named parameter JSON for a project patch')
@@ -37,15 +39,17 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     measure = timer(args.output)
     compilers = [args.baseline_compiler.resolve(), args.compiler.resolve()]
+    sources = [args.baseline_source.resolve(), SOURCE]
     report = dict(source_sha256=digest(SOURCE), platform=platform.platform(),
+                  baseline_source_sha256=digest(sources[0]),
                   compiler_sha256=[digest(p) for p in compilers], audio=[], timings=[])
     pairs = {}
 
     def pair(sr=48000, block=128):
         if (sr, block) not in pairs:
             result = []
-            for compiler in compilers:
-                inst = Instrument(SOURCE, compiler=str(compiler), sample_rate=sr,
+            for source, compiler in zip(sources, compilers):
+                inst = Instrument(source, compiler=str(compiler), sample_rate=sr,
                                   max_frames=block,
                                   toolchain_root=str(ROOT / 'crates/sequencer/tools/dgen-toolchain'))
                 subprocess.run([sys.executable, str(ROOT / 'tools/audition/check_fusion.py'),

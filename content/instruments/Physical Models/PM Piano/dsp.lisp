@@ -218,11 +218,11 @@
   value)
 
 ;; Coefficients update every 16 samples, independently of host block boundaries.
-;; Hop tensors are impulses in DGen; a frame-rate latch explicitly holds each
-;; coefficient for the audio-rate string recurrence. Maximum control latency
-;; is 15 samples (0.34 ms at 44.1 kHz).
+;; Event-held inputs schedule pure coefficient math on that same clock. A final
+;; frame-rate latch holds each coefficient for the string recurrence. Maximum
+;; control latency remains 15 samples (0.34 ms at 44.1 kHz).
 (def control_tick (eq (accum 1 0 0 16) 0))
-(defmacro piano-control (value) (hop-hold value 16))
+(defmacro piano-control (value) (event-hold value control_tick))
 (defmacro piano-audio (value) (latch value control_tick))
 
 ;; Complex rotations avoid the low-frequency cancellation of direct-form
@@ -357,9 +357,15 @@
   (def omega (* twopi (/ (min frequency (* 0.48 samplerate)) samplerate)))
   (def c (piano-audio (cos omega)))
   (def s (piano-audio (sin omega)))
-  (def norm (sqrt (max 0.25 (+ (* x x) (* y y)))))
-  (def xn (/ (- (* c x) (* s y)) norm))
-  (def yn (/ (+ (* s x) (* c y)) norm))
+  ;; This carrier starts at unit norm and rotates by a sin/cos pair. One Newton
+  ;; correction around squared norm q=1 removes amplitude drift without sqrt or
+  ;; division. For q in [0.5,1.5], q*(1.5-0.5*q)^2 stays in [0.78125,1]; even
+  ;; a 1% rotation-magnitude error keeps that interval invariant. The positive
+  ;; common scale preserves phase. This is specific to a unit carrier, never
+  ;; the struck modes whose amplitude must retain their physical decay.
+  (def unit_correction (- 1.5 (* 0.5 (+ (* x x) (* y y)))))
+  (def xn (* (- (* c x) (* s y)) unit_correction))
+  (def yn (* (+ (* s x) (* c y)) unit_correction))
   (write-tensor-history real_h xn)
   (write-tensor-history imag_h yn)
   (def contact_mag (pow (/ (- 1 swell_contact_pole)

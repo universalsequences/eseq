@@ -82,8 +82,8 @@ nonlinear hammer collision solver. The decomposition and tradeoffs are
 described in [Bank et al., 2003](https://home.mit.bme.hu/~bank/publist/jasp03.pdf)
 and [commuted piano synthesis](https://www.dsprelated.com/freebooks/pasp/Commuted_Piano_Synthesis.html).
 
-Coefficients update every 16 samples, then explicit frame-rate latches hold
-them for the audio-rate recurrence. Control latency is at most 15 samples
+Event-held controls schedule coefficient math every 16 samples, then explicit
+frame-rate latches hold the results for the audio-rate recurrence. Control latency is at most 15 samples
 (0.34 ms at 44.1 kHz). Modes fade out between 0.40 and 0.47 times the sample
 rate. Three broad, short soundboard modes and synthesized mechanism noise add
 hammer/key movement; a body filter and output section provide further color.
@@ -104,7 +104,13 @@ naturally. A `p^c` gain ensures that slowly decaying bass modes also rise
 clearly. An 8 ms entrance ramp and 5 ms per-mode magnitude smoothing keep
 retriggers and edits smooth. Each carrier is a normalized complex oscillator,
 so long swells and changing tuning do not accumulate oscillator gain or phase
-counter precision errors. A whole-seconds plus integer-samples age clock
+counter precision errors. Normalization uses one Newton correction around
+unit squared magnitude: multiply both components by `1.5 - 0.5*(x*x+y*y)`.
+The carrier starts at unit magnitude; paired sine/cosine rotations keep it in
+the correction's stable interval. This avoids a square root and two divisions
+per mode per sample. It applies only to the unit carriers, never to the struck
+modes whose amplitudes must preserve their physical decay.
+A whole-seconds plus integer-samples age clock
 continues natural decay through very long held notes.
 
 Key-up damping accumulates separately and irreversibly until the next onset;
@@ -122,9 +128,12 @@ A long treble swell can reach full level because it is not fading up a note
 that has already decayed.
 
 The extra carriers run even at zero blend, preserving continuous phase for
-live blending. On this macOS ARM64 run, a voice used about 0.085 CPU seconds
-per audio second, compared with about 0.045 before the swell. This is a real
-polyphony cost; it is not a guaranteed voice count or a host-wide benchmark.
+live blending. All 256 struck and reverse modes remain active. The September
+2026 follow-up measured about 115 microseconds per 128-frame call at 48 kHz,
+roughly 25% less CPU than v0.1.21, using the same piano patch and native ABI.
+This is a one-voice measurement, not a guaranteed voice count or a host-wide
+benchmark. See [the measured results](../../docs/pm-piano-performance-followup-2026-09-12.md)
+for whole-project measurements and sound comparisons.
 
 The factory has **one velocity layer, v8**. Softer/harder dynamics are modeled,
 not measured against additional Salamander velocity layers. The model does
