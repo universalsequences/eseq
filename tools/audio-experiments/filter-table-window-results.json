@@ -1,0 +1,205 @@
+{
+  "source_sha256": "a513e97e2f4998ca0001e8e1cda0822ae0a15f5aad09937354ce6f2f48e3199a",
+  "compiler_sha256": [
+    "77897a8134dd4477f2fccce7e57a17f25f2a1232a5284fd5d8aa89b4425c1ed5",
+    "c0a094f44b4462b0e71b4dc1faa64d618d794b4c7a388559566c46ad874a3417"
+  ],
+  "sample_rate": 48000,
+  "frames": 512,
+  "correctness": [
+    {
+      "bank": "flat",
+      "automated": false,
+      "compiler": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      },
+      "irregular_compiler": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      },
+      "baseline_partition": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      },
+      "candidate_partition": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      }
+    },
+    {
+      "bank": "flat",
+      "automated": true,
+      "compiler": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      },
+      "irregular_compiler": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      },
+      "baseline_partition": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      },
+      "candidate_partition": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      }
+    },
+    {
+      "bank": "shaped",
+      "automated": false,
+      "compiler": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      },
+      "irregular_compiler": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      },
+      "baseline_partition": {
+        "max_abs": 0.058419931679964066,
+        "nrmse": 0.00906053706999515
+      },
+      "candidate_partition": {
+        "max_abs": 0.058419931679964066,
+        "nrmse": 0.00906053706999515
+      }
+    },
+    {
+      "bank": "shaped",
+      "automated": true,
+      "compiler": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      },
+      "irregular_compiler": {
+        "max_abs": 0.0,
+        "nrmse": 0.0
+      },
+      "baseline_partition": {
+        "max_abs": 0.07460042834281921,
+        "nrmse": 0.011185745361313428
+      },
+      "candidate_partition": {
+        "max_abs": 0.07460042834281921,
+        "nrmse": 0.011185745361313428
+      }
+    }
+  ],
+  "timings": {
+    "static": {
+      "thread_cpu_us": [
+        [
+          279.43597412109375,
+          283.71645117187495,
+          279.65336083984374,
+          284.47334765625004,
+          283.087646484375,
+          279.04121923828126,
+          282.4230551757812,
+          280.4831337890625,
+          279.1116533203125
+        ],
+        [
+          250.6005048828125,
+          251.64023828125,
+          248.42303466796875,
+          248.2573447265625,
+          249.45245361328122,
+          248.41804980468754,
+          251.9785361328125,
+          249.43304443359372,
+          251.34326171874997
+        ]
+      ],
+      "median_us": [
+        280.4831337890625,
+        249.45245361328122
+      ],
+      "reduction_percent": 11.063296304696134
+    },
+    "automated": {
+      "thread_cpu_us": [
+        [
+          289.37495947265626,
+          299.46559619140623,
+          293.72515869140625,
+          300.89774560546874,
+          298.23382568359375,
+          300.3372397460937,
+          301.4636640625,
+          299.76186083984373,
+          301.13242626953127
+        ],
+        [
+          265.6693520507813,
+          268.15732812500005,
+          258.18001269531254,
+          267.5386147460937,
+          257.942341796875,
+          264.99385546875004,
+          260.11083984375,
+          259.3440551757812,
+          266.2152709960937
+        ]
+      ],
+      "median_us": [
+        299.76186083984373,
+        264.99385546875004
+      ],
+      "reduction_percent": 11.598542013878642
+    }
+  },
+  "partition_diagnostics": [
+    {
+      "bank": "shaped",
+      "automated": false,
+      "version": "baseline_partition",
+      "max_abs": 0.058419931679964066,
+      "nrmse": 0.00906053706999515
+    },
+    {
+      "bank": "shaped",
+      "automated": false,
+      "version": "candidate_partition",
+      "max_abs": 0.058419931679964066,
+      "nrmse": 0.00906053706999515
+    },
+    {
+      "bank": "shaped",
+      "automated": true,
+      "version": "baseline_partition",
+      "max_abs": 0.07460042834281921,
+      "nrmse": 0.011185745361313428
+    },
+    {
+      "bank": "shaped",
+      "automated": true,
+      "version": "candidate_partition",
+      "max_abs": 0.07460042834281921,
+      "nrmse": 0.011185745361313428
+    }
+  ],
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "toolchain_lock_sha256": "8df6b4befdfa63b650c651a7c15d70087cf9277ee4c9664a2480e45ad129bfbc",
+  "generated_c_sha256": [
+    "4e9b508deae8d36b5c602221d6fc83814ce480a8dd0797cd25fba08ec481c824",
+    "b6d664e59556d72a92a41a0a6fa14f704e893e28bdecd261ba343da8385ac49b"
+  ],
+  "timing_clock": "CLOCK_THREAD_CPUTIME_ID",
+  "warmup_blocks": 256,
+  "measured_blocks": 2048,
+  "discarded_repetitions": 2,
+  "publication": {
+    "commit": "db6065ec87aa4b95a9e99563a66380ef8f8d86ec",
+    "archive_sha256": "ca0f0cfae48c597a07b4d0dc3b758a4e75edf13f6b3f38bc372963d1e8eb7b71",
+    "binary_sha256": "f37c0c7c16575b5f6ffdadaeca94493dd5d5a37084321e6141dd08a5c9a7da8b",
+    "version": "dgenlisp-v0.1.24",
+    "url": "https://github.com/universalsequences/dgen-audio/releases/tag/dgenlisp-v0.1.24",
+    "fetched_generated_c_matches_benchmarked_candidate": true,
+    "fetched_host_tests_passed": 4,
+    "fetched_host_tests_without_compiler_overrides": true
+  }
+}

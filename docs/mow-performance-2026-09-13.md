@@ -201,11 +201,79 @@ element loops showed only a small preliminary gain; neither experiment changed
 production code. A proper compiler optimization must preserve frame-aware
 coefficient materialization and all contact/decay behavior.
 
-The causal FilterTable's reduction code is the next compiler target
-(`eseq-wlhz.3`). Its 256-tap reduction still publishes through cross-block scratch
-inside the sum loop. Local accumulation with one final publication needs a
-compiler-level implementation and complete waveform/modulation validation.
-Generated-C edits and source tricks to coerce code generation are not shipped.
+### Autonomous FilterTable follow-up
+
+The completed spring and graph-profiling pass was committed as `d82edb65`.
+The next pass used `tools/audio-experiments/compare_filter_table.py`, without
+opening the UI. It compiles the unchanged complete production causal effect,
+loads the native ABI with the app's Accelerate FFT services, and checks the
+output before timing. Flat/shaped procedural magnitude banks stand in for the
+project's table; this is an isolated effect workload, not a replay of mow B2.
+
+The first compiler experiment published reductions through local accumulators.
+It produced identical audio but no measurable speedup: static 285.43 -> 285.23 µs,
+automated 282.04 -> 283.71 µs. The uncommitted experiment was removed. Generated
+C that appears inefficient is not sufficient evidence of a runtime bottleneck.
+
+The successful change is in the adjacent DGen compiler's
+`Sources/DGen/IRBuilder+ViewTransforms.swift`. A circular window's normalized
+write head and valid element index bound the unwrapped index to
+`[1 - windowSize, bufferSize - 1]`. Only a negative wrap is possible. Replacing
+the per-tap integer remainder with one conditional addition saves work while
+retaining every tap, the 8 ms kernel slew, and the existing hop cadence.
+
+Nine alternating native repetitions, after two discarded rounds, at 48 kHz
+and 512 frames measured:
+
+| Full causal FilterTable kernel | Pinned compiler | Local candidate | Reduction |
+| --- | ---: | ---: | ---: |
+| Static controls | 280.48 µs | 249.45 µs | 11.1% |
+| Frame/cutoff/resonance automation | 299.76 µs | 264.99 µs | 11.6% |
+
+Each timed invocation has 256 warmup blocks (2.73 seconds of audio) and 2,048
+measured blocks. Timing uses native thread CPU time; Python, compilation and
+initial FFT setup are excluded. No build from this task overlapped the final
+timing run. Other desktop work may affect CPU frequency, so alternating runs
+and the retained individual measurements matter more than a single absolute time.
+
+All eight old/new waveform comparisons (two banks × static/automated controls ×
+regular/irregular partitions) were **sample-identical**. Generated-code fusion
+checks were clean. Three targeted compiler tests passed: a new exact circular
+buffer regression covering 15 block/window combinations and several wraps,
+the stored-operand fused reduction regression, and buffered FFT/IFFT execution.
+The compiler release build also passed. No full suite or Linux performance
+claim is made.
+
+Irregular short calls exposed an existing limitation: the shaped-bank output
+differs between regular and irregular partitions in both old and new compilers.
+A smaller counter/buffer probe reproduced identical failures on unchanged
+compiler source. This extends the existing `dgen-j6r` investigation, with host
+follow-up `eseq-mi4l`; it is not introduced by the optimization. Passing the
+compiler comparison does not certify partition invariance.
+
+The compiler change is committed upstream as
+`db6065ec87aa4b95a9e99563a66380ef8f8d86ec` and published in
+[DGenLisp v0.1.24](https://github.com/universalsequences/dgen-audio/releases/tag/dgenlisp-v0.1.24).
+Eseq's macOS arm64 pin now selects that release; the Linux pin remains v0.1.20.
+The archive SHA-256 is
+`ca0f0cfae48c597a07b4d0dc3b758a4e75edf13f6b3f38bc372963d1e8eb7b71`.
+The fetched package matches the tested stripped, ad-hoc signed distribution
+byte for byte, and its generated FilterTable C exactly matches the benchmarked
+candidate. Both the staged package and the fetched default compiler passed four
+focused host tests covering FIR tap placement, hop updates, causal unity and
+cutoff response. The fetched run used no compiler, audit or runtime-header
+environment overrides.
+
+Newly loaded instruments/effects use the fetched compiler; already-loaded
+instances need a project reload. No app rebuild is required to select it.
+This follow-up adds **no new measured app transport reduction** beyond the
+26.13% result above. With four workers, an 11% effect saving cannot be treated
+as an 11% callback saving.
+
+The full machine-readable result is
+`tools/audio-experiments/filter-table-window-results.json`. Native C, manifests,
+audio arrays and the rejected compiler experiment are retained under
+`.local/benchmarks/mow-2026-09-13/filter-{window-final,reduction}/`.
 
 Raw evidence is retained under `.local/benchmarks/mow-2026-09-13/`:
 `confirmed-live-sample.txt` and its JSON attribution, `ui.stderr.log`,

@@ -66,6 +66,34 @@ Initialization, compilation, warmup and shutdown are outside both measured
 intervals. Each process owns exactly one C engine. Stream teardown precedes
 App resource destruction, and workers stop before the graph is freed.
 
+## Headless FilterTable compiler comparison
+
+`compare_filter_table.py` compiles the unchanged production causal FilterTable
+with two compiler binaries and loads both through the native DGen ABI, using
+the app's Accelerate FFT host services. It requires macOS and NumPy. For a local
+compiler build, supply its audit script through `DGEN_BINARY_AUDIT_TOOL`:
+
+```sh
+DGEN_BINARY_AUDIT_TOOL=/path/to/dgen/scripts/audit-dgen-dylib.sh \
+  python3 tools/audio-experiments/compare_filter_table.py \
+  --baseline crates/sequencer/tools/DGenLisp-macos-arm64 \
+  --candidate /path/to/dgen/.build/release/DGenLisp \
+  --out /tmp/filter-table-comparison
+```
+
+The comparison covers flat/shaped procedural magnitude banks, static controls,
+frame/cutoff/resonance sweeps, and regular/irregular process calls. Cross-compiler
+waveform differences above the stated tolerance fail the run. Existing differences
+between partitions are reported separately (`eseq-mi4l` / `dgen-j6r`); a passing
+compiler comparison does not certify partition invariance. Audio arrays, compiler
+hashes, generated C, manifests and results remain in the output directory.
+
+Timing excludes Python and uses native thread CPU time, with 256 warmup blocks,
+2,048 measured blocks and nine alternating repetitions after two discarded rounds.
+Stop other benchmarks/builds for the final run. This measures one effect's DSP
+cost, without voice allocation, graph scheduling, the UI, or the saved project's
+particular magnitude bank. It does not estimate four-worker transport CPU.
+
 ## Parallel DSP timing in the app
 
 For projects that require UI authoring, the normal app can capture individual
