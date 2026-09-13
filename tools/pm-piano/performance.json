@@ -1,0 +1,305 @@
+{
+  "source_sha256": "079b8a7aef840980ce272f560f34fdff89f3c012fa7298aa77effd8f81492787",
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "compiler_sha256": [
+    "488a43450950646585bc808eecd6e48a0e5528503048b513c6fcba0aaa77a840",
+    "ecbf9a9fe548e91207248d93d86ab222ec7760ba82078654658c8dd44f7fa445"
+  ],
+  "timings": [
+    {
+      "case": "normal",
+      "frames": 128,
+      "baseline_us": 290.87799999999993,
+      "candidate_us": 152.964,
+      "cpu_reduction_percent": 47.413004764884235,
+      "raw_us": [
+        [
+          291.2806666666666,
+          290.0493333333333,
+          290.2993333333333,
+          290.87799999999993,
+          291.702,
+          291.06800000000004,
+          290.31466666666665
+        ],
+        [
+          152.52800000000002,
+          152.616,
+          152.964,
+          152.7086666666667,
+          153.51733333333334,
+          153.12399999999994,
+          154.39933333333335
+        ]
+      ]
+    },
+    {
+      "case": "reverse",
+      "frames": 128,
+      "baseline_us": 290.84200000000004,
+      "candidate_us": 153.41333333333336,
+      "cpu_reduction_percent": 47.2520016595494,
+      "raw_us": [
+        [
+          292.11,
+          290.5466666666667,
+          290.09799999999996,
+          291.81666666666666,
+          290.23466666666667,
+          290.964,
+          290.84200000000004
+        ],
+        [
+          155.38199999999998,
+          153.41333333333336,
+          170.8706666666667,
+          166.432,
+          151.87466666666668,
+          153.27066666666664,
+          152.878
+        ]
+      ]
+    },
+    {
+      "case": "project",
+      "frames": 128,
+      "baseline_us": 290.9273333333333,
+      "candidate_us": 153.58866666666663,
+      "cpu_reduction_percent": 47.207206381433174,
+      "raw_us": [
+        [
+          291.42533333333336,
+          290.1826666666667,
+          291.6393333333333,
+          290.80666666666673,
+          291.16799999999995,
+          290.9273333333333,
+          290.5406666666667
+        ],
+        [
+          153.79,
+          153.58866666666663,
+          153.81333333333333,
+          153.66866666666667,
+          152.69933333333333,
+          153.14133333333336,
+          153.00333333333336
+        ]
+      ]
+    },
+    {
+      "case": "normal",
+      "frames": 512,
+      "baseline_us": 1154.1119999999999,
+      "candidate_us": 618.5386666666666,
+      "cpu_reduction_percent": 46.405663690641234,
+      "raw_us": [
+        [
+          1158.9866666666667,
+          1156.1200000000001,
+          1153.3866666666668,
+          1148.6800000000003,
+          1154.1119999999999,
+          1152.408,
+          1156.224
+        ],
+        [
+          620.7493333333333,
+          618.5386666666666,
+          621.0853333333332,
+          616.3546666666667,
+          618.2026666666666,
+          619.0560000000002,
+          618.3706666666667
+        ]
+      ]
+    },
+    {
+      "case": "reverse",
+      "frames": 512,
+      "baseline_us": 1152.2373333333333,
+      "candidate_us": 618.8346666666667,
+      "cpu_reduction_percent": 46.292777645346206,
+      "raw_us": [
+        [
+          1151.3626666666664,
+          1152.7333333333333,
+          1151.7813333333334,
+          1145.6586666666667,
+          1154.0506666666665,
+          1152.2373333333333,
+          1153.6613333333332
+        ],
+        [
+          619.4853333333334,
+          618.9413333333334,
+          618.8346666666667,
+          617.9573333333332,
+          617.3573333333334,
+          616.5306666666668,
+          619.8613333333334
+        ]
+      ]
+    },
+    {
+      "case": "project",
+      "frames": 512,
+      "baseline_us": 1152.9813333333334,
+      "candidate_us": 618.968,
+      "cpu_reduction_percent": 46.31586981460239,
+      "raw_us": [
+        [
+          1152.416,
+          1151.2160000000001,
+          1160.8613333333333,
+          1154.7333333333333,
+          1148.9946666666667,
+          1154.5120000000002,
+          1152.9813333333334
+        ],
+        [
+          620.0026666666666,
+          618.968,
+          616.008,
+          616.9279999999999,
+          620.4799999999999,
+          619.7466666666668,
+          617.8693333333334
+        ]
+      ]
+    }
+  ],
+  "audio": {
+    "comparisons": 152,
+    "max_sample_error": 6.288290023803711e-06,
+    "max_normalized_rms_error": 2.8924929375452342e-05
+  },
+  "live_runs": [
+    {
+      "process_cpu_pct": 96.80848282563026,
+      "callback_mean_pct": 31.774922268749986,
+      "callback_p99_pct": 68.9371125,
+      "over_budget_blocks": 0,
+      "measured_dropped_events": 0,
+      "measured_late_events": 0,
+      "peak": 0.22511440515518188,
+      "rms": 0.022344762979906136,
+      "side": "baseline"
+    },
+    {
+      "process_cpu_pct": 63.87443044315268,
+      "callback_mean_pct": 21.354572387158555,
+      "callback_p99_pct": 43.97265937499999,
+      "over_budget_blocks": 0,
+      "measured_dropped_events": 0,
+      "measured_late_events": 0,
+      "peak": 0.22564426064491272,
+      "rms": 0.022313336957836553,
+      "side": "candidate"
+    },
+    {
+      "process_cpu_pct": 65.62812690789912,
+      "callback_mean_pct": 22.091037512500023,
+      "callback_p99_pct": 44.0457,
+      "over_budget_blocks": 0,
+      "measured_dropped_events": 0,
+      "measured_late_events": 0,
+      "peak": 0.22492992877960205,
+      "rms": 0.022333858129311077,
+      "side": "candidate"
+    },
+    {
+      "process_cpu_pct": 98.10953520371594,
+      "callback_mean_pct": 32.70247514374998,
+      "callback_p99_pct": 69.207815625,
+      "over_budget_blocks": 0,
+      "measured_dropped_events": 0,
+      "measured_late_events": 0,
+      "peak": 0.22492995858192444,
+      "rms": 0.022333864161923955,
+      "side": "baseline"
+    }
+  ],
+  "provenance": {
+    "sha256": {
+      "/Users/alecresende/code/learning/anthropic/eseq/target/release/audio_experiment": "69e7c02c47b552df97515b2062e2452e2cc3aac470b6b6e72d1cf96c716f2113",
+      "/Users/alecresende/code/learning/anthropic/eseq/target/release/instrument_probe": "4323e1cd9003668e99efd307beb3acd296d9157eba6b1dd97daaad8649e4c29d",
+      "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/tools/DGenLisp-macos-arm64": "488a43450950646585bc808eecd6e48a0e5528503048b513c6fcba0aaa77a840",
+      "/Users/alecresende/code/swift/dgen/.build/release/DGenLisp": "ecbf9a9fe548e91207248d93d86ab222ec7760ba82078654658c8dd44f7fa445",
+      "/Users/alecresende/code/learning/anthropic/eseq/content/instruments/Physical Models/PM Piano/dsp.lisp": "079b8a7aef840980ce272f560f34fdff89f3c012fa7298aa77effd8f81492787",
+      ".local/benchmarks/piano-2026-09-12/project.json": "0cc3e21b5e2948c92fdebd04b7914103da516b7b86509d2e2704bbc95927e5da"
+    },
+    "eseq_head": "699ecc2911a1f87a9b8e5ae433ec1c82961f719a",
+    "dgen_head": "6b49cfea3001a42bc3622ab4b7ecdb53dd5a5322",
+    "timing": "paired baseline/candidate/candidate/baseline; CoreAudio output silenced; no UI; 8s warmup and 16s measurement; 4 workers; 48kHz; 512-frame device blocks"
+  },
+  "release": {
+    "version": "dgenlisp-v0.1.21",
+    "upstream_commit": "53bdba8ad997a84f86b19dbd3cdb1ae168e33f17",
+    "archive_sha256": "9be84624d043469e275ffa577e90113028759e95989d0bcd13ee8d909be767e5",
+    "archive_bytes": 1372505,
+    "swift": "Apple Swift 6.2.3",
+    "xcode": "26.2 (17C52)",
+    "url": "https://github.com/universalsequences/dgen-audio/releases/tag/dgenlisp-v0.1.21",
+    "installed_checks": {
+      "compiler": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/tools/DGenLisp-macos-arm64",
+      "compiler_sha256": "99ee5a22d55e5b4508beb61bd11e4dd2be7264ebe3093c3ce7fb8ede23d956ca",
+      "piano_artifact": "/Users/alecresende/.cache/eseq-audition/2dbd26077fd81979/patch.c",
+      "piano_c_sha256": "e070808466f11726ea6e9cb88a268a5aabca9c2b9a1ec87c35427dd5ff7fc002",
+      "piano_matches_validated_candidate": true,
+      "scalar_smoke": true,
+      "grouped_parameter_smoke": true,
+      "resource_overrides": false
+    },
+    "host_probe": {
+      "effective_midi_note": 50.0,
+      "first_non_finite_frame": null,
+      "first_non_finite_state_slot": null,
+      "first_nonzero_frame": 1,
+      "first_samples": [
+        4.384255802847292e-08,
+        2.2512876967084594e-05,
+        0.000511162739712745,
+        0.0007467457908205688,
+        0.0009357037488371134,
+        0.0018563156481832266,
+        0.002689669607207179,
+        0.004297470673918724,
+        0.006902468390762806,
+        0.00996699370443821,
+        0.013259880244731903,
+        0.01648138090968132,
+        0.020340748131275177,
+        0.024119438603520393,
+        0.027620594948530197,
+        0.03255036100745201,
+        0.03740302473306656,
+        0.04229362681508064,
+        0.048516660928726196,
+        0.055951524525880814,
+        0.06540117412805557,
+        0.07637820392847061,
+        0.08951786905527115,
+        0.10528390109539032,
+        0.12287960946559906,
+        0.14213304221630096,
+        0.16336189210414886,
+        0.18455617129802704,
+        0.20524677634239197,
+        0.226079061627388,
+        0.2445753812789917,
+        0.2611561715602875
+      ],
+      "frames": 96000,
+      "instrument": "Physical Models/PM Piano",
+      "mean_abs": 0.024792073294520378,
+      "midi_note": 50.0,
+      "non_finite_samples": 0,
+      "non_finite_state_slots": 0,
+      "nonzero_frames": 71941,
+      "peak": 0.33384984731674194,
+      "preset": null,
+      "rms": 0.051328957080841064
+    }
+  }
+}
