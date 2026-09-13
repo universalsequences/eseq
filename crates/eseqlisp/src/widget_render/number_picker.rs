@@ -118,6 +118,8 @@ mod tests {
                 "plock-color-r",
                 "plock-color-g",
                 "plock-color-b",
+                "process-value",
+                "process-clamped",
             ]
         );
         assert!(

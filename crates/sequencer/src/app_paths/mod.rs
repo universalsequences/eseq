@@ -1588,10 +1588,11 @@ mod tests {
     fn global_accessor_matches_workspace_layout() {
         let paths = app_paths();
         let sequencer_dir = crate::paths::sequencer_dir().expect("locate sequencer dir");
-        assert_eq!(
-            paths.dgenlisp_tool(),
-            sequencer_dir.join("tools").join(DGENLISP_TOOL_FILENAME)
-        );
+        let expected_tool = std::env::var_os("ESEQ_DGENLISP_TOOL")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| sequencer_dir.join("tools").join(DGENLISP_TOOL_FILENAME));
+        assert_eq!(paths.dgenlisp_tool(), expected_tool);
         assert_eq!(
             paths.dgen_cache_root(),
             crate::paths::workspace_root()

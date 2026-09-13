@@ -931,8 +931,8 @@ mod tests {
     #[test]
     fn instrument_ui_dispatch_matches_unique_moved_folder_leaf_name() {
         let source = build_custom_instrument_ui_source_with_overlay(Some((
-            "emulations/minimoog-lad2/".to_string(),
-            "instruments/emulations/minimoog-lad2/ui.lisp".to_string(),
+            "emulations/unique-dispatch-test-voice/".to_string(),
+            "instruments/emulations/unique-dispatch-test-voice/ui.lisp".to_string(),
             r#"
             (defsynth-ui
               (eseq.effects.custom-ui-lego/ui-lego-column-full
@@ -943,23 +943,23 @@ mod tests {
         )));
 
         assert!(
-            source.contains(r#"(= (get inst :name) "emulations/minimoog-lad2/")"#),
+            source.contains(r#"(= (get inst :name) "emulations/unique-dispatch-test-voice/")"#),
             "{source}"
         );
         assert!(
-            source.contains(r#"(= (get inst :name) "emulations/minimoog-lad2")"#),
+            source.contains(r#"(= (get inst :name) "emulations/unique-dispatch-test-voice")"#),
             "{source}"
         );
         assert!(
-            source.contains(r#"(= (get inst :name) "minimoog-lad2/")"#),
+            source.contains(r#"(= (get inst :name) "unique-dispatch-test-voice/")"#),
             "{source}"
         );
         assert!(
-            source.contains(r#"(= (get inst :name) "minimoog-lad2")"#),
+            source.contains(r#"(= (get inst :name) "unique-dispatch-test-voice")"#),
             "{source}"
         );
         assert!(
-            source.contains(r#"(custom-ui-string-ends-with? (get inst :name) "/minimoog-lad2/")"#),
+            source.contains(r#"(custom-ui-string-ends-with? (get inst :name) "/unique-dispatch-test-voice/")"#),
             "{source}"
         );
     }

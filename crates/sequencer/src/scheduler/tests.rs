@@ -4102,10 +4102,9 @@
                 .iter()
                 .map(|event| event.sample_time)
                 .collect::<Vec<_>>(),
-            // The harness's process-emission chunk begins at sample 1. At
-            // 120 BPM / 48 kHz, the second call is beat 0.25, then +0.5 and
-            // +1.0 beats land at samples 18_001 and 30_001 respectively.
-            vec![18_001, 30_001],
+            // At 120 BPM / 48 kHz, the second call is beat 0.25, then
+            // +0.5 and +1.0 beats land at samples 18_000 and 30_000.
+            vec![18_000, 30_000],
             "delay=2 at a sixteenth-note timebase must place replies at +1/8 and +1/4"
         );
         assert_eq!(
@@ -4221,10 +4220,10 @@
                 .map(|event| (event.track, event.sample_time, event.transpose))
                 .collect::<Vec<_>>(),
             vec![
-                (2, 18_001, 3.0),
-                (3, 18_001, 7.0),
-                (2, 30_001, 7.0),
-                (3, 30_001, 10.0),
+                (2, 18_000, 3.0),
+                (3, 18_000, 7.0),
+                (2, 30_000, 7.0),
+                (3, 30_000, 10.0),
             ],
             "the second sparse call should turn the prior suggestion into two delayed phrases"
         );
@@ -4488,7 +4487,7 @@
 
             let events = schedule_process_observed_fixture(&state, scratch, 6_000);
             assert_eq!(events.len(), 1, "{events:?}");
-            assert_eq!(events[0].sample_time, 1);
+            assert_eq!(events[0].sample_time, 0);
             assert_eq!(events[0].transpose, 7.0);
         });
     }
@@ -4556,7 +4555,7 @@
                 .iter()
                 .map(|event| event.sample_time)
                 .collect::<Vec<_>>();
-            assert_eq!(sample_times, vec![1, 1_501, 3_001, 4_501], "{events:?}");
+            assert_eq!(sample_times, vec![0, 1_500, 3_000, 4_500], "{events:?}");
             assert!(events
                 .iter()
                 .all(|event| (event.duration - 0.25).abs() < 1e-6));
@@ -4594,7 +4593,7 @@
                 .iter()
                 .map(|event| event.sample_time)
                 .collect::<Vec<_>>();
-            assert_eq!(sample_times, vec![1, 3_001, 6_001], "{events:?}");
+            assert_eq!(sample_times, vec![0, 3_000, 6_000], "{events:?}");
             assert!(events
                 .iter()
                 .all(|event| (event.duration - 1.0).abs() < 1e-6));
@@ -9893,7 +9892,7 @@
             let (state, mut scheduler) = roll_test_state(&[]);
             let queue = ScheduledEventQueue::<64>::new();
             let frontier = drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 0, 0);
-            assert_eq!(frontier, 5_200, "frontier must sit mid-grid for this test");
+            assert_eq!(frontier, 5_000, "frontier must sit mid-grid for this test");
             let frontier =
                 drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 1_500, frontier);
             assert_eq!(frontier, 6_500, "frontier must sit past the 6000 line");
@@ -9935,7 +9934,7 @@
                 track: 0,
                 transpose: 3.0,
             }]);
-            drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 1_000, frontier);
+            drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 1_001, frontier);
             let triggers = drain_roll_triggers(&queue);
             assert_eq!(
                 triggers.iter().map(|(sample, ..)| *sample).collect::<Vec<_>>(),

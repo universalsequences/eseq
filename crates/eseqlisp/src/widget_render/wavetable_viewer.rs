@@ -649,15 +649,15 @@ mod tests {
         );
     }
 
-    /// The Wavetable instrument's UI names its bank by the content-relative
-    /// path `instruments/core/wavetable/waves/bank.json`. Since the factory
+    /// The Digi Wave instrument's UI names its bank by a content-relative
+    /// path. Since the factory
     /// `content/` split that no longer resolves against the process cwd
     /// (`crates/sequencer`), so the viewer must fall back to the installed
     /// content roots or `build_primitives` bails before drawing anything.
     /// Filter Table instances are unaffected — they pass `data-key`.
     #[test]
     fn relative_file_banks_resolve_against_the_content_roots() {
-        let bank = load_bank("instruments/core/wavetable/waves/bank.json")
+        let bank = load_bank("instruments/Synths/Digi Wave/waves/bank.json")
             .expect("wavetable instrument bank should resolve through the content roots");
         assert!(bank.frame_len >= 2, "frame_len={}", bank.frame_len);
         assert!(

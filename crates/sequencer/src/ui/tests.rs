@@ -15826,7 +15826,9 @@
             "a p-locked step under the playhead must move the curve, got {}",
             at(&played, cutoff_idx),
         );
-        // An explicit selection still wins over the playhead.
+        // An explicit triggered step with no lock resets the held value,
+        // and its selection wins over the playhead.
+        state.pattern.patterns[0].set_step_active(0, true);
         let selected = sample(&app, &mut watched, Some(0), true);
         assert!(
             (at(&selected, cutoff_idx) - 2_000.0).abs() < 1.0e-3,
@@ -15934,6 +15936,9 @@
 
         // Arming a lane requires both the slot selector and a depth; the audio
         // thread's published last-triggered voice is what gets watched.
+        let source_type_idx = instrument_desc.params.iter().position(|param| param.name == "mod1_source")
+            .expect("sampler source type selector");
+        instrument_slot.defaults.set(source_type_idx, 1.0);
         instrument_slot.defaults.set(source_idx, 1.0);
         instrument_slot.defaults.set(speed_target.depth_param_idx, 0.5);
         state.transport.display_modulator_node_ids[0]
@@ -15952,20 +15957,17 @@
             inst_at(&modulated, speed_idx),
         );
 
-        // Selecting the lane's `off` slot releases the watchlist entry, as
-        // does hiding the panel.
+        // The visible source editor keeps an enabled source watched even
+        // without a routed destination. Turning the source itself off releases it.
         instrument_slot.defaults.set(source_idx, 0.0);
         let _ = sample_instrument(&app, &mut instrument_watched, true);
-        assert!(
-            !instrument_watched.contains(&modulator_node_id),
-            "an `off` slot selector must release the watchlist entry: {instrument_watched:?}",
-        );
-        instrument_slot.defaults.set(source_idx, 1.0);
+        assert!(instrument_watched.contains(&modulator_node_id));
+        instrument_slot.defaults.set(source_type_idx, 0.0);
         let _ = sample_instrument(&app, &mut instrument_watched, true);
-        assert!(
-            instrument_watched.contains(&modulator_node_id),
-            "a re-armed lane watches again: {instrument_watched:?}",
-        );
+        assert!(!instrument_watched.contains(&modulator_node_id));
+        instrument_slot.defaults.set(source_type_idx, 1.0);
+        let _ = sample_instrument(&app, &mut instrument_watched, true);
+        assert!(instrument_watched.contains(&modulator_node_id));
         let _ = sample_instrument(&app, &mut instrument_watched, false);
         assert!(
             instrument_watched.is_empty(),

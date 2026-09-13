@@ -2459,16 +2459,12 @@ mod tests {
             .expect("eval subtree");
 
         let pending = runtime.take_pending_buffer_widget_trees();
-        let crate::vm::PendingUiUpdate::ReplaceSubtree {
-            subtree_root_id,
-            tree,
-            ..
-        } = &pending[0]
-        else {
-            panic!("expected replace subtree update");
+        assert_eq!(pending.len(), 1, "expected one initial buffer tree");
+        let crate::vm::PendingUiUpdate::FullTree(pending_tree) = &pending[0] else {
+            panic!("expected initial full tree update");
         };
+        let tree = &pending_tree.tree;
         let root_id = map_prop_u64(tree, "__subtree-root-id").expect("root subtree id");
-        assert_eq!(*subtree_root_id, root_id);
         assert_eq!(
             map_prop_string(tree, "__stable-key").as_deref(),
             Some("step-1")

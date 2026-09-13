@@ -147,13 +147,11 @@ HEAD (see "Working tree safety"), then report it as pre-existing and move on.
 
 Known pre-existing failures in the validated baselines below: **none**.
 
-Newer HEAD exception (Apple Silicon, 2026-09-10):
+Resolved on Apple Silicon, 2026-09-13 (`eseq-ymqh`):
 `state_values::tests::metal_seq_sequencer_ellipsis_toggles_expanded_track_editor`
-expects the removed `/expanded-timebase-0` control. Verified at clean commit
-`d63dd99948a782d74c1f108390755e4a322599df` in `/tmp/eseq-head-test` with a separate
-Cargo target directory using `cargo nextest run -p sequencer --bin metal_seq -E
-'test(=state_values::tests::metal_seq_sequencer_ellipsis_toggles_expanded_track_editor)'`.
-It fails identically in 4.209 seconds. Follow-up: `eseq-ymqh`.
+previously expected the removed `/expanded-timebase-0` control. The obsolete
+expectation is removed; expansion, current controls, bindings, and geometry
+remain covered. The test passes in focused and full-workspace validation.
 
 Platform baselines are not interchangeable:
 

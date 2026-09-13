@@ -919,19 +919,11 @@ mod tests {
         );
     }
 
-    // eseq-linux.73: the generated spectral code only emits overlap-add output
-    // when a hop boundary lands on a process-block boundary. Driven at a block
-    // size that is not hop-compatible — exactly what CPAL/ALSA hands the
-    // callback on Linux, 235 frames for a 512-frame request — the wet arm goes
-    // completely silent while the dry arm keeps passing, which is the reported
-    // "100% mix is silent" symptom.
-    //
-    // This pins the contract that `audio::FixedOutputBlocks` exists to uphold:
-    // the engine must never hand generated DGenLisp code a block size the DSP
-    // was not compiled for. If the audio callback ever goes back to rendering
-    // raw device-sized blocks, this test explains what breaks.
+    // A device-sized block (235 frames on the Linux workstation) must not
+    // silence the wet path. This used to assert the compiler's old failure;
+    // preserve the audible-output regression as arbitrary hop sizes improve.
     #[test]
-    fn bundled_dsp_wet_arm_needs_a_hop_compatible_block_size() {
+    fn bundled_dsp_wet_arm_is_audible_at_non_hop_block_sizes() {
         if !tool_path().exists() {
             eprintln!("skipping: DGenLisp tool not found at {:?}", tool_path());
             return;
@@ -979,10 +971,7 @@ mod tests {
         // 235 is the frame count PipeWire actually delivers on the Linux
         // workstation for a 512-frame request.
         let misaligned = wet_peak(235);
-        assert_eq!(
-            misaligned, 0.0,
-            "the wet arm is expected to be silent at a hop-incompatible block \
-             size; if that changed, FixedOutputBlocks may no longer be needed"
-        );
+        assert!(misaligned > 0.01,
+            "a non-hop-sized block must produce wet output, got peak {misaligned}");
     }
 }

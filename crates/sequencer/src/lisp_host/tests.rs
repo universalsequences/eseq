@@ -4884,7 +4884,29 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
-    fn built_in_instrument_dsp_files_do_not_hardcode_44100_sample_rate() {
+    fn built_in_instrument_sample_rate_literals_require_host_normalization() {
+        fn unnormalized_rates(source: &str) -> Vec<usize> {
+            use eseqlisp::parser::{Parser, Token};
+            let tokens = Parser::new(source.to_string()).parse_spanned().expect("tokenize DSP");
+            tokens.iter().enumerate().filter_map(|(i, token)| {
+                if !matches!(token.token, Token::Number(n) if n == 44_100.0 || n == 44.1) {
+                    return None;
+                }
+                // DGen's biquad frequency API uses a fixed 44.1 kHz reference.
+                // Explicit reference/host normalization is sample-rate aware;
+                // rejecting it would break correctly compensated instruments.
+                let normalized = i >= 2 && matches!(token.token, Token::Number(44_100.0))
+                    && matches!(&tokens[i - 2].token, Token::LeftParen)
+                    && matches!(&tokens[i - 1].token, Token::Symbol(op) if op == "/")
+                    && matches!(tokens.get(i + 1).map(|t| &t.token), Some(Token::Symbol(rate)) if rate == "samplerate")
+                    && matches!(tokens.get(i + 2).map(|t| &t.token), Some(Token::RightParen));
+                (!normalized).then(|| source[..token.span.start_byte].bytes().filter(|b| *b == b'\n').count() + 1)
+            }).collect()
+        }
+        assert!(unnormalized_rates("(param f @default 644.1) ; 44100\n(tensor @data [1.2441008])").is_empty());
+        assert!(unnormalized_rates("(* hz (/ 44100.0 samplerate))").is_empty());
+        assert_eq!(unnormalized_rates("(/ hz 44100.0)"), vec![1]);
+
         fn visit(dir: &std::path::Path, failures: &mut Vec<String>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
@@ -4901,11 +4923,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 let Ok(source) = std::fs::read_to_string(&path) else {
                     continue;
                 };
-                for (idx, line) in source.lines().enumerate() {
-                    let code = line.split(';').next().unwrap_or("");
-                    if code.contains("44100") || code.contains("44.1") {
-                        failures.push(format!("{}:{}", path.display(), idx + 1));
-                    }
+                for line in unnormalized_rates(&source) {
+                    failures.push(format!("{}:{line}", path.display()));
                 }
             }
         }

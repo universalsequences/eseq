@@ -162,11 +162,11 @@ mod probes {
 (def h-im (* hmag (sin l-im)))
 (def ir-td (ifft h-re h-im @N 512 @backend accelerated))
 
-; The hop-gated kernel chain must cross to frame rate before the conv:
-; without a latch, the multiply-reduce below executes only on hop frames
-; (output zero elsewhere). latch with a frame-rate cond re-emits the held
-; kernel every frame.
-(def ir-held (latch ir-td 1))
+; Capture only when the hop-domain result is valid. Between ticks, tensor
+; reads scatter zero, so an always-on latch would overwrite the held kernel.
+; This frame-rate counter shares the hop-hold clock's period and initial phase.
+(def kernel-tick (eq (accum 1 0 0 512) 0))
+(def ir-held (latch ir-td kernel-tick))
 (def kernel (gather ir-held (- 255 (iota 256))))
 
 (def win-l (reshape (buffer in-l 256) @shape [256]))
@@ -650,14 +650,15 @@ mod click_tests {
         table
     }
 
-    /// Worst absolute sample-to-sample jump on the left channel, skipping the
-    /// startup region. Clicks are exactly large first differences a smooth
-    /// signal cannot produce.
+    /// Worst change in sample slope on the left channel. First differences
+    /// are dominated by the intended sine, whose slope slew must preserve;
+    /// second differences isolate abrupt kernel changes from that carrier.
     fn max_delta(samples: &[f32], skip_frames: usize) -> f32 {
         let frames = samples.len() / 2;
         let mut worst = 0.0f32;
-        for frame in (skip_frames + 1)..frames {
-            let delta = (samples[frame * 2] - samples[(frame - 1) * 2]).abs();
+        for frame in (skip_frames + 2)..frames {
+            let delta = (samples[frame * 2] - 2.0 * samples[(frame - 1) * 2]
+                + samples[(frame - 2) * 2]).abs();
             worst = worst.max(delta);
         }
         worst
@@ -722,14 +723,15 @@ mod click_tests {
 
         let (slewed_delta, slewed_peak) = render_frame_sweep(slewed_source);
         let (raw_delta, raw_peak) = render_frame_sweep(&no_slew_source);
-        // 441 Hz sine: natural per-sample delta is peak * 2*pi*441/44100 ~ 0.063*peak.
-        let natural = slewed_peak * 2.0 * std::f32::consts::PI * 441.0 / 44_100.0;
+        // A sine has second-difference amplitude 4 * peak * sin(omega/2)^2.
+        let natural = 4.0 * slewed_peak
+            * (std::f32::consts::PI * 441.0 / 44_100.0).sin().powi(2);
         eprintln!(
             "frame morph clicks: slewed max-delta {slewed_delta} (peak {slewed_peak}, natural {natural}), no-slew max-delta {raw_delta} (peak {raw_peak})"
         );
         assert!(
             slewed_delta < natural * 1.6,
-            "slewed kernel should produce no jumps beyond the sine's own slope: max-delta {slewed_delta}, natural {natural}"
+            "slewed kernel should produce no jumps beyond the sine's own curvature: max-delta {slewed_delta}, natural {natural}"
         );
         assert!(
             slewed_delta < raw_delta * 0.7,

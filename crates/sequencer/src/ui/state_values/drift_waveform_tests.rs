@@ -29,6 +29,16 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
         ("noise_gain_db", -60.0, -60.0, 12.0),
         ("lp_freq", 2500.0, 20.0, 18000.0),
     ];
+    let root = sequencer::app_paths::app_paths().factory_root()
+        .join("instruments/Synths/Digi Drift");
+    let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
+    let compiled = sequencer::lisp_host::compile_and_load_instrument_with_asset_base(
+        &dsp, 48000, Some(&root)).expect("Digi Drift parameter manifest");
+    let params: Vec<_> = compiled.manifest.params.iter().map(|p| {
+        let value = params.iter().find(|(name, ..)| *name == p.name)
+            .map_or(p.default as f64, |(_, value, ..)| *value);
+        (p.name.clone(), value, p.min as f64, p.max as f64)
+    }).collect();
     let mut inst = test_instrument_map();
     inst.insert(
         "synth".into(),
@@ -109,7 +119,11 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
     editor.set_active_buffer(fx);
     let layout = editor.widget_layout().unwrap();
     let node = find_layout_node_by_widget_type(&layout, "drift-waveform")
-        .expect("preview is a widget, not a binding diagnostic");
+        .unwrap_or_else(|| {
+            let mut summaries = Vec::new();
+            collect_layout_node_summaries(&layout, &mut summaries);
+            panic!("preview is a widget, not a binding diagnostic: {summaries:#?}");
+        });
     let panel = find_layout_node_by_debug_name(&layout, "instrument-panel").unwrap();
     let r = node.rect;
     assert!(r.width.is_finite() && r.height.is_finite() && r.width > 0.0 && r.height > 0.0);
