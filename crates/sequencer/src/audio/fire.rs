@@ -922,6 +922,11 @@ pub(super) fn dispatch_retrig_event(
     {
         return;
     }
+    if let RetrigTarget::RackSampler(hit) = event.target {
+        dispatch_rack_sampler_retrig(data, hit, frame_offset, event.gate);
+        data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
+        return;
+    }
     if let RetrigTarget::Custom {
         voices,
         count,
@@ -936,6 +941,16 @@ pub(super) fn dispatch_retrig_event(
         for voice in voices.iter().take(count) {
             if voice.logical_id == 0 {
                 continue;
+            }
+            // A repeat after a short gate reopens the voice; keep allocation
+            // and release-tail bookkeeping in sync with that new gate.
+            if let Some(pool) = data.custom_engine_pools.get_mut(engine_id) {
+                if let Some(slot) = pool.voices[..pool.num_voices].iter_mut()
+                    .find(|slot| slot.logical_id == voice.logical_id)
+                {
+                    slot.active = true;
+                    slot.release_started_sample = None;
+                }
             }
             let seq = next_event_sequence_from(&mut data.event_seq);
             unsafe {

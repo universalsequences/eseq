@@ -296,6 +296,12 @@ pub(super) fn collect_rack_slot_active_voice_releases(
         }
         InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
     }
+    for note_off in &note_offs {
+        let logical_id = match *note_off {
+            RackSlotNoteOff::Custom { logical_id } | RackSlotNoteOff::Sampler { logical_id } => logical_id,
+        };
+        cancel_retrigs_for_voice(countdown_events, block_events, logical_id);
+    }
     note_offs
 }
 
@@ -929,6 +935,73 @@ pub(super) fn fire_live_keyboard_rack_note(
     true
 }
 
+/// Captured sampler hit: repeats reuse its voice and resolved slice rather
+/// than reading a later step or allocating another layer voice.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RackSamplerRetrig {
+    pool_id: usize,
+    logical_id: u64,
+    gatepitch_id: i32,
+    modulator_active: bool,
+    transpose: f32,
+    velocity: f32,
+    speed: f32,
+    gate_mode: f32,
+    params: ScheduledSamplerParams,
+}
+
+pub(super) fn dispatch_rack_sampler_retrig(
+    data: &mut AudioCallbackData,
+    hit: RackSamplerRetrig,
+    frame_offset: u32,
+    gate_samples: f32,
+) {
+    // A short gate can have released this pool entry before the next repeat.
+    // Reopening the DSP gate must also restore the sampler's activity mask.
+    if let Some(pool) = data.voice_pools.get_mut(hit.pool_id) {
+        if let Some(voice) = pool.voices[..pool.num_voices].iter_mut()
+            .find(|voice| voice.logical_id == hit.logical_id)
+        {
+            voice.active = true;
+        }
+    }
+    let params = hit.params;
+    let (warp_enabled, warp_mode, warp_ratio, warp_sample_bpm,
+        warp_project_bpm, warp_ptr_lo, warp_ptr_hi) = rack_sampler_warp_runtime(
+            &data.state, params.warp_enabled, params.warp_mode, params.sample_bpm,
+        );
+    if hit.modulator_active {
+        let seq = next_event_sequence_from(&mut data.event_seq);
+        unsafe {
+            send_custom_trigger(
+                data.lg.0, hit.gatepitch_id as u64, frame_offset, seq,
+                custom_pitch_hz(hit.transpose, 0.0), hit.velocity,
+            );
+        }
+    }
+    let seq = next_event_sequence_from(&mut data.event_seq);
+    unsafe {
+        send_trigger(
+            data.lg.0, hit.logical_id, frame_offset, seq, hit.velocity,
+            hit.speed * params.playback_speed, gate_samples,
+            params.attack_ms * data.sample_rate as f32 / 1000.0,
+            params.release_ms * data.sample_rate as f32 / 1000.0,
+            hit.gate_mode, hit.transpose, params.start_point, params.end_point,
+            params.instrument_enabled, params.reverse, params.loop_mode,
+            params.loop_xfade_ms * data.sample_rate as f32 / 1000.0,
+            params.sr_hz, warp_enabled, warp_mode, warp_ratio, warp_sample_bpm,
+            warp_project_bpm, warp_ptr_lo, warp_ptr_hi, params.warp_preserve,
+            params.warp_seg_loop_mode, params.warp_seg_envelope, params.scrub,
+        );
+    }
+    if hit.gate_mode > 0.5 {
+        schedule_gate_off_event(
+            data, hit.pool_id, hit.logical_id, frame_offset, gate_samples as f64,
+            GateOffTarget::Sampler { gatepitch_id: hit.gatepitch_id },
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fire_rack_slot_note(
     data: &mut AudioCallbackData,
@@ -946,18 +1019,16 @@ pub(super) fn fire_rack_slot_note(
     sampler_params: Option<ScheduledSamplerParams>,
     instrument_fingerprint: u64,
     origin: Option<crate::sequencer::LiveNoteOrigin>,
-) {
+) -> Option<RetrigTarget> {
     match slot.instrument_type {
         InstrumentType::Sampler => {
-            let Some(pool_id) = rack_slot_pool_index(parent_track_idx, slot_idx) else {
-                return;
-            };
+            let pool_id = rack_slot_pool_index(parent_track_idx, slot_idx)?;
             if pool_id >= data.voice_pools.len() {
-                return;
+                return None;
             }
             let sampler_lid = data.state.runtime.sampler_lids[pool_id].load(Ordering::Acquire);
             if sampler_lid == 0 {
-                return;
+                return None;
             }
             let mut sampler_params = sampler_params.unwrap_or_default();
             let mut trigger_transpose = transpose;
@@ -968,31 +1039,13 @@ pub(super) fn fire_rack_slot_note(
                 &mut trigger_transpose,
             ) == SliceTriggerVerdict::Ignore
             {
-                return;
+                return None;
             }
             // `resolve_slice` consumes the note to pick the slice and zeroes the
             // transpose, so adding the base-note offset unconditionally leaves
             // classic mode untouched and makes `base` the pitch offset that every
             // slice plays at.
             trigger_transpose += slot_params.base_note_offset;
-            let attack_samples = sampler_params.attack_ms * data.sample_rate as f32 / 1000.0;
-            let release_samples = sampler_params.release_ms * data.sample_rate as f32 / 1000.0;
-            let loop_xfade_samples =
-                sampler_params.loop_xfade_ms * data.sample_rate as f32 / 1000.0;
-            let (
-                warp_enabled,
-                warp_mode,
-                warp_ratio,
-                warp_sample_bpm,
-                warp_project_bpm,
-                warp_ptr_lo,
-                warp_ptr_hi,
-            ) = rack_sampler_warp_runtime(
-                &data.state,
-                sampler_params.warp_enabled,
-                sampler_params.warp_mode,
-                sampler_params.sample_bpm,
-            );
             data.voice_pools[pool_id].polyphonic = slot_params.max_polyphony > 1;
             let voice = data.voice_pools[pool_id].allocate_voice_retriggering_same_note_with_limit(
                 transpose,
@@ -1004,90 +1057,42 @@ pub(super) fn fire_rack_slot_note(
             } else {
                 sampler_lid
             };
-            let gatepitch_id = voice.gatepitch_id;
-            if voice.modulator_id > 0 {
-                let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
-                unsafe {
+            let hit = RackSamplerRetrig {
+                pool_id,
+                logical_id: lid,
+                gatepitch_id: voice.gatepitch_id,
+                modulator_active: voice.modulator_id > 0,
+                transpose: trigger_transpose,
+                velocity,
+                speed,
+                gate_mode,
+                params: sampler_params,
+            };
+            unsafe {
+                if hit.modulator_active {
                     dispatch_sampler_modulator_params_to_voice(
-                        data.lg.0,
-                        voice.modulator_id as u64,
-                        instrument_params,
-                    );
-                    send_custom_trigger(
-                        data.lg.0,
-                        voice.gatepitch_id as u64,
-                        frame_offset,
-                        gatepitch_seq,
-                        custom_pitch_hz(trigger_transpose, 0.0),
-                        velocity,
+                        data.lg.0, voice.modulator_id as u64, instrument_params,
                     );
                 }
-            }
-            let sampler_seq = next_event_sequence_from(&mut data.event_seq);
-            unsafe {
                 dispatch_sampler_extra_params_to_voice(data.lg.0, lid, instrument_params);
-                send_trigger(
-                    data.lg.0,
-                    lid,
-                    frame_offset,
-                    sampler_seq,
-                    velocity,
-                    speed * sampler_params.playback_speed,
-                    gate_samples,
-                    attack_samples,
-                    release_samples,
-                    gate_mode,
-                    trigger_transpose,
-                    sampler_params.start_point,
-                    sampler_params.end_point,
-                    sampler_params.instrument_enabled,
-                    sampler_params.reverse,
-                    sampler_params.loop_mode,
-                    loop_xfade_samples,
-                    sampler_params.sr_hz,
-                    warp_enabled,
-                    warp_mode,
-                    warp_ratio,
-                    warp_sample_bpm,
-                    warp_project_bpm,
-                    warp_ptr_lo,
-                    warp_ptr_hi,
-                    sampler_params.warp_preserve,
-                    sampler_params.warp_seg_loop_mode,
-                    sampler_params.warp_seg_envelope,
-                    sampler_params.scrub,
-                );
             }
-            if gate_mode > 0.5 {
-                schedule_gate_off_event(
-                    data,
-                    pool_id,
-                    lid,
-                    frame_offset,
-                    gate_samples as f64,
-                    GateOffTarget::Sampler { gatepitch_id },
-                );
-            }
+            dispatch_rack_sampler_retrig(data, hit, frame_offset, gate_samples);
+            return Some(RetrigTarget::RackSampler(hit));
         }
         InstrumentType::Custom => {
-            let Some(engine_id) = slot.track_sound_state.engine_id else {
-                return;
-            };
+            let engine_id = slot.track_sound_state.engine_id?;
             if engine_id >= data.custom_engine_pools.len() {
-                return;
+                return None;
             }
             let free_patch = slot.instrument_run_mode == CustomInstrumentRunMode::FreePatch;
             let allocation = if free_patch {
-                let Some(allocation) = data.custom_engine_pools[engine_id]
+                let allocation = data.custom_engine_pools[engine_id]
                     .allocate_free_patch_voice(
                         parent_track_idx,
                         rack_slot_pool_index(parent_track_idx, slot_idx)
                             .expect("validated rack slot must have a route identity"),
                         transpose,
-                    )
-                else {
-                    return;
-                };
+                    )?;
                 allocation
             } else {
                 let Some(allocation) = data.custom_engine_pools[engine_id].allocate_voice_with_priority(
@@ -1099,7 +1104,7 @@ pub(super) fn fire_rack_slot_note(
                     slot_params.max_polyphony,
                     data.state.pattern.track_params[parent_track_idx].get_voice_priority(),
                     origin,
-                ) else { return; };
+                ) else { return None; };
                 allocation
             };
             let legato = !free_patch && allocation.continues_mono_note(
@@ -1115,7 +1120,7 @@ pub(super) fn fire_rack_slot_note(
             let modulator_id = data.state.runtime.engine_modulator_node_ids[engine_id][voice_idx]
                 .load(Ordering::Relaxed);
             if lid == 0 || synth_id == 0 || modulator_id == 0 {
-                return;
+                return None;
             }
             let pitch_hz = custom_pitch_hz(transpose, slot_params.base_note_offset);
             if data.trace_audio {
@@ -1174,9 +1179,15 @@ pub(super) fn fire_rack_slot_note(
             } else {
                 data.legato_holds.clear_lid(lid);
             }
+            let mut voices = [RetrigCustomVoice::default(); MAX_VOICES];
+            voices[0] = RetrigCustomVoice { logical_id: lid, pitch_hz, velocity };
+            return Some(RetrigTarget::Custom {
+                voices, count: 1, engine_id, free_patch, gated: gate_mode > 0.5,
+            });
         }
         InstrumentType::Empty | InstrumentType::Modulator | InstrumentType::Rack => {}
     }
+    None
 }
 
 // ── Off-step p-locks ────────────────────────────────────────────────────────
@@ -1620,9 +1631,15 @@ pub(super) fn fire_rack_resolved(
             if tp.is_gate_on() { 1.0 } else { 0.0 },
         )
     };
-    let chop = (resolved.chop.round() as u32).max(1);
+    cancel_retrigs_for_track(
+        &mut data.countdown_events, &mut data.block_events, track_idx,
+    );
+    let repeats = retrig_repeats_from_resolved(&resolved);
+    let interval = retrig_interval_samples(
+        &resolved, data.sample_rate, data.scheduler_snapshot.transport.bpm as f64,
+    );
     let total_gate = (resolved.duration as f64 * samples_per_step) as f32;
-    let rack_gate = total_gate / chop as f32;
+    let rack_gate = retrig_hit_gate(total_gate, repeats, interval);
 
     let pan_lid = data.state.runtime.pan_lids[track_idx].load(Ordering::Acquire);
     if pan_lid != 0 {
@@ -1676,7 +1693,7 @@ pub(super) fn fire_rack_resolved(
                 } else {
                     total_gate
                 };
-                let note_gate = note_total_gate / chop as f32;
+                let note_gate = retrig_hit_gate(note_total_gate, repeats, interval);
                 let transpose = resolved_chord_transpose(
                     chord.notes[n],
                     chord.step_transpose,
@@ -1708,7 +1725,7 @@ pub(super) fn fire_rack_resolved(
                     &note_instrument_params,
                     slot_params.base_note_offset,
                 );
-                fire_rack_slot_note(
+                let target = fire_rack_slot_note(
                     data,
                     frame_offset,
                     track_idx,
@@ -1724,6 +1741,9 @@ pub(super) fn fire_rack_resolved(
                     sampler_params,
                     instrument_fingerprint,
                     chord.live_origins[n],
+                );
+                arm_rack_voice_retrig(
+                    data, track_idx, frame_offset, step, repeats, interval, note_gate, target,
                 );
             }
         } else {
@@ -1753,7 +1773,7 @@ pub(super) fn fire_rack_resolved(
                 &note_instrument_params,
                 slot_params.base_note_offset,
             );
-            fire_rack_slot_note(
+            let target = fire_rack_slot_note(
                 data,
                 frame_offset,
                 track_idx,
@@ -1769,6 +1789,9 @@ pub(super) fn fire_rack_resolved(
                 sampler_params,
                 instrument_fingerprint,
                 chord.live_origins[0],
+            );
+            arm_rack_voice_retrig(
+                data, track_idx, frame_offset, step, repeats, interval, rack_gate, target,
             );
         }
     }
@@ -1786,13 +1809,80 @@ pub(super) fn fire_rack_resolved(
             );
         }
     }
-    cancel_retrigs_for_track(
-        &mut data.countdown_events,
-        &mut data.block_events,
-        track_idx,
-    );
     data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
 }
+
+/// The parent hit cancels the previous burst once. Each allocated rack voice
+/// then owns its repeat cadence and gate; arming a layer must not cancel the
+/// repeats already armed for the other layers or chord notes.
+fn arm_rack_voice_retrig(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    frame_offset: u32,
+    step: usize,
+    repeats: u32,
+    interval: f64,
+    gate: f32,
+    target: Option<RetrigTarget>,
+) {
+    let Some(target) = target else { return; };
+    match target {
+        RetrigTarget::RackSampler(hit) => cancel_retrigs_for_voice(
+            &mut data.countdown_events, &mut data.block_events, hit.logical_id,
+        ),
+        RetrigTarget::Custom { voices, count, .. } => {
+            for voice in voices.iter().take(count) {
+                cancel_retrigs_for_voice(
+                    &mut data.countdown_events, &mut data.block_events, voice.logical_id,
+                );
+            }
+        }
+        RetrigTarget::Step { .. } => unreachable!("rack notes carry concrete voice targets"),
+    }
+    if repeats == 0 || !interval.is_finite() {
+        return;
+    }
+    schedule_countdown_or_block_event(
+        data, frame_offset as f64 + interval, interval, repeats,
+        data.scheduler_snapshot.transport.pattern_epoch,
+        CountdownEventKind::Retrig(RetrigEvent { track_idx, step, gate, target }),
+    );
+}
+
+/// A choked or reassigned voice must not be resurrected by its old burst.
+fn cancel_retrigs_for_voice(
+    countdown_events: &mut Vec<CountdownEvent>,
+    block_events: &mut Vec<BlockEvent>,
+    logical_id: u64,
+) {
+    let retain = |target: &mut RetrigTarget| match target {
+        RetrigTarget::RackSampler(hit) => hit.logical_id != logical_id,
+        RetrigTarget::Custom { voices, count, .. } => {
+            let mut kept = 0;
+            for index in 0..*count {
+                if voices[index].logical_id != logical_id {
+                    voices[kept] = voices[index];
+                    kept += 1;
+                }
+            }
+            *count = kept;
+            kept > 0
+        }
+        RetrigTarget::Step { .. } => true,
+    };
+    countdown_events.retain_mut(|event| match &mut event.kind {
+        CountdownEventKind::Retrig(hit) => retain(&mut hit.target),
+        _ => true,
+    });
+    block_events.retain_mut(|event| match &mut event.kind {
+        BlockEventKind::Retrig(hit) => retain(&mut hit.target),
+        _ => true,
+    });
+}
+
+#[cfg(test)]
+#[path = "rack_retrig_tests.rs"]
+mod retrig_tests;
 
 #[cfg(test)]
 mod off_step_solo_tests {

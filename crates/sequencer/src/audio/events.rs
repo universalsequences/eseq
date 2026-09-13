@@ -47,6 +47,8 @@ pub(super) enum RetrigTarget {
         velocity: f32,
         speed: f32,
     },
+    /// A rack sampler voice, with the initial hit's resolved slice and params.
+    RackSampler(RackSamplerRetrig),
     /// Custom (dgen) tracks: re-trigger the logical voices the initial hit
     /// allocated, with the gate left held.
     Custom {
