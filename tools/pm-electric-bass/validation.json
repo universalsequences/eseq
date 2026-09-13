@@ -1,0 +1,10 @@
+{
+  "renders": 192,
+  "max_preset_peak": 0.7204279899597168,
+  "max_pitch_error_cents": 0.0015825712740862666,
+  "partition_max_abs": 0.0,
+  "modal_reference_nrmse": 0.00022083328695783703,
+  "source_sha256": "8f9e9a0c7725ecf379c41cb1a7cbe9b1fd8b3537b47d3326e13f1c5a68931a79",
+  "compiler_sha256": "77897a8134dd4477f2fccce7e57a17f25f2a1232a5284fd5d8aa89b4425c1ed5",
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O"
+}

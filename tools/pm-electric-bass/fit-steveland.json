@@ -1,0 +1,31 @@
+{
+  "loss": 103.63942977335208,
+  "parts": {
+    "steveland1": [
+      46.70338253444132,
+      25.602087266812607,
+      5.102454212418756
+    ],
+    "steveland2": [
+      22.34866120013748,
+      43.57268481073397,
+      3.971760495262668
+    ]
+  },
+  "params": {
+    "pluck.position": 0.2285985194186752,
+    "pluck.softness": 0.0,
+    "pluck.attack_ms": 51.729396748620914,
+    "string.decay_s": 12.0,
+    "string.damping": 0.0020753594823038875,
+    "string.friction": 7.218115287149138,
+    "string.stiffness": 0.0,
+    "pickup.position": 0.17595239847410515,
+    "pickup.aperture": 0.005,
+    "output.tone_hz": 470.48193347164045,
+    "output.resonance": 0.5,
+    "output.steep": 1.0,
+    "output.gain": 1.0
+  },
+  "evals": 4179
+}
