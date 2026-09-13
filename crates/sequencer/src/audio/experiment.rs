@@ -153,6 +153,19 @@ fn live_interval(app: &mut App, seconds: f64) -> Result<()> {
     Ok(())
 }
 
+fn instrument_voice_stats(app: &App) -> Vec<serde_json::Value> {
+    crate::lisp_host::take_dgen_engine_process_stats().into_iter().filter_map(|stats| {
+        let engine = app.editor.engine_registry.get(stats.engine_id)?;
+        Some(serde_json::json!({
+            "engine_id": stats.engine_id, "name": engine.name,
+            "source_sha256": format!("{:x}", Sha256::digest(engine.source.as_bytes())),
+            "configured_voices": app.state.runtime.engine_voice_counts[stats.engine_id].load(Ordering::Acquire),
+            "enabled_voices_at_end": stats.enabled_voices,
+            "process_calls": stats.process_calls, "voice_zero_calls": stats.process_blocks,
+        }))
+    }).collect()
+}
+
 pub fn run(mut config: Config) -> Result<serde_json::Value> {
     if config.pattern == 0 || !(0..=16).contains(&config.workers)
         || !(1..=4096).contains(&config.worker_spins)
@@ -175,7 +188,7 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         blocks: ArrayQueue::new(32_768),
     }).map_err(|_| "Only one experiment is allowed per process")?;
     let capture = CAPTURE.get().unwrap();
-    let (sample_rate, channels, cpu, wall, audio_hash) = if config.offline {
+    let (sample_rate, channels, cpu, wall, audio_hash, instrument_stats) = if config.offline {
         let owner = OfflineOwner(engine::init_headless_engine(config.sample_rate, 2)?);
         let engine = &owner.0;
         let mut app = App::new(Arc::clone(&engine.state), engine.lg_ptr, engine.sample_rate,
@@ -192,6 +205,7 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
             session.render_block_with_controls(block * engine.block_size as u64, &mut output,
                 |sample| { app.drain_due_mixer_controls(sample); Ok(()) })?;
         }
+        crate::lisp_host::take_dgen_engine_process_stats();
         let cpu_start = cpu_seconds()?;
         let start = Instant::now();
         capture.enabled.store(true, Ordering::Release);
@@ -201,8 +215,10 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
             for sample in &output { hash.update(sample.to_le_bytes()); }
         }
         capture.enabled.store(false, Ordering::Release);
-        (engine.sample_rate, 2, cpu_seconds()? - cpu_start, start.elapsed().as_secs_f64(),
-            Some(format!("{:x}", hash.finalize())))
+        let cpu = cpu_seconds()? - cpu_start;
+        let wall = start.elapsed().as_secs_f64();
+        (engine.sample_rate, 2, cpu, wall,
+            Some(format!("{:x}", hash.finalize())), instrument_voice_stats(&app))
     } else {
         let mut owner = LiveOwner { engine: Some(engine::init_engine()?), app: None };
         let engine = owner.engine.as_ref().unwrap();
@@ -214,6 +230,7 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         live_interval(app, 0.1)?;
         engine.state.start_playback();
         live_interval(app, config.warmup_seconds)?;
+        crate::lisp_host::take_dgen_engine_process_stats();
         let cpu_start = cpu_seconds()?;
         let start = Instant::now();
         capture.enabled.store(true, Ordering::Release);
@@ -221,9 +238,10 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         capture.enabled.store(false, Ordering::Release);
         let cpu = cpu_seconds()? - cpu_start;
         let wall = start.elapsed().as_secs_f64();
+        let instrument_stats = instrument_voice_stats(app);
         eprintln!("[audio-experiment] measurement complete; stopping stream");
         engine.state.stop_playback();
-        (engine.sample_rate, engine.channels as usize, cpu, wall, None)
+        (engine.sample_rate, engine.channels as usize, cpu, wall, None, instrument_stats)
     };
     if capture.overflow.load(Ordering::Acquire) { return Err("Metric queue overflow".into()); }
     let mut blocks = Vec::new();
@@ -252,6 +270,6 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         "late_events": blocks.iter().map(|block| block.late).max(),
         "measured_dropped_events": blocks.last().unwrap().dropped.saturating_sub(blocks.first().unwrap().dropped),
         "measured_late_events": blocks.last().unwrap().late.saturating_sub(blocks.first().unwrap().late),
-        "audio_sha256": audio_hash, "blocks": blocks,
+        "audio_sha256": audio_hash, "instrument_voice_stats": instrument_stats, "blocks": blocks,
     }))
 }

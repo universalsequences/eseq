@@ -46,12 +46,70 @@ predict live scheduling latency; live mode is the performance comparison.
   counters also include startup/warmup, which can have separate late events.
 * `peak`, `rms` and the finite-sample check guard against benchmarking silence
   or invalid output. Offline hashes provide the stronger correctness check.
+* `instrument_voice_stats`: engine names, source hashes, configured capacity,
+  enabled voices at measurement end, and process/voice-zero call counts. The
+  counters reset after warmup. Live reads are approximate at the interval
+  boundaries; `process_calls / voice_zero_calls` estimates voices rendered per
+  block, including release tails, rather than currently held notes.
+
+Check workload parity before using these results for projects with Lisp-authored
+graph sequencers. The harness does not evaluate project scratch on the UI
+authoring runtime. In `mow` B2, the missing graph publication left rack engines
+rendering one voice while the normal app reached twelve, even after 45 seconds
+of warmup. Those headless CPU numbers do not represent that project's playback.
+This limitation is tracked in `eseq-tdjl`; see
+[the live investigation](../../docs/mow-performance-2026-09-13.md).
 
 The callback metric is taken before the experiment's signal-statistics scan;
 that scan and the final device silencing still count toward process CPU.
 Initialization, compilation, warmup and shutdown are outside both measured
 intervals. Each process owns exactly one C engine. Stream teardown precedes
 App resource destruction, and workers stop before the graph is freed.
+
+## Parallel DSP timing in the app
+
+For projects that require UI authoring, the normal app can capture individual
+graph slices with the same opt-in feature:
+
+```sh
+cargo build --release -p sequencer --features audio-experiments --bin metal_seq
+TINYSEQ_AUDIOGRAPH_PROFILE=/tmp/mow-profile.jsonl target/release/metal_seq
+```
+
+The output path must not already exist. Load the project, start the desired
+scene, and allow its voices and effect tails to warm up. From another terminal:
+
+```sh
+touch /tmp/mow-profile.jsonl.request
+```
+
+The recorder consumes the request file and captures forty slices over about
+twenty seconds. Creating another request after capture finishes appends another
+set. File access, allocation, and JSON writing happen on a control thread. The
+callback and helpers fill a bounded snapshot; metadata is copied after the
+timed graph interval. Normal builds omit this instrumentation entirely.
+
+```sh
+python3 tools/audio-experiments/analyze_profile.py /tmp/mow-profile.jsonl \
+  --out /tmp/mow-analysis.json
+python3 -m unittest discover -s tools/audio-experiments -p test_analyze_profile.py
+python3 tools/audio-experiments/check_scheduler.py --tests test_graph_profile
+```
+
+The analysis separates aggregate kernel time, per-worker busy time, and graph
+wall time. It reports the longest dependency chain by kernel duration and the
+predecessor chain that actually finished last, with ready-to-start gaps shown
+separately. Those gaps include binding, dispatch, and waiting for an available
+worker. They are not evidence of a scheduler defect by themselves. A companion
+`.trace.json` file uses the Chrome/Perfetto trace format; slot zero is the callback
+and positive slots are helper workers.
+
+These are graph slices, which can be shorter than a complete audio callback
+when events split the block. Captures also add timing overhead and are sampled
+diagnostics, not a substitute for a warmed callback CPU comparison with tracing
+disabled. Do not interpret summed kernel time as transport CPU when workers
+execute concurrently. Captures exceeding 4,096 nodes or 32,768 edges are marked
+incomplete and rejected by the analyzer.
 
 ## Policies and correctness checks
 
@@ -69,7 +127,7 @@ This compiles queue-saturation, block-event, ordered-summing and completion/life
 regressions in a disposable directory and runs them against eight policies. It
 does not modify shared Make artifacts. `--normal` checks the shipping policy
 without experiment hooks; `--diagnostics` enables scheduler diagnostic bookkeeping;
-`--tests` selects a comma-separated subset of the four binaries.
+`--tests` selects a comma-separated subset of the correctness binaries.
 
 The initial experiments exposed graph-lifetime and completion-wake failures in
 `worker-spins-1`, longer worker waits and `callback-wait-*`. The completion-aware

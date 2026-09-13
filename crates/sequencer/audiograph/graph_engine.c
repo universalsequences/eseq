@@ -1,6 +1,7 @@
 #include "graph_engine.h"
 #include "graph_edit.h"
 #include "graph_nodes.h"
+#include "graph_profile.h"
 #include <assert.h>
 #include <errno.h>
 #include <math.h>
@@ -204,9 +205,11 @@ static bool using_inline_out_cache(const RTNode *node) {
 // Thread-local storage for current node being processed
 static __thread RTNode *g_current_processing_node = NULL;
 
-#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS || defined(AUDIOGRAPH_EXPERIMENTS)
 static __thread int g_current_execution_slot = 0;
+#endif
 
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
 #define MAX_TRACKED_EXECUTION_SLOTS 65
 static _Atomic int g_inflight_node_ids[MAX_TRACKED_EXECUTION_SLOTS];
 static _Atomic uint64_t g_completion_seq = 0;
@@ -874,7 +877,7 @@ static void *worker_main(void *arg) {
   intptr_t worker_slot = (intptr_t)arg;
   int worker_index = (int)worker_slot - 1;
   flush_denormals_to_zero();
-#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS || defined(AUDIOGRAPH_EXPERIMENTS)
   g_current_execution_slot = (int)worker_slot;
 #endif
   // Elevate worker scheduling before it begins participating in graph work.
@@ -1148,6 +1151,7 @@ void engine_start_workers(int workers) {
     pthread_cond_wait(&g_engine.workerStartupCv, &g_engine.workerStartupMtx);
   }
   pthread_mutex_unlock(&g_engine.workerStartupMtx);
+  graph_profile_start_recorder();
 }
 
 void engine_set_os_workgroup(void *oswg_ptr) {
@@ -1274,6 +1278,7 @@ void engine_stop_workers(void) {
   // The host must stop rendering before stopping the pool. Every completed
   // render has already unregistered its queue waiters and worker references.
   assert(atomic_load_explicit(&g_engine.sessionUsers, memory_order_acquire) == SESSION_CLOSED);
+  graph_profile_stop_recorder();
   atomic_store(&g_engine.runFlag, 0);
 
   // All workers are between blocks; only the session wait can remain.
@@ -1407,8 +1412,14 @@ void bind_and_run_live(LiveGraph *lg, int nid, int nframes) {
   }
 
   if (node->vtable.process) {
+    uint64_t profile_start = graph_profile_node_begin();
     node->vtable.process((float *const *)inPtrs, (float *const *)outPtrs,
                          nframes, node->state, lg->buffers);
+#ifdef AUDIOGRAPH_EXPERIMENTS
+    graph_profile_node_end(nid, g_current_execution_slot, profile_start);
+#else
+    (void)profile_start;
+#endif
   }
 
   // Clear thread-local context
@@ -2248,6 +2259,7 @@ static void drain_retire_list(LiveGraph *lg) {
 static void update_watched_node_states(LiveGraph *lg);
 
 static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_watch) {
+  graph_profile_begin(lg, nframes);
   // Initialize pending counts and seed ready queue
   init_pending_and_seed(lg, nframes);
 
@@ -2266,6 +2278,7 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
     }
     if (update_watch)
       update_watched_node_states(lg);
+    graph_profile_end(lg);
     return;
   }
 
@@ -2273,6 +2286,7 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
   if (atomic_load_explicit(&lg->sched.jobsInFlight, memory_order_acquire) <= 0) {
     if (update_watch)
       update_watched_node_states(lg);
+    graph_profile_end(lg);
     return;
   }
 
@@ -2413,6 +2427,7 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
     }
   }
 
+  graph_profile_end(lg);
   drain_retire_list(lg);
 
   if (update_watch)

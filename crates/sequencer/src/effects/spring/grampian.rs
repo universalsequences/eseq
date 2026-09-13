@@ -22,6 +22,7 @@ const WRITE: usize = SHELF + PATHS;
 const ACTIVE: usize = WRITE + 1;
 const QUIET: usize = ACTIVE + 1;
 const ENVELOPE: usize = QUIET + 1;
+// Each section stores [forward z0, return z0, forward z1, return z1].
 const AP_STATE: usize = ENVELOPE + 1;
 const DELAYS: usize = AP_STATE + PATHS * 2 * MAX_SECTIONS * 2;
 const SCATTER: usize = DELAYS + PATHS * 2 * DELAY_LEN;
@@ -286,6 +287,16 @@ impl Biquad {
         z[1] = self.b2 * x - self.a2 * y;
         y
     }
+
+    #[inline]
+    fn tick_pair(self, x: [f32; 2], z: &mut [f32]) -> [f32; 2] {
+        let y = [self.b0 * x[0] + z[0], self.b0 * x[1] + z[1]];
+        z[0] = self.b1 * x[0] - self.a1 * y[0] + z[2];
+        z[1] = self.b1 * x[1] - self.a1 * y[1] + z[3];
+        z[2] = self.b2 * x[0] - self.a2 * y[0];
+        z[3] = self.b2 * x[1] - self.a2 * y[1];
+        y
+    }
 }
 
 /// Centered cubic Lagrange interpolation. Its stationary magnitude is <= 1
@@ -472,12 +483,6 @@ impl Coeffs {
     }
 }
 
-#[inline]
-fn delay(x: f32, d: FractionalDelay, w: usize, buffer: &mut [f32]) -> f32 {
-    buffer[w] = x;
-    d.read(w, buffer)
-}
-
 /// Returns mid and side, with the precursor centered. Stereo is a pickup mix
 /// of the SAME two springs, not a second detuned tank. Width scales side only.
 #[inline]
@@ -507,26 +512,26 @@ pub fn process(input: f32, c: &Coeffs, state: &mut [f32]) -> (f32, f32) {
         for (j, lp) in p.lp.iter().enumerate() {
             x = lp.tick(x, &mut state[filter + 2 + j * 2..filter + 4 + j * 2]);
         }
-        let mut wave = x + state[FEEDBACK + i];
-        for leg in 0..2 {
-            let base = DELAYS + (i * 2 + leg) * DELAY_LEN;
-            wave = delay(
-                wave,
-                if leg == 0 { p.forward } else { p.back },
-                w,
-                &mut state[base..base + DELAY_LEN],
-            );
-            let mut base = AP_STATE + (i * 2 + leg) * MAX_SECTIONS * 2;
-            for (count, ap) in &p.dispersion {
-                for z in state[base..base + count * 2].chunks_exact_mut(2) {
-                    wave = ap.tick(wave, z);
-                }
-                base += count * 2;
+        let forward_base = DELAYS + i * 2 * DELAY_LEN;
+        let return_base = forward_base + DELAY_LEN;
+        state[forward_base + w] = x + state[FEEDBACK + i];
+        // Both reads are strictly causal, including every interpolation tap.
+        // The return delay does not read this frame's forward pickup, so the
+        // two dispersion cascades can advance together with identical math.
+        let mut waves = [
+            p.forward.read(w, &state[forward_base..forward_base + DELAY_LEN]),
+            p.back.read(w, &state[return_base..return_base + DELAY_LEN]),
+        ];
+        let mut base = AP_STATE + i * MAX_SECTIONS * 4;
+        for (count, ap) in &p.dispersion {
+            for z in state[base..base + count * 4].chunks_exact_mut(4) {
+                waves = ap.tick_pair(waves, z);
             }
-            if leg == 0 {
-                outputs[i] = wave * p.gain;
-            }
+            base += count * 4;
         }
+        outputs[i] = waves[0] * p.gain;
+        state[return_base + w] = waves[0];
+        let mut wave = waves[1];
         if let Some(d) = p.scatter_delay {
             // Boundary scattering is in the RETURN path, so first arrivals
             // remain sharp. It produces the measured weak half-return and
@@ -580,6 +585,43 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grampian_paired_dispersion_matches_independent_scalar_legs() {
+        for sr in [8000.0, 44100.0, 48000.0, 96000.0, 192000.0] {
+            for tension in [0.0, 0.5, 1.0] {
+                let c = Coeffs::new(&Params::default(), sr, tension).unwrap();
+                for p in &c.paths {
+                    for (_, ap) in &p.dispersion {
+                        let mut paired = [0.13, -0.21, 0.07, 0.31];
+                        let mut forward = [paired[0], paired[2]];
+                        let mut back = [paired[1], paired[3]];
+                        for i in 0..1024 {
+                            let x = [(i as f32 * 0.13).sin(), (i as f32 * 0.27).cos()];
+                            let expected = [ap.tick(x[0], &mut forward), ap.tick(x[1], &mut back)];
+                            assert_eq!(ap.tick_pair(x, &mut paired), expected);
+                            assert_eq!(paired, [forward[0], back[0], forward[1], back[1]]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grampian_delay_reads_do_not_depend_on_current_frame_write() {
+        let mut buffer: Vec<f32> = (0..DELAY_LEN).map(|i| (i as f32 * 0.13).sin()).collect();
+        for samples in [0.0, 2.0, 2.0001, 2.5, 3.0, 17.9, (DELAY_LEN - 3) as f32, DELAY_LEN as f32] {
+            let d = FractionalDelay::new(samples);
+            for w in [0, 1, 2, 35, DELAY_LEN - 1] {
+                let before = d.read(w, &buffer);
+                let previous = buffer[w];
+                buffer[w] = 123.0;
+                assert_eq!(d.read(w, &buffer), before, "delay={samples} write={w}");
+                buffer[w] = previous;
+            }
+        }
+    }
 
     #[test]
     fn grampian_shipped_parameters_match_verified_fit() {

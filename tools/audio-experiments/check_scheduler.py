@@ -29,7 +29,7 @@ def main():
         if args.diagnostics:
             common.append("-DAUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS=1")
         objects = []
-        for source in ("graph_engine", "graph_nodes", "graph_api", "graph_edit", "ready_queue", "hot_swap", "wrapper"):
+        for source in ("graph_engine", "graph_profile", "graph_nodes", "graph_api", "graph_edit", "ready_queue", "hot_swap", "wrapper"):
             obj = out / f"{source}.o"
             subprocess.run(common + ["-c", str(GRAPH / f"{source}.c"), "-o", str(obj)], check=True)
             objects.append(str(obj))

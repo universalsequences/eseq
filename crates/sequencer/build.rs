@@ -7,6 +7,7 @@ fn main() {
             "audiograph/graph_api.c",
             "audiograph/graph_edit.c",
             "audiograph/graph_engine.c",
+            "audiograph/graph_profile.c",
             "audiograph/graph_nodes.c",
             "audiograph/hot_swap.c",
             "audiograph/ready_queue.c",
