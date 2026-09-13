@@ -88,7 +88,13 @@ fn descriptor_registers_persistent_modulation_controls() {
     let mut h = Harness::new(48000);
     for (i, p) in desc.params.iter().enumerate() {
         if !voice_modulator::is_source_param(p.node_param_idx) {
-            assert!((p.node_param_idx as usize) < DEPTH_BASE + MOD_TARGETS.len() * MOD_SLOTS);
+            let idx = p.node_param_idx as u64;
+            assert!(
+                idx < (DEPTH_BASE + MOD_TARGETS.len() * MOD_SLOTS) as u64
+                    || (PARAM_MODE..=PARAM_PITCH).contains(&idx),
+                "{}",
+                p.name
+            );
             let stored = unsafe { *h.ptr().cast::<f32>().add(p.node_param_idx as usize) };
             assert_eq!(slot.defaults[i], stored);
         }
@@ -545,4 +551,170 @@ fn stopped_transport_free_runs_and_play_resumes_the_grid() {
         assert!(off <= 1 || off >= 23_999, "{played:?}");
     }
     assert!(played.len() >= 3, "{played:?}");
+}
+
+fn zero_crossing_frequency(samples: &[[f32; 2]], sr: f32) -> f32 {
+    let mut crossings = Vec::new();
+    for i in 1..samples.len() {
+        if samples[i - 1][0] <= 0.0 && samples[i][0] > 0.0 {
+            let a = samples[i - 1][0];
+            let b = samples[i][0];
+            crossings.push(i as f32 - 1.0 + a / (a - b));
+        }
+    }
+    let n = crossings.len() - 1;
+    sr * n as f32 / (crossings[n] - crossings[0])
+}
+
+#[test]
+fn appended_params_land_after_the_transport_input_and_default_to_varispeed() {
+    let desc = descriptor();
+    let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        &names[names.len() - 4..],
+        ["mode", "slice", "xfade", "pitch"]
+    );
+    assert_eq!(
+        names[..8],
+        ["enabled", "speed", "sync", "time", "beats", "smooth", "tone", "mix"]
+    );
+    let by_name = |n: &str| desc.params.iter().find(|p| p.name == n).unwrap();
+    assert_eq!(
+        by_name("mode").node_param_idx as u64,
+        PARAM_TRANSPORT_BEAT_PHASE + 1
+    );
+    assert_eq!(
+        by_name("pitch").node_param_idx as u64,
+        PARAM_TRANSPORT_BEAT_PHASE + 4
+    );
+    assert!(matches!(&by_name("mode").kind, ParamKind::Enum { labels } if labels.len() == 3));
+    assert_eq!(by_name("mode").default, MODE_VARISPEED);
+    assert!(
+        by_name("slice").ui_metadata.is_none(),
+        "not a modulation destination"
+    );
+    let mut h = Harness::new(48_000);
+    unsafe {
+        *h.ptr().cast::<f32>().add(PARAM_MODE as usize) = MODE_STRETCH;
+        *h.ptr().cast::<f32>().add(PARAM_PITCH as usize) = -7.0;
+    }
+    assert_eq!(h.state().extra[EXTRA_MODE], MODE_STRETCH);
+    assert_eq!(h.state().extra[EXTRA_PITCH], -7.0);
+    assert_eq!(
+        h.state().params,
+        DEFAULTS,
+        "the appended slots must not alias a parameter"
+    );
+    assert_eq!(h.state().transport_phase, 0.0);
+}
+
+#[test]
+fn stretch_mode_keeps_pitch_and_falls_behind_by_speed() {
+    let sr = 48_000.0;
+    let mut h = Harness::new(48_000);
+    h.state().params[SYNC] = 0.0;
+    h.state().params[TIME] = 4000.0;
+    h.state().params[SPEED] = 0.5;
+    h.state().params[SMOOTH] = 1.0;
+    h.state().extra[EXTRA_MODE] = MODE_STRETCH;
+    h.state().extra[EXTRA_SLICE] = 50.0;
+    h.state().extra[EXTRA_XFADE] = 2.0;
+    let out = h.run(&sine(48_000, sr, 220.0), 512);
+    // Nineteen 25 ms steps of 50 ms slices inside the first second, plus the
+    // few-ms slew of the head rate from the varispeed default to unity.
+    let s = h.state();
+    assert_eq!(s.slice, 2400);
+    let stepped = BASE_DELAY + 19.0 * 1200.0;
+    assert!(
+        s.delay >= stepped && s.delay < stepped + 0.5 * 0.005 * sr as f64 * 1.1,
+        "{}",
+        s.delay
+    );
+    // Between steps the head is stationary: the output within a slice is the
+    // 220 Hz input, not the 110 Hz varispeed would give.
+    let slice = &out[24_000 + 200..24_000 + 2_300];
+    let f = zero_crossing_frequency(slice, sr);
+    assert!((f - 220.0).abs() < 0.5, "{f}");
+    assert!(out.iter().all(|x| x[0].is_finite() && x[1].is_finite()));
+    // Varispeed at the same settings really does halve the pitch.
+    let mut v = Harness::new(48_000);
+    v.state().params[SYNC] = 0.0;
+    v.state().params[TIME] = 4000.0;
+    v.state().params[SPEED] = 0.5;
+    let out = v.run(&sine(48_000, sr, 220.0), 512);
+    let f = zero_crossing_frequency(&out[24_000..36_000], sr);
+    assert!((f - 110.0).abs() < 1.0, "{f}");
+}
+
+#[test]
+fn stretch_pitch_mode_matches_varispeed_when_pitch_equals_speed_and_clamps_forward_steps() {
+    let sr = 48_000.0;
+    let input = sine(48_000, sr, 220.0);
+    let mut a = Harness::new(48_000);
+    a.state().params[SPEED] = 0.5;
+    let reference = a.run(&input, 512);
+    let mut b = Harness::new(48_000);
+    b.state().params[SPEED] = 0.5;
+    b.state().extra[EXTRA_MODE] = MODE_STRETCH_PITCH;
+    b.state().extra[EXTRA_PITCH] = -12.0;
+    let out = b.run(&input, 512);
+    // Playback at -12 st already falls behind at speed 0.5, so every slice
+    // step is zero and the crossfades join identical taps.
+    let error = reference
+        .iter()
+        .zip(&out)
+        .map(|(x, y)| (x[0] - y[0]).abs())
+        .fold(0.0f32, f32::max);
+    assert!(error < 1e-5, "{error}");
+    // Pitched down further than the slowdown: steps are forward, and the
+    // head never reads ahead of the guard.
+    let mut c = Harness::new(48_000);
+    c.state().params[SPEED] = 1.0;
+    c.state().params[SYNC] = 0.0;
+    c.state().params[TIME] = 4000.0;
+    c.state().extra[EXTRA_MODE] = MODE_STRETCH_PITCH;
+    c.state().extra[EXTRA_PITCH] = -24.0;
+    let mut minimum = f64::MAX;
+    for _ in 0..40 {
+        c.run(&input[..1024], 256);
+        minimum = minimum.min(c.state().delay);
+    }
+    assert!(minimum >= BASE_DELAY, "{minimum}");
+    // Within a slice the head drifts back by up to slice * (1 - rate), then a
+    // forward step returns it to the guard: no net growth over 40 blocks.
+    let slice = c.state().slice as f64;
+    assert!(
+        c.state().delay <= BASE_DELAY + slice * 0.75 + 1.0,
+        "{}",
+        c.state().delay
+    );
+}
+
+#[test]
+fn slice_steps_crossfade_with_a_raised_cosine_and_latch_with_the_cycle() {
+    let sr = 48_000.0;
+    let mut h = Harness::new(48_000);
+    h.state().params[SYNC] = 0.0;
+    h.state().params[TIME] = 400.0;
+    h.state().params[SPEED] = 0.6;
+    h.state().extra[EXTRA_MODE] = MODE_STRETCH;
+    h.state().extra[EXTRA_SLICE] = 40.0;
+    h.state().extra[EXTRA_XFADE] = 5.0;
+    h.run(&sine(4_800, sr, 220.0), 480);
+    let s = h.state();
+    assert_eq!(s.slice, 1920);
+    assert_eq!(s.slice_fade, 240);
+    assert!(s.fade_cosine, "a slice step fade is raised-cosine");
+    // Changing slice length mid-cycle waits for the next restart.
+    h.state().extra[EXTRA_SLICE] = 80.0;
+    h.run(&sine(1_920, sr, 220.0), 480);
+    assert_eq!(h.state().slice, 1920);
+    h.run(&sine(20_000, sr, 220.0), 480);
+    assert_eq!(h.state().slice, 3840);
+    assert!(!h.state().fade_cosine || h.state().fade_age > 0);
+    // Back to varispeed: no slicing, and the restart fade is linear again.
+    h.state().extra[EXTRA_MODE] = MODE_VARISPEED;
+    h.run(&sine(20_000, sr, 220.0), 480);
+    assert_eq!(h.state().slice, 0);
+    assert!(!h.state().fade_cosine);
 }

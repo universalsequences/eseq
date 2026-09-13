@@ -2,8 +2,12 @@
 
 A native stereo varispeed insert, available as **Slowdown** in the built-in
 picker on tracks, buses and rack slots. Saved effect identity: `builtin:Slowdown`.
-It lowers pitch and stretches the beginning of each rolling capture interval;
-this is not pitch-preserving time stretching or a frozen sample looper.
+In its default **Varispeed** mode it lowers pitch and stretches the beginning of
+each rolling capture interval. **Stretch** mode keeps pitch and instead imitates
+an SP-303-class sampler's slice-repeat time stretch, whose phase jumps read as a
+level wobble at the slice rate; **Stretch+Pitch** plays at a fixed pitch ratio
+and lets the slices make up the rest of the slowdown. None of these is a frozen
+sample looper.
 
 ## Controls
 
@@ -16,6 +20,36 @@ this is not pitch-preserving time stretching or a frozen sample looper.
 | smooth | 1–100 ms | Complementary crossfade at each restart; limited to half the interval |
 | tone | 200–20000 Hz | One-pole lowpass on the wet signal |
 | mix | 0–100% | Linear dry/wet blend |
+| mode | Varispeed / Stretch / Stretch+Pitch | How the read head falls behind (see below) |
+| slice | 20–200 ms | Slice length in the stretch modes; wobble rate is one per slice |
+| xfade | 0.5–30 ms | Raised-cosine crossfade at each slice step |
+| pitch | −24–0 st | Playback pitch in Stretch+Pitch mode |
+
+The four mode controls are appended after the modulation block so every
+earlier saved index stays put; projects saved before them load as Varispeed.
+They are mappable and lockable but not modulation destinations, and slice,
+xfade and mode latch at the next restart like the other timing controls.
+
+### Stretch modes
+
+In Varispeed the head plays the history at `speed`, so it falls behind live
+input at `1 − speed` per frame and pitch drops with it. In Stretch the head
+plays at unity and is instead stepped back by `slice × (1 − speed)` at every
+slice boundary, measured from the cycle restart. Over a slice the head falls
+behind by the same amount as Varispeed, so a cycle covers the same span of
+history at the same `speed`, but each step restarts the waveform at a new
+phase. With a crossfade of a few milliseconds that phase jump is heard as a
+level dip and a faint click rather than a pitch bend, and the dips repeat at
+`1 / slice`: the "wobble" of a slowed sampler loop. Dip depth depends on the
+phase advance `2π · f · step`, so it varies with the material's pitch and
+with `speed`. The same read pattern drives the texture group of the
+PM Electric Bass instrument (`tools/pm-electric-bass/README.md`).
+
+Stretch+Pitch plays at the `pitch` ratio and steps by
+`slice × (ratio − speed)`. When the ratio equals `speed` the steps are zero
+and the result is exactly Varispeed; when the pitch is lower than the
+slowdown the steps are forward (time compression) and the head is clamped at
+the read guard. `speed` still reads as the overall slowdown in every mode.
 
 All six continuous controls support the standard **four effect-modulator
 slots**, project-wide macro mapping, and parameter locks. Open **mods**, choose
@@ -73,6 +107,11 @@ Four extra graph inputs carry the shared effect modulator's sample-rate signals;
 its source parameters belong to the host-owned modulator node, not the audio
 buffer allocation.
 
+Slice steps use the same two-head crossfade as restarts, with their own
+raised-cosine fade of `xfade`; a step during a restart fade takes over the
+outgoing head. The history bound is unchanged: over a cycle the head falls
+behind by at most `period × (1 − speed)` in every mode.
+
 ## Focused validation
 
 ```sh
@@ -84,7 +123,9 @@ cargo run -p sequencer --bin metal_seq -- capture \
   --out /tmp/metal-seq-slowdown.png
 ```
 
-Run the capture command from the repository root. DSP tests cover rate/pitch,
+Run the capture command from the repository root. DSP tests cover rate/pitch, the appended mode params and their memory
+slots, pitch preservation and step spacing in Stretch, the Varispeed identity
+and forward-step clamp of Stretch+Pitch, raised-cosine slice fades,
 stereo coherence, interpolation images, wraparound, DC gain, clock latching,
 modulation stress, exact settled bypass, block partitioning, reset/migration
 and history bounds at 8–384 kHz. Tests also drive each source input through

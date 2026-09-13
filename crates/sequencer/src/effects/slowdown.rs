@@ -1,7 +1,16 @@
 //! Rolling-buffer varispeed insert. The read head falls behind live input at
 //! `1 - speed` samples/frame, then restarts through a complementary crossfade.
 //! Length/smooth changes latch at cycle boundaries; speed, tone and wet gain
-//! slew continuously. In beat-sync mode the host feeds the transport's beat
+//! slew continuously.
+//!
+//! `mode` selects how the head falls behind. Varispeed plays the history at
+//! `speed`, so pitch drops with it. Stretch plays at unity pitch and instead
+//! steps the head back by `slice * (1 - speed)` at every slice boundary, the
+//! slice-repeat time stretch of an SP-303-class sampler: each step restarts the
+//! waveform at a new phase, and through a few-millisecond raised-cosine
+//! crossfade that reads as a level wobble at the slice rate. Stretch+Pitch
+//! plays at the `pitch` ratio and lets the slice steps make up the difference
+//! to `speed`, in either direction. In beat-sync mode the host feeds the transport's beat
 //! phase every block and restarts land on the song's beat grid; while the
 //! transport is stopped (or in ms mode) the cycle free-runs from tempo alone.
 //!
@@ -27,6 +36,23 @@ const MIX: usize = 7;
 pub const PARAM_BPM: u64 = 8;
 const PARAM_COUNT: usize = 9;
 const DEFAULTS: [f32; PARAM_COUNT] = [1.0, 0.5, 1.0, 500.0, 1.0, 20.0, 20000.0, 1.0, 120.0];
+/// Params appended after the transport input (see `PARAM_MODE`); their
+/// descriptor entries come last so every earlier saved index stays put.
+const EXTRA_COUNT: usize = 4;
+const EXTRA_MODE: usize = 0;
+const EXTRA_SLICE: usize = 1;
+const EXTRA_XFADE: usize = 2;
+const EXTRA_PITCH: usize = 3;
+const EXTRA_DEFAULTS: [f32; EXTRA_COUNT] = [MODE_VARISPEED, 55.0, 8.0, -12.0];
+pub const MODE_VARISPEED: f32 = 0.0;
+pub const MODE_STRETCH: f32 = 1.0;
+pub const MODE_STRETCH_PITCH: f32 = 2.0;
+const SLICE_MS_MIN: f32 = 20.0;
+const SLICE_MS_MAX: f32 = 200.0;
+const XFADE_MS_MIN: f32 = 0.5;
+const XFADE_MS_MAX: f32 = 30.0;
+const PITCH_MIN: f32 = -24.0;
+const PITCH_MAX: f32 = 0.0;
 const TAPS: usize = 32;
 const PHASES: usize = 256;
 const BASE_DELAY: f64 = 17.0;
@@ -40,6 +66,11 @@ const DEPTH_BASE: usize = PARAM_COUNT;
 pub const PARAM_TRANSPORT_BEAT_PHASE: u64 = (DEPTH_BASE + 6 * MOD_SLOTS) as u64;
 /// The host wraps beat phase at eight beats (the DJ Mixer's longest division).
 const TRANSPORT_CYCLE_BEATS: f64 = 8.0;
+/// Memory slots of the appended params, directly after the transport input.
+pub const PARAM_MODE: u64 = PARAM_TRANSPORT_BEAT_PHASE + 1;
+pub const PARAM_SLICE: u64 = PARAM_MODE + 1;
+pub const PARAM_XFADE: u64 = PARAM_MODE + 2;
+pub const PARAM_PITCH: u64 = PARAM_MODE + 3;
 
 struct ModTarget {
     param: usize,
@@ -102,6 +133,8 @@ struct State {
     mod_depths: [[f32; MOD_SLOTS]; MOD_TARGETS.len()],
     /// `PARAM_TRANSPORT_BEAT_PHASE`; must directly follow `mod_depths`.
     transport_phase: f32,
+    /// `PARAM_MODE..=PARAM_PITCH`; must directly follow `transport_phase`.
+    extra: [f32; EXTRA_COUNT],
     /// Last block-start phase the host pushed. A repeated value means the
     /// transport is stopped (or nobody drives the input), so the cycle free-runs.
     transport_seen: f32,
@@ -117,6 +150,12 @@ struct State {
     period: usize,
     fade_length: usize,
     fade_age: usize,
+    /// Raised-cosine (slice step) rather than linear (cycle restart) fade.
+    fade_cosine: bool,
+    /// Slice length in samples, latched with the cycle; 0 = no slicing.
+    slice: usize,
+    /// Slice crossfade in samples, latched with the cycle.
+    slice_fade: usize,
     delay: f64,
     outgoing_delay: f64,
     speed: f64,
@@ -232,6 +271,66 @@ pub fn descriptor() -> EffectDescriptor {
             });
         }
     }
+    // Appended last: saved slots index params by descriptor position.
+    for (slot, name, min, max, kind, scaling) in [
+        (
+            PARAM_MODE,
+            "mode",
+            0.0,
+            2.0,
+            ParamKind::Enum {
+                labels: vec![
+                    "Varispeed".to_string(),
+                    "Stretch".to_string(),
+                    "Stretch+Pitch".to_string(),
+                ],
+            },
+            ParamScaling::Linear,
+        ),
+        (
+            PARAM_SLICE,
+            "slice",
+            SLICE_MS_MIN,
+            SLICE_MS_MAX,
+            ParamKind::Continuous {
+                unit: Some("ms".to_string()),
+            },
+            ParamScaling::Exponential,
+        ),
+        (
+            PARAM_XFADE,
+            "xfade",
+            XFADE_MS_MIN,
+            XFADE_MS_MAX,
+            ParamKind::Continuous {
+                unit: Some("ms".to_string()),
+            },
+            ParamScaling::Exponential,
+        ),
+        (
+            PARAM_PITCH,
+            "pitch",
+            PITCH_MIN,
+            PITCH_MAX,
+            ParamKind::Continuous {
+                unit: Some("st".to_string()),
+            },
+            ParamScaling::Linear,
+        ),
+    ] {
+        params.push(ParamDescriptor {
+            name: name.to_string(),
+            min,
+            max,
+            default: EXTRA_DEFAULTS[(slot - PARAM_MODE) as usize],
+            kind,
+            scaling,
+            node_param_idx: slot as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+    }
     EffectDescriptor {
         name: "Slowdown".to_string(),
         params,
@@ -298,6 +397,49 @@ impl State {
         self.period = (seconds * self.sample_rate).round().max(2.0) as usize;
         self.fade_length = ((params[SMOOTH] * 0.001 * self.sample_rate).round() as usize)
             .clamp(1, self.period / 2);
+        self.fade_cosine = false;
+        self.slice = if self.mode() == MODE_VARISPEED {
+            0
+        } else {
+            let slice_ms = finite(self.extra[EXTRA_SLICE], SLICE_MS_MIN, SLICE_MS_MAX, 55.0);
+            ((slice_ms * 0.001 * self.sample_rate).round() as usize).max(2)
+        };
+        let xfade_ms = finite(self.extra[EXTRA_XFADE], XFADE_MS_MIN, XFADE_MS_MAX, 8.0);
+        self.slice_fade = ((xfade_ms * 0.001 * self.sample_rate).round() as usize)
+            .clamp(1, self.slice.max(2) / 2);
+    }
+
+    fn mode(&self) -> f32 {
+        finite(
+            self.extra[EXTRA_MODE],
+            MODE_VARISPEED,
+            MODE_STRETCH_PITCH,
+            MODE_VARISPEED,
+        )
+        .round()
+    }
+
+    /// Playback rate of the read head: pitch ratio, not the overall slowdown.
+    fn rate(&self, params: &[f32; PARAM_COUNT]) -> f64 {
+        match self.mode() {
+            m if m == MODE_STRETCH => 1.0,
+            m if m == MODE_STRETCH_PITCH => {
+                let semitones = finite(self.extra[EXTRA_PITCH], PITCH_MIN, PITCH_MAX, -12.0);
+                (semitones as f64 / 12.0).exp2()
+            }
+            _ => params[SPEED] as f64,
+        }
+    }
+
+    /// One slice-repeat step: the head jumps back so that, on average over a
+    /// slice, it falls behind at `1 - speed` regardless of the playback rate.
+    fn slice_step(&mut self, params: &[f32; PARAM_COUNT]) {
+        let step = self.slice as f64 * (self.rate(params) - params[SPEED] as f64);
+        self.outgoing_delay = self.delay;
+        self.delay = (self.delay + step).max(BASE_DELAY);
+        self.fade_length = self.slice_fade;
+        self.fade_cosine = true;
+        self.fade_age = 0;
     }
 
     fn reset_runtime(&mut self) {
@@ -305,7 +447,7 @@ impl State {
         self.age = 0;
         self.delay = BASE_DELAY;
         self.outgoing_delay = BASE_DELAY;
-        self.speed = finite(self.params[SPEED], 0.25, 1.0, 0.5) as f64;
+        self.speed = self.rate(&self.effective_params([0.0; MOD_SLOTS]));
         // Fade in wet processing on startup/reset; dry remains sample-exact.
         self.wet = 0.0;
         self.tone = finite(self.params[TONE], 200.0, 20000.0, 20000.0) as f64;
@@ -375,6 +517,7 @@ unsafe extern "C" fn init(state: *mut c_void, sample_rate: c_int, _: c_int, _: *
             params: DEFAULTS,
             mod_depths: [[0.0; MOD_SLOTS]; MOD_TARGETS.len()],
             transport_phase: 0.0,
+            extra: EXTRA_DEFAULTS,
             transport_seen: 0.0,
             transport_driven: false,
             transport_cycle: -1,
@@ -386,6 +529,9 @@ unsafe extern "C" fn init(state: *mut c_void, sample_rate: c_int, _: c_int, _: *
             period: 0,
             fade_length: 0,
             fade_age: 0,
+            fade_cosine: false,
+            slice: 0,
+            slice_fade: 1,
             delay: BASE_DELAY,
             outgoing_delay: BASE_DELAY,
             speed: 0.5,
@@ -417,6 +563,7 @@ unsafe extern "C" fn migrate(new: *mut c_void, old: *const c_void) {
         // A rate change cannot reuse sample-domain history or coefficients.
         dst.params = src.params;
         dst.mod_depths = src.mod_depths;
+        dst.extra = src.extra;
         reset(new);
     }
 }
@@ -475,18 +622,27 @@ unsafe extern "C" fn process(
         } else if s.age >= s.period {
             s.restart(&params);
         }
+        if s.slice > 0 && s.age > 0 && s.age % s.slice == 0 {
+            s.slice_step(&params);
+        }
         let wet = if finite(params[ENABLED], 0.0, 1.0, 1.0) >= 0.5 {
             params[MIX]
         } else {
             0.0
         };
-        s.speed = slew(s.speed, params[SPEED] as f64, coefficient);
+        let rate = s.rate(&params);
+        s.speed = slew(s.speed, rate, coefficient);
         s.wet = slew(s.wet, wet as f64, coefficient);
         s.tone = slew(s.tone, params[TONE] as f64, coefficient);
         let mut sample = s.read(buffer, s.delay);
         if s.fade_age < s.fade_length {
             let previous = s.read(buffer, s.outgoing_delay);
-            let a = s.fade_age as f32 / s.fade_length as f32;
+            let linear = s.fade_age as f32 / s.fade_length as f32;
+            let a = if s.fade_cosine {
+                0.5 - 0.5 * (std::f32::consts::PI * linear).cos()
+            } else {
+                linear
+            };
             for ch in 0..2 {
                 sample[ch] = previous[ch] + a * (sample[ch] - previous[ch]);
             }

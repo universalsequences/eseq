@@ -48102,7 +48102,7 @@ mod instrument_header_ui_tests;
             let Value::Map(param) = &*param else { panic!("parameter map"); };
             let name = param.get("name").unwrap().borrow();
             let Value::String(name) = &*name else { panic!("parameter name"); };
-            let expected = !matches!(name.as_str(), "enabled" | "sync");
+            let expected = !matches!(name.as_str(), "enabled" | "sync" | "mode" | "slice" | "xfade" | "pitch");
             let modulatable = param.get("modulatable")
                 .is_some_and(|v| matches!(&*v.borrow(), Value::Bool(true)));
             assert_eq!(modulatable, expected, "{name}");
@@ -48138,7 +48138,17 @@ mod instrument_header_ui_tests;
             assert_finite_nonzero_rect(control, &desc.params[idx].name);
             assert_layout_inside(control, panel, &desc.params[idx].name);
         }
-        assert_eq!(count_widget_type(panel, "knob-number"), 6);
+        assert_eq!(count_widget_type(panel, "knob-number"), 9);
+        let mode = find_layout_node_by_debug_name(panel, "slowdown-mode").expect("mode picker");
+        assert_layout_inside(mode, panel, "mode picker");
+        let mode_idx = desc.params.iter().position(|p| p.name == "mode").unwrap();
+        for (name, unit) in [("slice", "ms"), ("xfade", "ms"), ("pitch", "st")] {
+            let idx = desc.params.iter().position(|p| p.name == name).unwrap();
+            let row = find_layout_node_by_debug_name(panel, &format!("slowdown-param-{idx}")).expect(name);
+            assert_layout_inside(row, panel, name);
+            let knob = find_layout_node_by_widget_type(row, "knob-number").unwrap();
+            assert_eq!(knob.props.get("unit"), Some(&Value::String(unit.to_string())));
+        }
         for (idx, unit, scale) in [(1, "×", 1.0), (3, "ms", 1.0), (4, "beats", 1.0),
                                    (5, "ms", 1.0), (6, "kHz", 0.001), (7, "%", 100.0)] {
             let row = find_layout_node_by_debug_name(panel, &format!("slowdown-param-{idx}")).unwrap();
@@ -48155,6 +48165,9 @@ mod instrument_header_ui_tests;
         assert_slowdown_param_command(editor.drain_host_commands(), "set-effect-param", 2, "value", Value::Number(0.0));
         editor.runtime_mut().invoke(division_callback, vec![Value::String("1/8".to_string())]).unwrap();
         assert_slowdown_param_command(editor.drain_host_commands(), "set-effect-param", 4, "value", Value::Number(0.5));
+        let mode_callback = find_layout_node_by_debug_name(panel, "slowdown-mode").unwrap().props["on-change"].clone();
+        editor.runtime_mut().invoke(mode_callback, vec![Value::String("Stretch".to_string())]).unwrap();
+        assert_slowdown_param_command(editor.drain_host_commands(), "set-effect-param", mode_idx, "value", Value::Number(1.0));
 
         editor.runtime_mut().eval_str(r#"
             (set! eseq.effects.state/effect-mods-chain "audio")
