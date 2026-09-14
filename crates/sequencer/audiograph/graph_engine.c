@@ -36,6 +36,9 @@
 
 // ===================== Forward Declarations =====================
 
+// Only control threads take this lock. Workers acknowledge through atomics.
+static pthread_mutex_t workgroup_control_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void bind_and_run_live(LiveGraph *lg, int nid, int nframes);
 static void init_pending_and_seed(LiveGraph *lg, int nframes);
 void process_live_block(LiveGraph *lg, int nframes);
@@ -309,6 +312,7 @@ void initialize_engine(int block_Size, int sample_rate) {
   atomic_store_explicit(&g_engine.rt_priority, 20, memory_order_relaxed);
   g_engine.workerPolicies = NULL;
   g_engine.workerPriorities = NULL;
+  g_engine.workerWorkgroupErrors = NULL;
   atomic_store_explicit(&g_engine.workerStartupCount, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.callbackPolicy, ENGINE_SCHED_POLICY_UNKNOWN,
                         memory_order_relaxed);
@@ -1021,9 +1025,6 @@ static void *worker_main(void *arg) {
       if (oswg_joined) {
         // We have a valid join - leave using our saved references
         os_workgroup_leave(oswg, &oswg_token);
-        if (atomic_load_explicit(&g_engine.rt_log, memory_order_relaxed))
-          fprintf(stderr, "[audiograph] worker %p left os_workgroup %p (version %d -> %d)\n",
-                  (void *)pthread_self(), (void *)oswg, oswg_local_version, global_version);
         oswg_joined = false;
         oswg = NULL;
         memset(&oswg_token, 0, sizeof(oswg_token));
@@ -1033,20 +1034,17 @@ static void *worker_main(void *arg) {
       oswg_local_version = global_version;
 
       void *w = atomic_load_explicit(&g_engine.oswg, memory_order_acquire);
+      int join_error = 0;
       if (w) {
         oswg = (os_workgroup_t)w;
-        int ok = os_workgroup_join(oswg, &oswg_token);
-        oswg_joined = (ok == 0);
-        if (oswg_joined) {
-          if (atomic_load_explicit(&g_engine.rt_log, memory_order_relaxed))
-            fprintf(stderr, "[audiograph] worker %p joined os_workgroup %p (version %d)\n",
-                    (void *)pthread_self(), (void *)oswg, global_version);
-        } else {
-          fprintf(stderr, "[audiograph] worker %p FAILED to join os_workgroup %p (err=%d)\n",
-                  (void *)pthread_self(), (void *)oswg, ok);
+        join_error = os_workgroup_join(oswg, &oswg_token);
+        oswg_joined = (join_error == 0);
+        if (!oswg_joined) {
           oswg = NULL;  // Don't keep stale pointer on failure
         }
       }
+      atomic_store_explicit(&g_engine.workerWorkgroupErrors[worker_index],
+                            join_error, memory_order_relaxed);
       // Decrement remaining counter; last worker clears the pending flag
       int remaining = atomic_fetch_sub_explicit(&g_engine.oswg_join_remaining, 1,
                                                 memory_order_acq_rel) - 1;
@@ -1144,22 +1142,27 @@ void engine_start_workers(int workers) {
       (_Atomic int *)calloc((size_t)workers, sizeof(_Atomic int));
   g_engine.workerPriorities =
       (_Atomic int *)calloc((size_t)workers, sizeof(_Atomic int));
+  g_engine.workerWorkgroupErrors =
+      (_Atomic int *)calloc((size_t)workers, sizeof(_Atomic int));
   if (workers > 0 && (!g_engine.threads || !g_engine.workerPolicies ||
-                      !g_engine.workerPriorities)) {
+                      !g_engine.workerPriorities || !g_engine.workerWorkgroupErrors)) {
     fprintf(stderr,
             "[audiograph] WARN: cannot allocate worker pool for %d workers\n",
             workers);
     free(g_engine.threads);
     free(g_engine.workerPolicies);
     free(g_engine.workerPriorities);
+    free(g_engine.workerWorkgroupErrors);
     g_engine.threads = NULL;
     g_engine.workerPolicies = NULL;
     g_engine.workerPriorities = NULL;
+    g_engine.workerWorkgroupErrors = NULL;
     workers = 0;
   }
   for (int i = 0; i < workers; i++) {
     atomic_init(&g_engine.workerPolicies[i], ENGINE_SCHED_POLICY_UNKNOWN);
     atomic_init(&g_engine.workerPriorities[i], 0);
+    atomic_init(&g_engine.workerWorkgroupErrors[i], 0);
   }
   atomic_store_explicit(&g_engine.workerStartupCount, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.callbackPolicy, ENGINE_SCHED_POLICY_UNKNOWN,
@@ -1207,72 +1210,69 @@ void engine_start_workers(int workers) {
 
 void engine_set_os_workgroup(void *oswg_ptr) {
 #ifdef HAVE_OS_WORKGROUP
-  // Store opaque pointer; Swift side retains it.
-  atomic_store_explicit(&g_engine.oswg, oswg_ptr, memory_order_release);
-
-  // Set counter to number of workers, then set flag and broadcast
-  // This ensures all workers see the flag before it's cleared
-  atomic_store_explicit(&g_engine.oswg_join_remaining, g_engine.workerCount,
-                        memory_order_release);
-  atomic_store_explicit(&g_engine.oswg_join_pending, g_engine.workerCount > 0,
-                        memory_order_release);
-  // Publish only after initializing the acknowledgement count.
-  int new_version = atomic_fetch_add_explicit(&g_engine.oswg_version, 1,
-                                              memory_order_acq_rel) + 1;
-  pthread_mutex_lock(&g_engine.sess_mtx);
-  pthread_cond_broadcast(&g_engine.sess_cv);
-  pthread_mutex_unlock(&g_engine.sess_mtx);
-
-  if (atomic_load_explicit(&g_engine.rt_log, memory_order_relaxed))
-    fprintf(stderr,
-            "[audiograph] set os_workgroup=%p (version %d, notifying %d existing workers)\n",
-            oswg_ptr, new_version, g_engine.workerCount);
+  pthread_mutex_lock(&workgroup_control_mutex);
+  void *previous = atomic_load_explicit(&g_engine.oswg, memory_order_acquire);
+  if (previous != oswg_ptr) {
+    // The engine, not the host, owns this reference until all helpers have
+    // acknowledged departure. Never turn a slow worker into a use-after-free.
+    if (oswg_ptr) os_retain(oswg_ptr);
+    atomic_store_explicit(&g_engine.oswg, oswg_ptr, memory_order_release);
+    atomic_store_explicit(&g_engine.oswg_join_remaining, g_engine.workerCount,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_engine.oswg_join_pending, g_engine.workerCount > 0,
+                          memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_engine.oswg_version, 1, memory_order_release);
+    if (g_engine.workerCount > 0) {
+      pthread_mutex_lock(&g_engine.sess_mtx);
+      pthread_cond_broadcast(&g_engine.sess_cv);
+      pthread_mutex_unlock(&g_engine.sess_mtx);
+      // Control-thread wait, just like joining the worker pool at shutdown.
+      // The workers only store atomics; no logging or control mutex on them.
+      while (atomic_load_explicit(&g_engine.oswg_join_pending, memory_order_acquire))
+        usleep(100);
+    }
+    if (previous) os_release(previous);
+  }
+  pthread_mutex_unlock(&workgroup_control_mutex);
 #else
   (void)oswg_ptr;
 #endif
 }
 
 void engine_clear_os_workgroup(void) {
+  engine_set_os_workgroup(NULL);
+}
+
+void engine_release_os_workgroup(void *oswg) {
 #ifdef HAVE_OS_WORKGROUP
-  // First, signal workers to leave by setting NULL and incrementing version
-  atomic_store_explicit(&g_engine.oswg, NULL, memory_order_release);
-  atomic_store_explicit(&g_engine.oswg_join_remaining, g_engine.workerCount,
-                        memory_order_release);
-  atomic_store_explicit(&g_engine.oswg_join_pending, g_engine.workerCount > 0,
-                        memory_order_release);
-  // Publish only after initializing the acknowledgement count.
-  int new_version = atomic_fetch_add_explicit(&g_engine.oswg_version, 1,
-                                              memory_order_acq_rel) + 1;
-  pthread_mutex_lock(&g_engine.sess_mtx);
-  pthread_cond_broadcast(&g_engine.sess_cv);
-  pthread_mutex_unlock(&g_engine.sess_mtx);
+  if (oswg) os_release(oswg);
+#else
+  (void)oswg;
+#endif
+}
 
-  if (atomic_load_explicit(&g_engine.rt_log, memory_order_relaxed))
-    fprintf(stderr,
-            "[audiograph] clearing os_workgroup (version %d, waiting for %d workers to leave)\n",
-            new_version, g_engine.workerCount);
-
-  // IMPORTANT: Wait for all workers to leave before returning
-  // This ensures Swift can safely release the old workgroup
-  int timeout_ms = 1000;  // 1 second timeout
-  int waited_ms = 0;
-  while (atomic_load_explicit(&g_engine.oswg_join_pending, memory_order_acquire) != 0) {
-    usleep(1000);  // 1ms
-    waited_ms++;
-    if (waited_ms >= timeout_ms) {
-      int remaining = atomic_load_explicit(&g_engine.oswg_join_remaining, memory_order_acquire);
-      fprintf(stderr,
-              "[audiograph] WARNING: timeout waiting for workers to leave workgroup (%d remaining)\n",
-              remaining);
-      break;
+void engine_get_workgroup_status(EngineWorkgroupStatus *status) {
+  memset(status, 0, sizeof(*status));
+  pthread_mutex_lock(&workgroup_control_mutex);
+  status->worker_count = g_engine.workerCount;
+#ifdef HAVE_OS_WORKGROUP
+  status->supported = 1;
+  status->assigned = atomic_load_explicit(&g_engine.oswg, memory_order_acquire) != NULL;
+  status->generation = atomic_load_explicit(&g_engine.oswg_version, memory_order_acquire);
+  status->pending_workers = atomic_load_explicit(&g_engine.oswg_join_remaining, memory_order_acquire);
+  if (status->assigned) {
+    for (int i = 0; i < g_engine.workerCount; ++i) {
+      int error = atomic_load_explicit(&g_engine.workerWorkgroupErrors[i], memory_order_relaxed);
+      if (error) {
+        status->failed_workers++;
+        if (!status->first_error) status->first_error = error;
+      } else {
+        status->joined_workers++;
+      }
     }
   }
-
-  if (atomic_load_explicit(&g_engine.rt_log, memory_order_relaxed))
-    fprintf(stderr, "[audiograph] os_workgroup cleared (workers left in %d ms)\n", waited_ms);
-#else
-  (void)0; // os_workgroup unsupported
 #endif
+  pthread_mutex_unlock(&workgroup_control_mutex);
 }
 
 void engine_enable_rt_logging(int enable) {
@@ -1329,6 +1329,7 @@ void engine_stop_workers(void) {
   // The host must stop rendering before stopping the pool. Every completed
   // render has already unregistered its queue waiters and worker references.
   assert(atomic_load_explicit(&g_engine.sessionUsers, memory_order_acquire) == SESSION_CLOSED);
+  engine_clear_os_workgroup();
   graph_profile_stop_recorder();
   atomic_store(&g_engine.runFlag, 0);
 
@@ -1350,9 +1351,11 @@ void engine_stop_workers(void) {
   free(g_engine.threads);
   free(g_engine.workerPolicies);
   free(g_engine.workerPriorities);
+  free(g_engine.workerWorkgroupErrors);
   g_engine.threads = NULL;
   g_engine.workerPolicies = NULL;
   g_engine.workerPriorities = NULL;
+  g_engine.workerWorkgroupErrors = NULL;
   g_engine.workerCount = 0;
 }
 

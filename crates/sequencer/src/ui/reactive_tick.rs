@@ -750,6 +750,16 @@ pub(crate) fn sync_reactive_tick(
         if !transport_visible && cpu_load_bits != ctx.frame.prev_cpu_load_bits {
             ctx.frame.prev_cpu_load_bits = cpu_load_bits;
         }
+        // Poll the event count every UI tick, independently of the smoothed
+        // percentage. Publish both edges even while the transport is hidden
+        // so reopening it cannot retain an expired warning.
+        let deadline_misses = ctx.shared.state.transport.audio_deadline_misses.load(Ordering::Relaxed);
+        if let Some(overloaded) = ctx.frame.cpu_overload.update(deadline_misses, Instant::now()) {
+            needs_reactive_cycle |= editor
+                .runtime_mut()
+                .set_reactive("SEQ", "cpu-overloaded", Value::Bool(overloaded))
+                .effects_dirty;
+        }
         let master_rec_on = ctx.shared.master_recording.load(Ordering::Acquire);
         app.ui.master_recording = master_rec_on;
         if transport_visible && master_rec_on != ctx.frame.prev_master_recording {

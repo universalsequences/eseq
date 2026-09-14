@@ -117,6 +117,20 @@ pub struct EngineRtStatus {
     pub callback_priority: c_int,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "audio-experiments", derive(serde::Serialize))]
+pub struct EngineWorkgroupStatus {
+    pub supported: c_int,
+    pub assigned: c_int,
+    pub generation: c_int,
+    pub worker_count: c_int,
+    pub joined_workers: c_int,
+    pub failed_workers: c_int,
+    pub pending_workers: c_int,
+    pub first_error: c_int,
+}
+
 /// Opaque handle — we only ever hold `*mut LiveGraph`.
 #[repr(C)]
 pub struct LiveGraph {
@@ -158,6 +172,8 @@ extern "C" {
     #[allow(dead_code)]
     pub fn engine_set_os_workgroup(oswg: *mut c_void);
     pub fn engine_clear_os_workgroup();
+    pub fn engine_get_workgroup_status(status: *mut EngineWorkgroupStatus);
+    pub fn engine_release_os_workgroup(oswg: *mut c_void);
     pub fn engine_enable_rt_logging(enable: c_int);
     pub fn engine_enable_graph_logging(enable: c_int);
     pub fn engine_enable_rt_scheduling(enable: c_int);
@@ -308,6 +324,13 @@ pub unsafe fn set_os_workgroup(oswg: *mut c_void) {
 
 pub unsafe fn clear_os_workgroup() {
     engine_clear_os_workgroup();
+}
+
+/// Control-thread snapshot; never call from an audio callback or DSP helper.
+pub unsafe fn workgroup_status() -> EngineWorkgroupStatus {
+    let mut status = EngineWorkgroupStatus::default();
+    engine_get_workgroup_status(&mut status);
+    status
 }
 
 pub unsafe fn free_c_ptr(ptr: *mut c_void) {

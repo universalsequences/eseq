@@ -318,6 +318,7 @@ pub(crate) fn run_event_loop(
         prev_song_row_mirror_epoch: 0,
         prev_current_track: usize::MAX,
         prev_cpu_load_bits: u32::MAX,
+        cpu_overload: CpuOverloadIndicator::default(),
         prev_output_latency_bits: u32::MAX,
         prev_peak_l_level: -1.0f64,
         prev_peak_r_level: -1.0f64,

@@ -12,6 +12,10 @@ use std::{io, path::PathBuf, sync::{OnceLock, atomic::AtomicBool}, time::Duratio
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+static WORKGROUPS_ENABLED: AtomicBool = AtomicBool::new(true);
+fn default_workgroups() -> bool { true }
+pub(super) fn workgroups_enabled() -> bool { WORKGROUPS_ENABLED.load(Ordering::Relaxed) }
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub project: PathBuf,
@@ -32,6 +36,8 @@ pub struct Config {
     /// startup, loading, warmup and teardown too. Requires audio-rtsan.
     #[serde(default)]
     pub rtsan_measure_only: bool,
+    #[serde(default = "default_workgroups")]
+    pub workgroups: bool,
 }
 
 #[derive(Serialize)]
@@ -240,6 +246,7 @@ fn instrument_voice_stats(app: &App) -> Vec<serde_json::Value> {
 }
 
 pub fn run(mut config: Config) -> Result<serde_json::Value> {
+    WORKGROUPS_ENABLED.store(config.workgroups, Ordering::Relaxed);
     #[cfg(feature = "audio-heap-audit")]
     let heap_calibration = Some(crate::heap_audit::calibrate()?);
     #[cfg(not(feature = "audio-heap-audit"))]
@@ -273,6 +280,9 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         blocks: ArrayQueue::new(32_768),
     }).map_err(|_| "Only one experiment is allowed per process")?;
     let capture = CAPTURE.get().unwrap();
+    let mut workgroup_start = None::<serde_json::Value>;
+    let mut workgroup_end = None::<serde_json::Value>;
+    let mut workgroup_verified = None::<bool>;
     let (sample_rate, channels, cpu, wall, audio_hash, instrument_stats) = if config.offline {
         let owner = OfflineOwner(engine::init_headless_engine(config.sample_rate, 2)?);
         let engine = &owner.0;
@@ -323,6 +333,12 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         live_interval(app, 0.1)?;
         engine.state.start_playback();
         live_interval(app, config.warmup_seconds)?;
+        #[cfg(target_os = "macos")]
+        let initial_workgroup = {
+            let report = engine._stream.workgroup_report();
+            workgroup_start = Some(serde_json::to_value(&report)?);
+            report
+        };
         crate::lisp_host::take_dgen_engine_process_stats();
         let cpu_start = cpu_seconds()?;
         let start = Instant::now();
@@ -340,6 +356,16 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         let cpu = cpu_seconds()? - cpu_start;
         let wall = start.elapsed().as_secs_f64();
         let instrument_stats = instrument_voice_stats(app);
+        #[cfg(target_os = "macos")]
+        {
+            let report = engine._stream.workgroup_report();
+            workgroup_verified = Some(initial_workgroup.verified() && report.verified()
+                && report.binding.worker_count == config.workers
+                && report.verification_failures == initial_workgroup.verification_failures
+                && report.changes == initial_workgroup.changes
+                && report.refreshes > initial_workgroup.refreshes);
+            workgroup_end = Some(serde_json::to_value(report)?);
+        }
         eprintln!("[audio-experiment] measurement complete; stopping stream");
         engine.state.stop_playback();
         (engine.sample_rate, engine.channels as usize, cpu, wall, None, instrument_stats)
@@ -374,6 +400,8 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         "rust_heap_calibration": heap_calibration,
         "rust_heap_audit": heap_report,
         "rust_heap_audit_passed": heap_passed,
+        "workgroup_start": workgroup_start, "workgroup_end": workgroup_end,
+        "workgroup_verified": workgroup_verified,
         "audio_seconds": audio_seconds, "wall_seconds": wall, "process_cpu_seconds": cpu,
         "process_cpu_pct": cpu / wall * 100.0, "cpu_pct_per_audio_second": cpu / audio_seconds * 100.0,
         "callback_mean_pct": loads.iter().sum::<f64>() / loads.len() as f64,

@@ -184,6 +184,56 @@ audio-thread scopes. A clean run establishes zero for that workload and interval
 it does not prove unexecuted scenes, live edits, loading, or native allocation
 paths. Use the native sanitizer audit above when stacks or C coverage are needed.
 
+## macOS device workgroup comparison
+
+Normal macOS builds bind all DSP helpers to the active output AudioUnit's
+workgroup. CPAL already uses AudioUnit; the pinned local CPAL extension exposes
+only the owned workgroup property. A control thread reads that property every
+100 milliseconds, adopts changes, and reports actual helper join results.
+Property reads, reference releases, waiting for acknowledgements, and logging
+stay outside audio threads. The native engine retains the previous group until
+every helper acknowledges departure. Stream teardown stops and joins the
+observer before the worker pool can be destroyed.
+
+Use the same heap-audit binary for both sides of the comparison:
+
+```sh
+cargo build --release -p sequencer --features audio-heap-audit --bin audio_experiment
+python3 tools/audio-experiments/run.py \
+  --project .local/projects/garageddd.json --pattern 23 \
+  --names workgroup-on-w4,workgroup-off-w4 \
+  --warmup-bars 13 --measure-bars 39 --repeat 3 \
+  --out /tmp/garageddd-workgroups
+```
+
+These variants hold the shipping four-worker wait policy constant and vary
+only helper membership. Both run the property observer, so its control-thread
+overhead is present on both sides. The JSON includes `workgroup_start`,
+`workgroup_end`, and `workgroup_verified`. A live macOS run fails verification
+if helpers fail to join, the expected worker count is wrong, property reads
+fail, the observer stops refreshing, or the source workgroup changes during
+measurement. Disabled runs must verify zero joined helpers. Offline and
+non-macOS runs report null for this verification.
+
+The native lifecycle regression covers join, same-group reads, replacement,
+cancelled-group failures, clearing, and pool restart. The ignored macOS test
+opens a silent real output stream and checks membership, observer refreshes,
+and teardown:
+
+```sh
+python3 tools/audio-experiments/check_scheduler.py --normal \
+  --tests test_workgroup_lifecycle,test_scheduler_completion
+cargo nextest run -p sequencer --lib --features audio-heap-audit \
+  -E 'test(=audio::workgroup::tests::macos_output_stream_verifies_helpers_and_releases_membership)' \
+  --run-ignored all --no-capture
+```
+
+Actual device changes are adopted on the next successful observer refresh;
+these tests do not switch the system output device. Workgroup membership gives
+macOS information about related real-time work, but is not a deadline guarantee.
+Compare averages and tails separately, and retain the measured interval and
+number of blocks when reporting zero misses.
+
 ## Parallel DSP timing in the app
 
 For projects that require UI authoring, the normal app can capture individual

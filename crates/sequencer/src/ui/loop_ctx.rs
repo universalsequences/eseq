@@ -1,5 +1,29 @@
 use super::*;
 
+/// Hold isolated deadline misses on screen independently of CPU smoothing.
+/// Only the UI owns the clock/deadline; the audio thread publishes a counter.
+#[derive(Default)]
+pub(crate) struct CpuOverloadIndicator {
+    seen_misses: u64,
+    hold_until: Option<Instant>,
+    displayed: bool,
+}
+
+impl CpuOverloadIndicator {
+    pub(crate) fn update(&mut self, misses: u64, now: Instant) -> Option<bool> {
+        if misses != self.seen_misses {
+            self.seen_misses = misses;
+            self.hold_until = Some(now + Duration::from_secs(2));
+        }
+        let active = self.hold_until.is_some_and(|deadline| now < deadline);
+        if active == self.displayed {
+            return None;
+        }
+        self.displayed = active;
+        Some(active)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PackageViewSession {
     pub(crate) root: PathBuf,
@@ -116,6 +140,7 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_song_row_mirror_epoch: u64,
     pub(crate) prev_current_track: usize,
     pub(crate) prev_cpu_load_bits: u32,
+    pub(crate) cpu_overload: CpuOverloadIndicator,
     pub(crate) prev_output_latency_bits: u32,
     pub(crate) prev_peak_l_level: f64,
     pub(crate) prev_peak_r_level: f64,
@@ -284,4 +309,32 @@ pub(crate) struct LoopCtx<'a> {
     pub(crate) gesture: &'a mut GestureState,
     pub(crate) track_names: &'a mut Vec<String>,
     pub(crate) shared: &'a SharedHandles,
+}
+
+#[cfg(test)]
+mod cpu_overload_tests {
+    use super::*;
+
+    #[test]
+    fn isolated_miss_is_held_and_later_misses_extend_the_hold() {
+        let mut indicator = CpuOverloadIndicator::default();
+        let now = Instant::now();
+        assert_eq!(indicator.update(0, now), None);
+        assert_eq!(indicator.update(1, now), Some(true));
+        assert_eq!(indicator.update(1, now + Duration::from_millis(1999)), None);
+        assert_eq!(indicator.update(2, now + Duration::from_millis(1999)), None);
+        assert_eq!(indicator.update(2, now + Duration::from_secs(2)), None);
+        assert_eq!(indicator.update(2, now + Duration::from_millis(3999)), Some(false));
+        assert_eq!(indicator.update(2, now + Duration::from_secs(5)), None);
+    }
+
+    #[test]
+    fn delayed_poll_observes_accumulated_misses_and_counter_wrap() {
+        let mut indicator = CpuOverloadIndicator::default();
+        let now = Instant::now();
+        assert_eq!(indicator.update(u64::MAX, now), Some(true));
+        assert_eq!(indicator.update(u64::MAX, now + Duration::from_secs(2)), Some(false));
+        assert_eq!(indicator.update(0, now + Duration::from_secs(3)), Some(true));
+        assert_eq!(indicator.update(0, now + Duration::from_secs(5)), Some(false));
+    }
 }

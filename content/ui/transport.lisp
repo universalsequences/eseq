@@ -1182,12 +1182,13 @@
               (label "cpu"
                 :v-align :center
                 :font-size 12 :width 3.0
-                :color :gray
+                :color (if SEQ.cpu-overloaded :red :gray)
                 :bg :transparent))
-            (number-label :value (bind-seq "cpu-load-pct")
+            (number-label :key "transport-cpu-value"
+              :value (bind-seq "cpu-load-pct")
               :decimals 0 :min-integer-digits 2 :suffix "%"
               :font-size 12 :width 2.0 :height 1
-              :color :dim
+              :color (if SEQ.cpu-overloaded :red :dim)
               :bg :transparent)))
         ;; The latency planner aligns every route to this delay. A latent FX
         ;; therefore delays the whole project, not only the track holding it.

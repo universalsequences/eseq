@@ -44,6 +44,9 @@ mod device;
 mod events;
 mod fire;
 mod graph_dispatch;
+mod metrics;
+#[cfg(target_os = "macos")]
+mod workgroup;
 mod params;
 mod pressure;
 #[cfg(target_os = "linux")]
@@ -73,7 +76,7 @@ use {
 
 use arrayvec::ArrayVec;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::Stream;
+pub use stream::OutputStream;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};

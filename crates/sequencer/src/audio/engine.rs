@@ -14,7 +14,7 @@ pub(crate) const ENGINE_BLOCK_FRAMES: usize = 512;
 use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 
-use cpal::Stream;
+use crate::audio::OutputStream;
 
 use crate::audio;
 use crate::audiograph::{self, LiveGraphPtr};
@@ -33,7 +33,7 @@ pub struct Engine {
     pub channels: u16,
     pub master_recorder: Arc<MasterRecorder>,
     pub keyboard_tx: std::sync::mpsc::Sender<crate::sequencer::LiveInputEvent>,
-    pub _stream: Stream,
+    pub _stream: OutputStream,
 }
 
 pub struct HeadlessEngine {

@@ -12,6 +12,30 @@ device for (sample rate, channels).
 #[allow(unused_imports)]
 use super::*;
 
+/// Owns the stream and its control-thread workgroup observer. Teardown stops
+/// callbacks, joins the observer and clears helper membership before the pool
+/// can be destroyed by the engine owner.
+pub struct OutputStream {
+    stream: cpal::Stream,
+    #[cfg(target_os = "macos")]
+    pub(super) workgroup: Option<super::workgroup::Monitor>,
+}
+
+impl Drop for OutputStream {
+    fn drop(&mut self) {
+        let _ = self.stream.pause();
+        #[cfg(target_os = "macos")]
+        self.workgroup.take();
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "audio-experiments"))]
+impl OutputStream {
+    pub(super) fn workgroup_report(&self) -> super::workgroup::Report {
+        self.workgroup.as_ref().unwrap().report()
+    }
+}
+
 /// Build a cpal output stream that drives the audiograph.
 pub fn build_output_stream(
     lg: *mut LiveGraph,
@@ -22,7 +46,7 @@ pub fn build_output_stream(
     master_recorder: Arc<MasterRecorder>,
     keyboard_rx: std::sync::mpsc::Receiver<crate::sequencer::LiveInputEvent>,
     bus_effect_runtime: Arc<Mutex<Arc<Vec<BusEffectRuntimeState>>>>,
-) -> Result<Stream, String> {
+) -> Result<OutputStream, String> {
     // The DEVICE half of the record latency only. CPAL does not expose
     // portable output latency, so use the configured output block as the
     // sensible default; users can tune this transport value when their
@@ -100,7 +124,7 @@ fn start_cpal_output_stream(
     config: &cpal::StreamConfig,
     block_size: usize,
     mut cb_data: Box<AudioCallbackData>,
-) -> Result<Stream, String> {
+) -> Result<OutputStream, String> {
     #[cfg(feature = "audio-rtsan")]
     rtsan_standalone::ensure_initialized();
     let channels = cb_data.num_channels;
@@ -114,6 +138,7 @@ fn start_cpal_output_stream(
         .build_output_stream(
             config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                let callback_start = Instant::now();
                 #[cfg(feature = "audio-heap-audit")]
                 let _heap = crate::heap_audit::AudioScope::enter();
                 // Cover the complete application callback, including first-call
@@ -141,6 +166,12 @@ fn start_cpal_output_stream(
                 if super::experiment::silence_device() {
                     data.fill(0.0);
                 }
+                super::metrics::record_output_callback(
+                    &cb_data.state,
+                    callback_start.elapsed(),
+                    data.len() / channels,
+                    cb_data.sample_rate,
+                );
             },
             |err| eprintln!("Audio stream error: {err}"),
             None,
@@ -151,7 +182,16 @@ fn start_cpal_output_stream(
         .play()
         .map_err(|e| format!("Failed to play stream: {e}"))?;
 
-    Ok(stream)
+    let mut output = OutputStream {
+        stream,
+        #[cfg(target_os = "macos")]
+        workgroup: None,
+    };
+    #[cfg(target_os = "macos")]
+    {
+        output.workgroup = Some(super::workgroup::Monitor::start(&output.stream)?);
+    }
+    Ok(output)
 }
 
 /// Query the default output device, preserving the system sample rate when possible.

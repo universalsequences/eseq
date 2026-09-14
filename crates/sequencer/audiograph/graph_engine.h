@@ -177,6 +177,7 @@ typedef struct Engine {
   _Atomic int oswg_join_pending; // set to 1 to wake workers for workgroup join
   _Atomic int oswg_join_remaining; // count of workers that need to see the flag
   _Atomic int oswg_version;      // incremented on each workgroup change for re-join detection
+  _Atomic int *workerWorkgroupErrors; // join result for each acknowledged worker
   _Atomic int rt_log; // enable lightweight debug prints from workers
   _Atomic int graph_log; // enable per-block audiograph scheduler/output trace
   _Atomic int rt_scheduling; // apply the platform realtime worker policy
@@ -222,6 +223,21 @@ void apply_params(LiveGraph *g);
 // from the audio unit. No-ops on platforms without OS Workgroup support.
 void engine_set_os_workgroup(void *oswg);
 void engine_clear_os_workgroup(void);
+// Control-thread-only snapshots. Pool lifecycle and binding calls must be
+// serialized by the host. Binding retains its own reference and synchronously
+// waits for every worker to leave/join before releasing the previous group.
+typedef struct EngineWorkgroupStatus {
+  int supported;
+  int assigned;
+  int generation;
+  int worker_count;
+  int joined_workers;
+  int failed_workers;
+  int pending_workers;
+  int first_error;
+} EngineWorkgroupStatus;
+void engine_get_workgroup_status(EngineWorkgroupStatus *status);
+void engine_release_os_workgroup(void *oswg);
 
 // Enable or disable minimal worker join logging (off by default).
 void engine_enable_rt_logging(int enable);

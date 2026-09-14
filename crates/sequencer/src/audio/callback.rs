@@ -5,7 +5,7 @@ The CPAL audio callback.
 module: topology resets, snapshot refresh, transport advance, pool and
 route sync, live keyboard trigger handling, scheduled/countdown/block event
 draining, rendering via `render_chunk`, master-recorder capture, metronome
-mix, metering, and CPU-load accounting.
+mix and metering. Device callback timing is published by `stream`.
 */
 
 #[allow(unused_imports)]
@@ -789,28 +789,20 @@ pub(super) fn render_audio_block(
             data.countdown_events.len(),
         );
     }
-    let render_start = Instant::now();
+    let render_start = probe_render.then(Instant::now);
     #[cfg(feature = "audio-experiments")]
     let voice_retirement_us = super::experiment::phase_elapsed(&mut phase_clock);
     render_chunk(data, output);
-    let render_elapsed = render_start.elapsed();
     #[cfg(feature = "audio-experiments")]
     let render_us = super::experiment::phase_elapsed(&mut phase_clock);
-    if probe_render {
+    if let Some(render_start) = render_start {
         let (chunk_peak_l, chunk_peak_r) = interleaved_peak(output, data.num_channels);
         eprintln!(
             "audio-trace: render-done callback={} nframes={nframes} elapsed_us={} peak_l={chunk_peak_l:.6} peak_r={chunk_peak_r:.6}",
             data.trace_callback_counter,
-            render_elapsed.as_micros(),
+            render_start.elapsed().as_micros(),
         );
         data.trace_render_probe_blocks -= 1;
-    }
-    if purpose == AudioOutputPurpose::Playback && render_elapsed.as_millis() >= 10 {
-        eprintln!(
-            "audio: slow render_chunk; nframes={nframes} elapsed_ms={} countdown_len={} block_start_sample={block_start_sample}",
-            render_elapsed.as_millis(),
-            data.countdown_events.len(),
-        );
     }
     data.rendered_samples
         .store(block_end_sample, Ordering::Release);
@@ -967,26 +959,5 @@ pub(super) fn render_audio_block(
             snapshot_transport_us, pool_sync_us, live_input_us, control_params_us,
             scheduled_events_us, voice_retirement_us, render_us, post_render_us,
         }, data, output);
-    }
-
-    if nframes > 0 {
-        let elapsed_secs = callback_start.elapsed().as_secs_f32();
-        let block_budget_secs = nframes as f32 / data.sample_rate as f32;
-        let raw_load_pct = if block_budget_secs > 0.0 {
-            (elapsed_secs / block_budget_secs) * 100.0
-        } else {
-            0.0
-        };
-        let prev_load_pct =
-            f32::from_bits(data.state.transport.cpu_load_pct.load(Ordering::Relaxed));
-        let smoothed_load_pct = if prev_load_pct <= 0.0 {
-            raw_load_pct
-        } else {
-            prev_load_pct * 0.97 + raw_load_pct * 0.03
-        };
-        data.state
-            .transport
-            .cpu_load_pct
-            .store(smoothed_load_pct.to_bits(), Ordering::Relaxed);
     }
 }

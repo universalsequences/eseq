@@ -26,6 +26,9 @@ def variants():
         configs[f"worker-spins-{spins}"] = dict(base, workers=4, worker_spins=spins)
     for workers in (2, 4, 6):
         configs[f"queue-hint-w{workers}"] = dict(base, workers=workers, queue_hint=True)
+    for enabled in (False, True):
+        configs[f"workgroup-{'on' if enabled else 'off'}-w4"] = dict(
+            base, workers=4, callback_wait_us=50, workgroups=enabled)
     return configs
 
 
@@ -58,7 +61,7 @@ def main():
     # Preserve the original control sweep. Select callback and longer-worker
     # waits explicitly; these also reproduce the failures on pre-fix binaries.
     names = args.names.split(",") if args.names else [name for name in candidates
-        if name != "worker-spins-1" and not name.startswith(("callback-wait-", "worker-wait-"))]
+        if name != "worker-spins-1" and not name.startswith(("callback-wait-", "worker-wait-", "workgroup-"))]
     jobs = [(name, rep, args.binary.resolve(), False) for rep in range(args.repeat) for name in names]
     if args.baseline_binary:
         jobs += [(name, rep, args.baseline_binary.resolve(), True)

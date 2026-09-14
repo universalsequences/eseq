@@ -8,6 +8,7 @@ resolver = "3"
 
 [patch.crates-io]
 aubio-sys = { path = "vendor/aubio-sys-0.2.1" }
+cpal = { path = "vendor/cpal-0.15.3" }
 
 [profile.release]
 debug = true

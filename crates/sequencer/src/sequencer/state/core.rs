@@ -77,6 +77,9 @@ pub struct TransportState {
     pub peak_l: AtomicU32,
     pub peak_r: AtomicU32,
     pub cpu_load_pct: AtomicU32,
+    /// Complete device callbacks exceeding their frame/sample-rate budget.
+    /// Monotonic event count so an isolated miss survives slow UI polling.
+    pub audio_deadline_misses: AtomicU64,
     pub trigger_flash: Vec<AtomicU32>,
     pub num_tracks: AtomicU32,
     pub track_playheads: Vec<AtomicU32>,

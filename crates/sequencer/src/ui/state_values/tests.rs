@@ -16286,6 +16286,7 @@ mod instrument_header_ui_tests;
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
                 ("cpu-load-pct", Value::Number(0.0)),
+                ("cpu-overloaded", Value::Bool(false)),
                 ("output-latency-ms", Value::Number(0.0)),
                 ("track-peak-0", Value::Number(0.0)),
                 ("bus-peak-0", Value::Number(0.0)),
@@ -25385,6 +25386,28 @@ mod instrument_header_ui_tests;
             latency.props.get("suffix"),
             Some(Value::String(suffix)) if suffix == "ms"
         ));
+    }
+
+    #[test]
+    fn metal_seq_transport_cpu_readout_survives_overload_transitions() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive("SEQ", "cpu-load-pct", Value::Number(29.0));
+        editor.runtime_mut().eval_str(r#"(set-window-buffer "*transport*")"#).unwrap();
+        for overloaded in [false, true, false] {
+            editor.runtime_mut().set_reactive("SEQ", "cpu-overloaded", Value::Bool(overloaded));
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().expect("transport layout");
+            let cpu = find_layout_node_by_stable_key_suffix(&layout, "/transport-cpu-value")
+                .expect("CPU readout in both normal and overloaded states");
+            assert_finite_nonzero_rect(cpu, "CPU readout");
+            assert_eq!(layout_prop_number(cpu, "value"), Some(29.0));
+        }
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        editor.runtime_mut().set_reactive("SEQ", "cpu-load-pct", Value::Number(30.0));
+        editor.runtime_mut().run_reactive_cycle();
+        assert!(editor.runtime_mut().take_pending_buffer_widget_trees().is_empty(),
+            "ordinary CPU updates must remain render-bound");
     }
 
     #[test]

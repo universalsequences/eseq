@@ -7,5 +7,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if result["rust_heap_audit_passed"] == false {
         return Err("Rust audio heap audit failed; see the JSON counters".into());
     }
+    if result["workgroup_verified"] == false {
+        return Err("Audio workgroup verification failed; see the JSON membership reports".into());
+    }
     Ok(())
 }
