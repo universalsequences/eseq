@@ -758,31 +758,16 @@ fn remap_track_index_after_delete(track: &mut usize, deleted_track: usize) -> bo
     }
 }
 
-fn remap_scheduled_event_after_track_delete(
-    event: &mut ScheduledEvent,
+pub(in crate::audio) fn remap_scheduled_event_after_track_delete(
+    event: &mut super::super::events::CallbackScheduledEvent,
     deleted_track: usize,
-    pattern_epoch: u64,
 ) -> bool {
-    let keep = match &mut event.kind {
-        ScheduledEventKind::ResolvedTrigger { track, .. }
-        | ScheduledEventKind::InstrumentParams { track, .. }
-        | ScheduledEventKind::EffectParams { track, .. }
-        | ScheduledEventKind::RackParams { track, .. } => {
-            remap_track_index_after_delete(track, deleted_track)
+    if let Some((seed_track, _)) = &mut event.seed {
+        if !remap_track_index_after_delete(seed_track, deleted_track) {
+            event.seed = None;
         }
-        ScheduledEventKind::NetworkTrigger { track, seed, .. } => {
-            if let Some((seed_track, _)) = seed {
-                if !remap_track_index_after_delete(seed_track, deleted_track) {
-                    *seed = None;
-                }
-            }
-            remap_track_index_after_delete(track, deleted_track)
-        }
-    };
-    if keep {
-        event.pattern_epoch = pattern_epoch;
     }
-    keep
+    remap_track_index_after_delete(&mut event.track, deleted_track)
 }
 
 fn reconcile_audio_runtime_after_track_delete(
@@ -801,7 +786,6 @@ fn reconcile_audio_runtime_after_track_delete(
                 remap_scheduled_event_after_track_delete(
                     scheduled,
                     deleted_track,
-                    pattern_epoch,
                 )
             }
             CountdownEventKind::GateOff(gate_off) => {
@@ -1214,11 +1198,11 @@ pub(in crate::audio) fn release_rack_active_voices(
     release_sample: u64,
     frame_offset: u32,
 ) {
-    let Some(rack) = data
-        .scheduler_snapshot
+    let snapshot = Arc::clone(&data.scheduler_snapshot);
+    let Some(rack) = snapshot
         .tracks
         .get(track_idx)
-        .and_then(|track| track.rack_track.clone())
+        .and_then(|track| track.rack_track.as_ref())
     else {
         return;
     };
@@ -1275,7 +1259,7 @@ pub(in crate::audio) fn release_track_active_voices(
     if let Some(engine_id) = track_engine_id(&data.state, track_idx) {
         let free_patch =
             track_custom_run_mode(&data.state, track_idx) == CustomInstrumentRunMode::FreePatch;
-        let lids: Vec<u64> = data.custom_engine_pools[engine_id].voices
+        let lids: arrayvec::ArrayVec<u64, MAX_VOICES> = data.custom_engine_pools[engine_id].voices
             [..data.custom_engine_pools[engine_id].num_voices]
             .iter()
             .filter(|voice| voice.active && voice.assigned_track == Some(track_idx))
@@ -1297,7 +1281,7 @@ pub(in crate::audio) fn release_track_active_voices(
         return;
     }
 
-    let active: Vec<(u64, i32)> = data.voice_pools[track_idx].voices
+    let active: arrayvec::ArrayVec<(u64, i32), MAX_VOICES> = data.voice_pools[track_idx].voices
         [..data.voice_pools[track_idx].num_voices]
         .iter()
         .filter(|voice| voice.active && voice.logical_id != 0)

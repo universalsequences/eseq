@@ -173,7 +173,7 @@
             }]);
 
             let mut values = Vec::new();
-            while let Some(event) = queue.pop() {
+            while let Some(event) = queue.pop_owned() {
                 if let ScheduledEventKind::ResolvedTrigger { step, effect_params, .. } = event.kind {
                     let value = effect_params.iter()
                         .find(|param| param.logical_id == 700)
@@ -285,7 +285,7 @@
 
             let mut saw_preserved = [false; 2];
             let mut saw_new_track = false;
-            while let Some(event) = queue.pop() {
+            while let Some(event) = queue.pop_owned() {
                 assert_eq!(
                     event.pattern_epoch, added.transport.pattern_epoch,
                     "the audio callback must accept events across the additive publication"
@@ -1279,14 +1279,14 @@
             [None; crate::sequencer::RACK_MACRO_COUNT],
         ));
 
-        let first = queue.pop().expect("first note event");
-        let second = queue.pop().expect("second note event");
+        let first = queue.pop_owned().expect("first note event");
+        let second = queue.pop_owned().expect("second note event");
         assert_eq!(first.sample_time, 1_000);
         assert_eq!(second.sample_time, 4_000);
         assert_eq!(track_output_events.len(), 2);
         assert_eq!(track_output_events[0].beat, 0.0);
         assert_eq!(track_output_events[1].beat, 0.0625);
-        assert!(queue.pop().is_none());
+        assert!(queue.pop_owned().is_none());
     }
 
     #[test]
@@ -1324,7 +1324,7 @@
             [None; crate::sequencer::RACK_MACRO_COUNT],
         ));
 
-        let event = queue.pop().expect("global-transposed event");
+        let event = queue.pop_owned().expect("global-transposed event");
         match event.kind {
             ScheduledEventKind::ResolvedTrigger { resolved, .. } => {
                 assert_eq!(resolved.transpose, 5.0);
@@ -1370,7 +1370,7 @@
             [None; crate::sequencer::RACK_MACRO_COUNT],
         ));
 
-        let event = queue.pop().expect("opted-out event");
+        let event = queue.pop_owned().expect("opted-out event");
         match event.kind {
             ScheduledEventKind::ResolvedTrigger { resolved, .. } => {
                 assert_eq!(resolved.transpose, 0.0);
@@ -1484,7 +1484,7 @@
             Vec::new(),
             false,
         ));
-        let scheduled = queue.pop().expect("MIDI FX output event");
+        let scheduled = queue.pop_owned().expect("MIDI FX output event");
         match scheduled.kind {
             ScheduledEventKind::NetworkTrigger {
                 track,
@@ -1501,7 +1501,7 @@
         assert_eq!(track_output_events.len(), 1);
         assert_eq!(track_output_events[0].track, 0);
         assert_eq!(track_output_events[0].transpose, 12.0);
-        assert!(queue.pop().is_none());
+        assert!(queue.pop_owned().is_none());
     }
 
     #[test]
@@ -1558,7 +1558,7 @@
             false,
         ));
 
-        let scheduled = queue.pop().expect("MIDI FX output event");
+        let scheduled = queue.pop_owned().expect("MIDI FX output event");
         match scheduled.kind {
             ScheduledEventKind::NetworkTrigger {
                 track,
@@ -1578,7 +1578,7 @@
             }
             other => panic!("expected network trigger, got {other:?}"),
         }
-        assert!(queue.pop().is_none());
+        assert!(queue.pop_owned().is_none());
         assert_eq!(track_output_events.len(), 1);
         assert_eq!(track_output_events[0].transpose, 12.0);
     }
@@ -1650,7 +1650,7 @@
         ));
 
         let mut events = Vec::new();
-        while let Some(event) = queue.pop() {
+        while let Some(event) = queue.pop_owned() {
             events.push(event);
         }
         assert_eq!(
@@ -1841,7 +1841,7 @@
             false,
         );
 
-        let scheduled = queue.pop().expect("on-grid quantized event");
+        let scheduled = queue.pop_owned().expect("on-grid quantized event");
         let ScheduledEventKind::ResolvedTrigger {
             track, resolved, ..
         } = scheduled.kind
@@ -1899,7 +1899,7 @@
             false,
         );
 
-        let scheduled = queue.pop().expect("step 0 trigger");
+        let scheduled = queue.pop_owned().expect("step 0 trigger");
         let ScheduledEventKind::ResolvedTrigger { resolved, .. } = scheduled.kind else {
             panic!("expected resolved trigger");
         };
@@ -1926,7 +1926,7 @@
             false,
             false,
         );
-        let scheduled = queue.pop().expect("step 0 trigger after disarm");
+        let scheduled = queue.pop_owned().expect("step 0 trigger after disarm");
         let ScheduledEventKind::ResolvedTrigger { resolved, .. } = scheduled.kind else {
             panic!("expected resolved trigger");
         };
@@ -1983,7 +1983,7 @@
             false,
         );
 
-        let scheduled = queue.pop().expect("step 0 trigger");
+        let scheduled = queue.pop_owned().expect("step 0 trigger");
         let ScheduledEventKind::ResolvedTrigger {
             track, resolved, ..
         } = scheduled.kind
@@ -2016,7 +2016,7 @@
             false,
             false,
         );
-        let scheduled = queue.pop().expect("step 0 trigger after disarm");
+        let scheduled = queue.pop_owned().expect("step 0 trigger after disarm");
         let ScheduledEventKind::ResolvedTrigger { resolved, .. } = scheduled.kind else {
             panic!("expected resolved trigger");
         };
@@ -2065,7 +2065,7 @@
             false,
         );
 
-        let scheduled = queue.pop().expect("chord step trigger");
+        let scheduled = queue.pop_owned().expect("chord step trigger");
         let ScheduledEventKind::ResolvedTrigger {
             resolved, chord, ..
         } = scheduled.kind
@@ -2140,7 +2140,7 @@
             false,
         );
 
-        let scheduled = queue.pop().expect("quantized event");
+        let scheduled = queue.pop_owned().expect("quantized event");
         let ScheduledEventKind::ResolvedTrigger {
             track, resolved, ..
         } = scheduled.kind
@@ -2151,7 +2151,7 @@
         assert_eq!(track, 0);
         assert_eq!(resolved.transpose, 7.0);
         assert!((resolved.velocity - 0.9).abs() < 1e-6);
-        assert!(queue.pop().is_none());
+        assert!(queue.pop_owned().is_none());
     }
 
     #[test]
@@ -2248,7 +2248,7 @@
         ));
 
         let mut tracks_and_transposes = Vec::new();
-        while let Some(event) = queue.pop() {
+        while let Some(event) = queue.pop_owned() {
             match event.kind {
                 ScheduledEventKind::NetworkTrigger {
                     track, resolved, ..
@@ -2314,7 +2314,7 @@
         ));
 
         assert!(
-            queue.pop().is_none(),
+            queue.pop_owned().is_none(),
             "graph route Off must not enqueue a source-track event or run source-track MIDI FX"
         );
         assert!(track_output_events.is_empty());
@@ -2381,7 +2381,7 @@
         ));
 
         let mut scheduled = Vec::new();
-        while let Some(event) = queue.pop() {
+        while let Some(event) = queue.pop_owned() {
             match event.kind {
                 ScheduledEventKind::NetworkTrigger {
                     track, resolved, ..
@@ -2479,7 +2479,7 @@
         queue: &ScheduledEventQueue<QUEUE_CAP>,
     ) -> Vec<ObservedTrigger> {
         let mut out = Vec::new();
-        while let Some(event) = queue.pop() {
+        while let Some(event) = queue.pop_owned() {
             match event.kind {
                 ScheduledEventKind::ResolvedTrigger {
                     track,
@@ -2716,7 +2716,7 @@
                     false,
                 );
                 scheduled_until = result.scheduled_until_sample;
-                while let Some(event) = queue.pop() {
+                while let Some(event) = queue.pop_owned() {
                     if let ScheduledEventKind::NetworkTrigger { resolved, .. } = event.kind {
                         velocities.push((event.sample_time, resolved.velocity));
                     }
@@ -2831,7 +2831,7 @@
                     false,
                 );
                 let mut out = Vec::new();
-                while let Some(event) = queue.pop() {
+                while let Some(event) = queue.pop_owned() {
                     if let ScheduledEventKind::NetworkTrigger { resolved, .. } = event.kind {
                         out.push(resolved.velocity);
                     }
@@ -3255,7 +3255,7 @@
         );
 
         let mut events = Vec::new();
-        while let Some(event) = queue.pop() {
+        while let Some(event) = queue.pop_owned() {
             events.push(event.kind);
         }
         events
@@ -3714,7 +3714,7 @@
                 false,
             );
             let mut hits = Vec::new();
-            while let Some(event) = queue.pop() {
+            while let Some(event) = queue.pop_owned() {
                 if let ScheduledEventKind::ResolvedTrigger { step, .. } = event.kind {
                     hits.push((event.sample_time, step));
                 }
@@ -5496,7 +5496,7 @@
             },
             false,
         ));
-        let scheduled = queue.pop().expect("network trigger");
+        let scheduled = queue.pop_owned().expect("network trigger");
         match scheduled.kind {
             ScheduledEventKind::NetworkTrigger {
                 track, resolved, voice_policy, ..
@@ -5508,7 +5508,7 @@
             }
             other => panic!("expected network trigger, got {other:?}"),
         }
-        assert!(queue.pop().is_none());
+        assert!(queue.pop_owned().is_none());
     }
 
     #[test]
@@ -5582,7 +5582,7 @@
             Vec::new(),
             false,
         ));
-        let scheduled = queue.pop().expect("routed network trigger");
+        let scheduled = queue.pop_owned().expect("routed network trigger");
         match scheduled.kind {
             ScheduledEventKind::NetworkTrigger {
                 track, resolved, ..
@@ -5592,7 +5592,7 @@
             }
             other => panic!("expected network trigger, got {other:?}"),
         }
-        assert!(queue.pop().is_none());
+        assert!(queue.pop_owned().is_none());
     }
 
     #[test]
@@ -5664,8 +5664,8 @@
             false,
         ));
 
-        let first = queue.pop().expect("source network trigger");
-        let second = queue.pop().expect("target network trigger");
+        let first = queue.pop_owned().expect("source network trigger");
+        let second = queue.pop_owned().expect("target network trigger");
         let mut tracks = [usize::MAX; 2];
         for (idx, scheduled) in [first, second].into_iter().enumerate() {
             assert_eq!(scheduled.sample_time, 1_000);
@@ -5676,7 +5676,7 @@
         }
         tracks.sort();
         assert_eq!(tracks, [0, 1]);
-        assert!(queue.pop().is_none());
+        assert!(queue.pop_owned().is_none());
     }
 
     #[test]
@@ -6245,7 +6245,7 @@
             event,
         ));
 
-        let scheduled = queue.pop().expect("scheduled step trigger");
+        let scheduled = queue.pop_owned().expect("scheduled step trigger");
         let ScheduledEventKind::ResolvedTrigger { sampler_params, .. } = scheduled.kind else {
             panic!("expected resolved trigger");
         };
@@ -6703,7 +6703,7 @@
             false,
         ));
 
-        let first = queue.pop().expect("instrument parameter event");
+        let first = queue.pop_owned().expect("instrument parameter event");
         assert_eq!(first.pattern_epoch, 7);
         assert_eq!(first.sample_time, 1234);
         match first.kind {
@@ -6727,7 +6727,7 @@
             other => panic!("expected instrument params, got {other:?}"),
         }
 
-        let second = queue.pop().expect("effect parameter event");
+        let second = queue.pop_owned().expect("effect parameter event");
         assert_eq!(second.pattern_epoch, 7);
         assert_eq!(second.sample_time, 1234);
         match second.kind {
@@ -6747,7 +6747,7 @@
             }
             other => panic!("expected effect params, got {other:?}"),
         }
-        assert!(queue.pop().is_none());
+        assert!(queue.pop_owned().is_none());
     }
 
     #[test]
@@ -6830,7 +6830,7 @@
             false,
         ));
 
-        let first = queue.pop().expect("cross-track effect parameter event");
+        let first = queue.pop_owned().expect("cross-track effect parameter event");
         match first.kind {
             ScheduledEventKind::EffectParams {
                 track,
@@ -6849,7 +6849,7 @@
             other => panic!("expected cross-track effect params, got {other:?}"),
         }
 
-        let second = queue.pop().expect("routed network trigger");
+        let second = queue.pop_owned().expect("routed network trigger");
         match second.kind {
             ScheduledEventKind::NetworkTrigger {
                 track,
@@ -6863,7 +6863,7 @@
             }
             other => panic!("expected routed network trigger, got {other:?}"),
         }
-        assert!(queue.pop().is_none());
+        assert!(queue.pop_owned().is_none());
     }
 
     #[test]
@@ -7456,7 +7456,7 @@
         ));
 
         let mut tracks = Vec::new();
-        while let Some(event) = queue.pop() {
+        while let Some(event) = queue.pop_owned() {
             match event.kind {
                 ScheduledEventKind::ResolvedTrigger {
                     track, resolved, ..
@@ -7484,7 +7484,7 @@
             &mut live_tracks,
             false,
         ));
-        assert!(queue.pop().is_none());
+        assert!(queue.pop_owned().is_none());
     }
 
     #[test]
@@ -9455,7 +9455,7 @@
         );
 
         let mut triggers = Vec::new();
-        while let Some(event) = queue.pop() {
+        while let Some(event) = queue.pop_owned() {
             if let ScheduledEventKind::ResolvedTrigger { track, step, .. } = event.kind {
                 triggers.push((event.sample_time, track, step));
             }
@@ -9853,7 +9853,7 @@
     /// Pop every enqueued ResolvedTrigger as (sample_time, chord notes, velocity).
     fn drain_roll_triggers(queue: &ScheduledEventQueue<64>) -> Vec<(u64, Vec<f32>, f32)> {
         let mut triggers = Vec::new();
-        while let Some(event) = queue.pop() {
+        while let Some(event) = queue.pop_owned() {
             if let ScheduledEventKind::ResolvedTrigger {
                 chord, resolved, ..
             } = event.kind
@@ -10365,7 +10365,7 @@
             drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
 
             let mut steps = Vec::new();
-            while let Some(event) = queue.pop() {
+            while let Some(event) = queue.pop_owned() {
                 if let ScheduledEventKind::ResolvedTrigger { step, .. } = event.kind {
                     steps.push(step);
                 }
@@ -10633,7 +10633,7 @@ fn scratch_generator_follows_a_mid_playback_scene_switch() {
             scheduled_until_sample = result.scheduled_until_sample;
             rendered += 48_000;
             let mut velocities = Vec::new();
-            while let Some(event) = queue.pop() {
+            while let Some(event) = queue.pop_owned() {
                 if let ScheduledEventKind::NetworkTrigger { resolved, .. } = &event.kind {
                     velocities.push(resolved.velocity);
                 }

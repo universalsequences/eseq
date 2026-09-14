@@ -28,11 +28,81 @@ pub struct Config {
     pub measure_seconds: f64,
     pub offline: bool,
     pub sample_rate: u32,
+    /// Limit sanitizer scopes to the measured playback interval. False audits
+    /// startup, loading, warmup and teardown too. Requires audio-rtsan.
+    #[serde(default)]
+    pub rtsan_measure_only: bool,
+}
+
+#[derive(Serialize)]
+pub(super) struct CallbackPhases {
+    pub snapshot_transport_us: f64,
+    pub pool_sync_us: f64,
+    pub live_input_us: f64,
+    pub control_params_us: f64,
+    pub scheduled_events_us: f64,
+    pub voice_retirement_us: f64,
+    pub render_us: f64,
+    pub post_render_us: f64,
+}
+
+/// A phase boundary uses only the monotonic clock; all formatting and storage
+/// beyond the bounded capture queue happen after the stream has stopped.
+pub(super) fn phase_elapsed(previous: &mut Instant) -> f64 {
+    let now = Instant::now();
+    let elapsed_us = now.duration_since(*previous).as_secs_f64() * 1e6;
+    *previous = now;
+    elapsed_us
+}
+
+#[derive(Clone, Copy, Default, Serialize)]
+pub(super) struct EventProfile {
+    pub countdown_us: f64,
+    pub queue_us: f64,
+    pub dispatch_us: f64,
+    pub event_count: usize,
+    pub slowest_event: Option<EventTiming>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+pub(super) struct EventTiming {
+    kind: &'static str,
+    track: usize,
+    step: Option<usize>,
+    frame_offset: u32,
+    elapsed_us: f64,
+}
+
+impl EventTiming {
+    pub(super) fn new(event: &BlockEvent) -> Self {
+        let (kind, track, step) = match &event.kind {
+            BlockEventKind::Scheduled(scheduled) => match &scheduled.event.kind {
+                ScheduledEventKind::ResolvedTrigger { track, step, .. } => ("trigger", scheduled.track, Some(*step)),
+                ScheduledEventKind::NetworkTrigger { track, .. } => ("network_trigger", scheduled.track, None),
+                ScheduledEventKind::InstrumentParams { track, .. } => ("instrument_params", scheduled.track, None),
+                ScheduledEventKind::EffectParams { track, .. } => ("effect_params", scheduled.track, None),
+                ScheduledEventKind::RackParams { track, step } => ("rack_params", scheduled.track, Some(*step)),
+            },
+            BlockEventKind::GateOff(event) => ("gate_off", event.track_idx, None),
+            BlockEventKind::Retrig(event) => ("retrig", event.track_idx, Some(event.step)),
+        };
+        Self { kind, track, step, frame_offset: event.frame_offset, elapsed_us: 0.0 }
+    }
+
+    pub(super) fn finish(mut self, start: Instant, profile: &mut EventProfile) {
+        self.elapsed_us = start.elapsed().as_secs_f64() * 1e6;
+        profile.event_count += 1;
+        if profile.slowest_event.is_none_or(|previous| self.elapsed_us > previous.elapsed_us) {
+            profile.slowest_event = Some(self);
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct Block {
     elapsed_us: f64,
+    phases: CallbackPhases,
+    events: EventProfile,
     frames: usize,
     rendered_samples: u64,
     dropped: u64,
@@ -51,12 +121,15 @@ static CAPTURE: OnceLock<Capture> = OnceLock::new();
 
 pub(super) fn silence_device() -> bool { CAPTURE.get().is_some() }
 
-pub(super) fn record_block(start: Instant, data: &AudioCallbackData, output: &[f32]) {
+pub(super) fn record_block(
+    start: Instant, phases: CallbackPhases, data: &AudioCallbackData, output: &[f32],
+) {
     let elapsed_us = start.elapsed().as_secs_f64() * 1e6;
     let Some(capture) = CAPTURE.get() else { return; };
     if !capture.enabled.load(Ordering::Acquire) { return; }
     let mut block = Block {
-        elapsed_us, frames: output.len() / data.num_channels,
+        elapsed_us, phases, events: data.event_profile,
+        frames: output.len() / data.num_channels,
         rendered_samples: data.rendered_samples.load(Ordering::Acquire),
         dropped: data.dropped_scheduled_events as u64,
         late: data.late_scheduled_events as u64,
@@ -167,6 +240,18 @@ fn instrument_voice_stats(app: &App) -> Vec<serde_json::Value> {
 }
 
 pub fn run(mut config: Config) -> Result<serde_json::Value> {
+    #[cfg(feature = "audio-heap-audit")]
+    let heap_calibration = Some(crate::heap_audit::calibrate()?);
+    #[cfg(not(feature = "audio-heap-audit"))]
+    let heap_calibration = None::<()>;
+    if config.rtsan_measure_only && !cfg!(feature = "audio-rtsan") {
+        return Err("rtsan_measure_only requires an audio-rtsan build".into());
+    }
+    #[cfg(feature = "audio-rtsan")]
+    {
+        rtsan_standalone::ensure_initialized();
+        super::rt_audit::set_enabled(!config.rtsan_measure_only);
+    }
     if config.pattern == 0 || !(0..=16).contains(&config.workers)
         || !(1..=4096).contains(&config.worker_spins)
         || !(1..=4096).contains(&config.callback_spins)
@@ -208,6 +293,10 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         crate::lisp_host::take_dgen_engine_process_stats();
         let cpu_start = cpu_seconds()?;
         let start = Instant::now();
+        #[cfg(feature = "audio-rtsan")]
+        super::rt_audit::set_enabled(true);
+        #[cfg(feature = "audio-heap-audit")]
+        crate::heap_audit::begin();
         capture.enabled.store(true, Ordering::Release);
         for block in warmup_blocks..warmup_blocks + measure_blocks {
             session.render_block_with_controls(block * engine.block_size as u64, &mut output,
@@ -215,6 +304,10 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
             for sample in &output { hash.update(sample.to_le_bytes()); }
         }
         capture.enabled.store(false, Ordering::Release);
+        #[cfg(feature = "audio-heap-audit")]
+        crate::heap_audit::end();
+        #[cfg(feature = "audio-rtsan")]
+        super::rt_audit::set_enabled(!config.rtsan_measure_only);
         let cpu = cpu_seconds()? - cpu_start;
         let wall = start.elapsed().as_secs_f64();
         (engine.sample_rate, 2, cpu, wall,
@@ -233,9 +326,17 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         crate::lisp_host::take_dgen_engine_process_stats();
         let cpu_start = cpu_seconds()?;
         let start = Instant::now();
+        #[cfg(feature = "audio-rtsan")]
+        super::rt_audit::set_enabled(true);
+        #[cfg(feature = "audio-heap-audit")]
+        crate::heap_audit::begin();
         capture.enabled.store(true, Ordering::Release);
         live_interval(app, config.measure_seconds)?;
         capture.enabled.store(false, Ordering::Release);
+        #[cfg(feature = "audio-heap-audit")]
+        crate::heap_audit::end();
+        #[cfg(feature = "audio-rtsan")]
+        super::rt_audit::set_enabled(!config.rtsan_measure_only);
         let cpu = cpu_seconds()? - cpu_start;
         let wall = start.elapsed().as_secs_f64();
         let instrument_stats = instrument_voice_stats(app);
@@ -243,6 +344,17 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         engine.state.stop_playback();
         (engine.sample_rate, engine.channels as usize, cpu, wall, None, instrument_stats)
     };
+    #[cfg(feature = "audio-heap-audit")]
+    let heap_report = Some(crate::heap_audit::snapshot());
+    #[cfg(feature = "audio-heap-audit")]
+    let heap_passed = heap_report.as_ref().map(|report| {
+        report.callback == crate::heap_audit::Counts::default()
+            && report.workers == crate::heap_audit::Counts::default()
+            && report.callbacks_entered > 0
+            && report.worker_threads_entered == config.workers as u64
+    });
+    #[cfg(not(feature = "audio-heap-audit"))]
+    let (heap_report, heap_passed) = (None::<()>, None::<bool>);
     if capture.overflow.load(Ordering::Acquire) { return Err("Metric queue overflow".into()); }
     let mut blocks = Vec::new();
     while let Some(block) = capture.blocks.pop() { blocks.push(block); }
@@ -258,6 +370,10 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
     if nonfinite != 0 || peak < 0.0001 { return Err(format!("Invalid/silent render: peak={peak}, nonfinite={nonfinite}").into()); }
     Ok(serde_json::json!({
         "config": config, "sample_rate": sample_rate, "channels": channels,
+        "rtsan_enabled": cfg!(feature = "audio-rtsan"),
+        "rust_heap_calibration": heap_calibration,
+        "rust_heap_audit": heap_report,
+        "rust_heap_audit_passed": heap_passed,
         "audio_seconds": audio_seconds, "wall_seconds": wall, "process_cpu_seconds": cpu,
         "process_cpu_pct": cpu / wall * 100.0, "cpu_pct_per_audio_second": cpu / audio_seconds * 100.0,
         "callback_mean_pct": loads.iter().sum::<f64>() / loads.len() as f64,

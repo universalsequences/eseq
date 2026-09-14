@@ -46,6 +46,11 @@ pub(super) fn render_audio_block(
     output: &mut [f32],
     purpose: AudioOutputPurpose,
 ) {
+    #[cfg(feature = "audio-heap-audit")]
+    let _heap = crate::heap_audit::AudioScope::enter();
+    // Also cover the shared rendering path when exercised by offline export.
+    #[cfg(feature = "audio-rtsan")]
+    let _realtime = super::rt_audit::scope();
     if !data.callback_thread_initialized {
         data.callback_thread_initialized = true;
         // FTZ/DAZ are per-thread MXCSR state and this thread executes graph
@@ -76,6 +81,8 @@ pub(super) fn render_audio_block(
         }
     }
     let callback_start = Instant::now();
+    #[cfg(feature = "audio-experiments")]
+    let mut phase_clock = callback_start;
     // Always the graph block size: `FixedOutputBlocks` in stream.rs absorbs the
     // device's actual request, which on ALSA/PipeWire is neither fixed nor
     // hop-compatible (eseq-linux.73).
@@ -167,6 +174,9 @@ pub(super) fn render_audio_block(
     sync_effect_modulator_transport_clock_params(data, host_transport_clock);
     sync_dj_mixer_transport_phase(data, block_start_sample);
 
+    #[cfg(feature = "audio-experiments")]
+    let snapshot_transport_us = super::experiment::phase_elapsed(&mut phase_clock);
+
     // Sync voice pools against current runtime bindings. Project loads can
     // replace tracks in-place, so growth-only sync leaves dead logical IDs.
     for t in 0..num_tracks {
@@ -183,6 +193,9 @@ pub(super) fn render_audio_block(
     sync_rack_voice_pools(data, num_tracks);
     apply_take_rack_macro_updates(data);
     sync_free_patch_transport_routes(data, num_tracks);
+
+    #[cfg(feature = "audio-experiments")]
+    let pool_sync_us = super::experiment::phase_elapsed(&mut phase_clock);
 
     // Process keyboard triggers
     let mut processed_keyboard_trigger = false;
@@ -330,11 +343,11 @@ pub(super) fn render_audio_block(
             enforce_mute_group_for_winning_track(data, kt.track, block_start_sample, 0);
             release_rack_choke_group_track_voices(data, kt.track, block_start_sample, 0);
             if instrument_type == InstrumentType::Rack {
-                let rack = data
-                    .scheduler_snapshot
+                let snapshot = Arc::clone(&data.scheduler_snapshot);
+                let rack = snapshot
                     .tracks
                     .get(kt.track)
-                    .and_then(|track| track.rack_track.clone());
+                    .and_then(|track| track.rack_track.as_ref());
                 if let Some(rack) = rack {
                     if !fire_live_keyboard_rack_note(data, kt.track, &kt, resolved_transpose, rack)
                     {
@@ -639,6 +652,9 @@ pub(super) fn render_audio_block(
         sync_free_patch_transport_routes(data, num_tracks);
     }
 
+    #[cfg(feature = "audio-experiments")]
+    let live_input_us = super::experiment::phase_elapsed(&mut phase_clock);
+
     // Schedule accumulator reset on play-start or pattern change; consumed at next step 0.
     {
         let playing = data.state.transport.playing.load(Ordering::Relaxed);
@@ -725,13 +741,28 @@ pub(super) fn render_audio_block(
     }
 
     let current_pattern_epoch = data.scheduler_snapshot.transport.pattern_epoch;
+    #[cfg(feature = "audio-experiments")]
+    let control_params_us = super::experiment::phase_elapsed(&mut phase_clock);
+    #[cfg(feature = "audio-experiments")]
+    let mut event_clock = phase_clock;
+    #[cfg(feature = "audio-experiments")]
+    { data.event_profile = super::experiment::EventProfile::default(); }
     collect_due_countdown_events(data, nframes, current_pattern_epoch);
+    #[cfg(feature = "audio-experiments")]
+    { data.event_profile.countdown_us = super::experiment::phase_elapsed(&mut event_clock); }
     drain_scheduled_events_for_callback(data, block_start_sample, nframes, current_pattern_epoch);
+    #[cfg(feature = "audio-experiments")]
+    { data.event_profile.queue_us = super::experiment::phase_elapsed(&mut event_clock); }
     let source_end = match purpose {
         AudioOutputPurpose::Playback => None,
         AudioOutputPurpose::Export { source_end_sample } => Some(source_end_sample),
     };
     dispatch_block_events_until(data, block_start_sample, source_end);
+    #[cfg(feature = "audio-experiments")]
+    { data.event_profile.dispatch_us = super::experiment::phase_elapsed(&mut event_clock); }
+
+    #[cfg(feature = "audio-experiments")]
+    let scheduled_events_us = super::experiment::phase_elapsed(&mut phase_clock);
 
     let custom_release_tail_samples =
         (CUSTOM_ENGINE_RELEASE_TAIL_SECONDS * data.sample_rate).round() as u64;
@@ -759,8 +790,12 @@ pub(super) fn render_audio_block(
         );
     }
     let render_start = Instant::now();
+    #[cfg(feature = "audio-experiments")]
+    let voice_retirement_us = super::experiment::phase_elapsed(&mut phase_clock);
     render_chunk(data, output);
     let render_elapsed = render_start.elapsed();
+    #[cfg(feature = "audio-experiments")]
+    let render_us = super::experiment::phase_elapsed(&mut phase_clock);
     if probe_render {
         let (chunk_peak_l, chunk_peak_r) = interleaved_peak(output, data.num_channels);
         eprintln!(
@@ -926,7 +961,13 @@ pub(super) fn render_audio_block(
     publish_active_voice_counts(data, num_tracks);
 
     #[cfg(feature = "audio-experiments")]
-    super::experiment::record_block(callback_start, data, output);
+    {
+        let post_render_us = super::experiment::phase_elapsed(&mut phase_clock);
+        super::experiment::record_block(callback_start, super::experiment::CallbackPhases {
+            snapshot_transport_us, pool_sync_us, live_input_us, control_params_us,
+            scheduled_events_us, voice_retirement_us, render_us, post_render_us,
+        }, data, output);
+    }
 
     if nframes > 0 {
         let elapsed_secs = callback_start.elapsed().as_secs_f32();

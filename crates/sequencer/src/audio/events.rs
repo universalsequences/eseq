@@ -76,9 +76,32 @@ pub(super) struct RetrigEvent {
     pub(super) target: RetrigTarget,
 }
 
+/// Routing can be reindexed when a track is deleted while swing-delayed
+/// notes remain pending. Keep that small mutable state separate from the
+/// scheduler-owned immutable parameter payload.
+#[derive(Debug)]
+pub(super) struct CallbackScheduledEvent {
+    pub(super) event: Arc<ScheduledEvent>,
+    pub(super) track: usize,
+    pub(super) seed: Option<(usize, usize)>,
+}
+
+impl From<Arc<ScheduledEvent>> for CallbackScheduledEvent {
+    fn from(event: Arc<ScheduledEvent>) -> Self {
+        let (track, seed) = match &event.kind {
+            ScheduledEventKind::NetworkTrigger { track, seed, .. } => (*track, *seed),
+            ScheduledEventKind::ResolvedTrigger { track, .. }
+            | ScheduledEventKind::InstrumentParams { track, .. }
+            | ScheduledEventKind::EffectParams { track, .. }
+            | ScheduledEventKind::RackParams { track, .. } => (*track, None),
+        };
+        Self { event, track, seed }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum CountdownEventKind {
-    Scheduled(ScheduledEvent),
+    Scheduled(CallbackScheduledEvent),
     GateOff(GateOffEvent),
     Retrig(RetrigEvent),
 }
@@ -95,7 +118,7 @@ pub(super) struct CountdownEvent {
 
 #[derive(Debug)]
 pub(super) enum BlockEventKind {
-    Scheduled(ScheduledEvent),
+    Scheduled(CallbackScheduledEvent),
     GateOff(GateOffEvent),
     Retrig(RetrigEvent),
 }
@@ -344,16 +367,16 @@ pub(super) fn dispatch_scheduled_step(
     samples_per_step: f32,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
-    mut effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: ScheduledInstrumentParams,
-    instrument_tensor_params: ScheduledInstrumentTensorParams,
+    effect_params: &[ScheduledEffectParam],
+    instrument_params: &ScheduledInstrumentParams,
+    instrument_tensor_params: &ScheduledInstrumentTensorParams,
     sampler_params: ScheduledSamplerParams,
     voice_policy: crate::scheduled_event::ScheduledVoicePolicy,
     instrument_fingerprint: u64,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) {
     unsafe {
-        dispatch_effect_chain_for_track(data.lg.0, &mut effect_params);
+        dispatch_effect_chain_for_track(data.lg.0, effect_params);
     }
     fire_resolved(
         data,
@@ -381,16 +404,16 @@ pub(super) fn dispatch_scheduled_network_step(
     samples_per_step: f32,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
-    mut effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: ScheduledInstrumentParams,
-    instrument_tensor_params: ScheduledInstrumentTensorParams,
+    effect_params: &[ScheduledEffectParam],
+    instrument_params: &ScheduledInstrumentParams,
+    instrument_tensor_params: &ScheduledInstrumentTensorParams,
     sampler_params: ScheduledSamplerParams,
     voice_policy: crate::scheduled_event::ScheduledVoicePolicy,
     instrument_fingerprint: u64,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) {
     unsafe {
-        dispatch_effect_chain_for_track(data.lg.0, &mut effect_params);
+        dispatch_effect_chain_for_track(data.lg.0, effect_params);
     }
     fire_resolved(
         data,
@@ -412,10 +435,10 @@ pub(super) fn dispatch_scheduled_network_step(
 
 pub(super) fn dispatch_scheduled_event(
     data: &mut AudioCallbackData,
-    event: ScheduledEvent,
+    event: &CallbackScheduledEvent,
     frame_offset: u32,
 ) {
-    match event.kind {
+    match &event.event.kind {
         ScheduledEventKind::ResolvedTrigger {
             track,
             step,
@@ -433,18 +456,18 @@ pub(super) fn dispatch_scheduled_event(
             dispatch_scheduled_step(
                 data,
                 frame_offset,
-                track,
-                step,
-                samples_per_step,
-                resolved,
-                chord,
+                event.track,
+                *step,
+                *samples_per_step,
+                *resolved,
+                *chord,
                 effect_params,
                 instrument_params,
                 instrument_tensor_params,
-                sampler_params,
-                voice_policy,
-                instrument_fingerprint,
-                rack_macro_values,
+                *sampler_params,
+                *voice_policy,
+                *instrument_fingerprint,
+                *rack_macro_values,
             );
         }
         ScheduledEventKind::InstrumentParams {
@@ -452,20 +475,20 @@ pub(super) fn dispatch_scheduled_event(
             instrument_params,
             instrument_tensor_params,
         } => {
-            dispatch_instrument_params_to_active_voices(data, track, &instrument_params);
+            dispatch_instrument_params_to_active_voices(data, event.track, instrument_params);
             dispatch_instrument_tensor_params_to_active_voices(
                 data,
-                track,
-                &instrument_tensor_params,
+                event.track,
+                instrument_tensor_params,
             );
         }
         ScheduledEventKind::EffectParams {
-            mut effect_params, ..
+            effect_params, ..
         } => unsafe {
-            dispatch_effect_chain_for_track(data.lg.0, &mut effect_params);
+            dispatch_effect_chain_for_track(data.lg.0, effect_params);
         },
         ScheduledEventKind::RackParams { track, step } => {
-            apply_rack_params_off_step(data, track, step);
+            apply_rack_params_off_step(data, event.track, *step);
         }
         ScheduledEventKind::NetworkTrigger {
             track,
@@ -485,27 +508,27 @@ pub(super) fn dispatch_scheduled_event(
             dispatch_scheduled_network_step(
                 data,
                 frame_offset,
-                track,
-                seed.map(|(_, step)| step),
-                samples_per_step,
-                resolved,
-                chord,
+                event.track,
+                event.seed.map(|(_, step)| step),
+                *samples_per_step,
+                *resolved,
+                *chord,
                 effect_params,
                 instrument_params,
                 instrument_tensor_params,
-                sampler_params,
-                voice_policy,
-                instrument_fingerprint,
-                rack_macro_values,
+                *sampler_params,
+                *voice_policy,
+                *instrument_fingerprint,
+                *rack_macro_values,
             );
         }
     }
 }
 
-pub(super) fn scheduled_trigger_track(event: &ScheduledEvent) -> Option<usize> {
-    match &event.kind {
+pub(super) fn scheduled_trigger_track(event: &CallbackScheduledEvent) -> Option<usize> {
+    match &event.event.kind {
         ScheduledEventKind::ResolvedTrigger { track, .. }
-        | ScheduledEventKind::NetworkTrigger { track, .. } => Some(*track),
+        | ScheduledEventKind::NetworkTrigger { track, .. } => Some(event.track),
         ScheduledEventKind::InstrumentParams { .. }
         | ScheduledEventKind::EffectParams { .. }
         | ScheduledEventKind::RackParams { .. } => None,
@@ -522,13 +545,10 @@ pub(super) fn frame_offset_from_remaining(remaining_samples: f64, nframes: usize
 pub(super) fn block_event_priority(kind: &BlockEventKind) -> u8 {
     match kind {
         BlockEventKind::GateOff(_) => 0,
-        BlockEventKind::Scheduled(ScheduledEvent {
-            kind:
-                ScheduledEventKind::InstrumentParams { .. }
-                | ScheduledEventKind::EffectParams { .. }
-                | ScheduledEventKind::RackParams { .. },
-            ..
-        }) => 1,
+        BlockEventKind::Scheduled(event) if matches!(&event.event.kind,
+            ScheduledEventKind::InstrumentParams { .. }
+            | ScheduledEventKind::EffectParams { .. }
+            | ScheduledEventKind::RackParams { .. }) => 1,
         BlockEventKind::Scheduled(_) | BlockEventKind::Retrig(_) => 2,
     }
 }
@@ -688,7 +708,7 @@ pub(super) fn schedule_countdown_or_block_event(
 
 pub(super) fn enqueue_scheduled_event_for_callback(
     data: &mut AudioCallbackData,
-    event: ScheduledEvent,
+    event: Arc<ScheduledEvent>,
     block_start_sample: u64,
     nframes: usize,
     current_pattern_epoch: u64,
@@ -706,7 +726,7 @@ pub(super) fn enqueue_scheduled_event_for_callback(
     };
     if remaining_samples < nframes as f64 {
         let frame_offset = frame_offset_from_remaining(remaining_samples, nframes);
-        try_push_block_event(data, frame_offset, seq, BlockEventKind::Scheduled(event));
+        try_push_block_event(data, frame_offset, seq, BlockEventKind::Scheduled(event.into()));
     } else {
         try_push_countdown_event(
             data,
@@ -715,7 +735,7 @@ pub(super) fn enqueue_scheduled_event_for_callback(
             1,
             event.pattern_epoch,
             seq,
-            CountdownEventKind::Scheduled(event),
+            CountdownEventKind::Scheduled(event.into()),
         );
     }
 }
@@ -927,6 +947,10 @@ pub(super) fn dispatch_block_events_until(
             .is_some_and(|event| event.frame_offset == frame_offset)
         {
             let event = data.block_events.pop().unwrap();
+            #[cfg(feature = "audio-experiments")]
+            let timing = super::experiment::EventTiming::new(&event);
+            #[cfg(feature = "audio-experiments")]
+            let event_start = Instant::now();
             match event.kind {
                 BlockEventKind::Scheduled(scheduled) => {
                     let dispatch = match scheduled_trigger_track(&scheduled) {
@@ -938,7 +962,7 @@ pub(super) fn dispatch_block_events_until(
                         None => true,
                     };
                     if dispatch {
-                        dispatch_scheduled_event(data, scheduled, frame_offset);
+                        dispatch_scheduled_event(data, &scheduled, frame_offset);
                     }
                 }
                 BlockEventKind::GateOff(gate_off) => {
@@ -948,6 +972,8 @@ pub(super) fn dispatch_block_events_until(
                     dispatch_retrig_event(data, retrig, frame_offset);
                 }
             }
+            #[cfg(feature = "audio-experiments")]
+            timing.finish(event_start, &mut data.event_profile);
         }
     }
     if let Some(end) = end_offset {

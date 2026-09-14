@@ -4,5 +4,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = serde_json::from_slice(&std::fs::read(path)?)?;
     let result = sequencer::audio::experiment::run(config)?;
     println!("{}", serde_json::to_string(&result)?);
+    if result["rust_heap_audit_passed"] == false {
+        return Err("Rust audio heap audit failed; see the JSON counters".into());
+    }
     Ok(())
 }

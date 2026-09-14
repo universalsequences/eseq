@@ -33,6 +33,20 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_AUDIO_EXPERIMENTS").is_some() {
         audiograph.define("AUDIOGRAPH_EXPERIMENTS", None);
     }
+    println!("cargo:rerun-if-env-changed=RTSAN_ENABLE");
+    if std::env::var_os("CARGO_FEATURE_AUDIO_HEAP_AUDIT").is_some() {
+        audiograph.define("AUDIOGRAPH_RUST_HEAP_AUDIT", None);
+    }
+    if std::env::var_os("CARGO_FEATURE_AUDIO_RTSAN").is_some() {
+        // The dependency otherwise silently compiles its guards to no-ops.
+        assert_eq!(std::env::var("RTSAN_ENABLE").as_deref(), Ok("1"),
+            "audio-rtsan requires RTSAN_ENABLE=1 at build time");
+        let target = std::env::var("TARGET").unwrap();
+        assert!(["aarch64-apple-darwin", "x86_64-apple-darwin",
+            "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"].contains(&target.as_str()),
+            "audio-rtsan is unsupported on {target}");
+        audiograph.define("AUDIOGRAPH_RTSAN", None);
+    }
     audiograph.compile("audiograph");
 
     // On Apple platforms the DGen ABI v1 host-services table stays vDSP-backed,

@@ -734,86 +734,30 @@ pub(super) fn resolve_rack_slot_instrument_params(
     slot: &EffectSlotSnapshot,
     step_idx: usize,
 ) -> ScheduledInstrumentParams {
-    let num_params = slot.num_params as usize;
-    let mut params = ScheduledInstrumentParams::new();
-    for param_idx in 0..num_params {
-        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
-            continue;
-        };
-        if raw_idx == u32::MAX {
-            continue;
-        }
-        let span = slot
-            .param_node_spans
-            .get(param_idx)
-            .copied()
-            .unwrap_or(1)
-            .max(1);
-        let (target, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
-            (
-                ScheduledInstrumentParamTarget::Modulator,
-                (raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
-            )
-        } else {
-            (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
-        };
-        let value = resolved_slot_param_value(slot, step_idx, param_idx, 0.0);
-        if !value.is_finite() {
-            continue;
-        }
-        params.push(ScheduledInstrumentParam {
-            target,
-            idx,
-            span,
-            value,
-        });
-    }
-    params.sort_by_key(|param| match param.target {
-        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
-        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
-    });
-    params
+    resolve_rack_slot_instrument_values(slot, |param| resolved_slot_param_value(slot, step_idx, param, 0.0))
 }
 
 pub(super) fn resolve_rack_slot_instrument_defaults(slot: &EffectSlotSnapshot) -> ScheduledInstrumentParams {
-    let num_params = slot.num_params as usize;
+    resolve_rack_slot_instrument_values(slot, |param| slot.defaults.get(param).copied().unwrap_or(0.0))
+}
+
+pub(super) fn resolve_rack_slot_instrument_values(
+    slot: &EffectSlotSnapshot,
+    value: impl Fn(usize) -> f32,
+) -> ScheduledInstrumentParams {
+    // Sort descriptor indices on the stack. The authored index breaks ties,
+    // preserving the former stable ordering without sort_by_key's heap scratch.
+    let mut indices: ArrayVec<usize, MAX_SLOT_PARAMS> =
+        (0..(slot.num_params as usize).min(MAX_SLOT_PARAMS)).collect();
+    indices.sort_unstable_by_key(|&param| (slot.node_param_idx(param).unwrap_or(u32::MAX), param));
     let mut params = ScheduledInstrumentParams::new();
-    for param_idx in 0..num_params {
-        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
-            continue;
-        };
-        if raw_idx == u32::MAX {
-            continue;
+    for param_idx in indices {
+        let Some((target, idx, span)) = snapshot_param_route(slot, param_idx) else { continue; };
+        let value = value(param_idx);
+        if value.is_finite() {
+            params.push(ScheduledInstrumentParam { target, idx, span, value });
         }
-        let span = slot
-            .param_node_spans
-            .get(param_idx)
-            .copied()
-            .unwrap_or(1)
-            .max(1);
-        let (target, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
-            (
-                ScheduledInstrumentParamTarget::Modulator,
-                (raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
-            )
-        } else {
-            (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
-        };
-        let value = slot.defaults.get(param_idx).copied().unwrap_or(0.0);
-        if !value.is_finite() {
-            continue;
-        }
-        params.push(ScheduledInstrumentParam {
-            target,
-            idx,
-            span,
-            value,
-        });
     }
-    params.sort_by_key(|param| match param.target {
-        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
-        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
-    });
     params
 }
 
@@ -821,59 +765,24 @@ pub(super) fn resolve_rack_slot_sampler_params(
     slot: &EffectSlotSnapshot,
     step_idx: usize,
 ) -> ScheduledSamplerParams {
-    let value = |param_idx: usize, default: f32| {
-        resolved_slot_param_value(slot, step_idx, param_idx, default)
-    };
-    ScheduledSamplerParams {
-        attack_ms: value(0, 0.0),
-        release_ms: value(1, 0.0),
-        start_point: value(2, 0.0),
-        end_point: value(3, 1.0),
-        instrument_enabled: value(4, 1.0),
-        reverse: value(5, 0.0),
-        loop_mode: value(6, 0.0),
-        loop_xfade_ms: value(7, 0.0),
-        sr_hz: value(8, 0.0),
-        warp_enabled: value(9, 0.0),
-        warp_mode: value(10, 0.0),
-        sample_bpm: value(11, 120.0),
-        playback_speed: value(12, 1.0),
-        scrub: value(13, 0.0),
-        slice_mode: resolved_sampler_host_param_value(
-            slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 0.0,
-        ),
-        slice_sensitivity: resolved_sampler_host_param_value(
-            slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY, 0.5,
-        ),
-        slice_base: resolved_sampler_host_param_value(
-            slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0,
-        ),
-        start_point_locked: slot_has_explicit_plock(slot, step_idx, 2),
-        end_point_locked: slot_has_explicit_plock(slot, step_idx, 3),
-        warp_preserve: resolved_slot_node_param_value(
-            slot,
-            step_idx,
-            crate::instruments::sampler::PARAM_WARP_PRESERVE as u32,
-            crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32,
-        ),
-        warp_seg_loop_mode: resolved_slot_node_param_value(
-            slot,
-            step_idx,
-            crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
-            crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
-        ),
-        warp_seg_envelope: resolved_slot_node_param_value(
-            slot,
-            step_idx,
-            crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
-            crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
-        ),
-    }
+    resolve_rack_slot_sampler_values(slot, Some(step_idx),
+        |param, default| resolved_slot_param_value(slot, step_idx, param, default),
+        |param, default| resolved_sampler_host_param_value(slot, step_idx, param, default))
 }
 
 pub(super) fn resolve_rack_slot_sampler_defaults(slot: &EffectSlotSnapshot) -> ScheduledSamplerParams {
-    let value =
-        |param_idx: usize, default: f32| slot.defaults.get(param_idx).copied().unwrap_or(default);
+    let value = |param, default| slot.defaults.get(param).copied().unwrap_or(default);
+    resolve_rack_slot_sampler_values(slot, None, value, value)
+}
+
+pub(super) fn resolve_rack_slot_sampler_values(
+    slot: &EffectSlotSnapshot,
+    step: Option<usize>,
+    value: impl Fn(usize, f32) -> f32,
+    host_value: impl Fn(usize, f32) -> f32,
+) -> ScheduledSamplerParams {
+    let node_value = |node_idx, default| snapshot_slot_param_index_by_node_idx(slot, node_idx)
+        .map_or(default, |param| value(param, default));
     ScheduledSamplerParams {
         attack_ms: value(0, 0.0),
         release_ms: value(1, 0.0),
@@ -889,28 +798,17 @@ pub(super) fn resolve_rack_slot_sampler_defaults(slot: &EffectSlotSnapshot) -> S
         sample_bpm: value(11, 120.0),
         playback_speed: value(12, 1.0),
         scrub: value(13, 0.0),
-        slice_mode: value(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 0.0),
-        slice_sensitivity: value(
-            crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY, 0.5,
-        ),
-        slice_base: value(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0),
-        start_point_locked: false,
-        end_point_locked: false,
-        warp_preserve: default_slot_node_param_value(
-            slot,
-            crate::instruments::sampler::PARAM_WARP_PRESERVE as u32,
-            crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32,
-        ),
-        warp_seg_loop_mode: default_slot_node_param_value(
-            slot,
-            crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
-            crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
-        ),
-        warp_seg_envelope: default_slot_node_param_value(
-            slot,
-            crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
-            crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
-        ),
+        slice_mode: host_value(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 0.0),
+        slice_sensitivity: host_value(crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY, 0.5),
+        slice_base: host_value(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0),
+        start_point_locked: step.is_some_and(|step| slot_has_explicit_plock(slot, step, 2)),
+        end_point_locked: step.is_some_and(|step| slot_has_explicit_plock(slot, step, 3)),
+        warp_preserve: node_value(crate::instruments::sampler::PARAM_WARP_PRESERVE as u32,
+            crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32),
+        warp_seg_loop_mode: node_value(crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
+            crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32),
+        warp_seg_envelope: node_value(crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
+            crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT),
     }
 }
 

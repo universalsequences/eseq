@@ -86,46 +86,62 @@ pub(super) unsafe fn dispatch_snapshot_effect_params_at_step(
     effect_slots: &[EffectSlotSnapshot],
     step: usize,
 ) {
-    for slot in effect_slots {
-        if slot.node_id == 0 {
+    dispatch_snapshot_effect_params_with_values(lg, effect_slots, |effect, param| {
+        resolved_slot_param_value(&effect_slots[effect], step, param, effect_slots[effect].defaults[param])
+    });
+}
+
+pub(super) unsafe fn dispatch_snapshot_effect_params_with_values(
+    lg: *mut LiveGraph,
+    effect_slots: &[EffectSlotSnapshot],
+    value: impl Fn(usize, usize) -> f32,
+) {
+    for (effect_idx, slot) in effect_slots.iter().enumerate() {
+        dispatch_snapshot_effect_slot_params_with_values(lg, slot, |param| value(effect_idx, param));
+    }
+}
+
+pub(super) unsafe fn dispatch_snapshot_effect_slot_params_with_values(
+    lg: *mut LiveGraph,
+    slot: &EffectSlotSnapshot,
+    value: impl Fn(usize) -> f32,
+) {
+    if slot.node_id == 0 { return; }
+    let num_params = slot.num_params as usize;
+    let mut param_indices: ArrayVec<usize, MAX_SLOT_PARAMS> = ArrayVec::new();
+    for param_idx in 0..num_params.min(MAX_SLOT_PARAMS) {
+        param_indices.push(param_idx);
+    }
+    param_indices.sort_unstable_by_key(|&param| (slot.node_param_idx(param).unwrap_or(u32::MAX), param));
+    for param_idx in param_indices {
+        let Some(idx) = slot.node_param_idx(param_idx) else {
+            continue;
+        };
+        if idx == u32::MAX || param_idx >= slot.defaults.len() {
             continue;
         }
-        let num_params = slot.num_params as usize;
-        let mut param_indices: ArrayVec<usize, MAX_SLOT_PARAMS> = ArrayVec::new();
-        for param_idx in 0..num_params.min(MAX_SLOT_PARAMS) {
-            param_indices.push(param_idx);
-        }
-        param_indices.sort_by_key(|param_idx| slot.node_param_idx(*param_idx).unwrap_or(u32::MAX));
-        for param_idx in param_indices {
-            let Some(idx) = slot.node_param_idx(param_idx) else {
-                continue;
-            };
-            if idx == u32::MAX || param_idx >= slot.defaults.len() {
+        let (logical_id, idx) = if idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
+            if slot.modulator_node_id == 0 {
                 continue;
             }
-            let (logical_id, idx) = if idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
-                if slot.modulator_node_id == 0 {
-                    continue;
-                }
-                (
-                    slot.modulator_node_id as u64,
-                    (idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
-                )
-            } else {
-                (slot.node_id as u64, idx as u64)
-            };
-            let value = resolved_slot_param_value(slot, step, param_idx, slot.defaults[param_idx]);
-            if !value.is_finite() {
-                continue;
-            }
-            let span = slot
-                .param_node_spans
-                .get(param_idx)
-                .copied()
-                .unwrap_or(1)
-                .max(1);
-            push_param_span(lg, logical_id, idx, span, value);
+            (
+                slot.modulator_node_id as u64,
+                (idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
+            )
+        } else {
+            (slot.node_id as u64, idx as u64)
+        };
+        let value = value(param_idx);
+        if !value.is_finite() {
+            continue;
         }
+        let span = slot
+            .param_node_spans
+            .get(param_idx)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        push_param_span(lg, logical_id, idx, span, value);
     }
 }
 

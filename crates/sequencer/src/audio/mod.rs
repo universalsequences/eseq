@@ -50,6 +50,8 @@ mod pressure;
 mod pipewire;
 mod rack;
 mod render;
+#[cfg(feature = "audio-rtsan")]
+mod rt_audit;
 #[cfg(target_os = "linux")]
 mod rtkit;
 mod state;

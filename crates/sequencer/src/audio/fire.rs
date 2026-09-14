@@ -85,8 +85,8 @@ pub(super) fn fire_resolved(
     samples_per_step: f64,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
-    instrument_params: ScheduledInstrumentParams,
-    instrument_tensor_params: ScheduledInstrumentTensorParams,
+    instrument_params: &ScheduledInstrumentParams,
+    instrument_tensor_params: &ScheduledInstrumentTensorParams,
     instrument_fingerprint: u64,
     sampler_params: ScheduledSamplerParams,
     voice_policy: crate::scheduled_event::ScheduledVoicePolicy,
@@ -117,11 +117,11 @@ pub(super) fn fire_resolved(
         return;
     }
     if instrument_type == InstrumentType::Rack {
-        let rack = data
-            .scheduler_snapshot
+        let snapshot = Arc::clone(&data.scheduler_snapshot);
+        let rack = snapshot
             .tracks
             .get(track_idx)
-            .and_then(|track| track.rack_track.clone());
+            .and_then(|track| track.rack_track.as_ref());
         if let Some(rack) = rack {
             fire_rack_resolved(
                 data,

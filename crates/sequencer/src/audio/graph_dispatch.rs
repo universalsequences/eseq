@@ -342,9 +342,8 @@ pub(super) unsafe fn dispatch_modulator_params(
 
 pub(super) unsafe fn dispatch_effect_chain_for_track(
     lg: *mut LiveGraph,
-    effect_params: &mut [ScheduledEffectParam],
+    effect_params: &[ScheduledEffectParam],
 ) {
-    effect_params.sort_by_key(|param| (param.logical_id, param.idx));
     for param in effect_params {
         params_push_wrapper(
             lg,
@@ -516,7 +515,7 @@ pub(super) unsafe fn dispatch_instrument_defaults_to_voice(
     for param_idx in 0..num_params.min(MAX_SLOT_PARAMS) {
         param_indices.push(param_idx);
     }
-    param_indices.sort_by_key(|param_idx| slot.resolve_node_idx(*param_idx));
+    param_indices.sort_unstable_by_key(|param_idx| (slot.resolve_node_idx(*param_idx), *param_idx));
     for param_idx in param_indices {
         let idx = slot.resolve_node_idx(param_idx);
         let is_mod_param = idx as u32 >= crate::instruments::voice_modulator::MOD_PARAM_BASE;

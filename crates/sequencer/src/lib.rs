@@ -51,6 +51,11 @@
 /// need this explicit budget until that traversal is made iterative.
 pub const REQUIRED_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
 
+#[cfg(any(test, feature = "audio-heap-audit"))]
+pub mod heap_audit;
+#[cfg(test)]
+use heap_audit as test_alloc;
+
 #[allow(dead_code)]
 pub mod agent;
 pub mod analysis;

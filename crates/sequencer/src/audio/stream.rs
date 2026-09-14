@@ -101,6 +101,8 @@ fn start_cpal_output_stream(
     block_size: usize,
     mut cb_data: Box<AudioCallbackData>,
 ) -> Result<Stream, String> {
+    #[cfg(feature = "audio-rtsan")]
+    rtsan_standalone::ensure_initialized();
     let channels = cb_data.num_channels;
     // CPAL honors `BufferSize::Fixed` only as a hint on ALSA; PipeWire answers a
     // 512-frame request with whatever `avail_update` reports (235 frames on the
@@ -112,6 +114,12 @@ fn start_cpal_output_stream(
         .build_output_stream(
             config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                #[cfg(feature = "audio-heap-audit")]
+                let _heap = crate::heap_audit::AudioScope::enter();
+                // Cover the complete application callback, including first-call
+                // setup, fixed-block adaptation, diagnostics and local drops.
+                #[cfg(feature = "audio-rtsan")]
+                let _realtime = super::rt_audit::scope();
                 if let Some(observation) =
                     cb_data.output_block_size.observe(data.len() / channels.max(1))
                 {

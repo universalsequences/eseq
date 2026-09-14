@@ -873,7 +873,45 @@ static void flush_denormals_to_zero(void) {
 #endif
 }
 
+#ifdef AUDIOGRAPH_RTSAN
+// ABI supplied by the pinned, development-only RealtimeSanitizer runtime.
+extern void __rtsan_realtime_enter(void);
+extern void __rtsan_realtime_exit(void);
+static _Atomic bool g_rtsan_enabled = true;
+
+void audiograph_rtsan_set_enabled(int enabled) {
+  atomic_store_explicit(&g_rtsan_enabled, enabled != 0, memory_order_release);
+}
+
+int audiograph_rtsan_enabled(void) {
+  return atomic_load_explicit(&g_rtsan_enabled, memory_order_acquire);
+}
+
+static void refresh_worker_rtsan_scope(bool *active) {
+  bool enabled = audiograph_rtsan_enabled();
+  if (*active == enabled)
+    return;
+  if (enabled)
+    __rtsan_realtime_enter();
+  else
+    __rtsan_realtime_exit();
+  *active = enabled;
+}
+#endif
+
+#ifdef AUDIOGRAPH_RUST_HEAP_AUDIT
+extern void eseq_rust_audio_heap_worker_enter(void);
+extern void eseq_rust_audio_heap_worker_exit(void);
+#endif
+
 static void *worker_main(void *arg) {
+#ifdef AUDIOGRAPH_RUST_HEAP_AUDIT
+  eseq_rust_audio_heap_worker_enter();
+#endif
+#ifdef AUDIOGRAPH_RTSAN
+  bool rtsan_active = false;
+  refresh_worker_rtsan_scope(&rtsan_active);
+#endif
   intptr_t worker_slot = (intptr_t)arg;
   int worker_index = (int)worker_slot - 1;
   flush_denormals_to_zero();
@@ -954,6 +992,9 @@ static void *worker_main(void *arg) {
 #endif
 
   for (;;) {
+#ifdef AUDIOGRAPH_RTSAN
+    refresh_worker_rtsan_scope(&rtsan_active);
+#endif
     if (!atomic_load_explicit(&g_engine.runFlag, memory_order_acquire))
       break;
 
@@ -962,6 +1003,9 @@ static void *worker_main(void *arg) {
     wait_for_block_start_or_shutdown(worker_index, oswg_local_version);
 #else
     wait_for_block_start_or_shutdown(worker_index, 0);
+#endif
+#ifdef AUDIOGRAPH_RTSAN
+    refresh_worker_rtsan_scope(&rtsan_active);
 #endif
     if (!atomic_load_explicit(&g_engine.runFlag, memory_order_acquire))
       break;
@@ -1079,6 +1123,13 @@ static void *worker_main(void *arg) {
   }
 #endif
 
+#ifdef AUDIOGRAPH_RTSAN
+  if (rtsan_active)
+    __rtsan_realtime_exit();
+#endif
+#ifdef AUDIOGRAPH_RUST_HEAP_AUDIT
+  eseq_rust_audio_heap_worker_exit();
+#endif
   return NULL;
 }
 

@@ -32,13 +32,71 @@ strict synchronous export driver instead of CoreAudio and includes an audio
 SHA-256 for deterministic output comparisons. Offline throughput does not
 predict live scheduling latency; live mode is the performance comparison.
 
+## Native real-time safety audit
+
+On macOS, run the calibrated audit separately from timing measurements:
+
+```sh
+python3 tools/audio-experiments/audit.py \
+  --project .local/projects/garageddd.json --pattern 23 \
+  --scope all --seconds 60 --repeat 3 --out /tmp/garageddd-rt-audit
+```
+
+`--scope all` checks the entire application-owned CPAL callback from its first
+entry, shared offline rendering, and native DSP worker lifetimes, including
+startup, project loading and teardown. `--scope measured` explicitly excludes
+loading and the configured warmup (20 seconds by default). A callback already
+in flight completes its scope; workers update their scope at block wakeups.
+Use both scopes when distinguishing steady playback from lifecycle violations.
+The default production build contains none of these sanitizer hooks.
+
+The script builds the separate `audio-rtsan` feature with `RTSAN_ENABLE=1` and
+uses the pinned `rtsan-standalone` 0.3.0 integration. Building that feature without
+`RTSAN_ENABLE=1`, or on an unsupported target, fails instead of silently disabling
+checks. The dependency obtains the pinned upstream runtime distribution on its
+first build; the runner retains its binary and hash alongside the executables.
+
+Before playback, separate-process controls must detect Rust allocation/free and
+native `malloc`, `calloc`, `realloc`, `posix_memalign` and `free` from a library
+loaded with `dlopen`, just like a compiled instrument. A stack-only control must
+remain clean. Failed basic calibration or missing sanitizer completion stats
+invalidates the run. No suppressions are inherited from the environment.
+
+**Coverage limit:** the current runtime misses direct macOS
+`malloc_zone_malloc`/`malloc_zone_free` calls. The runner deliberately exercises
+those too and records the gap; it never labels a run a zero-allocation
+certificate. Custom allocators and unexecuted branches also require separate
+coverage. Positive violations are conclusive; absence of reports is bounded by
+the tested workload and verified interceptors. This is native call interception,
+not allocation sampling and not just Rust's global allocator.
+
+Exit status 1 means observed real-time violations, 2 means no observed violations
+but incomplete allocator coverage, and 0 requires a clean run and all calibration
+controls passing. The retained `summary.json` distinguishes unique heap reports
+from total real-time errors, which also include locks and I/O. Sanitizer logging
+and stack collection perturb execution, so its callback timings must not be used
+as performance results. It does not open or alter an existing app session.
+
 ## What the numbers mean
 
 * `process_cpu_pct`: aggregate process CPU seconds / measured wall seconds,
   on the same one-core-equals-100% scale as Activity Monitor. The UI is absent.
-* `callback_*_pct`: callback render time / frame budget, summarized as mean,
-  p50, p95, p99 and maximum. `over_budget_blocks` counts render budget misses;
+* `callback_*_pct`: whole-callback elapsed time / frame budget, summarized as mean,
+  p50, p95, p99 and maximum. `over_budget_blocks` counts callback budget misses;
   it is not a hardware/acoustic glitch detector.
+* `blocks[].phases`: wall-clock microseconds spent in snapshot/transport sync,
+  pool sync, live input, control parameters, scheduled events, voice retirement,
+  graph rendering, and post-render work. These contiguous phase timings locate
+  callback stalls that the render-only terminal warning misses. They include
+  time when the callback thread is descheduled, so a slow phase alone does not
+  distinguish computation from waiting. Phase capture is compiled only with
+  `audio-experiments` and adds no callback allocation or logging.
+* `blocks[].events`: separates countdown collection, scheduled-queue draining,
+  and event dispatch, with the dispatched count and slowest individual event.
+  `slowest_event` includes its kind, zero-based track and step, frame offset,
+  and wall time (including destruction of its owned payload). It is null when
+  no event was dispatched. Event timings have the same descheduling caveat as
+  the phase timings; they are not CPU-time profiles.
 * `cpu_pct_per_audio_second`: CPU cost normalized to frames actually rendered,
   useful when the zero-worker configuration falls behind real time.
 * `measured_late_events` and `measured_dropped_events`: change in cumulative
@@ -93,6 +151,38 @@ Timing excludes Python and uses native thread CPU time, with 256 warmup blocks,
 Stop other benchmarks/builds for the final run. This measures one effect's DSP
 cost, without voice allocation, graph scheduling, the UI, or the saved project's
 particular magnitude bank. It does not estimate four-worker transport CPU.
+
+## Steady playback Rust heap audit
+
+`audio-heap-audit` wraps Rust's global allocator and marks the complete CPAL
+callback, shared offline renderer, and native DSP helper threads. It counts
+`alloc`, `alloc_zeroed`, `realloc`, and `dealloc`; C allocations are outside this
+specific audit. Setup and warmup are excluded. Scheduler/UI allocations are
+excluded by thread scope, even when they overlap playback.
+
+Every experiment first calibrates both callback and helper roles with explicit
+allocation, zeroed allocation, reallocation and free, plus unmarked work that
+must be ignored. Calibration failure aborts. The JSON includes separate callback
+and helper counters, callback entries, actual helper thread entries, and
+`rust_heap_audit_passed`. A nonzero counter or missing thread coverage exits
+unsuccessfully after preserving the JSON result. No allocator interception or
+counter updates remain in normal builds.
+
+For garageddd B11 at its saved 156 BPM, 13 warmup bars are 20 seconds and 39
+measured bars are 60 seconds:
+
+```sh
+cargo build --release -p sequencer --features audio-heap-audit --bin audio_experiment
+python3 tools/audio-experiments/run.py \
+  --project .local/projects/garageddd.json --pattern 23 \
+  --names callback-wait-50-w4 --warmup-bars 13 --measure-bars 39 --repeat 3 \
+  --out /tmp/garageddd-rust-heap-audit
+```
+
+This is exact counting of executed Rust heap operations within the measured
+audio-thread scopes. A clean run establishes zero for that workload and interval;
+it does not prove unexecuted scenes, live edits, loading, or native allocation
+paths. Use the native sanitizer audit above when stacks or C coverage are needed.
 
 ## Parallel DSP timing in the app
 

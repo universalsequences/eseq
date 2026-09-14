@@ -2,11 +2,10 @@ use crate::accumulator::ResolvedStep;
 use crate::effects::{MAX_SLOT_PARAMS, MAX_SLOT_TENSOR_PARAMS};
 use crate::audio::MAX_VOICES;
 use arrayvec::ArrayVec;
-use std::cell::UnsafeCell;
 use std::cmp::Ordering as CmpOrdering;
-use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use crossbeam_queue::ArrayQueue;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScheduledChordData {
@@ -315,63 +314,64 @@ impl Ord for TimedEvent {
 }
 
 pub struct ScheduledEventQueue<const CAPACITY: usize> {
-    // The queue can hold large event payloads. Keeping its fixed-capacity
-    // storage inline made construction reserve tens of MiB on the caller's
-    // stack in debug builds before Arc could move it to the heap.
-    slots: Box<[UnsafeCell<MaybeUninit<ScheduledEvent>>]>,
-    head: AtomicUsize,
-    tail: AtomicUsize,
+    ready: ArrayQueue<Arc<ScheduledEvent>>,
+    // Only producers access this mutex. A retained owner guarantees that
+    // dropping a callback's event (including cancellation) cannot free its
+    // Vecs, tensors or live-send cells. Admission counts ALL outstanding
+    // events, including those already moved into callback countdown storage.
+    // Thus reclamation needs neither an overflow-prone garbage queue nor a
+    // leak fallback. The callback owns the queue until stream teardown.
+    retained: Mutex<Vec<Arc<ScheduledEvent>>>,
     rejected_events: AtomicU64,
 }
-
-unsafe impl<const CAPACITY: usize> Sync for ScheduledEventQueue<CAPACITY> {}
 
 impl<const CAPACITY: usize> ScheduledEventQueue<CAPACITY> {
     pub fn new() -> Self {
         assert!(CAPACITY >= 2, "scheduled event queue needs at least two slots");
-        let slots = (0..CAPACITY)
-            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
         Self {
-            slots,
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
+            ready: ArrayQueue::new(CAPACITY - 1),
+            retained: Mutex::new(Vec::with_capacity(CAPACITY - 1)),
             rejected_events: AtomicU64::new(0),
         }
     }
 
-    #[inline]
-    fn next_index(index: usize) -> usize {
-        (index + 1) % CAPACITY
-    }
-
-    pub fn push(&self, event: ScheduledEvent) -> Result<(), ScheduledEvent> {
-        let tail = self.tail.load(Ordering::Relaxed);
-        let next_tail = Self::next_index(tail);
-        let head = self.head.load(Ordering::Acquire);
-        if next_tail == head {
+    /// Producer only: prepare payloads and reclaim completed events here.
+    pub fn push(&self, mut event: ScheduledEvent) -> Result<(), ScheduledEvent> {
+        let mut retained = self.retained.lock().unwrap();
+        // Once this is the sole owner, no consumer can obtain another one:
+        // both ready entries and callback leases hold their own strong ref.
+        retained.retain(|event| Arc::strong_count(event) != 1);
+        if retained.len() == CAPACITY - 1 {
             self.rejected_events.fetch_add(1, Ordering::Relaxed);
             return Err(event);
         }
-
-        unsafe {
-            (*self.slots[tail].get()).write(event);
+        match &mut event.kind {
+            ScheduledEventKind::ResolvedTrigger { effect_params, .. }
+            | ScheduledEventKind::NetworkTrigger { effect_params, .. }
+            | ScheduledEventKind::EffectParams { effect_params, .. } => {
+                // Stable ordering preserves authored precedence at equal
+                // targets. Live send values are still read at dispatch time.
+                effect_params.sort_by_key(|param| (param.logical_id, param.idx));
+            }
+            _ => {}
         }
-        self.tail.store(next_tail, Ordering::Release);
+        let event = Arc::new(event);
+        retained.push(Arc::clone(&event));
+        // ready.len() <= retained.len(); producer admission reserves this slot.
+        self.ready.push(event).expect("admitted scheduled event has queue capacity");
         Ok(())
     }
 
-    pub fn pop(&self) -> Option<ScheduledEvent> {
-        let head = self.head.load(Ordering::Relaxed);
-        let tail = self.tail.load(Ordering::Acquire);
-        if head == tail {
-            return None;
-        }
+    /// Consumer: borrow an immutable payload whose destruction stays with the
+    /// producer. Retain this owner for the entire countdown/dispatch lifetime.
+    pub fn pop(&self) -> Option<Arc<ScheduledEvent>> {
+        self.ready.pop()
+    }
 
-        let event = unsafe { (*self.slots[head].get()).assume_init_read() };
-        self.head.store(Self::next_index(head), Ordering::Release);
-        Some(event)
+    /// Scheduler tests inspect owned events without borrowing their fixtures.
+    #[cfg(test)]
+    pub(crate) fn pop_owned(&self) -> Option<ScheduledEvent> {
+        self.pop().map(|event| (*event).clone())
     }
 
     /// Cumulative admission failures, including failures a producer logs and
@@ -382,14 +382,6 @@ impl<const CAPACITY: usize> ScheduledEventQueue<CAPACITY> {
 
     pub fn clear(&self) {
         while self.pop().is_some() {}
-    }
-}
-
-impl<const CAPACITY: usize> Drop for ScheduledEventQueue<CAPACITY> {
-    fn drop(&mut self) {
-        // MaybeUninit does not drop queued payloads itself. Exclusive access
-        // at destruction guarantees there can be no producer/consumer race.
-        self.clear();
     }
 }
 
@@ -458,6 +450,110 @@ mod tests {
         assert!(retained.upgrade().is_some());
         drop(queue);
         assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
+    fn queue_reclaims_payloads_only_on_producer_and_bounds_inflight_events() {
+        let queue = ScheduledEventQueue::<3>::new();
+        let event = |sample_time| ScheduledEvent {
+            pattern_epoch: 0, sample_time,
+            kind: ScheduledEventKind::InstrumentParams {
+                track: 0, instrument_params: ScheduledInstrumentParams::new(),
+                instrument_tensor_params: ScheduledInstrumentTensorParams::from_iter([
+                    super::ScheduledInstrumentTensorParam {
+                        cell_offset: 0, values: vec![1.0; 1024],
+                    },
+                ]),
+            },
+        };
+        queue.push(event(0)).unwrap();
+        queue.push(event(1)).unwrap();
+        let ((first, second), counts) = crate::test_alloc::measure(|| {
+            (queue.pop().unwrap(), queue.pop().unwrap())
+        });
+        assert_eq!(counts, crate::test_alloc::Counts::default());
+        let first_weak = std::sync::Arc::downgrade(&first);
+        let second_weak = std::sync::Arc::downgrade(&second);
+        // Empty ready queue does not release admission capacity while a
+        // callback still holds either event in its countdown storage.
+        let rejected = queue.push(event(2)).unwrap_err();
+        let (_, counts) = crate::test_alloc::measure(|| drop(second));
+        assert_eq!(counts, crate::test_alloc::Counts::default());
+        assert!(second_weak.upgrade().is_some());
+        queue.push(rejected).unwrap();
+        assert!(second_weak.upgrade().is_none());
+        assert!(first_weak.upgrade().is_some());
+        let (_, counts) = crate::test_alloc::measure(|| {
+            drop(first);
+            queue.clear();
+        });
+        assert_eq!(counts, crate::test_alloc::Counts::default());
+        drop(queue);
+        assert!(first_weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn queue_prepares_stable_effect_order_and_keeps_live_send_reads() {
+        let params = crate::sequencer::TrackParams::new();
+        params.set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination: crate::sequencer::BusId::DEFAULT_A, amount: 0.5,
+        }]);
+        let baseline = params.send_baseline(crate::sequencer::BusId::DEFAULT_A).unwrap();
+        let queue = ScheduledEventQueue::<2>::new();
+        queue.push(ScheduledEvent {
+            pattern_epoch: 0, sample_time: 0,
+            kind: ScheduledEventKind::EffectParams {
+                track: 0, effect_params: vec![
+                    ScheduledEffectParam::fixed(2, 1, 1.0),
+                    ScheduledEffectParam::fixed(1, 3, 2.0),
+                    ScheduledEffectParam::fixed(2, 1, 3.0),
+                    ScheduledEffectParam { logical_id: 1, idx: 0, value: 0.5,
+                        live_value: Some(super::LiveScheduledEffectValue::new(baseline)) },
+                ],
+            },
+        }).unwrap();
+        params.set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination: crate::sequencer::BusId::DEFAULT_A, amount: 0.75,
+        }]);
+        let (_, counts) = crate::test_alloc::measure(|| {
+            let event = queue.pop().unwrap();
+            let ScheduledEventKind::EffectParams { effect_params, .. } = &event.kind else {
+                panic!("expected effect params");
+            };
+            assert_eq!(effect_params.iter().map(|param| param.current_value())
+                .collect::<arrayvec::ArrayVec<_, 4>>().as_slice(), &[0.75, 2.0, 1.0, 3.0]);
+        });
+        assert_eq!(counts, crate::test_alloc::Counts::default());
+    }
+
+    #[test]
+    fn queue_concurrent_reuse_never_reclaims_on_consumer() {
+        let queue = std::sync::Arc::new(ScheduledEventQueue::<8>::new());
+        let consumer_queue = std::sync::Arc::clone(&queue);
+        let consumer = std::thread::spawn(move || crate::test_alloc::measure(|| {
+            for expected in 0..4096 {
+                let event = loop {
+                    if let Some(event) = consumer_queue.pop() { break event; }
+                    std::thread::yield_now();
+                };
+                assert_eq!(event.sample_time, expected);
+            }
+        }).1);
+        for sample_time in 0..4096 {
+            let mut event = ScheduledEvent {
+                pattern_epoch: 0, sample_time,
+                kind: ScheduledEventKind::EffectParams {
+                    track: 0, effect_params: vec![ScheduledEffectParam::fixed(1, 0, 0.5); 256],
+                },
+            };
+            loop {
+                match queue.push(event) {
+                    Ok(()) => break,
+                    Err(rejected) => { event = rejected; std::thread::yield_now(); }
+                }
+            }
+        }
+        assert_eq!(consumer.join().unwrap(), crate::test_alloc::Counts::default());
     }
 
     #[test]
@@ -548,7 +644,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            queue.pop(),
+            queue.pop_owned(),
             Some(ScheduledEvent {
                 pattern_epoch: 0,
                 sample_time: 10,
@@ -594,7 +690,7 @@ mod tests {
             })
         );
         assert_eq!(
-            queue.pop(),
+            queue.pop_owned(),
             Some(ScheduledEvent {
                 pattern_epoch: 0,
                 sample_time: 11,
@@ -632,7 +728,7 @@ mod tests {
                 },
             })
         );
-        assert_eq!(queue.pop(), None);
+        assert_eq!(queue.pop_owned(), None);
     }
 
     #[test]

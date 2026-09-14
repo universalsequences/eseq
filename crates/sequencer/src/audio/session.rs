@@ -87,6 +87,8 @@ pub(super) fn new_audio_callback_data(
         event_seq: 0,
         trace_audio,
         trace_callback_counter: 0,
+        #[cfg(feature = "audio-experiments")]
+        event_profile: super::experiment::EventProfile::default(),
         trace_render_probe_blocks: 0,
         trace_silent_active_callbacks: 0,
         transport_beats: 0.0,
@@ -99,6 +101,67 @@ pub(super) fn new_audio_callback_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduled_payload_dispatch_and_cancellation_do_not_touch_rust_heap() {
+        use crate::audiograph as graph;
+        use crate::effects::filter;
+        let engine = engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr.0;
+        let filter_id = unsafe { graph::add_node(
+            lg, filter::filter_vtable(), filter::FILTER_STATE_SIZE * 4,
+            c"event-heap-test".as_ptr(), 1, 1, std::ptr::null(), 0,
+        ) };
+        assert!(filter_id >= 0);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let queue = Arc::new(ScheduledEventQueue::new());
+        let mut data = new_audio_callback_data(
+            lg, Arc::clone(&engine.state), 48_000, 2, 512,
+            Arc::clone(&engine.master_recorder), rx,
+            Arc::clone(&engine.buses.bus_effect_runtime),
+            Arc::clone(&queue), Arc::new(AtomicU64::new(0)),
+        );
+        data.current_callback_nframes = 512;
+        let mut output = [0.0; 1024];
+        unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
+        let event = |pattern_epoch, sample_time| ScheduledEvent {
+            pattern_epoch, sample_time,
+            kind: ScheduledEventKind::EffectParams {
+                track: 0, effect_params: (0..256).map(|idx|
+                    ScheduledEffectParam::fixed(filter_id as u64, 0, 500.0 + idx as f32)
+                ).collect(),
+            },
+        };
+        // Normal dispatch, stale admission, then a delayed event cancelled by
+        // a scene epoch change. Even the last callback owner may be discarded.
+        queue.push(event(1, 0)).unwrap();
+        queue.push(event(0, 0)).unwrap();
+        queue.push(event(1, 4096)).unwrap();
+        let (_, counts) = crate::test_alloc::measure(|| {
+            drain_scheduled_events_for_callback(&mut data, 0, 512, 1);
+            assert_eq!(data.block_events.len(), 1);
+            assert_eq!(data.countdown_events.len(), 1);
+            dispatch_block_events_until(&mut data, 0, None);
+            collect_due_countdown_events(&mut data, 512, 2);
+            assert!(data.countdown_events.is_empty() && data.block_events.is_empty());
+        });
+        assert_eq!(counts, crate::test_alloc::Counts::default());
+        // Explicit transport clearing and range-end exclusion use the same
+        // ownership path, including events still waiting in the shared queue.
+        queue.push(event(2, 0)).unwrap();
+        queue.push(event(2, 4096)).unwrap();
+        let (_, counts) = crate::test_alloc::measure(|| {
+            drain_scheduled_events_for_callback(&mut data, 0, 512, 2);
+            dispatch_block_events_until(&mut data, 0, Some(0));
+            clear_transport_countdown_events(&mut data);
+            clear_countdown_events(&mut data);
+            queue.clear();
+        });
+        assert_eq!(counts, crate::test_alloc::Counts::default());
+        drop(data);
+        drop(queue);
+        unsafe { engine.destroy(); }
+    }
 
     #[test]
     fn legato_gate_off_resumes_displaced_sequenced_note_on_live_graph() {

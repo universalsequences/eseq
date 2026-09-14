@@ -932,8 +932,8 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
         "unrelated sampler choke group should remain active"
     );
     assert_eq!(
-        sampler_note_offs,
-        vec![RackSlotNoteOff::Sampler { logical_id: 10 }]
+        sampler_note_offs.as_slice(),
+        &[RackSlotNoteOff::Sampler { logical_id: 10 }]
     );
     assert!(
         countdown_events.is_empty(),
@@ -1024,8 +1024,8 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
         "unrelated custom choke group should remain active"
     );
     assert_eq!(
-        custom_note_offs,
-        vec![RackSlotNoteOff::Custom { logical_id: 30 }]
+        custom_note_offs.as_slice(),
+        &[RackSlotNoteOff::Custom { logical_id: 30 }]
     );
     assert!(
         countdown_events.is_empty(),
@@ -1589,7 +1589,7 @@ fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
     BlockEvent {
         frame_offset: 128,
         seq,
-        kind: BlockEventKind::Scheduled(ScheduledEvent {
+        kind: BlockEventKind::Scheduled(Arc::new(ScheduledEvent {
             pattern_epoch: 1,
             sample_time: 128,
             kind: ScheduledEventKind::ResolvedTrigger {
@@ -1624,7 +1624,7 @@ fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
                 sampler_params: ScheduledSamplerParams::default(),
                 instrument_fingerprint: 0,
             },
-        }),
+        }).into()),
     }
 }
 
@@ -1632,7 +1632,7 @@ fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
     BlockEvent {
         frame_offset: 128,
         seq,
-        kind: BlockEventKind::Scheduled(ScheduledEvent {
+        kind: BlockEventKind::Scheduled(Arc::new(ScheduledEvent {
             pattern_epoch: 1,
             sample_time: 128,
             kind: ScheduledEventKind::NetworkTrigger {
@@ -1668,7 +1668,7 @@ fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
                 sampler_params: ScheduledSamplerParams::default(),
                 instrument_fingerprint: 0,
             },
-        }),
+        }).into()),
     }
 }
 
@@ -1682,6 +1682,30 @@ fn mute_group_same_sample_uses_highest_track_as_winner() {
     });
 
     assert_eq!(winner, 2);
+}
+
+#[test]
+fn delayed_event_track_remap_keeps_shared_payload_without_heap_work() {
+    let BlockEventKind::Scheduled(mut event) = test_block_network_trigger(0, 3).kind else {
+        unreachable!();
+    };
+    // Keep a scheduler owner just as the production handoff does.
+    let owner = Arc::clone(&event.event);
+    event.seed = Some((3, 7));
+    let (_, counts) = crate::test_alloc::measure(|| {
+        assert!(super::remap_scheduled_event_after_track_delete(&mut event, 1));
+        assert_eq!(super::scheduled_trigger_track(&event), Some(2));
+        assert_eq!(event.seed, Some((2, 7)));
+        assert!(Arc::ptr_eq(&owner, &event.event));
+        // Removing the seed only preserves the target note without its key
+        // lock source; deleting the target itself cancels the delayed note.
+        event.seed = Some((1, 7));
+        assert!(super::remap_scheduled_event_after_track_delete(&mut event, 1));
+        assert_eq!(event.seed, None);
+        assert!(!super::remap_scheduled_event_after_track_delete(&mut event, 1));
+        drop(event);
+    });
+    assert_eq!(counts, crate::test_alloc::Counts::default());
 }
 
 #[test]

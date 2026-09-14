@@ -80,8 +80,11 @@ fn rack_retrig_schedules_every_layer_and_chord_voice_with_resolved_gates() {
     chord.durations[0] = 0.1;
     let interval = retrig_interval_samples(&resolved, data.sample_rate, data.scheduler_snapshot.transport.bpm as f64);
     let fire = |data: &mut AudioCallbackData, resolved, chord| {
-        fire_rack_resolved(data, 17, 0, 0, None, 6000.0, resolved, chord,
-            rack.clone(), [None; crate::sequencer::RACK_MACRO_COUNT]);
+        let (_, heap) = crate::test_alloc::measure(|| {
+            fire_rack_resolved(data, 17, 0, 0, None, 6000.0, resolved, chord,
+                &rack, [None; crate::sequencer::RACK_MACRO_COUNT]);
+        });
+        assert_eq!(heap, crate::test_alloc::Counts::default());
     };
     fire(&mut data, resolved, chord);
     let repeats: Vec<_> = data.countdown_events.iter().filter_map(|event| {
@@ -171,6 +174,6 @@ fn rack_retrig_schedules_every_layer_and_chord_voice_with_resolved_gates() {
         slot.max_polyphony = 1;
     }
     fire_rack_resolved(&mut data, 17, 0, 0, None, 6000.0, resolved, chord,
-        mono_rack, [None; crate::sequencer::RACK_MACRO_COUNT]);
+        &mono_rack, [None; crate::sequencer::RACK_MACRO_COUNT]);
     assert_eq!(data.countdown_events.iter().filter(|event| matches!(event.kind, CountdownEventKind::Retrig(_))).count(), 2);
 }

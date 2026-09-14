@@ -18,6 +18,7 @@
 //! the effect path only), equal-power dry/wet, and an output trim.
 
 use crate::audiograph::NodeVTable;
+use arrayvec::ArrayVec;
 use std::os::raw::{c_int, c_void};
 
 // Power of two so reads wrap with a mask. Worst case is the doubler: 100 ms
@@ -342,7 +343,7 @@ unsafe fn line_read(buf: *const f32, wpos: usize, delay: f32) -> f32 {
 /// Allpass center-frequency layout for the phaser, before modulation. The
 /// resulting global dry/allpass sum has one notch near each center. This math
 /// is dual-maintained with the `phaser-notch` UI widget.
-pub fn notch_frequencies(notches: usize, center: f32, spread: f32, sr: f32) -> Vec<f32> {
+pub fn notch_frequencies(notches: usize, center: f32, spread: f32, sr: f32) -> ArrayVec<f32, MAX_NOTCHES> {
     let n = notches.clamp(1, MAX_NOTCHES);
     let center = super::nyquist_clamp(center, sr, 20.0, 0.45);
     let spread = spread.clamp(0.0, 1.0);
@@ -364,7 +365,7 @@ fn stack_notch_frequencies(
     spread: f32,
     blend: f32,
     sr: f32,
-) -> Vec<f32> {
+) -> ArrayVec<f32, MAX_NOTCHES> {
     let n = notches.clamp(1, MAX_NOTCHES);
     let center = super::nyquist_clamp(center, sr, 20.0, 0.45);
     let spread = spread.clamp(0.0, 1.0);
@@ -975,7 +976,7 @@ mod tests {
                 mod4.as_mut_ptr(),
             ];
             let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
-            unsafe {
+            let (_, heap) = crate::test_alloc::measure(|| unsafe {
                 phaser_flanger_process(
                     inputs.as_ptr(),
                     outputs.as_ptr(),
@@ -983,7 +984,9 @@ mod tests {
                     state.as_mut_ptr() as *mut c_void,
                     std::ptr::null_mut(),
                 );
-            }
+            });
+            assert_eq!(heap, crate::test_alloc::Counts::default(),
+                "phaser/flanger DSP must not allocate or free, including its first block");
             for i in 0..frames {
                 r.in_l[pos + i] = in_l[i];
                 r.out_l[pos + i] = out_l[i];
@@ -993,6 +996,26 @@ mod tests {
         // Stash final state for phase inspection.
         LAST_LFO_PHASE.with(|p| p.set(state[STATE_LFO_PHASE]));
         r
+    }
+
+    #[test]
+    fn every_circuit_and_mode_processes_without_heap_activity() {
+        for circuit in [PHASER_CIRCUIT_STACK, PHASER_CIRCUIT_CLASSIC] {
+            for mode in 0..=2 {
+                for notches in [1, MAX_NOTCHES] {
+                    let output = render_with_mods(
+                        &[(STATE_MODE, mode as f32), (STATE_PHASER_CIRCUIT, circuit as f32),
+                            (STATE_NOTCHES, notches as f32), (STATE_AMOUNT, 1.0),
+                            (STATE_FEEDBACK, 0.8), (STATE_MIX, 0.5)],
+                        [0.25, -0.25, 0.5, 0.0],
+                        |i| { let sample = (i as f32 * 0.07).sin() * 0.25; (sample, -sample) },
+                        BLOCK * 8,
+                    );
+                    assert!(output.out_l.iter().all(|sample| sample.is_finite()));
+                    assert!(output.out_l.iter().any(|sample| sample.abs() > 0.001));
+                }
+            }
+        }
     }
 
     thread_local! {
