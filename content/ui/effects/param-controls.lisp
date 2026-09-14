@@ -14,6 +14,9 @@
         process-map-arm-port
         process-map-clear
         process-param-bindable?
+        process-send-bindable?
+        process-bind-send-target
+        process-send-map-wrapper
         param-macro-mapping-active?
         param-macro-structure-key
         instrument-key-lock-has-selection?
@@ -162,7 +165,7 @@
     (if (= process-map-target-kind "")
       true
       (if (= process-map-target-kind "device-param")
-        (or (= kind "instrument") (= kind "effect") (= kind "midi-fx"))
+        (or (= kind "instrument") (= kind "effect") (= kind "midi-fx") (= kind "bus-send"))
         (if (= process-map-target-kind "instrument-param")
           (= kind "instrument")
           (if (= process-map-target-kind "effect-param")
@@ -189,6 +192,42 @@
   (if (and (process-map-active?) (process-param-bindable? fx p))
     (rgba 0.93 0.65 0.16 0.25)
     :transparent))
+
+;; Mixer / track-panel bus sends as process targets. A process writes on
+;; its own track, so only that track's send knobs light up while mapping:
+;; clicking another strip's send would silently bind this track's send.
+;; `send` is one SEQ.track-bus-sends entry (:bus-id :bus-idx :name).
+(def process-send-target-map (send)
+  (dict :kind "bus-send" :bus-id (get send :bus-id) :bus-idx (get send :bus-idx)
+        :param (get send :name)))
+
+(def process-send-bindable? (track send)
+  (and (process-map-active?)
+       (= track process-map-track)
+       (process-map-target-compatible? (process-send-target-map send))))
+
+(def process-bind-send-target (track send)
+  (if (process-send-bindable? track send)
+    (do
+      (seq-bind-process-port process-map-track process-map-instance-id process-map-port
+        (process-send-target-map send))
+      (process-map-clear))
+    nil))
+
+;; Same box treatment as the instrument-knob map wrapper above: the box
+;; captures the pointer so a click binds instead of starting a knob drag.
+(def process-send-map-wrapper (track send key body)
+  (if (process-send-bindable? track send)
+    (subtree :key (str key "-process-map")
+      (box :background-color (rgba 0.93 0.65 0.16 0.25)
+        :debug-name "process-send-map-wrapper"
+        :corner-radius 8
+        :border-width 1
+        :padding 0.08
+        :capture-pointer true
+        :on-click (lambda (info) (process-bind-send-target track send))
+        body))
+    body))
 
 (def param-macro-mapping-active? ()
   (or (and ms/mapping-open (>= ms/mapping-selected 0))

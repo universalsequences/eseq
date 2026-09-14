@@ -350,3 +350,30 @@ connectable out ports on one row and its wireable in ports on the next.
   non-process tests fail here but not in that worktree (conv_reverb wet arm,
   filter_table_causal click, custom_ui moved-folder dispatch,
   read_mod_display_values) and are believed environmental, not verified.
+
+
+## Bus-send targets (rev 5, shipped 2026-09-14; beads eseq-jmi9)
+
+A mappable port can now drive a track's mixer send. `ParamTarget::BusSend
+{ bus }` addresses the bus by project-stable id (never graph node id) and,
+like every other target, writes on the process's own track.
+
+- **Arm + click.** While a port is armed, the mixer strip and track panel
+  send knobs of that track (and only that track: clicking another strip's
+  send would silently bind this track's send) take the amber map overlay;
+  a click binds `(dict :kind "bus-send" :bus-id N)`. `device-param` ports
+  accept it alongside instrument / effect / MIDI-FX params.
+- **Scheduler.** `process_apply_bus_send_write` builds on exactly what
+  `resolve_track_send_params` would schedule for the step (send p-lock,
+  else the live mixer baseline, else the snapshot amount), applies
+  Set/Add, clamps to 0..1 and pins the left/right runtime targets as
+  plain values (`live_value: None`) so dispatch does not re-read the live
+  cell and undo the write. The mixer knob stays the editable base.
+- **Routing edge.** The scheduler can only address a send the track lists.
+  `bind-port` / `add-fanout` with a bus-send target first push a zero
+  `TrackSendSnapshot` for that bus (all active tracks under `scope: all`)
+  through `SetTrackSends`, outside the recorded scene-structure mutation so
+  the graph edit keeps its own history entry. A bus the track still does
+  not route to is traced as `bus-send-not-routed` and skipped.
+- Sends are not macro-mappable through this variant: `MacroParamKey::from_target`
+  returns `None` for it, like step params.

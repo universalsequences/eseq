@@ -19,6 +19,16 @@ use crate::scheduled_event::StepEvent;
 use crate::sequencer::{StepParam, NUM_PARAMS};
 
 pub const DEFAULT_PROCESS_PORT: &str = "__default";
+
+/// Short label for a `ParamTarget::BusSend` bus id: the two default buses
+/// read as the mixer's "A"/"B" send knobs, anything else by id.
+pub fn bus_send_label(bus: u64) -> String {
+    match bus {
+        crate::sequencer::DEFAULT_BUS_A_ID => "A".to_string(),
+        crate::sequencer::DEFAULT_BUS_B_ID => "B".to_string(),
+        other => format!("bus{other}"),
+    }
+}
 /// Exact retained depth for both grid-step and fired-trigger reads. Keeping a
 /// fixed, documented window makes scheduler memory independent of authored
 /// process input while covering sixteen bars at sixteenth-note resolution.
@@ -208,6 +218,7 @@ impl ProcessTargetKind {
                 ParamTarget::InstrumentParam { .. }
                     | ParamTarget::EffectParam { .. }
                     | ParamTarget::MidiFxParam { .. }
+                    | ParamTarget::BusSend { .. }
             ),
             Self::InstrumentParam => matches!(target, ParamTarget::InstrumentParam { .. }),
             Self::EffectParam => matches!(target, ParamTarget::EffectParam { .. }),
@@ -376,6 +387,12 @@ pub enum ParamTarget {
     },
     RackMacroParam {
         macro_id: u8,
+    },
+    /// A track's send level into a mix bus (the mixer "sends" knobs). The
+    /// bus is addressed by its project-stable id, never by graph node id.
+    /// Applied on the process's own track, like every other target.
+    BusSend {
+        bus: u64,
     },
 }
 

@@ -91,6 +91,9 @@ pub(super) fn process_target_label(target: &crate::process::ParamTarget) -> Stri
         crate::process::ParamTarget::RackMacroParam { macro_id } => {
             format!("rack-macro:{}", macro_id + 1)
         }
+        crate::process::ParamTarget::BusSend { bus } => {
+            format!("send:{}", crate::process::bus_send_label(*bus))
+        }
     }
 }
 
@@ -401,6 +404,75 @@ pub(super) fn process_apply_effect_write(
     scheduled.value = process_device_write_value(param_desc, current, op, value);
     upsert_effect_params(&mut overlay.effect_params, [scheduled.clone()]);
     Some(scheduled)
+}
+
+/// A process write onto a track's bus send. The base is exactly what
+/// `resolve_track_send_params` would schedule for this step (step lock,
+/// else the live mixer baseline, else the snapshot amount); the result is
+/// pinned as a plain value so dispatch does not re-read the live cell and
+/// undo the write. Returns the effective send amount, or `None` when the
+/// track has no runtime edge to that bus yet.
+pub(super) fn process_apply_bus_send_write(
+    snapshot: &SequencerSnapshot,
+    track: usize,
+    step: usize,
+    bus: u64,
+    op: crate::process::ProcessTargetOp,
+    value: f32,
+    overlay: &mut ProcessTargetOverlay,
+) -> Option<f32> {
+    let track_snapshot = snapshot.tracks.get(track)?;
+    let destination = crate::sequencer::BusId(bus);
+    let target = track_snapshot
+        .track_send_runtime_targets
+        .iter()
+        .find(|target| target.destination == destination)?;
+    let step_lock = track_snapshot
+        .steps
+        .get(step)
+        .and_then(|step| {
+            step.track_send_plocks
+                .iter()
+                .find(|send| send.destination == destination)
+        })
+        .map(|send| send.amount.clamp(0.0, 1.0));
+    let base = step_lock.unwrap_or_else(|| {
+        track_snapshot
+            .track_send_live_baselines
+            .iter()
+            .find(|(bus, _)| *bus == destination)
+            .map(|(_, baseline)| baseline.load())
+            .unwrap_or_else(|| {
+                track_snapshot
+                    .params
+                    .sends
+                    .iter()
+                    .find(|send| send.destination == destination)
+                    .map(|send| send.amount)
+                    .unwrap_or(0.0)
+            })
+    });
+    let current = overlay
+        .effect_params
+        .iter()
+        .find(|existing| existing.logical_id == target.left_id && existing.idx == 0)
+        .map(|existing| existing.value)
+        .unwrap_or(base);
+    let effective = match op {
+        crate::process::ProcessTargetOp::Set => value,
+        crate::process::ProcessTargetOp::Add => current + value,
+    }
+    .clamp(0.0, 1.0);
+    upsert_effect_params(
+        &mut overlay.effect_params,
+        [target.left_id, target.right_id].map(|logical_id| ScheduledEffectParam {
+            logical_id,
+            idx: 0,
+            value: effective,
+            live_value: None,
+        }),
+    );
+    Some(effective)
 }
 
 pub(super) fn process_apply_midi_fx_write(
@@ -1038,6 +1110,39 @@ pub(super) fn process_apply_concrete_target_write(
                 }
                 .clamp(0.0, 1.0),
             );
+        }
+        crate::process::ParamTarget::BusSend { bus } => {
+            match process_apply_bus_send_write(
+                snapshot,
+                track,
+                step,
+                *bus,
+                write.op,
+                write.value,
+                overlay,
+            ) {
+                Some(effective) => process_trace(snapshot, || {
+                    format!(
+                        "apply track={} step={} port={} target={} op={} value={} -> send={}",
+                        track + 1,
+                        step,
+                        write.port,
+                        process_target_label(target),
+                        process_target_op_label(write.op),
+                        write.value,
+                        effective
+                    )
+                }),
+                None => process_trace(snapshot, || {
+                    format!(
+                        "skip track={} step={} port={} target={} reason=bus-send-not-routed",
+                        track + 1,
+                        step,
+                        write.port,
+                        process_target_label(target)
+                    )
+                }),
+            }
         }
     }
 }

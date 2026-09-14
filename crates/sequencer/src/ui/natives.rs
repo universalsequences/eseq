@@ -467,6 +467,15 @@ pub(super) fn param_target_from_value(
             "rack process-port bindings are not exposed until rack dispatch supports them"
                 .to_string(),
         ),
+        "bus-send" | "bus_send" | "send" => {
+            let bus = value_number_field(value, "bus-id")
+                .or_else(|| value_number_field(value, "bus_id"))
+                .ok_or_else(|| "bus-send process target must include :bus-id".to_string())?;
+            if bus as u64 == sequencer::sequencer::MIX_BUS_ID {
+                return Err("the mix bus has no send".to_string());
+            }
+            Ok(sequencer::process::ParamTarget::BusSend { bus: bus as u64 })
+        }
         "bus-effect" | "bus-fx" => {
             Err("bus FX process-port bindings are not supported".to_string())
         }
@@ -3347,6 +3356,7 @@ pub(crate) fn init_runtime(
                 ("recording", Value::Bool(false)),
                 ("master-recording", Value::Bool(false)),
                 ("cpu-load-pct", Value::Number(0.0)),
+                ("cpu-overloaded", Value::Bool(false)),
                 (
                     "output-latency-ms",
                     Value::Number((state.pdc_latency_seconds() * 1000.0) as f64),
@@ -3475,12 +3485,30 @@ pub(crate) fn init_runtime(
                     Box::leak(format!("modulator-level-{idx}").into_boxed_str()),
                     Value::Number(1.0),
                 ));
+                for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
+                    fields.push((
+                        Box::leak(mod_in_level_field(idx, input).into_boxed_str()),
+                        Value::Number(0.0),
+                    ));
+                }
+                fields.push((
+                    Box::leak(mod_out_level_field(idx).into_boxed_str()),
+                    Value::Number(0.0),
+                ));
             }
             for idx in 0..app.buses.len() {
                 fields.push((
                     Box::leak(format!("bus-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),
                 ));
+            }
+            for bus in &app.buses {
+                for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
+                    fields.push((
+                        Box::leak(bus_mod_in_level_field(bus.id.0, input).into_boxed_str()),
+                        Value::Number(0.0),
+                    ));
+                }
             }
             for track in 0..track_count {
                 for (bus_idx, bus) in app.buses.iter().enumerate() {
@@ -7972,6 +8000,25 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bus_send_process_target_parses_by_bus_id_and_rejects_the_mix_bus() {
+        let state = SequencerState::new(1, vec![]);
+        let target = |bus: f64| {
+            let mut map = HashMap::new();
+            map.insert(
+                "kind".to_string(),
+                Rc::new(RefCell::new(Value::String("bus-send".to_string()))),
+            );
+            map.insert("bus-id".to_string(), Rc::new(RefCell::new(Value::Number(bus))));
+            Value::Map(map)
+        };
+        assert_eq!(
+            param_target_from_value(&state, 0, &target(2.0)),
+            Ok(sequencer::process::ParamTarget::BusSend { bus: 2 })
+        );
+        assert!(param_target_from_value(&state, 0, &target(0.0)).is_err());
+    }
 
     #[test]
     fn step_selection_disarms_delete_targets_even_when_selection_is_unchanged() {

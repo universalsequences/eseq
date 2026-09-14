@@ -104,6 +104,9 @@ pub(super) fn process_param_target_label(target: &sequencer::process::ParamTarge
         sequencer::process::ParamTarget::RackMacroParam { macro_id } => {
             format!("rack-macro:macro_{}", macro_id + 1)
         }
+        sequencer::process::ParamTarget::BusSend { bus } => {
+            format!("send:{}", sequencer::process::bus_send_label(*bus))
+        }
     }
 }
 
@@ -478,6 +481,10 @@ pub(super) fn macro_mapping_target_value(target: &sequencer::process::ParamTarge
         ParamTarget::RackMacroParam { macro_id } => {
             entries.push(("kind", Value::String("rack-macro".to_string())));
             entries.push(("macro-id", Value::Number(*macro_id as f64)));
+        }
+        ParamTarget::BusSend { bus } => {
+            entries.push(("kind", Value::String("bus-send".to_string())));
+            entries.push(("bus-id", Value::Number(*bus as f64)));
         }
     }
     map_value(entries)

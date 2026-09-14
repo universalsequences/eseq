@@ -376,6 +376,31 @@
 (def mod-route-sources (dest input)
   (mod-route-sources-at "track" dest input 0 (list)))
 
+;; True when any mod route leaves `source`'s OUT port; only a connected OUT
+;; port lights with its signal.
+(def mod-route-from-at (source idx)
+  (if (>= idx (len SEQ.mod-routes))
+    false
+    (or (= (get (nth SEQ.mod-routes idx) :source) source)
+      (mod-route-from-at source (+ idx 1)))))
+
+(def track-mod-out-connected? (track)
+  (mod-route-from-at track 0))
+
+;; Live port levels published by the host at meter rate (see
+;; read_mod_port_levels): bound by reference so a level change repaints the
+;; port without re-running the strip.
+(def mod-out-level (track)
+  (if (track-mod-out-connected? track)
+    (bind-seq (str "mod-out-level-" track))
+    0))
+
+(def mod-in-level (track input)
+  (bind-seq (str "mod-in-level-" track "-" input)))
+
+(def bus-mod-in-level (bus-id input)
+  (bind-seq (str "bus-mod-in-level-" bus-id "-" input)))
+
 (def bus-mod-route-sources (bus-id input)
   (mod-route-sources-at "bus" bus-id input 0 (list)))
 
@@ -459,8 +484,13 @@
 (defwidget mixer-v2-mod-port
   :width 1.55 :height 1.55
   :paint-margin 0.12
-  :state (active pending output selected)
+  :state (active pending output selected level)
+  :bindable (level)
   :shader
+  ;; `level` is the live mod signal at this port (0..1, bound to the SEQ
+  ;; mod-*-level fields at meter rate). It lights the port like a VCV Rack
+  ;; jack LED: the dark centre fills with the ring colour and the ring itself
+  ;; brightens a little.
   (let ((outer (if active
           (if selected
             :mod-port-selected
@@ -470,12 +500,16 @@
           :mod-port-inactive))
       (inner (if active
           (if output :mod-port-output-inner :mod-port-input-inner)
-          :mod-port-inactive-inner)))
+          :mod-port-inactive-inner))
+      (glow (* 0.9 (clamp level 0.0 1.0)))
+      (ring-lift (* 0.3 glow)))
     (sdf/layer
       (sdf/fill (sdf/circle 0.82)
-        (material :color outer))
+        (material :color (+ (* outer (rgba (- 1.0 ring-lift) (- 1.0 ring-lift) (- 1.0 ring-lift) 1.0))
+                            (rgba ring-lift ring-lift ring-lift 0.0))))
       (sdf/fill (sdf/circle 0.43)
-        (material :color inner)))))
+        (material :color (+ (* inner (rgba (- 1.0 glow) (- 1.0 glow) (- 1.0 glow) 1.0))
+                            (* outer (rgba glow glow glow 0.0))))))))
 
 (defwidget track-pattern-cell-bg
   :width 0.88 :height 0.38
@@ -648,6 +682,7 @@
       :pending (= pending-mod-source track)
       :output true
       :selected false
+      :level (mod-out-level track)
       :style (if (track-mod-output? track) mod-output-style nil)
       :on-click |x y r| (mod-out-click track)
       :on-mouse-down |x y r| (mod-out-click track)
@@ -672,6 +707,7 @@
           :pending false
           :output false
           :selected (> (len (selected-mod-sources track input)) 0)
+          :level (mod-in-level track input)
           :on-patch-drop (lambda (source dest input)
             (do
               (connect-mod-route source dest input)
@@ -699,6 +735,7 @@
           :pending false
           :output false
           :selected (> (len (selected-bus-mod-sources bus-id input)) 0)
+          :level (bus-mod-in-level bus-id input)
           :on-patch-drop (lambda (source dest input)
             (do
               (connect-bus-mod-route source bus-id input)
@@ -826,6 +863,7 @@
     (box :debug-name (str "track-" track "-send-" (get send :bus-idx) "-plock")
       :plock-any (if has-locks 1 0)
       :on-right-click (lambda (event) (pc/open-target-plock-menu event target has-locks))
+      (pc/process-send-map-wrapper track send (str "track-" track "-send-" (get send :bus-idx))
       (knob-number :label (send-label (get send :name))
         :key (str "track-" track "-send-" (get send :bus-idx))
         :value (bind-seq field)
@@ -843,7 +881,7 @@
           (do
             (clear-delete-target)
             (host-command "set-track-bus-send"
-              (dict :track track :bus (get send :bus-idx) :amount v))))))))
+              (dict :track track :bus (get send :bus-idx) :amount v)))))))))
 
 (def track-strip (i)
   (let ((sends (nth SEQ.track-bus-sends i)))
@@ -857,7 +895,7 @@
       :background-color :mixer-strip-bg
       :selected-background-color :mixer-strip-selected-bg
       :muted-background-color :mixer-strip-muted-bg
-      :border-width 2
+      :border-width 4
       :corner-radius 16
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border

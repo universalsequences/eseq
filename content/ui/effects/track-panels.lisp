@@ -64,6 +64,8 @@
     fallback))
 
 (def track-bus-send-control (send)
+  (pc/process-send-map-wrapper SEQ.current-track send
+    (str "tp-bus-send-" (get send :bus-idx))
   (v-stack :align :center :gap 0.25
     (h-stack :gap 0.25 :align :baseline
       (label (substring (get send :name) 0 8) :font-size 9 :color :dim :bg :transparent)
@@ -85,7 +87,7 @@
           (do
             (eseq.seq-core-state/cool-off-follow)
             (host-command "set-track-bus-send"
-              (dict :bus (get send :bus-idx) :amount v))))))))
+              (dict :bus (get send :bus-idx) :amount v)))))))))
 
 (def plock-set-value (p v)
   (do

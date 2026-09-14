@@ -1,7 +1,8 @@
     use super::{
         apply_fit_to_scale_to_trigger, apply_neuron_output_overrides, delayed_step_sample_time,
         enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, invoke_process_cascade,
-        midi_fx_window_events_from_step, process_device_write_value, quantized_live_tick_sample,
+        midi_fx_window_events_from_step, process_apply_concrete_target_write,
+        process_device_write_value, quantized_live_tick_sample,
         reconcile_graph_runtimes, resolve_effect_defaults, resolve_effect_params,
         resolve_effect_plocks, resolve_instrument_plocks,
         reconcile_playing_topology_change, resolve_sampler_params, resolve_track_send_params,
@@ -9,7 +10,8 @@
         should_reload_neural_runtime, topology_edit_frontier_drained,
         swing_delay_samples_from_quarter, swung_network_sample_time,
         track_active_note_spans_at_beat,
-        track_note_spans_for_trigger, EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent,
+        track_note_spans_for_trigger, upsert_effect_params, EmittedNetworkEventSource,
+        LiveMidiFxTrackState, MidiFxEvent, ProcessTargetOverlay,
         MidiFxQuantizerState, SchedulerLookaheadState, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
@@ -70,6 +72,79 @@
             restored.iter().map(|param| (param.logical_id, param.value)).collect::<Vec<_>>(),
             vec![(700, 0.2), (701, 0.2)],
         );
+    }
+
+    #[test]
+    fn process_bus_send_write_overrides_the_scheduled_send_level() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let destination = crate::sequencer::BusId::DEFAULT_A;
+        state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination,
+            amount: 0.2,
+        }]);
+        state.pattern.track_send_plocks[0].set(3, destination, 0.85);
+        state.set_track_send_runtime_targets(0, vec![crate::sequencer::TrackSendRuntimeTarget {
+            destination,
+            left_id: 700,
+            right_id: 701,
+        }]);
+        let snapshot = state.publish_scheduler_snapshot();
+        let target = crate::process::ParamTarget::BusSend { bus: destination.0 };
+        let write = |op, value| crate::process::ProcessTargetWrite {
+            port: "out".to_string(),
+            target: None,
+            op,
+            value,
+        };
+        let mut resolved = crate::generator::default_resolved();
+
+        // Add builds on the mixer baseline and pins the result: dispatch must
+        // not re-read the live cell and undo the write.
+        let mut overlay = ProcessTargetOverlay::default();
+        process_apply_concrete_target_write(
+            &snapshot, &[], 0, 0, &mut resolved, &mut overlay, &target,
+            &write(crate::process::ProcessTargetOp::Add, 0.5),
+        );
+        let mut params = resolve_track_send_params(&snapshot, 0, 0);
+        upsert_effect_params(&mut params, overlay.effect_params.clone());
+        assert_eq!(
+            params.iter().map(|param| (param.logical_id, param.value)).collect::<Vec<_>>(),
+            vec![(700, 0.7), (701, 0.7)],
+        );
+        assert!(params.iter().all(|param| param.live_value.is_none()));
+
+        // A step lock is the base on a locked step; the sum clamps to 1.
+        let mut overlay = ProcessTargetOverlay::default();
+        process_apply_concrete_target_write(
+            &snapshot, &[], 0, 3, &mut resolved, &mut overlay, &target,
+            &write(crate::process::ProcessTargetOp::Add, 0.5),
+        );
+        assert!(overlay.effect_params.iter().all(|param| param.value == 1.0));
+
+        // Set replaces outright, and a second write in the same fire chains
+        // on the first.
+        let mut overlay = ProcessTargetOverlay::default();
+        process_apply_concrete_target_write(
+            &snapshot, &[], 0, 0, &mut resolved, &mut overlay, &target,
+            &write(crate::process::ProcessTargetOp::Set, 0.3),
+        );
+        process_apply_concrete_target_write(
+            &snapshot, &[], 0, 0, &mut resolved, &mut overlay, &target,
+            &write(crate::process::ProcessTargetOp::Add, 0.1),
+        );
+        assert!(overlay
+            .effect_params
+            .iter()
+            .all(|param| (param.value - 0.4).abs() < 1.0e-6));
+
+        // A bus the track does not route to is skipped, not invented.
+        let mut overlay = ProcessTargetOverlay::default();
+        process_apply_concrete_target_write(
+            &snapshot, &[], 0, 0, &mut resolved, &mut overlay,
+            &crate::process::ParamTarget::BusSend { bus: crate::sequencer::BusId::DEFAULT_B.0 },
+            &write(crate::process::ProcessTargetOp::Set, 0.3),
+        );
+        assert!(overlay.effect_params.is_empty());
     }
 
     #[test]

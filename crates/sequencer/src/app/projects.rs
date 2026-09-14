@@ -157,7 +157,9 @@ pub(super) fn resolve_live_macro_target(
                 key: MacroParamKey::for_instrument(track, param_idx, param_id),
             })
         }
-        ParamTarget::StepParam { .. } | ParamTarget::ProcessInlet { .. } => None,
+        ParamTarget::StepParam { .. }
+            | ParamTarget::ProcessInlet { .. }
+            | ParamTarget::BusSend { .. } => None,
         _ => Some(ResolvedMacroTarget {
             target: target.clone(),
             key: MacroParamKey::from_target(scope, target, None)?,

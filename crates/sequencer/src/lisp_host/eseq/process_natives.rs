@@ -2419,6 +2419,9 @@ pub(in crate::lisp_host) fn process_param_target_label_for_error(target: &crate:
         crate::process::ParamTarget::RackMacroParam { macro_id } => {
             format!("rack-macro:{}", macro_id + 1)
         }
+        crate::process::ParamTarget::BusSend { bus } => {
+            format!("send:{}", crate::process::bus_send_label(*bus))
+        }
     }
 }
 

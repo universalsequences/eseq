@@ -327,7 +327,9 @@ impl MacroParamKey {
             ParamTarget::RackMacroParam { macro_id } => {
                 Some(Self::for_rack_macro(track, *macro_id))
             }
-            ParamTarget::StepParam { .. } | ParamTarget::ProcessInlet { .. } => None,
+            ParamTarget::StepParam { .. }
+            | ParamTarget::ProcessInlet { .. }
+            | ParamTarget::BusSend { .. } => None,
         }
     }
 }

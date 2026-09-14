@@ -239,6 +239,40 @@ pub(super) fn handle(
             // `scope: "all"` writes the shared project slot (every track);
             // the default forks the slot for this track only.
             let all_tracks = matches!(field("scope"), Some(Value::String(scope)) if scope == "all");
+            // A bus-send target needs a persistent graph edge on every track
+            // it will write to, exactly like a send p-lock at a zero baseline:
+            // the scheduler addresses sends through runtime targets that only
+            // exist once the track lists that destination. Done before the
+            // recorded mutation so the graph edit keeps its own history entry.
+            if matches!(op.as_str(), "bind-port" | "add-fanout") {
+                if let Some(sequencer::process::ParamTarget::BusSend { bus }) = field("target")
+                    .and_then(|target| natives::param_target_from_value(&app.state, track, &target).ok())
+                {
+                    let destination = sequencer::sequencer::BusId(bus);
+                    let tracks: Vec<usize> = if all_tracks {
+                        (0..state.active_track_count()).collect()
+                    } else {
+                        vec![track]
+                    };
+                    for track in tracks {
+                        let Some(params) = app.state.pattern.track_params.get(track) else {
+                            continue;
+                        };
+                        let mut sends = params.sends();
+                        if sends.iter().any(|send| send.destination == destination) {
+                            continue;
+                        }
+                        sends.push(sequencer::sequencer::TrackSendSnapshot {
+                            destination,
+                            amount: 0.0,
+                        });
+                        app::apply_command(
+                            &mut app,
+                            app::AppCommand::SetTrackSends { track, sends },
+                        );
+                    }
+                }
+            }
             let result = app.apply_recorded_scene_structure_mutation("Edit process chain", |app| {
                 let changed = match op.as_str() {
                     "set-lane-step" => {
@@ -2112,6 +2146,7 @@ mod tests {
                     cached_bus_peak_levels: Vec::new(),
                     cached_modulator_phases: Vec::new(),
                     cached_modulator_levels: Vec::new(),
+                    cached_mod_port_levels: Default::default(),
                     cached_mod_display_values: Default::default(),
                     watched_display_modulators: std::collections::HashSet::new(),
                     mod_display_poll_fx_epoch: usize::MAX,
