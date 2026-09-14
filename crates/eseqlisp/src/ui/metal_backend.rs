@@ -4043,6 +4043,40 @@ fragment float4 live_spectrogram_frag(
             }
             enc.setScissorRect(mtl_scissor(scene_scissor));
 
+            // ── Global patch cables ────────────────────────────────────────
+            // The live tiled renderer draws mod-matrix and lane-patchbay
+            // cables after the tiles, from every patch-port widget rect in
+            // the layout. Captures run the same pass so a wired patchbay
+            // renders its cables rather than bare ports. No cursor: there is
+            // no drag preview offscreen.
+            if let Some(layout) = frame.widget_layout.as_ref() {
+                let mut mod_patch_ports = Vec::new();
+                collect_mod_patch_ports(
+                    layout,
+                    -frame.widget_layout_scroll_left,
+                    -(frame.widget_scroll_top + frame.text_scroll_top as f32),
+                    cell_w,
+                    cell_h,
+                    scene_scissor,
+                    &mut mod_patch_ports,
+                );
+                if !mod_patch_ports.is_empty()
+                    && let Some(cable_pipeline) = self.patch_cable_pipeline.clone()
+                {
+                    let cables =
+                        build_mod_patch_cables(&mod_patch_ports, vp_w, vp_h, (-1.0e6, -1.0e6));
+                    draw_patch_cable_instances(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        &cable_pipeline,
+                        &cables,
+                    );
+                    enc.setScissorRect(mtl_scissor(scene_scissor));
+                }
+            }
+
             // ── Overlay stage (dropdown menus, modal panels, etc.) ─────────
             // Drawn after the main scene with the same ordered, clip-
             // segmented path as the live global overlay pass, so captures

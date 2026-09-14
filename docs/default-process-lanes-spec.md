@@ -36,6 +36,9 @@ Chain order is dropdown order. Lane names have no instance prefix.
 | `grab` | float lane 0..1 amount | note/transpose grab | `target-add!` of `(read (track source :transpose :steps-ago lag))`; `source`, `lag` are slot inlets |
 | `rand` | gate lane `roll` | generator | seeded roll between `lo`/`hi` slot inlets, `out :process-inlet` |
 | `count` | gate lane `step` | generator | up-counter with `lo`/`hi`/`wrap`, `out :process-inlet` |
+| `cmp A` / `cmp B` | float lane `a` (input, or wired) | logic | 1/0 from `a` under `op` (`< > >= <= == !=`) against the `value` picker; `hold` 1 keeps the last wired input on quiet fires |
+| `veto` | gate lane | logic | `veto!` on a high step, painted or wired |
+| `roll` | gate lane, `rate` enum | logic | `roll!`: sequence-roll the project from the step for the step's duration |
 
 Dropped from the old demo: `repeats`/`span`. Native rtrg/rate cover ratchets.
 
@@ -215,6 +218,132 @@ Where the build differs from the rev 1 plan, and why.
 - Tests that asserted an empty project layer now strip default lanes first
   (`without_default_lanes` in `state/tests.rs`, `non_default_lane_entries` in
   `ui/state_values/tests.rs`).
+
+## Logic lanes (rev 3, shipped 2026-09-13; beads eseq-mtme)
+
+Four more default lanes let the layer make trig-level decisions and drive
+the project-wide sequence roll. Motivating patches: `rand → cmp A (> 0.8) →
+roll` is a probabilistic roll; `acc A → cmp B (>= 8) → veto` silences the
+track once the accumulator reaches 8. They are appended after `grab` so a
+wire from any generator lands on the same fire (writes only flow forward
+within one fire; a backward wire waits for the next, as before).
+
+- **`cmp A` / `cmp B`** (`lane-cmp`): inlets `a` (the painted lane, and
+  the wire input: a wire replaces the painted value on the fires it sends,
+  exactly like acc's `amount`), `op` (an `:enum` over `< > >= <= == !=`,
+  `==`/`!=` with a 1e-4 tolerance), `value` (the threshold picker), `hold`.
+  Sends an explicit 1 or 0 on `out`/`wire` every fire; the first state cell
+  is `hit` so the strip scope draws the output. On a fire where the writer
+  sent nothing (rand on a quiet step) the painted lane is compared; `hold` 1
+  compares the last wired input instead (sample-and-hold on the input).
+  The lane inlet *must* be the wire input: the strip's OTHER LANES chip
+  binds a writer's `wire` to the target lane's lane inlet, so a first cut
+  with `value` as the lane wired rand into the threshold and `a` never saw
+  anything.
+- **`veto`** (`lane-veto`): gate lane; 1 = `veto!`. Painted, it is a mute
+  mask; wired from a comparator, a conditional mute. Later lanes still run.
+- **`roll`** (`lane-roll`): gate lane + `rate` enum (the eight transport
+  roll rates, default 1/16). A high step calls `(roll! rate-index)`.
+- **`(in? :name)`** is new: true when a process-inlet write (wire or
+  fan-out) landed on that inlet this fire. `ProcessStepEventContext` carries
+  `written_inlets` for it.
+- **`:enum ("a" "b" …)` inlet kind** (`ProcessInletKind::Enum`): the value
+  is the option index, stored as a number so bodies read it with `(in :op)`
+  and serialization is untouched; the strip and the fx process panel render
+  a dropdown from the published `options`. Wire and fan-out writes into an
+  enum inlet are rounded and clamped to the option list, so `count → roll
+  rate` sweeps the rates with no extra process.
+
+**`roll!` semantics** (`RollState::engage_process_roll`, scheduler thread):
+
+- Pulse only. The roll holds for the firing step's duration (its length on
+  the track timebase times the duration parameter), then releases itself.
+  A running roll ignores further `roll!` calls, including the same trig
+  re-firing inside the loop window, so a roll never chains itself.
+- The window is captured at the firing step's beat, not the lookahead
+  frontier, with the manual sequence roll's per-track snapping (§5.1 of the
+  rolling core spec). The roll owns the remap grid while it runs; the
+  transport rate atomic is read again afterwards.
+- Chunk granularity: the roll engages after the chunk in which the step
+  fired, so a repeat boundary inside that chunk is missed; the scheduler
+  block bounds that latency. Release is beat-exact: a chunk never straddles
+  the deadline (the lookahead clamps `chunk_frames` to it).
+- The transport ROLL button is fully automated, not a gate. If roll mode
+  was off, the roll arms it and disarms it at release; roll mode the user
+  armed stays armed. `sequence_rolling` mirrors the roll so the button goes
+  red. Side effect: while auto-armed, grid note keys act as track-roll keys
+  for that step's duration.
+- Manual sequence-roll commands and ClearAll (roll mode off, stop, panic)
+  cancel a process roll before they apply. The manual sequence roll does not
+  record, so neither does a process roll.
+- Rate is not audible unless it is finer than the step: a 1/16 step rolled
+  at 1/16 repeats nothing before it releases.
+
+## Lane patchbay (rev 4, shipped 2026-09-13; beads eseq-jrab)
+
+Lane-to-lane wiring was hard to read from the single-lane strip. The
+patchbay is a toggle (the `patch` chip in the strip header, state
+`lane-patch-view` in `content/ui/sequencer.lisp`) that renders under the
+step sliders and the strip: one box per composed-chain slot, two rows, read
+left to right then top to bottom in fire order. Each box shows the lane's
+connectable out ports on one row and its wireable in ports on the next.
+
+- **Data**: `SEQ.track-lane-patch` (`build_track_lane_patch_value`,
+  `ui/state_values/process_and_macros.rs`). Per slot: `out-ports` with
+  `port-id = (track * 4096 + slot-index) * 16 + ordinal`
+  (`lane_patch_port_id`; the track is folded in because every expanded
+  track's patchbay shares one layout and the cable renderer keys sources by
+  that number alone, so a slot-only id drew one track's cables from
+  another's ports), `primary-free`, and `readers` (the primary binding then the fan-out
+  entries, each resolved to a chain index with the scheduler's same-layer
+  rule); `in-ports` = lane inlets + gate inlets + any inlet a reader already
+  targets, each with the writer port ids; `param-ports` for mappable ports.
+- **Cables and drag** are the generic patch-port machinery the mixer's mod
+  ports use (`eseqlisp` `widget_interaction.rs` / `gpu_scene.rs`): out
+  ports carry `:track port-id`, in ports `:dest slot-index :input ordinal
+  :dest-kind "lane" :connected-sources writers`. `dest-kind "lane"` keeps the
+  mixer's track self-patch guard out of the way; the drop handler rejects a
+  lane feeding itself and a cable between tracks (the port id names its
+  track). Backward cables (reader before writer) are allowed and land next
+  fire, as always.
+- **Scrolled drops** (fixed in `eseqlisp` `widget_interaction.rs`,
+  `active_layout_pos`): the patch-drag drop and the cable click added the
+  buffer's text scroll unconditionally, while widget hit-testing ignores it
+  for UI-only buffers such as the sequencer. Once the sequencer had
+  scrolled, the mouse-down armed the port under the pointer but the drop
+  landed rows below and cancelled. The mixer never scrolls, so the mod
+  ports hid it. `lane_patchbay_drag_wires_ports_through_the_real_handlers`
+  drives the top-level tiled mouse path, backwards and scrolled.
+- **Multiple cables per out port**: the first cable fills the port's primary
+  binding (`seq-bind-process-port`); every further cable is a fan-out entry
+  on that port (`seq-add-process-port-fanout`) with the identity range, which
+  `ProcessPortFanout::scaled` now passes through unscaled (rev 4 fix: a
+  writer without `lo`/`hi` defaulted to a 0..1 source range and clamped).
+  The scheduler already routed process-inlet fan-out targets through the
+  inlet-write path, so no engine change beyond the pass-through.
+- **Select / remove**: cable click selects (local `lane-patch-selected`),
+  the `× cable` chip removes it (clear the primary binding or remove the
+  fan-out entry). The edit scope chip (this track / all tracks) applies.
+- **Captures draw cables**: `render_frame_into_texture` in the Metal backend
+  now runs the same global patch-cable pass as the live tiled renderer, so
+  `metal_seq capture` shows mixer mod routes and lane cables (it did not
+  before). Fixture: `crates/sequencer/ui/capture-fixtures/lane-patchbay.lisp`,
+  which wires track-layer lane instances through `:connect` because the
+  capture harness does not apply the edit natives' history commands.
+- **reset collapsed to one port**: `lane-reset` had three out ports
+  (`a`/`b`/`c`, one accumulator each) because a port held one target. It
+  is now one `wire` port: primary binding → `tacc`, two identity fan-out
+  entries → `acc A` / `acc B`. `ensure_default_project_layer` drops the
+  stale `a`/`b`/`c` bindings from saved projects and installs the fan-out.
+- **Box click selects the lane**: `lane-patch-select-lane` maps the slot to
+  its first lane entry index and sets the track param mode the way the
+  dropdown does; the strip's selected lane tints its box.
+- **Backspace / Delete** remove the selected cable: `handle-key` in
+  `sequencer.lisp` tries `lane-patch-delete-selected` before step deletion,
+  so the keys keep their old meaning when no cable is selected.
+- **Not built**: dimming backward cables (cable color is computed in Rust
+  from the in-port index, so the in port carries a ↑ marker instead);
+  scrolling when many track-layer lanes overflow the width.
 - Baseline (2026-09-10): the full `cargo nextest run -p sequencer` suite had
   44 failures on this tree versus 102 at clean HEAD in a worktree without the
   fetched compiler. No failure involving process chains or lanes is new; four

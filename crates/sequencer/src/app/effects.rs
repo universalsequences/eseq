@@ -7829,6 +7829,59 @@ mod tests {
     }
 
     #[test]
+    fn bus_output_routing_is_scene_scoped_cycle_safe_and_undoable() {
+        use crate::project::BusOutput;
+        use crate::sequencer::BusId;
+        let graph = TestLiveGraph::new("scene-bus-routing", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let group = app.group_tracks_recorded(vec![0, 1]).unwrap();
+        let extra = app.add_bus_recorded("Extra".into()).unwrap();
+        let a = BusId::DEFAULT_A;
+        let b = BusId::DEFAULT_B;
+        app.set_bus_output_recorded(group, a).unwrap();
+        app.set_bus_output_recorded(a, b).unwrap();
+        app.set_bus_output_recorded(b, extra).unwrap();
+        assert!(!app.bus_output_options(b).contains(&a));
+        assert!(!app.bus_output_options(a).contains(&a));
+        assert!(app.set_bus_output_recorded(extra, a).is_err());
+        assert_eq!(app.buses.iter().find(|bus| bus.id == extra).unwrap().output, BusOutput::Mix);
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.buses.iter().find(|bus| bus.id == b).unwrap().output, BusOutput::Mix);
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(app.buses.iter().find(|bus| bus.id == b).unwrap().output, BusOutput::Bus(extra.0));
+        app.save_current_bus_pattern();
+        let first = app.capture_bus_pattern_snapshot();
+        let second_scene = app.state.clone_pattern(app.tracks.len(), &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates, &app.tracks, &app.graph.track_instrument_types);
+        app.clone_bus_pattern_from_to(0, second_scene);
+        let mut second = first.clone();
+        for bus in &mut second { bus.output = BusOutput::Mix; }
+        second.iter_mut().find(|bus| bus.id == b).unwrap().output = BusOutput::Bus(a.0);
+        // Reverse A -> B to B -> A in one recall; intermediate edges must not form a loop.
+        app.restore_bus_pattern_snapshot(&second);
+        graph.process_block();
+        assert_eq!(app.buses.iter().find(|bus| bus.id == b).unwrap().output, BusOutput::Bus(a.0));
+        app.save_current_bus_pattern();
+        app.switch_bus_pattern(0);
+        app.state.switch_pattern(0, app.tracks.len(), &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates, &app.tracks, &app.graph.track_instrument_types).unwrap();
+        assert_eq!(app.buses.iter().find(|bus| bus.id == group).unwrap().output, BusOutput::Bus(a.0));
+        graph.process_block();
+        let project = app.capture_export_project().unwrap();
+        let decoded: crate::project::ProjectFile = serde_json::from_str(&serde_json::to_string(&project).unwrap()).unwrap();
+        assert!(decoded.patterns[0].bus_patterns.iter()
+            .any(|bus| bus.id == b.0 && bus.output == BusOutput::Bus(extra.0)));
+        assert!(decoded.patterns[second_scene].bus_patterns.iter()
+            .any(|bus| bus.id == b.0 && bus.output == BusOutput::Bus(a.0)));
+        app.switch_bus_pattern(second_scene);
+        app.state.switch_pattern(second_scene, app.tracks.len(), &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates, &app.tracks, &app.graph.track_instrument_types).unwrap();
+        assert_eq!(app.buses.iter().find(|bus| bus.id == b).unwrap().output, BusOutput::Bus(a.0));
+    }
+
+    #[test]
     fn recorded_group_delete_restores_backing_bus_fx_and_all_scene_routing() {
         let graph = TestLiveGraph::new("recorded-group-delete-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);

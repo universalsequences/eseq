@@ -45,6 +45,7 @@ mod hooks;
 pub mod mixer_controls;
 mod params;
 mod projects;
+mod bus_outputs;
 pub mod pending_capture;
 pub mod song_capture;
 pub mod song_edit;
@@ -750,9 +751,8 @@ pub struct BusChannelState {
     pub effect_descriptors: Vec<EffectDescriptor>,
     pub effect_slots: Vec<EffectSlotSnapshot>,
     pub custom_effect_names: Vec<Option<String>>,
-    /// Where this bus's post-fader signal goes: the master mix, or another bus
-    /// (a rack bus chained into its parent group's bus). See
-    /// `docs/drum-rack-v2-spec.md`, "Racks inside track groups".
+    /// Current scene's post-fader destination. Nested rack buses are owned by
+    /// group membership; other bus and group outputs are scene choices.
     pub output: crate::project::BusOutput,
 }
 
@@ -2143,6 +2143,7 @@ impl App {
             .iter()
             .map(|bus| BusPatternSnapshot {
                 id: bus.id,
+                output: bus.output,
                 effect_plocks: bus
                     .effect_slots
                     .iter()
@@ -2158,6 +2159,11 @@ impl App {
     }
 
     pub fn restore_bus_pattern_snapshot(&mut self, snapshot: &[BusPatternSnapshot]) {
+        for bus in &mut self.buses {
+            bus.output = snapshot.iter().find(|saved| saved.id == bus.id)
+                .map(|saved| saved.output).unwrap_or_default();
+        }
+        self.normalize_bus_output_routing();
         for bus in &mut self.buses {
             let Some(saved) = snapshot.iter().find(|saved| saved.id == bus.id) else {
                 for slot in &mut bus.effect_slots {
@@ -2235,6 +2241,8 @@ impl App {
                 self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
             }
         }
+        self.graph_controller().apply_all_bus_output_routing();
+        self.push_solo_mutes();
     }
 
     pub fn save_current_bus_pattern(&self) {

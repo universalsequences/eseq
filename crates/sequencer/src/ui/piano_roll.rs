@@ -273,10 +273,6 @@ impl PianoRollLanes {
         }
     }
 
-    fn step_delay(&self, step: usize) -> f32 {
-        piano_roll_sanitize_delay(self.step_param(step, StepParam::Delay))
-    }
-
     /// One step parameter of the focused source, `default_value()` when the
     /// step is unaddressable.
     fn step_param(&self, step: usize, param: StepParam) -> f32 {
@@ -2319,13 +2315,12 @@ pub(crate) fn apply_piano_roll_action_with_clipboard(
             let time = value_as_number(action.get("time")).unwrap_or(0.0) as f32;
             let ids = parse_piano_roll_ids(action.get("ids"));
             let duration_delta = value_as_number(action.get("duration-delta")).map(|n| n as f32);
-            if let Some((step, _voice_idx)) = lanes.item_parts(id) {
+            if lanes.item_parts(id).is_some() {
                 let resize_ids = if ids.is_empty() { vec![id] } else { ids };
                 let resized = resize_piano_roll_items_absolute(
                     lanes,
                     &resize_ids,
                     id,
-                    step,
                     time,
                     duration_delta,
                     move_state,
@@ -2411,7 +2406,6 @@ fn resize_piano_roll_items_absolute(
     lanes: &PianoRollLanes,
     ids: &[u64],
     anchor_id: u64,
-    anchor_step: usize,
     time: f32,
     duration_delta: Option<f32>,
     move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
@@ -2445,14 +2439,17 @@ fn resize_piano_roll_items_absolute(
                 })
             })
             .collect::<Vec<_>>();
-        if originals.is_empty() {
+        let Some(anchor) = originals.iter().find(|item| item.id == anchor_id) else {
             return 0;
-        }
+        };
+        // Chord voices carry their own delay, independent of the step's
+        // delay parameter. Keep the actual note onset for the whole gesture.
+        let anchor_start = anchor.step as f32 + anchor.delay;
         *guard = Some(PianoRollMoveState {
             kind: PianoRollDragKind::Resize,
             ids: sorted_ids,
             anchor_id,
-            anchor_start: anchor_step as f32 + lanes.step_delay(anchor_step),
+            anchor_start,
             anchor_lane: 0,
             last_positions: originals.clone(),
             originals,
@@ -2631,6 +2628,55 @@ fn move_piano_roll_items_absolute(
         .collect()
 }
 
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    #[test]
+    fn resize_short_delayed_note_preserves_its_start_and_selection_delta() {
+        for chord in [false, true] {
+            let state = Arc::new(SequencerState::new(1, vec![]));
+            let lanes = PianoRollLanes::live(&state, 0);
+            let selection = Arc::new(Mutex::new(HashSet::new()));
+            let move_state = Arc::new(Mutex::new(None));
+            let step = 2;
+            state.pattern.patterns[0].set_step_active(step, true);
+            state.pattern.step_data[0].set(step, StepParam::Duration, 0.5);
+            if chord {
+                state.pattern.chord_data[0].add_note_with_timing(step, 0.0, 0.5, 0.75);
+            } else {
+                state.pattern.step_data[0].set(step, StepParam::Delay, 0.75);
+            }
+            lanes.set_note_entries(5, &[PianoRollNote {
+                transpose: 7.0, duration: 0.5, delay: 0.25,
+            }]);
+
+            // First press without movement, then shorten repeatedly. The
+            // first write converts a step-only note into a chord entry.
+            for duration in [0.5, 0.25, PIANO_ROLL_MIN_DURATION] {
+                let action = map_value([
+                    ("type", Value::Keyword("resize-item-absolute".to_string())),
+                    ("id", Value::Number(piano_roll_item_id(step, 0) as f64)),
+                    ("ids", list_value(vec![
+                        Value::Number(piano_roll_item_id(step, 0) as f64),
+                        Value::Number(piano_roll_item_id(5, 0) as f64),
+                    ])),
+                    ("time", Value::Number((2.75 + duration) as f64)),
+                    ("duration-delta", Value::Number((duration - 0.5) as f64)),
+                ]);
+                apply_piano_roll_action(&lanes, &selection, &move_state, &action)
+                    .expect("resize action");
+                let anchor = lanes.note_entries(step);
+                assert_eq!(anchor[0].duration, duration, "chord={chord}");
+                assert_eq!(anchor[0].delay, 0.75);
+                let other = lanes.note_entries(5);
+                assert_eq!(other[0].duration, duration);
+                assert_eq!(other[0].delay, 0.25);
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod compact_label_tests {

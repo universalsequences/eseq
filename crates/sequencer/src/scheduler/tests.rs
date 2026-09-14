@@ -3505,6 +3505,293 @@
         );
     }
 
+    /// Bind `from`'s `wire` port to `to`'s inlet, both default project lanes.
+    fn wire_default_lane(
+        chain: &mut crate::process::TrackProcessChain,
+        from: &str,
+        to: &str,
+        inlet: &str,
+    ) {
+        let target = {
+            let slot = default_lane_slot_mut(chain, to);
+            crate::process::ParamTarget::ProcessInlet {
+                process: slot.class_name.clone(),
+                inlet: inlet.to_string(),
+                instance_id: Some(slot.instance_id),
+            }
+        };
+        default_lane_slot_mut(chain, from)
+            .bindings
+            .insert("wire".to_string(), Some(target));
+    }
+
+    fn trigger_sample_times(events: &[ObservedTrigger]) -> Vec<u64> {
+        events.iter().map(|event| event.sample_time).collect()
+    }
+
+    #[test]
+    fn scheduler_default_lanes_count_cmp_veto_silences_from_a_threshold() {
+        let events = run_with_scheduler_stack(|| {
+            default_lanes_fixture(|chain| {
+                // count runs 1..8 then wraps to 0; cmp A sends 1 once the
+                // count reaches 3 and veto silences those steps. All three
+                // land on the same fire because the logic lanes sit after
+                // every generator in the chain.
+                default_lane_slot_mut(chain, "count")
+                    .lanes
+                    .insert("step".to_string(), lane(&[1.0; 8]));
+                wire_default_lane(chain, "count", "cmp A", "a");
+                let cmp = default_lane_slot_mut(chain, "cmp A");
+                cmp.inlets
+                    .insert("op".to_string(), crate::process::ProcessLiteral::Number(2.0)); // >=
+                cmp.inlets
+                    .insert("value".to_string(), crate::process::ProcessLiteral::Number(3.0));
+                wire_default_lane(chain, "cmp A", "veto", "gate");
+            })
+        });
+        // Steps 0-1 (count 1, 2) play; 2-7 are vetoed; the wrap to 0 on
+        // step 8 lets 8-10 (count 0, 1, 2) through; step 16 (count 8) is
+        // vetoed again.
+        assert_eq!(
+            trigger_sample_times(&events),
+            vec![0, 6_000, 48_000, 54_000, 60_000],
+            "count -> cmp A (>= 3) -> veto"
+        );
+    }
+
+    /// A second cable out of a lane is a fan-out entry on its `wire` port.
+    /// count (no lo/hi set, so its source range defaults to 0..1) feeds
+    /// cmp A over the primary wire and acc A (pass mode, onto retrig) over
+    /// an identity fan-out entry: both must see the raw count on the same
+    /// fire, so retrig reads 2 on step 1 rather than a copy clamped to 1.
+    #[test]
+    fn scheduler_default_lanes_wire_fanout_carries_the_raw_value_to_a_second_reader() {
+        let events = run_with_scheduler_stack(|| {
+            default_lanes_fixture(|chain| {
+                default_lane_slot_mut(chain, "count")
+                    .lanes
+                    .insert("step".to_string(), lane(&[1.0; 8]));
+                wire_default_lane(chain, "count", "cmp A", "a");
+                let acc_target = {
+                    let acc = default_lane_slot_mut(chain, "acc A");
+                    acc.inlets
+                        .insert("mode".to_string(), crate::process::ProcessLiteral::Number(1.0));
+                    crate::process::ParamTarget::ProcessInlet {
+                        process: acc.class_name.clone(),
+                        inlet: "amount".to_string(),
+                        instance_id: Some(acc.instance_id),
+                    }
+                };
+                default_lane_slot_mut(chain, "count").fanout.insert(
+                    "wire".to_string(),
+                    vec![crate::process::ProcessPortFanout {
+                        target: acc_target,
+                        lo: 0.0,
+                        hi: 1.0,
+                    }],
+                );
+                let cmp = default_lane_slot_mut(chain, "cmp A");
+                cmp.inlets
+                    .insert("op".to_string(), crate::process::ProcessLiteral::Number(2.0)); // >=
+                cmp.inlets
+                    .insert("value".to_string(), crate::process::ProcessLiteral::Number(3.0));
+                wire_default_lane(chain, "cmp A", "veto", "gate");
+            })
+        });
+        let observed = events
+            .iter()
+            .map(|event| (event.sample_time, event.retrig))
+            .collect::<Vec<_>>();
+        // count 1, 2 play with retrig 1, 2; 3..8 are vetoed; the wrap to 0
+        // lets 0, 1, 2 through again on steps 8-10.
+        assert_eq!(
+            observed,
+            vec![(0, 1.0), (6_000, 2.0), (48_000, 0.0), (54_000, 1.0), (60_000, 2.0)],
+            "fan-out cable carries the raw count; primary wire vetoes from 3"
+        );
+    }
+
+    /// count sends only on its high step; cmp A `>= 1` behind it. With hold
+    /// 0 a quiet fire compares the painted lane (unpainted = 0), so only the
+    /// fires count spoke on are vetoed; with hold 1 the last wired input
+    /// (1, then 2) is held and every step is vetoed.
+    fn cmp_after_sparse_count_fixture(hold: f64) -> Vec<u64> {
+        run_with_scheduler_stack(move || {
+            let events = default_lanes_fixture(move |chain| {
+                default_lane_slot_mut(chain, "count")
+                    .lanes
+                    .insert("step".to_string(), lane(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+                wire_default_lane(chain, "count", "cmp A", "a");
+                let cmp = default_lane_slot_mut(chain, "cmp A");
+                cmp.inlets
+                    .insert("op".to_string(), crate::process::ProcessLiteral::Number(2.0)); // >=
+                cmp.inlets
+                    .insert("value".to_string(), crate::process::ProcessLiteral::Number(1.0));
+                cmp.inlets
+                    .insert("hold".to_string(), crate::process::ProcessLiteral::Number(hold));
+                wire_default_lane(chain, "cmp A", "veto", "gate");
+            });
+            trigger_sample_times(&events)
+        })
+    }
+
+    #[test]
+    fn scheduler_default_lanes_cmp_compares_the_lane_on_quiet_fires() {
+        let expected = (0..17u64)
+            .filter(|step| step % 8 != 0)
+            .map(|step| step * 6_000)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cmp_after_sparse_count_fixture(0.0),
+            expected,
+            "only the steps count spoke on are vetoed; quiet fires compare the lane's 0"
+        );
+    }
+
+    #[test]
+    fn scheduler_default_lanes_cmp_hold_keeps_the_last_wired_input() {
+        assert_eq!(
+            cmp_after_sparse_count_fixture(1.0),
+            Vec::<u64>::new(),
+            "hold 1 compares the held input on every fire, so every step is vetoed"
+        );
+    }
+
+    #[test]
+    fn scheduler_default_lanes_roll_lane_loops_the_step_then_releases() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(8);
+            for step in 0..8 {
+                state.pattern.patterns[0].set_step_active(step, true);
+            }
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("builtin process library");
+            let mut chain = crate::process::default_project_layer();
+            // Step 0 rolls at 1/32 for its own length: one 16th step.
+            let roll = default_lane_slot_mut(&mut chain, "roll");
+            roll.lanes
+                .insert("gate".to_string(), lane(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+            roll.inlets
+                .insert("rate".to_string(), crate::process::ProcessLiteral::Number(6.0));
+            assert!(state.set_project_process_chain(chain));
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<64>::new();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = Some(scratch);
+            // Small blocks: a process roll engages after the chunk whose
+            // step fired it, so the block size bounds the engage latency.
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                24_000,
+                48_000,
+                300,
+                24_000.0,
+                0,
+                false,
+                false,
+            );
+            let mut hits = Vec::new();
+            while let Some(event) = queue.pop() {
+                if let ScheduledEventKind::ResolvedTrigger { step, .. } = event.kind {
+                    hits.push((event.sample_time, step));
+                }
+            }
+            assert_eq!(
+                hits,
+                vec![(0, 0), (3_000, 0), (6_000, 1), (12_000, 2), (18_000, 3)],
+                "step 0 repeats once on the 1/32 grid, then the roll releases on the step boundary"
+            );
+            assert!(scheduler.roll.process_roll.is_none());
+            assert!(
+                !state.transport.roll_mode.load(Ordering::Relaxed),
+                "auto-armed roll mode is restored on release"
+            );
+            assert!(!state.transport.sequence_rolling.load(Ordering::Relaxed));
+        });
+    }
+
+    #[test]
+    fn process_roll_engages_once_arms_roll_mode_and_releases_on_its_deadline() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_num_steps(8);
+        state.toggle_play();
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut clock = SnapshotSequencerClock::new(48_000);
+        clock.seek_beats(0.9);
+        clock.was_playing = true;
+        let mut roll = RollState::new();
+        let request = super::roll::PendingProcessRoll {
+            beat: 0.75,
+            length_beats: 0.25,
+            grid_beats: 0.125,
+        };
+
+        assert!(roll.engage_process_roll(request, &mut clock, &snapshot, &state));
+        assert_eq!(
+            roll.window_start[0],
+            Some(0.75),
+            "anchored on the firing step, not the 0.9 frontier"
+        );
+        assert!(state.transport.roll_mode.load(Ordering::Relaxed), "auto-armed");
+        assert!(state.transport.sequence_rolling.load(Ordering::Relaxed));
+        assert!((roll.active_grid_beats(&state) - 0.125).abs() < 1.0e-9);
+        assert!(
+            !roll.engage_process_roll(
+                super::roll::PendingProcessRoll { beat: 0.875, ..request },
+                &mut clock,
+                &snapshot,
+                &state
+            ),
+            "a running roll ignores retriggers"
+        );
+        assert!(!roll.release_process_roll_if_due(0.99, &state));
+        assert!(roll.release_process_roll_if_due(1.0, &state));
+        assert!(roll.process_roll.is_none());
+        assert!(roll.window_start.iter().all(Option::is_none));
+        assert!(
+            !state.transport.roll_mode.load(Ordering::Relaxed),
+            "roll mode restored to off"
+        );
+        assert!(!state.transport.sequence_rolling.load(Ordering::Relaxed));
+        assert!(
+            (roll.active_grid_beats(&state) - Timebase::Sixteenth.step_beats(MAX_STEPS)).abs()
+                < 1.0e-9,
+            "grid falls back to the transport rate"
+        );
+
+        // Roll mode the user armed stays armed after ClearAll cancels the
+        // process roll.
+        state.transport.roll_mode.store(true, Ordering::Relaxed);
+        assert!(roll.engage_process_roll(request, &mut clock, &snapshot, &state));
+        roll.cancel_process_roll_for_commands(&[RollCommand::ClearAll], &state);
+        assert!(roll.process_roll.is_none());
+        assert!(state.transport.roll_mode.load(Ordering::Relaxed));
+        assert!(!state.transport.sequence_rolling.load(Ordering::Relaxed));
+    }
+
     fn tacc_ramp_restart_fixture(
         before_second_pass: impl FnOnce(&mut SchedulerLookaheadState) + Send + 'static,
     ) -> (Vec<f32>, Vec<f32>) {

@@ -791,6 +791,7 @@ fn project_bus_pattern_snapshot_from_ui(
 ) -> ProjectBusPatternSnapshot {
     ProjectBusPatternSnapshot {
         id: snapshot.id.0,
+        output: snapshot.output,
         effect_slots: snapshot
             .effect_plocks
             .iter()
@@ -829,6 +830,7 @@ fn project_bus_pattern_snapshot_from_ui(
 fn project_bus_pattern_snapshot_to_ui(snapshot: ProjectBusPatternSnapshot) -> BusPatternSnapshot {
     BusPatternSnapshot {
         id: BusId(snapshot.id),
+        output: snapshot.output,
         effect_defaults: snapshot
             .effect_slots
             .iter()

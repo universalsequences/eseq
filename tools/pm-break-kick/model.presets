@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "engine_name": "Studies/Break Kick 53",
+  "source_file": "instruments/Studies/Break Kick 53/dsp.lisp",
+  "presets": [
+    {
+      "id": "kick-53",
+      "name": "Boom-Bap Kick 53",
+      "base_note_offset": 0,
+      "params": {
+        "tune": 1,
+        "decay": 1,
+        "bend": 1,
+        "attack": 1,
+        "body": 1,
+        "knock": 1,
+        "air": 1,
+        "air_ms": 22,
+        "air_hz": 3500,
+        "drive": 1,
+        "clip_mix": 1,
+        "ceiling": 0.8889390649866298,
+        "level": 1,
+        "length_ms": 700
+      }
+    },
+    {
+      "id": "kick-53-air-plus12",
+      "name": "Air",
+      "base_note_offset": 0,
+      "params": {
+        "tune": 1,
+        "decay": 1,
+        "bend": 1,
+        "attack": 1,
+        "body": 1,
+        "knock": 1,
+        "air": 2.5,
+        "air_ms": 22,
+        "air_hz": 3500,
+        "drive": 1,
+        "clip_mix": 0.25,
+        "ceiling": 0.8889390649866298,
+        "level": 0.4,
+        "length_ms": 700
+      }
+    }
+  ]
+}

@@ -1454,6 +1454,7 @@
 
     fn sample_bus_pattern_snapshot(marker: f32) -> Vec<BusPatternSnapshot> {
         vec![BusPatternSnapshot {
+            output: crate::project::BusOutput::Mix,
             id: BusId::DEFAULT_A,
             effect_plocks: vec![
                 vec![vec![Some(marker)]],

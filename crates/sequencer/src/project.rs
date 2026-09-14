@@ -1926,6 +1926,8 @@ fn default_midi_fx_position() -> ProjectMidiFxPosition {
 pub struct ProjectBusPatternSnapshot {
     pub id: u64,
     #[serde(default)]
+    pub output: BusOutput,
+    #[serde(default)]
     pub effect_slots: Vec<ProjectEffectSlot>,
 }
 

@@ -1,9 +1,13 @@
+#[path = "rack_preset_tests.rs"]
+mod rack_preset_tests;
 #[path = "poseidon_ui_tests.rs"]
 mod poseidon_ui_tests;
 #[path = "drift_waveform_tests.rs"]
 mod drift_waveform_tests;
 #[path = "rack_slot_indicator_tests.rs"]
 mod rack_slot_indicator_tests;
+#[path = "rack_effect_modulation_tests.rs"]
+mod rack_effect_modulation_tests;
 #[path = "instrument_header_ui_tests.rs"]
 mod instrument_header_ui_tests;
 
@@ -11,6 +15,18 @@ mod instrument_header_ui_tests;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
     use sequencer::sequencer::default_empty_effect_chain;
     use std::collections::HashMap;
+
+    fn find_knob_by_label<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        label: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node.widget_type == "knob-number"
+            && node.props.get("label") == Some(&Value::String(label.to_string()))
+        {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find_knob_by_label(child, label))
+    }
 
     fn read_ui_source(relative: &str) -> std::io::Result<String> {
         std::fs::read_to_string(
@@ -6230,6 +6246,8 @@ mod instrument_header_ui_tests;
 
     fn test_track_bus_send(bus_idx: usize, name: &str, amount: f64) -> Value {
         let mut map = std::collections::HashMap::new();
+        let id = match name { "Bus A" => 1, "Bus B" => 2, _ => bus_idx };
+        map.insert("bus-id".to_string(), Rc::new(RefCell::new(Value::Number(id as f64))));
         map.insert(
             "bus-idx".to_string(),
             Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
@@ -14860,13 +14878,9 @@ mod instrument_header_ui_tests;
     }
 
     #[test]
-    fn rack_slot_effect_params_carry_no_modulated_value_fields() {
-        // eseq-hpc: only a rack slot's *instrument* is sampled
-        // (`read_rack_slot_mod_values`). A slot's effect chain declares
-        // modulation targets too, but nothing ever publishes `rack-mod-*` for
-        // them — and `pc/param-effective-value` prefers a bound field over the
-        // base value, so a Filter in a rack slot's chain would draw its curve
-        // from a field stuck at 0.0 instead of from its own cutoff.
+    fn rack_slot_effect_params_bind_their_own_node_modulation_fields() {
+        // Rack effects share the effect telemetry namespace, never the
+        // selected slot instrument's rack-mod-* fields.
         let descriptor = sequencer::effects::EffectDescriptor::builtin_filter();
         let app = test_app_with_rack_panel();
         let snapshot = sequencer::effects::EffectSlotSnapshot::new_default(&descriptor, 43);
@@ -14894,15 +14908,16 @@ mod instrument_header_ui_tests;
             value_param_has_key(&effect, "cutoff", "mod-targets"),
             "fixture: a rack slot Filter's cutoff is a declared modulation destination"
         );
-        for key in ["mod-offset-field", "mod-value-field", "mod-scale-field"] {
-            assert!(
-                !value_param_has_key(&effect, "cutoff", key),
-                "a rack slot effect param must not bind the unpublished {key}"
-            );
+        let cutoff = descriptor.params.iter().position(|param| param.name == "cutoff").unwrap();
+        for (key, expected) in [
+            ("mod-offset-field", super::effect_mod_offset_field(43, cutoff)),
+            ("mod-value-field", super::effect_mod_value_field(43, cutoff)),
+            ("mod-scale-field", super::effect_mod_scale_field(43, cutoff)),
+        ] {
+            assert_eq!(value_param_string(&effect, "cutoff", key), Some(expected));
         }
 
-        // The same slot's instrument does keep them: that is the one path the
-        // host samples.
+        // The slot instrument keeps its independent slot-keyed fields.
         let selected = Arc::new(Mutex::new(HashSet::new()));
         let panel = build_instrument_panel_value(&app, 0, &selected);
         assert_eq!(
@@ -16113,6 +16128,7 @@ mod instrument_header_ui_tests;
                 ("track-process-lanes", test_list(vec![test_list(vec![])])),
                 ("process-slots", test_list(vec![])),
                 ("track-process-slots", test_list(vec![test_list(vec![])])),
+                ("track-lane-patch", test_list(vec![test_list(vec![])])),
                 ("process-library", test_list(vec![])),
                 ("step-has-plocks", empty_plocks.clone()),
                 ("step-plock-kinds", test_number_list(&[0.0; 16])),
@@ -18128,10 +18144,59 @@ mod instrument_header_ui_tests;
     }
 
     #[test]
+    fn metal_seq_surface_select_all_disarms_mixer_deletion() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let target = register_test_delete_target_natives(&mut editor, 3);
+        for surface in ["*piano-roll*", "*arrangement*"] {
+            editor.runtime_mut().eval_str(&format!(
+                "(set-window-buffer \"{surface}\")"
+            )).expect("open selection surface");
+            editor.refresh_runtime_side_effects();
+            for populated in [false, true] {
+                editor.runtime_mut().eval_str(if populated {
+                    r#"(do
+                      (reactive-set "SEQ" "piano-roll-items"
+                        (list (dict :id 1 :time 0 :duration 1 :lane 60)))
+                      (reactive-set "SEQ" "song-lanes"
+                        (list (list (dict :clip-id 1 :start-beat 0 :end-beat 4)))))"#
+                } else {
+                    r#"(do
+                      (reactive-set "SEQ" "piano-roll-items" (list))
+                      (reactive-set "SEQ" "song-lanes" (list (list))))"#
+                }).expect("populate or empty surface");
+                // Repeating Cmd+A must cancel deletion even if selection
+                // is unchanged, or there is nothing on the surface to select.
+                for _ in 0..2 {
+                    editor.runtime_mut().eval_str(
+                        "(seq-set-delete-target :mixer-track (dict :track 0))"
+                    ).expect("arm mixer deletion");
+                    assert!(target.lock().unwrap().is_some());
+                    editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+                    assert!(target.lock().unwrap().is_none(),
+                        "Cmd+A must disarm mixer deletion in {surface}, populated={populated}");
+                }
+            }
+        }
+
+        // Text select-all does not transfer ownership to a sequencer surface.
+        editor.open_scratch_buffer("*editable-selection*", "abc");
+        editor.runtime_mut().eval_str(
+            "(seq-set-delete-target :mixer-track (dict :track 0))"
+        ).expect("arm mixer deletion before text editing");
+        assert_eq!(editor.runtime_mut().eval_str(
+            "(eseq.step-grid-interactions/seq-global-select-all)"
+        ).unwrap(), Some(Value::Bool(false)));
+        assert!(target.lock().unwrap().is_some());
+    }
+
+    #[test]
     fn metal_seq_cmd_a_dispatches_on_active_or_visible_surface() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut editor = full_grid_editor_for_scroll_tests();
+        let target = register_test_delete_target_natives(&mut editor, 3);
         editor
             .runtime_mut()
             .eval_str(
@@ -18161,7 +18226,13 @@ mod instrument_header_ui_tests;
             .eval_str(r#"(set-window-buffer "*arrangement*")"#)
             .expect("switch to arrangement");
         editor.refresh_runtime_side_effects();
+        editor.runtime_mut().eval_str(
+            "(seq-set-delete-target :mixer-track (dict :track 0))"
+        ).expect("arm mixer deletion");
+        assert!(target.lock().unwrap().is_some());
         editor.handle_key(ctrl_a);
+        assert!(target.lock().unwrap().is_none(),
+            "surface select-all must relinquish the mixer delete target");
         assert_eq!(
             editor.runtime_mut().eval_str("(eseq.step-grid-interactions/select-all-context)").unwrap(),
             Some(Value::Keyword("arrangement".into()))
@@ -18183,7 +18254,13 @@ mod instrument_header_ui_tests;
             "fx active + arrangement visible still targets the clips; visible = {:?}",
             editor.runtime_mut().eval_str("(visible-buffer-list)").unwrap()
         );
+        editor.runtime_mut().eval_str(
+            "(seq-set-delete-target :mixer-track (dict :track 0))"
+        ).expect("arm mixer deletion");
+        assert!(target.lock().unwrap().is_some());
         editor.handle_key(ctrl_a);
+        assert!(target.lock().unwrap().is_none(),
+            "surface select-all must relinquish the mixer delete target");
         let entries = format!("{:?}", log(&mut editor));
         assert_eq!(entries.matches("clips").count(), 2, "{entries}");
 
@@ -18193,7 +18270,13 @@ mod instrument_header_ui_tests;
             .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
             .expect("switch to piano roll");
         editor.refresh_runtime_side_effects();
+        editor.runtime_mut().eval_str(
+            "(seq-set-delete-target :mixer-track (dict :track 0))"
+        ).expect("arm mixer deletion");
+        assert!(target.lock().unwrap().is_some());
         editor.handle_key(ctrl_a);
+        assert!(target.lock().unwrap().is_none(),
+            "surface select-all must relinquish the mixer delete target");
         assert_eq!(
             editor.runtime_mut().eval_str("(eseq.step-grid-interactions/select-all-context)").unwrap(),
             Some(Value::Keyword("piano-roll".into()))
@@ -20258,6 +20341,205 @@ mod instrument_header_ui_tests;
         assert_eq!(port_field("out", "target"), Value::String("unbound".to_string()));
         assert_eq!(port_field("out", "disconnectable"), Value::Bool(false));
         assert_eq!(port_field("out", "clearable"), Value::Bool(true));
+    }
+
+    /// `SEQ.track-lane-patch`: cable-level view of the composed chain.
+    #[test]
+    fn lane_patch_lists_every_reader_of_a_port_and_every_writer_of_an_inlet() {
+        fn field(value: &Value, key: &str) -> Value {
+            let Value::Map(map) = value else {
+                panic!("expected a map for {key}");
+            };
+            map.get(key)
+                .unwrap_or_else(|| panic!("missing field {key}"))
+                .borrow()
+                .clone()
+        }
+        fn items(value: &Value) -> Vec<Value> {
+            let Value::List(items) = value else {
+                panic!("expected a list");
+            };
+            items.iter().map(|item| item.borrow().clone()).collect()
+        }
+        fn number(value: &Value) -> f64 {
+            let Value::Number(number) = value else {
+                panic!("expected a number, got {value:?}");
+            };
+            *number
+        }
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut runtime = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        runtime
+            .eval_str(&sequencer::lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        runtime
+            .eval_str(
+                r#"
+                (def-process patch-track-proc
+                  :in ((x :float 0 1 :default 0 :lane true))
+                  :run nil)
+                (def patch-track-attach
+                  (processes :track 0 (patch-track-proc)))
+                "#,
+            )
+            .expect("attach a track-layer process");
+
+        let mut chain = sequencer::process::default_project_layer();
+        let slot_mut = |chain: &mut sequencer::process::TrackProcessChain, name: &str| {
+            let index = chain
+                .slots
+                .iter()
+                .position(|slot| slot.instance_name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("default lane {name}"));
+            index
+        };
+        let cmp_index = slot_mut(&mut chain, "cmp A");
+        let acc_index = slot_mut(&mut chain, "acc A");
+        let rand_index = slot_mut(&mut chain, "rand");
+        let reset_index = slot_mut(&mut chain, "reset");
+        let cmp_target = sequencer::process::ParamTarget::ProcessInlet {
+            process: chain.slots[cmp_index].class_name.clone(),
+            inlet: "a".to_string(),
+            instance_id: Some(chain.slots[cmp_index].instance_id),
+        };
+        let acc_target = sequencer::process::ParamTarget::ProcessInlet {
+            process: chain.slots[acc_index].class_name.clone(),
+            inlet: "amount".to_string(),
+            instance_id: Some(chain.slots[acc_index].instance_id),
+        };
+        let rand = &mut chain.slots[rand_index];
+        rand.bindings.insert("wire".to_string(), Some(cmp_target));
+        rand.fanout.insert(
+            "wire".to_string(),
+            vec![sequencer::process::ProcessPortFanout {
+                target: acc_target,
+                lo: 0.0,
+                hi: 1.0,
+            }],
+        );
+        assert!(state.set_project_process_chain(chain));
+
+        let entries = items(&build_track_lane_patch_value(&state, 0));
+        let by_name = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| field(entry, "name") == Value::String(name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| panic!("patch entry {name}"))
+        };
+        let stride = LANE_PATCH_PORT_STRIDE as f64;
+
+        // Port ids fold the track in, so two patchbays in one layout never
+        // share a cable source id.
+        assert_eq!(
+            lane_patch_port_id(1, rand_index, 0),
+            LANE_PATCH_TRACK_STRIDE * LANE_PATCH_PORT_STRIDE + rand_index * LANE_PATCH_PORT_STRIDE
+        );
+
+        // rand's wire port lists both readers: the primary binding first,
+        // then the fan-out entry, each resolved to a chain index.
+        let rand_ports = items(&field(&by_name("rand"), "out-ports"));
+        assert_eq!(rand_ports.len(), 1);
+        assert_eq!(field(&rand_ports[0], "name"), Value::String("wire".to_string()));
+        let rand_port_id = number(&field(&rand_ports[0], "port-id"));
+        assert_eq!(rand_port_id, rand_index as f64 * stride);
+        assert_eq!(field(&rand_ports[0], "primary-free"), Value::Bool(false));
+        let cmp_ports = items(&field(&by_name("cmp A"), "out-ports"));
+        assert_eq!(field(&cmp_ports[0], "primary-free"), Value::Bool(true));
+        let readers = items(&field(&rand_ports[0], "readers"));
+        let reader = |index: usize| {
+            (
+                number(&field(&readers[index], "slot-index")) as usize,
+                field(&readers[index], "inlet"),
+                field(&readers[index], "source"),
+                field(&readers[index], "fanout-index"),
+            )
+        };
+        assert_eq!(
+            reader(0),
+            (
+                cmp_index,
+                Value::String("a".to_string()),
+                Value::String("primary".to_string()),
+                Value::Nil
+            )
+        );
+        assert_eq!(
+            reader(1),
+            (
+                acc_index,
+                Value::String("amount".to_string()),
+                Value::String("fanout".to_string()),
+                Value::Number(0.0)
+            )
+        );
+
+        // cmp A: one in port, its lane inlet, written by rand's wire.
+        let cmp_in = items(&field(&by_name("cmp A"), "in-ports"));
+        assert_eq!(cmp_in.len(), 1);
+        assert_eq!(field(&cmp_in[0], "name"), Value::String("a".to_string()));
+        assert_eq!(field(&cmp_in[0], "lane"), Value::Bool(true));
+        assert_eq!(
+            items(&field(&cmp_in[0], "writers")),
+            vec![Value::Number(rand_port_id)]
+        );
+
+        // acc A: amount (lane, written by rand) and reset (gate, written by
+        // the shared reset lane's single port through a fan-out entry).
+        let acc_in = items(&field(&by_name("acc A"), "in-ports"));
+        let names = acc_in
+            .iter()
+            .map(|port| field(port, "name"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                Value::String("amount".to_string()),
+                Value::String("reset".to_string())
+            ]
+        );
+        assert_eq!(
+            items(&field(&acc_in[0], "writers")),
+            vec![Value::Number(rand_port_id)]
+        );
+        assert_eq!(
+            items(&field(&acc_in[1], "writers")),
+            vec![Value::Number(reset_index as f64 * stride)],
+            "acc A's reset is driven by the reset lane's wire port"
+        );
+
+        // reset: one out port, three readers (primary + two fan-out).
+        let reset_ports = items(&field(&by_name("reset"), "out-ports"));
+        assert_eq!(reset_ports.len(), 1);
+        let reset_readers = items(&field(&reset_ports[0], "readers"));
+        assert_eq!(reset_readers.len(), 3);
+        assert_eq!(field(&reset_readers[0], "source"), Value::String("primary".to_string()));
+        assert_eq!(field(&reset_readers[1], "source"), Value::String("fanout".to_string()));
+        assert_eq!(field(&reset_readers[2], "fanout-index"), Value::Number(1.0));
+
+        // The mappable port rides along for the target chip.
+        let acc_params = items(&field(&by_name("acc A"), "param-ports"));
+        assert_eq!(acc_params.len(), 1);
+        assert_eq!(
+            field(&acc_params[0], "target"),
+            Value::String("step-param:retrig".to_string())
+        );
+
+        // The track-layer process comes after the project layer.
+        let last = entries.last().expect("track process entry");
+        assert_eq!(field(last, "name"), Value::String("patch-track-proc".to_string()));
+        assert_eq!(field(last, "project"), Value::Bool(false));
+        let last_in = items(&field(last, "in-ports"));
+        assert_eq!(last_in.len(), 1);
+        assert_eq!(field(&last_in[0], "name"), Value::String("x".to_string()));
     }
 
     #[test]
@@ -31387,6 +31669,50 @@ mod instrument_header_ui_tests;
     }
 
     #[test]
+    fn metal_seq_bus_and_group_output_dropdowns_have_visible_layout_and_route_by_id() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        apply_group_bindings(&mut editor, regular_group_fixture(false));
+        let mixer = editor.buffers.iter().find(|buffer| buffer.name == "*mixer*").unwrap().id;
+        editor.set_active_buffer(mixer);
+        editor.set_layout_viewport(160, 32);
+        editor.runtime_mut().set_reactive("SEQ", "track-bus-sends", test_list(vec![
+            test_list(vec![test_track_bus_send(9, "Extra", 0.0),
+                test_track_bus_send(2, "Bus B", 0.0), test_track_bus_send(1, "Bus A", 0.0)]),
+            test_list(vec![]),
+        ]));
+        let route = map_value([
+            ("value", Value::String("main".into())),
+            ("options", test_string_list(&["main", "Extra"])),
+            ("ids", test_number_list(&[0.0, 9.0])),
+        ]);
+        editor.runtime_mut().set_reactive("SEQ", "bus-output-routes", test_list(vec![
+            map_value([("options", test_list(vec![]))]), route.clone(), route,
+        ]));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("mixer layout");
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "track-0-send-9").is_none());
+        for index in [1, 2] {
+            assert!(find_layout_node_by_stable_key_suffix(&layout, &format!("track-0-send-{index}")).is_some());
+        }
+        for index in [1, 2] {
+            let dropdown = find_layout_node_by_stable_key_suffix(&layout, &format!("bus-output-{index}"))
+                .expect("bus or group routing dropdown");
+            assert_eq!(dropdown.widget_type, "dropdown");
+            assert!(dropdown.rect.width.is_finite() && dropdown.rect.width > 0.0);
+            assert!(dropdown.rect.height.is_finite() && dropdown.rect.height > 0.0);
+        }
+        let callback = find_layout_node_by_stable_key_suffix(&layout, "bus-output-2")
+            .unwrap().props.get("on-change").unwrap().clone();
+        editor.runtime_mut().invoke(callback, vec![Value::String("Extra".into())]).unwrap();
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, payload } if name == "set-bus-output"
+                && extract_usize_from_payload(payload, "bus-id") == Some(2)
+                && extract_usize_from_payload(payload, "destination-id") == Some(9))));
+    }
+
+    #[test]
     fn metal_seq_mixer_send_lock_marker_and_menu_target_clicked_track() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 16);
@@ -35520,6 +35846,72 @@ mod instrument_header_ui_tests;
     }
 
     #[test]
+    fn metal_seq_sequencer_track_clicks_select_visual_ranges() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 8, 16);
+        let mut group = regular_group_fixture(false);
+        group.members = vec![1, 6];
+        group.rack_members.clear();
+        apply_groups_bindings(&mut editor, &[group]);
+        editor.runtime_mut().set_reactive("SEQ", "track-collapsed",
+            test_bool_list(&[false, false, false, true, false, false, false, false]));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(220, 160);
+        editor.runtime_mut().register_native("seq-clear-selection", |_args, _ctx| {
+            Ok(Value::Bool(true))
+        });
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        for name in ["seq-set-track", "seq-select-tracks", "seq-toggle-track-selected"] {
+            let calls = Arc::clone(&calls);
+            editor.runtime_mut().register_native(name, move |args, _ctx| {
+                calls.lock().unwrap().push(format!("{name}:{args:?}"));
+                Ok(Value::Bool(true))
+            });
+        }
+        let layout = editor.widget_layout().expect("sequencer layout");
+        for (key, modifier) in [
+            ("/select-1", "plain"),
+            ("/color-badge-2", "shift"),
+            ("/track-drop-6", "shift"),
+            ("/select-7", "additive-selection"),
+            ("/select-4", "shift"),
+            ("/arm-2", "additive-selection"),
+            ("/mute-2", "additive-selection"),
+            ("/solo-2", "additive-selection"),
+            ("/expand-2", "additive-selection"),
+            ("/track-volume-control-2", "additive-selection"),
+            ("/select-4", "plain"),
+            ("/select-6", "shift"),
+        ] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key).expect(key);
+            assert!(node.rect.width.is_finite() && node.rect.width > 0.0, "{key}");
+            assert!(node.rect.height.is_finite() && node.rect.height > 0.0, "{key}");
+            editor.runtime_mut().invoke(node.props["on-click"].clone(),
+                vec![map_value([(modifier, Value::Bool(true))])]).expect(key);
+        }
+        assert_eq!(calls.lock().unwrap().as_slice(), [
+            "seq-set-track:[1]",
+            "seq-select-tracks:[(1 6 2), 2]",
+            "seq-select-tracks:[(1 6), 6]",
+            "seq-toggle-track-selected:[7]",
+            "seq-select-tracks:[(1 6 2 4), 4]",
+            "seq-toggle-track-selected:[2]",
+            "seq-toggle-track-selected:[2]",
+            "seq-toggle-track-selected:[2]",
+            "seq-toggle-track-selected:[2]",
+            "seq-toggle-track-selected:[2]",
+            "seq-set-track:[4]",
+            "seq-select-tracks:[(6 2 4), 6]",
+        ]);
+        // A hidden anchor is no longer a usable range endpoint.
+        editor.runtime_mut().eval_str("(do (set! eseq.sequencer/track-selection-anchor 3) (eseq.sequencer/track-click (dict :shift true) 4))").unwrap();
+        assert_eq!(calls.lock().unwrap().last().unwrap(), "seq-select-tracks:[(4), 4]");
+    }
+
+    #[test]
     fn metal_seq_sequencer_header_controls_activate_target_track_before_mutating() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 16);
@@ -35562,7 +35954,7 @@ mod instrument_header_ui_tests;
                     .get("on-click")
                     .cloned()
                     .expect("record-arm on-click"),
-                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+                vec![map_value([("shift", Value::Bool(false))])],
             )
             .expect("invoke second-row record-arm");
 
@@ -40973,19 +41365,6 @@ mod instrument_header_ui_tests;
 
         // Cutoff spans 40–18000 Hz: its knob must use the log taper so the
         // musical low decades get real arc travel; the neighbours stay linear.
-        fn find_knob_by_label<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            label: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node.widget_type == "knob-number"
-                && node.props.get("label") == Some(&Value::String(label.to_string()))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_knob_by_label(child, label))
-        }
         let cutoff_knob = find_knob_by_label(&layout, "cutoff").expect("cutoff knob-number");
         assert_eq!(
             cutoff_knob.props.get("taper"),
@@ -41072,7 +41451,7 @@ mod instrument_header_ui_tests;
     }
 
     #[test]
-    fn metal_seq_filter_table_rack_slot_dropdowns_are_visible_and_target_the_slot_effect() {
+    fn metal_seq_filter_table_rack_slot_controls_bind_modulation_and_target_the_slot_effect() {
         let app = test_app_with_rack_panel();
         let selected = Arc::new(Mutex::new(HashSet::new()));
         let panel = build_instrument_panel_value(&app, 0, &selected);
@@ -41081,7 +41460,17 @@ mod instrument_header_ui_tests;
             0,
             vec![
                 Value::Map(test_param_map("frame", 0, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("cutoff", 1, 1000.0, 40.0, 18000.0)),
+                {
+                    let mut param = test_param_map("cutoff", 1, 1000.0, 40.0, 18000.0);
+                    for (key, field) in [
+                        ("mod-value-field", effect_mod_value_field(43, 1)),
+                        ("mod-offset-field", effect_mod_offset_field(43, 1)),
+                        ("mod-scale-field", effect_mod_scale_field(43, 1)),
+                    ] {
+                        param.insert(key.into(), value_cell(Value::String(field)));
+                    }
+                    Value::Map(param)
+                },
                 Value::Map(test_param_map("resonance", 2, 0.0, 0.0, 1.0)),
                 Value::Map(test_param_map("mix", 3, 0.7, 0.0, 1.0)),
                 Value::Map(test_param_map("output", 4, 1.0, 0.25, 2.0)),
@@ -41091,6 +41480,7 @@ mod instrument_header_ui_tests;
             ("track-idx", Value::Number(0.0)),
             ("rack-slot", Value::Number(0.0)),
             ("rack-fx", Value::Bool(true)),
+            ("table-data-key", Value::String("rack-filter-table-test".to_string())),
             ("table-name", Value::String("Filterable".to_string())),
             ("table-engine", Value::String("Spectral".to_string())),
         ] {
@@ -41146,6 +41536,9 @@ mod instrument_header_ui_tests;
                 ("bus-effects", test_list(vec![])),
                 ("delete-target-version", Value::Number(0.0)),
                 (rack_slot_delete_target_field(0, 0).as_str(), Value::Bool(false)),
+                (effect_mod_value_field(43, 1).as_str(), Value::Number(1000.0)),
+                (effect_mod_offset_field(43, 1).as_str(), Value::Number(0.0)),
+                (effect_mod_scale_field(43, 1).as_str(), Value::Number(1.0)),
             ],
             true,
         );
@@ -41188,6 +41581,19 @@ mod instrument_header_ui_tests;
         assert_finite_nonzero_rect(engine, "rack Spectral/Min Phase dropdown");
         assert_eq!(preset.props.get("value"), Some(&Value::String("Filterable".to_string())));
         assert_eq!(engine.props.get("value"), Some(&Value::String("Spectral".to_string())));
+        let curve = find_layout_node_by_widget_type(effect_panel, "eq8-editor").unwrap();
+        let cutoff = find_knob_by_label(effect_panel, "cutoff").unwrap();
+        assert_finite_nonzero_rect(curve, "rack Filter Table response");
+        assert_finite_nonzero_rect(cutoff, "rack Filter Table cutoff");
+        assert!(matches!(curve.props.get("response-cutoff"), Some(Value::ReactiveRef { .. })));
+        assert!(matches!(cutoff.props.get("mod-offset"), Some(Value::ReactiveRef { .. })));
+        for value in [2400.0, 750.0, 1000.0] {
+            editor.runtime_mut().set_reactive("SEQ", &effect_mod_value_field(43, 1), Value::Number(value));
+            editor.runtime_mut().set_reactive("SEQ", &effect_mod_offset_field(43, 1), Value::Number(value - 1000.0));
+            assert_eq!(eseqlisp::widget_render::get_f32_prop(&curve.props, "response-cutoff", -1.0), value as f32);
+            assert_eq!(eseqlisp::widget_render::get_f32_prop(&cutoff.props, "mod-offset", -1.0), (value - 1000.0) as f32);
+            assert_eq!(eseqlisp::widget_render::get_f32_prop(&cutoff.props, "value", -1.0), 1000.0);
+        }
 
         editor.runtime_mut().eval_str(
             r#"(eseq.effects.builtin.filter-table/set-source
@@ -48242,9 +48648,15 @@ mod instrument_header_ui_tests;
                 let idx = match *p.get("idx").unwrap().borrow() { Value::Number(v) => v as usize, _ => panic!("index") };
                 if let sequencer::effects::ParamKind::Continuous { unit: Some(unit) } = &desc.params[idx].kind {
                     assert_eq!(*p.get("unit").unwrap().borrow(), Value::String(unit.clone()));
-                    let targets = p.get("mod-targets").unwrap().borrow();
-                    let Value::List(targets) = &*targets else { panic!("modulation targets"); };
-                    assert_eq!(targets.len(), 4);
+                    // The appended stretch controls carry units but are not
+                    // modulation destinations, so they project no targets.
+                    let modulatable = desc.params[idx].is_host_modulatable();
+                    assert_eq!(p.contains_key("mod-targets"), modulatable, "{}", desc.params[idx].name);
+                    if modulatable {
+                        let targets = p.get("mod-targets").unwrap().borrow();
+                        let Value::List(targets) = &*targets else { panic!("modulation targets"); };
+                        assert_eq!(targets.len(), 4);
+                    }
                 }
             }
             let sources = effect.get("sources").unwrap().borrow();
@@ -55225,6 +55637,566 @@ mod instrument_header_ui_tests;
         editor.runtime_mut().eval_str("(eseq.file-dialogs/unsaved-prompt-discard)").unwrap();
         assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
             HostCommand::Custom { name, .. } if name == "new-project")));
+    }
+
+    /// The lane patchbay under the step sliders: one box per lane, out and
+    /// in ports carrying the patch-port props the cable renderer and the
+    /// drag machinery read, cables from every wired reader.
+    #[test]
+    fn lane_patchbay_lays_out_ports_and_cables_for_wired_lanes() {
+        use eseqlisp::layout::LayoutNode;
+        fn patch_ports<'a>(node: &'a LayoutNode, out: &mut Vec<&'a LayoutNode>) {
+            if matches!(node.props.get("patch-port"), Some(Value::Bool(true))) {
+                out.push(node);
+            }
+            for child in &node.children {
+                patch_ports(child, out);
+            }
+        }
+        fn prop_number(node: &LayoutNode, key: &str) -> Option<f64> {
+            match node.props.get(key) {
+                Some(Value::Number(value)) => Some(*value),
+                _ => None,
+            }
+        }
+        fn prop_keyword(node: &LayoutNode, key: &str) -> Option<String> {
+            match node.props.get(key) {
+                Some(Value::Keyword(value)) | Some(Value::String(value)) => Some(value.clone()),
+                _ => None,
+            }
+        }
+        fn prop_numbers(node: &LayoutNode, key: &str) -> Vec<f64> {
+            match node.props.get(key) {
+                Some(Value::List(values)) => values
+                    .iter()
+                    .filter_map(|value| match &*value.borrow() {
+                        Value::Number(value) => Some(*value),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        }
+
+        // Publish the builtin lane classes into a state and wire
+        // rand -> cmp A (a) -> roll (gate) on the project layer.
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut authoring = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        authoring
+            .eval_str(&sequencer::lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        let mut chain = sequencer::process::default_project_layer();
+        let index_of = |chain: &sequencer::process::TrackProcessChain, name: &str| {
+            chain
+                .slots
+                .iter()
+                .position(|slot| slot.instance_name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("default lane {name}"))
+        };
+        let rand_index = index_of(&chain, "rand");
+        let cmp_index = index_of(&chain, "cmp A");
+        let roll_index = index_of(&chain, "roll");
+        let inlet_target = |chain: &sequencer::process::TrackProcessChain, index: usize, inlet: &str| {
+            sequencer::process::ParamTarget::ProcessInlet {
+                process: chain.slots[index].class_name.clone(),
+                inlet: inlet.to_string(),
+                instance_id: Some(chain.slots[index].instance_id),
+            }
+        };
+        let cmp_target = inlet_target(&chain, cmp_index, "a");
+        let roll_target = inlet_target(&chain, roll_index, "gate");
+        chain.slots[rand_index]
+            .bindings
+            .insert("wire".to_string(), Some(cmp_target));
+        chain.slots[cmp_index]
+            .bindings
+            .insert("wire".to_string(), Some(roll_target));
+        assert!(state.set_project_process_chain(chain));
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(220, 90);
+        for (name, value) in [
+            ("track-process-lanes", build_all_track_process_lanes_value(&state, 1)),
+            ("track-process-slots", build_all_track_process_slots_value(&state, 1)),
+            ("track-lane-patch", build_all_track_lane_patch_value(&state, 1)),
+        ] {
+            editor.runtime_mut().set_reactive("SEQ", name, value);
+        }
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/set-track-expanded (nth SEQ.track-ids 0) true)")
+            .unwrap();
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {cmp_index}))"
+            ))
+            .unwrap();
+        editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show true)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(220, 90);
+        let layout = editor.widget_layout().unwrap();
+        assert_finite_layout_tree(&layout);
+
+        let mut ports = Vec::new();
+        patch_ports(&layout, &mut ports);
+        let stride = LANE_PATCH_PORT_STRIDE as f64;
+        let rand_port = rand_index as f64 * stride;
+        let cmp_port = cmp_index as f64 * stride;
+        let out_ports = ports
+            .iter()
+            .filter(|node| prop_keyword(node, "direction").as_deref() == Some("out"))
+            .collect::<Vec<_>>();
+        let in_ports = ports
+            .iter()
+            .filter(|node| prop_keyword(node, "direction").as_deref() == Some("in"))
+            .collect::<Vec<_>>();
+        // Every lane with a connectable port has an out port: reset, the
+        // generators, the accumulators, cmp A, cmp B.
+        assert!(out_ports.len() >= 7, "out ports: {}", out_ports.len());
+        assert!(
+            out_ports
+                .iter()
+                .any(|node| prop_number(node, "track") == Some(rand_port)),
+            "rand's wire port carries its cable id"
+        );
+        for node in &ports {
+            assert!(
+                node.rect.width > 0.0 && node.rect.height > 0.0,
+                "port rect {:?}",
+                node.rect
+            );
+        }
+        // In ports name their reader by chain index and list their writers.
+        let cmp_in = in_ports
+            .iter()
+            .find(|node| {
+                prop_number(node, "dest") == Some(cmp_index as f64)
+                    && prop_number(node, "input") == Some(0.0)
+            })
+            .expect("cmp A's `a` in port");
+        assert_eq!(prop_keyword(cmp_in, "dest-kind").as_deref(), Some("lane"));
+        assert_eq!(prop_numbers(cmp_in, "connected-sources"), vec![rand_port]);
+        let roll_in = in_ports
+            .iter()
+            .find(|node| {
+                prop_number(node, "dest") == Some(roll_index as f64)
+                    && prop_number(node, "input") == Some(0.0)
+            })
+            .expect("roll's `gate` in port");
+        assert_eq!(prop_numbers(roll_in, "connected-sources"), vec![cmp_port]);
+        assert!(cmp_in.props.get("on-patch-drop").is_some(), "in ports accept drops");
+        assert!(cmp_in.props.get("on-cable-click").is_some(), "cables are selectable");
+        // An unwired in port draws no cable.
+        let veto_in = in_ports
+            .iter()
+            .find(|node| prop_number(node, "dest") == Some(index_of_name(&state, "veto") as f64))
+            .expect("veto's gate in port");
+        assert!(prop_numbers(veto_in, "connected-sources").is_empty());
+
+        // Backspace removes the selected cable; with nothing selected the
+        // key falls through to step deletion and stays handled.
+        let rand_port_id = lane_patch_port_id(0, rand_index, 0);
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(eseq.sequencer/lane-patch-select-cable 0 {rand_port_id} {cmp_index} 0)"
+            ))
+            .unwrap();
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-cable-selected?)").unwrap(),
+            Some(Value::Bool(true)),
+            "cable click selects the cable"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.sequencer/handle-key \"BS\" \"\")").unwrap(),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-cable-selected?)").unwrap(),
+            Some(Value::Bool(false)),
+            "Backspace removed the selected cable"
+        );
+        // With nothing selected the key falls through to step deletion,
+        // whose native the full-grid test editor does not register; the
+        // branch is the pre-existing one, so it is not driven here.
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-delete-selected)").unwrap(),
+            Some(Value::Bool(false)),
+            "nothing selected: the cable handler declines the key"
+        );
+
+        // A box click selects its lane in the strip, and the box knows it.
+        let instance_id = |name: &str| {
+            state
+                .composed_track_process_chain(0)
+                .expect("composed chain")
+                .slots
+                .iter()
+                .find(|slot| slot.instance_name.as_deref() == Some(name))
+                .map(|slot| slot.instance_id.0)
+                .unwrap_or_else(|| panic!("lane {name}"))
+        };
+        let (rand_id, roll_id) = (instance_id("rand"), instance_id("roll"));
+        let lane_selected = |editor: &mut eseqlisp::Editor, id: u64| {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(eseq.sequencer/lane-patch-lane-selected? 0 (nth SEQ.track-ids 0) {id})"
+                ))
+                .unwrap()
+        };
+        assert_eq!(lane_selected(&mut editor, rand_id), Some(Value::Bool(false)));
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(eseq.sequencer/lane-patch-select-lane 0 (nth SEQ.track-ids 0) {roll_id})"
+            ))
+            .unwrap();
+        assert_eq!(lane_selected(&mut editor, roll_id), Some(Value::Bool(true)));
+        assert_eq!(lane_selected(&mut editor, rand_id), Some(Value::Bool(false)));
+
+        // Toggling the view off removes every port.
+        editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show false)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        let mut ports = Vec::new();
+        patch_ports(&layout, &mut ports);
+        assert!(ports.is_empty(), "patch view off leaves no ports");
+    }
+
+    /// Drag through the editor's top-level mouse path (the one the app
+    /// uses, with the patch-drag intercept): out port down, drag, up on an
+    /// in port must reach the wiring natives, backwards included.
+    #[test]
+    fn lane_patchbay_drag_wires_ports_through_the_real_handlers() {
+        use eseqlisp::layout::LayoutNode;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        fn patch_ports<'a>(node: &'a LayoutNode, out: &mut Vec<&'a LayoutNode>) {
+            if matches!(node.props.get("patch-port"), Some(Value::Bool(true))) {
+                out.push(node);
+            }
+            for child in &node.children {
+                patch_ports(child, out);
+            }
+        }
+        fn prop_number(node: &LayoutNode, key: &str) -> Option<f64> {
+            match node.props.get(key) {
+                Some(Value::Number(value)) => Some(*value),
+                _ => None,
+            }
+        }
+        fn prop_keyword(node: &LayoutNode, key: &str) -> Option<String> {
+            match node.props.get(key) {
+                Some(Value::Keyword(value)) | Some(Value::String(value)) => Some(value.clone()),
+                _ => None,
+            }
+        }
+        fn map_string(value: &Value, key: &str) -> Option<String> {
+            let Value::Map(map) = value else { return None };
+            match &*map.get(key)?.borrow() {
+                Value::String(value) => Some(value.clone()),
+                _ => None,
+            }
+        }
+        fn map_number(value: &Value, key: &str) -> Option<f64> {
+            let Value::Map(map) = value else { return None };
+            match &*map.get(key)?.borrow() {
+                Value::Number(value) => Some(*value),
+                _ => None,
+            }
+        }
+
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut authoring = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        authoring
+            .eval_str(&sequencer::lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        let mut chain = sequencer::process::default_project_layer();
+        let index_of = |chain: &sequencer::process::TrackProcessChain, name: &str| {
+            chain
+                .slots
+                .iter()
+                .position(|slot| slot.instance_name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("default lane {name}"))
+        };
+        let (reset_index, count_index, cmp_index, cmp_b_index, roll_index) = (
+            index_of(&chain, "reset"),
+            index_of(&chain, "count"),
+            index_of(&chain, "cmp A"),
+            index_of(&chain, "cmp B"),
+            index_of(&chain, "roll"),
+        );
+        // cmp A already feeds roll, so a new cable out of it is a fan-out;
+        // count's wire is free, so a new cable out of it is the primary.
+        let roll_target = sequencer::process::ParamTarget::ProcessInlet {
+            process: chain.slots[roll_index].class_name.clone(),
+            inlet: "gate".to_string(),
+            instance_id: Some(chain.slots[roll_index].instance_id),
+        };
+        chain.slots[cmp_index]
+            .bindings
+            .insert("wire".to_string(), Some(roll_target));
+        let (reset_id, count_id, cmp_id, cmp_b_id) = (
+            chain.slots[reset_index].instance_id.0,
+            chain.slots[count_index].instance_id.0,
+            chain.slots[cmp_index].instance_id.0,
+            chain.slots[cmp_b_index].instance_id.0,
+        );
+        assert!(state.set_project_process_chain(chain));
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(220, 90);
+        for (name, value) in [
+            ("track-process-lanes", build_all_track_process_lanes_value(&state, 1)),
+            ("track-process-slots", build_all_track_process_slots_value(&state, 1)),
+            ("track-lane-patch", build_all_track_lane_patch_value(&state, 1)),
+        ] {
+            editor.runtime_mut().set_reactive("SEQ", name, value);
+        }
+        let calls: Rc<RefCell<Vec<(String, Vec<Value>)>>> = Rc::new(RefCell::new(Vec::new()));
+        for name in ["seq-bind-process-port", "seq-add-process-port-fanout"] {
+            let calls = Rc::clone(&calls);
+            editor.runtime_mut().register_native(name, move |args, _ctx| {
+                calls.borrow_mut().push((name.to_string(), args.to_vec()));
+                Ok(Value::Bool(true))
+            });
+        }
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/set-track-expanded (nth SEQ.track-ids 0) true)")
+            .unwrap();
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {cmp_index}))"
+            ))
+            .unwrap();
+        editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show true)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(220, 90);
+
+        // Screen coordinates come from the sequencer tile's own frame layout
+        // plus the tile's rect, the way the tiled mouse handler expects.
+        let port_center = |editor: &mut eseqlisp::Editor, out: bool, a: usize, b: usize| {
+            let frame = eseqlisp::frame::build_tiled_render_frame_borderless(editor, 220, 90);
+            let tile = frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                .expect("sequencer tile");
+            let layout = tile.frame.widget_layout.as_deref().expect("sequencer tile layout");
+            let mut ports = Vec::new();
+            patch_ports(layout, &mut ports);
+            let node = ports
+                .iter()
+                .find(|node| {
+                    if out {
+                        prop_keyword(node, "direction").as_deref() == Some("out")
+                            && prop_number(node, "track") == Some(a as f64)
+                    } else {
+                        prop_keyword(node, "direction").as_deref() == Some("in")
+                            && prop_number(node, "dest") == Some(a as f64)
+                            && prop_number(node, "input") == Some(b as f64)
+                    }
+                })
+                .unwrap_or_else(|| panic!("port out={out} a={a} b={b}"));
+            (
+                tile.rect.col + node.rect.col + node.rect.width * 0.5 - tile.frame.widget_layout_scroll_left,
+                tile.rect.row + node.rect.row + node.rect.height * 0.5 - tile.frame.widget_scroll_top,
+            )
+        };
+        let mouse = |editor: &mut eseqlisp::Editor,
+                     kind: crossterm::event::MouseEventKind,
+                     at: (f32, f32)| {
+            editor.handle_tiled_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind,
+                    column: at.0 as u16,
+                    row: at.1 as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                at.0,
+                at.1,
+                0,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+        };
+        let drag = |editor: &mut eseqlisp::Editor, from: (f32, f32), to: (f32, f32)| {
+            use crossterm::event::{MouseButton, MouseEventKind};
+            mouse(editor, MouseEventKind::Down(MouseButton::Left), from);
+            let armed = editor
+                .runtime_mut()
+                .eval_str("(eseq.sequencer/lane-patch-pending-port)")
+                .unwrap();
+            assert!(
+                !matches!(armed, Some(Value::Number(value)) if value < 0.0),
+                "mouse down on the out port must arm the drag: {armed:?}"
+            );
+            let mid = ((from.0 + to.0) * 0.5, (from.1 + to.1) * 0.5);
+            mouse(editor, MouseEventKind::Drag(MouseButton::Left), mid);
+            mouse(editor, MouseEventKind::Drag(MouseButton::Left), to);
+            mouse(editor, MouseEventKind::Up(MouseButton::Left), to);
+        };
+
+        // Backwards: cmp A (row two) into reset (row one). cmp A's wire is
+        // taken, so the cable is a fan-out entry.
+        let from = port_center(&mut editor, true, lane_patch_port_id(0, cmp_index, 0), 0);
+        let to = port_center(&mut editor, false, reset_index, 0);
+        drag(&mut editor, from, to);
+        let recorded = calls.borrow().clone();
+        assert_eq!(recorded.len(), 1, "one wiring call: {recorded:?}");
+        let (native, args) = &recorded[0];
+        assert_eq!(native, "seq-add-process-port-fanout");
+        assert_eq!(args[0], Value::Number(0.0));
+        assert_eq!(args[1], Value::Number(cmp_id as f64));
+        assert_eq!(args[2], Value::String("wire".to_string()));
+        assert_eq!(map_string(&args[3], "inlet").as_deref(), Some("reset"));
+        assert_eq!(map_number(&args[3], "instance-id"), Some(reset_id as f64));
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-pending-port)").unwrap(),
+            Some(Value::Number(-1.0)),
+            "the drop clears the pending drag"
+        );
+
+        // Forwards: count into cmp B, a free wire, so the primary binding.
+        // The sequencer is a UI-only buffer whose text scroll must not move
+        // the drop: with the buffer scrolled, the drag has to land exactly
+        // where the arming mouse-down did.
+        calls.borrow_mut().clear();
+        {
+            let buffer = editor.buffers.iter_mut().find(|b| b.name == "*sequencer*").unwrap();
+            buffer.scroll_top = 7;
+        }
+        let from = port_center(&mut editor, true, lane_patch_port_id(0, count_index, 0), 0);
+        let to = port_center(&mut editor, false, cmp_b_index, 0);
+        drag(&mut editor, from, to);
+        let recorded = calls.borrow().clone();
+        assert_eq!(recorded.len(), 1, "one wiring call: {recorded:?}");
+        let (native, args) = &recorded[0];
+        assert_eq!(native, "seq-bind-process-port");
+        assert_eq!(args[1], Value::Number(count_id as f64));
+        assert_eq!(map_string(&args[3], "inlet").as_deref(), Some("a"));
+        assert_eq!(map_number(&args[3], "instance-id"), Some(cmp_b_id as f64));
+    }
+
+    /// A second cable out of a default (project-layer) lane, wired in
+    /// "this track" scope, is a fan-out entry on the track's fork of the
+    /// slot. The composed chain the patchbay reads must carry it.
+    #[test]
+    fn lane_patch_shows_a_per_track_fanout_cable_on_a_project_lane() {
+        fn field(value: &Value, key: &str) -> Value {
+            let Value::Map(map) = value else { panic!("expected a map for {key}") };
+            map.get(key).unwrap_or_else(|| panic!("missing field {key}")).borrow().clone()
+        }
+        fn items(value: &Value) -> Vec<Value> {
+            let Value::List(items) = value else { panic!("expected a list") };
+            items.iter().map(|item| item.borrow().clone()).collect()
+        }
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut runtime = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        runtime
+            .eval_str(&sequencer::lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        let chain = state.composed_track_process_chain(0).expect("composed chain");
+        let slot = |name: &str| {
+            chain
+                .slots
+                .iter()
+                .find(|slot| slot.instance_name.as_deref() == Some(name))
+                .cloned()
+                .unwrap_or_else(|| panic!("lane {name}"))
+        };
+        let (cmp, roll, reset) = (slot("cmp A"), slot("roll"), slot("reset"));
+        let target = |slot: &sequencer::process::TrackProcessSlot, inlet: &str| {
+            sequencer::process::ParamTarget::ProcessInlet {
+                process: slot.class_name.clone(),
+                inlet: inlet.to_string(),
+                instance_id: Some(slot.instance_id),
+            }
+        };
+        // First cable: the primary binding, forking the project slot for track 0.
+        assert!(state.set_process_port_binding(0, cmp.instance_id, "wire", target(&roll, "gate")));
+        // Second cable, backwards into reset: a fan-out entry on the same fork.
+        assert!(state.edit_process_port_fanout(0, cmp.instance_id, "wire", false, |list| {
+            list.push(sequencer::process::ProcessPortFanout {
+                target: target(&reset, "reset"),
+                lo: 0.0,
+                hi: 1.0,
+            })
+        }));
+
+        let entries = items(&build_track_lane_patch_value(&state, 0));
+        let by_name = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| field(entry, "name") == Value::String(name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| panic!("patch entry {name}"))
+        };
+        let cmp_ports = items(&field(&by_name("cmp A"), "out-ports"));
+        let readers = items(&field(&cmp_ports[0], "readers"));
+        let reader_names = readers
+            .iter()
+            .map(|reader| (field(reader, "inlet"), field(reader, "source")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reader_names,
+            vec![
+                (Value::String("gate".to_string()), Value::String("primary".to_string())),
+                (Value::String("reset".to_string()), Value::String("fanout".to_string())),
+            ],
+            "the fork carries both cables"
+        );
+        let reset_in = items(&field(&by_name("reset"), "in-ports"));
+        assert_eq!(
+            items(&field(&reset_in[0], "writers")),
+            vec![field(&cmp_ports[0], "port-id")],
+            "reset's in port sees the backward cable from cmp A"
+        );
+    }
+
+    fn index_of_name(state: &Arc<SequencerState>, name: &str) -> usize {
+        state
+            .composed_track_process_chain(0)
+            .expect("composed chain")
+            .slots
+            .iter()
+            .position(|slot| slot.instance_name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("lane {name}"))
     }
 
     #[test]

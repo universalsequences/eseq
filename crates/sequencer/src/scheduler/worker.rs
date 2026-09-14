@@ -448,15 +448,17 @@ impl SchedulerDriver {
                 "[roll-debug] scheduler drain commands={roll_commands:?} frontier_beats={:.6}",
                 self.lookahead_state.clock.total_beats,
             );
+            // Manual sequence-roll commands and ClearAll win over a running
+            // process roll (`roll!`).
+            self.lookahead_state
+                .roll
+                .cancel_process_roll_for_commands(&roll_commands, state);
             self.lookahead_state.roll.apply_commands_with_clock(
                 &roll_commands,
                 &mut self.lookahead_state.clock,
                 &snapshot,
             );
-            let grid = crate::sequencer::Timebase::from_index(
-                state.transport.roll_rate.load(Ordering::Relaxed),
-            )
-            .step_beats(MAX_STEPS);
+            let grid = self.lookahead_state.roll.active_grid_beats(state);
             self.lookahead_state.roll.publish_windows(state, grid);
             let active_windows: Vec<(usize, f64)> = self.lookahead_state
                 .roll
@@ -549,6 +551,7 @@ impl SchedulerDriver {
             // roll keys pressed with roll mode on stay armed, so a
             // press-then-play starts rolling exactly on beat one.
             if self.last_playing {
+                self.lookahead_state.roll.cancel_process_roll(state, true);
                 self.lookahead_state.roll.clear_all();
             }
             self.roll_play_hold = None;

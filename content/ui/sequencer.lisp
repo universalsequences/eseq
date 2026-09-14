@@ -36,6 +36,13 @@
         select-track-for-edit
         open-piano-roll-for-track
         set-track-expanded
+        lane-patch-show
+        lane-patch-select-cable
+        lane-patch-cable-selected?
+        lane-patch-delete-selected
+        lane-patch-select-lane
+        lane-patch-lane-selected?
+        lane-patch-pending-port
         track-param-mode
         set-track-param-mode
         track-cursor
@@ -212,14 +219,47 @@
     (lambda (track) (sync-track-cursor-to-global track))
     (range 0 (len SEQ.track-ids))))
 
+;; Plain selections reset the range anchor; additive clicks leave it intact.
+(def track-selection-anchor nil)
+
 ;; Selecting an edit target must not change workspace layout. Opening FX is an
 ;; explicit gesture owned by show-fx-for-track (track-name double-click).
 (def select-track-for-edit (track)
   (do
+    (set! track-selection-anchor track)
     (set! eseq.seq-core-state/selected-bus -1)
     (if (= SEQ.current-track track) nil (seq-clear-selection))
     (seq-set-track track)
     (sync-track-cursor-to-global track)))
+
+(def track-selection-click? (event)
+  (or (get event :shift) (get event :additive-selection)))
+
+(def track-click (event track)
+  (do
+    (if (get event :shift)
+      (let ((anchor (if (= track-selection-anchor nil)
+                      SEQ.current-track
+                      track-selection-anchor)))
+        (do
+          (set! track-selection-anchor anchor)
+          (set! eseq.seq-core-state/selected-bus -1)
+          (seq-select-tracks
+            (eseq.seq-core-state/track-range-in-order
+              (eseq.drum-rack-v2/visible-track-order) anchor track)
+            track)))
+      (if (get event :additive-selection)
+        (do
+          (set! eseq.seq-core-state/selected-bus -1)
+          (seq-toggle-track-selected track))
+        (select-track-for-edit track)))
+    (sync-track-cursor-to-global track)))
+
+;; Modified track-control clicks select tracks without also editing a control.
+(def track-control-click (event track action)
+  (if (track-selection-click? event)
+    (track-click event track)
+    (action)))
 
 (def activate-track-for-edit (track)
   (select-track-for-edit track))
@@ -408,7 +448,11 @@
             (if (or (= key "C-h") (= key "C-H"))
               (do (collapse-all-tracks) true)
               (if (or (= key "BS") (= key "Delete"))
-                (do (eseq.step-grid-interactions/delete-selected-steps) true)
+                (do
+                  (if (lane-patch-delete-selected)
+                    nil
+                    (eseq.step-grid-interactions/delete-selected-steps))
+                  true)
                 (if (= key "RET")
                   (do (eseq.step-grid-interactions/cursor-toggle) true)
                   false)))))))))
@@ -851,7 +895,8 @@
       :background "seqv-track-volume-meter"
       :level (track-peak i)
       :volume (track-volume-binding i)
-      :on-click (lambda (event) (set-track-volume-from-event i event))
+      :on-click (lambda (event)
+        (track-control-click event i (lambda () (set-track-volume-from-event i event))))
       :on-drag (lambda (event) (set-track-volume-from-event i event))))
   )
 
@@ -860,7 +905,7 @@
     (box :background "seqv-track-container"
       :padding 0.1
       
-      :on-click |x y r| (select-track-for-edit i)
+      :on-click (lambda (event) (track-click event i))
       (h-stack :gap 0.4 :align :center
         (box
           :key (str "color-badge-" i)
@@ -869,12 +914,14 @@
           :track-r (track-color-r-binding i)
           :track-g (track-color-g-binding i)
           :track-b (track-color-b-binding i)
-          :on-click |x y r| (select-track-for-edit i))
+          :on-click (lambda (event) (track-click event i)))
         (box :width 2 :height 1.5
           :background "seqv-rec-arm-dot"
           :key (str "arm-" i)
           :active (if (nth SEQ.record-armed i) 1 0)
-          :on-click |x y r| (do (activate-track-for-edit i) (seq-toggle-record-arm i)))
+          :on-click (lambda (event)
+            (track-control-click event i
+              (lambda () (do (activate-track-for-edit i) (seq-toggle-record-arm i))))))
         (if is-bare-track (box :width 1.55))
         (button (str (+ i 1))
           :key (str "mute-" i)
@@ -882,18 +929,22 @@
           :border-color :transparent
           :background-color (mute-bg (nth SEQ.track-mutes i))
           :color (if (nth SEQ.track-mutes i) :gray :control-on-fg)
-          :on-click |x y r| (do (activate-track-for-edit i) (seq-toggle-track-mute i)))
+          :on-click (lambda (event)
+            (track-control-click event i
+              (lambda () (do (activate-track-for-edit i) (seq-toggle-track-mute i))))))
         (button "S"
           :key (str "solo-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :background-color (solo-bg (nth SEQ.track-solos i))
           :border-color :transparent
           :color (if (nth SEQ.track-solos i) :sequencer-solo-on-fg :gray)
-          :on-click |x y r| (do (activate-track-for-edit i) (seq-toggle-track-solo i)))
+          :on-click (lambda (event)
+            (track-control-click event i
+              (lambda () (do (activate-track-for-edit i) (seq-toggle-track-solo i))))))
         (box :width 8.6 :height 1
           :key (str "select-" i)
           :background-color :transparent
-          :on-click |x y r| (select-track-for-edit i)
+          :on-click (lambda (event) (track-click event i))
           ;; Arrangement/step track headers are device-view gestures:
           ;; double-click always enters FX mode rather than toggling.
           :on-double-click (lambda (evt) (show-fx-for-track i))
@@ -940,7 +991,8 @@
       :width 3.5 :height 1.0
       :background "seqv-ellipsis-button"
       :expanded (if (track-expanded? (nth SEQ.track-ids i)) 1 0)
-      :on-click |x y r| (track-menu-click i))
+      :on-click (lambda (event)
+        (track-control-click event i (lambda () (track-menu-click i)))))
     (box :width 0.1 :height 0.0)
     ))
 
@@ -1828,6 +1880,33 @@
             (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) index))))
       :width 7.5 :height 1.1 :font-size 8.5)))
 
+;; Enum inlets (cmp's `op`, roll's `rate`) pick from the definition's option
+;; list. The inlet value is the option index, so the row maps label <-> index.
+(def lane-enum-option (inlet index)
+  (let ((options (if (get inlet :options) (get inlet :options) '())))
+    (if (and (< -1 index) (< index (len options))) (nth options index) "")))
+
+(def lane-enum-option-index (inlet label)
+  (let ((options (if (get inlet :options) (get inlet :options) '())))
+    (reduce |acc index| (if (= label (nth options index)) index acc)
+      0
+      (range 0 (len options)))))
+
+(def lane-strip-enum-inlet-row (track slot inlet)
+  (h-stack :width :fill :gap 0.3 :align :center
+    :key (str "lane-inlet-" (get slot :instance-id) "-" (get inlet :name))
+    (label (get inlet :label) :flex 1 :font-size 8.5 :color :white :bg :transparent)
+    (dropdown
+      :key (str "lane-inlet-enum-" (get slot :instance-id) "-" (get inlet :name))
+      :value (lane-enum-option inlet (floor (get inlet :value)))
+      :options (if (get inlet :options) (get inlet :options) '())
+      :on-change (lambda (label)
+        (let ((index (lane-enum-option-index inlet label)))
+          (if (lane-edit-all?)
+            (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) index :all)
+            (seq-set-process-inlet track (get slot :instance-id) (get inlet :name) index))))
+      :width 7.5 :height 1.1 :font-size 8.5)))
+
 (def lane-strip-inlets (track slot)
   ;; `mode` has its own row; `reset` is written by the shared reset lane's
   ;; wire, never typed.
@@ -1836,7 +1915,9 @@
         |inlet|
     (if (= (get inlet :kind) "track")
       (lane-strip-track-inlet-row track slot inlet)
-      (lane-strip-inlet-row track slot inlet))))
+      (if (= (get inlet :kind) "enum")
+        (lane-strip-enum-inlet-row track slot inlet)
+        (lane-strip-inlet-row track slot inlet)))))
 
 ;; Reorder within the chain: move before the previous slot, or after the next.
 (def lane-strip-neighbor (track slot delta)
@@ -1901,6 +1982,345 @@
             :area true)))
       nil)))
 
+
+;; ---------------------------------------------------------------------------
+;; Lane patchbay (docs/default-process-lanes-spec.md, patchbay): every lane of
+;; the composed chain in fire order, cables between their connectable ports.
+;; Data comes from SEQ.track-lane-patch; the cables, the drag and the cable
+;; click are the generic patch-port machinery the mixer's mod ports use.
+;; Cable ids: an out port is `(track * 4096 + slot-index) * 16 + ordinal`, an
+;; in port is (slot-index, ordinal) on its own track's closure. The track is
+;; folded in because every expanded track's patchbay shares one layout and
+;; the cable renderer keys sources by that number alone.
+
+(defstate lane-patch-view true)
+;; Out port id being dragged (or armed by a click); -1 when idle. Port id 0
+;; is a legal port, so never test this with a bare `if`.
+(defstate lane-patch-pending -1)
+;; The selected cable, a dict of writer/port/reader/inlet/source, or nil.
+(defstate lane-patch-selected nil)
+
+(def lane-patch-show (on) (set! lane-patch-view on))
+
+(def lane-patch-port-style
+  (ui/style
+    :hover (dict
+      :brightness 1.45
+      :transition (dict :brightness 0.08 :ease :smoothstep))))
+
+(defwidget lane-patch-port
+  :width 0.9 :height 0.9
+  :paint-margin 0.012
+  :state (active pending output selected)
+  :shader
+  (let ((outer (if active
+          (if selected
+            :mod-port-selected
+            (if output
+              (if pending :mod-port-pending :mod-port-output)
+              :mod-port-input))
+          :mod-port-inactive))
+      (inner (if active
+          (if output :mod-port-output-inner :mod-port-input-inner)
+          :mod-port-inactive-inner)))
+    (sdf/layer
+      (sdf/fill (sdf/circle 0.82)
+        (material :color outer))
+      (sdf/fill (sdf/circle 0.43)
+        (material :color inner)))))
+
+(def track-lane-patch (track)
+  (if (< track (len SEQ.track-lane-patch))
+    (nth SEQ.track-lane-patch track)
+    '()))
+
+(def lane-patch-entry (track slot-index)
+  (let ((entries (track-lane-patch track)))
+    (if (and (< -1 slot-index) (< slot-index (len entries)))
+      (nth entries slot-index)
+      nil)))
+
+(def lane-patch-port-track (port-id) (floor (/ port-id (* 16 4096))))
+(def lane-patch-port-slot (track port-id) (- (floor (/ port-id 16)) (* track 4096)))
+(def lane-patch-port-ordinal (port-id) (- port-id (* 16 (floor (/ port-id 16)))))
+
+(def lane-patch-list (entry key)
+  (if (and entry (get entry key)) (get entry key) '()))
+
+(def lane-patch-out-port (track port-id)
+  (let ((ports (lane-patch-list (lane-patch-entry track (lane-patch-port-slot track port-id)) :out-ports))
+        (ordinal (lane-patch-port-ordinal port-id)))
+    (if (< ordinal (len ports)) (nth ports ordinal) nil)))
+
+(def lane-patch-in-port (track slot-index ordinal)
+  (let ((ports (lane-patch-list (lane-patch-entry track slot-index) :in-ports)))
+    (if (and (< -1 ordinal) (< ordinal (len ports))) (nth ports ordinal) nil)))
+
+;; The reader entry of an out port that lands on (reader slot, inlet), or nil.
+(def lane-patch-reader (out-port reader-slot inlet)
+  (reduce |acc reader|
+    (if (and (= acc nil)
+             (= (get reader :slot-index) reader-slot)
+             (= (get reader :inlet) inlet))
+      reader
+      acc)
+    nil
+    (lane-patch-list out-port :readers)))
+
+;; A cable pointing up the chain lands next fire (writes only flow forward
+;; within one fire).
+(def lane-patch-in-port-backward? (track slot-index port)
+  (reduce |acc writer| (or acc (> (lane-patch-port-slot track writer) slot-index))
+    false
+    (lane-patch-list port :writers)))
+
+(def lane-patch-clear-pending () (set! lane-patch-pending -1))
+
+(def lane-patch-arm (port-id)
+  (do
+    (set! lane-patch-pending port-id)
+    (set! lane-patch-selected nil)))
+
+(def lane-patch-inlet-target (entry inlet)
+  (dict :kind "process-inlet"
+        :process (get entry :class)
+        :inlet inlet
+        :instance-id (get entry :instance-id)))
+
+;; Wire out port `port-id` into (reader slot, in-port ordinal). The first
+;; cable out of a port takes its primary binding; every further cable is a
+;; fan-out entry on the port (identity range, so the value passes through).
+(def lane-patch-connect (track port-id reader-slot ordinal)
+  (let ((writer (lane-patch-entry track (lane-patch-port-slot track port-id)))
+        (out-port (lane-patch-out-port track port-id))
+        (reader (lane-patch-entry track reader-slot))
+        (in-port (lane-patch-in-port track reader-slot ordinal)))
+    (do
+      (set! lane-patch-pending -1)
+      (if (not (= (lane-patch-port-track port-id) track))
+        (status "Cables stay within a track")
+      (if (or (= writer nil) (= out-port nil) (= reader nil) (= in-port nil))
+        (status "Nothing to wire")
+        (if (= (lane-patch-port-slot track port-id) reader-slot)
+          (status "A lane cannot feed itself")
+          (if (lane-patch-reader out-port reader-slot (get in-port :name))
+            (status "Already wired")
+            (let ((target (lane-patch-inlet-target reader (get in-port :name)))
+                  (writer-id (get writer :instance-id))
+                  (port-name (get out-port :name)))
+              (do
+                (if (get out-port :primary-free)
+                  (if (lane-edit-all?)
+                    (seq-bind-process-port track writer-id port-name target :all)
+                    (seq-bind-process-port track writer-id port-name target))
+                  (if (lane-edit-all?)
+                    (seq-add-process-port-fanout track writer-id port-name target :all)
+                    (seq-add-process-port-fanout track writer-id port-name target)))
+                (status (str "Wired " (get writer :name) " → " (get reader :name) " " (get in-port :name)
+                             (if (< reader-slot (lane-patch-port-slot track port-id)) " (next fire)" "")
+                             (if (lane-edit-all?) " (all tracks)" ""))))))))))))
+
+(def lane-patch-in-click (track slot-index ordinal)
+  (if (< lane-patch-pending 0)
+    nil
+    (lane-patch-connect track lane-patch-pending slot-index ordinal)))
+
+(def lane-patch-select-cable (track port-id reader-slot ordinal)
+  (let ((out-port (if (= (lane-patch-port-track port-id) track) (lane-patch-out-port track port-id) nil))
+        (in-port (lane-patch-in-port track reader-slot ordinal)))
+    (if (and out-port in-port)
+      (let ((reader (lane-patch-reader out-port reader-slot (get in-port :name))))
+        (if reader
+          (do
+            (set! lane-patch-pending -1)
+            (set! lane-patch-selected
+              (dict :track track
+                    :port-id port-id
+                    :writer-slot (lane-patch-port-slot track port-id)
+                    :port (get out-port :name)
+                    :reader-slot reader-slot
+                    :ordinal ordinal
+                    :inlet (get in-port :name)
+                    :source (get reader :source)
+                    :fanout-index (get reader :fanout-index)))
+            (status "Cable selected: × removes it"))
+          nil))
+      nil)))
+
+(def lane-patch-selected-sources (slot-index ordinal)
+  (if (and lane-patch-selected
+           (= (get lane-patch-selected :reader-slot) slot-index)
+           (= (get lane-patch-selected :ordinal) ordinal))
+    (list (get lane-patch-selected :port-id))
+    '()))
+
+(def lane-patch-remove-selected (track)
+  (let ((cable lane-patch-selected))
+    (if cable
+      (let ((writer (lane-patch-entry track (get cable :writer-slot))))
+        (do
+          (set! lane-patch-selected nil)
+          (if writer
+            (if (= (get cable :source) "fanout")
+              (if (lane-edit-all?)
+                (seq-remove-process-port-fanout track (get writer :instance-id) (get cable :port) (get cable :fanout-index) :all)
+                (seq-remove-process-port-fanout track (get writer :instance-id) (get cable :port) (get cable :fanout-index)))
+              (if (lane-edit-all?)
+                (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port) :all)
+                (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port))))
+            nil)))
+      nil)))
+
+(def lane-patch-cable-selected? () (if lane-patch-selected true false))
+(def lane-patch-pending-port () lane-patch-pending)
+
+;; Backspace / Delete in the sequencer buffer: a selected cable goes first,
+;; otherwise the keys keep deleting steps. Returns true when a cable went.
+(def lane-patch-delete-selected ()
+  (if lane-patch-selected
+    (do
+      (lane-patch-remove-selected (get lane-patch-selected :track))
+      true)
+    false))
+
+(def lane-patch-out-port-widget (track entry port)
+  (let ((port-id (get port :port-id)))
+    (lane-patch-port
+      :key (str "lane-patch-out-" (get entry :instance-id) "-" (get port :name))
+      :patch-port true
+      :direction :out
+      :track port-id
+      :active true
+      :pending (= lane-patch-pending port-id)
+      :output true
+      :selected false
+      :style lane-patch-port-style
+      :on-mouse-down |x y r| (lane-patch-arm port-id)
+      :on-click |x y r| (lane-patch-arm port-id)
+      :on-patch-cancel (lambda (source) (lane-patch-clear-pending))
+      :on-patch-miss (lambda () (set! lane-patch-selected nil)))))
+
+(def lane-patch-in-port-widget (track entry port)
+  (let ((slot-index (get entry :slot-index))
+        (ordinal (get port :ordinal))
+        (backward (lane-patch-in-port-backward? track (get entry :slot-index) port)))
+    (h-stack :height 1.1 :gap 0.1 :align :center
+      :key (str "lane-patch-in-" (get entry :instance-id) "-" (get port :name))
+      (lane-patch-port
+        :key (str "lane-patch-in-port-" (get entry :instance-id) "-" (get port :name))
+        :patch-port true
+        :direction :in
+        :dest-kind "lane"
+        :dest slot-index
+        :input ordinal
+        :connected-sources (lane-patch-list port :writers)
+        :selected-sources (lane-patch-selected-sources slot-index ordinal)
+        :active true
+        :pending false
+        :output false
+        :selected (> (len (lane-patch-selected-sources slot-index ordinal)) 0)
+        :style lane-patch-port-style
+        :on-patch-drop (lambda (source dest input) (lane-patch-connect track source dest input))
+        :on-cable-click (lambda (source dest input) (lane-patch-select-cable track source dest input))
+        :on-click |x y r| (lane-patch-in-click track slot-index ordinal)
+        :on-mouse-up |x y r| (lane-patch-in-click track slot-index ordinal))
+      (label (str (get port :name) (if backward " ↑" ""))
+        :height 1.1 :font-size 6.5 :v-align :center
+        :color (if backward :process-lane-accent :dim) :bg :transparent))))
+
+;; The strip's selected lane, as the patchbay sees it: the lane entry index
+;; (dropdown order) of the first lane inlet on the slot with `instance-id`.
+(def lane-patch-lane-index (track instance-id)
+  (let ((lanes (eseq.seqv-track-params/seqv-track-process-lanes track)))
+    (reduce |acc index|
+      (if (and (< acc 0) (= (get (nth lanes index) :instance-id) instance-id)) index acc)
+      -1
+      (range 0 (len lanes)))))
+
+(def lane-patch-lane-selected? (track track-id instance-id)
+  (let ((lane (selected-process-lane track (track-param-mode track-id))))
+    (if lane (= (get lane :instance-id) instance-id) false)))
+
+;; Clicking a box selects its lane in the strip, the same as picking it in
+;; the dropdown, so the card and the painted lane follow the patchbay.
+(def lane-patch-select-lane (track track-id instance-id)
+  (let ((index (lane-patch-lane-index track instance-id)))
+    (if (< index 0)
+      nil
+      (do
+        (activate-track-for-edit track)
+        (set-track-param-mode track-id
+          (+ eseq.seqv-track-params/seqv-process-lane-mode-offset index))))))
+
+(def lane-patch-column (track track-id entry)
+  (let ((selected (lane-patch-lane-selected? track track-id (get entry :instance-id))))
+    (box :padding 0.4 :corner-radius 12
+      :key (str "lane-patch-col-" (get entry :instance-id))
+      :background-color (rgba 1 1 1 0.04)
+      :selected-background-color :mixer-strip-selected-bg
+      :selected selected
+      :height 3
+      :on-click (lambda (event) (lane-patch-select-lane track track-id (get entry :instance-id)))
+      (v-stack :width 9.0 :gap 0.0 :align :start
+        (label (get entry :name) :width :fill :font-size 8 :v-align :center
+          :v-align :center
+          :color (if (get entry :enabled) :process-lane-accent :dim) :bg :transparent)
+        (h-stack :width :fill :height 0.8 :gap 0.4 :align :center
+          (each (lane-patch-list entry :in-ports) |port|
+            (lane-patch-in-port-widget track entry port)))
+        (h-stack :width :fill :height 0.8 :gap 0.4 :align :center
+          (each (lane-patch-list entry :out-ports) |port|
+            (lane-patch-out-port-widget track entry port)))
+        ))))
+
+(def lane-patch-toggle-chip ()
+  (button (if lane-patch-view "lane" "patch")
+    :key "lane-patch-view-toggle"
+    :height 1.0 :padding 0.2 :font-size 7.5
+    :background-color (if lane-patch-view :process-lane-accent :transparent)
+    :border-color :process-lane-accent
+    :color (if lane-patch-view :black :dim)
+    :on-click (lambda (event)
+      (do
+        (set! lane-patch-pending -1)
+        (set! lane-patch-selected nil)
+        (set! lane-patch-view (not lane-patch-view))))))
+
+(def lane-patch-remove-button (track)
+  (button "× cable"
+    :key "lane-patch-remove-cable"
+    :height 1.0 :padding 0.2 :font-size 7.5
+    :background-color :transparent :border-color :process-lane-accent
+    :color :process-lane-accent
+    :on-click (lambda (event) (lane-patch-remove-selected track))))
+
+;; The patchbay sits under the step sliders and the lane strip, spanning the
+;; expanded track: one box per lane in fire order (left fires first), so a
+;; cable pointing left lands next fire (marked ↑ on the in port). The strip
+;; card's chip toggles it and holds the edit scope; the only control here is
+;; the remove chip that appears while a cable is selected.
+(def lane-patch-grid-row (track track-id entries from to)
+  (h-stack :width :fill :gap 0.2 :align :start
+    :key (str "lane-patch-grid-row-" track-id "-" from)
+    (each (range from to) |index|
+      (lane-patch-column track track-id (nth entries index)))))
+
+;; Two rows of lane boxes, read left to right then top to bottom.
+(def lane-patchbay (track track-id)
+  (let ((entries (track-lane-patch track)))
+    (let ((count (len entries))
+          (half (floor (/ (+ (len entries) 1) 2))))
+      (v-stack :width :fill :gap 0.1 :padding 0.3
+        :key (str "lane-patchbay-" track-id)
+        (lane-patch-grid-row track track-id entries 0 half)
+        (lane-patch-grid-row track track-id entries half count)
+        (if lane-patch-selected (lane-patch-remove-button track) nil)))))
+
+(def lane-patchbay-under (track track-id mode)
+  (if (and lane-patch-view (selected-process-lane track mode))
+    (lane-patchbay track track-id)
+    nil))
+
 (def lane-strip (track track-id mode)
   (let ((lane (selected-process-lane track mode))
       (slot (if lane (track-process-slot track (get lane :instance-id)) nil)))
@@ -1918,6 +2338,7 @@
             (if (get slot :project)
               (lane-scope-chip)
               (label "track lane" :v-align :center :font-size 7.5 :color :dim :bg :transparent))
+; removed this intentionally:            (lane-patch-toggle-chip)
             (lane-strip-move-button track slot "▲" -1)
             (lane-strip-move-button track slot "▼" 1))
           (lane-strip-in-row track lane)
@@ -2144,7 +2565,8 @@
                     (step-playhead-dot
                       :active (slot-playhead-binding track-id i)))))))
           (lane-strip track track-id mode))
-          (other-lanes-row track)))
+          (other-lanes-row track)
+          (lane-patchbay-under track track-id mode)))
       )
     )
   )
@@ -2213,7 +2635,7 @@
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (drop-on-track event))
       :padding 0.0145
-      :on-click |x y r| (select-track-for-edit i)
+      :on-click (lambda (event) (track-click event i))
       (if (track-expanded? (nth SEQ.track-ids i))
         (v-stack 
           :width :fill :gap 0.2

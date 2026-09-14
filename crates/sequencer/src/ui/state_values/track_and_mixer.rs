@@ -816,6 +816,24 @@ pub(crate) fn sync_track_mixer_state(
     );
 }
 
+pub(crate) fn build_bus_output_routes(app: &app::App) -> Value {
+    let label = |id: sequencer::sequencer::BusId| {
+        if id == sequencer::sequencer::BusId::MIX { return "main".to_string(); }
+        let Some(bus) = app.buses.iter().find(|bus| bus.id == id) else { return "main".to_string(); };
+        if bus.name == "main" || app.buses.iter().filter(|other| other.name == bus.name).count() > 1 {
+            format!("{} ({})", bus.name, id.0)
+        } else { bus.name.clone() }
+    };
+    list_value(app.buses.iter().map(|bus| {
+        let options = app.bus_output_options(bus.id);
+        map_value([
+            ("value", Value::String(label(sequencer::sequencer::BusId(bus.output.destination().unwrap_or(0))))),
+            ("options", list_value(options.iter().map(|id| Value::String(label(*id))))),
+            ("ids", list_value(options.iter().map(|id| Value::Number(id.0 as f64)))),
+        ])
+    }))
+}
+
 pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
     let names: Vec<String> = app.buses.iter().map(|bus| bus.name.clone()).collect();
     let volumes: Vec<Rc<RefCell<Value>>> = app
@@ -838,6 +856,7 @@ pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
         .iter()
         .map(|bus| Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))))
         .collect();
+    rt.set_reactive("SEQ", "bus-output-routes", build_bus_output_routes(app));
     rt.set_reactive("SEQ", "bus-ids", Value::List(ids));
     rt.set_reactive("SEQ", "bus-names", build_track_names(&names));
     rt.set_reactive("SEQ", "bus-volumes", Value::List(volumes));

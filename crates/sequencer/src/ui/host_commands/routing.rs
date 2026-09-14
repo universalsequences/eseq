@@ -2,6 +2,8 @@ use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
     "set-track-output",
+    "add-bus",
+    "set-bus-output",
     "set-mod-route",
     "delete-mod-route",
     "refresh-mixer-ui",
@@ -35,6 +37,22 @@ pub(super) fn handle(
     let ui_invalidations = ctx.shared.ui_invalidations.clone();
     let bus_state = ctx.shared.bus_state.clone();
     match name {
+        "add-bus" | "set-bus-output" => {
+            match apply_bus_routing_command(name, &payload, app) {
+                Ok(()) => {
+                    *bus_state.lock().unwrap() = app.buses.clone();
+                    *ctx.shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+                    let rt = editor.runtime_mut();
+                    sync_bus_mixer_state(rt, app);
+                    sync_track_mixer_state(rt, app, &state);
+                    rt.set_reactive("SEQ", "track-output-options", build_track_output_options(app));
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => app.editor.status_message = Some((error, Instant::now())),
+            }
+        }
         "set-track-output" => {
             if let Value::Map(ref map) = payload {
                 let label = map.get("label").and_then(|cell| match &*cell.borrow() {
@@ -900,4 +918,21 @@ pub(super) fn handle(
         }
         _ => {}
     }
+}
+
+/// Shared by interactive dispatch and the production headless capture path.
+pub(crate) fn apply_bus_routing_command(name: &str, payload: &Value, app: &mut app::App) -> Result<(), String> {
+    if name == "add-bus" {
+        let mut number = 3;
+        let name = loop {
+            let candidate = format!("Bus {number}");
+            if !app.buses.iter().any(|bus| bus.name == candidate) { break candidate; }
+            number += 1;
+        };
+        app.add_bus_recorded(name)?;
+        return Ok(());
+    }
+    let source = extract_usize_from_payload(payload, "bus-id").ok_or("Missing source bus id")?;
+    let target = extract_usize_from_payload(payload, "destination-id").ok_or("Missing destination bus id")?;
+    app.set_bus_output_recorded(sequencer::sequencer::BusId(source as u64), sequencer::sequencer::BusId(target as u64))
 }

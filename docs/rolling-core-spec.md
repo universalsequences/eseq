@@ -395,6 +395,12 @@ editor drops Release events. The single-step latch-repeat remains a possible fut
 *mode* (roll rate applied to a latched step rather than a window) — if built, it
 should be a core `RollState` variant, not a process primitive.
 
-The process layer still gets the feature for free at the control level: `roll_mode` /
-`roll_rate` / `sequence_rolling` are host-command-settable, so lisp processes and
-graph outputs can drive rolls (auto-stutter brains) without any new primitives.
+The process layer drives sequence rolling through one primitive, `(roll! rate-index)`
+(docs/default-process-lanes-spec.md, "Logic lanes"): the default `roll` lane calls it
+on a high step, the lookahead stamps the request with the firing step's beat and
+duration, and `RollState::engage_process_roll` captures the windows at that beat
+(§5.1 snapping), owns the remap grid while it runs, and releases itself on the
+deadline. Manual sequence-roll commands and ClearAll cancel it first. The earlier
+note that processes could drive rolls through host-command-settable atomics was
+aspirational: `toggle-roll-mode` is UI-thread only and there is no timed release on
+the manual path.

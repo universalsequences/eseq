@@ -12643,6 +12643,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             beat: 0.0,
             sample_time: 0,
             step_beats: 0.25,
+            written_inlets: Vec::new(),
             resolved: ResolvedStep {
                 duration: 1.0,
                 velocity: 0.8,
@@ -12656,6 +12657,155 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 retrig_rate: crate::sequencer::StepParam::RetrigRate.default_value(),
             },
         }
+    }
+
+    #[test]
+    fn process_inlet_enum_kind_parses_options_and_index_range() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process enum-check
+                  :in ((op :enum ("<" ">" "==") :default 1)
+                       (rate :enum (fast slow) :default 0))
+                  :run nil)
+                "#,
+            )
+            .expect("define enum-check process");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "enum-check")
+            .expect("process definition");
+        let op = &def.inlets[0];
+        assert_eq!(
+            op.kind,
+            crate::process::ProcessInletKind::Enum(vec![
+                "<".to_string(),
+                ">".to_string(),
+                "==".to_string()
+            ])
+        );
+        assert_eq!(op.min, Some(0.0));
+        assert_eq!(op.max, Some(2.0));
+        assert_eq!(op.default, Value::Number(1.0));
+        assert_eq!(
+            def.inlets[1].kind,
+            crate::process::ProcessInletKind::Enum(vec!["fast".to_string(), "slow".to_string()])
+        );
+    }
+
+    #[test]
+    fn process_run_in_written_reports_wire_writes_for_the_fire() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process written-check
+                  :in ((a :float -10 10 :default 0)
+                       (b :float -10 10 :default 0))
+                  :state ((a-seen 0) (b-seen 0))
+                  :run (do
+                    (set! a-seen (if (in? :a) 1 0))
+                    (set! b-seen (if (in? :b) 1 0))))
+                "#,
+            )
+            .expect("define written-check process");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "written-check")
+            .expect("process definition");
+        let mut step_context = test_process_step_context();
+        step_context.written_inlets = vec!["a".to_string()];
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 702,
+                source: def.run_source.expect("run source"),
+                beat: 0.0,
+                sample_time: 0,
+                inlets: HashMap::from([
+                    ("a".to_string(), Value::Number(0.0)),
+                    ("b".to_string(), Value::Number(0.0)),
+                ]),
+                state: HashMap::new(),
+                event: None,
+                step_context: Some(step_context),
+                ports: def.ports,
+                reads: crate::process::ProcessReadSnapshot::default(),
+                seed: 1,
+            })
+            .expect("invoke written-check process");
+        // Both inlets hold 0; only `a` received a write this fire.
+        assert_eq!(result.state.get("a-seen"), Some(&Value::Number(1.0)));
+        assert_eq!(result.state.get("b-seen"), Some(&Value::Number(0.0)));
+    }
+
+    #[test]
+    fn process_run_roll_native_pushes_a_clamped_rate_index() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process roll-check
+                  :run (do (roll! 6) (roll! 99) (roll! -3)))
+                "#,
+            )
+            .expect("define roll-check process");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "roll-check")
+            .expect("process definition");
+        let source = def.run_source.expect("run source");
+        let invocation = |step_context| crate::process::ProcessRunInvocation {
+            runtime_id: 703,
+            source: source.clone(),
+            beat: 0.0,
+            sample_time: 0,
+            inlets: HashMap::new(),
+            state: HashMap::new(),
+            event: None,
+            step_context,
+            ports: def.ports.clone(),
+            reads: crate::process::ProcessReadSnapshot::default(),
+            seed: 1,
+        };
+        let result = scratch
+            .invoke_process_run(invocation(Some(test_process_step_context())))
+            .expect("invoke roll-check process");
+        let roll = |rate_index| {
+            crate::process::ProcessRunCommand::Roll(crate::process::ProcessRollRequest {
+                rate_index,
+            })
+        };
+        assert_eq!(result.commands, vec![roll(6), roll(7), roll(0)]);
+        // Like veto!, the native needs a scheduler step event to anchor on.
+        assert!(scratch.invoke_process_run(invocation(None)).is_err());
     }
 
     #[test]
@@ -14614,6 +14764,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             beat: 0.0,
             sample_time: 0,
             step_beats: 0.25,
+            written_inlets: Vec::new(),
             resolved: crate::accumulator::ResolvedStep {
                 duration: 1.0,
                 velocity: 1.0,

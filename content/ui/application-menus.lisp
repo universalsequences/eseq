@@ -51,6 +51,8 @@
         (application-menu-entry "create-menu-effect" "Create Effect…" ""
           (lambda () (eseq.browser/enter-new-effect-editor)))
         nil
+        (application-menu-entry "create-menu-bus" "Bus" ""
+          (lambda () (host-command "add-bus" (dict))))
         (application-menu-entry "create-menu-midi" "MIDI Track" ""
           (lambda () (host-command "add-track-empty" (dict))))
         (application-menu-entry "create-menu-sampler" "Sampler Track" ""

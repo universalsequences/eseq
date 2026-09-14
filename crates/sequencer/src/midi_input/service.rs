@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+#[path = "service_run_loop.rs"]
+mod run_loop;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
     pub id: String,
@@ -35,6 +39,25 @@ pub enum Command {
     Refresh,
     SetEnabled { id: String, enabled: bool },
     Stop,
+}
+
+/// Queues commands and wakes the native event loop servicing device changes.
+#[derive(Clone)]
+pub struct CommandSender {
+    tx: mpsc::Sender<Command>,
+    #[cfg(target_os = "macos")]
+    wake: Arc<std::sync::OnceLock<run_loop::Wake>>,
+}
+
+impl CommandSender {
+    pub fn send(&self, command: Command) -> Result<(), mpsc::SendError<Command>> {
+        self.tx.send(command)?;
+        #[cfg(target_os = "macos")]
+        if let Some(wake) = self.wake.get() {
+            wake.signal();
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -355,7 +378,7 @@ pub fn persistent_device_ids() -> bool {
 }
 
 pub struct Service {
-    pub commands: mpsc::Sender<Command>,
+    pub commands: CommandSender,
     rx: mpsc::Receiver<Event>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -370,11 +393,22 @@ impl Service {
 
     fn start_at(wake: Option<WakeFn>, path: PathBuf) -> Result<Self, std::io::Error> {
         let (commands, command_rx) = mpsc::channel();
+        #[cfg(target_os = "macos")]
+        let wake_loop = Arc::new(std::sync::OnceLock::new());
+        let commands = CommandSender {
+            tx: commands,
+            #[cfg(target_os = "macos")]
+            wake: wake_loop.clone(),
+        };
         let (tx, rx) = mpsc::channel();
         let sink = Sink { tx, wake };
         let worker = std::thread::Builder::new()
             .name("midi-devices".into())
             .spawn(move || {
+                // CoreMIDI attaches process-wide topology updates to the run
+                // loop of its first client. Create and service it on this worker.
+                #[cfg(target_os = "macos")]
+                let native_loop = run_loop::WorkerLoop::new(&wake_loop);
                 let mut manager = Manager::new(
                     SystemDriver::default(),
                     sink.clone(),
@@ -388,7 +422,11 @@ impl Service {
                         sink.send(Event::Snapshot(manager.snapshot.clone()));
                         previous = Some(manager.snapshot.clone());
                     }
-                    match command_rx.recv_timeout(Duration::from_secs(1)) {
+                    #[cfg(target_os = "macos")]
+                    let command = native_loop.recv_timeout(&command_rx, Duration::from_secs(1));
+                    #[cfg(not(target_os = "macos"))]
+                    let command = command_rx.recv_timeout(Duration::from_secs(1));
+                    match command {
                         Ok(Command::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Ok(Command::SetEnabled { id, enabled }) => {
                             manager.set_enabled(&id, enabled, &path)
@@ -631,41 +669,84 @@ mod tests {
     #[test]
     fn coremidi_hotplug_delivers_notes_and_disconnect_cleanup() {
         use midir::os::unix::VirtualOutput;
+        use std::io::{Read, Write};
+        use std::process::{Child, Command as ProcessCommand, Stdio};
+
+        // CoreMIDI updates from inside the client process can bypass the native
+        // notification path. An external source exercises real hot-plug discovery.
+        const SOURCE_ENV: &str = "ESEQ_TEST_EXTERNAL_MIDI_SOURCE";
+        if let Ok(name) = std::env::var(SOURCE_ENV) {
+            let mut output = midir::MidiOutput::new(&name)
+                .unwrap()
+                .create_virtual(&name)
+                .unwrap();
+            for byte in std::io::stdin().lock().bytes() {
+                match byte.unwrap() {
+                    b'n' => output.send(&[0x93, 60, 100]).unwrap(),
+                    b'q' => break,
+                    other => panic!("unexpected source command: {other}"),
+                }
+            }
+            return;
+        }
+        struct Source(Child);
+        impl Drop for Source {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
         let dir = tempfile::tempdir().unwrap();
         let service = Service::start_at(None, dir.path().join("prefs.json")).unwrap();
         let name = format!("eseq-hotplug-test-{}", std::process::id());
-        let wait = |predicate: &dyn Fn(&Event) -> bool| {
+        let wait = |phase: &str, predicate: &dyn Fn(&Event) -> bool| {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 let event = service
                     .rx
                     .recv_timeout(remaining)
-                    .expect("MIDI event before deadline");
+                    .unwrap_or_else(|error| panic!("{phase}: {error}"));
                 if predicate(&event) {
                     return event;
                 }
             }
         };
-        wait(&|event| matches!(event, Event::Snapshot(_)));
-        let mut output = midir::MidiOutput::new(&name)
-            .unwrap()
-            .create_virtual(&name)
-            .unwrap();
-        wait(
-            &|event| matches!(event, Event::Snapshot(s) if s.devices.iter().any(|d| d.name == name && d.connected)),
-        );
-        output.send(&[0x93, 60, 100]).unwrap();
-        let Event::Message(on) = wait(&|event| {
-            matches!(event, Event::Message(e) if matches!(e.message,
-            MidiMessage::Note { channel: 3, note: MidiNoteEvent { note: 60, on: true, .. } }))
-        }) else {
-            unreachable!()
-        };
-        drop(output);
-        wait(
-            &|event| matches!(event, Event::Message(e) if e.port == on.port && e.message == note(false)),
-        );
-        wait(&|event| matches!(event, Event::ResetPort(port) if *port == on.port));
+        wait("initial scan", &|event| matches!(event, Event::Snapshot(_)));
+        for refresh in [false, true] {
+            let mut source = Source(ProcessCommand::new(std::env::current_exe().unwrap())
+                .args(["--exact", "midi_input::service::tests::coremidi_hotplug_delivers_notes_and_disconnect_cleanup", "--nocapture"])
+                .env(SOURCE_ENV, &name)
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap());
+            if refresh {
+                service.commands.send(Command::Refresh).unwrap();
+            }
+            let Event::Snapshot(snapshot) = wait("discover external source", &|event| {
+                matches!(event, Event::Snapshot(s) if s.devices.iter().any(|d| d.name == name && d.connected))
+            }) else { unreachable!() };
+            let id = snapshot.devices.iter().find(|d| d.name == name).unwrap().id.clone();
+            for enabled in [false, true] {
+                service.commands.send(Command::SetEnabled { id: id.clone(), enabled }).unwrap();
+                wait("apply device selection", &|event| {
+                    matches!(event, Event::Snapshot(s) if s.devices.iter().any(|d| d.id == id && d.enabled == enabled && d.connected == enabled))
+                });
+            }
+            source.0.stdin.as_mut().unwrap().write_all(b"n").unwrap();
+            let Event::Message(on) = wait("receive external note", &|event| {
+                matches!(event, Event::Message(e) if matches!(e.message,
+                MidiMessage::Note { channel: 3, note: MidiNoteEvent { note: 60, on: true, .. } }))
+            }) else { unreachable!() };
+            source.0.stdin.as_mut().unwrap().write_all(b"q").unwrap();
+            wait("release disconnected note", &|event| {
+                matches!(event, Event::Message(e) if e.port == on.port && e.message == note(false))
+            });
+            wait("reset disconnected controllers", &|event| matches!(event, Event::ResetPort(port) if *port == on.port));
+            wait("remove external source", &|event| {
+                matches!(event, Event::Snapshot(s) if !s.devices.iter().any(|d| d.id == id))
+            });
+            assert!(source.0.wait().unwrap().success());
+        }
     }
 }

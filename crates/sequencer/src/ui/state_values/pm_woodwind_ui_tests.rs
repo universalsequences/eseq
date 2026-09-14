@@ -3,9 +3,13 @@ use super::*;
 fn check_woodwind_surface(instrument: &str, pages: usize) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../content/instruments/Physical Models").join(instrument);
+    check_resonant_surface_at(&root, "dsp.lisp", instrument, pages);
+}
+
+fn check_resonant_surface_at(root: &std::path::Path, dsp_file: &str, instrument: &str, pages: usize) {
     // The compiler is authoritative for grouped names, nested declarations,
     // ranges and defaults. Hand-parsed source misses the flute's inline params.
-    let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
+    let dsp = std::fs::read_to_string(root.join(dsp_file)).unwrap();
     let compiled = sequencer::lisp_host::compile_and_load_instrument_with_asset_base(
         &dsp, 48000, Some(&root)).expect("compile factory woodwind manifest");
     let mut values = Vec::new();
@@ -212,6 +216,9 @@ fn clarinet_surface_controls_and_pages() { check_woodwind_surface("PM Clarinet",
 fn cello_surface_controls_and_pages() { check_woodwind_surface("PM Cello", 8); }
 
 #[test]
+fn electric_bass_surface_controls_and_pages() { check_woodwind_surface("PM Electric Bass", 4); }
+
+#[test]
 fn piano_surface_controls_and_pages() { check_woodwind_surface("PM Piano", 8); }
 
 #[test]
@@ -225,3 +232,17 @@ fn ride_surface_controls_and_pages() { check_woodwind_surface("PM Ride", 4); }
 
 #[test]
 fn hihat_surface_controls_and_pages() { check_woodwind_surface("PM Hi-Hat", 4); }
+
+#[test]
+fn doom_kick_surface_controls_and_pages() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/pm-doom-kick");
+    check_resonant_surface_at(&root, "model.lisp", "DOOM Kick", 5);
+}
+
+#[test]
+fn break_kick_53_surface_controls_and_pages() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/pm-break-kick");
+    check_resonant_surface_at(&root, "model.lisp", "Break Kick 53", 4);
+}

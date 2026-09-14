@@ -1,6 +1,6 @@
 # Process lanes
 
-Beside velocity, duration, and the other step parameters, every track carries eight process lanes. A lane is a value per step, like any other parameter lane, but instead of setting a note property directly it feeds a small process that runs just before the step plays. Processes remember things between steps, so a few sparse values become a running transform: a transpose that climbs, a random number that lands on a filter, a hit that repeats more each bar.
+Beside velocity, duration, and the other step parameters, every track carries twelve process lanes. A lane is a value per step, like any other parameter lane, but instead of setting a note property directly it feeds a small process that runs just before the step plays. Processes remember things between steps, so a few sparse values become a running transform: a transpose that climbs, a random number that lands on a filter, a hit that repeats more each bar.
 
 The lanes are the same on every track, and each track keeps its own values and its own running state. If you know the Cirklon's accumulators and aux lanes, this is that idea with named lanes.
 
@@ -15,6 +15,9 @@ The lanes are the same on every track, and each track keeps its own values and i
 - **tacc** — accumulates the lane value into a running transpose, added to the step's own transpose. Set 1 on the first step for a line that climbs one semitone per bar.
 - **acc A** and **acc B** — two more accumulators with a mappable output. acc A starts on retrig and acc B on rate, so a ramp on either turns into a growing roll.
 - **grab** — adds another track's transpose, scaled by the lane, optionally from a few steps ago. Set the source track in the strip.
+- **cmp A** and **cmp B** — comparators. Wire another lane into it, pick an operator and a value in the strip, and the lane sends 1 when the input passes the test and 0 when it fails. The painted lane is the input when nothing is wired in. On a step where the wired lane sends nothing, such as rand on a step you left low, the comparator falls back to the painted value; set hold to 1 to keep comparing the last number it received instead.
+- **veto** — a step set high is silent. Paint it for a mute mask, or wire a comparator into it to mute on a condition: acc A into cmp A set to `>= 8`, cmp A into veto, and the track drops out once the accumulator reaches 8.
+- **roll** — a step set high rolls the whole project from that step for the step's length, looping a window at the rate in the strip. Wire rand into cmp A set to `> 0.8` and cmp A into roll for a roll on roughly one step in five. The transport ROLL button lights while it runs. A roll never restarts itself while it is running, and a rate no finer than the step has nothing to repeat.
 
 ## Opening a lane
 
@@ -42,9 +45,13 @@ Step parameters take the value in their own units: 3 on tpose is three semitones
 
 ## Wiring lanes together
 
-While a map is armed, the **OTHER LANES** row lists the lanes that can take the output as their input. Click one to wire it. rand into acc A with acc A on pass and mapped to a filter is the classic patch: a new random filter position on every step you choose.
+Press **patch** in the strip header and a patchbay opens under the step sliders: one box per lane, in the order they run, with the lane's out ports on the top row and its in ports below. Click a box to select that lane in the strip; the selected lane's box is tinted. Drag from an out port onto an in port to wire them; the cable stays drawn so you can see the whole patch at a glance. Click a cable to select it and press Backspace, or the **× cable** chip, to remove it. rand into acc A with acc A on pass and mapped to a filter is the classic patch: a new random filter position on every step you choose.
 
-Order counts. Lanes run top to bottom in the dropdown's order, so a lane that feeds one above it lands one step late. The IN chip draws dimmed when that is the case. Use the header arrows to move the writer above the reader.
+An out port can feed as many in ports as you like. The first cable takes the port's main connection; each further cable is a fan-out entry that carries the same value.
+
+Order counts. Lanes run in the order the boxes read, left to right then top to bottom, so a cable that runs backwards lands one step late. The in port marks that with a small arrow. Use the strip's header arrows to move the writer ahead of the reader.
+
+While a map is armed, the **OTHER LANES** row still lists the lanes that can take the output, which is the same wiring without the cables.
 
 ## This track or every track
 

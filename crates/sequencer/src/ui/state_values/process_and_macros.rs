@@ -43,6 +43,7 @@ pub(super) fn process_inlet_kind_name(kind: &sequencer::process::ProcessInletKin
         sequencer::process::ProcessInletKind::Track => "track",
         sequencer::process::ProcessInletKind::Field => "field",
         sequencer::process::ProcessInletKind::Any => "any",
+        sequencer::process::ProcessInletKind::Enum(_) => "enum",
     }
 }
 
@@ -700,7 +701,8 @@ pub(super) fn process_inlet_decimals(kind: Option<&sequencer::process::ProcessIn
     match kind {
         Some(sequencer::process::ProcessInletKind::Int)
         | Some(sequencer::process::ProcessInletKind::Gate)
-        | Some(sequencer::process::ProcessInletKind::Track) => 0,
+        | Some(sequencer::process::ProcessInletKind::Track)
+        | Some(sequencer::process::ProcessInletKind::Enum(_)) => 0,
         _ => 2,
     }
 }
@@ -982,9 +984,19 @@ pub(super) fn process_scalar_inlet_entry_value(
         .and_then(|entry| process_literal_as_f32(&entry.default))
         .unwrap_or(value);
     let (min, max) = process_inlet_range(def, inlet, value);
+    // Enum inlets carry their option labels so the strip can render a
+    // dropdown; the value stays the option index.
+    let options = match inlet.map(|entry| &entry.kind) {
+        Some(sequencer::process::ProcessInletKind::Enum(options)) => options
+            .iter()
+            .map(|label| Value::String(label.clone()))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
     Some(map_value([
         ("name", Value::String(inlet_name.to_string())),
         ("label", Value::String(inlet_name.to_string())),
+        ("options", list_value(options)),
         (
             "kind",
             Value::String(
@@ -1086,6 +1098,216 @@ pub(crate) fn build_all_track_process_slots_value(
     track_count: usize,
 ) -> Value {
     list_value((0..track_count).map(|track| build_process_slots_value(state, track)))
+}
+
+/// Out ports get cable ids `(track * TRACK_STRIDE + slot-index) * PORT_STRIDE
+/// + ordinal`. The patch-port machinery keys cable sources by a single number
+/// across the whole buffer layout, and two expanded tracks show two
+/// patchbays at once, so the id must be unique per track as well as per
+/// port (a slot-only id drew track 3's cables from track 2's ports).
+pub(crate) const LANE_PATCH_PORT_STRIDE: usize = 16;
+pub(crate) const LANE_PATCH_TRACK_STRIDE: usize = 4096;
+
+pub(crate) fn lane_patch_port_id(track: usize, slot_index: usize, ordinal: usize) -> usize {
+    (track * LANE_PATCH_TRACK_STRIDE + slot_index) * LANE_PATCH_PORT_STRIDE + ordinal
+}
+
+/// `SEQ.track-lane-patch`: per track, one entry per composed chain slot in
+/// fire order, with the cable-level view the lane patchbay draws
+/// (docs/default-process-lanes-spec.md, patchbay). Each slot lists its
+/// connectable out ports with every reader (the primary binding, then the
+/// fan-out entries on that port, each resolved to a chain index), its
+/// wireable in ports (lane inlets, gate inlets, and any inlet a reader entry
+/// on this track already targets) with the cable ids writing into them, and
+/// its mappable ports for the target chip.
+pub(crate) fn build_track_lane_patch_value(state: &Arc<SequencerState>, track: usize) -> Value {
+    let Some(chain) = state.composed_track_process_chain(track) else {
+        return list_value(Vec::<Value>::new());
+    };
+    let published = state.published_process_authoring();
+    let def_for = |slot: &sequencer::process::TrackProcessSlot| {
+        published.defs.iter().find(|def| def.name == slot.class_name)
+    };
+    // Wiring stays within a layer, as the scheduler resolves it
+    // (`resolve_process_inlet_target`): a project slot drives project slots.
+    let resolve = |writer: &sequencer::process::TrackProcessSlot,
+                   target: &sequencer::process::ParamTarget|
+     -> Option<(usize, String)> {
+        let sequencer::process::ParamTarget::ProcessInlet {
+            process,
+            inlet,
+            instance_id,
+        } = target
+        else {
+            return None;
+        };
+        let index = chain.slots.iter().position(|slot| {
+            slot.project_layer == writer.project_layer
+                && slot.class_name == *process
+                && instance_id.is_none_or(|id| slot.instance_id == id)
+        })?;
+        Some((index, inlet.clone()))
+    };
+
+    struct Reader {
+        slot_index: usize,
+        inlet: String,
+        source: &'static str,
+        fanout_index: Option<usize>,
+    }
+    let mut out_ports: Vec<Vec<(String, usize, bool, Vec<Reader>)>> = Vec::new();
+    let mut in_writers: std::collections::BTreeMap<(usize, String), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (slot_index, slot) in chain.slots.iter().enumerate() {
+        let mut entries = Vec::new();
+        let connectable = def_for(slot)
+            .map(|def| {
+                def.ports
+                    .iter()
+                    .filter(|port| port.is_connectable())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (ordinal, port) in connectable.iter().enumerate() {
+            let port_id = lane_patch_port_id(track, slot_index, ordinal);
+            let mut readers = Vec::new();
+            // A new cable fills the primary binding when nothing holds it;
+            // otherwise it becomes a fan-out entry on the port.
+            let primary_free = slot.unbound_ports.contains(&port.name)
+                || !matches!(slot.bindings.get(&port.name), Some(Some(_)));
+            if !slot.unbound_ports.contains(&port.name) {
+                if let Some(Some(target)) = slot.bindings.get(&port.name) {
+                    if let Some((index, inlet)) = resolve(slot, target) {
+                        readers.push(Reader {
+                            slot_index: index,
+                            inlet,
+                            source: "primary",
+                            fanout_index: None,
+                        });
+                    }
+                }
+            }
+            let fanout = slot.fanout.get(&port.name).map(Vec::as_slice).unwrap_or(&[]);
+            for (fanout_index, entry) in fanout.iter().enumerate() {
+                if let Some((index, inlet)) = resolve(slot, &entry.target) {
+                    readers.push(Reader {
+                        slot_index: index,
+                        inlet,
+                        source: "fanout",
+                        fanout_index: Some(fanout_index),
+                    });
+                }
+            }
+            for reader in &readers {
+                in_writers
+                    .entry((reader.slot_index, reader.inlet.clone()))
+                    .or_default()
+                    .push(port_id);
+            }
+            entries.push((port.name.clone(), port_id, primary_free, readers));
+        }
+        out_ports.push(entries);
+    }
+
+    list_value(chain.slots.iter().enumerate().map(|(slot_index, slot)| {
+        let def = def_for(slot);
+        let in_ports = def
+            .map(|def| {
+                def.inlets
+                    .iter()
+                    .filter(|inlet| {
+                        inlet.lane
+                            || matches!(inlet.kind, sequencer::process::ProcessInletKind::Gate)
+                            || in_writers.contains_key(&(slot_index, inlet.name.clone()))
+                    })
+                    .enumerate()
+                    .map(|(ordinal, inlet)| {
+                        let writers = in_writers
+                            .get(&(slot_index, inlet.name.clone()))
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        map_value([
+                            ("name", Value::String(inlet.name.clone())),
+                            ("ordinal", Value::Number(ordinal as f64)),
+                            ("lane", Value::Bool(inlet.lane)),
+                            ("kind", Value::String(process_inlet_kind_name(&inlet.kind).to_string())),
+                            (
+                                "writers",
+                                list_value(writers.iter().map(|id| Value::Number(*id as f64))),
+                            ),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let param_ports = def
+            .map(|def| {
+                def.ports
+                    .iter()
+                    .filter(|port| port.is_mappable())
+                    .map(|port| process_port_value(slot, port))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let display_name = slot
+            .instance_name
+            .clone()
+            .unwrap_or_else(|| slot.class_name.clone());
+        map_value([
+            ("slot-index", Value::Number(slot_index as f64)),
+            ("instance-id", Value::Number(slot.instance_id.0 as f64)),
+            ("name", Value::String(display_name)),
+            ("class", Value::String(slot.class_name.clone())),
+            ("project", Value::Bool(slot.project_layer)),
+            ("enabled", Value::Bool(slot.enabled)),
+            ("default-lane", Value::Bool(sequencer::process::is_default_lane_slot(slot))),
+            (
+                "out-ports",
+                list_value(out_ports[slot_index].iter().enumerate().map(
+                    |(ordinal, (name, port_id, primary_free, readers))| {
+                        map_value([
+                            ("name", Value::String(name.clone())),
+                            ("ordinal", Value::Number(ordinal as f64)),
+                            ("port-id", Value::Number(*port_id as f64)),
+                            ("primary-free", Value::Bool(*primary_free)),
+                            (
+                                "readers",
+                                list_value(readers.iter().map(|reader| {
+                                    map_value([
+                                        ("slot-index", Value::Number(reader.slot_index as f64)),
+                                        (
+                                            "instance-id",
+                                            Value::Number(
+                                                chain.slots[reader.slot_index].instance_id.0 as f64,
+                                            ),
+                                        ),
+                                        ("inlet", Value::String(reader.inlet.clone())),
+                                        ("source", Value::String(reader.source.to_string())),
+                                        (
+                                            "fanout-index",
+                                            reader
+                                                .fanout_index
+                                                .map(|index| Value::Number(index as f64))
+                                                .unwrap_or(Value::Nil),
+                                        ),
+                                    ])
+                                })),
+                            ),
+                        ])
+                    },
+                )),
+            ),
+            ("in-ports", list_value(in_ports)),
+            ("param-ports", list_value(param_ports)),
+        ])
+    }))
+}
+
+pub(crate) fn build_all_track_lane_patch_value(
+    state: &Arc<SequencerState>,
+    track_count: usize,
+) -> Value {
+    list_value((0..track_count).map(|track| build_track_lane_patch_value(state, track)))
 }
 
 pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value {
@@ -1240,6 +1462,11 @@ pub(crate) fn sync_process_chain_state(
         "SEQ",
         "track-process-slots",
         build_all_track_process_slots_value(state, track_count),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-lane-patch",
+        build_all_track_lane_patch_value(state, track_count),
     );
     rt.set_reactive("SEQ", "process-library", build_process_library_value(state));
 }

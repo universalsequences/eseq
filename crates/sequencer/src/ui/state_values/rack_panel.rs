@@ -78,12 +78,12 @@ pub(super) fn insert_rack_mod_metadata(
     );
 }
 
-/// Whether a rack param map should carry the modulated-value display fields.
-/// The host only samples a rack slot's instrument, so a slot's effect-chain
-/// params must stay on their base values the way they did before eseq-hpc.
+/// The telemetry owner of a rack parameter. Instrument fields are slot-keyed;
+/// effect fields use the graph node identity shared with track and bus effects.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum RackModDisplay {
-    Published,
+    Instrument,
+    Effect(i32),
     None,
 }
 
@@ -133,30 +133,25 @@ pub(super) fn rack_slot_param_map(
     }
     if let Some(targets) = mod_targets {
         insert_rack_mod_metadata(&mut pmap, targets);
-        // Modulated-value display fields (eseq-hpc), keyed by track and slot
-        // like this panel's value fields: the knob's dot rides the offset,
-        // curve visualizers bind the absolute value. Only the selected slot's
-        // *instrument* is sampled (`read_rack_slot_mod_values`), so only that
-        // call site asks for the fields — a slot's effect chain would otherwise
-        // bind params to fields nothing ever publishes, and a curve visualizer
-        // reading `param-effective-value` would draw them as 0.0 instead of
-        // falling back to the base value.
-        if let (RackModDisplay::Published, Some(param_idx)) = (mod_display, idx) {
-            insert_string_prop(
-                &mut pmap,
-                "mod-offset-field",
-                rack_slot_mod_offset_field(track, slot_idx, param_idx),
-            );
-            insert_string_prop(
-                &mut pmap,
-                "mod-value-field",
-                rack_slot_mod_value_field(track, slot_idx, param_idx),
-            );
-            insert_string_prop(
-                &mut pmap,
-                "mod-scale-field",
-                rack_slot_mod_scale_field(track, slot_idx, param_idx),
-            );
+        if let Some(param_idx) = idx {
+            let fields = match mod_display {
+                RackModDisplay::Instrument => Some((
+                    rack_slot_mod_offset_field(track, slot_idx, param_idx),
+                    rack_slot_mod_value_field(track, slot_idx, param_idx),
+                    rack_slot_mod_scale_field(track, slot_idx, param_idx),
+                )),
+                RackModDisplay::Effect(node_id) if node_id > 0 => Some((
+                    effect_mod_offset_field(node_id, param_idx),
+                    effect_mod_value_field(node_id, param_idx),
+                    effect_mod_scale_field(node_id, param_idx),
+                )),
+                _ => None,
+            };
+            if let Some((offset, value, scale)) = fields {
+                insert_string_prop(&mut pmap, "mod-offset-field", offset);
+                insert_string_prop(&mut pmap, "mod-value-field", value);
+                insert_string_prop(&mut pmap, "mod-scale-field", scale);
+            }
         }
     }
     insert_param_ui_metadata(&mut pmap, ui_metadata);
@@ -403,7 +398,7 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                 pdesc.stored_to_user(pdesc.max),
                 options,
                 modulation_targets.get(&param_idx),
-                RackModDisplay::Published,
+                RackModDisplay::Instrument,
                 pdesc.ui_metadata.as_ref(),
             ));
         }
@@ -825,7 +820,7 @@ pub(super) fn build_rack_slot_effect_value(
                 param.max,
                 options,
                 modulation_targets.get(&param_idx),
-                RackModDisplay::None,
+                RackModDisplay::Effect(snapshot.node_id as i32),
                 param.ui_metadata.as_ref(),
             );
             if let sequencer::effects::ParamKind::Continuous { unit: Some(unit) } = &param.kind {
@@ -919,9 +914,10 @@ pub(super) fn build_rack_slot_effect_value(
         if let Some(source_param) = source_param {
             section.insert("source-param".to_string(), source_param);
         }
-        // No `phase-field`: rack effect modulators are not sampled by the
-        // UI-tick poller, so the source editor draws the waveform without a
-        // marker here.
+        if snapshot.node_id > 0 {
+            insert_string_prop(&mut section, "phase-field",
+                effect_mod_slot_phase_field(snapshot.node_id as i32, slot_number));
+        }
         section.insert(
             "params".to_string(),
             value_cell(Value::List(section_params)),
@@ -1156,6 +1152,16 @@ pub(super) fn build_rack_panel_value(
                 value_cell(Value::Number(slot_idx as f64)),
             );
             slot_map.insert("track".to_string(), value_cell(Value::Number(track as f64)));
+            let param_targets = sequencer::sequencer::RackSlotParam::ALL.iter().map(|param| {
+                value_cell(Value::Map([
+                    ("name".to_string(), value_cell(Value::String(param.name().to_string()))),
+                    ("target".to_string(), value_cell(Value::String("rack-slot-param".to_string()))),
+                    ("track".to_string(), value_cell(Value::Number(track as f64))),
+                    ("slot-idx".to_string(), value_cell(Value::Number(slot_idx as f64))),
+                    ("param-idx".to_string(), value_cell(Value::Number(param.index() as f64))),
+                ].into_iter().collect()))
+            }).collect();
+            slot_map.insert("param-targets".to_string(), value_cell(Value::List(param_targets)));
             insert_string_prop(&mut slot_map, "type", slot_type);
             insert_string_prop(&mut slot_map, "name", raw_name.clone());
             insert_string_prop(

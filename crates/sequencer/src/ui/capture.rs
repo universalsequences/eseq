@@ -170,6 +170,7 @@ struct CaptureTrackSpec {
     step_params: Vec<(usize, StepParam, f32)>,
     instrument_locks: Vec<(usize, String, f32)>,
     samples: Vec<String>,
+    instruments: Vec<String>,
     midi_fx: Vec<String>,
     audio_fx: Vec<String>,
     rack_slot_audio_fx: Vec<String>,
@@ -180,6 +181,7 @@ struct CaptureTrackSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 struct CaptureProjectSpec {
+    groups: Vec<Vec<usize>>,
     tracks: Vec<CaptureTrackSpec>,
     rack_slot_macros: Vec<(usize, sequencer::sequencer::RackMacroId, sequencer::sequencer::RackMacroMapping)>,
     /// Source track, destination track, zero-based external modulation input.
@@ -272,10 +274,23 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
         return Err("capture-project must be a list".to_string());
     };
     let mut tracks = Vec::new();
+    let mut groups = Vec::new();
     let mut rack_slot_macros = Vec::new();
     let mut mod_routes = Vec::new();
     let mut scenes = 1usize;
     for (index, expression) in items.iter().skip(1).enumerate() {
+        if expression_name(expression_head_item(expression)) == Some("group") {
+            let Expression::List(items) = expression else { unreachable!() };
+            let members = items.iter().skip(1).map(|item| match item {
+                Expression::Number(value) if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 => Some(*value as usize),
+                _ => None,
+            })
+                .collect::<Option<Vec<_>>>().ok_or("(group TRACK...) expects zero-based track indices")?;
+            if members.len() < 2 { return Err("a capture group needs at least two tracks".into()); }
+            groups.push(members);
+            continue;
+        }
+
         if expression_name(expression_head_item(expression)) == Some("rack-slot-macro") {
             use sequencer::sequencer::{RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotParam};
             let Expression::List(items) = expression else { unreachable!() };
@@ -355,7 +370,13 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
             return Err(format!("rack-slot-macro requires a populated layer at track {track} slot {slot}"));
         }
     }
-    Ok(CaptureProjectSpec { tracks, rack_slot_macros, mod_routes, scenes })
+    let mut grouped = std::collections::HashSet::new();
+    for track in groups.iter().flatten() {
+        if *track >= tracks.len() || !grouped.insert(*track) {
+            return Err("capture groups require distinct existing track indices".into());
+        }
+    }
+    Ok(CaptureProjectSpec { tracks, groups, rack_slot_macros, mod_routes, scenes })
 }
 
 /// The head item of a list expression, for dispatching `capture-project`
@@ -401,6 +422,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     let mut step_params = Vec::new();
     let mut instrument_locks = Vec::new();
     let mut samples = Vec::new();
+    let mut instruments = Vec::new();
     let mut midi_fx = Vec::new();
     let mut audio_fx = Vec::new();
     let mut rack_slot_audio_fx = Vec::new();
@@ -448,6 +470,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
             }
             "instrument-locks" => instrument_locks = parse_capture_param_values(value, ":instrument-locks")?,
             "samples" => samples = expression_string_list(value, ":samples")?,
+            "instruments" => instruments = expression_string_list(value, ":instruments")?,
             "midi-fx" => midi_fx = expression_string_list(value, ":midi-fx")?,
             "audio-fx" => audio_fx = expression_string_list(value, ":audio-fx")?,
             "rack-slot-audio-fx" => {
@@ -465,6 +488,9 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     if !samples.is_empty() && kind != CaptureTrackKind::LayerRack {
         return Err(":samples is only supported for :layer-rack tracks".to_string());
     }
+    if !instruments.is_empty() && kind != CaptureTrackKind::LayerRack {
+        return Err(":instruments is only supported for :layer-rack tracks".to_string());
+    }
     if !instrument_locks.is_empty() && !matches!(kind, CaptureTrackKind::Instrument(_)) {
         return Err(":instrument-locks requires an :instrument track".to_string());
     }
@@ -478,6 +504,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         step_params,
         instrument_locks,
         samples,
+        instruments,
         midi_fx,
         audio_fx,
         rack_slot_audio_fx,
@@ -638,6 +665,10 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
                 )
             })?;
         }
+        for instrument in &spec.instruments {
+            app.add_saved_instrument_slot_to_rack_sync(track, instrument)
+                .map_err(|error| format!("failed to add instrument {instrument:?} to rack: {error}"))?;
+        }
         for effect in &spec.midi_fx {
             app.add_midi_fx_to_track_sync(track, effect)
                 .map_err(|error| {
@@ -747,6 +778,10 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
         }
     }
 
+    for members in &project.groups {
+        app.group_tracks_recorded(members.clone())?;
+    }
+
     // :steps write the live pattern; persist them into the scene's pattern
     // pool through the production scene-launch path (capture current
     // snapshot, save, relaunch the same scene) so pool-derived read surfaces
@@ -821,6 +856,11 @@ fn apply_capture_macro_host_commands(
         let HostCommand::Custom { name, payload } = command else {
             continue;
         };
+        if matches!(name.as_str(), "add-bus" | "set-bus-output") {
+            crate::host_commands::apply_bus_routing_command(&name, &payload, app)?;
+            applied = true;
+            continue;
+        }
         // Song/arrangement editing primitives (def-song lowers to
         // arrangement-replace) so arrangement fixtures can commit a song
         // during capture setup.
@@ -1099,7 +1139,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&bus_state),
         Arc::clone(&bus_node_ids),
         Arc::clone(&current_track),
-        selected_tracks,
+        Arc::clone(&selected_tracks),
         track_groups,
         Arc::clone(&selected_steps),
         Arc::clone(&piano_roll_selection),
@@ -1134,6 +1174,9 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     {
         let runtime = editor.runtime_mut();
         sync_project_state(runtime, &app);
+        // This also publishes group topology, which hook gestures need to
+        // calculate the same visible track order as the rendered UI.
+        sync_track_color_state(runtime, &app, &state);
         sync_macro_state(runtime, &app);
         sync_track_topology_state(
             runtime,
@@ -1178,6 +1221,24 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
             true,
         );
     }
+    // Selection gestures in the hook mutate the same shared state as live UI
+    // clicks. Publish it before drawing, as the live reactive tick does.
+    let selected_track = current_track.load(std::sync::atomic::Ordering::Relaxed);
+    editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(selected_track as f64));
+    sync_selected_tracks_bindings(
+        editor.runtime_mut(), app.tracks.len(), selected_track,
+        &selected_tracks.lock().unwrap(),
+    );
+    // Capture has no meter tick. Seed the same effective-value bindings at
+    // rest, so mod-capable curves draw their resolved base rather than reading
+    // an uninitialized reactive field as zero. No DSP or watchlist is needed.
+    let mod_values = read_mod_display_values(
+        app.graph.lg, &app, &state, Some(selected_track), selected_plock_step(&selected_steps),
+        false, &mut HashSet::new(),
+    );
+    sync_effect_mod_offset_field_delta(editor.runtime_mut(), &[], &mod_values.effects);
+    sync_instrument_mod_offset_field_delta(editor.runtime_mut(), None, mod_values.instrument.as_ref());
+    sync_rack_slot_mod_offset_field_delta(editor.runtime_mut(), None, mod_values.rack_slot.as_ref());
     // Publish the sound-palette read surfaces so capture scripts can open the
     // palette modal via the real (seq-sound-palette-open ...) funnel.
     let _ = sync_sound_palette(
@@ -1302,7 +1363,7 @@ mod tests {
         let source = r#"
             (capture-project
               (track :sampler :name "Drums" :solo true :num-steps 8 :midi-fx ("arp") :audio-fx '("filter"))
-              (track :layer-rack :samples ("kick.wav" "snare.wav"))
+              (track :layer-rack :samples ("kick.wav" "snare.wav") :instruments ("factory:Synths/Digi Drift"))
               (track :instrument "core/drift"))
 
             (def-process passthrough :run nil)
@@ -1321,6 +1382,7 @@ mod tests {
                 step_params: vec![],
                 instrument_locks: vec![],
                 samples: vec![],
+                instruments: vec![],
                 midi_fx: vec!["arp".to_string()],
                 audio_fx: vec!["filter".to_string()],
                 rack_slot_audio_fx: vec![],
@@ -1331,6 +1393,10 @@ mod tests {
             parsed.project.tracks[1].samples,
             vec!["kick.wav".to_string(), "snare.wav".to_string()]
         );
+        assert_eq!(parsed.project.tracks[1].instruments, vec!["factory:Synths/Digi Drift"]);
+        assert!(parse_capture_source(
+            "(capture-project (track :sampler :instruments (\"factory:Synths/Digi Drift\")))"
+        ).is_err());
         assert_eq!(
             parsed.project.tracks[2].kind,
             CaptureTrackKind::Instrument("core/drift".to_string())
@@ -1368,6 +1434,16 @@ mod tests {
         ] {
             let invalid_source = source.replace("(rack-slot-macro 0 0 0 gain 0.5 1.5)", invalid);
             assert!(parse_capture_source(&invalid_source).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn capture_groups_validate_member_indices() {
+        let prefix = "(track :sampler) (track :sampler)";
+        let parsed = parse_capture_source(&format!("(capture-project {prefix} (group 0 1))")).unwrap();
+        assert_eq!(parsed.project.groups, vec![vec![0, 1]]);
+        for group in ["(group 0)", "(group 0 0)", "(group 0 2)", "(group -1 1)", "(group 0 1.5)"] {
+            assert!(parse_capture_source(&format!("(capture-project {prefix} {group})")).is_err());
         }
     }
 

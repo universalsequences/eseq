@@ -98,6 +98,8 @@ Supported track forms are:
 ```
 
 `capture-project` also accepts `(mod-route SOURCE TRACK INPUT)` entries.
+Captures draw patch cables (mixer mod routes, the lane patchbay) with the
+same pass as the live renderer, so a wired fixture shows its cables.
 All three indices are zero-based; input must be 0–3. The capture installs the
 route through the production graph controller after building the tracks, so
 mixer cable captures use real routing state. Self-routes and missing endpoints
@@ -174,3 +176,13 @@ been synchronized and before the frame is rendered.
 Keep durable visual fixtures in `crates/sequencer/ui/capture-fixtures/`. Layout
 tests should still assert finite, nonzero widget rectangles; PNG capture adds the
 visual review needed for spacing, typography, hierarchy, and clipping.
+
+## Bus and group routing
+
+`(group 0 1)` inside `capture-project` groups the named zero-based track indices
+through the normal group creation path. Members must be distinct existing tracks.
+The capture command also accepts the normal `add-bus` and `set-bus-output` host
+commands. See `crates/sequencer/ui/capture-fixtures/bus-routing.lisp` for a mixer
+capture with a group routed through several buses.
+
+Layer racks can declare `:instruments ("factory:Synths/Digi Drift")` to load saved instruments into slots through the normal host path. When combined with `:samples`, instrument slots follow the sample slots. See `crates/sequencer/ui/capture-fixtures/rack-slot-presets.lisp`.

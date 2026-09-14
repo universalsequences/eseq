@@ -97,6 +97,7 @@ pub(in crate::lisp_host) fn register_process_natives(
             crate::process::ProcessInletKind::Int
                 | crate::process::ProcessInletKind::Gate
                 | crate::process::ProcessInletKind::Track
+                | crate::process::ProcessInletKind::Enum(_)
         )
         .then_some(1.0);
         Some(eseqlisp::vm::InlineWidgetMetadata {
@@ -622,6 +623,27 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
+    let process_eval_for_in_written = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "in?",
+        "(in? :name)",
+        "True when a process-inlet write (wire or fan-out) landed on this inlet for the current fire. Inlet writes are per fire, so this is how a body tells 'nothing arrived' from 'the default arrived'.",
+        move |args, _ctx| {
+            let key = process_key_arg(args.first(), "in?")?;
+            let guard = process_eval_for_in_written
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("in? called outside process execution".to_string());
+            };
+            let written = ctx
+                .step_context
+                .as_ref()
+                .is_some_and(|step| step.written_inlets.iter().any(|name| *name == key));
+            Ok(EValue::Bool(written))
+        },
+    );
+
     let process_eval_for_out = Arc::clone(&process_eval);
     runtime.register_native_with_docs(
         "out",
@@ -725,6 +747,36 @@ pub(in crate::lisp_host) fn register_process_natives(
             }
             ctx.commands
                 .push(crate::process::ProcessRunCommand::VetoBaseEvent);
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let process_eval_for_roll = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "roll!",
+        "(roll! rate-index)",
+        "Roll the whole project from this step for the step's duration, looping a window at the given roll rate (an index into the transport roll rates: 1/4 1/4T 1/8 1/8T 1/16 1/16T 1/32 1/32T; default 1/16). Ignored while a process roll is already running, so a re-fired trig inside the loop never restarts it.",
+        move |args, _ctx| {
+            let rate = match args.first() {
+                None => 4.0,
+                Some(EValue::Number(value)) if value.is_finite() => *value,
+                Some(_) => return Err("roll! expects a numeric rate index".to_string()),
+            };
+            let last = crate::sequencer::Timebase::ROLL_RATES.len().saturating_sub(1) as f64;
+            let rate_index = rate.round().clamp(0.0, last) as usize;
+            let mut guard = process_eval_for_roll
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("roll! called outside process execution".to_string());
+            };
+            ensure_process_run_scope(ctx, "roll!")?;
+            if ctx.step_context.is_none() {
+                return Err("roll! requires a scheduler step event context".to_string());
+            }
+            ctx.commands.push(crate::process::ProcessRunCommand::Roll(
+                crate::process::ProcessRollRequest { rate_index },
+            ));
             Ok(EValue::Bool(true))
         },
     );

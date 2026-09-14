@@ -346,6 +346,19 @@ impl SnapshotSequencerClock {
         snapshot: &SequencerSnapshot,
         grid_beats: f64,
     ) -> [Option<f64>; MAX_TRACKS] {
+        let at_beats = self.total_beats;
+        self.capture_roll_windows_at(snapshot, grid_beats, at_beats)
+    }
+
+    /// `capture_roll_windows` anchored at an explicit absolute transport beat
+    /// instead of the frontier: a process roll (`roll!`) anchors on the step
+    /// that fired it, which the lookahead frontier may already be past.
+    pub(super) fn capture_roll_windows_at(
+        &mut self,
+        snapshot: &SequencerSnapshot,
+        grid_beats: f64,
+        at_beats: f64,
+    ) -> [Option<f64>; MAX_TRACKS] {
         const EPS: f64 = 1.0e-9;
         let mut windows = [None; MAX_TRACKS];
         if grid_beats <= EPS {
@@ -359,8 +372,7 @@ impl SnapshotSequencerClock {
             if cycle <= EPS {
                 continue;
             }
-            let live = Self::anchored_local_beats(tc, self.total_beats, num_steps)
-                .rem_euclid(cycle);
+            let live = Self::anchored_local_beats(tc, at_beats, num_steps).rem_euclid(cycle);
             windows[track] = Some(Self::snap_roll_window(live, grid_beats, cycle));
         }
         windows

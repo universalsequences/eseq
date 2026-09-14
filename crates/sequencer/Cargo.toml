@@ -52,6 +52,7 @@ pipewire = "0.10"
 eseqlisp = { path = "../eseqlisp", features = ["wgpu"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
 muda = { version = "0.19.3", default-features = false }
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"

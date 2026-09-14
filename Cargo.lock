@@ -3442,6 +3442,7 @@ dependencies = [
  "aubio",
  "backtrace",
  "cc",
+ "core-foundation 0.10.1",
  "cpal",
  "crossbeam-queue",
  "crossterm",

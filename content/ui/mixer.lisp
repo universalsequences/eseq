@@ -190,22 +190,9 @@
     (seq-toggle-track-selected i)
     (host-command "reveal-sequencer-track" (dict :track i))))
 
-(def track-position (order track)
-  (reduce |found pos|
-    (if (>= found 0) found (if (= (nth order pos) track) pos found))
-    -1
-    (range 0 (len order))))
-
 (def visual-track-range (anchor target)
-  (let ((order (eseq.drum-rack-v2/mixer-visible-track-order)))
-    (let ((anchor-pos (track-position order anchor))
-        (target-pos (track-position order target)))
-      (if (or (< anchor-pos 0) (< target-pos 0))
-        (list target)
-        (reduce |tracks pos|
-          (append tracks (list (nth order pos)))
-          (list)
-          (range (min anchor-pos target-pos) (+ (max anchor-pos target-pos) 1)))))))
+  (eseq.seq-core-state/track-range-in-order
+    (eseq.drum-rack-v2/mixer-visible-track-order) anchor target))
 
 (def range-track-select (i)
   (let ((anchor (if (= track-selection-anchor nil)
@@ -801,7 +788,7 @@
         ;;(seq-set-bus-volume i (event-volume event))
         ))
     (v-stack
-      (box :width :fill :height 5.9)
+      (box :width :fill :height 4.2)
       (h-stack :gap 0.06 
         (box :width (if is-group 6 2))
         (mixer-v2-volume-triangle
@@ -864,7 +851,7 @@
     ;; dead space at the bottom inside the group container.
     ;; Mute/name/output reads live in bindings or nested subtrees so those
     ;; changes don't rerun the whole strip.
-    (box :width 12.9 :height (if (track-grouped? i) 13.5 13.8)
+    (box :width 12.9 :height (if (track-grouped? i) 12.5 13.8)
       :selected (track-selected-binding i)
       :muted (bind-seq-nth "track-muted-effective" i)
       :background-color :mixer-strip-bg
@@ -887,7 +874,7 @@
         ;; bus); the container provides the color above. A small spacer keeps
         ;; the pattern grid aligned with loose strips.
         (if (track-grouped? i)
-          (box :width :fill :height 0.55 :bg :transparent)
+          nil
           (subtree :key (str "mixer-v2-track-output-sub-" i)
             (dropdown :value (nth SEQ.track-outputs i)
               :key (str "track-output-" i)
@@ -904,10 +891,11 @@
           (v-stack
             
             (h-stack :gap 0.05
-              ;; Only the first two send knobs (Bus A / Bus B); group-backing
-              ;; bus sends are not shown on the strip.
-              (each (range 0 (min 2 (len sends))) |send-idx|
-                (send-knob i (nth sends send-idx))))
+              ;; Stable identities keep only Bus A / Bus B here even when
+              ;; other buses are created or the bus list is reordered.
+              (each (filter (lambda (send)
+                    (or (= (get send :bus-id) 1) (= (get send :bus-id) 2))) sends) |send|
+                (send-knob i send)))
             
             (knob-number :label "pan"
               :key (str "track-pan-" i)
@@ -1106,6 +1094,7 @@
           :height 1.0
           :padding 0
           :font-size 10
+          :v-align :center
           :h-align :left
           :background-color :transparent
           :border-color :transparent
@@ -1258,6 +1247,23 @@
           (delete-key)
           false)))))
 
+(def bus-output-dropdown (i)
+  (subtree :key (str "mixer-bus-output-" i)
+    (let ((route (nth SEQ.bus-output-routes i))
+          (options (get route :options))
+          (ids (get route :ids)))
+      (if (> (len options) 0)
+        (dropdown :key (str "bus-output-" i)
+          :value (get route :value) :options options
+          :width :fill :height 1.2 :font-size 10
+          :on-change (lambda (value)
+            (each (range 0 (len options)) |index|
+              (if (= value (nth options index))
+                (host-command "set-bus-output"
+                  (dict :bus-id (nth SEQ.bus-ids i) :destination-id (nth ids index)))
+                nil))))
+        (box :height 1.2 :width :fill)))))
+
 (def bus-strip (i)
   (do
     ;; `do` keeps the original body indentation; the strip is one box.
@@ -1281,7 +1287,7 @@
       :on-drop (lambda (event) (drop-effect-on-bus event))
       :on-click (lambda (event) (select-bus i))
       (v-stack :gap 0.25
-        (box :height 1.55)
+        (bus-output-dropdown i)
         ;; Mix/Main is the graph output and has no external modulation inputs.
         ;; Every other bus has the same four backend inputs used by group buses.
         ;(if (= (nth SEQ.bus-names i) "Mix")
@@ -1509,13 +1515,13 @@
       :drop-meta (dict :kind "bus" :bus bus-idx)
       :on-drop (lambda (event) (drop-on-group-header event gidx))
       (v-stack :gap 0.3 :align :center
-        
+        (bus-output-dropdown bus-idx)
         ;; Meter + fader reflect the group's backing bus. Selecting/dragging
         ;; them selects the group's bus (bus-meter-control selects by
         ;; index). Fall back to nothing if the bus can't be resolved.
         (if (>= bus-idx 0)
           (v-stack :gap 0.4 :align :center
-            (box :width :fill :height 9.6 
+            (box :width :fill :height 8.1
               (bus-meter-control bus-idx true)
               )
             )
@@ -1530,7 +1536,7 @@
           :on-click (lambda (event) (select-group-delete-target gidx))
           :on-right-click (lambda (event) (open-group-menu event gidx))
           (h-stack :gap 0.2 :align :center
-            (box :width 0.01)
+            (box :width 0.05)
             (box :background "disclosure-button"
               :width 1.7 :height 0.8
               :collapsed (get group :collapsed)
@@ -1539,12 +1545,14 @@
                 (do
                   (select-group gidx)
                   (toggle-group-collapsed (get group :id)))))
+            (box :width 0.05)
             (if (= group-renaming (get group :id))
               (group-rename-input (get group :id))
               (label (substring (get group :name) 0 10)
                 :key (str "group-name-label-" (get group :id))
                 :font-size 11
                 :height 0.9
+                :v-align :center
                 :h-align :center
                 :background-color :transparent
                 :border-color :transparent
@@ -1614,7 +1622,7 @@
         (if (get group :collapsed)
           (box :width 0.0 :height 0.0 :bg :transparent)
           (v-stack :gap 0.0
-            (box :width :fill :height 0.4 :bg :transparent)
+            (box :width :fill :height 0.85 :bg :transparent)
             (h-stack :gap 0.1
               (each (get group :members) |m|
                 (subtree :key (str "mixer-v2-track-" m)

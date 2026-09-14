@@ -851,6 +851,14 @@ pub enum AppCommand {
         value: f32,
     },
 
+    /// Clear one rack strip parameter across several steps as one undoable edit.
+    ClearRackSlotParamPlockMulti {
+        track: usize,
+        slot_idx: usize,
+        steps: Vec<usize>,
+        param: RackSlotParam,
+    },
+
     /// Set a rack layer's underlying instrument default param.
     SetRackSlotInstrumentParam {
         track: usize,
@@ -1020,7 +1028,8 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::ClearInstrumentPlockMulti { .. }
         | AppCommand::ClearInstrumentTensorPlockMulti { .. }
         | AppCommand::ClearRackMacroPlockMulti { .. }
-        | AppCommand::ClearRackSlotEffectPlockMulti { .. } => HistoryPolicy::Record,
+        | AppCommand::ClearRackSlotEffectPlockMulti { .. }
+        | AppCommand::ClearRackSlotParamPlockMulti { .. } => HistoryPolicy::Record,
         AppCommand::DuplicateTrackPattern { .. }
         | AppCommand::HalveTrackPattern { .. }
         | AppCommand::SetTrackNumSteps { .. }
@@ -4085,6 +4094,14 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
             if let Some(id) = crate::sequencer::RackMacroId::from_index(macro_idx) {
                 app.set_rack_macro_plocks(track, id, &steps, value);
             }
+        }
+
+        AppCommand::ClearRackSlotParamPlockMulti { track, slot_idx, steps, param } => {
+            app.state.update_rack_slot_in_current_pattern(track, slot_idx, |slot| {
+                for step in &steps {
+                    slot.param_plocks.clear(*step, param);
+                }
+            });
         }
 
         AppCommand::ClearRackMacroPlockMulti {

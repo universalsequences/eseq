@@ -132,16 +132,14 @@
          (target-set! :wire (if (> (in :mode) 0.5) (in :amount) value))))
 
 (def-process lane-reset
-  :doc "Shared reset lane: a high step resets every accumulator wired to its ports before that step plays."
-  :targets ((a :process-inlet)
-            (b :process-inlet)
-            (c :process-inlet))
+  :doc "Shared reset lane: a high step resets every accumulator wired to its port before that step plays."
+  ;; One out port, three cables: the primary binding reaches tacc and two
+  ;; fan-out entries reach acc A and acc B (rev 4; the a/b/c trio predates
+  ;; fan-out on connectable ports).
+  :targets ((wire :process-inlet))
   :in ((reset :gate :default 0 :lane true))
   :run (if (> (in :reset) 0.5)
-         (do
-           (target-set! :a 1)
-           (target-set! :b 1)
-           (target-set! :c 1))
+         (target-set! :wire 1)
          nil))
 
 (def-process lane-grab
@@ -200,3 +198,49 @@
              (target-add! :out count)
              (target-set! :wire count))
            nil)))
+
+(def-process lane-cmp
+  :doc "Comparator: sends 1 when the input satisfies op against value, else 0. The input is the painted lane, or whatever another lane wires in (the wire replaces the painted value on the fires it sends). hold 1 keeps comparing the last wired input on fires that bring none, instead of the lane."
+  :targets ((out :mappable)
+            (wire :process-inlet))
+  :in ((a :float -128 128 :default 0 :lane true)
+       (op :enum ("<" ">" ">=" "<=" "==" "!=") :default 1)
+       (value :float -128 128 :default 0)
+       (hold :int 0 1 :default 0))
+  ;; `hit` first so the strip's scope draws the 1/0 output; `last` is the
+  ;; most recent wired input, for hold. `in?` tells a quiet fire from an
+  ;; input of 0: inlet writes are per fire. == / != use a small tolerance
+  ;; since inputs are floats.
+  :state ((hit 0) (last 0))
+  :run (do
+         (if (in? :a) (set! last (in :a)) nil)
+         (set! hit
+           (let ((op (in :op))
+                 (d (- (if (and (> (in :hold) 0.5) (not (in? :a))) last (in :a))
+                       (in :value))))
+             (let ((near (and (< d 0.0001) (> d -0.0001))))
+               (if (or (and (= op 0) (< d 0))
+                       (and (= op 1) (> d 0))
+                       (and (= op 2) (or (> d 0) near))
+                       (and (= op 3) (or (< d 0) near))
+                       (and (= op 4) near)
+                       (and (= op 5) (not near)))
+                 1
+                 0))))
+         (target-add! :out hit)
+         (target-set! :wire hit)))
+
+(def-process lane-veto
+  :doc "Veto lane: a high step, painted or wired from a comparator, silences the step's note. Later lanes still run and advance."
+  :in ((gate :gate :default 0 :lane true))
+  :run (if (> (in :gate) 0.5)
+         (veto!)
+         nil))
+
+(def-process lane-roll
+  :doc "Roll lane: a high step, painted or wired from a comparator, rolls the whole project from that step for the step's duration, looping a window at rate. A roll already running is never restarted, so the re-fired step inside the loop cannot chain it."
+  :in ((gate :gate :default 0 :lane true)
+       (rate :enum ("1/4" "1/4T" "1/8" "1/8T" "1/16" "1/16T" "1/32" "1/32T") :default 4))
+  :run (if (> (in :gate) 0.5)
+         (roll! (in :rate))
+         nil))

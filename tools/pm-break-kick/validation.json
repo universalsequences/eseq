@@ -1,0 +1,35 @@
+{
+  "source_sha256": "d55d1bcdf7a67ca70a80315cd9422bf7e3dba2cd7376e7ea559b4940f0190ad3",
+  "rates": {
+    "16000": {
+      "equation_max_abs": 5.486660956399714e-06,
+      "peak": 0.8889390826225281
+    },
+    "44100": {
+      "equation_max_abs": 9.49778748607355e-06,
+      "peak": 0.8889390826225281
+    },
+    "48000": {
+      "equation_max_abs": 8.337746758846354e-06,
+      "peak": 0.8889390826225281
+    },
+    "96000": {
+      "equation_max_abs": 9.448274060963602e-06,
+      "peak": 0.8889390826225281
+    }
+  },
+  "compiler_sha256": "db15b7809a0557bd6b3513eedf5617e27d4aa288fc6ef0caf191da051aafaa92",
+  "uint32_memory_slots": [
+    38,
+    73
+  ],
+  "reference_metrics": {
+    "wave_nrmse": 0.27885696171924945,
+    "correlation": 0.9618649455344154,
+    "envelope_nrmse": 0.19542525185690954,
+    "spectral_convergence": 0.235399181842733,
+    "level_error_db": -0.2515377457771801
+  },
+  "partition_max_abs": 0.0,
+  "controls_checked": 14
+}

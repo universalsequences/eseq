@@ -7,7 +7,7 @@
 //!
 //! - track primary output edge → its destination (MIX or a bus input),
 //! - each track send edge → its destination bus input,
-//! - each bus output edge → MIX.
+//! - each bus output edge → its destination (MIX or another bus input).
 //!
 //! Sends tap the track's fx output *before* the primary-edge pad, so every
 //! edge gets an independent, always-non-negative pad. Rack-slot chains are
@@ -32,6 +32,8 @@ pub struct LatencyTopology {
     pub tracks: Vec<TrackLatencyInput>,
     /// (bus id, summed chain latency) for every live bus, in graph order.
     pub buses: Vec<(BusId, u32)>,
+    /// Bus output edges. An absent edge terminates at the master mix.
+    pub bus_destinations: Vec<(BusId, BusId)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -55,7 +57,7 @@ pub struct LatencyPlan {
     pub track_primary_pads: Vec<u32>,
     /// Pad per (track, destination bus) send edge.
     pub send_pads: Vec<Vec<(BusId, u32)>>,
-    /// Pad on each bus's output edge into MIX, aligned with the input order.
+    /// Pad on each bus's output edge, aligned with the input order.
     pub bus_pads: Vec<(BusId, u32)>,
     /// Pad per (track, rack slot) aligning slot chains at the voice sum.
     /// Computed but not yet applied to graph nodes.
@@ -118,7 +120,7 @@ pub fn compute_latency_plan(topology: &LatencyTopology) -> LatencyPlan {
 
     // Bus input alignment: the max latency across every source feeding the
     // bus (primary routes and sends both tap the track fx output).
-    let bus_inputs: Vec<u32> = topology
+    let mut bus_inputs: Vec<u32> = topology
         .buses
         .iter()
         .map(|(bus_id, _)| {
@@ -134,12 +136,26 @@ pub fn compute_latency_plan(topology: &LatencyTopology) -> LatencyPlan {
                 .unwrap_or(0)
         })
         .collect();
-    let bus_outputs: Vec<u32> = topology
-        .buses
-        .iter()
-        .zip(&bus_inputs)
-        .map(|((_, chain), input)| input + chain)
-        .collect();
+    let destinations: Vec<Option<usize>> = topology.buses.iter().map(|(id, _)| {
+        topology.bus_destinations.iter().find(|(source, _)| source == id)
+            .and_then(|(_, destination)| topology.buses.iter().position(|(id, _)| id == destination))
+    }).collect();
+    let mut incoming = vec![0usize; topology.buses.len()];
+    for target in destinations.iter().flatten() { incoming[*target] += 1; }
+    let mut ready: std::collections::VecDeque<_> = incoming.iter().enumerate()
+        .filter_map(|(index, count)| (*count == 0).then_some(index)).collect();
+    let mut bus_outputs = vec![0; topology.buses.len()];
+    let mut visited = 0;
+    while let Some(index) = ready.pop_front() {
+        visited += 1;
+        bus_outputs[index] = bus_inputs[index] + topology.buses[index].1;
+        if let Some(target) = destinations[index] {
+            bus_inputs[target] = bus_inputs[target].max(bus_outputs[index]);
+            incoming[target] -= 1;
+            if incoming[target] == 0 { ready.push_back(target); }
+        }
+    }
+    assert_eq!(visited, topology.buses.len(), "latency topology contains a bus cycle");
 
     // MIX alignment: direct tracks and bus outputs.
     let mix_latency = topology
@@ -148,7 +164,8 @@ pub fn compute_latency_plan(topology: &LatencyTopology) -> LatencyPlan {
         .zip(&track_totals)
         .filter(|(t, _)| t.output == TrackOutput::Mix)
         .map(|(_, total)| *total)
-        .chain(bus_outputs.iter().copied())
+        .chain(bus_outputs.iter().enumerate()
+            .filter(|(index, _)| destinations[*index].is_none()).map(|(_, output)| *output))
         .max()
         .unwrap_or(0);
 
@@ -190,7 +207,11 @@ pub fn compute_latency_plan(topology: &LatencyTopology) -> LatencyPlan {
         .buses
         .iter()
         .zip(&bus_outputs)
-        .map(|((bus_id, _), output)| (*bus_id, mix_latency - output))
+        .enumerate()
+        .map(|(index, ((bus_id, _), output))| {
+            let target_latency = destinations[index].map(|target| bus_inputs[target]).unwrap_or(mix_latency);
+            (*bus_id, target_latency - output)
+        })
         .collect();
 
     let rack_slot_pads = topology
@@ -406,6 +427,9 @@ impl App {
 
         LatencyTopology {
             tracks,
+            bus_destinations: self.buses.iter().filter_map(|bus| {
+                bus.output.destination().map(|target| (bus.id, BusId(target)))
+            }).collect(),
             buses: live_buses,
         }
     }
@@ -512,6 +536,31 @@ impl App {
 mod tests {
     use super::*;
 
+    #[test]
+    fn chained_bus_joins_compensate_each_destination() {
+        let a = BusId(1);
+        let b = BusId(2);
+        let plan = compute_latency_plan(&LatencyTopology {
+            tracks: vec![track(10, TrackOutput::Bus(a), &[]),
+                track(100, TrackOutput::Bus(b), &[]), track(200, TrackOutput::Mix, &[a])],
+            buses: vec![(b, 30), (a, 20)],
+            bus_destinations: vec![(a, b)],
+        });
+        assert_eq!(plan.mix_latency, 250);
+        assert_eq!(plan.track_primary_pads, vec![190, 120, 50]);
+        assert_eq!(plan.bus_pads, vec![(b, 0), (a, 0)]);
+        assert_eq!(plan.send_pads[2], vec![(a, 0)]);
+        let plan = compute_latency_plan(&LatencyTopology {
+            tracks: vec![track(10, TrackOutput::Bus(a), &[]),
+                track(100, TrackOutput::Bus(b), &[]), track(400, TrackOutput::Mix, &[])],
+            buses: vec![(b, 30), (a, 20)],
+            bus_destinations: vec![(a, b)],
+        });
+        assert_eq!(plan.mix_latency, 400);
+        assert_eq!(plan.bus_pads, vec![(b, 270), (a, 70)]);
+        assert_eq!(plan.track_primary_pads, vec![0, 0, 0]);
+    }
+
     fn track(chain: u32, output: TrackOutput, sends: &[BusId]) -> TrackLatencyInput {
         TrackLatencyInput {
             chain_latency: chain,
@@ -538,6 +587,7 @@ mod tests {
     #[test]
     fn bounce_rejects_uninstalled_rack_pads_and_oversize_compensation() {
         let mut topology = LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![TrackLatencyInput {
                 rack_slot_latencies: vec![0, 300], output: TrackOutput::Mix,
                 ..Default::default()
@@ -563,6 +613,7 @@ mod tests {
     #[test]
     fn zero_latency_graph_needs_no_pads() {
         let plan = compute_latency_plan(&LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![
                 track(0, TrackOutput::Mix, &[]),
                 track(0, TrackOutput::Mix, &[]),
@@ -579,6 +630,7 @@ mod tests {
         // Track 0 has two latency effects in series (2048 + 512); track 1 is
         // dry. Both sum at MIX: track 1 must be padded by the full serial sum.
         let plan = compute_latency_plan(&LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![
                 track(2048 + 512, TrackOutput::Mix, &[]),
                 track(0, TrackOutput::Mix, &[]),
@@ -595,6 +647,7 @@ mod tests {
         // bus 1 and routes to MIX. Bus chain adds 100.
         let bus = BusId(1);
         let plan = compute_latency_plan(&LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![
                 track(2048, TrackOutput::Bus(bus), &[]),
                 track(0, TrackOutput::Mix, &[bus]),
@@ -617,6 +670,7 @@ mod tests {
         // dry bus: the bus output edge into MIX takes the pad.
         let bus = BusId(2);
         let plan = compute_latency_plan(&LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![
                 track(2048, TrackOutput::Mix, &[]),
                 track(0, TrackOutput::Bus(bus), &[]),
@@ -631,6 +685,7 @@ mod tests {
     #[test]
     fn rack_slot_chains_align_to_the_widest_slot() {
         let plan = compute_latency_plan(&LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![TrackLatencyInput {
                 chain_latency: 0,
                 rack_slot_latencies: vec![2048, 0, 512],
@@ -775,6 +830,7 @@ mod tests {
     fn bounce_trims_installed_pdc_once_and_keeps_exact_tail_length() {
         let graph = EngineGraph::new("bounce-pdc-interval");
         let latency = compute_latency_plan(&LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![track(300, TrackOutput::Mix, &[]), track(0, TrackOutput::Mix, &[])],
             buses: Vec::new(),
         });
@@ -870,6 +926,7 @@ mod tests {
     fn parallel_branches_sum_in_phase_after_compensation() {
         const EFFECT_LATENCY: u32 = 300;
         let plan = compute_latency_plan(&LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![
                 track(EFFECT_LATENCY, TrackOutput::Mix, &[]),
                 track(0, TrackOutput::Mix, &[]),
@@ -944,10 +1001,12 @@ mod tests {
         // pad set changing would never fire, and recording would keep
         // compensating for latency that had been removed.
         let latent = compute_latency_plan(&LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![track(2048, TrackOutput::Mix, &[])],
             buses: vec![],
         });
         let dry = compute_latency_plan(&LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![track(0, TrackOutput::Mix, &[])],
             buses: vec![],
         });
@@ -993,6 +1052,7 @@ mod tests {
     #[test]
     fn unrouted_track_never_pads() {
         let plan = compute_latency_plan(&LatencyTopology {
+            bus_destinations: Vec::new(),
             tracks: vec![
                 track(0, TrackOutput::None, &[]),
                 track(2048, TrackOutput::Mix, &[]),

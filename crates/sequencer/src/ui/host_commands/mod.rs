@@ -25,6 +25,7 @@ mod step_history;
 mod tracks;
 
 pub(crate) use dispatch::dispatch_custom_host_command;
+pub(crate) use routing::apply_bus_routing_command;
 #[cfg(test)]
 pub(crate) use learn::open_patch_learn_buffer;
 #[cfg(test)]

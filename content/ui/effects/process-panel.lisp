@@ -155,17 +155,30 @@
       (label (get port :target)
         :width :fill :font-size 8.2 :color :dim :bg :transparent))))
 
-(def inlet-row (slot inlet)
-  (h-stack
-    :key (str "inlet-" (get slot :instance-id) "-" (get inlet :name))
-    :width :fill :gap 0.35 :align :center
-    (v-stack :width 8.0 :gap 0
-      (label (get inlet :label)
-        :font-size 8.8 :color :white :bg :transparent)
-      (if (not (= (get inlet :doc) ""))
-        (label (substring (get inlet :doc) 0 18)
-          :font-size 7.5 :color :dim :bg :transparent)
-        (box :height 0)))
+;; Enum inlets carry their option labels; the value is the option index.
+(def inlet-enum-option (inlet index)
+  (let ((options (if (get inlet :options) (get inlet :options) '())))
+    (if (and (< -1 index) (< index (len options))) (nth options index) "")))
+
+(def inlet-enum-option-index (inlet label)
+  (let ((options (if (get inlet :options) (get inlet :options) '())))
+    (reduce |acc index| (if (= label (nth options index)) index acc)
+      0
+      (range 0 (len options)))))
+
+(def inlet-control (slot inlet)
+  (if (= (get inlet :kind) "enum")
+    (dropdown
+      :key (str "inlet-control-" (get slot :instance-id) "-" (get inlet :name))
+      :value (inlet-enum-option inlet (floor (get inlet :value)))
+      :options (if (get inlet :options) (get inlet :options) '())
+      :on-change (lambda (label)
+        (seq-set-process-inlet
+          SEQ.current-track
+          (get slot :instance-id)
+          (get inlet :name)
+          (inlet-enum-option-index inlet label)))
+      :width 6.2 :height 1.1 :font-size 8.5)
     (number-picker
       :key (str "inlet-control-" (get slot :instance-id) "-" (get inlet :name))
       :value (get inlet :value)
@@ -180,6 +193,19 @@
           (get inlet :name)
           value))
       :width 6.2 :height 1.0)))
+
+(def inlet-row (slot inlet)
+  (h-stack
+    :key (str "inlet-" (get slot :instance-id) "-" (get inlet :name))
+    :width :fill :gap 0.35 :align :center
+    (v-stack :width 8.0 :gap 0
+      (label (get inlet :label)
+        :font-size 8.8 :color :white :bg :transparent)
+      (if (not (= (get inlet :doc) ""))
+        (label (substring (get inlet :doc) 0 18)
+          :font-size 7.5 :color :dim :bg :transparent)
+        (box :height 0)))
+    (inlet-control slot inlet)))
 
 (def mappable-ports (slot)
   (filter (lambda (port) (get port :mappable))

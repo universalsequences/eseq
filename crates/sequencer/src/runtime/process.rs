@@ -121,6 +121,10 @@ pub enum ProcessInletKind {
     Track,
     Field,
     Any,
+    /// A fixed option list (`:enum ("<" ">" ...)`); the inlet value is the
+    /// option index, so bodies read it with `(in :op)` like any number and
+    /// wire writes land as an index rounded and clamped to the list.
+    Enum(Vec<String>),
 }
 
 impl Default for ProcessInletKind {
@@ -444,8 +448,20 @@ pub struct ProcessPortFanout {
 }
 
 impl ProcessPortFanout {
-    /// Rescale `value` from `source` (lo, hi) into this entry's range.
+    /// An entry whose range equals the writer's range: the default an added
+    /// fan-out starts with, and what a lane-to-lane cable stays at.
+    pub fn is_identity(&self, source: (f32, f32)) -> bool {
+        (self.lo - source.0).abs() <= f32::EPSILON && (self.hi - source.1).abs() <= f32::EPSILON
+    }
+
+    /// Rescale `value` from `source` (lo, hi) into this entry's range. An
+    /// identity entry passes the value through untouched: a second cable out
+    /// of a lane without `lo`/`hi` (source defaults to 0..1) must carry the
+    /// same raw value the primary wire does, not a copy clamped to 0..1.
     pub fn scaled(&self, value: f32, source: (f32, f32)) -> f32 {
+        if self.is_identity(source) {
+            return value;
+        }
         let span = source.1 - source.0;
         let norm = if span.abs() > f32::EPSILON {
             ((value - source.0) / span).clamp(0.0, 1.0)
@@ -1546,6 +1562,16 @@ pub enum ProcessRunCommand {
     VetoBaseEvent,
     Ratchet(ProcessRatchetRequest),
     Graph(crate::graph::GraphControlCommand),
+    /// `(roll! rate-index)`: engage the project-wide sequence roll from the
+    /// firing step for that step's duration (docs/default-process-lanes-spec.md,
+    /// roll lane). The lookahead collects it; the scheduler owns roll state.
+    Roll(ProcessRollRequest),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessRollRequest {
+    /// Index into `Timebase::ROLL_RATES` (the transport roll-rate keys).
+    pub rate_index: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1596,6 +1622,10 @@ pub struct ProcessStepEventContext {
     pub sample_time: u64,
     pub step_beats: f32,
     pub resolved: ResolvedStep,
+    /// Inlets that received a process-inlet write (wire or fan-out) on this
+    /// fire. Inlet writes are per fire, so `(in? :a)` is the only way a body
+    /// can tell "nothing arrived" from "the default arrived".
+    pub written_inlets: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -2984,6 +3014,7 @@ impl ProcessRuntime {
                 sample_time: ctx.sample_time,
                 step_beats: ctx.step_beats,
                 resolved: ctx.resolved,
+                written_inlets: written_step_process_inlets(&def, inlet_writes),
             }),
             ports,
             reads: ProcessReadSnapshot::default(),
@@ -3128,9 +3159,39 @@ fn resolve_step_process_inlets(
         if let Some(writes) = inlet_writes.and_then(|writes| writes.get(&inlet.name)) {
             value = apply_process_inlet_writes(value, writes);
         }
+        if let ProcessInletKind::Enum(options) = &inlet.kind {
+            value = clamp_enum_inlet_value(value, options.len());
+        }
         inlets.insert(inlet.name.clone(), value);
     }
     inlets
+}
+
+/// Names of the inlets that received at least one write on this fire, in
+/// definition order.
+fn written_step_process_inlets(
+    def: &ProcessDef,
+    inlet_writes: Option<&BTreeMap<String, Vec<ProcessInletWrite>>>,
+) -> Vec<String> {
+    let Some(writes) = inlet_writes else {
+        return Vec::new();
+    };
+    def.inlets
+        .iter()
+        .filter(|inlet| writes.get(&inlet.name).is_some_and(|entries| !entries.is_empty()))
+        .map(|inlet| inlet.name.clone())
+        .collect()
+}
+
+/// An enum inlet holds an option index: round whatever arrived (a wire from
+/// an accumulator, a typed value) and clamp it to the option list.
+fn clamp_enum_inlet_value(value: Value, option_count: usize) -> Value {
+    let Some(number) = process_value_as_f32(&value) else {
+        return value;
+    };
+    let last = option_count.saturating_sub(1) as f32;
+    let index = if number.is_finite() { number.round().clamp(0.0, last) } else { 0.0 };
+    Value::Number(index as f64)
 }
 
 fn process_value_as_f32(value: &Value) -> Option<f32> {
@@ -3808,6 +3869,7 @@ mod tests {
             beat: 1.0,
             sample_time: 48_000,
             step_beats: 0.25,
+            written_inlets: Vec::new(),
             resolved: ResolvedStep {
                 duration: 1.0,
                 velocity: 1.0,
@@ -4290,13 +4352,16 @@ mod tests {
 
 /// Class names of the always-on project layer. The classes themselves are
 /// defined in `content/processes/builtin.lisp`.
-pub const DEFAULT_LANE_CLASSES: [&str; 6] = [
+pub const DEFAULT_LANE_CLASSES: [&str; 9] = [
     "lane-prob",
     "lane-acc",
     "lane-reset",
     "lane-grab",
     "lane-rand",
     "lane-count",
+    "lane-cmp",
+    "lane-veto",
+    "lane-roll",
 ];
 
 /// One default lane as installed on every scene's project layer, in chain
@@ -4307,7 +4372,10 @@ pub struct DefaultLaneSpec {
     pub name: &'static str,
 }
 
-pub const DEFAULT_LANES: [DefaultLaneSpec; 8] = [
+/// The logic lanes (`cmp A`, `cmp B`, `veto`, `roll`) sit after every
+/// generator so a wire from any of them lands on the same fire (writes only
+/// flow forward within one fire; a backward wire waits for the next).
+pub const DEFAULT_LANES: [DefaultLaneSpec; 12] = [
     DefaultLaneSpec { class_name: "lane-prob", name: "prob" },
     DefaultLaneSpec { class_name: "lane-reset", name: "reset" },
     DefaultLaneSpec { class_name: "lane-rand", name: "rand" },
@@ -4316,6 +4384,10 @@ pub const DEFAULT_LANES: [DefaultLaneSpec; 8] = [
     DefaultLaneSpec { class_name: "lane-acc", name: "acc A" },
     DefaultLaneSpec { class_name: "lane-acc", name: "acc B" },
     DefaultLaneSpec { class_name: "lane-grab", name: "grab" },
+    DefaultLaneSpec { class_name: "lane-cmp", name: "cmp A" },
+    DefaultLaneSpec { class_name: "lane-cmp", name: "cmp B" },
+    DefaultLaneSpec { class_name: "lane-veto", name: "veto" },
+    DefaultLaneSpec { class_name: "lane-roll", name: "roll" },
 ];
 
 /// Default lane slot ids sit in a fixed block below the UI handle base
@@ -4347,6 +4419,7 @@ fn default_lane_slot(spec: &DefaultLaneSpec) -> TrackProcessSlot {
     let instance_id = default_lane_instance_id(spec);
     let mut bindings: BTreeMap<String, Option<ParamTarget>> = BTreeMap::new();
     let mut inlets: BTreeMap<String, ProcessLiteral> = BTreeMap::new();
+    let mut fanout: BTreeMap<String, Vec<ProcessPortFanout>> = BTreeMap::new();
     let acc_inlet = |name: &str| {
         let target = DEFAULT_LANES
             .iter()
@@ -4385,9 +4458,15 @@ fn default_lane_slot(spec: &DefaultLaneSpec) -> TrackProcessSlot {
             inlets.insert("hi".to_string(), ProcessLiteral::Number(8.0));
         }
         "reset" => {
-            bindings.insert("a".to_string(), acc_inlet("tacc"));
-            bindings.insert("b".to_string(), acc_inlet("acc A"));
-            bindings.insert("c".to_string(), acc_inlet("acc B"));
+            // One port, three cables: primary to tacc, fan-out to the
+            // generic accumulators (identity 0..1 range, passed through).
+            bindings.insert("wire".to_string(), acc_inlet("tacc"));
+            let entry = |name: &str| ProcessPortFanout {
+                target: acc_inlet(name).expect("default accumulator lane"),
+                lo: 0.0,
+                hi: 1.0,
+            };
+            fanout.insert("wire".to_string(), vec![entry("acc A"), entry("acc B")]);
         }
         "rand" | "count" => {
             bindings.insert("out".to_string(), None);
@@ -4403,7 +4482,7 @@ fn default_lane_slot(spec: &DefaultLaneSpec) -> TrackProcessSlot {
         project_layer: true,
         inlets,
         lanes: BTreeMap::new(),
-        fanout: Default::default(),
+        fanout,
         unbound_ports: Default::default(),
         bindings,
     }
@@ -4444,7 +4523,9 @@ pub fn ensure_default_project_layer(chain: &mut TrackProcessChain) -> bool {
             }
         }
     }
-    // The reset lane's wires must point at the accumulators' current ids.
+    // The reset lane's wires must point at the accumulators' current ids,
+    // and a project saved with the a/b/c trio (before one port carried
+    // several cables) collapses to the single `wire` port + fan-out.
     let fresh_reset = default_lane_slot(&DEFAULT_LANES[1]);
     if let Some(reset) = chain
         .slots
@@ -4457,6 +4538,25 @@ pub fn ensure_default_project_layer(chain: &mut TrackProcessChain) -> bool {
                 changed = true;
             }
         }
+        let stale = reset
+            .bindings
+            .keys()
+            .filter(|port| !fresh_reset.bindings.contains_key(*port))
+            .cloned()
+            .collect::<Vec<_>>();
+        for port in stale {
+            reset.bindings.remove(&port);
+            changed = true;
+        }
+        for (port, entries) in &fresh_reset.fanout {
+            let existing = reset.fanout.entry(port.clone()).or_default();
+            for entry in entries {
+                if !existing.iter().any(|candidate| candidate.target == entry.target) {
+                    existing.push(entry.clone());
+                    changed = true;
+                }
+            }
+        }
     }
     changed
 }
@@ -4464,6 +4564,17 @@ pub fn ensure_default_project_layer(chain: &mut TrackProcessChain) -> bool {
 #[cfg(test)]
 mod default_lane_tests {
     use super::*;
+
+    #[test]
+    fn enum_inlet_values_round_and_clamp_to_the_option_list() {
+        let clamp = |value: f64| clamp_enum_inlet_value(Value::Number(value), 3);
+        assert_eq!(clamp(1.4), Value::Number(1.0));
+        assert_eq!(clamp(1.6), Value::Number(2.0));
+        assert_eq!(clamp(9.0), Value::Number(2.0));
+        assert_eq!(clamp(-4.0), Value::Number(0.0));
+        assert_eq!(clamp(f64::NAN), Value::Number(0.0));
+        assert_eq!(clamp_enum_inlet_value(Value::Nil, 3), Value::Nil);
+    }
 
     #[test]
     fn ensure_default_project_layer_installs_once_and_keeps_edits() {
@@ -4506,7 +4617,7 @@ mod default_lane_tests {
             .find(|slot| slot.instance_name.as_deref() == Some("reset"))
             .unwrap();
         assert!(matches!(
-            reset.bindings["a"],
+            reset.bindings["wire"],
             Some(ParamTarget::ProcessInlet { instance_id: Some(id), .. }) if id == tacc_id
         ));
     }
@@ -4519,26 +4630,59 @@ mod default_lane_tests {
             .iter()
             .find(|slot| slot.instance_name.as_deref() == Some("reset"))
             .unwrap();
-        for (port, name) in [("a", "tacc"), ("b", "acc A"), ("c", "acc B")] {
+        let reset_target = |name: &str| {
             let acc = chain
                 .slots
                 .iter()
                 .find(|slot| slot.instance_name.as_deref() == Some(name))
                 .unwrap();
-            assert_eq!(
-                reset.bindings[port],
-                Some(ParamTarget::ProcessInlet {
-                    process: "lane-acc".to_string(),
-                    inlet: "reset".to_string(),
-                    instance_id: Some(acc.instance_id),
-                })
-            );
             // Slot ids stay exact through f64; override identity is name-derived.
             assert!(acc.instance_id.0 < (1u64 << 53));
             assert_eq!(
                 project_slot_identity_id(acc).0,
                 named_process_runtime_id("lane-acc", name)
             );
-        }
+            ParamTarget::ProcessInlet {
+                process: "lane-acc".to_string(),
+                inlet: "reset".to_string(),
+                instance_id: Some(acc.instance_id),
+            }
+        };
+        // One port, three cables: the primary binding and two fan-out entries.
+        assert_eq!(reset.bindings["wire"], Some(reset_target("tacc")));
+        let fanout = &reset.fanout["wire"];
+        assert_eq!(
+            fanout.iter().map(|entry| entry.target.clone()).collect::<Vec<_>>(),
+            vec![reset_target("acc A"), reset_target("acc B")]
+        );
+        assert!(fanout.iter().all(|entry| entry.is_identity((0.0, 1.0))));
+    }
+
+    #[test]
+    fn ensure_default_project_layer_collapses_the_reset_trio_to_one_port() {
+        // A project saved before rev 4 carries reset's a/b/c bindings.
+        let mut chain = default_project_layer();
+        let reset_index = chain
+            .slots
+            .iter()
+            .position(|slot| slot.instance_name.as_deref() == Some("reset"))
+            .unwrap();
+        let fresh = chain.slots[reset_index].clone();
+        let reset = &mut chain.slots[reset_index];
+        let wire = reset.bindings.remove("wire").unwrap();
+        let entries = reset.fanout.remove("wire").unwrap();
+        reset.bindings.insert("a".to_string(), wire);
+        reset
+            .bindings
+            .insert("b".to_string(), Some(entries[0].target.clone()));
+        reset
+            .bindings
+            .insert("c".to_string(), Some(entries[1].target.clone()));
+
+        assert!(ensure_default_project_layer(&mut chain));
+        let reset = &chain.slots[reset_index];
+        assert_eq!(reset.bindings, fresh.bindings, "a/b/c dropped, wire restored");
+        assert_eq!(reset.fanout, fresh.fanout);
+        assert!(!ensure_default_project_layer(&mut chain), "idempotent");
     }
 }

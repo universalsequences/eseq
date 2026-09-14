@@ -3,6 +3,8 @@ use super::*;
 #[derive(Clone, Debug)]
 pub struct BusPatternSnapshot {
     pub id: BusId,
+    /// Primary post-fader destination recalled with this scene.
+    pub output: crate::project::BusOutput,
     pub effect_plocks: Vec<Vec<Vec<Option<f32>>>>,
     /// Per-scene base (non-plocked) effect parameter values, indexed
     /// `[slot][param]`. Recalled on scene switch so a bus effect knob can

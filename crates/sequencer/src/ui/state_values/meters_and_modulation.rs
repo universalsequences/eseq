@@ -271,8 +271,7 @@ pub(super) fn quantize_modulator_unit_value(value: f32) -> f64 {
 // display is read-only telemetry: nothing here ever writes back into widget or
 // interactive state, so dragging a modulated knob still edits the base value.
 //
-// Track and bus chains are covered; rack slots keep base values (they have no
-// modulation command target either).
+// Track, bus, and rack-slot effect chains share graph-node-keyed telemetry.
 
 /// One modulation destination's live display values.
 ///
@@ -759,6 +758,35 @@ pub(crate) fn read_mod_display_values(
                 true,
                 &mut wanted,
             ));
+        }
+    }
+
+    // Rack effects use the same node-keyed telemetry as track/bus effects,
+    // but their bases must follow rack p-lock and macro resolution exactly as
+    // the rack control value publisher does.
+    {
+        let racks = state.pattern.rack_tracks.lock().unwrap();
+        for (track, rack) in racks.iter().enumerate() {
+            let Some(rack) = rack else { continue };
+            let display_step = displayed_plock_step(state, track,
+                selected_step.filter(|_| selected_track == Some(track)));
+            let selected_slot = app.selected_rack_slot_index_for_rack(track, rack);
+            for (rack_slot, slot) in rack.slots.iter().enumerate() {
+                for (effect_slot, (desc, effect)) in slot.effect_descriptors.iter()
+                    .zip(&slot.effect_slots).enumerate() {
+                    if effect.node_id == 0 || desc.instrument_modulation_targets.is_empty() {
+                        continue;
+                    }
+                    let value_of = |idx| rack_effect_param_value(
+                        rack, rack_slot, effect_slot, effect, desc, idx, display_step);
+                    responses.push(effect_mod_values_for_slot(
+                        lg, desc, effect.node_id as i32, effect.modulator_node_id as i32,
+                        &value_of, live,
+                        selected_track == Some(track) && selected_slot == Some(rack_slot),
+                        &mut wanted,
+                    ));
+                }
+            }
         }
     }
 

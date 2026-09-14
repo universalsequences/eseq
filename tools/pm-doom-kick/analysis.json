@@ -1,0 +1,664 @@
+{
+  "samples": [
+    {
+      "hash": "d7d4b78cb81b6ee4532ceb1d79afadd79186ae1ca0bdbd9134a272dee0c96a93",
+      "title": "07_Kick_16_SP.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.6783125,
+      "peak": 0.8376820833664534,
+      "body_peak_hz": 52.24609375,
+      "energy95_s": 0.2829375,
+      "high_energy_share": 0.003317740356728756
+    },
+    {
+      "hash": "8fa8524b04f280e4623c6f57b913b1b91d573d6256be87ce4025a1b5ff980976",
+      "title": "07_Kick_18_SP.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.000625,
+      "duration_s": 0.53,
+      "peak": 0.8415452347831933,
+      "body_peak_hz": 65.4296875,
+      "energy95_s": 0.1224375,
+      "high_energy_share": 1.7739116525928606e-06
+    },
+    {
+      "hash": "3cac75420069de96128ec3847e3ca37b3529daed10317d3d0831ba83735b2513",
+      "title": "07_Kick_19_SP.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2825625,
+      "peak": 0.804874432753356,
+      "body_peak_hz": 45.8984375,
+      "energy95_s": 0.169625,
+      "high_energy_share": 0.006022128334215712
+    },
+    {
+      "hash": "d392aeaaa386a48b445b59b700b1de184d10dc3d7df98fb60cfecaa756de0131",
+      "title": "07_Kick_20_SP.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0003125,
+      "duration_s": 0.5074375,
+      "peak": 0.8410672409197971,
+      "body_peak_hz": 47.8515625,
+      "energy95_s": 0.134125,
+      "high_energy_share": 0.0005447701142387897
+    },
+    {
+      "hash": "a2b1022053597904994cf081f92007fb1e0faae9572db30383c85a7356182ea1",
+      "title": "1 Kick -Grr.wav",
+      "sample_rate": 44100,
+      "channels": 1,
+      "onset_s": 0.0,
+      "duration_s": 0.376375,
+      "peak": 0.9890030017392292,
+      "body_peak_hz": 74.951171875,
+      "energy95_s": 0.1080625,
+      "high_energy_share": 0.0002440906652177686
+    },
+    {
+      "hash": "3775f26047fc7c332dc141c566f18f23fd86319b4d9c78fb4f96450291db8fd4",
+      "title": "2 Kick -seatbelts.wav",
+      "sample_rate": 44100,
+      "channels": 1,
+      "onset_s": 0.0,
+      "duration_s": 0.476875,
+      "peak": 0.9886812599514699,
+      "body_peak_hz": 52.978515625,
+      "energy95_s": 0.0754375,
+      "high_energy_share": 0.0004924974943445605
+    },
+    {
+      "hash": "6ca83b6d136270ddace41be2bbc3e13ad14d2b7ad8860ef8518a26336131332c",
+      "title": "3 Kick -roundhouse.wav",
+      "sample_rate": 44100,
+      "channels": 1,
+      "onset_s": 0.0,
+      "duration_s": 0.240875,
+      "peak": 0.9904431354434184,
+      "body_peak_hz": 36.865234375,
+      "energy95_s": 0.12625,
+      "high_energy_share": 0.0009331775094292824
+    },
+    {
+      "hash": "eb352c2acebe7535d461ab9f47c5d668f5e0762e91439289ee8fcbef6e13f01b",
+      "title": "Boom-Bap Kick 51.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2701875,
+      "peak": 0.6279196477298956,
+      "body_peak_hz": 44.677734375,
+      "energy95_s": 0.0506875,
+      "high_energy_share": 0.000462647930552508
+    },
+    {
+      "hash": "e31f2b34f7e207b5a9569224240df21749ae7fcccc6ea55e613e574fde063b09",
+      "title": "Boom-Bap Kick 52.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2759375,
+      "peak": 0.8880149065095782,
+      "body_peak_hz": 42.724609375,
+      "energy95_s": 0.1399375,
+      "high_energy_share": 0.0002167336166933229
+    },
+    {
+      "hash": "18b0fd84278df8a7bab6def01af9d61b170c511b3718c6206ce0cd45dd1ac063",
+      "title": "Boom-Bap Kick 53.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.6836875,
+      "peak": 0.9019957001221016,
+      "body_peak_hz": 53.466796875,
+      "energy95_s": 0.3556875,
+      "high_energy_share": 0.0020818624480129382
+    },
+    {
+      "hash": "e317758f848b0d604cf9efbb99a3847a5e6bc3aa24205f5467edf01fa7ffec16",
+      "title": "Boom-Bap Kick 54.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.3959375,
+      "peak": 0.8857425835673567,
+      "body_peak_hz": 54.443359375,
+      "energy95_s": 0.09975,
+      "high_energy_share": 0.005054800789540541
+    },
+    {
+      "hash": "0bf2e37ba990fb3338f85b92cbe75038d0013e6a05e2a0decb4e425d9901c936",
+      "title": "Boom-Bap Kick 55.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.6590625,
+      "peak": 0.8842578307018559,
+      "body_peak_hz": 52.24609375,
+      "energy95_s": 0.2829375,
+      "high_energy_share": 0.003317768823146882
+    },
+    {
+      "hash": "6fc3bde01c75b1699aa8241232fb96ad49e3e30cc9f12b6a7b79ff16954c8f54",
+      "title": "Boom-Bap Kick 56.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.294875,
+      "peak": 0.8877224117362549,
+      "body_peak_hz": 93.26171875,
+      "energy95_s": 0.118875,
+      "high_energy_share": 0.0010780589197333004
+    },
+    {
+      "hash": "b942a2760ae552034f7a24c7a36049ad6d46055e17b5326bb82314f75ebd474b",
+      "title": "Boom-Bap Kick 57.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.286875,
+      "peak": 0.8885784131615341,
+      "body_peak_hz": 35.15625,
+      "energy95_s": 0.165125,
+      "high_energy_share": 0.00018284825676318536
+    },
+    {
+      "hash": "75491465d6ae96f754778968c45b0f4e5f7f22d9b8faa2234208d62dd711757d",
+      "title": "Boom-Bap Kick 58.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.23275,
+      "peak": 0.8759919654818304,
+      "body_peak_hz": 90.576171875,
+      "energy95_s": 0.161125,
+      "high_energy_share": 0.008747625937104465
+    },
+    {
+      "hash": "093167bf195e1995a70ba41374b6c4dfbf12397d72eeec6d5180f5e48105c89b",
+      "title": "Boom-Bap Kick 59.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.357375,
+      "peak": 0.8929769029016769,
+      "body_peak_hz": 62.98828125,
+      "energy95_s": 0.0834375,
+      "high_energy_share": 0.00029571670217261477
+    },
+    {
+      "hash": "13b6ad1b4fa07f271d0b2343b72891a3e4df31980482110b470284c09e6ec844",
+      "title": "Boom-Bap Kick 60.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2858125,
+      "peak": 0.8883882071743885,
+      "body_peak_hz": 45.166015625,
+      "energy95_s": 0.17425,
+      "high_energy_share": 2.1412026683867854e-05
+    },
+    {
+      "hash": "aa0abe04bbb11bc549def03f9229f066e562a55dafd2c1c02a394b30fd2c5597",
+      "title": "Boom-Bap Kick 61.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.4835625,
+      "peak": 0.8889177125497255,
+      "body_peak_hz": 59.08203125,
+      "energy95_s": 0.0833125,
+      "high_energy_share": 2.302378617100494e-05
+    },
+    {
+      "hash": "c03b4e1375072cc33be84110649e4b8328cc9efb1077eb3733336160a65c7c16",
+      "title": "Boom-Bap Kick 62.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.18375,
+      "peak": 0.8898542184217455,
+      "body_peak_hz": 47.119140625,
+      "energy95_s": 0.05825,
+      "high_energy_share": 3.657125077434031e-05
+    },
+    {
+      "hash": "83090499219b6c86c96ae56b9890d4f25060086da7e448528418b81b74001839",
+      "title": "Boom-Bap Kick 63.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.5158125,
+      "peak": 0.8885653271429745,
+      "body_peak_hz": 35.15625,
+      "energy95_s": 0.2363125,
+      "high_energy_share": 0.0015877237967988843
+    },
+    {
+      "hash": "356da59e32e449097642c1f818ebc6294cf315cc41b1ea92571889ad61eff53f",
+      "title": "Boom-Bap Kick 64.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.265875,
+      "peak": 0.628047796319864,
+      "body_peak_hz": 41.9921875,
+      "energy95_s": 0.074625,
+      "high_energy_share": 6.429330474910494e-05
+    },
+    {
+      "hash": "f4db9071669970d1534c735dee84be74625ca7fc233f723511043f75c5163a38",
+      "title": "Boom-Bap Kick 65.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.301625,
+      "peak": 0.8896476952760322,
+      "body_peak_hz": 42.236328125,
+      "energy95_s": 0.116625,
+      "high_energy_share": 0.00018687192009963995
+    },
+    {
+      "hash": "3d5a2130e0a479d8f256b95f0fdbc3dc33a17f134122f1cb82fd55437ea7ca1d",
+      "title": "Boom-Bap Kick 66.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.3324375,
+      "peak": 0.887534803085512,
+      "body_peak_hz": 147.4609375,
+      "energy95_s": 0.1369375,
+      "high_energy_share": 0.0011173859997771695
+    },
+    {
+      "hash": "2f78c848da0c881c4e7e8d967d2b77e18ec002871a68bf2be7a0ecb49ef0531c",
+      "title": "Boom-Bap Kick 67.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2569375,
+      "peak": 0.8918008116026465,
+      "body_peak_hz": 48.828125,
+      "energy95_s": 0.08875,
+      "high_energy_share": 0.0015536196602683099
+    },
+    {
+      "hash": "900656f5bb8fe6ebc22f637718143b7444ace2dab0fbbaf4bebcb24d7e574dd0",
+      "title": "Boom-Bap Kick 68.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.3293125,
+      "peak": 0.8865633680227939,
+      "body_peak_hz": 50.29296875,
+      "energy95_s": 0.26025,
+      "high_energy_share": 0.0024139856599454047
+    },
+    {
+      "hash": "67fbbad1cbb5f19c7c3d0d4c1944320369165555cc5c9db54302e9ed97c3f3fe",
+      "title": "Boom-Bap Kick 69.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.710375,
+      "peak": 0.9123062573999827,
+      "body_peak_hz": 93.75,
+      "energy95_s": 0.331125,
+      "high_energy_share": 0.026900759329871522
+    },
+    {
+      "hash": "47765ec1e7faf10bb121157becba191bdedf6543fa6720f775a37d7826c20375",
+      "title": "Boom-Bap Kick 70.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.4075625,
+      "peak": 0.8778580665095049,
+      "body_peak_hz": 65.673828125,
+      "energy95_s": 0.06025,
+      "high_energy_share": 0.0009273654349284244
+    },
+    {
+      "hash": "389fb15d15a18bb6c6ec97ff99f06c6d5cca2a0550962f56f0e468b0b45ff976",
+      "title": "Boom-Bap Kick 71.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.1311875,
+      "peak": 0.8839145315189898,
+      "body_peak_hz": 48.33984375,
+      "energy95_s": 0.109,
+      "high_energy_share": 0.0019613838587248566
+    },
+    {
+      "hash": "add9de07bbfc3d4b02827e66b09dbdb122372f25c18dfe31b967f8100a4a19da",
+      "title": "Boom-Bap Kick 72.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2325,
+      "peak": 0.8892128646987737,
+      "body_peak_hz": 53.7109375,
+      "energy95_s": 0.0945,
+      "high_energy_share": 0.0020332602947637094
+    },
+    {
+      "hash": "1e53f60b42f41fde62a0fb42821596fd804402234e28b3986bae6e81c8e99012",
+      "title": "Boom-Bap Kick 73.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.3260625,
+      "peak": 0.888216088958391,
+      "body_peak_hz": 29.052734375,
+      "energy95_s": 0.290875,
+      "high_energy_share": 0.0024961641136823647
+    },
+    {
+      "hash": "fe380a27db1426ba6625c00fd4f0fdb001c22a40bae075b88bcb6c999e57f942",
+      "title": "Boom-Bap Kick 74.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.3384375,
+      "peak": 0.880771225448611,
+      "body_peak_hz": 92.041015625,
+      "energy95_s": 0.1364375,
+      "high_energy_share": 0.008176863608981077
+    },
+    {
+      "hash": "cacb5fe82feca5b525bc9a35e20c197e5238698718725f33fd3ab9a3359faff4",
+      "title": "Boom-Bap Kick 75.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.269,
+      "peak": 0.628992247668046,
+      "body_peak_hz": 66.162109375,
+      "energy95_s": 0.0910625,
+      "high_energy_share": 0.004139812435039678
+    },
+    {
+      "hash": "88ec49b023bb8d1c6401fa26f8c5c97bf1350af03d343e5d02ec9543c794ba1f",
+      "title": "Boom-Bap Kick 76.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.1974375,
+      "peak": 0.6281403678469076,
+      "body_peak_hz": 62.98828125,
+      "energy95_s": 0.058625,
+      "high_energy_share": 5.682296295084801e-05
+    },
+    {
+      "hash": "4a48dc4c4566d0873763a62bc809d5f19161809ad073f67c64e0299f3e68dbbf",
+      "title": "Boom-Bap Kick 77.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2228125,
+      "peak": 0.6281244115752241,
+      "body_peak_hz": 31.73828125,
+      "energy95_s": 0.1131875,
+      "high_energy_share": 0.0010045127487445116
+    },
+    {
+      "hash": "c8296751a8ff7731284c5fd0467373c8bc15742aac941d5cc50dc7c6e007a1ab",
+      "title": "Boom-Bap Kick 78.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.3975625,
+      "peak": 0.8949001964822417,
+      "body_peak_hz": 68.359375,
+      "energy95_s": 0.1804375,
+      "high_energy_share": 0.0006374473762765954
+    },
+    {
+      "hash": "d2b57219f1f699c2062af6e108e936025bf38da316f36df1e344fe2e3d295805",
+      "title": "Boom-Bap Kick 79.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.1874375,
+      "peak": 0.6278229704328405,
+      "body_peak_hz": 49.31640625,
+      "energy95_s": 0.11675,
+      "high_energy_share": 4.960740300121644e-05
+    },
+    {
+      "hash": "3a81c37eaf8cd870a1b8a066e3f5565c74aa580e75a255db598df58609d4a623",
+      "title": "Boom-Bap Kick 81.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.4800625,
+      "peak": 0.8908775806568152,
+      "body_peak_hz": 40.283203125,
+      "energy95_s": 0.1820625,
+      "high_energy_share": 0.0029518812730737194
+    },
+    {
+      "hash": "6c7c2461c9bd9145e750bb98d23d91a869cd2bccc16f81aa002bbc40892d4c38",
+      "title": "Boom-Bap Kick 85.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2336875,
+      "peak": 0.8413147998568817,
+      "body_peak_hz": 57.373046875,
+      "energy95_s": 0.1065,
+      "high_energy_share": 0.0010690048081510104
+    },
+    {
+      "hash": "c4b0fed6ea5a08db8d080be8bb64406cc3a77dda2a7a0be34aa902d1f4393728",
+      "title": "Boom-Bap Kick 86.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2769375,
+      "peak": 0.88848975570359,
+      "body_peak_hz": 78.857421875,
+      "energy95_s": 0.0866875,
+      "high_energy_share": 0.0007218582686987087
+    },
+    {
+      "hash": "d35141b7a2c6e47b0e1eea661370492d0c90a8958cdfd38b20bd5e8c5b9c1e05",
+      "title": "Boom-Bap Kick 98.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.63525,
+      "peak": 0.887798800631713,
+      "body_peak_hz": 60.791015625,
+      "energy95_s": 0.129125,
+      "high_energy_share": 0.002530338237410833
+    },
+    {
+      "hash": "68cfbb32e6587964883a509d65f7036c17b036bb55ba0f9e2adf1e36934aeb43",
+      "title": "Boom-Bap Kick 99.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.3221875,
+      "peak": 0.628798341745209,
+      "body_peak_hz": 51.025390625,
+      "energy95_s": 0.120125,
+      "high_energy_share": 0.0022313447369326183
+    },
+    {
+      "hash": "ef538e966c280ac256736da0d301c582b26159d4bc525130f5a0b05f23c8f812",
+      "title": "baz_kick.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.327875,
+      "peak": 0.994621658172148,
+      "body_peak_hz": 78.369140625,
+      "energy95_s": 0.1196875,
+      "high_energy_share": 0.0011807014678700705
+    },
+    {
+      "hash": "9b3a163db3c3b0414a28ab27800e220a241456fc001f5df3ff909e22b71c2e14",
+      "title": "dadahhh_kick.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.345,
+      "peak": 1.0056902494688784,
+      "body_peak_hz": 68.84765625,
+      "energy95_s": 0.102,
+      "high_energy_share": 0.007910493978716295
+    }
+  ],
+  "ranked_families": [
+    {
+      "distance_db": 3.0795561926272637,
+      "members": [
+        "3 Kick -roundhouse.wav",
+        "Boom-Bap Kick 52.wav",
+        "Boom-Bap Kick 57.wav",
+        "Boom-Bap Kick 65.wav",
+        "Boom-Bap Kick 77.wav"
+      ]
+    },
+    {
+      "distance_db": 3.1390009833848715,
+      "members": [
+        "3 Kick -roundhouse.wav",
+        "Boom-Bap Kick 52.wav",
+        "Boom-Bap Kick 57.wav",
+        "Boom-Bap Kick 60.wav",
+        "Boom-Bap Kick 65.wav"
+      ]
+    },
+    {
+      "distance_db": 3.1953632982432096,
+      "members": [
+        "3 Kick -roundhouse.wav",
+        "Boom-Bap Kick 65.wav",
+        "Boom-Bap Kick 67.wav",
+        "Boom-Bap Kick 72.wav",
+        "Boom-Bap Kick 77.wav"
+      ]
+    },
+    {
+      "distance_db": 3.3573358192646827,
+      "members": [
+        "Boom-Bap Kick 65.wav",
+        "Boom-Bap Kick 67.wav",
+        "Boom-Bap Kick 70.wav",
+        "Boom-Bap Kick 72.wav",
+        "Boom-Bap Kick 99.wav"
+      ]
+    },
+    {
+      "distance_db": 3.3820178970317216,
+      "members": [
+        "Boom-Bap Kick 52.wav",
+        "Boom-Bap Kick 57.wav",
+        "Boom-Bap Kick 65.wav",
+        "Boom-Bap Kick 67.wav",
+        "Boom-Bap Kick 99.wav"
+      ]
+    },
+    {
+      "distance_db": 3.417467054436528,
+      "members": [
+        "07_Kick_19_SP.wav",
+        "3 Kick -roundhouse.wav",
+        "Boom-Bap Kick 52.wav",
+        "Boom-Bap Kick 57.wav",
+        "Boom-Bap Kick 77.wav"
+      ]
+    },
+    {
+      "distance_db": 3.4572285411665047,
+      "members": [
+        "Boom-Bap Kick 51.wav",
+        "Boom-Bap Kick 64.wav",
+        "Boom-Bap Kick 67.wav",
+        "Boom-Bap Kick 70.wav",
+        "Boom-Bap Kick 76.wav"
+      ]
+    },
+    {
+      "distance_db": 3.504055583681459,
+      "members": [
+        "Boom-Bap Kick 54.wav",
+        "Boom-Bap Kick 67.wav",
+        "Boom-Bap Kick 70.wav",
+        "Boom-Bap Kick 72.wav",
+        "Boom-Bap Kick 99.wav"
+      ]
+    }
+  ],
+  "selected": [
+    {
+      "hash": "6ca83b6d136270ddace41be2bbc3e13ad14d2b7ad8860ef8518a26336131332c",
+      "title": "3 Kick -roundhouse.wav",
+      "sample_rate": 44100,
+      "channels": 1,
+      "onset_s": 0.0,
+      "duration_s": 0.240875,
+      "peak": 0.9904431354434184,
+      "body_peak_hz": 36.865234375,
+      "energy95_s": 0.12625,
+      "high_energy_share": 0.0009331775094292824
+    },
+    {
+      "hash": "e31f2b34f7e207b5a9569224240df21749ae7fcccc6ea55e613e574fde063b09",
+      "title": "Boom-Bap Kick 52.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2759375,
+      "peak": 0.8880149065095782,
+      "body_peak_hz": 42.724609375,
+      "energy95_s": 0.1399375,
+      "high_energy_share": 0.0002167336166933229
+    },
+    {
+      "hash": "b942a2760ae552034f7a24c7a36049ad6d46055e17b5326bb82314f75ebd474b",
+      "title": "Boom-Bap Kick 57.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.286875,
+      "peak": 0.8885784131615341,
+      "body_peak_hz": 35.15625,
+      "energy95_s": 0.165125,
+      "high_energy_share": 0.00018284825676318536
+    },
+    {
+      "hash": "f4db9071669970d1534c735dee84be74625ca7fc233f723511043f75c5163a38",
+      "title": "Boom-Bap Kick 65.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.301625,
+      "peak": 0.8896476952760322,
+      "body_peak_hz": 42.236328125,
+      "energy95_s": 0.116625,
+      "high_energy_share": 0.00018687192009963995
+    },
+    {
+      "hash": "4a48dc4c4566d0873763a62bc809d5f19161809ad073f67c64e0299f3e68dbbf",
+      "title": "Boom-Bap Kick 77.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "onset_s": 0.0,
+      "duration_s": 0.2228125,
+      "peak": 0.6281244115752241,
+      "body_peak_hz": 31.73828125,
+      "energy95_s": 0.1131875,
+      "high_energy_share": 0.0010045127487445116
+    }
+  ]
+}

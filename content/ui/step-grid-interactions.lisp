@@ -456,6 +456,9 @@
   (if (or (buffer-read-only?) (= (view-mode) "ui") (= (current-buffer-name) "*transport*"))
     (let ((context (select-all-context)))
       (do
+        ;; Selecting this surface relinquishes the prior destructive target,
+        ;; even when it is empty or its selection is already complete.
+        (seq-clear-delete-target)
         (if (= context :arrangement)
           (do (drop-step-selection) (eseq.arrangement/select-all-clips))
           (if (= context :piano-roll)

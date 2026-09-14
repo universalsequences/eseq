@@ -1,0 +1,52 @@
+[
+  {
+    "a": "3 Kick -roundhouse.wav",
+    "b": "Boom-Bap Kick 52.wav",
+    "max_abs_correlation_within_20ms": 0.7169951407427665
+  },
+  {
+    "a": "3 Kick -roundhouse.wav",
+    "b": "Boom-Bap Kick 60.wav",
+    "max_abs_correlation_within_20ms": 0.644566151499758
+  },
+  {
+    "a": "3 Kick -roundhouse.wav",
+    "b": "Boom-Bap Kick 65.wav",
+    "max_abs_correlation_within_20ms": 0.3053508599377976
+  },
+  {
+    "a": "3 Kick -roundhouse.wav",
+    "b": "Boom-Bap Kick 72.wav",
+    "max_abs_correlation_within_20ms": 0.7634884682680262
+  },
+  {
+    "a": "Boom-Bap Kick 52.wav",
+    "b": "Boom-Bap Kick 60.wav",
+    "max_abs_correlation_within_20ms": 0.6307998770478879
+  },
+  {
+    "a": "Boom-Bap Kick 52.wav",
+    "b": "Boom-Bap Kick 65.wav",
+    "max_abs_correlation_within_20ms": 0.4873757967983898
+  },
+  {
+    "a": "Boom-Bap Kick 52.wav",
+    "b": "Boom-Bap Kick 72.wav",
+    "max_abs_correlation_within_20ms": 0.7241505625311929
+  },
+  {
+    "a": "Boom-Bap Kick 60.wav",
+    "b": "Boom-Bap Kick 65.wav",
+    "max_abs_correlation_within_20ms": 0.2921345025458773
+  },
+  {
+    "a": "Boom-Bap Kick 60.wav",
+    "b": "Boom-Bap Kick 72.wav",
+    "max_abs_correlation_within_20ms": 0.5310158897436971
+  },
+  {
+    "a": "Boom-Bap Kick 65.wav",
+    "b": "Boom-Bap Kick 72.wav",
+    "max_abs_correlation_within_20ms": 0.4771162361363057
+  }
+]

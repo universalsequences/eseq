@@ -340,6 +340,36 @@ pub(crate) fn current_custom_instrument_name(app: &app::App, track: usize) -> Op
 }
 
 pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usize) {
+    // Publish each slot independently of the edit cursor: only the explicit
+    // delete-target selection opts the browser into slot presets.
+    let slots = {
+        let racks = app.state.pattern.rack_tracks.lock().unwrap();
+        racks.get(track).and_then(Option::as_ref).map(|rack| {
+            rack.slots.iter().enumerate().map(|(slot_idx, slot)| (
+                slot_idx,
+                slot.instrument_type,
+                rack_slot_raw_name(app, slot_idx, slot),
+                slot.track_sound_state.loaded_preset.clone().unwrap_or_default(),
+            )).collect::<Vec<_>>()
+        }).unwrap_or_default()
+    };
+    let slot_contexts = slots.into_iter().map(|(slot_idx, kind, name, loaded_preset)| {
+        let mut presets = if kind == sequencer::sequencer::InstrumentType::Custom {
+            sequencer::lisp_host::load_instrument_preset_names(&name).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        presets.sort();
+        map_value([
+            ("track", Value::Number(track as f64)),
+            ("slot", Value::Number(slot_idx as f64)),
+            ("instrument", Value::String(name.clone())),
+            ("display-name", Value::String(instrument_display_name(&name))),
+            ("presets", build_string_list(&presets)),
+            ("loaded-preset", Value::String(loaded_preset)),
+        ])
+    }).collect::<Vec<_>>();
+    rt.set_reactive("SEQ", "sidebar-rack-slot-presets", list_value(slot_contexts));
     rt.set_reactive(
         "SEQ",
         "project-instrument-engines",
@@ -493,6 +523,54 @@ pub(crate) fn load_instrument_preset_into_track(
     )
     .map(|_| ())
     .map_err(|error| format!("{error:?}"))
+}
+
+pub(crate) fn load_instrument_preset_into_rack_slot(
+    app: &mut app::App,
+    track: usize,
+    slot_idx: usize,
+    instrument_name: &str,
+    preset_name: &str,
+) -> Result<(), String> {
+    let slot = app.rack_slot_effect_snapshot(track, slot_idx)?;
+    if slot.instrument_type != sequencer::sequencer::InstrumentType::Custom
+        || rack_slot_raw_name(app, slot_idx, &slot) != instrument_name
+    {
+        return Err("Rack slot instrument changed; select its preset again".to_string());
+    }
+    let desc = app.rack_slot_instrument_descriptor(&slot)
+        .ok_or_else(|| "Rack instrument descriptor unavailable".to_string())?;
+    let presets = sequencer::lisp_host::load_instrument_presets_shared(instrument_name)
+        .map_err(|error| error.to_string())?;
+    let preset = presets.iter().find(|preset| preset.name == preset_name)
+        .cloned().ok_or_else(|| format!("Preset '{preset_name}' not found"))?;
+    // Reuse the ordinary preset key-lock validation and stable parameter IDs.
+    let key_lock_state = sequencer::effects::EffectSlotState::new(&desc, 0);
+    slot.instrument_slot.restore(&key_lock_state);
+    sequencer::effects::restore_key_locks_by_param_name(&key_lock_state, &desc, &preset.key_locks);
+    let key_locks = sequencer::effects::EffectSlotSnapshot::capture(&key_lock_state);
+    let defaults: Vec<f32> = desc.params.iter().map(|param| {
+        param.clamp(preset.params.get(&param.name).copied().unwrap_or(param.default))
+    }).collect();
+    sequencer::app::edit::apply_recorded_rack_instrument_values_mutation(
+        app, track, slot_idx, format!("Load preset '{}'", preset.name), move |app| {
+            if !app.state.update_live_rack_slot(track, slot_idx, |slot| {
+                slot.instrument_slot.defaults = defaults.clone();
+                slot.instrument_slot.key_locks = key_locks.key_locks.clone();
+                slot.instrument_slot.key_lock_param_ids = key_locks.key_lock_param_ids.clone();
+                slot.instrument_base_note_offset = preset.base_note_offset;
+                slot.track_sound_state.loaded_preset = Some(preset.name.clone());
+                slot.track_sound_state.dirty = false;
+            }) {
+                return Err("Rack slot no longer exists".to_string());
+            }
+            for (param_idx, value) in defaults.iter().copied().enumerate() {
+                app.send_rack_slot_instrument_param(track, slot_idx, param_idx, value);
+            }
+            app.state.schedule_mod_resync();
+            Ok(())
+        },
+    ).map(|_| ()).map_err(|error| format!("{error:?}"))
 }
 
 /// Extract the :path string from a host-command payload dict.

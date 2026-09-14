@@ -525,6 +525,17 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             }
             scratch.set_scene_slot_snapshot(chunk_slots);
         }
+        // A process roll (`roll!`) releases on its deadline beat exactly:
+        // never let a chunk straddle it, so the next chunk starts on the
+        // release beat and reads the pattern normally from there.
+        if let Some(roll) = scheduler.roll.process_roll {
+            let remaining_beats = roll.until_beats - clock.total_beats;
+            if remaining_beats > 0.0 {
+                let remaining_frames =
+                    (remaining_beats * samples_per_quarter).ceil().max(1.0) as usize;
+                chunk_frames = chunk_frames.min(remaining_frames);
+            }
+        }
         let chunk_start_beats = clock.total_beats;
         // Control-thread channel writes land on the chunk boundary, in order,
         // with a defined beat (docs/jaki-live-channel-widgets-spec.md 7). This
@@ -539,10 +550,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 scheduled_until_sample,
             ));
         }
-        let roll_grid = crate::sequencer::Timebase::from_index(
-            state.transport.roll_rate.load(Ordering::Relaxed),
-        )
-        .step_beats(MAX_STEPS);
+        // A process roll (`roll!`) releases itself once the frontier reaches
+        // its deadline and owns the remap grid while it runs; otherwise the
+        // grid is the transport rate, read fresh every chunk (F2).
+        scheduler.roll.release_process_roll_if_due(chunk_start_beats, state);
+        let roll_grid = scheduler.roll.active_grid_beats(state);
         let triggers = clock.process_chunk_with_roll(
             chunk_frames,
             snapshot,
@@ -571,6 +583,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             }
         }
         let mut neural_reset_group_idx = 0;
+        // `roll!` requests from this chunk's process runs, applied after the
+        // trigger loop: the remap only touches later chunks, and the roll
+        // state is borrowed by the clock pass above.
+        let mut pending_process_rolls: Vec<super::roll::PendingProcessRoll> = Vec::new();
         for trigger in triggers {
             let trigger_sample_time = scheduled_until_sample + trigger.offset as u64;
             let conductor_invocations =
@@ -854,6 +870,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         invocation,
                         debug_accum,
                         |scratch, process_runtime, runtime_id, commands| {
+                            super::roll::collect_process_roll_requests(
+                                commands,
+                                trigger.absolute_beats,
+                                step_beats,
+                                resolved.duration,
+                                &mut pending_process_rolls,
+                            );
                             let mut inlet_context = ProcessInletWriteContext {
                                 chain: process_chain,
                                 current_slot_index: Some(slot_index),
@@ -920,6 +943,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 sample_time,
                 step_beats,
                 resolved,
+                written_inlets: Vec::new(),
             };
             for invocation in process_runtime.track_fires_at(
                 trigger.track,
@@ -934,6 +958,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     invocation,
                     debug_accum,
                     |scratch, process_runtime, runtime_id, commands| {
+                        super::roll::collect_process_roll_requests(
+                            commands,
+                            trigger.absolute_beats,
+                            step_beats,
+                            resolved.duration,
+                            &mut pending_process_rolls,
+                        );
                         apply_step_process_commands(
                             scratch,
                             process_runtime,
@@ -2054,6 +2085,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         }
         if !chunk_enqueued {
             break;
+        }
+        for request in pending_process_rolls.drain(..) {
+            if scheduler.roll.engage_process_roll(request, clock, snapshot, state) {
+                scheduler.roll.publish_windows(state, request.grid_beats);
+            }
         }
 
         // Track rolling (docs/rolling-core-spec.md 4.2): emit held-note roll

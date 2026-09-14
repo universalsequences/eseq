@@ -1284,7 +1284,7 @@ pub(super) fn build_track_output_label(app: &app::App, tp: &sequencer::sequencer
     Value::String(label)
 }
 
-pub(super) fn build_track_output_options(app: &app::App) -> Value {
+pub(crate) fn build_track_output_options(app: &app::App) -> Value {
     let mut labels = vec![
         Rc::new(RefCell::new(Value::String("main".to_string()))),
         Rc::new(RefCell::new(Value::String("sends only".to_string()))),
@@ -1308,6 +1308,7 @@ pub(super) fn build_track_bus_sends(app: &app::App, _tp: &sequencer::sequencer::
         .filter(|(_, bus)| bus.id != sequencer::sequencer::BusId::MIX)
         .map(|(bus_idx, bus)| {
             let mut map = HashMap::new();
+            map.insert("bus-id".to_string(), Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))));
             map.insert(
                 "bus-idx".to_string(),
                 Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
@@ -1767,9 +1768,8 @@ pub(crate) fn plock_key_row(
 ///
 /// Deliberately excludes `step-param` rows: velocity/duration/transpose deviate
 /// from their defaults on almost every pattern, so a presence dot there would
-/// be permanently lit and carry no information. Rack slot params and rack slot
-/// instrument params are excluded too — the Lisp key scheme has no target for
-/// them, so no control could read the field.
+/// be permanently lit and carry no information. Rack slot instrument params
+/// are excluded because their controls do not yet consume a dedicated target.
 pub(crate) fn build_track_plock_any_value(
     app: &app::App,
     state: &Arc<SequencerState>,
@@ -1860,6 +1860,13 @@ pub(crate) fn build_track_plock_any_value(
             }
         }
         for (rack_slot_idx, rack_slot) in rack.slots.iter().enumerate() {
+            for param in sequencer::sequencer::RackSlotParam::ALL {
+                if (0..num_steps).any(|step| rack_slot.param_plocks.get(step, param).is_some()) {
+                    items.push(plock_key_row(
+                        "rack-slot-param", Some(rack_slot_idx), None, Some(param.index()),
+                    ));
+                }
+            }
             for (effect_slot_idx, (descriptor, effect_slot)) in rack_slot
                 .effect_descriptors
                 .iter()

@@ -388,11 +388,16 @@
         (get panel :macros))) 0))))
 
 (def rack-slot-param-wrapper (slot param body)
-  (box :key (str "rack-slot-control-" (get slot :track) "-" (get slot :idx) "-" param)
-    :debug-name (str "rack-slot-control-" (get slot :idx) "-" param)
-    :background-color :transparent
-    :macro-owned (if (rack-slot-param-macro-owned? slot param) 1 0)
-    body))
+  (let ((target (nth (filter |target| (= (get target :name) param)
+                      (get slot :param-targets)) 0))
+        (has-locks (pc/target-plock-any? target)))
+    (box :key (str "rack-slot-control-" (get slot :track) "-" (get slot :idx) "-" param)
+      :debug-name (str "rack-slot-control-" (get slot :idx) "-" param)
+      :background-color :transparent
+      :macro-owned (if (rack-slot-param-macro-owned? slot param) 1 0)
+      :plock-any (if has-locks 1 0)
+      :on-right-click (lambda (event) (pc/open-target-plock-menu event target has-locks))
+      body)))
 
 (def rack-slot-row (slot)
   (let ((delete-target (rack-slot-delete-target? slot))

@@ -941,7 +941,8 @@ impl App {
         let mut repository = self.state.export_bus_pattern_repository(&live_all);
         for (scene, saved) in repository.iter_mut().zip(&target.scenes) {
             if let Some(bus) = scene.iter_mut().find(|bus| bus.id == bus_id) {
-                *bus = saved.clone();
+                bus.effect_plocks.clone_from(&saved.effect_plocks);
+                bus.effect_defaults.clone_from(&saved.effect_defaults);
             } else {
                 scene.push(saved.clone());
             }
@@ -2794,6 +2795,9 @@ impl App {
         let bus = self.buses.iter_mut().find(|bus| bus.id == rack_bus)
             .ok_or_else(|| format!("Track group {rack_id} has no backing bus"))?;
         bus.output = output;
+        // Membership is project-wide. Persist its forced edge (or detach) in
+        // every scene so a later recall cannot resurrect an old parent.
+        self.state.set_bus_output_in_all_scene_patterns(rack_bus, output);
         self.graph_controller().apply_bus_output_routing(rack_bus);
         // The audible set under solo follows the chain, so re-derive it.
         self.push_solo_mutes();
@@ -2805,7 +2809,7 @@ impl App {
     /// independently and can disagree.
     pub(crate) fn reconcile_rack_group_bus_outputs(&mut self) {
         let desired = self.groups.iter()
-            .filter(|group| group.is_rack())
+            .filter(|group| group.is_rack() && self.rack_parent_group(group.id).is_some())
             .map(|group| (group.id, self.rack_parent_group(group.id)
                 .map(|parent| BusId(self.groups[parent].bus_id))))
             .collect::<Vec<_>>();
@@ -5318,7 +5322,8 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
         | AppCommand::SetRackSlotChokeGroup { track, slot_idx, .. }
         | AppCommand::SetRackSlotBaseNoteOffset { track, slot_idx, .. }
         | AppCommand::SetRackSlotParamPlock { track, slot_idx, .. }
-        | AppCommand::SetRackSlotParamPlockMulti { track, slot_idx, .. } => {
+        | AppCommand::SetRackSlotParamPlockMulti { track, slot_idx, .. }
+        | AppCommand::ClearRackSlotParamPlockMulti { track, slot_idx, .. } => {
             let rack = app
                 .state
                 .live_rack_track_snapshot(*track)
@@ -5641,6 +5646,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::ClearRackMacroPlockMulti { .. }
         | AppCommand::SetRackSlotEffectPlockMulti { .. }
         | AppCommand::ClearRackSlotEffectPlockMulti { .. }
+        | AppCommand::ClearRackSlotParamPlockMulti { .. }
         | AppCommand::TogglePlay => Err(EditError::UnsupportedCommand),
     }
 }
@@ -6133,7 +6139,8 @@ fn device_plock_command_target(cmd: &AppCommand) -> Option<(usize, Vec<usize>)> 
         | AppCommand::SetRackMacroPlockMulti { track, steps, .. }
         | AppCommand::ClearRackMacroPlockMulti { track, steps, .. }
         | AppCommand::SetRackSlotEffectPlockMulti { track, steps, .. }
-        | AppCommand::ClearRackSlotEffectPlockMulti { track, steps, .. } => {
+        | AppCommand::ClearRackSlotEffectPlockMulti { track, steps, .. }
+        | AppCommand::ClearRackSlotParamPlockMulti { track, steps, .. } => {
             Some((*track, normalized_steps(steps)))
         }
         _ => None,
@@ -6169,6 +6176,7 @@ fn device_plock_label(cmd: &AppCommand) -> &'static str {
         AppCommand::ClearRackMacroPlockMulti { .. } => "Clear rack macro p-lock",
         AppCommand::SetRackSlotEffectPlockMulti { .. } => "Set rack effect p-lock",
         AppCommand::ClearRackSlotEffectPlockMulti { .. } => "Clear rack effect p-lock",
+        AppCommand::ClearRackSlotParamPlockMulti { .. } => "Clear rack strip p-lock",
         _ => "Set device p-lock",
     }
 }
@@ -7185,6 +7193,26 @@ pub fn apply_recorded_instrument_values_mutation(
     label: impl Into<String>,
     mutate: impl FnOnce(&mut App) -> Result<(), String>,
 ) -> Result<EditOutcome, EditError> {
+    apply_recorded_instrument_target_values_mutation(app, track, None, label, mutate)
+}
+
+pub fn apply_recorded_rack_instrument_values_mutation(
+    app: &mut App,
+    track: usize,
+    slot: usize,
+    label: impl Into<String>,
+    mutate: impl FnOnce(&mut App) -> Result<(), String>,
+) -> Result<EditOutcome, EditError> {
+    apply_recorded_instrument_target_values_mutation(app, track, Some(slot), label, mutate)
+}
+
+fn apply_recorded_instrument_target_values_mutation(
+    app: &mut App,
+    track: usize,
+    rack_slot: Option<usize>,
+    label: impl Into<String>,
+    mutate: impl FnOnce(&mut App) -> Result<(), String>,
+) -> Result<EditOutcome, EditError> {
     let label = label.into();
     let track_id = app
         .track_registry
@@ -7199,10 +7227,13 @@ pub fn apply_recorded_instrument_values_mutation(
         _ => rule_three_device_write_target(app, track).ok_or(EditError::MissingTrackPattern)?,
     };
     let target = ResolvedDeviceTarget {
-        id: DeviceId::TrackInstrument(track_id),
+        id: match rack_slot {
+            Some(slot) => DeviceId::RackInstrument(app.device_registry.rack_slot(track_id, slot)),
+            None => DeviceId::TrackInstrument(track_id),
+        },
         track,
         pattern,
-        slot_idx: None,
+        slot_idx: rack_slot,
     };
     let before = capture_device_value_snapshot(app, target)?;
     finish_active_gesture(app);

@@ -1380,6 +1380,11 @@ pub(super) fn apply_step_process_commands(
                 // Graph commands are applied by the scheduler-owned graph runtime
                 // alongside this step-local command pass.
             }
+            crate::process::ProcessRunCommand::Roll(_) => {
+                // Roll requests are stamped with the firing step's geometry
+                // and applied by the lookahead pass, which owns the scheduler
+                // roll state (`roll::collect_process_roll_requests`).
+            }
         }
     }
 }

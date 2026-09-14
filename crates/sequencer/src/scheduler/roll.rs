@@ -8,6 +8,55 @@ use super::*;
 
 use crate::sequencer::{RollCommand, Timebase};
 
+/// A process-driven sequence roll (`roll!`, docs/default-process-lanes-spec.md
+/// roll lane): the remap grid it owns, the absolute beat it releases at, and
+/// whether it auto-armed roll mode so release can restore the button.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ProcessRoll {
+    pub(super) grid_beats: f64,
+    pub(super) until_beats: f64,
+    pub(super) armed_roll_mode: bool,
+}
+
+/// A `roll!` request stamped with the firing step's geometry by the lookahead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PendingProcessRoll {
+    /// Absolute transport beat of the step that fired.
+    pub(super) beat: f64,
+    /// How long the roll holds: the step's duration in beats.
+    pub(super) length_beats: f64,
+    /// Remap grid from the request's rate index.
+    pub(super) grid_beats: f64,
+}
+
+/// Stamp the `roll!` commands of one process run with the firing step's
+/// geometry. The roll holds for the step's duration: its length on the track
+/// timebase times the duration parameter, so a long note rolls as long as it
+/// sounds and a plain step rolls for one step.
+pub(super) fn collect_process_roll_requests(
+    commands: &[crate::process::ProcessRunCommand],
+    beat: f64,
+    step_beats: f32,
+    duration: f32,
+    pending: &mut Vec<PendingProcessRoll>,
+) {
+    for command in commands {
+        let crate::process::ProcessRunCommand::Roll(request) = command else {
+            continue;
+        };
+        let rate = Timebase::ROLL_RATES
+            .get(request.rate_index)
+            .copied()
+            .unwrap_or(Timebase::Sixteenth);
+        let multiplier = if duration.is_finite() && duration > 0.0 { duration as f64 } else { 1.0 };
+        pending.push(PendingProcessRoll {
+            beat,
+            length_beats: step_beats as f64 * multiplier,
+            grid_beats: rate.step_beats(MAX_STEPS),
+        });
+    }
+}
+
 /// Scheduler-side roll state (spec 3). Track-roll emission deliberately reads
 /// its rate from the transport atomics every chunk (F2), while sequence roll
 /// retains the last ordered rate command solely for re-anchor semantics. No
@@ -33,6 +82,9 @@ pub(super) struct RollState {
     /// emission still reads the transport atomic every chunk (F2); this is
     /// retained solely to implement sequence-roll same-rate re-press rules.
     sequence_rate: Timebase,
+    /// The running process roll, if a `roll!` engaged one. Owns the remap
+    /// grid while it runs and releases itself at its deadline.
+    pub(super) process_roll: Option<ProcessRoll>,
 }
 
 impl RollState {
@@ -43,6 +95,115 @@ impl RollState {
             newly_pressed: Vec::new(),
             window_start: [None; MAX_TRACKS],
             sequence_rate: Timebase::Sixteenth,
+            process_roll: None,
+        }
+    }
+
+    /// Grid the sequence-roll remap runs on this chunk: a process roll owns
+    /// its rate; otherwise the transport rate atomic, read fresh (F2).
+    pub(super) fn active_grid_beats(&self, state: &SequencerState) -> f64 {
+        match self.process_roll {
+            Some(roll) => roll.grid_beats,
+            None => Timebase::from_index(state.transport.roll_rate.load(Ordering::Relaxed))
+                .step_beats(MAX_STEPS),
+        }
+    }
+
+    /// Engage a process roll from the step that fired it. Ignored while one
+    /// is already running (the re-fired trig inside the loop window must not
+    /// restart it) and while the manual sequence roll holds the windows.
+    /// Arms roll mode if it was off so the transport button lights, and
+    /// remembers that so release restores it. Returns true when engaged.
+    pub(super) fn engage_process_roll(
+        &mut self,
+        request: PendingProcessRoll,
+        clock: &mut SnapshotSequencerClock,
+        snapshot: &SequencerSnapshot,
+        state: &SequencerState,
+    ) -> bool {
+        const EPS: f64 = 1.0e-9;
+        if self.process_roll.is_some() || self.sequence_rolling() {
+            return false;
+        }
+        if request.grid_beats <= EPS || request.length_beats <= EPS {
+            return false;
+        }
+        let windows = clock.capture_roll_windows_at(snapshot, request.grid_beats, request.beat);
+        if windows.iter().all(Option::is_none) {
+            return false;
+        }
+        self.window_start = windows;
+        let armed_roll_mode = !state.transport.roll_mode.swap(true, Ordering::AcqRel);
+        state
+            .transport
+            .sequence_rolling
+            .store(true, Ordering::Release);
+        self.process_roll = Some(ProcessRoll {
+            grid_beats: request.grid_beats,
+            until_beats: request.beat + request.length_beats,
+            armed_roll_mode,
+        });
+        true
+    }
+
+    /// Release the process roll once the scheduling frontier reaches its
+    /// deadline. Returns true when a roll was released.
+    pub(super) fn release_process_roll_if_due(
+        &mut self,
+        frontier_beats: f64,
+        state: &SequencerState,
+    ) -> bool {
+        const EPS: f64 = 1.0e-9;
+        let Some(roll) = self.process_roll else {
+            return false;
+        };
+        if frontier_beats + EPS < roll.until_beats {
+            return false;
+        }
+        self.cancel_process_roll(state, true);
+        true
+    }
+
+    /// Drop the process roll: the deadline, ClearAll (roll mode off, stop,
+    /// panic) and manual sequence-roll commands all land here. Manual
+    /// commands keep `sequence_rolling` to the input thread, which owns it
+    /// while a key is held; everything else clears it.
+    pub(super) fn cancel_process_roll(&mut self, state: &SequencerState, clear_sequence_rolling: bool) {
+        let Some(roll) = self.process_roll.take() else {
+            return;
+        };
+        self.window_start.fill(None);
+        if clear_sequence_rolling {
+            state
+                .transport
+                .sequence_rolling
+                .store(false, Ordering::Release);
+        }
+        if roll.armed_roll_mode {
+            state.transport.roll_mode.store(false, Ordering::Release);
+        }
+    }
+
+    /// Manual roll commands take precedence over a process roll: a sequence
+    /// roll press/release or ClearAll drops it before the command applies.
+    pub(super) fn cancel_process_roll_for_commands(
+        &mut self,
+        commands: &[RollCommand],
+        state: &SequencerState,
+    ) {
+        if self.process_roll.is_none() {
+            return;
+        }
+        if commands
+            .iter()
+            .any(|command| matches!(command, RollCommand::ClearAll))
+        {
+            self.cancel_process_roll(state, true);
+        } else if commands
+            .iter()
+            .any(|command| matches!(command, RollCommand::SequenceRoll { .. }))
+        {
+            self.cancel_process_roll(state, false);
         }
     }
 
@@ -52,6 +213,9 @@ impl RollState {
 
     pub(super) fn clear_all(&mut self) {
         self.newly_pressed.clear();
+        // A process roll is cancelled through `cancel_process_roll` so the
+        // transport atomics are restored; this only drops a stale record.
+        self.process_roll = None;
         let had_state = self.any_held() || self.sequence_rolling();
         for held in &mut self.held {
             held.clear();

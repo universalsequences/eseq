@@ -83,17 +83,27 @@ pub(super) fn handle(
                         _ => None,
                     });
                 if let Some(preset_name) = preset_name {
-                    let track = current_track.load(Ordering::Relaxed);
+                    let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+                    let track = if rack_slot.is_some() {
+                        extract_usize_from_payload(&payload, "track")
+                            .unwrap_or_else(|| current_track.load(Ordering::Relaxed))
+                    } else {
+                        current_track.load(Ordering::Relaxed)
+                    };
                     let is_rack = app.graph.track_instrument_types.get(track)
                         == Some(&sequencer::sequencer::InstrumentType::Rack);
-                    let load_result = if is_rack {
+                    let load_result = if let Some(slot) = rack_slot {
+                        let instrument = extract_string_from_payload(&payload, "instrument")
+                            .unwrap_or_default();
+                        load_instrument_preset_into_rack_slot(app, track, slot, &instrument, &preset_name)
+                    } else if is_rack {
                         app.load_rack_preset_onto_track(track, &preset_name)
                     } else {
                         load_instrument_preset_into_track(&mut app, track, &preset_name)
                     };
                     match load_result {
                         Ok(()) => {
-                            if is_rack {
+                            if is_rack && rack_slot.is_none() {
                                 sync_after_instrument_track_apply(
                                     &mut app,
                                     &mut editor,

@@ -1,6 +1,15 @@
 use super::super::*;
 
 impl SequencerState {
+    /// Project-wide rack membership changes own this edge in every scene.
+    pub(crate) fn set_bus_output_in_all_scene_patterns(&self, id: BusId, output: crate::project::BusOutput) {
+        for scene in &mut self.pattern.scenes.lock().unwrap().scenes {
+            if let Some(bus) = scene.bus_patterns.iter_mut().find(|bus| bus.id == id) {
+                bus.output = output;
+            }
+        }
+    }
+
     fn ensure_scene_bus_patterns_len_locked(
         scenes: &mut ProjectScenes,
         len: usize,

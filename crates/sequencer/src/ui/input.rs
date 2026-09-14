@@ -5384,6 +5384,7 @@ mod live_keyboard_tests {
                 ("track-process-lanes", Value::List(vec![])),
                 ("process-slots", Value::List(vec![])),
                 ("track-process-slots", Value::List(vec![])),
+                ("track-lane-patch", Value::List(vec![])),
                 ("process-library", Value::List(vec![])),
             ],
             true,

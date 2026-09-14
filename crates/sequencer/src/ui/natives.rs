@@ -2008,6 +2008,15 @@ fn bump_delete_target_version(active_delete_target_version: &Arc<AtomicUsize>) {
     active_delete_target_version.fetch_add(1, Ordering::Relaxed);
 }
 
+fn clear_active_delete_target(
+    target: &Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    version: &Arc<AtomicUsize>,
+) {
+    if target.lock().unwrap().take().is_some() {
+        bump_delete_target_version(version);
+    }
+}
+
 #[cfg(test)]
 mod delete_target_tests {
     use super::*;
@@ -2504,6 +2513,157 @@ fn load_browser_sample_waveform(
         })
 }
 
+// Step selection takes ownership of destructive keyboard commands, even when
+// the requested selection is unchanged. Native entry points keep keyboard,
+// pointer, menu, and package callers consistent.
+fn register_step_selection_natives(
+    runtime: &mut Runtime,
+    state: Arc<SequencerState>,
+    current_track: Arc<AtomicUsize>,
+    selected_steps: Arc<Mutex<HashSet<usize>>>,
+    ui_invalidations: Arc<UiInvalidationQueue>,
+    active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    active_delete_target_version: Arc<AtomicUsize>,
+) {
+    // seq-select-step — toggle step in/out of selection
+    let sel = selected_steps.clone();
+    let ct = current_track.clone();
+    let ui_inv = ui_invalidations.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    runtime.register_native("seq-select-step", move |args, _ctx| {
+        let Some(Value::Number(step)) = args.first() else {
+            return Err("seq-select-step: expected step number".into());
+        };
+        clear_active_delete_target(&delete_target, &delete_target_version);
+        let step = *step as usize;
+        let mut set = sel.lock().unwrap();
+        let was_selected = !set.insert(step);
+        if was_selected {
+            set.remove(&step);
+        }
+        ui_inv.push(UiInvalidation::StepSelection {
+            track: ct.load(Ordering::Relaxed),
+            changed_steps: vec![step],
+        });
+        Ok(Value::Bool(!was_selected))
+    });
+
+    // seq-select-step-range — replace selection with inclusive step range
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_inv = ui_invalidations.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    runtime.register_native("seq-select-step-range", move |args, _ctx| {
+        let (Some(Value::Number(a)), Some(Value::Number(b))) = (args.first(), args.get(1)) else {
+            return Err("seq-select-step-range: expected start and end steps".into());
+        };
+        clear_active_delete_target(&delete_target, &delete_target_version);
+        let track = ct.load(Ordering::Relaxed);
+        let num_steps = st.pattern.track_params[track].get_num_steps();
+        if num_steps == 0 {
+            return Ok(Value::Number(0.0));
+        }
+        let a = (*a as usize).min(num_steps - 1);
+        let b = (*b as usize).min(num_steps - 1);
+        let lo = a.min(b);
+        let hi = a.max(b);
+        let len = hi - lo + 1;
+        let mut set = sel.lock().unwrap();
+        if set.len() == len && (lo..=hi).all(|step| set.contains(&step)) {
+            return Ok(Value::Number(len as f64));
+        }
+        let previous = std::mem::take(&mut *set);
+        set.extend(lo..=hi);
+        let mut changed_steps = previous
+            .symmetric_difference(&set)
+            .copied()
+            .collect::<Vec<_>>();
+        changed_steps.sort_unstable();
+        drop(set);
+        ui_inv.push(UiInvalidation::StepSelection {
+            track,
+            changed_steps,
+        });
+        Ok(Value::Number(len as f64))
+    });
+
+    // seq-clear-selection
+    let sel = selected_steps.clone();
+    let ct = current_track.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-clear-selection", move |_args, _ctx| {
+        let mut selected = sel.lock().unwrap();
+        if selected.is_empty() {
+            return Ok(Value::Nil);
+        }
+        let mut changed_steps = selected.drain().collect::<Vec<_>>();
+        changed_steps.sort_unstable();
+        drop(selected);
+        ui_inv.push(UiInvalidation::StepSelection {
+            track: ct.load(Ordering::Relaxed),
+            changed_steps,
+        });
+        Ok(Value::Nil)
+    });
+
+    // seq-has-selection?
+    let sel = selected_steps.clone();
+    runtime.register_native("seq-has-selection?", move |_args, _ctx| {
+        Ok(Value::Bool(!sel.lock().unwrap().is_empty()))
+    });
+
+    let sel = selected_steps.clone();
+    runtime.register_native("seq-step-selected?", move |args, _ctx| {
+        let Some(Value::Number(step)) = args.first() else {
+            return Err("seq-step-selected?: expected step number".into());
+        };
+        Ok(Value::Bool(sel.lock().unwrap().contains(&(*step as usize))))
+    });
+
+    let sel = selected_steps.clone();
+    runtime.register_native("seq-selected-step-indexes-native", move |_args, _ctx| {
+        let mut steps = sel.lock().unwrap().iter().copied().collect::<Vec<_>>();
+        steps.sort_unstable();
+        Ok(Value::List(
+            steps
+                .into_iter()
+                .map(|step| Rc::new(RefCell::new(Value::Number(step as f64))))
+                .collect(),
+        ))
+    });
+
+    // seq-select-all-steps — select every step in the current track pattern
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_inv = ui_invalidations.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    runtime.register_native("seq-select-all-steps", move |_args, _ctx| {
+        clear_active_delete_target(&delete_target, &delete_target_version);
+        let track = ct.load(Ordering::Relaxed);
+        let num_steps = st.pattern.track_params[track].get_num_steps();
+        let mut set = sel.lock().unwrap();
+        let previous = std::mem::take(&mut *set);
+        set.extend(0..num_steps);
+        let mut changed_steps = previous
+            .symmetric_difference(&set)
+            .copied()
+            .collect::<Vec<_>>();
+        changed_steps.sort_unstable();
+        drop(set);
+        ui_inv.push(UiInvalidation::StepSelection {
+            track,
+            changed_steps,
+        });
+        Ok(Value::Number(num_steps as f64))
+    });
+
+}
+
 pub(crate) fn init_runtime(
     app: &app::App,
     state: Arc<SequencerState>,
@@ -2859,6 +3019,10 @@ pub(crate) fn init_runtime(
                     "track-process-slots",
                     build_all_track_process_slots_value(&state, track_count),
                 ),
+                (
+                    "track-lane-patch",
+                    build_all_track_lane_patch_value(&state, track_count),
+                ),
                 ("process-library", build_process_library_value(&state)),
                 ("sync-labels", build_sync_labels()),
                 ("track-volumes", build_track_volumes(&state)),
@@ -2885,6 +3049,7 @@ pub(crate) fn init_runtime(
                 ("track-mutes", build_track_mutes(&state)),
                 ("track-solos", build_track_solos(&state)),
                 ("track-muted-by-solo", build_track_muted_by_solo(&app, &state)),
+                ("bus-output-routes", build_bus_output_routes(&app)),
                 (
                     "bus-ids",
                     Value::List(
@@ -3203,6 +3368,7 @@ pub(crate) fn init_runtime(
                 ("sidebar-selected-sample", Value::String(String::new())),
                 ("sidebar-track-index", Value::Number(0.0)),
                 ("sidebar-presets", Value::List(vec![])),
+                ("sidebar-rack-slot-presets", Value::List(vec![])),
                 ("sidebar-preset-tree", Value::List(vec![])),
                 (
                     "project-instrument-engines",
@@ -3410,10 +3576,7 @@ pub(crate) fn init_runtime(
     let delete_target_version = active_delete_target_version.clone();
     
     runtime.register_native("seq-clear-delete-target", move |_args, _ctx| {
-        let mut guard = delete_target.lock().unwrap();
-        if guard.take().is_some() {
-            bump_delete_target_version(&delete_target_version);
-        }
+        clear_active_delete_target(&delete_target, &delete_target_version);
         Ok(Value::Bool(true))
     });
 
@@ -5306,133 +5469,15 @@ pub(crate) fn init_runtime(
 
     // ── Selection natives ──
 
-    // seq-select-step — toggle step in/out of selection
-    let sel = selected_steps.clone();
-    let ct = current_track.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-select-step", move |args, _ctx| {
-        let Some(Value::Number(step)) = args.first() else {
-            return Err("seq-select-step: expected step number".into());
-        };
-        let step = *step as usize;
-        let mut set = sel.lock().unwrap();
-        let was_selected = !set.insert(step);
-        if was_selected {
-            set.remove(&step);
-        }
-        ui_inv.push(UiInvalidation::StepSelection {
-            track: ct.load(Ordering::Relaxed),
-            changed_steps: vec![step],
-        });
-        Ok(Value::Bool(!was_selected))
-    });
-
-    // seq-select-step-range — replace selection with inclusive step range
-    let st = state.clone();
-    let ct = current_track.clone();
-    let sel = selected_steps.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-select-step-range", move |args, _ctx| {
-        let (Some(Value::Number(a)), Some(Value::Number(b))) = (args.first(), args.get(1)) else {
-            return Err("seq-select-step-range: expected start and end steps".into());
-        };
-        let track = ct.load(Ordering::Relaxed);
-        let num_steps = st.pattern.track_params[track].get_num_steps();
-        if num_steps == 0 {
-            return Ok(Value::Number(0.0));
-        }
-        let a = (*a as usize).min(num_steps - 1);
-        let b = (*b as usize).min(num_steps - 1);
-        let lo = a.min(b);
-        let hi = a.max(b);
-        let len = hi - lo + 1;
-        let mut set = sel.lock().unwrap();
-        if set.len() == len && (lo..=hi).all(|step| set.contains(&step)) {
-            return Ok(Value::Number(len as f64));
-        }
-        let previous = std::mem::take(&mut *set);
-        set.extend(lo..=hi);
-        let mut changed_steps = previous
-            .symmetric_difference(&set)
-            .copied()
-            .collect::<Vec<_>>();
-        changed_steps.sort_unstable();
-        drop(set);
-        ui_inv.push(UiInvalidation::StepSelection {
-            track,
-            changed_steps,
-        });
-        Ok(Value::Number(len as f64))
-    });
-
-    // seq-clear-selection
-    let sel = selected_steps.clone();
-    let ct = current_track.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-clear-selection", move |_args, _ctx| {
-        let mut selected = sel.lock().unwrap();
-        if selected.is_empty() {
-            return Ok(Value::Nil);
-        }
-        let mut changed_steps = selected.drain().collect::<Vec<_>>();
-        changed_steps.sort_unstable();
-        drop(selected);
-        ui_inv.push(UiInvalidation::StepSelection {
-            track: ct.load(Ordering::Relaxed),
-            changed_steps,
-        });
-        Ok(Value::Nil)
-    });
-
-    // seq-has-selection?
-    let sel = selected_steps.clone();
-    runtime.register_native("seq-has-selection?", move |_args, _ctx| {
-        Ok(Value::Bool(!sel.lock().unwrap().is_empty()))
-    });
-
-    let sel = selected_steps.clone();
-    runtime.register_native("seq-step-selected?", move |args, _ctx| {
-        let Some(Value::Number(step)) = args.first() else {
-            return Err("seq-step-selected?: expected step number".into());
-        };
-        Ok(Value::Bool(sel.lock().unwrap().contains(&(*step as usize))))
-    });
-
-    let sel = selected_steps.clone();
-    runtime.register_native("seq-selected-step-indexes-native", move |_args, _ctx| {
-        let mut steps = sel.lock().unwrap().iter().copied().collect::<Vec<_>>();
-        steps.sort_unstable();
-        Ok(Value::List(
-            steps
-                .into_iter()
-                .map(|step| Rc::new(RefCell::new(Value::Number(step as f64))))
-                .collect(),
-        ))
-    });
-
-    // seq-select-all-steps — select every step in the current track pattern
-    let st = state.clone();
-    let ct = current_track.clone();
-    let sel = selected_steps.clone();
-    let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-select-all-steps", move |_args, _ctx| {
-        let track = ct.load(Ordering::Relaxed);
-        let num_steps = st.pattern.track_params[track].get_num_steps();
-        let mut set = sel.lock().unwrap();
-        let previous = std::mem::take(&mut *set);
-        set.extend(0..num_steps);
-        let mut changed_steps = previous
-            .symmetric_difference(&set)
-            .copied()
-            .collect::<Vec<_>>();
-        changed_steps.sort_unstable();
-        drop(set);
-        ui_inv.push(UiInvalidation::StepSelection {
-            track,
-            changed_steps,
-        });
-        Ok(Value::Number(num_steps as f64))
-    });
+    register_step_selection_natives(
+        &mut runtime,
+        state.clone(),
+        current_track.clone(),
+        selected_steps.clone(),
+        ui_invalidations.clone(),
+        active_delete_target.clone(),
+        active_delete_target_version.clone(),
+    );
 
     // seq-delete-selected-steps — clear all selected steps and clear selection
     let ct = current_track.clone();
@@ -7927,6 +7972,54 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step_selection_disarms_delete_targets_even_when_selection_is_unchanged() {
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        let num_steps = state.pattern.track_params[0].get_num_steps();
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let target = Arc::new(Mutex::new(None));
+        let version = Arc::new(AtomicUsize::new(0));
+        let mut runtime = Runtime::new();
+        register_step_selection_natives(
+            &mut runtime,
+            state,
+            Arc::new(AtomicUsize::new(0)),
+            selected.clone(),
+            Arc::new(UiInvalidationQueue::new()),
+            target.clone(),
+            version.clone(),
+        );
+
+        for armed in [
+            ActiveDeleteTarget::MixerTrack { track: 0 },
+            ActiveDeleteTarget::MixerTracks { tracks: vec![0, 1] },
+            ActiveDeleteTarget::MixerGroup { group_id: 7 },
+        ] {
+            for (command, expected) in [
+                ("(seq-select-all-steps)", (0..num_steps).collect::<HashSet<_>>()),
+                ("(seq-select-step-range 1 3)", HashSet::from([1, 2, 3])),
+                ("(seq-select-step 2)", HashSet::from([2])),
+            ] {
+                selected.lock().unwrap().clear();
+                // Repeat after rearming the badge: unchanged selections and
+                // toggling off the last step must still relinquish deletion.
+                for repeat in 0..2 {
+                    *target.lock().unwrap() = Some(armed.clone());
+                    let before = version.load(Ordering::Relaxed);
+                    runtime.eval_str(command).expect("select steps");
+                    assert_eq!(*target.lock().unwrap(), None, "{command}");
+                    assert_eq!(version.load(Ordering::Relaxed), before + 1,
+                        "the mixer badge must be republished");
+                    if repeat == 1 && command == "(seq-select-step 2)" {
+                        assert!(selected.lock().unwrap().is_empty());
+                    } else {
+                        assert_eq!(*selected.lock().unwrap(), expected);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn track_selection_natives_replace_selection_atomically() {

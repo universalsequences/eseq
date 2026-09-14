@@ -1015,10 +1015,10 @@
         (box :width 0 :height 0)
         (h-stack :gap 0.2 :align :center
           (map (lambda (name)
-            (subtree :key (str "transport-" name "-menu-button")
-              (application-menu-button name)))
+              (subtree :key (str "transport-" name "-menu-button")
+                (application-menu-button name)))
             (application-menu-names)))))
-
+    
     ;; Transport buttons in a shared rounded-rect container
     (box :key "transport-playback-controls" :background-color :mixer-strip-bg :corner-radius 72 :padding 0.015 :height 1.4
       (h-stack :gap 0.2 :align :center
@@ -1153,11 +1153,13 @@
         (v-stack :gap 0.08 :padding 0.05
           (label "L"
             :font-size 5 :width 0.9
+            :v-align :center
             :color '(rgba 0.63 0.88 0.41 1)
             :bg :transparent)
           
           (label "R"
             :font-size 5 :width 0.9
+            :v-align :center
             :color '(rgba 0.63 0.88 0.41 1)
             :bg :transparent)          )
         
@@ -1166,7 +1168,7 @@
           (h-stack :gap 0.25
             
             (v-stack
-              (box :height 0.2)
+              (box :height 0.0)
               (subtree :key "master-meter-l"
                 (transport-master-meter :level (bind-seq "master-peak-l")))))
           (h-stack :gap 0.25 :align :center
@@ -1178,6 +1180,7 @@
           (h-stack :gap 0 :align :center :padding 0.4
             (box :height 2.7
               (label "cpu"
+                :v-align :center
                 :font-size 12 :width 3.0
                 :color :gray
                 :bg :transparent))

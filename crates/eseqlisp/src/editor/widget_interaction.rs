@@ -676,6 +676,36 @@ impl Editor {
             .is_some_and(|layout| has_pending_patch_drag(layout))
     }
 
+    /// Layout content coordinates for a pointer position in the active
+    /// tile, with the scroll arithmetic widget hit-testing uses: text scroll
+    /// counts only for buffers that show text (a UI-only buffer such as the
+    /// sequencer scrolls its widget layout alone), and inline-widget buffers
+    /// scale it. The patch-drag drop and the cable click used to add the
+    /// text scroll unconditionally, so a scrolled sequencer armed a drag on
+    /// the port under the pointer and then dropped it rows below.
+    fn active_layout_pos(&self, local_col: f32, local_row: f32) -> (f32, f32) {
+        let buffer = self.active_buffer();
+        let leaf = self.active_leaf();
+        let (text_width_scale, text_height_scale) = self.text_cell_scales_for_buffer(buffer);
+        let has_inline_widgets = !buffer.inline_code_widgets().is_empty();
+        let layout_scroll_left = if has_inline_widgets {
+            leaf.widget_scroll_left * text_width_scale
+        } else {
+            leaf.widget_scroll_left
+        };
+        let text_scroll_top = if buffer.view_mode == super::ViewMode::UiOnly {
+            0.0
+        } else if has_inline_widgets {
+            buffer.scroll_top as f32 * text_height_scale
+        } else {
+            buffer.scroll_top as f32
+        };
+        (
+            local_col + layout_scroll_left,
+            local_row + leaf.widget_scroll_top + text_scroll_top,
+        )
+    }
+
     pub(super) fn handle_active_patch_drag_mouse(
         &mut self,
         mouse: MouseEvent,
@@ -705,10 +735,7 @@ impl Editor {
                     self.mark_needs_redraw();
                     return handled;
                 };
-                let layout_pos = (
-                    local_col + self.widget_layout_scroll_left(),
-                    local_row + self.widget_scroll_top() + self.active_buffer().scroll_top as f32,
-                );
+                let layout_pos = self.active_layout_pos(local_col, local_row);
                 let output = patch_drop_output(layout, layout_pos.0, layout_pos.1);
                 let handled = output.is_some();
                 let _ = self.apply_widget_output(output);
@@ -948,10 +975,7 @@ impl Editor {
             MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
         ) {
             if let Some(layout) = self.runtime.current_layout.as_ref() {
-                let layout_pos = (
-                    local_col + self.widget_layout_scroll_left(),
-                    local_row + self.widget_scroll_top() + self.active_buffer().scroll_top as f32,
-                );
+                let layout_pos = self.active_layout_pos(local_col, local_row);
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         let hit_patch_port = hit_test_layout(layout, layout_pos.1, layout_pos.0)

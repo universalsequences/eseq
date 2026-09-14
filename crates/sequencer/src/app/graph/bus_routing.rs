@@ -263,6 +263,11 @@ impl GraphController<'_> {
     /// is rebuilt wholesale (project load, history replay): a chained bus can
     /// only be wired once its destination's nodes exist.
     pub fn apply_all_bus_output_routing(&mut self) {
+        if self.app.graph.lg.0.is_null() { return; }
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        for bus in &self.app.graph.bus_node_ids {
+            self.disconnect_bus_output_from_all(bus.pdc_id);
+        }
         let ids = self
             .app
             .buses

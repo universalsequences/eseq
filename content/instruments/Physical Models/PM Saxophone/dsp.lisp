@@ -127,7 +127,10 @@
   (def neck (delay (read-history backward) (max 2 (* pos period))))
   (def bore_pressure (- bell neck))
   (def delta (- mouth bore_pressure))
-  (def reflection (clip (+ aperture (* slope delta)) -1 1))
+  ;; The reflection must stay non-negative: the round-trip loop gain is
+  ;; 0.96 * (1 - reflection), so a negative reflection pumps energy into the
+  ;; bore with nothing to saturate it and the voice diverges within a few periods.
+  (def reflection (clip (+ aperture (* slope delta)) 0 1))
   (def outgoing (- mouth (* delta reflection) bell))
   (def dc (+ (- bore_pressure (read-history dc_x)) (* (exp (/ (* -20 twopi) samplerate)) (read-history dc_y))))
   (write-history forward outgoing)

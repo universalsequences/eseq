@@ -767,8 +767,27 @@
         (status (str "Add MIDI FX: " name)))
       (status "Choose a MIDI effect"))))
 
+(def selected-rack-preset-context ()
+  (let ((version SEQ.delete-target-version))
+    (nth (filter |slot| (seq-delete-target? :rack-slot
+             (dict :track (get slot :track) :slot (get slot :slot)))
+           SEQ.sidebar-rack-slot-presets) 0)))
+
+(def browser-preset-items ()
+  (let ((slot (selected-rack-preset-context)))
+    (if slot (get slot :presets) SEQ.sidebar-presets)))
+
+(def browser-loaded-preset ()
+  (let ((slot (selected-rack-preset-context)))
+    (if slot (get slot :loaded-preset) SEQ.sidebar-loaded-preset)))
+
 (def load-preset (name)
-  (host-command "load-instrument-preset" (dict :name name))
+  (let ((slot (selected-rack-preset-context)))
+    (host-command "load-instrument-preset"
+      (if slot
+        (dict :name name :track (get slot :track) :rack-slot (get slot :slot)
+          :instrument (get slot :instrument))
+        (dict :name name))))
   (eseq.seq-panels/seq-show-fx-lower-panel)
   (status (str "Load preset: " name)))
 
@@ -817,7 +836,9 @@
 
 (def instrument-header ()
   (box :key "instrument-header" :width :fill :height 1.1 :padding 0.15
-    (label (if (= SEQ.sidebar-instrument-display-name "") "Instrument" SEQ.sidebar-instrument-display-name)
+    (label (let ((slot (selected-rack-preset-context)))
+      (if slot (get slot :display-name)
+        (if (= SEQ.sidebar-instrument-display-name "") "Instrument" SEQ.sidebar-instrument-display-name)))
       :font-size 12
       :color :white
       :bg :transparent)))
@@ -1390,7 +1411,7 @@
   (v-stack :key "presets-tab-panel" :width :fill :gap 0.22 :padding 0.25 :flex 1
     (instrument-header)
     (if (= SEQ.sidebar-kind "instrument")
-      (let ((items (seq-preset-tree SEQ.sidebar-presets search-filter)))
+      (let ((items (seq-preset-tree (browser-preset-items) search-filter)))
         (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
           (if (= (len items) 0)
             (empty-message "No presets found.")
@@ -1401,7 +1422,7 @@
                 :background-color :buffer-bg
                 :items items
                 :font-size 12
-                :selected-label SEQ.sidebar-loaded-preset
+                :selected-label (browser-loaded-preset)
                 :expand-all false
                 :focusable true
                 :drag-type "instrument-preset"
@@ -1520,8 +1541,8 @@
           :key "preset-list-tree"
           :width :fill
           :background-color :buffer-bg
-          :items (seq-preset-tree SEQ.sidebar-presets preset-filter)
-          :selected-label SEQ.sidebar-loaded-preset
+          :items (seq-preset-tree (browser-preset-items) preset-filter)
+          :selected-label (browser-loaded-preset)
           :expand-all false
           :on-select (lambda (item) (load-preset (get item :label)))
           :on-activate (lambda (item) (load-preset (get item :label))))))))

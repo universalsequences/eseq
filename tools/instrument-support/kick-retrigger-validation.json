@@ -1,0 +1,180 @@
+{
+  "pm-doom-kick": {
+    "source_sha256": "bda4997774b3123c6c1d892b12391912bb443cedbf8be2ac61eaf524234bc872",
+    "cases": [
+      {
+        "preset": "3 Kick -roundhouse",
+        "interval_ms": 5.0,
+        "equation_max_abs": 2.820004839532153e-06,
+        "trigger_discontinuity": 0.0009825415660282034
+      },
+      {
+        "preset": "3 Kick -roundhouse",
+        "interval_ms": 11.0,
+        "equation_max_abs": 1.549720764193463e-05,
+        "trigger_discontinuity": 2.526035138838978e-07
+      },
+      {
+        "preset": "3 Kick -roundhouse",
+        "interval_ms": 31.25,
+        "equation_max_abs": 1.549720764193463e-05,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "3 Kick -roundhouse",
+        "interval_ms": 62.5,
+        "equation_max_abs": 1.549720764193463e-05,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Boom-Bap Kick 52",
+        "interval_ms": 5.0,
+        "equation_max_abs": 1.5798428804059128e-06,
+        "trigger_discontinuity": 0.0005986421108245821
+      },
+      {
+        "preset": "Boom-Bap Kick 52",
+        "interval_ms": 11.0,
+        "equation_max_abs": 1.3366341590437258e-05,
+        "trigger_discontinuity": 1.2725667880575386e-07
+      },
+      {
+        "preset": "Boom-Bap Kick 52",
+        "interval_ms": 31.25,
+        "equation_max_abs": 1.3366341590437258e-05,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Boom-Bap Kick 52",
+        "interval_ms": 62.5,
+        "equation_max_abs": 1.3366341590437258e-05,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Boom-Bap Kick 60",
+        "interval_ms": 5.0,
+        "equation_max_abs": 1.6344827499653602e-06,
+        "trigger_discontinuity": 0.00034897375896170146
+      },
+      {
+        "preset": "Boom-Bap Kick 60",
+        "interval_ms": 11.0,
+        "equation_max_abs": 1.0371208190307346e-05,
+        "trigger_discontinuity": 1.9603482925845128e-07
+      },
+      {
+        "preset": "Boom-Bap Kick 60",
+        "interval_ms": 31.25,
+        "equation_max_abs": 1.0371208190307346e-05,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Boom-Bap Kick 60",
+        "interval_ms": 62.5,
+        "equation_max_abs": 1.0371208190307346e-05,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Boom-Bap Kick 65",
+        "interval_ms": 5.0,
+        "equation_max_abs": 1.5589337940546955e-06,
+        "trigger_discontinuity": 0.0002714980486486773
+      },
+      {
+        "preset": "Boom-Bap Kick 65",
+        "interval_ms": 11.0,
+        "equation_max_abs": 7.197260856350862e-06,
+        "trigger_discontinuity": 4.4780547048262065e-08
+      },
+      {
+        "preset": "Boom-Bap Kick 65",
+        "interval_ms": 31.25,
+        "equation_max_abs": 7.197260856350862e-06,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Boom-Bap Kick 65",
+        "interval_ms": 62.5,
+        "equation_max_abs": 7.197260856350862e-06,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Boom-Bap Kick 72",
+        "interval_ms": 5.0,
+        "equation_max_abs": 2.0959742973447604e-06,
+        "trigger_discontinuity": 0.0009042411545497342
+      },
+      {
+        "preset": "Boom-Bap Kick 72",
+        "interval_ms": 11.0,
+        "equation_max_abs": 1.1950731276688664e-05,
+        "trigger_discontinuity": 2.3309738339527541e-07
+      },
+      {
+        "preset": "Boom-Bap Kick 72",
+        "interval_ms": 31.25,
+        "equation_max_abs": 1.1950731276688664e-05,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Boom-Bap Kick 72",
+        "interval_ms": 62.5,
+        "equation_max_abs": 1.1950731276688664e-05,
+        "trigger_discontinuity": 0.0
+      }
+    ]
+  },
+  "pm-break-kick": {
+    "source_sha256": "d55d1bcdf7a67ca70a80315cd9422bf7e3dba2cd7376e7ea559b4940f0190ad3",
+    "cases": [
+      {
+        "preset": "Boom-Bap Kick 53",
+        "interval_ms": 5.0,
+        "equation_max_abs": 8.940696699655248e-07,
+        "trigger_discontinuity": 0.0007425336538954275
+      },
+      {
+        "preset": "Boom-Bap Kick 53",
+        "interval_ms": 11.0,
+        "equation_max_abs": 8.94069706713907e-07,
+        "trigger_discontinuity": 8.81742842273256e-08
+      },
+      {
+        "preset": "Boom-Bap Kick 53",
+        "interval_ms": 31.25,
+        "equation_max_abs": 9.471606340349936e-07,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Boom-Bap Kick 53",
+        "interval_ms": 62.5,
+        "equation_max_abs": 8.940696699655248e-07,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Air",
+        "interval_ms": 5.0,
+        "equation_max_abs": 8.940696700765471e-07,
+        "trigger_discontinuity": 0.0002970134675128744
+      },
+      {
+        "preset": "Air",
+        "interval_ms": 11.0,
+        "equation_max_abs": 8.344650253011565e-07,
+        "trigger_discontinuity": 3.526971593687672e-08
+      },
+      {
+        "preset": "Air",
+        "interval_ms": 31.25,
+        "equation_max_abs": 8.344650253011565e-07,
+        "trigger_discontinuity": 0.0
+      },
+      {
+        "preset": "Air",
+        "interval_ms": 62.5,
+        "equation_max_abs": 8.940696700765471e-07,
+        "trigger_discontinuity": 0.0
+      }
+    ]
+  }
+}

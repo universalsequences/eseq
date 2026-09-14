@@ -578,6 +578,31 @@ pub(in crate::lisp_host) fn parse_process_inlet_kind_and_range(
         "track" => crate::process::ProcessInletKind::Track,
         "field" => crate::process::ProcessInletKind::Field,
         "any" => crate::process::ProcessInletKind::Any,
+        "enum" | "choice" => {
+            // `(op :enum ("<" ">" "==") :default 1)`: the option list sits
+            // where a numeric kind takes its positional range, and the
+            // range is the index span.
+            let options = items
+                .get(2)
+                .and_then(value_list)
+                .ok_or_else(|| ":enum expects a list of option labels".to_string())?
+                .iter()
+                .map(|option| match option {
+                    EValue::String(label) => Ok(label.clone()),
+                    other => process_symbol_name(other)
+                        .map_err(|_| ":enum options must be strings or symbols".to_string()),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if options.is_empty() {
+                return Err(":enum expects at least one option".to_string());
+            }
+            let last = (options.len() - 1) as f32;
+            return Ok((
+                crate::process::ProcessInletKind::Enum(options),
+                Some(0.0),
+                Some(last),
+            ));
+        }
         other => return Err(format!("unknown process inlet kind :{other}")),
     };
     let positional_min = items.get(2).and_then(|value| match value {

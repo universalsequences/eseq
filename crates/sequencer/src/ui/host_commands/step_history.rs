@@ -1749,6 +1749,13 @@ pub(super) fn handle(
                 return;
             }
             let command = match target.as_str() {
+                "rack-slot-param" => slot_idx.and_then(|slot_idx| {
+                    sequencer::sequencer::RackSlotParam::ALL.iter().copied()
+                        .find(|param| param.index() == param_idx)
+                        .map(|param| app::AppCommand::ClearRackSlotParamPlockMulti {
+                            track, slot_idx, steps, param,
+                        })
+                }),
                 "rack-macro" => Some(app::AppCommand::ClearRackMacroPlockMulti {
                     track,
                     steps,
@@ -1802,13 +1809,17 @@ pub(super) fn handle(
             }
             // Refresh the clicked strip without changing the selected track's
             // parameter projection. Mixer controls may belong to any track.
-            if target == "rack-macro" {
+            if target == "rack-macro" || target == "rack-slot-param" {
                 let display_step = if track == selected_track {
                     displayed_plock_step(&state, track, selected_plock_step(&selected_steps))
                 } else {
                     None
                 };
-                sync_rack_macro_value_fields(editor.runtime_mut(), &app, track, display_step);
+                if target == "rack-macro" {
+                    sync_rack_macro_value_fields(editor.runtime_mut(), &app, track, display_step);
+                } else {
+                    sync_rack_panel_param_value_fields(editor.runtime_mut(), &app, track, display_step);
+                }
             }
             if target == "bus-send" {
                 sync_track_bus_send_binding_field(editor.runtime_mut(), &app, &state, track, param_idx);
@@ -2678,6 +2689,69 @@ mod tests {
             .into_iter()
             .collect(),
         )
+    }
+
+    #[test]
+    fn clear_rack_slot_param_plocks_are_scoped_and_undoable() {
+        use sequencer::sequencer::{RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot,
+            RackTrackSnapshot, InstrumentType, CustomInstrumentRunMode, TrackSoundState,
+            default_rack_macros};
+        for param in RackSlotParam::ALL {
+            for scope in ["all", "selected"] {
+                let mut harness = Harness::with_track_count(2);
+                let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+                let mut slot = RackSlotSnapshot {
+                    instrument_type: InstrumentType::Sampler,
+                    instrument_run_mode: CustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0, choke_group: None,
+                    gain: 0.75, pan: 0.0, mute: false, solo: false, max_polyphony: 4,
+                    param_plocks: RackSlotParamPlocks::new(),
+                    instrument_slot: sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(&desc, 0, 0),
+                    effect_slots: RackSlotSnapshot::empty_effect_slots(),
+                    effect_descriptors: sequencer::effects::EffectDescriptor::default_full_chain(),
+                    custom_effect_names: RackSlotSnapshot::empty_effect_names(),
+                    track_sound_state: TrackSoundState::default(), sample_id: None,
+                };
+                for step in [2, 9, 40] {
+                    for p in RackSlotParam::ALL {
+                        slot.param_plocks.set(step, p, 1.0);
+                    }
+                }
+                for track in 0..2 {
+                    harness.state.set_rack_track_for_all_pattern_snapshots(track,
+                        RackTrackSnapshot::new(vec![slot.clone(), slot.clone()], default_rack_macros()));
+                }
+                harness.selected_steps.lock().unwrap().insert(2);
+                let mut payload = clear_param_plocks_payload(scope, param.index());
+                let Value::Map(ref mut map) = payload else { unreachable!() };
+                map.insert("track".into(), Rc::new(RefCell::new(Value::Number(1.0))));
+                map.insert("slot-idx".into(), Rc::new(RefCell::new(Value::Number(1.0))));
+                map.insert("target".into(), Rc::new(RefCell::new(Value::String("rack-slot-param".into()))));
+                let before = harness.app.history.undo_len();
+                harness.dispatch("clear-param-plocks", payload);
+                assert_eq!(harness.app.history.undo_len(), before + 1, "{param:?}/{scope}");
+                for undone in [false, true] {
+                    if undone {
+                        assert!(matches!(app::edit::undo(&mut harness.app), app::history::HistoryReplay::Applied(_)));
+                    }
+                    let racks = harness.state.pattern.rack_tracks.lock().unwrap();
+                    for track in 0..2 {
+                        for slot_idx in 0..2 {
+                            let current = &racks[track].as_ref().unwrap().slots[slot_idx];
+                            assert_eq!(current.gain, 0.75);
+                            for step in [2, 9, 40] {
+                                for p in RackSlotParam::ALL {
+                                    let cleared = !undone && track == 1 && slot_idx == 1 && p == param
+                                        && (scope == "all" || step == 2);
+                                    assert_eq!(current.param_plocks.get(step, p).is_none(), cleared,
+                                        "{param:?}/{scope}: track {track}, slot {slot_idx}, step {step}, {p:?}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

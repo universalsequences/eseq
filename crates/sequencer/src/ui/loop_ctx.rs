@@ -13,7 +13,7 @@ pub(crate) struct PackageViewSession {
 /// checkpoints, bundled out of the event loop.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct EditSessionState {
-    pub(crate) midi_commands: Option<std::sync::mpsc::Sender<sequencer::midi_input::service::Command>>,
+    pub(crate) midi_commands: Option<sequencer::midi_input::service::CommandSender>,
     pub(crate) editor_buffer_name: Option<String>,
     pub(crate) editor_mode: Option<String>,
     pub(crate) instrument_edit_session: Option<InstrumentEditSession>,

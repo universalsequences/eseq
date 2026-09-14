@@ -1,0 +1,18 @@
+[
+  {
+    "instrument": "pm-doom-kick",
+    "microseconds_per_128_frames_including_python_call": {
+      "single": 4.963222658261657,
+      "crossfade": 9.506333308915297
+    },
+    "ratio": 1.9153549948220217
+  },
+  {
+    "instrument": "pm-break-kick",
+    "microseconds_per_128_frames_including_python_call": {
+      "single": 10.312528000213206,
+      "crossfade": 19.65083333197981
+    },
+    "ratio": 1.905530179561553
+  }
+]

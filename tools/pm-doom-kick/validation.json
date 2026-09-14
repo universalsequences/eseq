@@ -1,0 +1,102 @@
+{
+  "source_sha256": "bda4997774b3123c6c1d892b12391912bb443cedbf8be2ac61eaf524234bc872",
+  "presets": [
+    {
+      "title": "3 Kick -roundhouse.wav",
+      "hash": "6ca83b6d136270ddace41be2bbc3e13ad14d2b7ad8860ef8518a26336131332c",
+      "metrics": {
+        "wave_nrmse": 0.21345538395778707,
+        "correlation": 0.9769543832430747,
+        "envelope_nrmse": 0.12782926026148747,
+        "spectral_convergence": 0.16510032791901794,
+        "level_error_db": -0.1973644722687819
+      }
+    },
+    {
+      "title": "Boom-Bap Kick 52.wav",
+      "hash": "e31f2b34f7e207b5a9569224240df21749ae7fcccc6ea55e613e574fde063b09",
+      "metrics": {
+        "wave_nrmse": 0.1125950319513003,
+        "correlation": 0.9936409653092595,
+        "envelope_nrmse": 0.07420638475042922,
+        "spectral_convergence": 0.08038309064891878,
+        "level_error_db": -0.05593695166161444
+      }
+    },
+    {
+      "title": "Boom-Bap Kick 60.wav",
+      "hash": "13b6ad1b4fa07f271d0b2343b72891a3e4df31980482110b470284c09e6ec844",
+      "metrics": {
+        "wave_nrmse": 0.23523118101166218,
+        "correlation": 0.9719731061388323,
+        "envelope_nrmse": 0.1579237382536973,
+        "spectral_convergence": 0.1755521408300674,
+        "level_error_db": -0.3180595941392721
+      }
+    },
+    {
+      "title": "Boom-Bap Kick 65.wav",
+      "hash": "f4db9071669970d1534c735dee84be74625ca7fc233f723511043f75c5163a38",
+      "metrics": {
+        "wave_nrmse": 0.23059169906856758,
+        "correlation": 0.9730620976395266,
+        "envelope_nrmse": 0.15524513940981247,
+        "spectral_convergence": 0.16588566145947023,
+        "level_error_db": -0.2735278733900153
+      }
+    },
+    {
+      "title": "Boom-Bap Kick 72.wav",
+      "hash": "add9de07bbfc3d4b02827e66b09dbdb122372f25c18dfe31b967f8100a4a19da",
+      "metrics": {
+        "wave_nrmse": 0.23575173977095723,
+        "correlation": 0.9718423776792823,
+        "envelope_nrmse": 0.13646681964462068,
+        "spectral_convergence": 0.1956766203220408,
+        "level_error_db": -0.24085212749982637
+      }
+    }
+  ],
+  "rates": {
+    "16000": {
+      "preset_peaks": [
+        0.9766184091567993,
+        0.8336004614830017,
+        0.9411504864692688,
+        0.9569272398948669,
+        0.8958025574684143
+      ]
+    },
+    "44100": {
+      "preset_peaks": [
+        0.9766190648078918,
+        0.8336363434791565,
+        0.9411880970001221,
+        0.9569692015647888,
+        0.8958064317703247
+      ]
+    },
+    "48000": {
+      "preset_peaks": [
+        0.9766190648078918,
+        0.8336424827575684,
+        0.9411870241165161,
+        0.9569628834724426,
+        0.8958048820495605
+      ]
+    },
+    "96000": {
+      "preset_peaks": [
+        0.9766191244125366,
+        0.8336424827575684,
+        0.9411870241165161,
+        0.9569659233093262,
+        0.8958141803741455
+      ]
+    }
+  },
+  "compiler_sha256": "db15b7809a0557bd6b3513eedf5617e27d4aa288fc6ef0caf191da051aafaa92",
+  "compiled_equation_max_abs": 1.626901989082441e-05,
+  "block_partition_max_abs": 0,
+  "controls_checked": 26
+}

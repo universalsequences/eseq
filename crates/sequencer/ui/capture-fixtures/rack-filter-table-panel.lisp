@@ -2,5 +2,5 @@
 (capture-project
   (track :layer-rack
     :name "Rack Filter Table"
-    :samples ("../../assets/ir/lexicon-300-rich-plate.wav")
+    :samples ("../../../../content/impulses/lexicon-300-rich-plate.wav")
     :rack-slot-audio-fx ("Filter Table")))

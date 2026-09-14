@@ -15,7 +15,8 @@
 ;; The one exception is `cursor-step` — see its pin below.
 (module eseq.seq-core-state)
 
-(export selected-bus
+(export track-range-in-order
+        selected-bus
         selected-bus-name
         seq-has-selected-bus?
         samples-sidebar-visible
@@ -41,6 +42,23 @@
         group-selected-vis-binding
         bus-selected-vis-binding)
 
+
+;; Both views select ranges by their rendered order, not storage indices.
+(def track-position (order track)
+  (reduce |found pos|
+    (if (>= found 0) found (if (= (nth order pos) track) pos found))
+    -1
+    (range 0 (len order))))
+
+(def track-range-in-order (order anchor target)
+  (let ((anchor-pos (track-position order anchor))
+        (target-pos (track-position order target)))
+    (if (or (< anchor-pos 0) (< target-pos 0))
+      (list target)
+      (reduce |tracks pos|
+        (append tracks (list (nth order pos)))
+        (list)
+        (range (min anchor-pos target-pos) (+ (max anchor-pos target-pos) 1))))))
 
 (defstate selected-bus -1)
 
