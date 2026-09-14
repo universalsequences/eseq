@@ -220,6 +220,9 @@ fn digi_snare_surface() { check_surface("Digi Snare", 4); }
 fn membrane_snare_surface() { check_surface("Membrane Snare", 5); }
 
 #[test]
+fn modal_snare_surface() { check_surface("Modal Snare", 5); }
+
+#[test]
 fn modal_kick_surface() { check_surface("Modal Kick", 6); }
 
 #[test]
