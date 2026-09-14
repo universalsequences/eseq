@@ -336,6 +336,7 @@ impl GraphController<'_> {
             bus_send_ids: Vec::new(),
             rack_slots,
             rack_signature: Some(rack_signature),
+            applied_output: None,
         });
         self.publish_rack_slot_panner_runtime(idx);
         self.app.graph.track_synth_node_ids.push(Vec::new());

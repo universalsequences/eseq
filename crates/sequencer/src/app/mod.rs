@@ -683,6 +683,10 @@ pub struct TrackNodeIds {
     pub bus_send_ids: Vec<BusSendNodeIds>,
     pub rack_slots: Vec<RackSlotNodeIds>,
     pub rack_signature: Option<graph::RackTopologySignature>,
+    /// The `TrackOutput` whose edge `apply_track_output_routing` last wired
+    /// from `pdc_id`; `None` until the first apply. Lets a scene switch skip
+    /// the rewire when the incoming pattern routes the track the same way.
+    pub applied_output: Option<crate::sequencer::TrackOutput>,
 }
 
 #[derive(Clone)]

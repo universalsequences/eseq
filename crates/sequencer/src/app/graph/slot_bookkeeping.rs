@@ -120,6 +120,7 @@ impl GraphController<'_> {
                     bus_send_ids: Vec::new(),
                     rack_slots: Vec::new(),
                     rack_signature: None,
+                    applied_output: None,
                 });
                 self.app.graph.track_synth_node_ids.push(Vec::new());
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
@@ -172,6 +173,7 @@ impl GraphController<'_> {
                     bus_send_ids: Vec::new(),
                     rack_slots: Vec::new(),
                     rack_signature: None,
+                    applied_output: None,
                 });
                 let engine = self.app.graph.engine_node_ids[engine_id]
                     .as_ref()
@@ -235,6 +237,7 @@ impl GraphController<'_> {
                     bus_send_ids: Vec::new(),
                     rack_slots: Vec::new(),
                     rack_signature: None,
+                    applied_output: None,
                 });
                 self.app.graph.track_synth_node_ids.push(Vec::new());
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());

@@ -513,15 +513,43 @@ impl GraphController<'_> {
         }
     }
 
+    /// Rewires the track's primary output edge (`pdc_id` -> mix or bus) to
+    /// whatever the live pattern's `TrackOutput` says, unconditionally.
+    /// Callers that only know the value may have changed (a scene switch)
+    /// want `sync_track_output_routing`; this one is for edits and for
+    /// topology rebuilds where the destination nodes themselves changed.
     pub fn apply_track_output_routing(&mut self, track_idx: usize) {
         let Some(nodes) = self.app.graph.track_node_ids.get(track_idx) else {
             return;
         };
+        let pdc_id = nodes.pdc_id;
         let output = self.app.state.pattern.track_params[track_idx].output();
-        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
-        self.disconnect_delay_output_from_all(nodes.pdc_id);
-        self.connect_delay_output_to(nodes.pdc_id, &output);
+        {
+            let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+            self.disconnect_delay_output_from_all(pdc_id);
+            self.connect_delay_output_to(pdc_id, &output);
+        }
+        if let Some(nodes) = self.app.graph.track_node_ids.get_mut(track_idx) {
+            nodes.applied_output = Some(output);
+        }
         self.app.refresh_latency_compensation();
+    }
+
+    /// `apply_track_output_routing` only when the live pattern's output
+    /// differs from the edge last wired. Track output is scene-locked (each
+    /// pattern carries its own `TrackOutput`), so every path that swaps the
+    /// live pattern — a scene launch, its scheduler mirror, a song-row
+    /// mirror — must run this, or the audio keeps the previous scene's route
+    /// while the UI shows the new one.
+    pub fn sync_track_output_routing(&mut self, track_idx: usize) {
+        let Some(nodes) = self.app.graph.track_node_ids.get(track_idx) else {
+            return;
+        };
+        let output = self.app.state.pattern.track_params[track_idx].output();
+        if nodes.applied_output.as_ref() == Some(&output) {
+            return;
+        }
+        self.apply_track_output_routing(track_idx);
     }
 
     pub fn apply_track_bus_sends(&mut self, track_idx: usize) {

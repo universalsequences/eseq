@@ -15728,6 +15728,7 @@
             bus_send_ids: Vec::new(),
             rack_slots: Vec::new(),
             rack_signature: None,
+            applied_output: None,
         }];
         app.graph.effect_descriptors =
             vec![sequencer::effects::EffectDescriptor::default_full_chain()];

@@ -4947,6 +4947,14 @@ impl App {
                 }
             }
         }
+        // Track output is scene-locked too: the restored pattern may route a
+        // track to a different bus than the one whose edge is currently
+        // wired. Diffed, so an unchanged route (every held lane included:
+        // the hold means the lane's source did not change) is a no-op. Runs
+        // before the solo pass, which derives solo audibility from routing.
+        for track_idx in 0..self.tracks.len() {
+            self.graph_controller().sync_track_output_routing(track_idx);
+        }
         self.push_solo_mutes();
         self.push_all_restored_instrument_defaults_except(hold_mask);
         self.state.publish_scheduler_snapshot();

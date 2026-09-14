@@ -690,6 +690,7 @@
                 bus_send_ids: Vec::new(),
                 rack_slots: Vec::new(),
                 rack_signature: None,
+                applied_output: None,
             };
             {
                 let _batch = GraphEditBatchGuard::new(graph.ptr.0);
@@ -945,6 +946,211 @@
             meter_at_silence[crate::effects::peak_meter::STATE_PEAK_L] < 0.001,
             "a -inf track fader must silence its bus sends; meter={meter_at_silence:?}"
         );
+    }
+
+    /// Track output is scene-locked: scene 1 routes the track to Bus A while
+    /// scene 0 sends it to the mix. Launching a scene must rewire the audio
+    /// graph, not just repaint the live `TrackParams` the UI reads.
+    #[test]
+    fn scene_launch_rewires_the_scene_locked_track_output() {
+        use crate::quantized_launch::PatternLaunchTarget;
+
+        let graph = TestLiveGraph::new("scene-locked-track-output-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(0, &[]),
+                PatternSnapshot::new_default(0, &[]),
+            ],
+            0,
+        );
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add sampler track");
+        app.graph_controller()
+            .ensure_bus_graph_node(BusId::DEFAULT_A, "Bus A");
+
+        let nodes = app.graph.track_node_ids[0].clone();
+        let source_l = graph.add_constant_source("scene_output_source_l");
+        let source_r = graph.add_constant_source("scene_output_source_r");
+        unsafe {
+            crate::audiograph::graph_connect(graph.ptr.0, source_l, 0, nodes.voice_sum_id, 0);
+            crate::audiograph::graph_connect(graph.ptr.0, source_r, 0, nodes.voice_sum_r_id, 0);
+        }
+        let bus_meter_id = app
+            .graph
+            .bus_node_ids
+            .iter()
+            .find(|nodes| nodes.id == BusId::DEFAULT_A)
+            .expect("Bus A graph nodes")
+            .meter_id;
+        let bus_peak = |graph: &TestLiveGraph| {
+            graph
+                .read_node_state::<{ crate::effects::peak_meter::PEAK_METER_STATE_SIZE }>(
+                    bus_meter_id,
+                )
+                .expect("watched bus meter")[crate::effects::peak_meter::STATE_PEAK_L]
+        };
+        let settle = |graph: &TestLiveGraph| {
+            for _ in 0..120 {
+                graph.process_block();
+            }
+        };
+
+        // Author scene 1 as "track 1 -> Bus A", the way the mixer does it:
+        // edit the live pattern while the scene is current.
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("launch scene 1");
+        app.state.pattern.track_params[0].set_output(TrackOutput::Bus(BusId::DEFAULT_A));
+        app.graph_controller().apply_track_output_routing(0);
+        settle(&graph);
+        assert!(
+            bus_peak(&graph) > 0.1,
+            "scene 1 routes the track to Bus A; meter={}",
+            bus_peak(&graph)
+        );
+
+        // Scene 0 still routes to the mix: launching it must take the track
+        // off Bus A even though nothing in the graph was edited directly.
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 })
+            .expect("launch scene 0");
+        assert_eq!(
+            app.state.pattern.track_params[0].output(),
+            TrackOutput::Mix,
+            "scene 0 carries the mix route in its live params",
+        );
+        settle(&graph);
+        assert!(
+            bus_peak(&graph) < 0.001,
+            "launching the mix-routed scene must disconnect Bus A; meter={}",
+            bus_peak(&graph)
+        );
+
+        // And back: the scene-locked Bus A route returns with scene 1.
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("relaunch scene 1");
+        settle(&graph);
+        assert!(
+            bus_peak(&graph) > 0.1,
+            "relaunching scene 1 must re-route the track to Bus A; meter={}",
+            bus_peak(&graph)
+        );
+    }
+
+    /// The arrangement path: a song row that recalls a scene is mirrored on
+    /// the control thread through `apply_song_row_control`, which must
+    /// rewire the scene-locked track output exactly like a live launch.
+    #[test]
+    fn song_row_mirror_rewires_the_scene_locked_track_output() {
+        use crate::app::song_edit::SongRowSpec;
+        use crate::sequencer::AudibleSongRowApplied;
+
+        let graph = TestLiveGraph::new("scene-locked-track-output-song-row-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(0, &[]),
+                PatternSnapshot::new_default(0, &[]),
+            ],
+            0,
+        );
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add sampler track");
+        app.graph_controller()
+            .ensure_bus_graph_node(BusId::DEFAULT_A, "Bus A");
+
+        let nodes = app.graph.track_node_ids[0].clone();
+        let source_l = graph.add_constant_source("song_row_output_source_l");
+        let source_r = graph.add_constant_source("song_row_output_source_r");
+        unsafe {
+            crate::audiograph::graph_connect(graph.ptr.0, source_l, 0, nodes.voice_sum_id, 0);
+            crate::audiograph::graph_connect(graph.ptr.0, source_r, 0, nodes.voice_sum_r_id, 0);
+        }
+        let bus_meter_id = app
+            .graph
+            .bus_node_ids
+            .iter()
+            .find(|nodes| nodes.id == BusId::DEFAULT_A)
+            .expect("Bus A graph nodes")
+            .meter_id;
+        let bus_peak = |graph: &TestLiveGraph| {
+            graph
+                .read_node_state::<{ crate::effects::peak_meter::PEAK_METER_STATE_SIZE }>(
+                    bus_meter_id,
+                )
+                .expect("watched bus meter")[crate::effects::peak_meter::STATE_PEAK_L]
+        };
+        let settle = |graph: &TestLiveGraph| {
+            for _ in 0..120 {
+                graph.process_block();
+            }
+        };
+
+        // Scene 1 routes the track to Bus A; scene 0 keeps the mix. Authored
+        // through the state-level launch: a manual `apply_pattern_launch`
+        // would latch the scene identity against song rows (takes spec 10).
+        let launch_scene = |app: &mut App, scene: usize| {
+            app.state
+                .launch_scene(
+                    scene,
+                    app.tracks.len(),
+                    &app.graph.track_buffer_ids,
+                    &app.graph.track_sample_rates,
+                    &app.tracks,
+                    &app.graph.track_instrument_types,
+                )
+                .expect("launch scene");
+        };
+        launch_scene(&mut app, 1);
+        app.state.pattern.track_params[0].set_output(TrackOutput::Bus(BusId::DEFAULT_A));
+        app.graph_controller().apply_track_output_routing(0);
+        launch_scene(&mut app, 0);
+        app.graph_controller().apply_track_output_routing(0);
+        settle(&graph);
+        assert!(bus_peak(&graph) < 0.001, "scene 0 starts on the mix");
+
+        app.arr_replace_rows(
+            vec![
+                SongRowSpec { start_beat: 0.0, scene: 0, overrides: Vec::new() },
+                SongRowSpec { start_beat: 4.0, scene: 1, overrides: Vec::new() },
+                SongRowSpec { start_beat: 8.0, scene: 0, overrides: Vec::new() },
+            ],
+            16.0,
+            false,
+        )
+        .expect("arr_replace_rows succeeds");
+        app.song_transport_play(false).expect("song playback starts");
+        let song = app.active_runtime_song.clone().expect("active song");
+        let mirror = |app: &mut App, ordinal: usize, beat: f64| {
+            app.mirror_song_row_applied(&AudibleSongRowApplied {
+                row_id: song.rows[ordinal].id,
+                row_ordinal: ordinal,
+                effective_beat: beat,
+                effective_sample: (beat * 22_050.0) as u64,
+                wrapped: false,
+            })
+            .expect("mirror succeeds");
+        };
+
+        mirror(&mut app, 1, 4.0);
+        assert_eq!(app.state.current_scene_index(), 1);
+        settle(&graph);
+        assert!(
+            bus_peak(&graph) > 0.1,
+            "the scene-1 row must route the track to Bus A; meter={}",
+            bus_peak(&graph)
+        );
+
+        mirror(&mut app, 2, 8.0);
+        assert_eq!(app.state.current_scene_index(), 0);
+        settle(&graph);
+        assert!(
+            bus_peak(&graph) < 0.001,
+            "the scene-0 row must take the track off Bus A; meter={}",
+            bus_peak(&graph)
+        );
+        let _ = app.song_transport_stop();
     }
 
     #[test]
