@@ -377,3 +377,11 @@ like every other target, writes on the process's own track.
   not route to is traced as `bus-send-not-routed` and skipped.
 - Sends are not macro-mappable through this variant: `MacroParamKey::from_target`
   returns `None` for it, like step params.
+- **Effective-value dot.** The write is recorded as `ProcessEffectiveSend`
+  (bus, base, value, clamped) in the overlay and published per `(track, bus)`
+  through `publish_process_effective_sends`, sharing the instrument feed's
+  version counter. The UI tick republishes it as
+  `track-{t}-bus-{b}-send-proc-value`; process-chain edits republish
+  `…-send-proc-mapped` (1 while an enabled slot binds or fans out to that
+  bus). The mixer send knob gates its `process-value` amber dot on the
+  mapped flag, so an unbound send drops the dot without waiting for a write.

@@ -254,12 +254,19 @@ pub(crate) fn sync_reactive_tick(
     let process_effective_params_version = ctx.shared.state.process_effective_params_version();
     if process_effective_params_version != ctx.frame.prev_process_effective_params_version {
         ctx.frame.prev_process_effective_params_version = process_effective_params_version;
-        if state_values::sync_process_effective_param_fields(
+        let mut dirty = state_values::sync_process_effective_param_fields(
             editor.runtime_mut(),
             app,
             &ctx.shared.state,
             &mut ctx.frame.prev_process_effective_params,
-        ) {
+        );
+        dirty |= state_values::sync_process_effective_send_fields(
+            editor.runtime_mut(),
+            app,
+            &ctx.shared.state,
+            &mut ctx.frame.prev_process_effective_sends,
+        );
+        if dirty {
             editor.runtime_mut().run_reactive_cycle();
             editor.mark_needs_redraw();
         }
@@ -385,6 +392,7 @@ pub(crate) fn sync_reactive_tick(
                 ctx.meters.cached_modulator_phases,
                 ctx.meters.cached_modulator_levels,
             ) = read_modulator_display_values(app.graph.lg, &app);
+            ctx.meters.cached_mod_port_levels = read_mod_port_levels(app.graph.lg, &app);
             meter_polled = true;
             ctx.meters.last_meter_poll_at = Instant::now();
         }
@@ -1013,6 +1021,18 @@ pub(crate) fn sync_reactive_tick(
                 );
             }
             ctx.frame.prev_modulator_levels = ctx.meters.cached_modulator_levels.clone();
+        }
+        // Mod-port lights live in the mixer, so publishing is gated on it the
+        // way the modulator readouts above are gated on the FX panel.
+        if ctx.meters.cached_mod_port_levels != ctx.frame.prev_mod_port_levels {
+            if mixer_visible {
+                needs_reactive_cycle |= sync_mod_port_level_field_delta(
+                    editor.runtime_mut(),
+                    &ctx.frame.prev_mod_port_levels,
+                    &ctx.meters.cached_mod_port_levels,
+                );
+            }
+            ctx.frame.prev_mod_port_levels = ctx.meters.cached_mod_port_levels.clone();
         }
         // Effective-value bindings (eseq-dtx.13, eseq-hpc). Published whatever
         // the panel visibility: the sampler already reports base values while

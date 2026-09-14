@@ -72,6 +72,8 @@ pub(crate) struct MeterCache {
     pub(crate) cached_bus_peak_levels: Vec<f64>,
     pub(crate) cached_modulator_phases: Vec<f64>,
     pub(crate) cached_modulator_levels: Vec<f64>,
+    /// Mod-port light levels (track IN/OUT and bus IN peaks), meter rate.
+    pub(crate) cached_mod_port_levels: ModPortLevels,
     /// Effective (post-modulation) param values for the modulated-value
     /// display — every effect plus the selected track's instrument — polled at
     /// meter rate off the modulator nodes (eseq-dtx.13, eseq-hpc, eseq-6mva).
@@ -162,6 +164,7 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_bus_peak_levels: Vec<f64>,
     pub(crate) prev_modulator_phases: Vec<f64>,
     pub(crate) prev_modulator_levels: Vec<f64>,
+    pub(crate) prev_mod_port_levels: ModPortLevels,
     pub(crate) prev_mod_display_values: ModDisplayValues,
     /// Drum-rack pad lights (eseq-4b5.16): the published flag per track, plus
     /// the instant each rack member last triggered, which is what the light
@@ -179,6 +182,8 @@ pub(crate) struct FrameDiffState {
     /// Last published `(display value, clamped)` per `(track, param)` of the
     /// process effective-value feed, so the tick only writes deltas.
     pub(crate) prev_process_effective_params: HashMap<(usize, usize), (f32, bool)>,
+    /// Same for the bus-send feed, keyed `(track, bus id)`.
+    pub(crate) prev_process_effective_sends: HashMap<(usize, u64), f32>,
     pub(crate) prev_track_tint:
         Option<(eseqlisp::backend::Color, [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS])>,
     pub(crate) prev_variant_tint:

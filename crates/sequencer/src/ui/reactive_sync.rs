@@ -2388,6 +2388,7 @@ pub(super) fn apply_ui_invalidations(
             }
             UiInvalidation::ProcessChain { track } => {
                 sync_process_chain_state(rt, state, app.tracks.len(), current_track_idx);
+                needs_reactive_cycle |= sync_process_send_mapped_fields(rt, app, state);
                 if sequencer_visible {
                     let _ = sync_all_expanded_step_viewports(
                         rt,

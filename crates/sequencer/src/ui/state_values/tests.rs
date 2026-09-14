@@ -13,6 +13,75 @@ mod instrument_header_ui_tests;
 
     use super::*;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
+
+    fn mod_port_level_number(runtime: &Runtime, field: &str) -> f64 {
+        match runtime.reactive_field_value("SEQ", field) {
+            Some(Value::Number(value)) => *value,
+            other => panic!("{field}: expected a number, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mod_port_level_delta_publishes_changes_and_zeroes_removed_ports() {
+        let mut runtime = Runtime::new();
+        let mut fields: Vec<(&str, Value)> = Vec::new();
+        for track in 0..2 {
+            for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
+                fields.push((
+                    Box::leak(mod_in_level_field(track, input).into_boxed_str()),
+                    Value::Number(0.0),
+                ));
+            }
+            fields.push((
+                Box::leak(mod_out_level_field(track).into_boxed_str()),
+                Value::Number(0.0),
+            ));
+        }
+        for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
+            fields.push((
+                Box::leak(bus_mod_in_level_field(7, input).into_boxed_str()),
+                Value::Number(0.0),
+            ));
+        }
+        runtime.register_reactive("SEQ", fields, true);
+
+        let mut previous = ModPortLevels {
+            track_inputs: vec![[0.0; 4], [0.0; 4]],
+            track_outputs: vec![0.0, 0.0],
+            bus_inputs: vec![(7, [0.0; 4])],
+        };
+        let mut current = previous.clone();
+        current.track_inputs[1][2] = 0.5;
+        current.track_outputs[0] = 0.25;
+        current.bus_inputs[0].1[3] = 1.0;
+
+        sync_mod_port_level_field_delta(&mut runtime, &previous, &current);
+        assert_eq!(mod_port_level_number(&runtime, "mod-in-level-1-2"), 0.5);
+        assert_eq!(mod_port_level_number(&runtime, "mod-out-level-0"), 0.25);
+        assert_eq!(mod_port_level_number(&runtime, "bus-mod-in-level-7-3"), 1.0);
+        assert_eq!(mod_port_level_number(&runtime, "mod-in-level-0-0"), 0.0);
+
+        // Dropping the second track and the bus zeroes their fields so no
+        // stale light survives the delete.
+        previous = current.clone();
+        current.track_inputs.truncate(1);
+        current.track_outputs.truncate(1);
+        current.bus_inputs.clear();
+        current.track_outputs[0] = 0.75;
+        sync_mod_port_level_field_delta(&mut runtime, &previous, &current);
+        assert_eq!(mod_port_level_number(&runtime, "mod-in-level-1-2"), 0.0);
+        assert_eq!(mod_port_level_number(&runtime, "bus-mod-in-level-7-3"), 0.0);
+        assert_eq!(mod_port_level_number(&runtime, "mod-out-level-0"), 0.75);
+    }
+
+    #[test]
+    fn mod_port_levels_quantize_to_sixty_fourths_inside_the_unit_range() {
+        assert_eq!(quantize_mod_port_level(-0.5), 0.0);
+        assert_eq!(quantize_mod_port_level(2.0), 1.0);
+        assert_eq!(quantize_mod_port_level(0.5), 0.5);
+        assert_eq!(quantize_mod_port_level(0.501), 0.5);
+        assert_eq!(quantize_mod_port_level(0.51), 0.515625);
+    }
     use sequencer::sequencer::default_empty_effect_chain;
     use std::collections::HashMap;
 
@@ -14875,6 +14944,77 @@ mod instrument_header_ui_tests;
         let before = previous.clone();
         super::sync_process_effective_param_fields(&mut runtime, &app, &app.state, &mut previous);
         assert_eq!(previous, before);
+    }
+
+    #[test]
+    fn process_effective_send_fields_publish_per_bus_and_gate_on_a_live_binding() {
+        use std::collections::BTreeMap;
+        let app = test_app_with_instrument_descriptor(
+            sequencer::effects::EffectDescriptor::builtin_filter(),
+        );
+        let bus_a = sequencer::sequencer::BusId::DEFAULT_A;
+        let bus_a_idx = app
+            .buses
+            .iter()
+            .position(|bus| bus.id == bus_a)
+            .expect("default bus A");
+        let chain_bound_to_send = |enabled: bool| sequencer::process::TrackProcessChain {
+            slots: vec![sequencer::process::TrackProcessSlot {
+                instance_id: sequencer::process::ProcessInstanceId(1),
+                instance_name: None,
+                class_name: "rand".to_string(),
+                enabled,
+                project_layer: false,
+                inlets: BTreeMap::new(),
+                lanes: BTreeMap::new(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: BTreeMap::from([(
+                    "out".to_string(),
+                    Some(sequencer::process::ParamTarget::BusSend { bus: bus_a.0 }),
+                )]),
+            }],
+        };
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], false);
+        let mapped_field = super::track_bus_send_proc_mapped_field(0, bus_a_idx);
+
+        assert!(app.state.set_track_process_chain(0, chain_bound_to_send(true)));
+        super::sync_process_send_mapped_fields(&mut runtime, &app, &app.state);
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", &mapped_field),
+            Some(&Value::Number(1.0))
+        );
+        assert!(app.state.set_track_process_chain(0, chain_bound_to_send(false)));
+        super::sync_process_send_mapped_fields(&mut runtime, &app, &app.state);
+        assert_eq!(
+            runtime.reactive_field_value("SEQ", &mapped_field),
+            Some(&Value::Number(0.0)),
+            "a disabled slot's binding does not count as mapped"
+        );
+
+        app.state.publish_process_effective_sends(
+            0,
+            &[sequencer::process::ProcessEffectiveSend {
+                bus: bus_a.0,
+                base: 0.2,
+                value: 0.7,
+                clamped: false,
+            }],
+        );
+        let mut previous = std::collections::HashMap::new();
+        super::sync_process_effective_send_fields(&mut runtime, &app, &app.state, &mut previous);
+        assert_eq!(
+            runtime.reactive_field_value(
+                "SEQ",
+                &super::track_bus_send_proc_value_field(0, bus_a_idx)
+            ),
+            Some(&Value::Number(0.7_f32 as f64))
+        );
+        assert_eq!(previous.len(), 1);
+        let before = previous.clone();
+        super::sync_process_effective_send_fields(&mut runtime, &app, &app.state, &mut previous);
+        assert_eq!(previous, before, "same feed again publishes nothing");
     }
 
     #[test]

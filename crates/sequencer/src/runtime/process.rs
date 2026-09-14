@@ -453,6 +453,16 @@ pub struct ProcessEffectiveParam {
     pub clamped: bool,
 }
 
+/// Twin of `ProcessEffectiveParam` for a bus-send write: what the send
+/// level resolved to on the last fire, keyed by project bus id.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessEffectiveSend {
+    pub bus: u64,
+    pub base: f32,
+    pub value: f32,
+    pub clamped: bool,
+}
+
 /// One extra target for a process port: the port's value is rescaled from
 /// the slot's output range (its `lo`/`hi` inlets, else 0..1) into `lo..hi`
 /// and *set* on the target. Lets one generator drive several parameters

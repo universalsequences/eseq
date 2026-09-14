@@ -112,6 +112,15 @@
             vec![(700, 0.7), (701, 0.7)],
         );
         assert!(params.iter().all(|param| param.live_value.is_none()));
+        assert_eq!(
+            overlay.send_effective,
+            vec![crate::process::ProcessEffectiveSend {
+                bus: destination.0,
+                base: 0.2,
+                value: 0.7,
+                clamped: false,
+            }]
+        );
 
         // A step lock is the base on a locked step; the sum clamps to 1.
         let mut overlay = ProcessTargetOverlay::default();
@@ -120,6 +129,7 @@
             &write(crate::process::ProcessTargetOp::Add, 0.5),
         );
         assert!(overlay.effect_params.iter().all(|param| param.value == 1.0));
+        assert!(overlay.send_effective[0].clamped);
 
         // Set replaces outright, and a second write in the same fire chains
         // on the first.

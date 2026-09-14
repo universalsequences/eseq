@@ -859,6 +859,9 @@
 (def send-knob (track send)
   (let ((field (send-field track (get send :bus-idx)))
         (has-locks (= (reactive-get "SEQ" (str field "-plock-any")) 1))
+        ;; A process OUT port writing this send: show its last value as the
+        ;; amber knob dot (same read-only overlay as instrument params).
+        (proc-mapped (= (reactive-get "SEQ" (str field "-proc-mapped")) 1))
         (target (dict :track track :target "bus-send" :param-idx (get send :bus-idx))))
     (box :debug-name (str "track-" track "-send-" (get send :bus-idx) "-plock")
       :plock-any (if has-locks 1 0)
@@ -872,6 +875,7 @@
         :plock-color-r (pc/param-plock-color-r)
         :plock-color-g (pc/param-plock-color-g)
         :plock-color-b (pc/param-plock-color-b)
+        :process-value (if proc-mapped (bind-seq (str field "-proc-value")) false)
         :min 0 :max 1 :decimals 2
         :show-value false
         :font-size 9 :label-font-size 5

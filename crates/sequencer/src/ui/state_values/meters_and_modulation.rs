@@ -253,6 +253,216 @@ pub(super) fn quantize_modulator_unit_value(value: f32) -> f64 {
     ((value.clamp(0.0, 1.0) * 128.0).round() / 128.0) as f64
 }
 
+// ── Mod-port lights ──────────────────────────────────────────────────────────
+//
+// Every track has one mod OUT hub and four mod IN clips; every bus has four
+// mod IN clips. All are watched tap nodes holding their block peak (see
+// `instruments::track_modulator`). The mixer binds these fields to the port
+// widgets so an IN port lights with the summed modulation it receives and a
+// connected OUT port lights with what its track sends.
+
+pub(crate) fn mod_in_level_field(track: usize, input: usize) -> String {
+    format!("mod-in-level-{track}-{input}")
+}
+
+pub(crate) fn bus_mod_in_level_field(bus_id: u64, input: usize) -> String {
+    format!("bus-mod-in-level-{bus_id}-{input}")
+}
+
+pub(crate) fn mod_out_level_field(track: usize) -> String {
+    format!("mod-out-level-{track}")
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ModPortLevels {
+    /// Per track: the four IN clip peaks.
+    pub(crate) track_inputs: Vec<[f64; sequencer::sequencer::EXT_MOD_INPUT_COUNT]>,
+    /// Per track: the OUT hub peak.
+    pub(crate) track_outputs: Vec<f64>,
+    /// Per bus (keyed by bus id): the four IN clip peaks.
+    pub(crate) bus_inputs: Vec<(u64, [f64; sequencer::sequencer::EXT_MOD_INPUT_COUNT])>,
+}
+
+pub(crate) fn read_mod_port_levels(
+    lg: sequencer::audiograph::LiveGraphPtr,
+    app: &app::App,
+) -> ModPortLevels {
+    let mut levels = ModPortLevels::default();
+    for nodes in &app.graph.track_node_ids {
+        levels.track_inputs.push(
+            nodes
+                .mod_in_clip_ids
+                .map(|node_id| read_mod_tap_level(lg, node_id)),
+        );
+        levels
+            .track_outputs
+            .push(read_mod_tap_level(lg, nodes.mod_out_id));
+    }
+    for bus in &app.graph.bus_node_ids {
+        levels.bus_inputs.push((
+            bus.id.0,
+            bus.mod_in_clip_ids
+                .map(|node_id| read_mod_tap_level(lg, node_id)),
+        ));
+    }
+    levels
+}
+
+fn read_mod_tap_level(lg: sequencer::audiograph::LiveGraphPtr, node_id: i32) -> f64 {
+    const STATE_BYTES: usize = std::mem::size_of::<f32>();
+    if node_id < 0 {
+        return 0.0;
+    }
+    let mut state_size = 0usize;
+    let mut state = [0.0_f32; 1];
+    let copied = unsafe {
+        sequencer::audiograph::get_node_state_into(
+            lg.0,
+            node_id,
+            state.as_mut_ptr().cast(),
+            STATE_BYTES,
+            &mut state_size as *mut usize,
+        )
+    };
+    if !copied || state_size < STATE_BYTES {
+        return 0.0;
+    }
+    quantize_mod_port_level(state[sequencer::instruments::track_modulator::MOD_TAP_STATE_LEVEL])
+}
+
+/// 1/64 steps: coarse enough that a steady signal publishes nothing, fine
+/// enough that a port light ramps smoothly.
+pub(crate) fn quantize_mod_port_level(value: f32) -> f64 {
+    ((value.clamp(0.0, 1.0) * 64.0).round() / 64.0) as f64
+}
+
+pub(crate) fn sync_mod_port_level_fields(rt: &mut Runtime, levels: &ModPortLevels) -> bool {
+    let mut effects_dirty = false;
+    for (track, inputs) in levels.track_inputs.iter().enumerate() {
+        for (input, &level) in inputs.iter().enumerate() {
+            effects_dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &mod_in_level_field(track, input),
+                    Value::Number(level),
+                )
+                .effects_dirty;
+        }
+    }
+    for (track, &level) in levels.track_outputs.iter().enumerate() {
+        effects_dirty |= rt
+            .set_reactive("SEQ", &mod_out_level_field(track), Value::Number(level))
+            .effects_dirty;
+    }
+    for (bus_id, inputs) in &levels.bus_inputs {
+        for (input, &level) in inputs.iter().enumerate() {
+            effects_dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &bus_mod_in_level_field(*bus_id, input),
+                    Value::Number(level),
+                )
+                .effects_dirty;
+        }
+    }
+    effects_dirty
+}
+
+/// Publishes only the fields whose value changed. A topology change (track
+/// or bus count) republishes everything and zeroes the fields of removed
+/// tracks so a stale light never survives a delete.
+pub(crate) fn sync_mod_port_level_field_delta(
+    rt: &mut Runtime,
+    previous: &ModPortLevels,
+    levels: &ModPortLevels,
+) -> bool {
+    let same_topology = previous.track_inputs.len() == levels.track_inputs.len()
+        && previous.track_outputs.len() == levels.track_outputs.len()
+        && previous.bus_inputs.len() == levels.bus_inputs.len()
+        && previous
+            .bus_inputs
+            .iter()
+            .zip(levels.bus_inputs.iter())
+            .all(|((old_id, _), (id, _))| old_id == id);
+    if !same_topology {
+        let mut effects_dirty = sync_mod_port_level_fields(rt, levels);
+        for track in levels.track_inputs.len()..previous.track_inputs.len() {
+            for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
+                effects_dirty |= rt
+                    .set_reactive("SEQ", &mod_in_level_field(track, input), Value::Number(0.0))
+                    .effects_dirty;
+            }
+        }
+        for track in levels.track_outputs.len()..previous.track_outputs.len() {
+            effects_dirty |= rt
+                .set_reactive("SEQ", &mod_out_level_field(track), Value::Number(0.0))
+                .effects_dirty;
+        }
+        for (bus_id, _) in &previous.bus_inputs {
+            if !levels.bus_inputs.iter().any(|(id, _)| id == bus_id) {
+                for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
+                            &bus_mod_in_level_field(*bus_id, input),
+                            Value::Number(0.0),
+                        )
+                        .effects_dirty;
+                }
+            }
+        }
+        return effects_dirty;
+    }
+
+    let mut effects_dirty = false;
+    for (track, (old_inputs, inputs)) in previous
+        .track_inputs
+        .iter()
+        .zip(levels.track_inputs.iter())
+        .enumerate()
+    {
+        for (input, (&old_level, &level)) in old_inputs.iter().zip(inputs.iter()).enumerate() {
+            if old_level != level {
+                effects_dirty |= rt
+                    .set_reactive(
+                        "SEQ",
+                        &mod_in_level_field(track, input),
+                        Value::Number(level),
+                    )
+                    .effects_dirty;
+            }
+        }
+    }
+    for (track, (&old_level, &level)) in previous
+        .track_outputs
+        .iter()
+        .zip(levels.track_outputs.iter())
+        .enumerate()
+    {
+        if old_level != level {
+            effects_dirty |= rt
+                .set_reactive("SEQ", &mod_out_level_field(track), Value::Number(level))
+                .effects_dirty;
+        }
+    }
+    for ((bus_id, old_inputs), (_, inputs)) in
+        previous.bus_inputs.iter().zip(levels.bus_inputs.iter())
+    {
+        for (input, (&old_level, &level)) in old_inputs.iter().zip(inputs.iter()).enumerate() {
+            if old_level != level {
+                effects_dirty |= rt
+                    .set_reactive(
+                        "SEQ",
+                        &bus_mod_in_level_field(*bus_id, input),
+                        Value::Number(level),
+                    )
+                    .effects_dirty;
+            }
+        }
+    }
+    effects_dirty
+}
+
 // ── Effective (post-modulation) parameter values (eseq-dtx.13, eseq-hpc) ───
 //
 // Effect params marked `@mod true` are resolved inside the engine: the DSP
@@ -908,6 +1118,73 @@ pub(crate) fn sync_process_effective_param_fields(
                     "SEQ",
                     &instrument_proc_clamped_field(track, param_idx),
                     Value::Number(if entry.clamped { 1.0 } else { 0.0 }),
+                )
+                .effects_dirty;
+        }
+    }
+    effects_dirty
+}
+
+/// Reactive field carrying the send level a process OUT port last wrote onto
+/// one track's bus send (`track-{t}-bus-{b}-send` + `-proc-value`). Set only
+/// by writes; the mixer gates the overlay on `-proc-mapped`.
+pub(crate) fn track_bus_send_proc_value_field(track: usize, bus_idx: usize) -> String {
+    format!("{}-proc-value", track_bus_send_field(track, bus_idx))
+}
+
+/// `1` while an enabled process slot on the track binds or fans out to that
+/// bus send, else `0`. Republished on process-chain changes.
+pub(crate) fn track_bus_send_proc_mapped_field(track: usize, bus_idx: usize) -> String {
+    format!("{}-proc-mapped", track_bus_send_field(track, bus_idx))
+}
+
+/// Bus-send twin of `sync_process_effective_param_fields`.
+pub(crate) fn sync_process_effective_send_fields(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &SequencerState,
+    previous: &mut HashMap<(usize, u64), f32>,
+) -> bool {
+    let mut effects_dirty = false;
+    for ((track, bus), entry) in state.process_effective_sends() {
+        let Some(bus_idx) = app.buses.iter().position(|candidate| candidate.id.0 == bus) else {
+            continue;
+        };
+        if previous.get(&(track, bus)) == Some(&entry.value) {
+            continue;
+        }
+        previous.insert((track, bus), entry.value);
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_bus_send_proc_value_field(track, bus_idx),
+                Value::Number(entry.value as f64),
+            )
+            .effects_dirty;
+    }
+    effects_dirty
+}
+
+/// Republish the per-send "a process writes here" flags for every track and
+/// bus. Cheap (tracks × buses), so it runs whole on any process-chain edit.
+pub(crate) fn sync_process_send_mapped_fields(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &SequencerState,
+) -> bool {
+    let mut effects_dirty = false;
+    for track in 0..state.active_track_count() {
+        let bound = process_bound_bus_sends(state, track);
+        for (bus_idx, bus) in app.buses.iter().enumerate() {
+            if bus.id == sequencer::sequencer::BusId::MIX {
+                continue;
+            }
+            let mapped = bound.contains(&bus.id.0);
+            effects_dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &track_bus_send_proc_mapped_field(track, bus_idx),
+                    Value::Number(if mapped { 1.0 } else { 0.0 }),
                 )
                 .effects_dirty;
         }

@@ -199,6 +199,30 @@ impl SequencerState {
                 .fetch_add(1, Ordering::Release);
         }
     }
+    pub fn publish_process_effective_sends(
+        &self,
+        track: usize,
+        values: &[crate::process::ProcessEffectiveSend],
+    ) {
+        let mut published = self.process_effective_sends.lock().unwrap();
+        let mut changed = false;
+        for value in values {
+            let key = (track, value.bus);
+            if published.get(&key) != Some(value) {
+                published.insert(key, *value);
+                changed = true;
+            }
+        }
+        if changed {
+            self.process_effective_params_version
+                .fetch_add(1, Ordering::Release);
+        }
+    }
+    pub fn process_effective_sends(
+        &self,
+    ) -> HashMap<(usize, u64), crate::process::ProcessEffectiveSend> {
+        self.process_effective_sends.lock().unwrap().clone()
+    }
     pub fn process_effective_params_version(&self) -> u64 {
         self.process_effective_params_version.load(Ordering::Acquire)
     }

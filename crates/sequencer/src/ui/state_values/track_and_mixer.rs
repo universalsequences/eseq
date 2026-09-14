@@ -771,6 +771,7 @@ pub(crate) fn sync_track_mixer_state(
         build_all_track_bus_sends(app, state),
     );
     sync_track_bus_send_binding_fields(rt, app, state);
+    sync_process_send_mapped_fields(rt, app, state);
     rt.set_reactive("SEQ", "mod-routes", build_mod_routes(state));
     rt.set_reactive("SEQ", "track-mutes", build_track_mutes(state));
     rt.set_reactive("SEQ", "track-solos", build_track_solos(state));

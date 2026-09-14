@@ -1436,6 +1436,27 @@ pub(crate) fn process_bound_instrument_params(
     bound
 }
 
+/// Bus ids an enabled process slot on `track` binds or fans out to.
+pub(crate) fn process_bound_bus_sends(state: &SequencerState, track: usize) -> HashSet<u64> {
+    let mut bound = HashSet::new();
+    let Some(chain) = state.composed_track_process_chain(track) else {
+        return bound;
+    };
+    for slot in chain.slots.iter().filter(|slot| slot.enabled) {
+        let targets = slot
+            .bindings
+            .values()
+            .flatten()
+            .chain(slot.fanout.values().flatten().map(|entry| &entry.target));
+        for target in targets {
+            if let sequencer::process::ParamTarget::BusSend { bus } = target {
+                bound.insert(*bus);
+            }
+        }
+    }
+    bound
+}
+
 pub(crate) fn sync_process_scope_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
     rt.set_reactive(
         "SEQ",

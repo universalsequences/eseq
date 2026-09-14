@@ -336,6 +336,7 @@ pub(crate) fn run_event_loop(
         prev_bus_peak_levels: Vec::new(),
         prev_modulator_phases: Vec::new(),
         prev_modulator_levels: Vec::new(),
+        prev_mod_port_levels: Default::default(),
         prev_mod_display_values: Default::default(),
         prev_rack_pad_triggers: Vec::new(),
         rack_pad_triggered_at: Vec::new(),
@@ -346,6 +347,7 @@ pub(crate) fn run_event_loop(
         prev_process_scope_values_version: shared.state.process_scope_values_version(),
         prev_process_effective_params_version: shared.state.process_effective_params_version(),
         prev_process_effective_params: Default::default(),
+        prev_process_effective_sends: Default::default(),
         prev_track_tint: None,
         prev_variant_tint: None,
         prev_ui_epoch: 0,
@@ -384,6 +386,7 @@ pub(crate) fn run_event_loop(
         cached_bus_peak_levels: read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids),
         cached_modulator_phases: initial_modulator_phases,
         cached_modulator_levels: initial_modulator_levels,
+        cached_mod_port_levels: read_mod_port_levels(app.graph.lg, &app),
         cached_mod_display_values: Default::default(),
         watched_display_modulators: std::collections::HashSet::new(),
         // usize::MAX seeds the first tick's off-cadence poll (eseq-dtx.13).
@@ -1024,6 +1027,7 @@ pub(crate) fn run_event_loop(
                                         rt,
                                         &meters.cached_modulator_levels,
                                     );
+                                    sync_mod_port_level_fields(rt, &meters.cached_mod_port_levels);
                                     rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 }
                                 sync_bus_mixer_state(rt, &app);
@@ -1654,6 +1658,7 @@ pub(crate) fn run_event_loop(
                         sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
                         sync_modulator_phase_fields(rt, &meters.cached_modulator_phases);
                         sync_modulator_level_fields(rt, &meters.cached_modulator_levels);
+                        sync_mod_port_level_fields(rt, &meters.cached_mod_port_levels);
                         rt.set_reactive(
                             "SEQ",
                             "num-tracks",

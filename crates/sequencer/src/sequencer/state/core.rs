@@ -684,6 +684,10 @@ pub struct SequencerState {
     pub(super) process_effective_params:
         Mutex<HashMap<(usize, usize), crate::process::ProcessEffectiveParam>>,
     pub(super) process_effective_params_version: AtomicU64,
+    /// Bus-send twin of `process_effective_params`, keyed `(track, bus id)`.
+    /// Shares the version counter above so one UI gate covers both feeds.
+    pub(super) process_effective_sends:
+        Mutex<HashMap<(usize, u64), crate::process::ProcessEffectiveSend>>,
     pub(super) scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     pub(super) scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
     pub(super) process_trace_enabled: AtomicBool,

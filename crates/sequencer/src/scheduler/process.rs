@@ -15,6 +15,8 @@ pub(super) struct ProcessTargetOverlay {
     /// for the UI's effective-value display. Keyed by descriptor index (not
     /// node param index) because that is what the panel knows.
     pub(super) instrument_effective: Vec<crate::process::ProcessEffectiveParam>,
+    /// Same feed for bus-send writes, keyed by bus id.
+    pub(super) send_effective: Vec<crate::process::ProcessEffectiveSend>,
 }
 
 impl Default for ProcessTargetOverlay {
@@ -25,6 +27,7 @@ impl Default for ProcessTargetOverlay {
             midi_fx_params: Vec::new(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             instrument_effective: Vec::new(),
+            send_effective: Vec::new(),
         }
     }
 }
@@ -458,11 +461,11 @@ pub(super) fn process_apply_bus_send_write(
         .find(|existing| existing.logical_id == target.left_id && existing.idx == 0)
         .map(|existing| existing.value)
         .unwrap_or(base);
-    let effective = match op {
+    let raw = match op {
         crate::process::ProcessTargetOp::Set => value,
         crate::process::ProcessTargetOp::Add => current + value,
-    }
-    .clamp(0.0, 1.0);
+    };
+    let effective = raw.clamp(0.0, 1.0);
     upsert_effect_params(
         &mut overlay.effect_params,
         [target.left_id, target.right_id].map(|logical_id| ScheduledEffectParam {
@@ -472,6 +475,20 @@ pub(super) fn process_apply_bus_send_write(
             live_value: None,
         }),
     );
+    let record = crate::process::ProcessEffectiveSend {
+        bus,
+        base,
+        value: effective,
+        clamped: raw.is_finite() && !(0.0..=1.0).contains(&raw),
+    };
+    match overlay
+        .send_effective
+        .iter_mut()
+        .find(|existing| existing.bus == bus)
+    {
+        Some(existing) => *existing = record,
+        None => overlay.send_effective.push(record),
+    }
     Some(effective)
 }
 
