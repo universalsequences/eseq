@@ -1,7 +1,7 @@
 use super::*;
 use sequencer::sequencer::{RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotParam};
 
-fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
+pub(super) fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
     let app = test_app_with_rack_panel();
     {
         let mut racks = app.state.pattern.rack_tracks.lock().unwrap();

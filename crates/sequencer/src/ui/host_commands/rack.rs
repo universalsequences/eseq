@@ -44,6 +44,28 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-instrument-key-lock-batch",
 ];
 
+/// Set presentation defaults only at an explicit successful container load.
+/// Editing mappings and switching tracks/scenes must preserve the user's view.
+pub(crate) fn initialize_loaded_rack_view(app: &app::App, editor: &mut Editor, track: usize) {
+    let Some(track_id) = app.track_registry.id_at(track) else { return; };
+    let macros_only = {
+        let racks = app.state.pattern.rack_tracks.lock().unwrap();
+        let Some(rack) = racks.get(track).and_then(Option::as_ref) else { return; };
+        rack.macros.iter().any(|rack_macro| {
+            !rack_macro.name.trim().is_empty() && !rack_macro.mappings.is_empty()
+        })
+    };
+    if let Err(error) = editor.runtime_mut().invoke_global(
+        "eseq.effects.state/rack-panel-set-view",
+        vec![Value::String(track_id.0.to_string()), Value::Bool(!macros_only),
+            Value::Bool(macros_only), Value::Bool(!macros_only)],
+    ) {
+        editor.handle_host_event(HostEvent::Error(format!(
+            "Could not initialize the loaded rack view: {error:?}"
+        )));
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
     name: &str,
@@ -2329,6 +2351,7 @@ mod tests {
                 cached_bus_peak_levels: Vec::new(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
+                cached_mod_port_levels: Default::default(),
                 cached_mod_display_values: Default::default(),
                 watched_display_modulators: std::collections::HashSet::new(),
                 mod_display_poll_fx_epoch: usize::MAX,

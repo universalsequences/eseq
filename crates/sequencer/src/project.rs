@@ -64,7 +64,11 @@ use crate::track_color::TrackColor;
 //  10 — per-step `Retrig` / `RetrigRate` params appended to every step row.
 //       Narrower rows load with those two at their defaults (see
 //       `step_values_from_vec`), so v9 files are read unchanged.
-const PROJECT_FILE_VERSION: u32 = 10;
+//  11 — per-track process lane rosters (eseq-53y7): the scene-independent
+//       list of user-added process slots on each track. Older files have no
+//       roster, load with an empty one, and behave exactly as before — every
+//       track slot they carry stays the per-pattern slot it already was.
+const PROJECT_FILE_VERSION: u32 = 11;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -178,6 +182,13 @@ pub struct ProjectFile {
     /// private-entities-per-pattern shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub track_sounds: Vec<ProjectTrackSounds>,
+    /// Per-track roster of user-added process slots (eseq-53y7), outer index
+    /// = track. Scene-independent by design: the per-pattern chains in
+    /// `patterns` still carry each slot's lane values, inlet literals,
+    /// bindings and enabled flag. Absent in files below v11, which load with
+    /// an empty roster.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_lane_rosters: Vec<crate::process::TrackLaneRoster>,
 }
 
 impl ProjectFile {
@@ -364,6 +375,8 @@ struct ProjectFileWire {
     take_pools: Vec<ProjectTrackTakePool>,
     #[serde(default)]
     track_sounds: Vec<ProjectTrackSounds>,
+    #[serde(default)]
+    track_lane_rosters: Vec<crate::process::TrackLaneRoster>,
 }
 
 impl<'de> Deserialize<'de> for ProjectFile {
@@ -402,6 +415,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             scene_cell_presence: wire.scene_cell_presence,
             take_pools: wire.take_pools,
             track_sounds: wire.track_sounds,
+            track_lane_rosters: wire.track_lane_rosters,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
         migrate_legacy_chop_to_retrig(&mut project);
@@ -4108,6 +4122,7 @@ mod tests {
             scene_cell_presence: Vec::new(),
             take_pools: Vec::new(),
             track_sounds: Vec::new(),
+            track_lane_rosters: Vec::new(),
         }
     }
 
@@ -4331,6 +4346,40 @@ mod tests {
         // Save never writes it.
         let json = serde_json::to_string(&sample_project()).expect("serialize project");
         assert!(!json.contains("\"song\""), "{json}");
+    }
+
+    /// eseq-53y7: the per-track lane roster round-trips, and a project saved
+    /// before it (v10) loads with an empty roster — unchanged behavior.
+    #[test]
+    fn track_lane_rosters_round_trip_and_older_files_load_empty() {
+        let mut project = sample_project();
+        project.track_lane_rosters = vec![
+            vec![crate::process::TrackLaneRosterSlot {
+                instance_id: crate::process::ProcessInstanceId(
+                    crate::process::TRACK_ROSTER_INSTANCE_ID_BASE,
+                ),
+                instance_name: "grab 2".to_string(),
+                class_name: "lane-grab".to_string(),
+            }],
+            Vec::new(),
+        ];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("parse project");
+        assert_eq!(restored.track_lane_rosters, project.track_lane_rosters);
+
+        // A v10 file has no `track_lane_rosters` key at all.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        let object = value.as_object_mut().expect("project is a json object");
+        object.remove("track_lane_rosters");
+        object.insert("version".to_string(), serde_json::json!(10));
+        let legacy: ProjectFile =
+            serde_json::from_value(value).expect("a pre-roster project must still parse");
+        assert!(legacy.track_lane_rosters.is_empty());
+
+        // An empty roster is never written, so unaffected projects keep the
+        // byte-for-byte shape they had.
+        let empty = serde_json::to_string(&sample_project()).expect("serialize project");
+        assert!(!empty.contains("track_lane_rosters"), "{empty}");
     }
 
     /// Spec 10, v5 -> v6: a version-5 arrangement may carry explicit-empty

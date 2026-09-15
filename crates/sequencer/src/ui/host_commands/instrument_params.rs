@@ -1244,6 +1244,7 @@ mod tests {
             cached_bus_peak_levels: Vec::new(),
             cached_modulator_phases: Vec::new(),
             cached_modulator_levels: Vec::new(),
+            cached_mod_port_levels: Default::default(),
             cached_mod_display_values: Default::default(),
             watched_display_modulators: std::collections::HashSet::new(),
             mod_display_poll_fx_epoch: usize::MAX,

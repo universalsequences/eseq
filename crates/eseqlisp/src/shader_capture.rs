@@ -646,6 +646,63 @@ mod tests {
         );
     }
 
+    /// The solid style (mixer mod routes, lane patchbay) paints one flat
+    /// colour with no white core, darkens only a thin rim, and caps each end
+    /// with a plug disc whose hole is dark without signal and lit with it.
+    #[test]
+    fn patch_cable_pipeline_paints_the_solid_style_flat_with_end_plugs() {
+        let Some(renderer) = renderer() else { return };
+        let pixels = renderer.render("patch-cable");
+
+        // Centre line just past the start plug, where the tangent is horizontal.
+        let body = pixel(&pixels, 48, 152);
+        assert!(
+            body[0] > 200 && body[1] > 100 && body[1] < 170 && body[2] < 90,
+            "the solid body should be the flat warm colour, not a white core: {body:?}"
+        );
+        let body_off_centre = pixel(&pixels, 48, 153);
+        assert_eq!(
+            body, body_off_centre,
+            "the solid body must not shade toward its centre line"
+        );
+        let rim = pixel(&pixels, 48, 157);
+        assert_ne!(rim, CLEAR_RGBA, "the rim must be painted");
+        assert!(
+            luminance(rim) * 2 < luminance(body),
+            "the rim should be markedly darker than the body: {rim:?} vs {body:?}"
+        );
+        assert_eq!(pixel(&pixels, 48, 159), CLEAR_RGBA, "outside the rim stays clear");
+
+        // Plugs: a disc wider than the body over each end. The start hole
+        // (level 0) is dark; the end hole (level 1) glows brighter than the
+        // body.
+        for (name, x, y, lit) in [("start", 32u32, 152u32, false), ("end", 200, 220, true)] {
+            let hole = pixel(&pixels, x, y);
+            assert_ne!(hole, CLEAR_RGBA, "the {name} plug's hole must be painted");
+            if lit {
+                assert!(
+                    luminance(hole) > luminance(body),
+                    "the lit {name} plug's hole should glow: {hole:?} vs {body:?}"
+                );
+            } else {
+                assert!(
+                    luminance(hole) * 4 < luminance(body),
+                    "the unlit {name} plug's hole should be dark: {hole:?} vs {body:?}"
+                );
+            }
+            let disc = pixel(&pixels, x, y + 5);
+            assert_eq!(disc, body, "the {name} plug disc must be the flat body colour");
+            let disc_far = pixel(&pixels, x, y - 6);
+            assert_eq!(disc_far, body, "the {name} plug disc must be round, not just the body");
+            assert_eq!(
+                pixel(&pixels, x, y - 11),
+                CLEAR_RGBA,
+                "outside the {name} plug stays clear"
+            );
+        }
+        assert_eq!(pixel(&pixels, 214, 220), CLEAR_RGBA, "nothing is painted past the end plug");
+    }
+
     /// Drives the shared preamble end to end: `WidgetInstance` attributes,
     /// `widget_vert`, `WidgetVaryings`, and the SDF helpers the button surface
     /// calls. The tab shape's splay is the check that `uv` reaches the fragment

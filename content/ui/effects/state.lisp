@@ -14,6 +14,7 @@
         rack-panel-slot-list-open
         rack-panel-selected-chain-open
         rack-panel-macros-open
+        rack-panel-set-view
         effect-mods-open
         effect-mods-chain
         effect-mods-track
@@ -47,9 +48,36 @@
 (defstate instrument-key-lock-octave 4)
 (defstate instrument-key-lock-selected-notes '())
 (defstate instrument-key-lock-audition true)
-(defstate rack-panel-slot-list-open true)
-(defstate rack-panel-selected-chain-open true)
-(defstate rack-panel-macros-open false)
+;; Presentation state belongs to stable track identities, never dense indices.
+;; A project replacement invalidates old entries; ordinary scene changes do not.
+(defstate rack-panel-views '())
+
+(def rack-panel-view-generation ()
+  (or SEQ.rack-panel-view-generation 0))
+
+(def rack-panel-view (inst)
+  (let ((generation (rack-panel-view-generation))
+        (view (nth (filter
+          (lambda (view)
+            (and (= (get view :track-id) (get inst :track-id))
+                 (= (get view :generation) generation)))
+          rack-panel-views) 0)))
+    (or view (dict :slots true :macros false :device true))))
+
+(def rack-panel-slot-list-open (inst) (get (rack-panel-view inst) :slots))
+(def rack-panel-selected-chain-open (inst) (get (rack-panel-view inst) :device))
+(def rack-panel-macros-open (inst) (get (rack-panel-view inst) :macros))
+
+;; Also called by the host after successfully loading a rack preset or Sound.
+(def rack-panel-set-view (track-id slots macros device)
+  (let ((generation (rack-panel-view-generation)))
+    (set! rack-panel-views
+      (append
+        (filter (lambda (view)
+          (and (= (get view :generation) generation)
+               (not (= (get view :track-id) track-id)))) rack-panel-views)
+        (list (dict :track-id track-id :generation generation
+                    :slots slots :macros macros :device device))))))
 (defstate effect-mods-open false)
 (defstate effect-mods-chain "audio")
 (defstate effect-mods-track -1)

@@ -66,6 +66,20 @@ individual timing, beating and room tail. The bowed crescendo remains the harder
 spectral fit. `validation.json` records the actual error rather than claiming a
 perfect match.
 
+## Source structure
+
+`dsp.lisp` is organized so the patch editor shows one box per physical block.
+The top level is only the signal path: `cello-age` and a shared filtered noise
+source feed `cello-bow` and `cello-pluck`; `cello-pitch` applies vibrato and
+tuning; `cello-strings` runs the three players (`cello-string` x3, with their
+smoothed controls in `cello-string-controls`); `cello-stereo` blends and pans
+them; `cello-resonance` applies `cello-body` per channel plus the tone filter;
+`cello-level` scales by velocity and gain. Each block reads the parameters it
+owns by name inside its macro. Modulatable parameters must stay top-level
+(`(mod x)` only resolves against a bare top-level `param`), and the
+parameter order is a saved-project contract (projects address parameters by
+position), so the `param` block is unchanged and new parameters go at its end.
+
 ## Compiler prerequisite
 
 This model exposed a compiler history-ordering bug: a ready flag could be written

@@ -16,6 +16,7 @@ echo "Copying library files..."
 cp ../libaudiograph.dylib ./audiograph/
 cp ../audiograph_swift.h ./audiograph/
 cp ../graph_types.h ./audiograph/
+cp ../mpmc_queue.h ./audiograph/
 cp ../graph_engine.h ./audiograph/
 cp ../graph_api.h ./audiograph/
 cp ../graph_edit.h ./audiograph/

@@ -3,10 +3,10 @@
 (capture-project
   (track :layer-rack
     :name "Macro Rack"
-    :samples ("../../assets/ir/lexicon-300-rich-plate.wav")
-    :rack-slot-audio-fx ("OTT")))
+    :samples ("../../../../content/impulses/lexicon-300-rich-plate.wav")
+    :rack-slot-audio-fx ("OTT"))
+  (rack-slot-macro 0 0 0 gain 0.5 1.5))
 
 (def capture-after-sync ()
-  (set! eseq.effects.state/rack-panel-slot-list-open false)
-  (set! eseq.effects.state/rack-panel-selected-chain-open false)
-  (set! eseq.effects.state/rack-panel-macros-open true))
+  (eseq.effects.state/rack-panel-set-view
+      (get (nth SEQ.instrument-panel 0) :track-id) false true false))

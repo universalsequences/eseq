@@ -36,11 +36,48 @@ pub const PROCESS_READ_HISTORY_DEPTH: usize = 256;
 
 pub type ProcessResolvedValues = [f32; NUM_PARAMS];
 
+/// Pattern data of one step as authored: what `(track n :param :pattern)`
+/// reads. Unlike the resolved registers this is the row value itself, before
+/// accumulators and other process writes, and it is visible on the same tick
+/// the track steps onto it (the Cirklon grab/xpose-by-track model: "the note
+/// value from pattern B remains current for as long as it takes the next
+/// step to play").
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ProcessStepPattern {
+    /// The step's authored pitch in semitones from the track root: the chord
+    /// base note when the step carries chord data, else its transpose p-lock.
+    /// Playback sounds a plain step at its resolved transpose and a chord note
+    /// at `chord_note + (resolved - step_transpose)`, so this is the part of
+    /// the pitch that a note grab replaces.
+    pub note: f32,
+    pub params: ProcessResolvedValues,
+}
+
+impl ProcessStepPattern {
+    pub fn from_step_snapshot(step: &crate::sequencer::SequencerStepSnapshot) -> Self {
+        Self {
+            note: step_authored_note(&step.chord, &step.params),
+            params: step.params,
+        }
+    }
+}
+
+/// See [`ProcessStepPattern::note`].
+pub fn step_authored_note(chord: &[f32], params: &[f32; NUM_PARAMS]) -> f32 {
+    chord
+        .first()
+        .copied()
+        .unwrap_or(params[StepParam::Transpose.index()])
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ProcessTrackReadSnapshot {
     pub current: ProcessResolvedValues,
     /// Newest boundary first; index `n` implements `:steps-ago n`.
     pub steps: Vec<ProcessResolvedValues>,
+    /// Pattern data of the step the track is on as of the read beat (the
+    /// latest boundary at or before it). `None` until the track has stepped.
+    pub step_pattern: Option<ProcessStepPattern>,
     /// Newest fired trigger first; index `n` implements `:trigs-ago n`.
     pub trigs: Vec<ProcessResolvedValues>,
     /// Beat timestamps aligned with `trigs`, used by bounded window reads.
@@ -61,6 +98,8 @@ pub struct ProcessReadSnapshot {
 struct TimedResolvedValues {
     beat: f64,
     values: ProcessResolvedValues,
+    /// Only step boundaries carry the pattern data of the step entered.
+    pattern: Option<ProcessStepPattern>,
 }
 
 #[derive(Clone, Debug)]
@@ -1649,6 +1688,9 @@ pub struct ProcessStepEventContext {
     pub sample_time: u64,
     pub step_beats: f32,
     pub resolved: ResolvedStep,
+    /// The step's authored pitch (`step_authored_note`), what `(step-note)`
+    /// returns.
+    pub note: f32,
     /// Inlets that received a process-inlet write (wire or fan-out) on this
     /// fire. Inlet writes are per fire, so `(in? :a)` is the only way a body
     /// can tell "nothing arrived" from "the default arrived".
@@ -1832,12 +1874,24 @@ impl ProcessRuntime {
     }
 
     pub fn record_track_step_boundary(&mut self, track: usize, beat: f64) {
+        self.record_track_step_boundary_with_pattern(track, beat, None);
+    }
+
+    /// Record a step boundary together with the pattern data of the step the
+    /// track just entered, so same-tick `:pattern` reads can see it.
+    pub fn record_track_step_boundary_with_pattern(
+        &mut self,
+        track: usize,
+        beat: f64,
+        pattern: Option<ProcessStepPattern>,
+    ) {
         let Some(history) = self.resolved_track_history.get_mut(track) else {
             return;
         };
         history.steps.push_back(TimedResolvedValues {
             beat,
             values: history.current,
+            pattern,
         });
         while history.steps.len() > PROCESS_READ_HISTORY_DEPTH {
             history.steps.pop_front();
@@ -1862,9 +1916,11 @@ impl ProcessRuntime {
             return;
         };
         history.current = values;
-        history
-            .trigs
-            .push_back(TimedResolvedValues { beat, values });
+        history.trigs.push_back(TimedResolvedValues {
+            beat,
+            values,
+            pattern: None,
+        });
         while history.trigs.len() > PROCESS_READ_HISTORY_DEPTH {
             history.trigs.pop_front();
         }
@@ -1940,9 +1996,16 @@ impl ProcessRuntime {
                             .filter(|entry| step_is_visible(entry.beat))
                             .map(|entry| entry.values)
                             .collect::<Vec<_>>();
+                        let step_pattern = history
+                            .steps
+                            .iter()
+                            .rev()
+                            .filter(|entry| step_is_visible(entry.beat))
+                            .find_map(|entry| entry.pattern);
                         ProcessTrackReadSnapshot {
                             current,
                             steps,
+                            step_pattern,
                             trigs,
                             trig_beats,
                         }
@@ -3041,6 +3104,7 @@ impl ProcessRuntime {
                 sample_time: ctx.sample_time,
                 step_beats: ctx.step_beats,
                 resolved: ctx.resolved,
+                note: ctx.note,
                 written_inlets: written_step_process_inlets(&def, inlet_writes),
             }),
             ports,
@@ -3066,6 +3130,8 @@ pub struct ProcessStepRunContext {
     pub sample_time: u64,
     pub step_beats: f32,
     pub resolved: ResolvedStep,
+    /// See [`ProcessStepEventContext::note`].
+    pub note: f32,
     pub event: Value,
 }
 
@@ -3621,7 +3687,12 @@ fn runtime_instance_id(instance: &AuthoredProcessInstance) -> u64 {
 }
 
 pub fn track_process_slot_runtime_id(slot: &TrackProcessSlot, track: usize) -> ProcessInstanceId {
-    let base = if let Some(name) = slot.instance_name.as_deref() {
+    let base = if is_track_roster_slot(slot) {
+        // Roster display names are minted per track and collide across
+        // tracks ("grab 2" on two tracks); the band id is globally unique,
+        // so it — not the name hash — is the runtime identity.
+        slot.instance_id.0
+    } else if let Some(name) = slot.instance_name.as_deref() {
         named_process_runtime_id(&slot.class_name, name)
     } else {
         slot.instance_id.0
@@ -3758,6 +3829,41 @@ mod tests {
     }
 
     #[test]
+    fn step_pattern_reads_are_same_tick_and_hold_until_the_next_boundary() {
+        let pattern = |note: f32| ProcessStepPattern {
+            note,
+            params: read_values(0.0),
+        };
+        let mut runtime = ProcessRuntime::default();
+        runtime.reset_resolved_track_history(&[read_values(0.0)]);
+        assert_eq!(runtime.read_snapshot(0.0).tracks[0].step_pattern, None);
+
+        // The chunk pre-pass records every boundary in the chunk before any
+        // process runs: a boundary at the read beat is visible, a later one
+        // is not, and the register holds between boundaries.
+        runtime.record_track_step_boundary_with_pattern(0, 0.0, Some(pattern(5.0)));
+        runtime.record_track_step_boundary_with_pattern(0, 1.0, Some(pattern(7.0)));
+        assert_eq!(
+            runtime.read_snapshot(0.0).tracks[0].step_pattern,
+            Some(pattern(5.0))
+        );
+        assert_eq!(
+            runtime.read_snapshot(0.5).tracks[0].step_pattern,
+            Some(pattern(5.0))
+        );
+        assert_eq!(
+            runtime.read_snapshot(1.0).tracks[0].step_pattern,
+            Some(pattern(7.0))
+        );
+        // A pattern-less boundary (tests, legacy callers) keeps the last one.
+        runtime.record_track_step_boundary(0, 2.0);
+        assert_eq!(
+            runtime.read_snapshot(2.0).tracks[0].step_pattern,
+            Some(pattern(7.0))
+        );
+    }
+
+    #[test]
     fn resolved_track_trigger_history_ignores_grid_gaps_and_is_bounded() {
         let mut runtime = ProcessRuntime::default();
         runtime.reset_resolved_track_history(&[read_values(0.0)]);
@@ -3862,6 +3968,7 @@ mod tests {
                         sample_time: 0,
                         step_beats: 0.25,
                         resolved: test_step_context(track).resolved,
+                        note: 0.0,
                         event: Value::Nil,
                     },
                 )
@@ -3897,6 +4004,7 @@ mod tests {
             sample_time: 48_000,
             step_beats: 0.25,
             written_inlets: Vec::new(),
+            note: 0.0,
             resolved: ResolvedStep {
                 duration: 1.0,
                 velocity: 1.0,
@@ -4588,6 +4696,201 @@ pub fn ensure_default_project_layer(chain: &mut TrackProcessChain) -> bool {
     changed
 }
 
+/// One user-added process slot on a track (eseq-53y7). The roster is the
+/// *structure* half of a track's own process chain: which instances the
+/// track carries, in what order. It is scene-independent — every pattern of
+/// the track runs the same roster — while each pattern keeps its own lane
+/// values, inlet literals, port bindings, fan-out and enabled flag inside its
+/// `TrackProcessChain`. `reconcile_track_lane_roster` is what joins the two.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackLaneRosterSlot {
+    pub instance_id: ProcessInstanceId,
+    /// Display name, unique within the track (`grab`, `grab 2`, …).
+    pub instance_name: String,
+    pub class_name: String,
+}
+
+/// One track's ordered roster.
+pub type TrackLaneRoster = Vec<TrackLaneRosterSlot>;
+
+/// Instance-id band reserved for track roster slots. Like the default-lane
+/// block it sits below the UI handle base (`1 << 48`) and well inside f64's
+/// exact-integer range, because instance ids cross into Lisp as numbers.
+/// Membership in the band is also what marks a chain slot as roster-owned,
+/// so reconciliation can drop a slot the roster no longer lists without
+/// touching a chain a `(processes ...)` form authored.
+pub const TRACK_ROSTER_INSTANCE_ID_BASE: u64 = 1 << 46;
+/// One past the band's last id — the default-lane block starts here.
+pub const TRACK_ROSTER_INSTANCE_ID_END: u64 = 1 << 47;
+
+pub fn is_track_roster_instance_id(id: ProcessInstanceId) -> bool {
+    (TRACK_ROSTER_INSTANCE_ID_BASE..TRACK_ROSTER_INSTANCE_ID_END).contains(&id.0)
+}
+
+/// A roster-owned chain slot carries the band id, so it is identifiable
+/// without a name hash. Track slots normally take their runtime identity
+/// from `class:name`, but roster names are minted per track and collide
+/// across tracks (two tracks can both hold a `grab 2`); the band id is
+/// globally unique, so roster slots key runtime state on it instead.
+pub fn is_track_roster_slot(slot: &TrackProcessSlot) -> bool {
+    !slot.project_layer && is_track_roster_instance_id(slot.instance_id)
+}
+
+/// The next free roster instance id given every id already in use.
+pub fn next_track_roster_instance_id(
+    used: impl IntoIterator<Item = ProcessInstanceId>,
+) -> ProcessInstanceId {
+    let highest = used
+        .into_iter()
+        .filter(|id| is_track_roster_instance_id(*id))
+        .map(|id| id.0)
+        .max();
+    ProcessInstanceId(match highest {
+        Some(id) => (id + 1).min(TRACK_ROSTER_INSTANCE_ID_END - 1),
+        None => TRACK_ROSTER_INSTANCE_ID_BASE,
+    })
+}
+
+/// The bare lane name a class reads as in the UI: `lane-grab` -> `grab`.
+pub fn lane_class_display_name(class_name: &str) -> &str {
+    class_name.strip_prefix("lane-").unwrap_or(class_name)
+}
+
+/// Mint a per-track-unique instance name for a new `class_name` slot: the
+/// bare class name when free, else `name 2`, `name 3`, … . The default
+/// project lanes already own their bare names (`grab`, `rand`, …) on every
+/// track, so a track's first added grab reads `grab 2`.
+pub fn mint_track_roster_instance_name(class_name: &str, taken: &BTreeSet<String>) -> String {
+    let base = lane_class_display_name(class_name).to_string();
+    if !taken.contains(&base) {
+        return base;
+    }
+    for suffix in 2u32.. {
+        let candidate = format!("{base} {suffix}");
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("instance name space exhausted")
+}
+
+/// Every instance name a new roster slot on this track must avoid: the
+/// project layer's default lanes plus whatever the roster already holds.
+pub fn taken_track_roster_instance_names(roster: &[TrackLaneRosterSlot]) -> BTreeSet<String> {
+    DEFAULT_LANES
+        .iter()
+        .map(|spec| spec.name.to_string())
+        .chain(roster.iter().map(|entry| entry.instance_name.clone()))
+        .collect()
+}
+
+/// A fresh chain slot for a roster entry: structure only, no lane values.
+pub fn track_roster_chain_slot(entry: &TrackLaneRosterSlot) -> TrackProcessSlot {
+    TrackProcessSlot {
+        instance_id: entry.instance_id,
+        instance_name: Some(entry.instance_name.clone()),
+        class_name: entry.class_name.clone(),
+        enabled: true,
+        project_layer: false,
+        inlets: BTreeMap::new(),
+        lanes: BTreeMap::new(),
+        bindings: BTreeMap::new(),
+        fanout: BTreeMap::new(),
+        unbound_ports: BTreeSet::new(),
+    }
+}
+
+/// Join a track's scene-independent roster into one pattern's chain.
+///
+/// Append every roster entry the chain is missing, in roster order, at the
+/// END of the chain (track slots always run after the project layer, see
+/// `compose_effective_process_chain`); keep an existing slot's lanes, inlet
+/// literals, bindings, fan-out, unbound ports and enabled flag exactly as
+/// the pattern has them; drop roster-owned slots the roster no longer lists.
+/// Slots outside the roster band — chains authored by `(processes ...)` —
+/// are never touched. Returns true when the chain changed.
+///
+/// Order is roster-owned too (eseq-53y7.5): slot order is structure, not
+/// painted data, so a reorder has to land in every scene the way add and
+/// remove do. The rule is a stable partition — the positions roster-owned
+/// slots occupy in this chain stay roster positions and are refilled in
+/// roster order, while script-authored slots keep their own index and
+/// relative placement. A chain with no roster slots is untouched; a chain
+/// that only gains slots simply grows at the end.
+pub fn reconcile_track_lane_roster(
+    chain: &mut TrackProcessChain,
+    roster: &[TrackLaneRosterSlot],
+) -> bool {
+    let mut changed = false;
+    let listed = roster
+        .iter()
+        .map(|entry| entry.instance_id)
+        .collect::<BTreeSet<_>>();
+    let before = chain.slots.len();
+    chain
+        .slots
+        .retain(|slot| !is_track_roster_slot(slot) || listed.contains(&slot.instance_id));
+    changed |= chain.slots.len() != before;
+    for entry in roster {
+        match chain
+            .slots
+            .iter_mut()
+            .find(|slot| slot.instance_id == entry.instance_id)
+        {
+            Some(slot) => {
+                // The roster owns class and display name; the pattern owns
+                // everything else on the slot.
+                if slot.class_name != entry.class_name {
+                    slot.class_name = entry.class_name.clone();
+                    changed = true;
+                }
+                if slot.instance_name.as_deref() != Some(entry.instance_name.as_str()) {
+                    slot.instance_name = Some(entry.instance_name.clone());
+                    changed = true;
+                }
+            }
+            None => {
+                chain.slots.push(track_roster_chain_slot(entry));
+                changed = true;
+            }
+        }
+    }
+    // Roster order wins among roster-owned slots. Refill the positions they
+    // already occupy, in roster order; script slots never move.
+    let rank = roster
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.instance_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let positions = chain
+        .slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| is_track_roster_slot(slot))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if positions.len() > 1 {
+        let mut ordered = positions.clone();
+        // Stable, so slots the roster does not rank keep their relative order.
+        ordered.sort_by_key(|index| {
+            rank.get(&chain.slots[*index].instance_id)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+        if ordered != positions {
+            let reordered = ordered
+                .iter()
+                .map(|index| chain.slots[*index].clone())
+                .collect::<Vec<_>>();
+            for (position, slot) in positions.iter().zip(reordered) {
+                chain.slots[*position] = slot;
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod default_lane_tests {
     use super::*;
@@ -4647,6 +4950,175 @@ mod default_lane_tests {
             reset.bindings["wire"],
             Some(ParamTarget::ProcessInlet { instance_id: Some(id), .. }) if id == tacc_id
         ));
+    }
+
+    #[test]
+    fn reconcile_track_lane_roster_appends_keeps_and_drops() {
+        let entry = |id: u64, name: &str| TrackLaneRosterSlot {
+            instance_id: ProcessInstanceId(TRACK_ROSTER_INSTANCE_ID_BASE + id),
+            instance_name: name.to_string(),
+            class_name: "lane-grab".to_string(),
+        };
+        let roster = vec![entry(0, "grab 2"), entry(1, "grab 3")];
+
+        // A chain authored by `(processes ...)` keeps its slots, and the
+        // roster's slots land after them in roster order.
+        let mut chain = TrackProcessChain {
+            slots: vec![TrackProcessSlot {
+                instance_id: ProcessInstanceId(7),
+                instance_name: Some("sparse-h".to_string()),
+                class_name: "sparse".to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: BTreeMap::new(),
+                lanes: BTreeMap::new(),
+                bindings: BTreeMap::new(),
+                fanout: BTreeMap::new(),
+                unbound_ports: BTreeSet::new(),
+            }],
+        };
+        assert!(reconcile_track_lane_roster(&mut chain, &roster));
+        assert_eq!(
+            chain
+                .slots
+                .iter()
+                .map(|slot| slot.instance_id)
+                .collect::<Vec<_>>(),
+            vec![
+                ProcessInstanceId(7),
+                roster[0].instance_id,
+                roster[1].instance_id,
+            ]
+        );
+        assert!(!reconcile_track_lane_roster(&mut chain, &roster));
+
+        // Pattern-owned state on a roster slot survives reconciliation.
+        chain.slots[1]
+            .lanes
+            .insert("value".to_string(), ProcessLane { values: vec![0.5] });
+        chain.slots[1]
+            .inlets
+            .insert("lo".to_string(), ProcessLiteral::Number(3.0));
+        chain.slots[1].enabled = false;
+        assert!(!reconcile_track_lane_roster(&mut chain, &roster));
+        assert_eq!(chain.slots[1].lanes["value"].values, vec![0.5]);
+        assert_eq!(
+            chain.slots[1].inlets["lo"],
+            ProcessLiteral::Number(3.0)
+        );
+        assert!(!chain.slots[1].enabled);
+
+        // Dropping the first roster entry drops exactly that slot.
+        let trimmed = vec![roster[1].clone()];
+        assert!(reconcile_track_lane_roster(&mut chain, &trimmed));
+        assert_eq!(
+            chain
+                .slots
+                .iter()
+                .map(|slot| slot.instance_id)
+                .collect::<Vec<_>>(),
+            vec![ProcessInstanceId(7), roster[1].instance_id]
+        );
+
+        // A missing roster slot comes back empty, not with the old values.
+        assert!(reconcile_track_lane_roster(&mut chain, &roster));
+        let restored = chain
+            .slots
+            .iter()
+            .find(|slot| slot.instance_id == roster[0].instance_id)
+            .expect("roster slot reinstalled");
+        assert!(restored.lanes.is_empty());
+        assert!(restored.enabled);
+        assert_eq!(restored.instance_name.as_deref(), Some("grab 2"));
+    }
+
+    #[test]
+    fn reconcile_track_lane_roster_puts_roster_slots_in_roster_order() {
+        let entry = |id: u64, name: &str| TrackLaneRosterSlot {
+            instance_id: ProcessInstanceId(TRACK_ROSTER_INSTANCE_ID_BASE + id),
+            instance_name: name.to_string(),
+            class_name: "lane-grab".to_string(),
+        };
+        let script_slot = |id: u64, name: &str| TrackProcessSlot {
+            instance_id: ProcessInstanceId(id),
+            instance_name: Some(name.to_string()),
+            class_name: "sparse".to_string(),
+            enabled: true,
+            project_layer: false,
+            inlets: BTreeMap::new(),
+            lanes: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+            fanout: BTreeMap::new(),
+            unbound_ports: BTreeSet::new(),
+        };
+        // Roster says grab 3 runs before grab 2; the chain was saved the
+        // other way round, with a script slot wedged between them.
+        let roster = vec![entry(1, "grab 3"), entry(0, "grab 2")];
+        let mut chain = TrackProcessChain {
+            slots: vec![
+                track_roster_chain_slot(&entry(0, "grab 2")),
+                script_slot(7, "sparse-h"),
+                track_roster_chain_slot(&entry(1, "grab 3")),
+            ],
+        };
+        chain.slots[0]
+            .lanes
+            .insert("grab".to_string(), ProcessLane { values: vec![1.0] });
+
+        assert!(reconcile_track_lane_roster(&mut chain, &roster));
+        assert_eq!(
+            chain
+                .slots
+                .iter()
+                .map(|slot| slot.instance_id)
+                .collect::<Vec<_>>(),
+            vec![
+                roster[0].instance_id,
+                ProcessInstanceId(7),
+                roster[1].instance_id,
+            ],
+            "roster slots take roster order in the positions they held; the \
+             script slot keeps its index"
+        );
+        // The pattern's painted values travel with their slot, not its index.
+        assert_eq!(
+            chain.slots[2].lanes["grab"].values,
+            vec![1.0],
+            "grab 2 must keep the values it was painted with"
+        );
+        assert!(chain.slots[0].lanes.is_empty());
+        assert!(!reconcile_track_lane_roster(&mut chain, &roster));
+    }
+
+    #[test]
+    fn roster_instance_names_avoid_the_default_lane_names() {
+        let mut roster: TrackLaneRoster = Vec::new();
+        let mint = |class: &str, roster: &mut TrackLaneRoster| {
+            let name = mint_track_roster_instance_name(
+                class,
+                &taken_track_roster_instance_names(roster),
+            );
+            roster.push(TrackLaneRosterSlot {
+                instance_id: next_track_roster_instance_id(
+                    roster.iter().map(|entry| entry.instance_id),
+                ),
+                instance_name: name.clone(),
+                class_name: class.to_string(),
+            });
+            name
+        };
+        assert_eq!(mint("lane-grab", &mut roster), "grab 2");
+        assert_eq!(mint("lane-grab", &mut roster), "grab 3");
+        assert_eq!(mint("sparse", &mut roster), "sparse");
+        assert_eq!(
+            roster.iter().map(|e| e.instance_id.0).collect::<Vec<_>>(),
+            vec![
+                TRACK_ROSTER_INSTANCE_ID_BASE,
+                TRACK_ROSTER_INSTANCE_ID_BASE + 1,
+                TRACK_ROSTER_INSTANCE_ID_BASE + 2,
+            ]
+        );
+        assert!(roster.iter().all(|e| is_track_roster_instance_id(e.instance_id)));
     }
 
     #[test]

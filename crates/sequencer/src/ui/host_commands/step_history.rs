@@ -336,7 +336,33 @@ pub(super) fn handle(
                         app.state
                             .move_track_process_slot_before(track, instance_id, before)
                     }
-                    "remove-slot" => app.state.remove_track_process_slot(track, instance_id),
+                    "add-roster-slot" => {
+                        let class_name = field("class-name")
+                            .and_then(|value| match value {
+                                Value::String(value) => Some(value),
+                                _ => None,
+                            })
+                            .ok_or_else(|| "Process class name is missing".to_string())?;
+                        // The native already minted `instance_id`; the state
+                        // layer keeps it unless another slot took it first.
+                        app.state
+                            .add_track_roster_slot_with_id(
+                                track,
+                                &class_name,
+                                Some(instance_id),
+                            )
+                            .is_some()
+                    }
+                    // A roster slot exists in every scene, so removing it goes
+                    // through the roster (eseq-53y7); project-layer slots and
+                    // script-authored track slots keep the per-pattern detach.
+                    "remove-slot" => {
+                        if sequencer::process::is_track_roster_instance_id(instance_id) {
+                            app.state.remove_track_roster_slot(track, instance_id)
+                        } else {
+                            app.state.remove_track_process_slot(track, instance_id)
+                        }
+                    }
                     "bind-port" => {
                         let port = field("port")
                             .and_then(|value| match value {
@@ -2930,6 +2956,442 @@ mod tests {
         let cleared = harness.state.capture_step_snapshot(0, 1);
         assert!(!cleared.active);
         assert!(cleared.chord.is_empty());
+    }
+
+
+    /// `seq-add-track-process-slot` and a roster-slot `seq-remove-process-slot`
+    /// through the REAL `dispatch_custom_host_command` ->
+    /// `process-history-action` seam (eseq-53y7.2). The natives themselves are
+    /// thin: they mint the id (`next_track_roster_slot_id`, mirrored here) and
+    /// enqueue exactly these payloads, so whatever the handler does with them
+    /// is what the UI gets.
+    #[test]
+    fn track_roster_slots_add_and_remove_through_the_process_history_handler() {
+        fn process_payload(op: &str, fields: Vec<(&str, Value)>) -> Value {
+            let mut map: std::collections::HashMap<String, Rc<RefCell<Value>>> = fields
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), Rc::new(RefCell::new(value))))
+                .collect();
+            map.insert(
+                "op".to_string(),
+                Rc::new(RefCell::new(Value::Keyword(op.to_string()))),
+            );
+            Value::Map(map)
+        }
+
+        let mut harness = Harness::with_track_count(3);
+        assert!(harness
+            .state
+            .set_project_process_chain(sequencer::process::default_project_layer()));
+        let project_slot_count = harness.state.project_process_chain().slots.len();
+        assert!(project_slot_count > 0, "fixture needs the default lanes");
+
+        let mut added = Vec::new();
+        for _ in 0..2 {
+            let instance_id = harness.state.next_track_roster_slot_id();
+            harness.dispatch(
+                "process-history-action",
+                process_payload("add-roster-slot", vec![
+                    ("track", Value::Number(0.0)),
+                    ("instance-id", Value::Number(instance_id.0 as f64)),
+                    ("class-name", Value::String("lane-grab".to_string())),
+                ]),
+            );
+            added.push(instance_id);
+        }
+        assert_ne!(added[0], added[1]);
+        assert_eq!(
+            harness
+                .state
+                .track_lane_roster(0)
+                .expect("track 1 roster")
+                .iter()
+                .map(|entry| (entry.instance_id, entry.instance_name.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (added[0], "grab 2".to_string()),
+                (added[1], "grab 3".to_string()),
+            ],
+            "the handler must append both slots, named around the project lanes"
+        );
+
+        // Each added grab points at a different source track.
+        for (offset, instance_id) in added.iter().enumerate() {
+            harness.dispatch(
+                "process-history-action",
+                process_payload("set-inlet", vec![
+                    ("track", Value::Number(0.0)),
+                    ("instance-id", Value::Number(instance_id.0 as f64)),
+                    ("inlet", Value::String("source".to_string())),
+                    ("value", Value::Number(offset as f64 + 1.0)),
+                ]),
+            );
+        }
+
+        let chain = harness
+            .state
+            .composed_track_process_chain(0)
+            .expect("composed chain");
+        assert_eq!(chain.slots.len(), project_slot_count + 2);
+        assert!(
+            chain.slots[..project_slot_count]
+                .iter()
+                .all(|slot| slot.project_layer),
+            "added slots must run after every project lane"
+        );
+        let tail = &chain.slots[project_slot_count..];
+        assert_eq!(
+            tail.iter()
+                .map(|slot| (
+                    slot.instance_id,
+                    slot.instance_name.clone().unwrap_or_default(),
+                    slot.class_name.clone(),
+                    slot.inlets.get("source").cloned(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    added[0],
+                    "grab 2".to_string(),
+                    "lane-grab".to_string(),
+                    Some(sequencer::process::ProcessLiteral::Number(1.0)),
+                ),
+                (
+                    added[1],
+                    "grab 3".to_string(),
+                    "lane-grab".to_string(),
+                    Some(sequencer::process::ProcessLiteral::Number(2.0)),
+                ),
+            ]
+        );
+
+        // Removing a roster slot goes through the roster, so it is gone for
+        // good rather than reappearing at the next reconcile.
+        harness.dispatch(
+            "process-history-action",
+            process_payload("remove-slot", vec![
+                ("track", Value::Number(0.0)),
+                ("instance-id", Value::Number(added[0].0 as f64)),
+            ]),
+        );
+        assert_eq!(
+            harness
+                .state
+                .track_lane_roster(0)
+                .expect("track 1 roster")
+                .iter()
+                .map(|entry| entry.instance_id)
+                .collect::<Vec<_>>(),
+            vec![added[1]],
+            "the removed slot must leave the roster, not just this pattern"
+        );
+        let chain = harness
+            .state
+            .composed_track_process_chain(0)
+            .expect("composed chain after removal");
+        assert_eq!(chain.slots.len(), project_slot_count + 1);
+        let survivor = chain.slots.last().expect("surviving slot");
+        assert_eq!(survivor.instance_id, added[1]);
+        assert_eq!(
+            survivor.inlets.get("source"),
+            Some(&sequencer::process::ProcessLiteral::Number(2.0)),
+            "the surviving slot keeps its own inlet literal"
+        );
+    }
+
+    /// Payload shape shared by the roster undo tests: the map
+    /// `process-history-action` reads, with `:op` folded in.
+    fn process_payload(op: &str, fields: Vec<(&str, Value)>) -> Value {
+        let mut map: std::collections::HashMap<String, Rc<RefCell<Value>>> = fields
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), Rc::new(RefCell::new(value))))
+            .collect();
+        map.insert(
+            "op".to_string(),
+            Rc::new(RefCell::new(Value::Keyword(op.to_string()))),
+        );
+        Value::Map(map)
+    }
+
+    /// A harness whose project has `scenes` scenes on `tracks` tracks, with
+    /// the default project lane layer installed and the graph arrays the
+    /// scene save-back seam reads.
+    fn roster_harness(tracks: usize, scenes: usize) -> Harness {
+        let mut harness = Harness::with_track_count(tracks);
+        harness.app.graph.track_buffer_ids = vec![-1; tracks];
+        harness.app.graph.track_sample_rates = vec![44_100; tracks];
+        harness.app.graph.track_instrument_types =
+            vec![sequencer::sequencer::InstrumentType::Sampler; tracks];
+        harness.state.replace_pattern_repository(
+            (0..scenes)
+                .map(|_| sequencer::sequencer::PatternSnapshot::new_default(tracks, &[]))
+                .collect(),
+            0,
+        );
+        harness
+            .state
+            .restore_current_pattern_from_repository()
+            .expect("restore scene 1");
+        assert!(harness
+            .state
+            .set_project_process_chain(sequencer::process::default_project_layer()));
+        harness
+    }
+
+    fn launch(harness: &mut Harness, scene: usize) {
+        let num_tracks = harness.app.tracks.len();
+        harness
+            .app
+            .state
+            .launch_scene(
+                scene,
+                num_tracks,
+                &harness.app.graph.track_buffer_ids,
+                &harness.app.graph.track_sample_rates,
+                &harness.app.tracks,
+                &harness.app.graph.track_instrument_types,
+            )
+            .unwrap_or_else(|| panic!("launch scene {scene}"));
+    }
+
+    /// The roster-owned slots of `track`'s chain in the ACTIVE scene, in
+    /// chain order.
+    fn roster_slots_in_chain(
+        harness: &Harness,
+        track: usize,
+    ) -> Vec<(sequencer::process::ProcessInstanceId, String)> {
+        harness
+            .state
+            .track_process_chain(track)
+            .expect("track process chain")
+            .slots
+            .iter()
+            .filter(|slot| sequencer::process::is_track_roster_slot(slot))
+            .map(|slot| {
+                (
+                    slot.instance_id,
+                    slot.instance_name.clone().unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    fn roster_ids(
+        harness: &Harness,
+        track: usize,
+    ) -> Vec<(sequencer::process::ProcessInstanceId, String)> {
+        harness
+            .state
+            .track_lane_roster(track)
+            .expect("track roster")
+            .iter()
+            .map(|entry| (entry.instance_id, entry.instance_name.clone()))
+            .collect()
+    }
+
+    fn undo(harness: &mut Harness) {
+        assert!(
+            matches!(
+                app::edit::undo(&mut harness.app),
+                app::history::HistoryReplay::Applied(_)
+            ),
+            "undo must apply"
+        );
+    }
+
+    fn redo(harness: &mut Harness) {
+        assert!(
+            matches!(
+                app::edit::redo(&mut harness.app),
+                app::history::HistoryReplay::Applied(_)
+            ),
+            "redo must apply"
+        );
+    }
+
+    /// eseq-53y7.6: the roster is scene-independent structure that lives
+    /// OUTSIDE `ProjectScenes`, so an undo that restored only the pattern
+    /// chains would be re-applied by the next reconcile. Adding a lane must
+    /// undo in every scene — and survive a scene switch after the undo,
+    /// which is where a roster/chain disagreement shows up.
+    #[test]
+    fn adding_a_track_roster_slot_undoes_and_redoes_in_every_scene() {
+        let mut harness = roster_harness(3, 3);
+        const TRACK_1: usize = 1;
+
+        let instance_id = harness.state.next_track_roster_slot_id();
+        harness.dispatch(
+            "process-history-action",
+            process_payload("add-roster-slot", vec![
+                ("track", Value::Number(TRACK_1 as f64)),
+                ("instance-id", Value::Number(instance_id.0 as f64)),
+                ("class-name", Value::String("lane-grab".to_string())),
+            ]),
+        );
+        assert_eq!(
+            roster_ids(&harness, TRACK_1),
+            vec![(instance_id, "grab 2".to_string())]
+        );
+
+        undo(&mut harness);
+        assert!(
+            roster_ids(&harness, TRACK_1).is_empty(),
+            "undo must take the slot off the roster, not just out of the chains"
+        );
+        for scene in 0..3 {
+            launch(&mut harness, scene);
+            assert!(
+                roster_slots_in_chain(&harness, TRACK_1).is_empty(),
+                "scene {scene} must not get the added lane back at the next reconcile"
+            );
+        }
+
+        // Undo left the project on the memento's scene; the redo memento is
+        // the same shape, so replay lands back where the edit was made.
+        redo(&mut harness);
+        assert_eq!(
+            roster_ids(&harness, TRACK_1),
+            vec![(instance_id, "grab 2".to_string())],
+            "redo must restore the same instance id and minted name"
+        );
+        for scene in 0..3 {
+            launch(&mut harness, scene);
+            assert_eq!(
+                roster_slots_in_chain(&harness, TRACK_1),
+                vec![(instance_id, "grab 2".to_string())],
+                "scene {scene} must carry the re-added lane"
+            );
+            assert!(
+                roster_slots_in_chain(&harness, 0).is_empty(),
+                "scene {scene}: the roster belongs to one track"
+            );
+        }
+    }
+
+    /// Removing a roster slot drops it from EVERY scene, values included, so
+    /// its undo has to bring both the roster entry and each scene's painted
+    /// lane back.
+    #[test]
+    fn removing_a_track_roster_slot_undoes_its_painted_values_in_every_scene() {
+        let mut harness = roster_harness(2, 2);
+        const TRACK_1: usize = 0;
+
+        let instance_id = harness.state.next_track_roster_slot_id();
+        harness.dispatch(
+            "process-history-action",
+            process_payload("add-roster-slot", vec![
+                ("track", Value::Number(TRACK_1 as f64)),
+                ("instance-id", Value::Number(instance_id.0 as f64)),
+                ("class-name", Value::String("lane-grab".to_string())),
+            ]),
+        );
+
+        // Paint the lane differently per scene: step `scene` in scene `scene`.
+        for scene in 0..2 {
+            launch(&mut harness, scene);
+            assert!(harness
+                .state
+                .set_process_lane_value(TRACK_1, instance_id, "grab", scene, 1.0));
+        }
+        launch(&mut harness, 0);
+
+        harness.dispatch(
+            "process-history-action",
+            process_payload("remove-slot", vec![
+                ("track", Value::Number(TRACK_1 as f64)),
+                ("instance-id", Value::Number(instance_id.0 as f64)),
+            ]),
+        );
+        assert!(roster_ids(&harness, TRACK_1).is_empty());
+
+        undo(&mut harness);
+        assert_eq!(
+            roster_ids(&harness, TRACK_1),
+            vec![(instance_id, "grab 2".to_string())],
+            "undo must put the slot back on the roster"
+        );
+        for scene in 0..2 {
+            launch(&mut harness, scene);
+            let slot = harness
+                .state
+                .track_process_chain(TRACK_1)
+                .expect("track process chain")
+                .slots
+                .iter()
+                .find(|slot| slot.instance_id == instance_id)
+                .cloned()
+                .unwrap_or_else(|| panic!("scene {scene} must have the lane back"));
+            assert_eq!(
+                slot.lanes["grab"].values.iter().position(|value| *value > 0.5),
+                Some(scene),
+                "scene {scene} must get its OWN painted lane back, not an empty slot"
+            );
+        }
+    }
+
+    /// Slot order is roster-owned (eseq-53y7.5), so a reorder is a roster
+    /// edit and its undo has to rewrite the roster back — otherwise the next
+    /// reconcile re-applies the new order in every scene.
+    #[test]
+    fn reordering_a_track_roster_slot_undoes_in_every_scene() {
+        let mut harness = roster_harness(2, 2);
+        const TRACK_1: usize = 0;
+
+        let mut added = Vec::new();
+        for _ in 0..2 {
+            let instance_id = harness.state.next_track_roster_slot_id();
+            harness.dispatch(
+                "process-history-action",
+                process_payload("add-roster-slot", vec![
+                    ("track", Value::Number(TRACK_1 as f64)),
+                    ("instance-id", Value::Number(instance_id.0 as f64)),
+                    ("class-name", Value::String("lane-grab".to_string())),
+                ]),
+            );
+            added.push(instance_id);
+        }
+        let original = vec![
+            (added[0], "grab 2".to_string()),
+            (added[1], "grab 3".to_string()),
+        ];
+        let swapped = vec![original[1].clone(), original[0].clone()];
+        assert_eq!(roster_slots_in_chain(&harness, TRACK_1), original);
+
+        harness.dispatch(
+            "process-history-action",
+            process_payload("move-slot", vec![
+                ("track", Value::Number(TRACK_1 as f64)),
+                ("instance-id", Value::Number(added[1].0 as f64)),
+                ("before-instance-id", Value::Number(added[0].0 as f64)),
+            ]),
+        );
+        assert_eq!(roster_ids(&harness, TRACK_1), swapped);
+
+        undo(&mut harness);
+        assert_eq!(
+            roster_ids(&harness, TRACK_1),
+            original,
+            "undo must rewrite the roster order, not just this pattern's chain"
+        );
+        for scene in 0..2 {
+            launch(&mut harness, scene);
+            assert_eq!(
+                roster_slots_in_chain(&harness, TRACK_1),
+                original,
+                "scene {scene} must be back in the original order"
+            );
+        }
+
+        redo(&mut harness);
+        assert_eq!(roster_ids(&harness, TRACK_1), swapped);
+        for scene in 0..2 {
+            launch(&mut harness, scene);
+            assert_eq!(
+                roster_slots_in_chain(&harness, TRACK_1),
+                swapped,
+                "scene {scene} must be back in the reordered order"
+            );
+        }
     }
 
 }

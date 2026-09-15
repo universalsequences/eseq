@@ -1326,6 +1326,8 @@ pub(super) fn build_rack_panel_value(
 
     let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
     insert_string_prop(&mut panel_map, "type", "rack");
+    insert_string_prop(&mut panel_map, "track-id",
+        app.track_registry.id_at(track).expect("rack track has a stable identity").0.to_string());
     panel_map.insert("track".to_string(), value_cell(Value::Number(track as f64)));
     panel_map.insert(
         "selected-slot".to_string(),

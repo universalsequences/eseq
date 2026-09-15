@@ -876,12 +876,12 @@ pub(in crate::lisp_host) fn register_process_natives(
     if runtime.global_value("track").is_none() {
         runtime.register_native_with_docs(
             "track",
-            "(track index :param [:steps-ago n | :trigs-ago n])",
-            "Construct a previous-tick resolved track-parameter read source.",
+            "(track index :param [:steps-ago n | :trigs-ago n | :pattern])",
+            "Construct a track read source: the previous-tick resolved value (optionally n steps or trigs back), or with :pattern the authored value on the step the track is currently on, visible the same tick. :note is only readable as :pattern.",
             move |args, _ctx| {
-                if args.len() != 2 && args.len() != 4 {
+                if args.len() != 2 && args.len() != 3 && args.len() != 4 {
                     return Err(
-                        "track expects index, param, and optional :steps-ago/:trigs-ago count"
+                        "track expects index, param, and optional :steps-ago/:trigs-ago count or :pattern"
                             .to_string(),
                     );
                 }
@@ -890,6 +890,25 @@ pub(in crate::lisp_host) fn register_process_natives(
                     return Err("track index must be a non-negative integer".to_string());
                 }
                 let param = process_symbol_name(&args[1])?;
+                if args.len() == 3 {
+                    if process_symbol_name(&args[2])? != "pattern" {
+                        return Err(
+                            "track read with three arguments expects :pattern".to_string()
+                        );
+                    }
+                    if param != "note" {
+                        parse_step_param_arg(&[EValue::Keyword(param.clone())], 0)?;
+                    }
+                    return Ok(process_map([
+                        ("kind", EValue::Keyword("track-read".to_string())),
+                        ("track", EValue::Number(track)),
+                        ("param", EValue::Keyword(param)),
+                        ("mode", EValue::Keyword("pattern".to_string())),
+                    ]));
+                }
+                if param == "note" {
+                    return Err("track :note is only readable as :pattern".to_string());
+                }
                 if param == "fire-count" {
                     if args.len() != 4 || process_symbol_name(&args[2])? != "window" {
                         return Err(
@@ -1145,6 +1164,25 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
+    let process_eval_for_step_note = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "step-note",
+        "(step-note)",
+        "Return the current step's authored pitch in semitones from the track root: the chord base note when the step has chord data, else its transpose p-lock. Pair with (current-note) to replace the note while keeping accumulator offsets: (target-set! (+ (current-note) (- new (step-note)))).",
+        move |args, _ctx| {
+            if !args.is_empty() {
+                return Err("step-note expects no arguments".to_string());
+            }
+            let guard = process_eval_for_step_note
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(step) = guard.as_ref().and_then(|ctx| ctx.step_context.as_ref()) else {
+                return Err("step-note requires a scheduler step event context".to_string());
+            };
+            Ok(EValue::Number(step.note as f64))
+        },
+    );
+
     for (native, observe) in [("observed-tracks", true), ("play-tracks", false)] {
         let process_eval_for_tracks = Arc::clone(&process_eval);
         runtime.register_native_with_docs(
@@ -1271,15 +1309,33 @@ pub(in crate::lisp_host) fn register_process_natives(
                         Some(value) => process_number_arg(Some(&value), "read")? as usize,
                         None => return Err("track read source missing track".to_string()),
                     };
-                    let param =
-                        parse_step_param_arg(&[EValue::Keyword(string_field("param")?)], 0)?;
-                    let Some(track) = ctx.reads.tracks.get(track) else {
-                        return Ok(EValue::Number(param.default_value() as f64));
-                    };
                     let mode = source
                         .get("mode")
                         .map(|_| string_field("mode"))
                         .transpose()?;
+                    let param_name = string_field("param")?;
+                    if mode.as_deref() == Some("pattern") {
+                        // Same-tick pattern data of the step the source track
+                        // is on; Nil until that track has stepped at all, so
+                        // a grab stays inert instead of copying a default.
+                        let Some(pattern) = ctx
+                            .reads
+                            .tracks
+                            .get(track)
+                            .and_then(|track| track.step_pattern)
+                        else {
+                            return Ok(EValue::Nil);
+                        };
+                        if param_name == "note" {
+                            return Ok(EValue::Number(pattern.note as f64));
+                        }
+                        let param = parse_step_param_arg(&[EValue::Keyword(param_name)], 0)?;
+                        return Ok(EValue::Number(pattern.params[param.index()] as f64));
+                    }
+                    let param = parse_step_param_arg(&[EValue::Keyword(param_name)], 0)?;
+                    let Some(track) = ctx.reads.tracks.get(track) else {
+                        return Ok(EValue::Number(param.default_value() as f64));
+                    };
                     let ago = match source.get("ago").map(|value| value.borrow()) {
                         Some(value) => process_number_arg(Some(&value), "read")? as usize,
                         None => 0,

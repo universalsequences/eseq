@@ -184,13 +184,71 @@ impl SceneSlotPatch {
     }
 }
 
+/// The scene-independent half of a scene-structure edit: every track's lane
+/// roster (eseq-53y7.6). Pattern chains restore out of `ProjectScenes`, but
+/// the roster lives beside them in `PatternState::track_lane_rosters` and is
+/// reconciled into every chain at each pattern activation — so an undo that
+/// restored only the chains would be silently re-applied by the next
+/// reconcile. Roster-aware edits (`apply_recorded_scene_structure_mutation`)
+/// carry this; edits that cannot touch a roster leave it `None`.
+#[derive(Clone, Debug)]
+pub struct TrackLaneRosterPatch {
+    pub before: Vec<crate::process::TrackLaneRoster>,
+    pub after: Vec<crate::process::TrackLaneRoster>,
+}
+
+impl TrackLaneRosterPatch {
+    fn state_bytes(state: &[crate::process::TrackLaneRoster]) -> usize {
+        state
+            .iter()
+            .map(|roster| {
+                roster.capacity() * std::mem::size_of::<crate::process::TrackLaneRosterSlot>()
+                    + roster
+                        .iter()
+                        .map(|slot| slot.instance_name.capacity() + slot.class_name.capacity())
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + Self::state_bytes(&self.before)
+            + Self::state_bytes(&self.after)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SceneStructurePatch {
     pub before: crate::sequencer::ProjectScenes,
     pub after: crate::sequencer::ProjectScenes,
+    /// Per-track lane rosters captured around the same edit, when the edit
+    /// could have changed them. `None` means "this edit cannot move a
+    /// roster", and replay leaves the rosters alone.
+    pub rosters: Option<TrackLaneRosterPatch>,
 }
 
 impl SceneStructurePatch {
+    /// A scene-structure patch that carries no roster change.
+    pub fn new(
+        before: crate::sequencer::ProjectScenes,
+        after: crate::sequencer::ProjectScenes,
+    ) -> Self {
+        Self { before, after, rosters: None }
+    }
+
+    /// The same patch with the per-track lane rosters captured around the
+    /// edit. Restoring the roster is a no-op when the two halves match, so
+    /// callers may pass them unconditionally.
+    pub fn with_rosters(
+        mut self,
+        before: Vec<crate::process::TrackLaneRoster>,
+        after: Vec<crate::process::TrackLaneRoster>,
+    ) -> Self {
+        self.rosters = (before != after).then_some(TrackLaneRosterPatch { before, after });
+        self
+    }
+
     fn state_bytes(state: &crate::sequencer::ProjectScenes) -> usize {
             state.track_pools.iter().map(|pool| {
                 pool.patterns.capacity()
@@ -208,6 +266,7 @@ impl SceneStructurePatch {
         std::mem::size_of::<Self>()
             + Self::state_bytes(&self.before)
             + Self::state_bytes(&self.after)
+            + self.rosters.as_ref().map_or(0, TrackLaneRosterPatch::retained_bytes)
     }
 }
 

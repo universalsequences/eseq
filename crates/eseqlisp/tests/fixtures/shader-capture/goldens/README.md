@@ -32,7 +32,7 @@ tables.
 | `text` | `text_vert` + `text_frag` | Eight glyph cells, nearest-sampled, `mix(bg, fg, coverage)` with an alternating per-quad background |
 | `proportional-text` | `text_vert` + `prop_text_frag` | The same cells linear-sampled, coverage as alpha, no background rect |
 | `image` | `image_vert` + `image_frag` | Unclipped / rounded / circle-clipped / rotated-and-translucent quads |
-| `patch-cable` | `patch_cable_vert` + `patch_cable_frag` | Two bezier cables of different radius and color, plus the segmented orthogonal router |
+| `patch-cable` | `patch_cable_vert` + `patch_cable_frag` | A patcher-style bezier (white core, dark edge), a solid app-wide bezier (flat colour, dark rim, plug discs over both ends), plus the segmented orthogonal router |
 | `widget-surface` | widget preamble + `widget_vert` + `button_surface.{metal,wgsl}` | Four button surfaces: three corner radii and the splayed tab shape |
 | `wavetable` | `wavetable_vert` + `wavetable_frag` | Sine/saw/square/triangle stacked bottom to top, with the morphed selected wave at `wave_pos` 1.6 |
 | `waveform` | `waveform_vert` + `waveform_frag` | A decaying burst with a selection, both boundary flags, an active start marker and the playhead |

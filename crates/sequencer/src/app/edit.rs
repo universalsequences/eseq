@@ -2184,11 +2184,16 @@ impl App {
         let profile = std::env::var_os("METAL_SEQ_PROFILE_PATTERN_SWITCH").is_some();
         let profile_started = Instant::now();
         let before = self.capture_synchronized_scene_structure_state()?;
+        // Roster structure is scene-independent and therefore NOT inside
+        // `ProjectScenes`; capture it alongside so undo restores both halves
+        // (eseq-53y7.6).
+        let rosters_before = self.state.capture_track_lane_rosters();
         let capture_before_elapsed = profile_started.elapsed();
         let mutate_started = Instant::now();
         let result = match mutate(self) {
             Ok(result) => result,
             Err(error) => {
+                self.state.restore_track_lane_rosters(&rosters_before);
                 return match self.restore_scene_structure_state(&before) {
                     Ok(()) => Err(error),
                     Err(rollback_error) => Err(format!(
@@ -2207,6 +2212,7 @@ impl App {
             &self.tracks,
             &self.graph.track_instrument_types,
         ) {
+            self.state.restore_track_lane_rosters(&rosters_before);
             return match self.restore_scene_structure_state(&before) {
                 Ok(()) => Err(
                     "Scene edit was rolled back because its after-state could not be synchronized"
@@ -2222,7 +2228,9 @@ impl App {
         let after = self.state.capture_project_scenes();
         let capture_after_elapsed = capture_after_started.elapsed();
         let commit_started = Instant::now();
-        let patch = SceneStructurePatch { before, after };
+        let rosters_after = self.state.capture_track_lane_rosters();
+        let patch = SceneStructurePatch::new(before, after)
+            .with_rosters(rosters_before, rosters_after);
         let retained_bytes = patch.retained_bytes();
         self.history.commit(label, None, EditPatch::SceneStructure(patch), retained_bytes);
         if profile {
@@ -2272,7 +2280,7 @@ impl App {
             return Err(message);
         }
         let after = self.state.capture_project_scenes();
-        let patch = SceneStructurePatch { before, after };
+        let patch = SceneStructurePatch::new(before, after);
         let retained_bytes = patch.retained_bytes();
         Ok(self.history.commit(
             label,
@@ -9729,15 +9737,28 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.state.set_scene_slot_overrides(&writes).map_err(EditError::ReplayFailed)
         }
         EditPatch::SceneStructure(patch) => {
-            let target = match mode {
-                ApplyMode::Undo => &patch.before,
-                ApplyMode::Redo => &patch.after,
+            let (target, rosters) = match mode {
+                ApplyMode::Undo => (
+                    &patch.before,
+                    patch.rosters.as_ref().map(|rosters| &rosters.before),
+                ),
+                ApplyMode::Redo => (
+                    &patch.after,
+                    patch.rosters.as_ref().map(|rosters| &rosters.after),
+                ),
                 ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
                     return Err(EditError::ReplayFailed(
                         "scene-structure replay requires undo or redo mode".to_string(),
                     ));
                 }
             };
+            // Rosters first: `ProjectScenes` carries the pattern chains, but
+            // every pattern activation reconciles the roster into the chain
+            // it activates, so restoring the chains against a stale roster
+            // would immediately undo the undo (eseq-53y7.6).
+            if let Some(rosters) = rosters {
+                app.state.restore_track_lane_rosters(rosters);
+            }
             app.restore_scene_structure_state(target)
                 .map_err(EditError::ReplayFailed)
         }

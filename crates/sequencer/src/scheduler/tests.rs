@@ -3257,6 +3257,7 @@
                             sample_time: cycle * 96_000 + step as u64 * 6_000,
                             step_beats: 0.25,
                             resolved: test_resolved_step(),
+                            note: 0.0,
                             event: Value::Nil,
                         },
                     ) else {
@@ -4031,6 +4032,204 @@
         }
     }
 
+    /// Two 8-step tracks with the default lane layer; track 1 is the grab
+    /// source. `edit_state` paints the patterns, `edit_chain` the lanes.
+    /// Returns track 0's first eight triggers in time order.
+    fn grab_lanes_fixture(
+        edit_state: impl FnOnce(&SequencerState),
+        edit_chain: impl FnOnce(&mut crate::process::TrackProcessChain),
+    ) -> Vec<ObservedTrigger> {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        for track in 0..2 {
+            state.pattern.track_params[track].set_num_steps(8);
+            for step in 0..8 {
+                state.pattern.patterns[track].set_step_active(step, true);
+            }
+        }
+        edit_state(&state);
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new(), Vec::new()],
+            vec![
+                EffectDescriptor::builtin_sampler(),
+                EffectDescriptor::builtin_sampler(),
+            ],
+            0,
+            0,
+        );
+        scratch
+            .eval(&lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        let mut chain = crate::process::default_project_layer();
+        {
+            let grab = default_lane_slot_mut(&mut chain, "grab");
+            grab.inlets.insert(
+                "source".to_string(),
+                crate::process::ProcessLiteral::Number(1.0),
+            );
+        }
+        edit_chain(&mut chain);
+        assert!(state.set_project_process_chain(chain));
+        let mut events = schedule_process_observed_fixture(&state, scratch, 102_000)
+            .into_iter()
+            .filter(|event| event.track == 0)
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.sample_time);
+        events.truncate(8);
+        events
+    }
+
+    fn paint_transposes(state: &SequencerState, track: usize, values: &[f32]) {
+        for (step, value) in values.iter().enumerate() {
+            state.pattern.step_data[track].set(step, StepParam::Transpose, *value);
+        }
+    }
+
+    const SOURCE_SCALE: [f32; 8] = [0.0, 2.0, 4.0, 5.0, 7.0, 9.0, 11.0, 12.0];
+
+    /// The Cirklon manual's "A Quick Grab": a flat pattern grabbing the note
+    /// of a rising scale on steps 1, 5, ... plays the scale's note on exactly
+    /// those steps, the same tick the source steps onto it. Here tacc also
+    /// ramps on the grabbing track: a note grab replaces the authored pitch
+    /// and keeps the accumulator on top (Cirklon `note`, not `nte+A`).
+    #[test]
+    fn scheduler_default_lanes_grab_replaces_the_note_from_the_source_step_same_tick() {
+        let events = run_with_scheduler_stack(|| {
+            grab_lanes_fixture(
+                |state| paint_transposes(state, 1, &SOURCE_SCALE),
+                |chain| {
+                    default_lane_slot_mut(chain, "grab").lanes.insert(
+                        "grab".to_string(),
+                        lane(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+                    );
+                    default_lane_slot_mut(chain, "tacc")
+                        .lanes
+                        .insert("amount".to_string(), lane(&[1.0; 8]));
+                },
+            )
+        });
+        let transposes = events
+            .iter()
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transposes,
+            vec![1.0, 2.0, 3.0, 4.0, 12.0, 6.0, 7.0, 8.0],
+            "step 0 grabs 0 and step 4 grabs 7 from the scale, both on top of the tacc ramp"
+        );
+    }
+
+    /// A chord step on the grabbing track moves as a block: the write is a
+    /// transpose delta that lands the chord's base note (3) on the source's
+    /// (7), so the resolved transpose is 4 and the chord sounds 3 + 4 = 7.
+    /// A chord step on the source grabs its base note, not its trn p-lock.
+    #[test]
+    fn scheduler_default_lanes_grab_moves_chords_by_their_base_note() {
+        let events = run_with_scheduler_stack(|| {
+            grab_lanes_fixture(
+                |state| {
+                    paint_transposes(state, 1, &SOURCE_SCALE);
+                    state.pattern.chord_data[0].add_note(4, 3.0);
+                    state.pattern.chord_data[0].add_note(4, 7.0);
+                    // Source step 6 has chord data (base 24) under a trn of 11:
+                    // the chord base is what a note grab copies.
+                    state.pattern.chord_data[1].add_note(6, 24.0);
+                    state.pattern.chord_data[1].add_note(6, 28.0);
+                },
+                |chain| {
+                    default_lane_slot_mut(chain, "grab").lanes.insert(
+                        "grab".to_string(),
+                        lane(&[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0]),
+                    );
+                },
+            )
+        });
+        let transposes = events
+            .iter()
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transposes,
+            vec![0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 24.0, 0.0],
+            "chord grabber: 7 - 3 = +4; chord source: base note 24, not trn 11"
+        );
+    }
+
+    /// `value` picks the row: dur copies the source step's duration p-lock
+    /// and leaves the note alone.
+    #[test]
+    fn scheduler_default_lanes_grab_value_picks_duration() {
+        let events = run_with_scheduler_stack(|| {
+            grab_lanes_fixture(
+                |state| {
+                    paint_transposes(state, 1, &SOURCE_SCALE);
+                    state.pattern.step_data[1].set(4, StepParam::Duration, 3.0);
+                },
+                |chain| {
+                    let grab = default_lane_slot_mut(chain, "grab");
+                    grab.lanes.insert(
+                        "grab".to_string(),
+                        lane(&[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+                    );
+                    grab.inlets.insert(
+                        "value".to_string(),
+                        crate::process::ProcessLiteral::Number(2.0),
+                    );
+                },
+            )
+        });
+        let default_duration = StepParam::Duration.default_value();
+        let durations = events
+            .iter()
+            .map(|event| event.duration)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            durations,
+            vec![
+                default_duration,
+                default_duration,
+                default_duration,
+                default_duration,
+                3.0,
+                default_duration,
+                default_duration,
+                default_duration
+            ]
+        );
+        assert!(
+            events.iter().all(|event| event.transpose == 0.0),
+            "a dur grab never touches the note"
+        );
+    }
+
+    /// The manual's timebase example: a source stepping four times slower
+    /// holds each step for four of the grabber's, so grabbing on every step
+    /// plays the grabber's pattern through under each source note in turn.
+    #[test]
+    fn scheduler_default_lanes_grab_holds_a_slow_source_step_until_it_moves() {
+        let events = run_with_scheduler_stack(|| {
+            grab_lanes_fixture(
+                |state| {
+                    paint_transposes(state, 1, &[2.0, 9.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]);
+                    state.pattern.track_params[1].set_timebase(crate::sequencer::Timebase::Quarter);
+                },
+                |chain| {
+                    default_lane_slot_mut(chain, "grab")
+                        .lanes
+                        .insert("grab".to_string(), lane(&[1.0; 8]));
+                },
+            )
+        });
+        let transposes = events
+            .iter()
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(transposes, vec![2.0, 2.0, 2.0, 2.0, 9.0, 9.0, 9.0, 9.0]);
+    }
+
     fn rand_spike_into_acc_fixture(hold: f64) -> Vec<f32> {
         // rand roll 0 0 0 1 0 0 0 0 with lo = hi = 5 (a deterministic draw)
         // wired into acc A (accumulate) on transpose.
@@ -4072,6 +4271,118 @@
             })
         });
         events.iter().take(8).map(|event| event.transpose).collect()
+    }
+
+    /// Two per-track grabs added to track 0's lane roster (eseq-53y7), each
+    /// sourcing a different track, both running after the whole project
+    /// layer. Returns track 0's first eight triggers plus its composed chain
+    /// order as the scheduler snapshot carries it.
+    fn track_roster_grabs_fixture() -> (Vec<ObservedTrigger>, Vec<String>) {
+        let state = Arc::new(SequencerState::new(
+            3,
+            vec![
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+            ],
+        ));
+        for track in 0..3 {
+            state.pattern.track_params[track].set_num_steps(8);
+            for step in 0..8 {
+                state.pattern.patterns[track].set_step_active(step, true);
+            }
+        }
+        // Track 1 is the note source, track 2 the duration source.
+        paint_transposes(&state, 1, &SOURCE_SCALE);
+        state.pattern.step_data[2].set(4, StepParam::Duration, 3.0);
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new(), Vec::new(), Vec::new()],
+            vec![
+                EffectDescriptor::builtin_sampler(),
+                EffectDescriptor::builtin_sampler(),
+                EffectDescriptor::builtin_sampler(),
+            ],
+            0,
+            0,
+        );
+        scratch
+            .eval(&lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        // The project layer stays untouched: its own grab has no grab lane,
+        // so only the two added slots write.
+        assert!(state.set_project_process_chain(crate::process::default_project_layer()));
+        let note_grab = state
+            .add_track_roster_slot(0, "lane-grab")
+            .expect("note grab slot");
+        let dur_grab = state
+            .add_track_roster_slot(0, "lane-grab")
+            .expect("duration grab slot");
+        for (instance_id, source, value) in
+            [(note_grab, 1.0, 0.0), (dur_grab, 2.0, 2.0)]
+        {
+            assert!(state.set_track_process_inlet_value(
+                0,
+                instance_id,
+                "source",
+                crate::process::ProcessLiteral::Number(source),
+            ));
+            assert!(state.set_track_process_inlet_value(
+                0,
+                instance_id,
+                "value",
+                crate::process::ProcessLiteral::Number(value),
+            ));
+            for step in 0..8 {
+                assert!(state.set_process_lane_value(0, instance_id, "grab", step, 1.0));
+            }
+        }
+        let order = state
+            .composed_track_process_chain(0)
+            .expect("composed chain")
+            .slots
+            .iter()
+            .map(|slot| slot.instance_name.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        let mut events = schedule_process_observed_fixture(&state, scratch, 102_000)
+            .into_iter()
+            .filter(|event| event.track == 0)
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.sample_time);
+        events.truncate(8);
+        (events, order)
+    }
+
+    /// Both added grabs fire, after every project lane and in roster order:
+    /// the first copies track 1's notes, the second copies track 2's
+    /// durations, so neither write hides the other.
+    #[test]
+    fn scheduler_track_roster_grabs_both_fire_after_the_project_lanes() {
+        let (events, order) = run_with_scheduler_stack(track_roster_grabs_fixture);
+        assert_eq!(
+            order.iter().rev().take(2).cloned().collect::<Vec<_>>(),
+            vec!["grab 3".to_string(), "grab 2".to_string()],
+            "added slots run last, in roster order; chain was {order:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.transpose)
+                .collect::<Vec<_>>(),
+            SOURCE_SCALE.to_vec(),
+            "the first added grab copies the note source track"
+        );
+        let default_duration = StepParam::Duration.default_value();
+        let mut expected_durations = vec![default_duration; 8];
+        expected_durations[4] = 3.0;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.duration)
+                .collect::<Vec<_>>(),
+            expected_durations,
+            "the second added grab copies the duration source track"
+        );
     }
 
     #[test]

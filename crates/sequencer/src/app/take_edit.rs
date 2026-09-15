@@ -897,10 +897,10 @@ impl App {
         if take_before == take_after && arrangement_before == arrangement_current {
             self.history.discard_active_gesture_entry(&merge_key);
         } else {
-            let scene_patch = SceneStructurePatch {
-                before: scenes_before,
-                after: scenes_after,
-            };
+            let scene_patch = SceneStructurePatch::new(
+                scenes_before,
+                scenes_after,
+            );
             let arrangement_patch = ArrangementStructurePatch {
                 before: arrangement_before,
                 after: arrangement_current,
@@ -961,10 +961,10 @@ impl App {
         }
         let scenes_after = self.state.capture_project_scenes();
         finish_active_gesture(self);
-        let scene_patch = SceneStructurePatch {
-            before: scenes_before,
-            after: scenes_after,
-        };
+        let scene_patch = SceneStructurePatch::new(
+            scenes_before,
+            scenes_after,
+        );
         let arrangement_patch = ArrangementStructurePatch {
             before: arrangement_before,
             after: arrangement_after,
@@ -1077,10 +1077,10 @@ impl App {
 
         let scenes_after = self.state.capture_project_scenes();
         finish_active_gesture(self);
-        let scene_patch = SceneStructurePatch {
-            before: scenes_before,
-            after: scenes_after,
-        };
+        let scene_patch = SceneStructurePatch::new(
+            scenes_before,
+            scenes_after,
+        );
         let arrangement_patch = ArrangementStructurePatch {
             before: Some(arrangement_before),
             after: Some(arrangement_after),
@@ -1194,10 +1194,10 @@ impl App {
         }
         let scenes_after = self.state.capture_project_scenes();
         finish_active_gesture(self);
-        let scene_patch = SceneStructurePatch {
-            before: scenes_before,
-            after: scenes_after,
-        };
+        let scene_patch = SceneStructurePatch::new(
+            scenes_before,
+            scenes_after,
+        );
         let arrangement_patch = ArrangementStructurePatch {
             before: arrangement_before,
             after: Some(arrangement_after),

@@ -12644,6 +12644,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             sample_time: 0,
             step_beats: 0.25,
             written_inlets: Vec::new(),
+            note: 0.0,
             resolved: ResolvedStep {
                 duration: 1.0,
                 velocity: 0.8,
@@ -13066,6 +13067,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tracks: Arc::new(vec![crate::process::ProcessTrackReadSnapshot {
                 current,
                 steps: vec![step_zero, step_one],
+                step_pattern: None,
                 trigs: vec![trig, trig, trig],
                 trig_beats: vec![0.9, 0.5, -3.1],
             }]),
@@ -14765,6 +14767,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             sample_time: 0,
             step_beats: 0.25,
             written_inlets: Vec::new(),
+            note: 0.0,
             resolved: crate::accumulator::ResolvedStep {
                 duration: 1.0,
                 velocity: 1.0,

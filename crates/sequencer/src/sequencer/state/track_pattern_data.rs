@@ -727,6 +727,18 @@ impl TrackPatternData {
             )
         };
         {
+            // The track's roster is scene-independent (eseq-53y7): a pattern
+            // stored before a slot was added still activates with it.
+            let roster = state
+                .pattern
+                .track_lane_rosters
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .unwrap_or_default();
+            let mut refreshed_process_chain = refreshed_process_chain;
+            crate::process::reconcile_track_lane_roster(&mut refreshed_process_chain, &roster);
             let mut process_chains = state.pattern.process_chains.lock().unwrap();
             if track < process_chains.len() {
                 process_chains[track] = refreshed_process_chain;
@@ -858,6 +870,18 @@ impl TrackPatternData {
             )
         };
         {
+            // The track's roster is scene-independent (eseq-53y7): a pattern
+            // stored before a slot was added still activates with it.
+            let roster = state
+                .pattern
+                .track_lane_rosters
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .unwrap_or_default();
+            let mut refreshed_process_chain = refreshed_process_chain;
+            crate::process::reconcile_track_lane_roster(&mut refreshed_process_chain, &roster);
             let mut process_chains = state.pattern.process_chains.lock().unwrap();
             if track < process_chains.len() {
                 process_chains[track] = refreshed_process_chain;

@@ -64,7 +64,6 @@ pre { padding: 18px 22px; overflow-x: auto; border: 1px solid var(--border); bor
 pre code { padding: 0; }
 .app-action { font-weight: 500; }
 figure { margin: 28px 0 32px; }
-.figure-link { display: block; width: fit-content; max-width: 100%; cursor: zoom-in; border-radius: 8px; }
 figure img { display: block; max-width: 100%; height: auto; border: 1px solid var(--border); border-radius: 8px; background: #1a1a1e; }
 figcaption { color: var(--muted); font-size: 13px; line-height: 1.6; margin-top: 12px; max-width: 80ch; }
 main .chapter-menu { list-style: none; padding: 0; margin: 32px 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 32px; }

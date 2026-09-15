@@ -2,7 +2,7 @@
 
 Beside velocity, duration, and the other step parameters, every track carries twelve process lanes. A lane is a value per step, like any other parameter lane, but instead of setting a note property directly it feeds a small process that runs just before the step plays. Processes remember things between steps, so a few sparse values become a running transform: a transpose that climbs, a random number that lands on a filter, a hit that repeats more each bar.
 
-The lanes are the same on every track, and each track keeps its own values and its own running state. If you know the Cirklon's accumulators and aux lanes, this is that idea with named lanes.
+Every track starts with the same lanes, and you can add more to a single track; each track keeps its own values and its own running state. If you know the Cirklon's accumulators and aux lanes, this is that idea with named lanes.
 
 ![The tacc lane and its amber control strip. The strip sets the accumulation mode, output, and range.](images/process-lane.png)
 
@@ -14,10 +14,18 @@ The lanes are the same on every track, and each track keeps its own values and i
 - **count** — adds the lane value to a counter each step and wraps from hi back to lo. A generator like rand, but predictable.
 - **tacc** — accumulates the lane value into a running transpose, added to the step's own transpose. Set 1 on the first step for a line that climbs one semitone per bar.
 - **acc A** and **acc B** — two more accumulators with a mappable output. acc A starts on retrig and acc B on rate, so a ramp on either turns into a growing roll.
-- **grab** — adds another track's transpose, scaled by the lane, optionally from a few steps ago. Set the source track in the strip.
+- **grab** — a step set high plays the value from the step the source track is on right now instead of its own: the note, the velocity or the duration, whichever **value** says in the strip. It is the Cirklon inter-track grab. Set every step high and this track plays the source's melody on its own rhythm; set a few and only those steps borrow. A source track running at a slower timebase holds its step for a whole bar, so the grabbing track plays through transposed by that one note. A note grab keeps this track's own tacc offsets on top, and a chord step moves as a block so its bottom note lands on the source's.
 - **cmp A** and **cmp B** — comparators. Wire another lane into it, pick an operator and a value in the strip, and the lane sends 1 when the input passes the test and 0 when it fails. The painted lane is the input when nothing is wired in. On a step where the wired lane sends nothing, such as rand on a step you left low, the comparator falls back to the painted value; set hold to 1 to keep comparing the last number it received instead.
 - **veto** — a step set high is silent. Paint it for a mute mask, or wire a comparator into it to mute on a condition: acc A into cmp A set to `>= 8`, cmp A into veto, and the track drops out once the accumulator reaches 8.
 - **roll** — a step set high rolls the whole project from that step for the step's length, looping a window at the rate in the strip. Wire rand into cmp A set to `> 0.8` and cmp A into roll for a roll on roughly one step in five. The transport ROLL button lights while it runs. A roll never restarts itself while it is running, and a rate no finer than the step has nothing to repeat.
+
+## Adding a lane
+
+Each lane does one job, so a second job needs a second lane. At the end of the patch bay, which the **patch** chip in the lane strip header opens, there is a **+** box. Click it and a list of the lane types opens; pick one and a new lane is added to this track, at the end of the chain, with nothing painted on it. It appears in this track's lane dropdown under its own name: the plain name if the track has not used it yet, otherwise the name with a number, so a second grab is **grab 2**. Use the strip's header arrows to move it earlier if another lane needs to feed it.
+
+A lane you add belongs to the track, not to the scene. It exists on that track in every scene, while what you paint on it and everything in its strip stay per scene, like the rest of the grid. Removing it removes it from every scene, values and all.
+
+The usual reason to add one is a second grab. grab takes one source track and one kind of value, so to play track 1's notes with track 3's velocities, keep the first grab on track 1 with value set to note, add a second grab, set its source to track 3 and its value to vel, and paint both lanes high on the steps that should borrow.
 
 ## Opening a lane
 
@@ -33,7 +41,7 @@ With a lane open, a strip appears to the right of the grid. It is the lane's con
 - **OUT** shows the target the output lands on, and **map** changes it.
 - **NOW** shows the running value, with a small scope of its recent history on this track. It stays hidden until the lane has fired.
 - **lo** and **hi** set the range the value wraps inside. They also set the range of the lane's sliders.
-- grab's **source** is a track picker; **lag** reads that many steps back.
+- grab's **source** is a track picker and **value** picks what is grabbed: note, vel or dur.
 
 ## Mapping an output
 

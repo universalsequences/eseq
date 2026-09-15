@@ -104,6 +104,7 @@ pub(super) fn handle(
                     match load_result {
                         Ok(()) => {
                             if is_rack && rack_slot.is_none() {
+                                super::initialize_loaded_rack_view(app, editor, track);
                                 sync_after_instrument_track_apply(
                                     &mut app,
                                     &mut editor,
@@ -250,7 +251,7 @@ pub(super) fn handle(
             let playing = state.transport.playing.load(Ordering::Relaxed);
             let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
             let rt = editor.runtime_mut();
-            sync_pattern_state(rt, &state);
+            sync_project_scene_state(rt, &state);
             sync_project_state(rt, &app);
             rt.set_reactive("SEQ", "playing", Value::Bool(playing));
             rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
@@ -264,6 +265,7 @@ pub(super) fn handle(
             sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
             sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
             sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
+            sync_mod_port_level_fields(rt, &ctx.meters.cached_mod_port_levels);
             // New projects have default tracks; publish their real topology,
             // rather than leaving live input and the UI with empty mirrors.
             sync_track_topology_state(

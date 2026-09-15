@@ -3285,6 +3285,308 @@
         assert_eq!(state.track_process_chain(0), Some(expected));
     }
 
+    /// Three scenes on one track, launched by index. Scene 0 is "A", 1 is
+    /// "B", 2 is "C" in the eseq-53y7 acceptance criteria.
+    fn state_with_three_scenes() -> SequencerState {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            (0..3)
+                .map(|_| PatternSnapshot::new_default(1, &[]))
+                .collect(),
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        state
+    }
+
+    fn launch(state: &SequencerState, scene: usize) {
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+        state
+            .launch_scene(scene, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .unwrap();
+    }
+
+    fn roster_slot(
+        state: &SequencerState,
+        instance_id: crate::process::ProcessInstanceId,
+    ) -> Option<crate::process::TrackProcessSlot> {
+        state
+            .track_process_chain(0)
+            .expect("track 1 process chain")
+            .slots
+            .iter()
+            .find(|slot| slot.instance_id == instance_id)
+            .cloned()
+    }
+
+    #[test]
+    fn track_roster_slot_is_scene_independent_and_its_values_are_not() {
+        let state = state_with_three_scenes();
+        launch(&state, 1);
+
+        let id = state
+            .add_track_roster_slot(0, "lane-grab")
+            .expect("roster slot added");
+        // The project layer owns the bare `grab` name on every track.
+        assert_eq!(
+            state
+                .track_lane_roster(0)
+                .expect("track 1 roster")
+                .iter()
+                .map(|entry| entry.instance_name.clone())
+                .collect::<Vec<_>>(),
+            vec!["grab 2".to_string()]
+        );
+        // Track slots run after every project-layer slot.
+        let chain = state.track_process_chain(0).expect("track 1 process chain");
+        assert_eq!(chain.slots.last().map(|slot| slot.instance_id), Some(id));
+        assert!(roster_slot(&state, id).expect("scene B slot").lanes.is_empty());
+
+        // The slot exists in the sibling scenes too, with no lane values.
+        for scene in [0usize, 2] {
+            launch(&state, scene);
+            let slot = roster_slot(&state, id)
+                .unwrap_or_else(|| panic!("scene {scene} must hold the roster slot"));
+            assert!(slot.enabled);
+            assert!(
+                slot.lanes.is_empty(),
+                "scene {scene} must start with no lane values"
+            );
+        }
+
+        // Painting the lane in scene A leaves scene B's values alone.
+        launch(&state, 0);
+        assert!(state.set_process_lane_value(0, id, "value", 2, 0.5));
+        assert_eq!(
+            roster_slot(&state, id).expect("scene A slot").lanes["value"].values,
+            vec![0.0, 0.0, 0.5]
+        );
+        launch(&state, 1);
+        assert!(
+            roster_slot(&state, id).expect("scene B slot").lanes.is_empty(),
+            "lane values must stay scene-scoped"
+        );
+        launch(&state, 0);
+        assert_eq!(
+            roster_slot(&state, id).expect("scene A slot").lanes["value"].values,
+            vec![0.0, 0.0, 0.5],
+            "returning to the painted scene must keep its values"
+        );
+
+        // Removing goes through the roster, so it lands in every scene.
+        assert!(state.remove_track_roster_slot(0, id));
+        assert!(state.track_lane_roster(0).expect("track 1 roster").is_empty());
+        for scene in [0usize, 1, 2] {
+            launch(&state, scene);
+            assert!(
+                roster_slot(&state, id).is_none(),
+                "scene {scene} must not keep a removed roster slot"
+            );
+        }
+    }
+
+    /// Removing one added lane must not disturb the other in any scene — the
+    /// UI's remove button routes a roster slot here (eseq-53y7.2), so this is
+    /// the scene-wide half of that path.
+    #[test]
+    fn removing_one_track_roster_slot_keeps_the_other_and_its_values_in_every_scene() {
+        let state = state_with_three_scenes();
+        launch(&state, 1);
+        let first = state.add_track_roster_slot(0, "lane-grab").expect("grab 2");
+        let second = state.add_track_roster_slot(0, "lane-grab").expect("grab 3");
+
+        // Each scene paints the surviving lane differently, and points it at
+        // its own source track.
+        for scene in [0usize, 1, 2] {
+            launch(&state, scene);
+            assert!(state.set_process_lane_value(0, second, "grab", scene, 1.0));
+            assert!(state.set_track_process_inlet_value(
+                0,
+                second,
+                "source",
+                crate::process::ProcessLiteral::Number(scene as f64 + 1.0),
+            ));
+            assert!(state.set_process_lane_value(0, first, "grab", 7, 1.0));
+        }
+
+        assert!(state.remove_track_roster_slot(0, first));
+        assert_eq!(
+            state
+                .track_lane_roster(0)
+                .expect("track 1 roster")
+                .iter()
+                .map(|entry| entry.instance_id)
+                .collect::<Vec<_>>(),
+            vec![second]
+        );
+        for scene in [0usize, 1, 2] {
+            launch(&state, scene);
+            assert!(
+                roster_slot(&state, first).is_none(),
+                "scene {scene} must lose the removed lane"
+            );
+            let slot = roster_slot(&state, second)
+                .unwrap_or_else(|| panic!("scene {scene} must keep the other lane"));
+            assert_eq!(slot.instance_name.as_deref(), Some("grab 3"));
+            assert_eq!(
+                slot.lanes["grab"].values.iter().position(|value| *value > 0.5),
+                Some(scene),
+                "scene {scene} must keep its own lane values"
+            );
+            assert_eq!(
+                slot.inlets.get("source"),
+                Some(&crate::process::ProcessLiteral::Number(scene as f64 + 1.0)),
+                "scene {scene} must keep its own inlet literal"
+            );
+        }
+    }
+
+    /// Slot order is structure, not painted data (eseq-53y7.5): reordering an
+    /// added lane in one scene reorders it in every scene, and leaves each
+    /// scene's own lane values alone.
+    #[test]
+    fn reordering_a_track_roster_slot_reorders_it_in_every_scene() {
+        let state = state_with_three_scenes();
+        launch(&state, 0);
+        let first = state.add_track_roster_slot(0, "lane-grab").expect("grab 2");
+        let second = state.add_track_roster_slot(0, "lane-grab").expect("grab 3");
+
+        // Paint each scene's lanes differently so the reorder can be shown
+        // not to disturb them.
+        for scene in [0usize, 1, 2] {
+            launch(&state, scene);
+            assert!(state.set_process_lane_value(0, first, "grab", scene, 1.0));
+            assert!(state.set_process_lane_value(0, second, "grab", scene + 4, 1.0));
+        }
+
+        let roster_order = |state: &SequencerState| {
+            state
+                .track_process_chain(0)
+                .expect("track 1 process chain")
+                .slots
+                .iter()
+                .filter(|slot| crate::process::is_track_roster_slot(slot))
+                .map(|slot| slot.instance_id)
+                .collect::<Vec<_>>()
+        };
+
+        launch(&state, 0);
+        assert_eq!(roster_order(&state), vec![first, second]);
+        assert!(state.move_track_process_slot_before(0, second, Some(first)));
+        assert_eq!(roster_order(&state), vec![second, first]);
+        assert_eq!(
+            state
+                .track_lane_roster(0)
+                .expect("track 1 roster")
+                .iter()
+                .map(|entry| entry.instance_id)
+                .collect::<Vec<_>>(),
+            vec![second, first],
+            "the move must rewrite the roster, not just this pattern"
+        );
+
+        for scene in [0usize, 1, 2] {
+            launch(&state, scene);
+            assert_eq!(
+                roster_order(&state),
+                vec![second, first],
+                "scene {scene} must see the new order"
+            );
+            assert_eq!(
+                roster_slot(&state, first).expect("grab 2").lanes["grab"]
+                    .values
+                    .iter()
+                    .position(|value| *value > 0.5),
+                Some(scene),
+                "scene {scene} must keep its own lane values"
+            );
+            assert_eq!(
+                roster_slot(&state, second).expect("grab 3").lanes["grab"]
+                    .values
+                    .iter()
+                    .position(|value| *value > 0.5),
+                Some(scene + 4),
+                "scene {scene} must keep its own lane values"
+            );
+        }
+
+        // Moving back to the end lands everywhere too.
+        launch(&state, 2);
+        assert!(state.move_track_process_slot_before(0, second, None));
+        for scene in [0usize, 1, 2] {
+            launch(&state, scene);
+            assert_eq!(roster_order(&state), vec![first, second]);
+        }
+    }
+
+    #[test]
+    fn track_roster_slots_mint_unique_names_and_ids_per_track() {
+        let state = make_state_with_tracks(2);
+        let first = state.add_track_roster_slot(0, "lane-grab").expect("first");
+        let second = state.add_track_roster_slot(0, "lane-grab").expect("second");
+        let other_track = state.add_track_roster_slot(1, "lane-grab").expect("track 2");
+        assert_ne!(first, second);
+        assert_ne!(first, other_track);
+        assert_ne!(second, other_track);
+        assert_eq!(
+            state
+                .track_lane_roster(0)
+                .expect("track 1 roster")
+                .iter()
+                .map(|entry| entry.instance_name.clone())
+                .collect::<Vec<_>>(),
+            vec!["grab 2".to_string(), "grab 3".to_string()]
+        );
+        // Names are per track, so track 2's first added grab is "grab 2" too
+        // — which is exactly why roster slots key runtime identity on the
+        // globally unique instance id instead of the name hash.
+        assert_eq!(
+            state.track_lane_roster(1).expect("track 2 roster")[0].instance_name,
+            "grab 2"
+        );
+        let slot_for = |track: usize, id: crate::process::ProcessInstanceId| {
+            state
+                .track_process_chain(track)
+                .expect("process chain")
+                .slots
+                .iter()
+                .find(|slot| slot.instance_id == id)
+                .cloned()
+                .expect("roster slot in chain")
+        };
+        assert_ne!(
+            crate::process::track_process_slot_runtime_id(&slot_for(0, first), 0),
+            crate::process::track_process_slot_runtime_id(&slot_for(1, other_track), 1),
+        );
+        // Roster ids stay exact through f64: they cross into Lisp as numbers.
+        assert!(first.0 < (1u64 << 53));
+    }
+
+    #[test]
+    fn track_roster_edits_publish_to_the_scheduler_snapshot() {
+        let state = make_state_with_tracks(1);
+        let before = state.transport.pattern_epoch.load(Ordering::Relaxed);
+        let id = state
+            .add_track_roster_slot(0, "lane-grab")
+            .expect("roster slot added");
+        assert!(state.transport.pattern_epoch.load(Ordering::Relaxed) > before);
+        assert!(state.latest_scheduler_snapshot().tracks[0]
+            .process_chain
+            .slots
+            .iter()
+            .any(|slot| slot.instance_id == id));
+
+        let after_add = state.transport.pattern_epoch.load(Ordering::Relaxed);
+        assert!(state.remove_track_roster_slot(0, id));
+        assert!(state.transport.pattern_epoch.load(Ordering::Relaxed) > after_add);
+        assert!(!state.latest_scheduler_snapshot().tracks[0]
+            .process_chain
+            .slots
+            .iter()
+            .any(|slot| slot.instance_id == id));
+        assert!(!state.remove_track_roster_slot(0, id));
+    }
+
     #[test]
     fn process_chain_slot_edits_are_track_scoped_and_snapshot_visible() {
         let state = make_state_with_tracks(2);

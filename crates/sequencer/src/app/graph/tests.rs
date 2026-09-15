@@ -1987,6 +1987,72 @@
         }
     }
 
+    /// eseq-53y7: the scene-independent lane roster and the per-pattern lane
+    /// values it carries both survive a real project save/reopen.
+    #[test]
+    fn track_lane_roster_and_its_lane_values_survive_a_project_reopen() {
+        let engine = crate::audio::engine::init_headless_engine(44_100, 2).unwrap();
+        struct HeadlessGuard(LiveGraphPtr);
+        impl Drop for HeadlessGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    crate::audiograph::engine_stop_workers();
+                    crate::audiograph::destroy_live_graph(self.0.0);
+                }
+            }
+        }
+        let _guard = HeadlessGuard(engine.lg_ptr);
+        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let process_block = || {
+            let mut output = [0.0_f32; 1024];
+            unsafe { engine.lg_ptr.process_next_block(output.as_mut_ptr(), 512); }
+        };
+        app.start_new_project();
+
+        let id = app
+            .state
+            .add_track_roster_slot(1, "lane-grab")
+            .expect("roster slot added to track 2");
+        assert!(app.state.set_process_lane_value(1, id, "value", 3, 0.75));
+
+        let name = format!("__test-lane-roster-{}", std::process::id());
+        let project = app.capture_project(&name).unwrap();
+        assert_eq!(
+            project.track_lane_rosters[1][0].instance_name,
+            "grab 2",
+            "the roster is saved per track, outside pattern data"
+        );
+        assert!(project.track_lane_rosters[0].is_empty());
+        let path = crate::project::save_project(&name, &project).unwrap();
+        let _cleanup = TestProjectFile(path.clone());
+
+        app.queue_project_load_from_path(&name, &path).unwrap();
+        for _ in 0..100 {
+            if !app.has_pending_project_load() { break; }
+            app.advance_pending_project_load().unwrap();
+            process_block();
+        }
+        assert!(!app.has_pending_project_load());
+
+        let roster = app.state.track_lane_roster(1).expect("track 2 roster");
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].instance_id, id);
+        assert_eq!(roster[0].class_name, "lane-grab");
+        assert!(app.state.track_lane_roster(0).expect("track 1 roster").is_empty());
+        let slot = app
+            .state
+            .track_process_chain(1)
+            .expect("track 2 process chain")
+            .slots
+            .iter()
+            .find(|slot| slot.instance_id == id)
+            .cloned()
+            .expect("the reopened chain holds the roster slot");
+        assert_eq!(slot.lanes["value"].values, vec![0.0, 0.0, 0.0, 0.75]);
+        process_block();
+    }
+
     #[test]
     fn empty_track_creation_edit_save_reopen_and_history() {
         let engine = crate::audio::engine::init_headless_engine(44_100, 2).unwrap();

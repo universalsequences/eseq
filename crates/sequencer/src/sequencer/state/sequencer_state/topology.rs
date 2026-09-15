@@ -152,6 +152,9 @@ impl SequencerState {
         if let Some(chain) = self.pattern.process_chains.lock().unwrap().get_mut(track) {
             *chain = crate::process::TrackProcessChain::default();
         }
+        if let Some(roster) = self.pattern.track_lane_rosters.lock().unwrap().get_mut(track) {
+            roster.clear();
+        }
         if let Some(overrides) = self
             .pattern
             .project_process_lane_overrides
@@ -674,6 +677,15 @@ impl SequencerState {
         for idx in track_idx..old_count - 1 {
             let next = self.pattern.track_params[idx + 1].is_solo();
             self.pattern.track_params[idx].set_solo(next);
+        }
+        {
+            // Rosters are live-only per-track lanes: shift them down with
+            // their track, like the solo bits above.
+            let mut rosters = self.pattern.track_lane_rosters.lock().unwrap();
+            if track_idx < rosters.len() {
+                rosters.remove(track_idx);
+                rosters.push(Vec::new());
+            }
         }
         self.shift_runtime_track_bindings_left(track_idx, old_count);
         self.clear_live_track_lane(old_count - 1);

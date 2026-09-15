@@ -845,10 +845,10 @@ impl App {
         }
         let scenes_after = self.state.capture_project_scenes();
         finish_active_gesture(self);
-        let scene_patch = SceneStructurePatch {
-            before: scenes_before,
-            after: scenes_after,
-        };
+        let scene_patch = SceneStructurePatch::new(
+            scenes_before,
+            scenes_after,
+        );
         let arrangement_patch = ArrangementStructurePatch {
             before: arrangement_before,
             after: Some(arrangement.clone()),

@@ -41,7 +41,7 @@ static void test_recorder_init(void *state, int sampleRate, int maxBlock,
 }
 
 static NodeVTable create_test_recorder_vtable(void) {
-  NodeVTable vt;
+  NodeVTable vt = {0};
   vt.process = test_recorder_process;
   vt.init = test_recorder_init;
   vt.reset = NULL;

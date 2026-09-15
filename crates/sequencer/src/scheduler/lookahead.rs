@@ -570,8 +570,15 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         let mut chunk_enqueued = true;
         let mut neural_reset_groups: Vec<(usize, f64)> = Vec::new();
         for trigger in &triggers {
-            process_runtime.record_track_step_boundary(trigger.track, trigger.absolute_beats);
             let step = &snapshot.tracks[trigger.track].steps[trigger.step];
+            // Pattern data rides along so a `:pattern` read from any track's
+            // process later in this chunk sees the step the source is on,
+            // same tick (the grab lane's Cirklon semantics).
+            process_runtime.record_track_step_boundary_with_pattern(
+                trigger.track,
+                trigger.absolute_beats,
+                Some(crate::process::ProcessStepPattern::from_step_snapshot(step)),
+            );
             if !step.active || !step.neural_reset {
                 continue;
             }
@@ -860,6 +867,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         sample_time,
                         step_beats,
                         resolved,
+                        note: crate::process::step_authored_note(
+                            &step_snapshot.chord,
+                            &step_snapshot.params,
+                        ),
                         event,
                     },
                     Some(&slot_inlet_writes),
@@ -949,6 +960,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 sample_time,
                 step_beats,
                 resolved,
+                note: crate::process::step_authored_note(
+                    &step_snapshot.chord,
+                    &step_snapshot.params,
+                ),
                 written_inlets: Vec::new(),
             };
             for invocation in process_runtime.track_fires_at(

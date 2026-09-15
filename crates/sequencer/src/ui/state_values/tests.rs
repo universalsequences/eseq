@@ -1,3 +1,5 @@
+#[path = "rack_view_tests.rs"]
+mod rack_view_tests;
 #[path = "rack_preset_tests.rs"]
 mod rack_preset_tests;
 #[path = "rack_macro_name_tests.rs"]
@@ -14068,7 +14070,7 @@ mod instrument_header_ui_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-slot-list)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-slot-list (nth SEQ.instrument-panel 0))")
             .expect("collapse rack slot list");
         editor.refresh_runtime_side_effects();
         let compact_list_layout = editor
@@ -14109,7 +14111,7 @@ mod instrument_header_ui_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-macros)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-macros (nth SEQ.instrument-panel 0))")
             .expect("open rack macro bank");
         editor.refresh_runtime_side_effects();
         let macro_layout = editor.widget_layout().expect("rack macro bank layout");
@@ -14253,13 +14255,13 @@ mod instrument_header_ui_tests;
             .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-macros)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-macros (nth SEQ.instrument-panel 0))")
             .expect("close rack macro bank");
         editor.refresh_runtime_side_effects();
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-selected-chain)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-selected-chain (nth SEQ.instrument-panel 0))")
             .expect("collapse selected rack chain");
         editor.refresh_runtime_side_effects();
         let toolbar_only_layout = editor
@@ -14295,7 +14297,7 @@ mod instrument_header_ui_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-slot-list)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-slot-list (nth SEQ.instrument-panel 0))")
             .expect("restore rack slot list independently");
         editor.refresh_runtime_side_effects();
         let list_only_layout = editor
@@ -14310,7 +14312,7 @@ mod instrument_header_ui_tests;
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-selected-chain)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-selected-chain (nth SEQ.instrument-panel 0))")
             .expect("restore selected rack chain");
         editor.refresh_runtime_side_effects();
 
@@ -25750,6 +25752,25 @@ mod instrument_header_ui_tests;
     }
 
     #[test]
+    fn project_scene_publication_resets_bank_view_on_every_replacement() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![
+            ("scene-bank-view-generation", Value::Number(0.0)),
+        ], true);
+        for generation in 1..=2 {
+            sync_project_scene_state(&mut runtime, &state);
+            assert_eq!(runtime.reactive_field_value("SEQ", "scene-bank-view-generation"),
+                Some(&Value::Number(generation as f64)));
+            assert_eq!(runtime.reactive_field_value("SEQ", "current-pattern"),
+                Some(&Value::Number(state.current_scene_index() as f64)));
+        }
+        sync_pattern_state(&mut runtime, &state);
+        assert_eq!(runtime.reactive_field_value("SEQ", "scene-bank-view-generation"),
+            Some(&Value::Number(2.0)));
+    }
+
+    #[test]
     fn metal_seq_transport_scene_bank_ui_filters_and_routes_global_scenes() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let scene_banks = editor
@@ -25771,8 +25792,11 @@ mod instrument_header_ui_tests;
             .set_reactive("SEQ", "current-pattern", Value::Number(2.0));
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.scene-banks/viewed-scene-bank-index -1)")
-            .expect("reset viewed bank initialization");
+            .eval_str("(do (set! eseq.scene-banks/viewed-scene-bank-index 0) \
+                (set! eseq.scene-banks/viewed-scene-bank-pending-new true))")
+            .expect("retain previous project's bank browsing state");
+        editor.runtime_mut().set_reactive(
+            "SEQ", "scene-bank-view-generation", Value::Number(1.0));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor
@@ -25812,6 +25836,15 @@ mod instrument_header_ui_tests;
         let selector = find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-selector")
             .expect("scene bank selector context-menu surface");
         assert!(selector.props.contains_key("on-right-click"));
+
+        editor.runtime_mut().eval_str("(eseq.transport/select-scene-bank \"A\")").unwrap();
+        editor.runtime_mut().set_reactive("SEQ", "current-pattern", Value::Number(3.0));
+        assert_eq!(editor.runtime_mut().eval_str("(eseq.scene-banks/scene-viewed-bank-index)").unwrap(),
+            Some(Value::Number(0.0)), "playback must not override manual browsing");
+        editor.runtime_mut().set_reactive("SEQ", "current-pattern", Value::Number(2.0));
+        editor.runtime_mut().set_reactive("SEQ", "scene-bank-view-generation", Value::Number(2.0));
+        assert_eq!(editor.runtime_mut().eval_str("(eseq.scene-banks/scene-viewed-bank-index)").unwrap(),
+            Some(Value::Number(1.0)), "reloading the same project must reveal its initial bank again");
 
         editor
             .runtime_mut()
@@ -56377,6 +56410,271 @@ mod instrument_header_ui_tests;
         assert_eq!(args[1], Value::Number(count_id as f64));
         assert_eq!(map_string(&args[3], "inlet").as_deref(), Some("a"));
         assert_eq!(map_number(&args[3], "instance-id"), Some(cmp_b_id as f64));
+    }
+
+    /// The patch bay's `+` box (eseq-53y7.3): it is the last cell of the
+    /// grid on every expanded track; clicking it through the real pointer
+    /// path opens the class picker, and picking `grab` appends one slot to
+    /// THIS track's roster — the lane list gains "grab 2", the dropdown
+    /// lists it under that instance name, and its strip opens with the
+    /// source/value inlets. The roster edit itself (native -> host command
+    /// -> `add_track_roster_slot_with_id`) is covered by
+    /// `track_roster_slots_add_and_remove_through_the_process_history_handler`;
+    /// here the native stands in for that round trip so the UI projection
+    /// can be asserted in one frame.
+    #[test]
+    fn lane_patchbay_add_box_picks_a_class_and_opens_the_new_lane() {
+        use eseqlisp::layout::LayoutNode;
+
+        fn label_texts(node: &LayoutNode, out: &mut Vec<String>) {
+            if node.widget_type == "label" {
+                if let Some(Value::String(text)) = node.props.get("text") {
+                    out.push(text.clone());
+                }
+            }
+            for child in &node.children {
+                label_texts(child, out);
+            }
+        }
+
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut authoring = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        authoring
+            .eval_str(&sequencer::lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        let chain = sequencer::process::default_project_layer();
+        let grab_index = chain
+            .slots
+            .iter()
+            .position(|slot| slot.instance_name.as_deref() == Some("grab"))
+            .expect("default grab lane");
+        assert!(state.set_project_process_chain(chain));
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(220, 90);
+
+        let publish = |editor: &mut eseqlisp::Editor, state: &Arc<SequencerState>| {
+            for (name, value) in [
+                ("track-process-lanes", build_all_track_process_lanes_value(state, 1)),
+                ("track-process-slots", build_all_track_process_slots_value(state, 1)),
+                ("track-lane-patch", build_all_track_lane_patch_value(state, 1)),
+                ("process-library", build_process_library_value(state)),
+            ] {
+                editor.runtime_mut().set_reactive("SEQ", name, value);
+            }
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+        };
+        publish(&mut editor, &state);
+
+        // The real native validates the class and hands the id back before
+        // its host command runs; the roster edit is the handler's job.
+        let add_state = Arc::clone(&state);
+        editor
+            .runtime_mut()
+            .register_native("seq-add-track-process-slot", move |args, _ctx| {
+                let (Some(Value::Number(track)), Some(class)) = (args.first(), args.get(1)) else {
+                    return Err("expected (track class-name)".into());
+                };
+                let class_name = match class {
+                    Value::String(name) | Value::Symbol(name) | Value::Keyword(name) => {
+                        name.trim_start_matches(':').to_string()
+                    }
+                    _ => return Err("class-name must be a name".into()),
+                };
+                let instance_id = add_state
+                    .add_track_roster_slot(*track as usize, &class_name)
+                    .expect("roster slot");
+                Ok(Value::Number(instance_id.0 as f64))
+            });
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/set-track-expanded (nth SEQ.track-ids 0) true)")
+            .unwrap();
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {grab_index}))"
+            ))
+            .unwrap();
+        editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show true)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(220, 90);
+
+        let track_id = match editor.runtime_mut().eval_str("(nth SEQ.track-ids 0)").unwrap() {
+            Some(Value::Number(value)) => value as i64,
+            other => panic!("track id: {other:?}"),
+        };
+        let add_key = format!("/lane-patch-add-{track_id}");
+
+        // The + cell is the last cell of the expanded track's patch bay.
+        let click = |editor: &mut eseqlisp::Editor, key: &str| {
+            use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+            let frame = eseqlisp::frame::build_tiled_render_frame_borderless(editor, 220, 90);
+            let tile = frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                .expect("sequencer tile");
+            let layout = tile.frame.widget_layout.as_deref().expect("sequencer tile layout");
+            let node = find_layout_node_by_stable_key_suffix(layout, key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            let col = tile.rect.col + node.rect.col + node.rect.width * 0.5
+                - tile.frame.widget_layout_scroll_left;
+            let row = tile.rect.row + node.rect.row + node.rect.height * 0.5
+                - tile.frame.widget_scroll_top;
+            // A modal's children are hit-tested against the overlay regions
+            // primitive collection records, so the picker only takes clicks
+            // after a render pass (the settings-modal tests do the same).
+            eseqlisp::widget_render::clear_overlay();
+            let _ = eseqlisp::widget_render::collect_gpu_primitives(
+                layout,
+                eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    vp_w: 1760.0,
+                    vp_h: 1440.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: None,
+                    focused_branch: false,
+                    overlay_viewport_bottom: 90.0,
+                    scroll_top: 0.0,
+                    scroll_left: 0.0,
+                    inherited_hover: false,
+                },
+                0.0,
+                90,
+            );
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                editor.handle_tiled_mouse_precise(
+                    MouseEvent {
+                        kind,
+                        column: col as u16,
+                        row: row as u16,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    },
+                    col,
+                    row,
+                    0,
+                );
+            }
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+        };
+
+        assert!(
+            find_layout_node_by_stable_key_suffix(&editor.widget_layout().unwrap(), &add_key)
+                .is_some(),
+            "the + box renders on the expanded track's patch bay"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.sequencer/lane-add-open?)").unwrap(),
+            Some(Value::Bool(false)),
+            "the picker starts closed"
+        );
+
+        click(&mut editor, &add_key);
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.sequencer/lane-add-open?)").unwrap(),
+            Some(Value::Bool(true)),
+            "clicking the + box opens the class picker"
+        );
+        // Default lane classes come first, by their lane name.
+        let layout = editor.widget_layout().unwrap();
+        for key in ["/lane-add-option-lane-prob", "/lane-add-option-lane-grab"] {
+            assert!(
+                find_layout_node_by_stable_key_suffix(&layout, key).is_some(),
+                "picker lists {key}"
+            );
+        }
+        let mut texts = Vec::new();
+        label_texts(&layout, &mut texts);
+        assert!(
+            texts.iter().any(|text| text == "grab"),
+            "the picker shows the lane name, not the class name: {texts:?}"
+        );
+
+        click(&mut editor, "/lane-add-option-lane-grab");
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.sequencer/lane-add-open?)").unwrap(),
+            Some(Value::Bool(false)),
+            "picking a class closes the picker"
+        );
+
+        // The host publishes the new chain; the pending selection resolves
+        // on the next render and opens the new lane's strip.
+        publish(&mut editor, &state);
+        let new_slot = state
+            .composed_track_process_chain(0)
+            .expect("composed chain")
+            .slots
+            .iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("grab 2"))
+            .cloned()
+            .expect("the added lane is named 'grab 2'");
+        assert_eq!(new_slot.class_name, "lane-grab");
+
+        let options = editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/process-lane-options 0)")
+            .unwrap();
+        let Some(Value::List(options)) = options else { panic!("lane options: {options:?}") };
+        let options: Vec<String> = options
+            .iter()
+            .filter_map(|value| match &*value.borrow() {
+                Value::String(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            options.iter().any(|label| label.contains("grab 2")),
+            "the lane dropdown lists the new lane by its instance name: {options:?}"
+        );
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(eseq.sequencer/lane-patch-lane-selected? 0 (nth SEQ.track-ids 0) {})",
+                    new_slot.instance_id.0
+                ))
+                .unwrap(),
+            Some(Value::Bool(true)),
+            "the new lane is selected, so its strip is the one on screen"
+        );
+
+        let layout = editor.widget_layout().unwrap();
+        let mut texts = Vec::new();
+        label_texts(&layout, &mut texts);
+        assert!(
+            texts.iter().any(|text| text == "grab 2"),
+            "the strip names the new lane: {texts:?}"
+        );
+        for inlet in ["source", "value"] {
+            assert!(
+                texts.iter().any(|text| text == inlet),
+                "the new grab's strip shows its {inlet} inlet: {texts:?}"
+            );
+        }
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, &add_key).is_some(),
+            "the + box is still the last cell after the add"
+        );
     }
 
     /// A second cable out of a default (project-layer) lane, wired in

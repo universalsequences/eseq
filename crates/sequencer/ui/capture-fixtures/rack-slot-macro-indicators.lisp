@@ -8,6 +8,5 @@
 
 (def capture-after-sync ()
   (do
-    (set! eseq.effects.state/rack-panel-slot-list-open true)
-    (set! eseq.effects.state/rack-panel-selected-chain-open false)
-    (set! eseq.effects.state/rack-panel-macros-open true)))
+    (eseq.effects.state/rack-panel-set-view
+      (get (nth SEQ.instrument-panel 0) :track-id) true true false)))

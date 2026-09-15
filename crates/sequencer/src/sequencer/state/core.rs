@@ -55,6 +55,15 @@ pub struct PatternState {
     pub track_sound_state: Mutex<Vec<TrackSoundState>>,
     pub rack_tracks: Mutex<Vec<Option<RackTrackSnapshot>>>,
     pub process_chains: Mutex<Vec<crate::process::TrackProcessChain>>,
+    /// Per-track roster of user-added process slots (eseq-53y7): the
+    /// scene-INDEPENDENT structure half of a track's own process chain.
+    /// Lives here rather than in pattern data precisely because the set of
+    /// lanes a track carries must be the same in every scene; each pattern's
+    /// `TrackProcessChain` still owns that slot's lane values, inlet
+    /// literals, bindings, fan-out and enabled flag.
+    /// `crate::process::reconcile_track_lane_roster` joins the two at every
+    /// point a pattern's chain becomes live.
+    pub track_lane_rosters: Mutex<Vec<crate::process::TrackLaneRoster>>,
     pub project_process_lane_overrides: Mutex<Vec<crate::process::ProjectLaneOverrides>>,
     pub plock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,
     pub key_lock_variant_registries: Mutex<Vec<PlockVariantRegistry>>,

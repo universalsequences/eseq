@@ -134,6 +134,9 @@ impl SequencerState {
                         .map(|_| crate::process::TrackProcessChain::default())
                         .collect(),
                 ),
+                track_lane_rosters: Mutex::new(
+                    (0..MAX_TRACKS).map(|_| Vec::new()).collect(),
+                ),
                 project_process_lane_overrides: Mutex::new(
                     (0..MAX_TRACKS).map(|_| Default::default()).collect(),
                 ),

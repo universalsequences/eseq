@@ -39,19 +39,7 @@ void engine_enable_rt_logging(int enable);
 void engine_enable_rt_scheduling(int enable);
 void engine_set_rt_priority(int priority);
 
-#define ENGINE_SCHED_POLICY_UNKNOWN (-1)
-#define ENGINE_SCHED_POLICY_MIXED (-2)
-#define ENGINE_SCHED_PRIORITY_MIXED (-1)
-typedef struct EngineRtStatus {
-  int worker_count;
-  int workers_reported;
-  int worker_policy;
-  int worker_priority;
-  int callback_reported;
-  int callback_policy;
-  int callback_priority;
-} EngineRtStatus;
-
+// EngineRtStatus and the ENGINE_SCHED_* sentinels come from graph_engine.h.
 // Snapshot the policies and priorities actually observed on the worker and
 // callback threads. Policies are native SCHED_* values on Linux.
 void engine_get_rt_status(EngineRtStatus *status);

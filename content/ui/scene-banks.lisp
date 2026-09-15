@@ -47,8 +47,18 @@
 ;; current scene. Structural edits clamp a stale index to the nearest survivor.
 (defstate viewed-scene-bank-index -1)
 (defstate viewed-scene-bank-pending-new false)
+(defstate viewed-scene-bank-generation 0)
 
 (def scene-viewed-bank-index ()
+  ;; Project replacement resets browsing even when reloading the same file.
+  ;; Ordinary scene changes leave the user's chosen bank alone.
+  (let ((generation (or SEQ.scene-bank-view-generation 0)))
+    (if (not (= generation viewed-scene-bank-generation))
+      (do
+        (set! viewed-scene-bank-generation generation)
+        (set! viewed-scene-bank-pending-new false)
+        (set! viewed-scene-bank-index -1))
+      nil))
   (let ((count (len (scene-banks))))
     (if (= count 0)
       0

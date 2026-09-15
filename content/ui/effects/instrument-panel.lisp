@@ -42,16 +42,21 @@
 ;; owned by eseq.browser (a UI-root module that must not be imported from
 ;; library code); reached through its compat aliases.
 
-(def rack-panel-toggle-slot-list ()
-  (set! st/rack-panel-slot-list-open (not st/rack-panel-slot-list-open)))
+(def rack-panel-toggle-slot-list (inst)
+  (st/rack-panel-set-view (get inst :track-id)
+    (not (st/rack-panel-slot-list-open inst))
+    (st/rack-panel-macros-open inst) (st/rack-panel-selected-chain-open inst)))
 
-(def rack-panel-toggle-selected-chain ()
-  (set! st/rack-panel-selected-chain-open (not st/rack-panel-selected-chain-open)))
+(def rack-panel-toggle-selected-chain (inst)
+  (st/rack-panel-set-view (get inst :track-id)
+    (st/rack-panel-slot-list-open inst) (st/rack-panel-macros-open inst)
+    (not (st/rack-panel-selected-chain-open inst))))
 
-(def rack-panel-toggle-macros ()
-  (do
-    (set! st/rack-panel-macros-open (not st/rack-panel-macros-open))
-    (if (not st/rack-panel-macros-open) (ms/rack-clear-mapping-arm) false)))
+(def rack-panel-toggle-macros (inst)
+  (let ((open (not (st/rack-panel-macros-open inst))))
+    (st/rack-panel-set-view (get inst :track-id)
+      (st/rack-panel-slot-list-open inst) open (st/rack-panel-selected-chain-open inst))
+    (if (not open) (ms/rack-clear-mapping-arm) false)))
 
 (defwidget rack-macro-view-icon
   :width 2.25 :height 1.05 :paint-margin 0.15 :state (active)
@@ -129,7 +134,7 @@
       (sdf/fill (sdf/translate 0.12 0.32 (sdf/rounded-rect 0.36 0.09 0.035))
         (material :color glyph-color)))))
 
-(def rack-panel-view-toolbar ()
+(def rack-panel-view-toolbar (inst)
   (box :debug-name "rack-view-toolbar"
     :width 2.85 :height 9.7
     :padding 0.2 :h-align :center :v-align :start
@@ -138,18 +143,18 @@
       (rack-chain-view-icon
         :key "rack-chain-view-toggle"
         :debug-name "rack-chain-view-toggle"
-        :active (if st/rack-panel-selected-chain-open 1 0)
-        :on-click |x y r| (rack-panel-toggle-selected-chain))
+        :active (if (st/rack-panel-selected-chain-open inst) 1 0)
+        :on-click |x y r| (rack-panel-toggle-selected-chain inst))
       (rack-slot-list-view-icon
         :key "rack-slot-list-view-toggle"
         :debug-name "rack-slot-list-view-toggle"
-        :active (if st/rack-panel-slot-list-open 1 0)
-        :on-click |x y r| (rack-panel-toggle-slot-list))
+        :active (if (st/rack-panel-slot-list-open inst) 1 0)
+        :on-click |x y r| (rack-panel-toggle-slot-list inst))
       (rack-macro-view-icon
         :key "rack-macro-view-toggle"
         :debug-name "rack-macro-view-toggle"
-        :active (if st/rack-panel-macros-open 1 0)
-        :on-click |x y r| (rack-panel-toggle-macros)))
+        :active (if (st/rack-panel-macros-open inst) 1 0)
+        :on-click |x y r| (rack-panel-toggle-macros inst)))
     ))
 
 (def rack-macro-set (track macro value)
@@ -573,8 +578,8 @@
            :width 1.2 :height st/fx-fixed-panel-height :gap 0 :align :center
     (box :width 0.08 :flex 1 :background-color :mixer-strip-border)))
 
-(def rack-panel-expanded? ()
-  (or st/rack-panel-macros-open st/rack-panel-slot-list-open st/rack-panel-selected-chain-open))
+(def rack-panel-expanded? (inst)
+  (or (st/rack-panel-macros-open inst) (st/rack-panel-slot-list-open inst) (st/rack-panel-selected-chain-open inst)))
 
 (def rack-panel (inst)
   (box
@@ -582,7 +587,7 @@
       (box :debug-name "rack-header-box" :height 1 :padding 0 :v-align :center :h-align :start :width :fill
         (h-stack :debug-name "rack-header-row" :gap 0.6 :align :center :width :fill
           (pf/fx-panel-header-leading-spacer)
-          (if (rack-panel-expanded?)
+          (if (rack-panel-expanded? inst)
             (h-stack :debug-name "rack-expanded-header-content" :gap 0.6 :align :start :flex 1
               (label (substring (get inst :display-name) 0 16)
                 :v-align :center
@@ -594,7 +599,7 @@
                 :v-align :center
                 :color :dim :bg :transparent))
             )
-          (if (rack-panel-expanded?)
+          (if (rack-panel-expanded? inst)
             (box :debug-name "rack-preset-button" :padding 0 :width 2 :align :center
               (v-stack
                 (box :width 1 :height 0.1)
@@ -606,9 +611,9 @@
       (pf/fx-panel-body "rack-content-box"
         (h-stack :debug-name "rack-content-row" :gap 0.20
           :width :fill :align :stretch
-          (rack-panel-view-toolbar)
-          (if st/rack-panel-macros-open (rack-macro-bank inst) (box :width 0 :height 0))
-          (if st/rack-panel-slot-list-open
+          (rack-panel-view-toolbar inst)
+          (if (st/rack-panel-macros-open inst) (rack-macro-bank inst) (box :width 0 :height 0))
+          (if (st/rack-panel-slot-list-open inst)
             (box
               :background-color :bg
               :border-color :buffer-bg
@@ -631,8 +636,8 @@
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
     :padding 0
-    :width (max (if (rack-panel-expanded?) 18 3.35)
-                (+ 3.35 (if st/rack-panel-slot-list-open 34.7 0) (if st/rack-panel-macros-open 24.2 0)))
+    :width (max (if (rack-panel-expanded? inst) 18 3.35)
+                (+ 3.35 (if (st/rack-panel-slot-list-open inst) 34.7 0) (if (st/rack-panel-macros-open inst) 24.2 0)))
     :height st/fx-fixed-panel-height
     :selected 0))
 
@@ -642,7 +647,7 @@
            :height st/fx-fixed-panel-height
            :align :stretch
     (rack-panel inst)
-    (if st/rack-panel-selected-chain-open
+    (if (st/rack-panel-selected-chain-open inst)
       (rack-selected-instrument-panel inst)
       (box :width 0 :height 0))))
 

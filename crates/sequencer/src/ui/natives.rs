@@ -260,6 +260,18 @@ fn value_symbol_name(value: &Value) -> Option<String> {
     }
 }
 
+/// A process class a track lane may be built from: one of the always-on
+/// default lane classes, or a `def-process` in the project's authoring
+/// snapshot (the process library).
+fn process_class_is_known(state: &Arc<SequencerState>, class_name: &str) -> bool {
+    sequencer::process::DEFAULT_LANE_CLASSES.contains(&class_name)
+        || state
+            .published_process_authoring()
+            .defs
+            .iter()
+            .any(|def| def.name == class_name)
+}
+
 /// Optional trailing `:all` / "all" on the process edit natives: write the
 /// shared project slot on every track instead of forking this track.
 fn process_edit_scope_is_all(value: Option<&Value>) -> bool {
@@ -2203,6 +2215,24 @@ mod process_binding_target_tests {
         )
     }
 
+    /// `seq-add-track-process-slot` only builds a lane from a class the
+    /// runtime actually defines (eseq-53y7.2).
+    #[test]
+    fn process_class_is_known_accepts_default_lanes_and_rejects_unknown_classes() {
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        for class_name in sequencer::process::DEFAULT_LANE_CLASSES {
+            assert!(
+                process_class_is_known(&state, class_name),
+                "{class_name} is a default lane class"
+            );
+        }
+        assert!(!process_class_is_known(&state, "lane-nope"));
+        assert!(!process_class_is_known(&state, ""));
+    }
+
     #[test]
     fn process_binding_target_prefers_clicked_instrument_param_name_over_descriptor_cache() {
         let state =
@@ -3391,6 +3421,8 @@ pub(crate) fn init_runtime(
                 ("sound-presets", build_sound_presets_value()),
                 ("kit-presets", build_kit_presets_value()),
                 ("current-project-name", Value::String(String::new())),
+                ("scene-bank-view-generation", Value::Number(0.0)),
+                ("rack-panel-view-generation", Value::Number(0.0)),
                 // Editor mode state (for inline instrument/effect creation/editing)
                 ("editor-active", Value::Bool(false)),
                 ("editor-canceling", Value::Bool(false)),
@@ -4480,6 +4512,32 @@ pub(crate) fn init_runtime(
                 .unwrap_or(Value::Nil)),
         ]));
         Ok(Value::Bool(true))
+    });
+
+    let st = state.clone();
+    runtime.register_native("seq-add-track-process-slot", move |args, ctx| {
+        let (Some(Value::Number(track)), Some(class)) = (args.first(), args.get(1)) else {
+            return Err("seq-add-track-process-slot: expected (track class-name)".into());
+        };
+        let track = *track as usize;
+        let class_name = value_symbol_name(class)
+            .ok_or_else(|| "seq-add-track-process-slot: class-name must be a name".to_string())?;
+        if !process_class_is_known(&st, &class_name) {
+            return Err(format!(
+                "seq-add-track-process-slot: unknown process class {class_name:?}"
+            )
+            .into());
+        }
+        // The id is minted here, not in the handler, because the caller gets
+        // it back now while the roster edit runs later off the command queue.
+        // Ids stay under 1 << 47, so they are exact as lisp numbers.
+        let instance_id = st.next_track_roster_slot_id();
+        ctx.enqueue_command(process_history_command("add-roster-slot", vec![
+            ("track", Value::Number(track as f64)),
+            ("instance-id", Value::Number(instance_id.0 as f64)),
+            ("class-name", Value::String(class_name)),
+        ]));
+        Ok(Value::Number(instance_id.0 as f64))
     });
 
     runtime.register_native("seq-remove-process-slot", move |args, ctx| {
@@ -7630,6 +7688,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-move-process-slot-before",
             "(seq-move-process-slot-before track instance-id before-instance-id-or-nil)",
             "Move an attached process slot before another slot, or to the end with nil.",
+        ),
+        (
+            "seq-add-track-process-slot",
+            "(seq-add-track-process-slot track class-name)",
+            "Add one process lane of the given class to a track in every scene, returning its new instance id.",
         ),
         (
             "seq-remove-process-slot",

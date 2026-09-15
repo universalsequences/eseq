@@ -37,7 +37,11 @@ pub const PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 
 pub const MODULATOR_ENVELOPE_STATE_SIZE: usize =
     STATE_TIMELINE_BASE + MODULATOR_TIMELINE_CAPACITY * TIMELINE_EVENT_WIDTH;
-pub const MOD_IN_CLIP_STATE_SIZE: usize = 0;
+/// Both mod-port tap nodes keep one float: the block peak of what they just
+/// passed, read at meter rate by the UI to light the port (eseq mod-port glow).
+pub const MOD_TAP_STATE_LEVEL: usize = 0;
+pub const MOD_IN_CLIP_STATE_SIZE: usize = 1;
+pub const MOD_OUT_TAP_STATE_SIZE: usize = 1;
 
 const DISPLAY_START_X: f32 = 0.18;
 const DISPLAY_END_X: f32 = 0.82;
@@ -213,17 +217,61 @@ unsafe extern "C" fn modulator_envelope_schedule_event(
     true
 }
 
+unsafe extern "C" fn mod_tap_init(
+    state: *mut c_void,
+    _sample_rate: c_int,
+    _max_block: c_int,
+    _init_msg: *const c_void,
+) {
+    if !state.is_null() {
+        *(state as *mut f32).add(MOD_TAP_STATE_LEVEL) = 0.0;
+    }
+}
+
+/// Track/bus modulation input: the audiograph sums every source connected to
+/// this input, and the clip keeps the sum inside the unit range the voice
+/// modulators expect. The block peak of the clipped sum is published for the
+/// port light.
 unsafe extern "C" fn mod_in_clip_process(
     inp: *const *mut f32,
     out: *const *mut f32,
     nframes: c_int,
-    _state: *mut c_void,
+    state: *mut c_void,
     _buffers: *mut c_void,
 ) {
     let input = *inp.add(0);
     let output = *out.add(0);
+    let mut peak = 0.0_f32;
     for i in 0..nframes as usize {
-        *output.add(i) = (*input.add(i)).clamp(0.0, 1.0);
+        let value = (*input.add(i)).clamp(0.0, 1.0);
+        *output.add(i) = value;
+        peak = peak.max(value);
+    }
+    if !state.is_null() {
+        *(state as *mut f32).add(MOD_TAP_STATE_LEVEL) = peak;
+    }
+}
+
+/// Track modulation output hub: every mod route fans out from here. A plain
+/// pass-through that also keeps the block peak (clamped to the unit range for
+/// display) so the OUT port can light with what the track is sending.
+unsafe extern "C" fn mod_out_tap_process(
+    inp: *const *mut f32,
+    out: *const *mut f32,
+    nframes: c_int,
+    state: *mut c_void,
+    _buffers: *mut c_void,
+) {
+    let input = *inp.add(0);
+    let output = *out.add(0);
+    let mut peak = 0.0_f32;
+    for i in 0..nframes as usize {
+        let value = *input.add(i);
+        *output.add(i) = value;
+        peak = peak.max(value.clamp(0.0, 1.0));
+    }
+    if !state.is_null() {
+        *(state as *mut f32).add(MOD_TAP_STATE_LEVEL) = peak;
     }
 }
 
@@ -241,7 +289,17 @@ pub fn modulator_envelope_vtable() -> NodeVTable {
 pub fn mod_in_clip_vtable() -> NodeVTable {
     NodeVTable {
         process: Some(mod_in_clip_process),
-        init: None,
+        init: Some(mod_tap_init),
+        reset: None,
+        migrate: None,
+        ..NodeVTable::default()
+    }
+}
+
+pub fn mod_out_tap_vtable() -> NodeVTable {
+    NodeVTable {
+        process: Some(mod_out_tap_process),
+        init: Some(mod_tap_init),
         reset: None,
         migrate: None,
         ..NodeVTable::default()

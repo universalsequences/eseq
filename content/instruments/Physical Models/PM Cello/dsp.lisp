@@ -1,11 +1,22 @@
 ;; One split velocity-wave string, excited by bow friction and/or a pluck.
 ;; Articulations change controls, never the resonator topology or audio source.
 ;; Physical assumptions and reference comparisons: tools/pm-cello/README.md.
+;;
+;; Every defmacro is one subpatch in the patch editor. Signals travel through
+;; macro inlets; each block reads the parameters it owns by name, so the top
+;; level shows only the signal path:
+;;
+;;   gate/trigger ─ cello-age ─┬─ cello-bow ───┐
+;;                             ├─ cello-pluck ─┼─ cello-strings ─ cello-stereo
+;;   pitch ──────────────────── cello-pitch ───┘         │
+;;                                        cello-resonance ─ cello-level ─ out
 
 (def mod1 (in 6 @name mod1 @modulator 1))
 (def mod2 (in 7 @name mod2 @modulator 2))
 (def mod3 (in 8 @name mod3 @modulator 3))
 (def mod4 (in 9 @name mod4 @modulator 4))
+
+;; --- building blocks ---------------------------------------------------------
 
 (defmacro cello-smooth (target ms)
   (make-history previous)
@@ -16,6 +27,7 @@
   (write-history ready 1)
   value)
 
+;; Seconds since the note started (gate rise or trigger), clamped at 120.
 (defmacro cello-age (gate trigger)
   (make-history elapsed)
   (make-history last_gate)
@@ -30,6 +42,9 @@
   (write-history has_note armed)
   age)
 
+;; One bowed/plucked string: two velocity-wave delay segments meeting at the
+;; contact point, loss and dispersion on the neck return, bow friction and the
+;; pluck force injected at the same scattering junction.
 (defmacro cello-string (frequency contact speed pressure curve position pluck cutoff decay_s warp)
   (make-history bridge_h)
   (make-history neck_h)
@@ -78,6 +93,7 @@
   (write-history dc_y dc)
   dc)
 
+;; Four normalized resonant bandpasses approximate bridge/body radiation.
 (defmacro cello-body (signal amount size q low_hz low mid_hz mid high_hz high air_hz air)
   (def b1 (/ (svf signal (/ low_hz size) q 1) q))
   (def b2 (/ (svf signal (/ mid_hz size) q 1) q))
@@ -86,6 +102,10 @@
   (def modes (/ (+ (* b1 low) (* b2 mid) (* b3 high) (* b4 air))
     (max 0.001 (+ low mid high air))))
   (mix signal modes amount))
+
+;; --- parameters ---------------------------------------------------------------
+;; Projects address parameters by position, so this order is part of the
+;; instrument's saved-state contract; append new parameters at the end.
 
 (param attack @group amp @env amp-env @role attack @default 3655.08123 @min 0 @max 6000 @unit ms)
 (param decay @group amp @env amp-env @role decay @default 100 @min 1 @max 3000 @unit ms)
@@ -127,63 +147,118 @@
 (param width @group section @default 0.7 @min 0 @max 1 @mod true @mod-mode additive)
 (param gain @default 0.895561 @min 0 @max 1 @mod true @mod-mode additive)
 
+;; --- articulation blocks --------------------------------------------------------
+
+;; Bow: the amp envelope shapes bow speed, a prompt contact envelope couples the
+;; bow to the string, and Stroke limit lifts the bow after a fixed time.
+;; Returns (contact motion).
+(defmacro cello-bow (gate trigger velocity age texture_noise)
+  (def stroke_gate (* gate (max (lte stroke_ms 0) (lt age (* 0.001 stroke_ms)))))
+  (def envelope (adsr stroke_gate trigger attack decay sustain release))
+  (def contact_envelope (adsr stroke_gate trigger 2 1 1 release))
+  (def bow_amount (cello-smooth (clip (mod amount) 0 1) 5))
+  (def bow_speed (cello-smooth (clip (mod speed) 0 0.8) 8))
+  (def contact (* bow_amount contact_envelope))
+  (def motion (* envelope bow_speed (mix 1 (clip velocity 0 1) vel_bow)
+    (+ 1 (* (clip (mod noise) 0 0.3) texture_noise))))
+  (tuple contact motion))
+
+;; Pluck: a short half-sine force pulse at note start, optionally roughened
+;; with the same filtered noise that textures the bow.
+(defmacro cello-pluck (age texture_noise)
+  (def pluck_time (/ age (* 0.001 (clip (mod width_ms) 0.2 25))))
+  (def pulse (* (lt pluck_time 1) (sin (* pi (clip pluck_time 0 1)))))
+  (* (clip (mod strength) 0 1) pulse
+    (mix 1 texture_noise (clip (mod texture) 0 1))))
+
+;; Pitch: delayed vibrato and fine tuning applied to the incoming frequency.
+(defmacro cello-pitch (pitch age)
+  (def vibrato_fade (clip (/ (- age (* 0.001 vib_wait)) 0.15) 0 1))
+  (def vibrato (* vibrato_fade (clip (mod vib_cent) 0 100)
+    (sin (* twopi (phasor (clip (mod vib_hz) 0.1 12))))))
+  (* pitch (pow 2 (/ (+ vibrato (clip (mod tune) -100 100)) 1200))))
+
+;; String controls, smoothed once and shared by every player in the section.
+;; Returns (pressure curve position damping lifetime warp).
+(defmacro cello-string-controls ()
+  (def bow_pressure (cello-smooth (clip (mod pressure) 0.02 1) 5))
+  (def friction_curve (cello-smooth (clip (mod rosin) 1 8) 5))
+  (def position_value (cello-smooth (clip (mod position) 0.08 0.5) 8))
+  (def damping (cello-smooth (clip (mod damping_hz) 500 15000) 8))
+  (def lifetime (cello-smooth (clip (mod decay_s) 0.08 12) 8))
+  (def warp (cello-smooth (clip (mod stiffness) 0 0.75) 8))
+  (tuple bow_pressure friction_curve position_value damping lifetime warp))
+
+;; Section: the central player plus two copies of the exact same physical
+;; string, detuned by Spread and entering Entry spacing later. Blend=0 hears
+;; only the central player; there is no alternate engine.
+;; Returns (center second third).
+(defmacro cello-strings (frequency contact motion pluck)
+  (def (bow_pressure friction_curve position_value damping lifetime warp)
+    (cello-string-controls))
+  (def center (cello-string frequency contact motion bow_pressure friction_curve
+    position_value pluck damping lifetime warp))
+  (def detune (cello-smooth (clip (mod spread) 0 50) 8))
+  (def lag_samples (* 0.001 samplerate (clip (mod lag_ms) 0 40)))
+  (def second (cello-string (* frequency (pow 2 (/ (- detune) 1200)))
+    (delay contact lag_samples) (delay motion lag_samples)
+    bow_pressure friction_curve position_value (delay pluck lag_samples) damping lifetime warp))
+  (def third (cello-string (* frequency (pow 2 (/ detune 1200)))
+    (delay contact (* 2 lag_samples)) (delay motion (* 2 lag_samples))
+    bow_pressure friction_curve position_value (delay pluck (* 2 lag_samples)) damping lifetime warp))
+  (tuple center second third))
+
+;; Stereo: Blend crossfades the central player against the three-player
+;; average; Width pans the two outer players apart. Returns (left right).
+(defmacro cello-stereo (center second third)
+  (def ensemble (cello-smooth (clip (mod blend) 0 1) 8))
+  (def stereo (clip (mod width) 0 1))
+  (def left (mix center
+    (/ (+ center (* second (+ 1 stereo)) (* third (- 1 stereo))) 3) ensemble))
+  (def right (mix center
+    (/ (+ center (* second (- 1 stereo)) (* third (+ 1 stereo))) 3) ensemble))
+  (tuple left right))
+
+;; Resonance: the four body modes on each channel, then the tone lowpass.
+;; Returns (left right).
+(defmacro cello-resonance (left right)
+  (def wood_amount (clip (mod wood) 0 1))
+  (def body_size (clip (mod size) 0.5 2))
+  (def body_q (clip (mod resonance) 0.5 8))
+  (def low_freq (clip (mod low_hz) 60 350))
+  (def low_level (clip (mod low) 0 1))
+  (def mid_freq (clip (mod mid_hz) 120 900))
+  (def mid_level (clip (mod mid) 0 1))
+  (def high_freq (clip (mod high_hz) 250 2500))
+  (def high_level (clip (mod high) 0 1))
+  (def air_freq (clip (mod air_hz) 600 6000))
+  (def air_level (clip (mod air) 0 1))
+  (def left_body (cello-body left wood_amount body_size body_q low_freq low_level
+    mid_freq mid_level high_freq high_level air_freq air_level))
+  (def right_body (cello-body right wood_amount body_size body_q low_freq low_level
+    mid_freq mid_level high_freq high_level air_freq air_level))
+  (def cutoff (min (* samplerate 0.4) (clip (mod tone_hz) 400 16000)))
+  (tuple (svf left_body cutoff 0.7 0) (svf right_body cutoff 0.7 0)))
+
+;; Output level: velocity also sets loudness, then the master gain.
+(defmacro cello-level (signal velocity)
+  (* signal (clip velocity 0 1) (clip (mod gain) 0 1)))
+
+;; --- signal path ---------------------------------------------------------------
+
 (def gate (in 1 @name gate))
 (def pitch (in 2 @name pitch))
 (def velocity (in 3 @name velocity))
 (def trigger (in 4 @name trigger))
 (def clock (in 5 @name clock))
 (def age (cello-age gate trigger))
-(def stroke_gate (* gate (max (lte stroke_ms 0) (lt age (* 0.001 stroke_ms)))))
-(def envelope (adsr stroke_gate trigger attack decay sustain release))
-(def contact_envelope (adsr stroke_gate trigger 2 1 1 release))
-(def vibrato_fade (clip (/ (- age (* 0.001 vib_wait)) 0.15) 0 1))
-(def vibrato (* vibrato_fade (clip (mod vib_cent) 0 100)
-  (sin (* twopi (phasor (clip (mod vib_hz) 0.1 12))))))
-(def frequency (* pitch (pow 2 (/ (+ vibrato (clip (mod tune) -100 100)) 1200))))
-(def bow_amount (cello-smooth (clip (mod amount) 0 1) 5))
-(def bow_pressure (cello-smooth (clip (mod pressure) 0.02 1) 5))
-(def bow_speed (cello-smooth (clip (mod speed) 0 0.8) 8))
-(def friction_curve (cello-smooth (clip (mod rosin) 1 8) 5))
-(def position_value (cello-smooth (clip (mod position) 0.08 0.5) 8))
-(def damping (cello-smooth (clip (mod damping_hz) 500 15000) 8))
-(def lifetime (cello-smooth (clip (mod decay_s) 0.08 12) 8))
-(def warp (cello-smooth (clip (mod stiffness) 0 0.75) 8))
+;; One filtered noise source colors both the bow motion and the pluck.
 (def texture_noise (svf (noise) 5000 0.7 0))
-(def motion (* envelope bow_speed (mix 1 (clip velocity 0 1) vel_bow)
-  (+ 1 (* (clip (mod noise) 0 0.3) texture_noise))))
-(def pluck_time (/ age (* 0.001 (clip (mod width_ms) 0.2 25))))
-(def pulse (* (lt pluck_time 1) (sin (* pi (clip pluck_time 0 1)))))
-(def pluck_drive (* (clip (mod strength) 0 1) pulse
-  (mix 1 texture_noise (clip (mod texture) 0 1))))
-(def string_wave (cello-string frequency (* bow_amount contact_envelope) motion bow_pressure friction_curve
-  position_value pluck_drive damping lifetime warp))
-(def detune (cello-smooth (clip (mod spread) 0 50) 8))
-(def lag_samples (* 0.001 samplerate (clip (mod lag_ms) 0 40)))
-;; The section repeats this exact same physical string with detuned tuning and
-;; staggered excitation. Blend=0 is the central player; no alternate engine.
-(def second_string (cello-string (* frequency (pow 2 (/ (- detune) 1200)))
-  (delay (* bow_amount contact_envelope) lag_samples) (delay motion lag_samples)
-  bow_pressure friction_curve position_value (delay pluck_drive lag_samples) damping lifetime warp))
-(def third_string (cello-string (* frequency (pow 2 (/ detune 1200)))
-  (delay (* bow_amount contact_envelope) (* 2 lag_samples)) (delay motion (* 2 lag_samples))
-  bow_pressure friction_curve position_value (delay pluck_drive (* 2 lag_samples)) damping lifetime warp))
-(def ensemble (cello-smooth (clip (mod blend) 0 1) 8))
-(def stereo (clip (mod width) 0 1))
-(def left_string (mix string_wave
-  (/ (+ string_wave (* second_string (+ 1 stereo)) (* third_string (- 1 stereo))) 3) ensemble))
-(def right_string (mix string_wave
-  (/ (+ string_wave (* second_string (- 1 stereo)) (* third_string (+ 1 stereo))) 3) ensemble))
-(def left_body (cello-body left_string (clip (mod wood) 0 1) (clip (mod size) 0.5 2)
-  (clip (mod resonance) 0.5 8) (clip (mod low_hz) 60 350) (clip (mod low) 0 1)
-  (clip (mod mid_hz) 120 900) (clip (mod mid) 0 1)
-  (clip (mod high_hz) 250 2500) (clip (mod high) 0 1)
-  (clip (mod air_hz) 600 6000) (clip (mod air) 0 1)))
-(def right_body (cello-body right_string (clip (mod wood) 0 1) (clip (mod size) 0.5 2)
-  (clip (mod resonance) 0.5 8) (clip (mod low_hz) 60 350) (clip (mod low) 0 1)
-  (clip (mod mid_hz) 120 900) (clip (mod mid) 0 1)
-  (clip (mod high_hz) 250 2500) (clip (mod high) 0 1)
-  (clip (mod air_hz) 600 6000) (clip (mod air) 0 1)))
-(def left (svf left_body (min (* samplerate 0.4) (clip (mod tone_hz) 400 16000)) 0.7 0))
-(def right (svf right_body (min (* samplerate 0.4) (clip (mod tone_hz) 400 16000)) 0.7 0))
-(out (* left (clip velocity 0 1) (clip (mod gain) 0 1)) 1 @name left)
-(out (* right (clip velocity 0 1) (clip (mod gain) 0 1)) 2 @name right)
+(def (contact motion) (cello-bow gate trigger velocity age texture_noise))
+(def pluck (cello-pluck age texture_noise))
+(def frequency (cello-pitch pitch age))
+(def (center second third) (cello-strings frequency contact motion pluck))
+(def (left right) (cello-stereo center second third))
+(def (left_body right_body) (cello-resonance left right))
+(out (cello-level left_body velocity) 1 @name left)
+(out (cello-level right_body velocity) 2 @name right)

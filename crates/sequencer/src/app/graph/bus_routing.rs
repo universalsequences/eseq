@@ -22,22 +22,30 @@ impl GraphController<'_> {
         let merge_name = CString::new(format!("{safe_name}_merge")).unwrap();
         let gate_name = CString::new(format!("{safe_name}_gate")).unwrap();
         let volume_name = CString::new(format!("{safe_name}_volume")).unwrap();
-        let mod_in_clip_ids = std::array::from_fn(|input| {
-            let mod_in_name =
-                CString::new(format!("{safe_name}_mod_in{}_clip", input + 1)).unwrap();
+        let mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT] =
+            std::array::from_fn(|input| {
+                let mod_in_name =
+                    CString::new(format!("{safe_name}_mod_in{}_clip", input + 1)).unwrap();
+                unsafe {
+                    crate::audiograph::add_node(
+                        self.app.graph.lg.0,
+                        crate::instruments::track_modulator::mod_in_clip_vtable(),
+                        crate::instruments::track_modulator::MOD_IN_CLIP_STATE_SIZE
+                            * std::mem::size_of::<f32>(),
+                        mod_in_name.as_ptr(),
+                        1,
+                        1,
+                        std::ptr::null(),
+                        0,
+                    )
+                }
+            });
+        // Watched taps: the mixer lights the bus Ext ports from their peaks.
+        for mod_in_clip_id in mod_in_clip_ids {
             unsafe {
-                crate::audiograph::add_node(
-                    self.app.graph.lg.0,
-                    crate::instruments::track_modulator::mod_in_clip_vtable(),
-                    crate::instruments::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
-                    mod_in_name.as_ptr(),
-                    1,
-                    1,
-                    std::ptr::null(),
-                    0,
-                )
+                crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, mod_in_clip_id);
             }
-        });
+        }
         let left_id = match add_gain_node_checked(
             self.app.graph.lg.0,
             1.0,

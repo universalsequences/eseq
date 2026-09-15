@@ -787,7 +787,7 @@ impl App {
         }
         let after = self.state.capture_project_scenes();
         crate::app::edit::finish_active_gesture(self);
-        let patch = crate::app::history::SceneStructurePatch { before, after };
+        let patch = crate::app::history::SceneStructurePatch::new(before, after);
         let retained_bytes = patch.retained_bytes();
         self.history.commit(
             label,

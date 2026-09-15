@@ -25,6 +25,10 @@ pub(super) struct ProcessLaneUiEntry {
     forked: bool,
     instance_name: Option<String>,
     default_lane: bool,
+    /// A slot the user added to this track through the patch bay's + box
+    /// (eseq-53y7): named per track, so the lane dropdown lists it under
+    /// that instance name instead of the numbered class/inlet form.
+    roster: bool,
 }
 
 pub(super) fn process_literal_as_f32(value: &sequencer::process::ProcessLiteral) -> Option<f32> {
@@ -802,6 +806,7 @@ pub(super) fn process_lane_entries_for_track(
                 .collect::<Vec<_>>();
             let map_ports = process_mappable_port_values(slot, def);
             let default_lane = sequencer::process::is_default_lane_slot(slot);
+            let roster = sequencer::process::is_track_roster_slot(slot);
             // Default lanes read like the builtin step params: the instance
             // name alone ("prob", "acc A"), never "N class/inlet".
             let (label, short_label) = match slot.instance_name.as_deref() {
@@ -839,6 +844,7 @@ pub(super) fn process_lane_entries_for_track(
                     ),
                 instance_name: slot.instance_name.clone(),
                 default_lane,
+                roster,
             });
         }
     }
@@ -861,6 +867,7 @@ pub(super) fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) 
         ("project", Value::Bool(entry.project)),
         ("forked", Value::Bool(entry.forked)),
         ("default-lane", Value::Bool(entry.default_lane)),
+        ("roster", Value::Bool(entry.roster)),
         (
             "instance-name",
             entry

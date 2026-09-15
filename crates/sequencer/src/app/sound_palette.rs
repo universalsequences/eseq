@@ -325,7 +325,7 @@ impl App {
         debug_assert!(changed > 0, "a fresh fork always moves the target");
         let after = self.state.capture_project_scenes();
         crate::app::edit::finish_active_gesture(self);
-        let patch = crate::app::history::SceneStructurePatch { before, after };
+        let patch = crate::app::history::SceneStructurePatch::new(before, after);
         let retained_bytes = patch.retained_bytes();
         self.history.commit(
             "Fork sound",
@@ -380,7 +380,7 @@ impl App {
             .rename_track_sound_entity(track, patch, mix, name)?;
         let after = self.state.capture_project_scenes();
         crate::app::edit::finish_active_gesture(self);
-        let patch = crate::app::history::SceneStructurePatch { before, after };
+        let patch = crate::app::history::SceneStructurePatch::new(before, after);
         let retained_bytes = patch.retained_bytes();
         self.history.commit(
             "Rename sound",
@@ -402,7 +402,7 @@ impl App {
         }
         let after = self.state.capture_project_scenes();
         crate::app::edit::finish_active_gesture(self);
-        let patch = crate::app::history::SceneStructurePatch { before, after };
+        let patch = crate::app::history::SceneStructurePatch::new(before, after);
         let retained_bytes = patch.retained_bytes();
         self.history.commit(
             "Clean up unused sounds",

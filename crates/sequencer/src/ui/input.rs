@@ -1866,10 +1866,6 @@ pub(crate) fn handle_recording_key(
                         .transport
                         .sequence_rolling
                         .store(true, Ordering::Release);
-                    eprintln!(
-                        "[roll-debug] input SequenceRoll on=true key={:?} roll_mode={roll_mode}",
-                        key.code,
-                    );
                     state.push_roll_command(sequencer::sequencer::RollCommand::SequenceRoll {
                         on: true,
                     });
@@ -1889,10 +1885,6 @@ pub(crate) fn handle_recording_key(
                         .transport
                         .sequence_rolling
                         .store(false, Ordering::Release);
-                    eprintln!(
-                        "[roll-debug] input SequenceRoll on=false key={:?}",
-                        key.code,
-                    );
                     state.push_roll_command(sequencer::sequencer::RollCommand::SequenceRoll {
                         on: false,
                     });
@@ -1901,10 +1893,6 @@ pub(crate) fn handle_recording_key(
                 return RecordingKeyOutcome::Ignored;
             }
             KeyEventKind::Press => {
-                eprintln!(
-                    "[roll-debug] input SequenceRoll ignored key={:?} roll_mode=false",
-                    key.code,
-                );
                 return RecordingKeyOutcome::Ignored;
             }
             _ => return RecordingKeyOutcome::Consumed,
@@ -1925,12 +1913,6 @@ pub(crate) fn handle_recording_key(
                     .transport
                     .roll_rate
                     .store(rate as u32, Ordering::Release);
-                eprintln!(
-                    "[roll-debug] input SetRate key={:?} rate={} grid_beats={}",
-                    key.code,
-                    rate.label(),
-                    rate.step_beats(sequencer::sequencer::MAX_STEPS),
-                );
                 state.push_roll_command(sequencer::sequencer::RollCommand::SetRate { rate });
             }
             return RecordingKeyOutcome::Consumed;

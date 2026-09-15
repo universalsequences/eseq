@@ -192,6 +192,8 @@ struct PatchCableInstance {
     @location(4) color: vec4<f32>,
     // radius_px, is_segmented, segment_y_px, corner_radius_px
     @location(5) params: vec4<f32>,
+    // style, plug_radius_px, plug_levels.xy
+    @location(6) style: vec4<f32>,
 };
 
 struct PatchCableVaryings {
@@ -201,6 +203,7 @@ struct PatchCableVaryings {
     @location(2) @interpolate(flat) control2_end: vec4<f32>,
     @location(3) @interpolate(flat) color: vec4<f32>,
     @location(4) @interpolate(flat) params: vec4<f32>,
+    @location(5) @interpolate(flat) style: vec4<f32>,
 };
 
 fn patch_cable_quad_corner(vid: u32) -> vec2<f32> {
@@ -228,6 +231,7 @@ fn patch_cable_vert(
     out.control2_end = cable.control2_end;
     out.color = cable.color;
     out.params = cable.params;
+    out.style = cable.style;
     return out;
 }
 
@@ -421,12 +425,42 @@ fn patch_cable_frag(input: PatchCableVaryings) -> @location(0) vec4<f32> {
             end);
     }
 
-    let sdf = min_dist_to_line - radius_px;
+    var sdf = min_dist_to_line - radius_px;
+    let style = input.style.x;
+    let plug_radius_px = input.style.y;
+    // Solid style: a plug disc over each port, with a dark hole in its
+    // centre like a jack, unioned into the body so they share one rim.
+    var plug_dist = 1.0e6;
+    var plug_level = 0.0;
+    if (style > 0.5 && plug_radius_px > 0.0) {
+        let start_dist = length(input.pixel_pos - start);
+        let end_dist = length(input.pixel_pos - end);
+        plug_dist = min(start_dist, end_dist);
+        plug_level = select(input.style.w, input.style.z, start_dist < end_dist);
+        sdf = min(sdf, plug_dist - plug_radius_px);
+    }
     let derivative = max(fwidth(sdf), 0.0001);
     let alpha = smoothstep(derivative * 0.5, -derivative * 0.5, sdf);
 
     if (alpha <= 0.0) {
         discard;
+    }
+
+    if (style > 0.5) {
+        // One flat colour with a thin dark rim so the cable reads over any
+        // strip colour.
+        let rim_width = max(radius_px * 0.34, 0.75);
+        let rim_blend = smoothstep(-rim_width - derivative, -rim_width + derivative, sdf);
+        let rim_color = input.color.rgb * 0.42;
+        var cable_color = mix(input.color.rgb, rim_color, rim_blend);
+        let hole_radius = plug_radius_px * 0.40;
+        let hole_blend = 1.0 - smoothstep(hole_radius - derivative, hole_radius + derivative, plug_dist);
+        // The hole is a jack LED: dark at rest, glowing past the cable's
+        // own colour toward white with the port's live signal.
+        let lit_color = mix(input.color.rgb, vec3<f32>(1.0, 1.0, 1.0), 0.45);
+        let hole_color = mix(vec3<f32>(0.04, 0.045, 0.05), lit_color, clamp(plug_level, 0.0, 1.0));
+        cable_color = mix(cable_color, hole_color, hole_blend);
+        return vec4<f32>(cable_color, input.color.a * alpha);
     }
 
     let core_radius = radius_px * 0.48;

@@ -14,7 +14,7 @@
 (import eseq.effects.panel-widgets :as pw)
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.process-panel :as pp)
-(import eseq.effects.state :as st :refer (rack-panel-selected-chain-open))
+(import eseq.effects.state :as st)
 (import eseq.effects.track-panels :as tp)
 
 (export empty-track-fallback
@@ -218,7 +218,7 @@
         (if (= (get inst :type) "rack")
           (h-stack :gap 0.2 :height st/fx-fixed-panel-height :align :stretch
             (ip/instrument-panel inst)
-            (if eseq.effects.state/rack-panel-selected-chain-open
+            (if (st/rack-panel-selected-chain-open inst)
               (h-stack :debug-name "rack-selected-chain-fx"
                 :gap 1 :height st/fx-fixed-panel-height :align :stretch
                 (ip/rack-selected-fx-panel inst)

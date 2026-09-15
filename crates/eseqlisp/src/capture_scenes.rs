@@ -11,8 +11,8 @@
 //! so two runs on one host produce byte-identical buffers.
 
 use crate::ui::gpu_geometry::{
-    ImageVertex, LiveSpectrogramInstance, PatchCableInstance, Vertex, WaveformInstance,
-    WavetableInstance,
+    ImageVertex, LiveSpectrogramInstance, PATCH_CABLE_STYLE_PATCHER, PATCH_CABLE_STYLE_SOLID,
+    PatchCableInstance, Vertex, WaveformInstance, WavetableInstance,
 };
 use crate::widget_render::{self, ShaderBackend, WidgetInstance};
 
@@ -339,7 +339,10 @@ pub fn patch_cable_instances() -> Vec<PatchCableInstance> {
                  color: [f32; 4],
                  radius_px: f32,
                  is_segmented: f32,
-                 segment_y_px: f32| PatchCableInstance {
+                 segment_y_px: f32,
+                 style: f32,
+                 plug_radius_px: f32,
+                 plug_levels: [f32; 2]| PatchCableInstance {
         ndc_min: ndc(bounds[0], bounds[1]),
         ndc_max: ndc(bounds[2], bounds[3]),
         bounds_min: [bounds[0], bounds[1]],
@@ -353,9 +356,12 @@ pub fn patch_cable_instances() -> Vec<PatchCableInstance> {
         is_segmented,
         segment_y_px,
         corner_radius_px: 12.0,
+        style,
+        plug_radius_px,
+        plug_levels,
     };
     vec![
-        // Bezier: a long horizontal S-curve.
+        // Patcher bezier: a long horizontal S-curve.
         cable(
             [16.0, 16.0, 240.0, 120.0],
             [32.0, 40.0],
@@ -366,18 +372,26 @@ pub fn patch_cable_instances() -> Vec<PatchCableInstance> {
             4.0,
             0.0,
             0.0,
+            PATCH_CABLE_STYLE_PATCHER,
+            0.0,
+            [0.0, 0.0],
         ),
-        // Thicker bezier, warmer, so radius and color both vary between draws.
+        // Solid app-wide bezier, thicker and warmer: one flat colour, a dark
+        // rim, and a 9 px plug disc over each end; the start plug's hole is
+        // dark (no signal) and the end plug's hole is fully lit.
         cable(
             [16.0, 128.0, 240.0, 240.0],
-            [32.0, 224.0],
-            [180.0, 224.0],
-            [80.0, 152.0],
-            [224.0, 152.0],
+            [32.0, 152.0],
+            [100.0, 152.0],
+            [156.0, 220.0],
+            [200.0, 220.0],
             [1.00, 0.55, 0.18, 1.0],
-            7.0,
+            5.0,
             0.0,
             0.0,
+            PATCH_CABLE_STYLE_SOLID,
+            9.0,
+            [0.0, 1.0],
         ),
         // Segmented: the orthogonal router with rounded corners.
         cable(
@@ -390,6 +404,9 @@ pub fn patch_cable_instances() -> Vec<PatchCableInstance> {
             5.0,
             1.0,
             128.0,
+            PATCH_CABLE_STYLE_PATCHER,
+            0.0,
+            [0.0, 0.0],
         ),
     ]
 }

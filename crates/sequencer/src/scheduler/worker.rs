@@ -444,10 +444,6 @@ impl SchedulerDriver {
         // inside the horizon (docs/rolling-core-spec.md 4.2, F3).
         let roll_commands = state.drain_roll_commands();
         if !roll_commands.is_empty() {
-            eprintln!(
-                "[roll-debug] scheduler drain commands={roll_commands:?} frontier_beats={:.6}",
-                self.lookahead_state.clock.total_beats,
-            );
             // Manual sequence-roll commands and ClearAll win over a running
             // process roll (`roll!`).
             self.lookahead_state
@@ -460,16 +456,6 @@ impl SchedulerDriver {
             );
             let grid = self.lookahead_state.roll.active_grid_beats(state);
             self.lookahead_state.roll.publish_windows(state, grid);
-            let active_windows: Vec<(usize, f64)> = self.lookahead_state
-                .roll
-                .window_start
-                .iter()
-                .enumerate()
-                .filter_map(|(track, start)| start.map(|start| (track, start)))
-                .collect();
-            eprintln!(
-                "[roll-debug] scheduler applied grid_beats={grid:.6} windows={active_windows:?}"
-            );
         }
         let live_midi_fx_active = any_live_midi_fx_notes(&self.live_midi_fx_tracks);
         if live_midi_fx_active != self.last_live_midi_fx_active {

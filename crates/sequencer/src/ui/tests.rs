@@ -5465,6 +5465,7 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
+                cached_mod_port_levels: Default::default(),
                 cached_mod_display_values: Default::default(),
                 watched_display_modulators: std::collections::HashSet::new(),
                 mod_display_poll_fx_epoch: usize::MAX,
@@ -7531,6 +7532,7 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
+                cached_mod_port_levels: Default::default(),
                 cached_mod_display_values: Default::default(),
                 watched_display_modulators: std::collections::HashSet::new(),
                 mod_display_poll_fx_epoch: usize::MAX,
@@ -8161,6 +8163,7 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
+                cached_mod_port_levels: Default::default(),
                 cached_mod_display_values: Default::default(),
                 watched_display_modulators: std::collections::HashSet::new(),
                 mod_display_poll_fx_epoch: usize::MAX,
@@ -9202,6 +9205,7 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: Vec::new(),
                 cached_modulator_levels: Vec::new(),
+                cached_mod_port_levels: Default::default(),
                 cached_mod_display_values: Default::default(),
                 watched_display_modulators: std::collections::HashSet::new(),
                 mod_display_poll_fx_epoch: usize::MAX,
@@ -10563,6 +10567,7 @@
                 cached_bus_peak_levels: cached_bus_peak_levels.clone(),
                 cached_modulator_phases: cached_modulator_phases.clone(),
                 cached_modulator_levels: cached_modulator_levels.clone(),
+                cached_mod_port_levels: Default::default(),
                 cached_mod_display_values: Default::default(),
                 watched_display_modulators: std::collections::HashSet::new(),
                 mod_display_poll_fx_epoch: usize::MAX,
@@ -13314,7 +13319,7 @@
             editor.set_active_buffer(fx_buffer_id);
             editor
                 .runtime_mut()
-                .eval_str("(if (not eseq.effects.state/rack-panel-macros-open) (eseq.effects.instrument-panel/rack-panel-toggle-macros) false)")
+                .eval_str("(if (not (eseq.effects.state/rack-panel-macros-open (nth SEQ.instrument-panel 0))) (eseq.effects.instrument-panel/rack-panel-toggle-macros (nth SEQ.instrument-panel 0)) false)")
                 .expect("open rack macro bank");
             editor.refresh_runtime_side_effects();
             editor.update_tile_rects(180, 70);

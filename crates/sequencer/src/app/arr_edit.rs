@@ -509,10 +509,10 @@ impl App {
             ));
         }
         finish_active_gesture(self);
-        let scene_patch = SceneStructurePatch {
-            before: scenes_before,
-            after: self.state.capture_project_scenes(),
-        };
+        let scene_patch = SceneStructurePatch::new(
+            scenes_before,
+            self.state.capture_project_scenes(),
+        );
         let arrangement_patch = ArrangementStructurePatch {
             before: Some(arrangement_before),
             after: Some(after),

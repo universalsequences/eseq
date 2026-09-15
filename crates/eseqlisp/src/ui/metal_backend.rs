@@ -60,8 +60,10 @@ mod inner {
     use crate::live_audio;
     use crate::theme;
     use crate::ui::gpu_geometry::{
-        ClipStack, ImageVertex, LiveSpectrogramInstance, PatchCableInstance, ScissorRect, Vertex,
-        WaveformInstance, WavetableInstance, push_solid_quad_vertices, push_solid_rect_vertices,
+        ClipStack, ImageVertex, LiveSpectrogramInstance, PATCH_CABLE_STYLE_PATCHER,
+        PatchCableInstance, SOLID_CABLE_RADIUS_DESIGN_PX, SOLID_CABLE_TENSION, ScissorRect,
+        SolidCablePath, Vertex, WaveformInstance, WavetableInstance, push_solid_quad_vertices,
+        push_solid_rect_vertices, solid_cable_instance,
     };
     use crate::vm::Value;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
@@ -304,6 +306,9 @@ struct PatchCableInstance {
     float is_segmented;
     float segment_y_px;
     float corner_radius_px;
+    float style;
+    float plug_radius_px;
+    packed_float2 plug_levels;
 };
 
 struct PatchCableVaryings {
@@ -318,6 +323,9 @@ struct PatchCableVaryings {
     float is_segmented;
     float segment_y_px;
     float corner_radius_px;
+    float style;
+    float plug_radius_px;
+    float2 plug_levels;
 };
 
 float2 patch_cable_quad_corner(uint vid) {
@@ -351,6 +359,9 @@ vertex PatchCableVaryings patch_cable_vert(
     out.is_segmented = cable.is_segmented;
     out.segment_y_px = cable.segment_y_px;
     out.corner_radius_px = cable.corner_radius_px;
+    out.style = cable.style;
+    out.plug_radius_px = cable.plug_radius_px;
+    out.plug_levels = float2(cable.plug_levels);
     return out;
 }
 
@@ -523,11 +534,40 @@ fragment float4 patch_cable_frag(PatchCableVaryings in [[stage_in]])
             in.end);
 
     float sdf = min_dist_to_line - in.radius_px;
+    bool solid = in.style > 0.5;
+    // Solid style: a plug disc over each port, with a dark hole in its
+    // centre like a jack, unioned into the body so they share one rim.
+    float plug_dist = 1.0e6;
+    float plug_level = 0.0;
+    if (solid && in.plug_radius_px > 0.0) {
+        float start_dist = length(in.pixel_pos - in.start);
+        float end_dist = length(in.pixel_pos - in.end);
+        plug_dist = min(start_dist, end_dist);
+        plug_level = start_dist < end_dist ? in.plug_levels.x : in.plug_levels.y;
+        sdf = min(sdf, plug_dist - in.plug_radius_px);
+    }
     float derivative = max(fwidth(sdf), 0.0001);
     float alpha = smoothstep(derivative * 0.5, -derivative * 0.5, sdf);
 
     if (alpha <= 0.0) {
         discard_fragment();
+    }
+
+    if (solid) {
+        // One flat colour with a thin dark rim so the cable reads over any
+        // strip colour.
+        float rim_width = max(in.radius_px * 0.34, 0.75);
+        float rim_blend = smoothstep(-rim_width - derivative, -rim_width + derivative, sdf);
+        float3 rim_color = in.color.rgb * 0.42;
+        float3 cable_color = mix(in.color.rgb, rim_color, rim_blend);
+        float hole_radius = in.plug_radius_px * 0.40;
+        float hole_blend = 1.0 - smoothstep(hole_radius - derivative, hole_radius + derivative, plug_dist);
+        // The hole is a jack LED: dark at rest, glowing past the cable's
+        // own colour toward white with the port's live signal.
+        float3 lit_color = mix(in.color.rgb, float3(1.0, 1.0, 1.0), 0.45);
+        float3 hole_color = mix(float3(0.04, 0.045, 0.05), lit_color, clamp(plug_level, 0.0, 1.0));
+        cable_color = mix(cable_color, hole_color, hole_blend);
+        return float4(cable_color, in.color.a * alpha);
     }
 
     float core_radius = in.radius_px * 0.48;
@@ -8420,6 +8460,9 @@ fragment float4 live_spectrogram_frag(
                 is_segmented: if cable.is_segmented { 1.0 } else { 0.0 },
                 segment_y_px,
                 corner_radius_px,
+                style: PATCH_CABLE_STYLE_PATCHER,
+                plug_radius_px: 0.0,
+                plug_levels: [0.0, 0.0],
             },
             clip,
         })
@@ -8441,6 +8484,12 @@ fragment float4 live_spectrogram_frag(
         active: bool,
         pending: bool,
         center_px: (f32, f32),
+        /// Live signal level at this port (0..1), from the widget's bound
+        /// `level` state; lights the plug hole of every cable ending here.
+        level: f32,
+        /// Half the port widget's smaller side, in framebuffer pixels: cables
+        /// stop at the port ring instead of covering it.
+        radius_px: f32,
         clip: ScissorRect,
         connected_sources: Vec<usize>,
         selected_sources: Vec<usize>,
@@ -8478,6 +8527,8 @@ fragment float4 live_spectrogram_frag(
                 let center_col = col_off + node.rect.col + node.rect.width * 0.5;
                 let center_row = row_off + node.rect.row + node.rect.height * 0.5;
                 let center_px = (center_col * cell_w, center_row * cell_h);
+                let radius_px = mod_patch_port_radius_px(node, cell_w, cell_h);
+                let level = layout_node_level_prop(node, "level");
                 if center_px.0.is_finite() && center_px.1.is_finite() {
                     out.push(ModPatchPort {
                         direction,
@@ -8488,6 +8539,8 @@ fragment float4 live_spectrogram_frag(
                         active: layout_node_bool_prop(node, "active"),
                         pending: layout_node_bool_prop(node, "pending"),
                         center_px,
+                        level,
+                        radius_px,
                         clip: visible_scissor,
                         connected_sources: layout_node_usize_list_prop(node, "connected-sources"),
                         selected_sources: layout_node_usize_list_prop(node, "selected-sources"),
@@ -8506,6 +8559,30 @@ fragment float4 live_spectrogram_frag(
                 visible_scissor,
                 out,
             );
+        }
+    }
+
+    /// A numeric prop that may be a literal or a reactive float binding, as the
+    /// SDF widget resolves its own state props.
+    fn layout_node_level_prop(node: &LayoutNode, key: &str) -> f32 {
+        let value = match node
+            .props
+            .get(key)
+            .or_else(|| node.props.get(&format!("shader-state-{key}")))
+        {
+            Some(Value::Number(value)) => *value,
+            Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot),
+            _ => 0.0,
+        };
+        if value.is_finite() { value.clamp(0.0, 1.0) as f32 } else { 0.0 }
+    }
+
+    fn mod_patch_port_radius_px(node: &LayoutNode, cell_w: f32, cell_h: f32) -> f32 {
+        let radius = (node.rect.width * cell_w).min(node.rect.height * cell_h) * 0.5;
+        if radius.is_finite() {
+            radius.max(0.0)
+        } else {
+            0.0
         }
     }
 
@@ -8563,40 +8640,33 @@ fragment float4 live_spectrogram_frag(
         let mut outputs = HashMap::new();
         for port in ports {
             if port.direction == ModPatchPortDirection::Out && port.active {
-                outputs.insert(port.track, (port.center_px, port.clip));
+                outputs.insert(
+                    port.track,
+                    (port.center_px, port.clip, port.radius_px, port.level),
+                );
             }
         }
 
+        // App-wide cables (mixer mod routes, lane patchbay) use the solid style:
+        // one flat themed colour with a dark rim, capped by a plug disc over each
+        // port. The dedicated patch editor keeps its own look.
         let mut cables = Vec::new();
         let base_color = crate::theme::MOD_CABLE();
-        let highlight_color = crate::theme::MOD_CABLE_HIGHLIGHT();
-        let shadow_color = Color::rgba(0.0, 0.0, 0.0, 0.34);
         let selected_color = crate::theme::MOD_CABLE_SELECTED();
-        let selected_highlight_color = crate::theme::MOD_CABLE_SELECTED_HIGHLIGHT();
         let preview_color = crate::theme::MOD_CABLE_PREVIEW();
-        let preview_highlight_color = crate::theme::MOD_CABLE_PREVIEW_HIGHLIGHT();
         let lane_color = crate::theme::MOD_CABLE_LANE_TINT();
-        let tension = 0.30;
+        let radius_px = widget_render::ui_design_px(SOLID_CABLE_RADIUS_DESIGN_PX);
         for port in ports {
             if port.direction != ModPatchPortDirection::In {
                 continue;
             }
             for source in &port.connected_sources {
-                let Some((start, source_clip)) = outputs.get(source).copied() else {
+                let Some((start, source_clip, source_radius, source_level)) =
+                    outputs.get(source).copied()
+                else {
                     continue;
                 };
                 let cable_clip = shared_endpoint_clip(source_clip, port.clip, vp_w, vp_h);
-                push_mod_patch_cable_instance(
-                    (start.0 + 1.4, start.1 + 2.2),
-                    (port.center_px.0 + 1.4, port.center_px.1 + 2.2),
-                    3.6,
-                    shadow_color,
-                    cable_clip,
-                    &mut cables,
-                    vp_w,
-                    vp_h,
-                    tension,
-                );
                 let lane_tint = (port.input as f32 * 0.08).min(0.24);
                 let is_selected = port
                     .selected_sources
@@ -8612,69 +8682,37 @@ fragment float4 live_spectrogram_frag(
                         a: base_color.a,
                     }
                 };
-                push_mod_patch_cable_instance(
-                    start,
-                    port.center_px,
-                    1.85,
+                let path = SolidCablePath::between(start, port.center_px, SOLID_CABLE_TENSION);
+                let plug_radius_px = source_radius.max(port.radius_px);
+                let plug_levels = [source_level, port.level];
+                push_solid_mod_patch_cable(
+                    path,
+                    radius_px,
+                    plug_radius_px,
+                    plug_levels,
                     color,
                     cable_clip,
                     &mut cables,
                     vp_w,
                     vp_h,
-                    tension,
-                );
-                push_mod_patch_cable_instance(
-                    (start.0, start.1 - 0.7),
-                    (port.center_px.0, port.center_px.1 - 0.7),
-                    0.55,
-                    if is_selected {
-                        selected_highlight_color
-                    } else {
-                        highlight_color
-                    },
-                    cable_clip,
-                    &mut cables,
-                    vp_w,
-                    vp_h,
-                    tension,
                 );
             }
         }
         if let Some(source_port) = ports.iter().find(|port| {
             port.direction == ModPatchPortDirection::Out && port.active && port.pending
         }) {
-            push_mod_patch_cable_instance(
-                (source_port.center_px.0 + 1.4, source_port.center_px.1 + 2.2),
-                (cursor_px.0 + 1.4, cursor_px.1 + 2.2),
-                3.6,
-                shadow_color,
-                source_port.clip,
-                &mut cables,
-                vp_w,
-                vp_h,
-                tension,
-            );
-            push_mod_patch_cable_instance(
-                source_port.center_px,
-                cursor_px,
-                1.85,
+            let path =
+                SolidCablePath::between(source_port.center_px, cursor_px, SOLID_CABLE_TENSION);
+            push_solid_mod_patch_cable(
+                path,
+                radius_px,
+                source_port.radius_px,
+                [source_port.level, 0.0],
                 preview_color,
                 source_port.clip,
                 &mut cables,
                 vp_w,
                 vp_h,
-                tension,
-            );
-            push_mod_patch_cable_instance(
-                (source_port.center_px.0, source_port.center_px.1 - 0.7),
-                (cursor_px.0, cursor_px.1 - 0.7),
-                0.55,
-                preview_highlight_color,
-                source_port.clip,
-                &mut cables,
-                vp_w,
-                vp_h,
-                tension,
             );
         }
         cables
@@ -8778,55 +8816,28 @@ fragment float4 live_spectrogram_frag(
         Some((verts, input_port.clip))
     }
 
-    fn push_mod_patch_cable_instance(
-        start: (f32, f32),
-        end: (f32, f32),
+    fn push_solid_mod_patch_cable(
+        path: SolidCablePath,
         radius_px: f32,
+        plug_radius_px: f32,
+        plug_levels: [f32; 2],
         color: Color,
         clip: ScissorRect,
         cables: &mut Vec<PatchCableDrawInstance>,
         vp_w: f32,
         vp_h: f32,
-        tension: f32,
     ) {
-        let dx = end.0 - start.0;
-        let dy = end.1 - start.1;
-        let distance = (dx * dx + dy * dy).sqrt();
-        let horizontal = dx.abs();
-        let slack = (1.0 - tension).clamp(0.0, 1.0);
-        let sag = ((28.0 + distance * 0.22) * slack).clamp(18.0, 98.0);
-        let handle_x = horizontal.clamp(42.0, 190.0) * (0.30 + 0.14 * slack);
-        let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
-        let c1 = (start.0 + handle_x * direction, start.1 + sag);
-        let c2 = (end.0 - handle_x * direction, end.1 + sag);
-        let padding = radius_px + sag * 0.12 + 8.0;
-        let min_x = start.0.min(end.0).min(c1.0).min(c2.0) - padding;
-        let max_x = start.0.max(end.0).max(c1.0).max(c2.0) + padding;
-        let min_y = start.1.min(end.1).min(c1.1).min(c2.1) - padding;
-        let max_y = start.1.max(end.1).max(c1.1).max(c2.1) + padding;
-        if min_x >= vp_w || max_x <= 0.0 || min_y >= vp_h || max_y <= 0.0 {
-            return;
+        if let Some(instance) = solid_cable_instance(
+            path,
+            radius_px,
+            plug_radius_px,
+            plug_levels,
+            color.to_rgba(),
+            vp_w,
+            vp_h,
+        ) {
+            cables.push(PatchCableDrawInstance { instance, clip });
         }
-        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
-        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
-        cables.push(PatchCableDrawInstance {
-            instance: PatchCableInstance {
-                ndc_min: [ndc_x(min_x), ndc_y(min_y)],
-                ndc_max: [ndc_x(max_x), ndc_y(max_y)],
-                bounds_min: [min_x, min_y],
-                bounds_max: [max_x, max_y],
-                start: [start.0, start.1],
-                control1: [c1.0, c1.1],
-                control2: [c2.0, c2.1],
-                end: [end.0, end.1],
-                color: color.to_rgba(),
-                radius_px,
-                is_segmented: 0.0,
-                segment_y_px: 0.0,
-                corner_radius_px: 0.0,
-            },
-            clip,
-        });
     }
 
     fn image_vertices(

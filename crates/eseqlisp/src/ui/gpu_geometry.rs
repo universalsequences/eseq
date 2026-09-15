@@ -70,6 +70,115 @@ pub(crate) struct PatchCableInstance {
     pub is_segmented: f32,
     pub segment_y_px: f32,
     pub corner_radius_px: f32,
+    /// [`PATCH_CABLE_STYLE_PATCHER`] or [`PATCH_CABLE_STYLE_SOLID`].
+    pub style: f32,
+    /// Solid style only: radius in framebuffer pixels of the plug disc drawn
+    /// over each end of the cable. Zero draws no plugs.
+    pub plug_radius_px: f32,
+    /// Solid style only: live signal level (0..1) at the start and end plug.
+    /// The plug's hole glows with it, like a jack LED.
+    pub plug_levels: [f32; 2],
+}
+
+/// The dedicated patch editor's cable: a near-white core inside a darkened,
+/// translucent edge, no arrowhead.
+pub(crate) const PATCH_CABLE_STYLE_PATCHER: f32 = 0.0;
+/// The app-wide cable (mixer mod routes, lane patchbay): one flat colour with
+/// a thin dark rim, capped by a VCV-Rack-style plug disc over each port.
+pub(crate) const PATCH_CABLE_STYLE_SOLID: f32 = 1.0;
+
+/// Geometry for one app-wide solid cable: it hangs between the two port
+/// centres with horizontal handles and a sag. The plug discs the shader draws
+/// at `start` and `end` cover the ports themselves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SolidCablePath {
+    pub start: (f32, f32),
+    pub control1: (f32, f32),
+    pub control2: (f32, f32),
+    pub end: (f32, f32),
+}
+
+impl SolidCablePath {
+    pub fn between(start: (f32, f32), end: (f32, f32), tension: f32) -> Self {
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let horizontal = dx.abs();
+        let slack = (1.0 - tension).clamp(0.0, 1.0);
+        let sag = ((28.0 + distance * 0.22) * slack).clamp(18.0, 98.0);
+        let handle_x = horizontal.clamp(42.0, 190.0) * (0.30 + 0.14 * slack);
+        let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
+        let control1 = (start.0 + handle_x * direction, start.1 + sag);
+        let control2 = (end.0 - handle_x * direction, end.1 + sag);
+        Self {
+            start,
+            control1,
+            control2,
+            end,
+        }
+    }
+}
+
+/// Design-pixel half-width of the app-wide solid cable body.
+pub(crate) const SOLID_CABLE_RADIUS_DESIGN_PX: f32 = 3.0;
+/// Hang of the solid cable between its ports: 0 sags fully, 1 pulls taut.
+pub(crate) const SOLID_CABLE_TENSION: f32 = 0.30;
+
+/// One solid-style cable instance, or `None` when it lies entirely offscreen.
+/// `plug_radius_px` is the plug disc drawn over each end.
+pub(crate) fn solid_cable_instance(
+    path: SolidCablePath,
+    radius_px: f32,
+    plug_radius_px: f32,
+    plug_levels: [f32; 2],
+    color: [f32; 4],
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<PatchCableInstance> {
+    let padding = radius_px.max(plug_radius_px) + 4.0;
+    let points = [path.start, path.control1, path.control2, path.end];
+    let mut min_x = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    for (x, y) in points {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    let (min_x, max_x, min_y, max_y) = (
+        min_x - padding,
+        max_x + padding,
+        min_y - padding,
+        max_y + padding,
+    );
+    if !(min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite()) {
+        return None;
+    }
+    if min_x >= vp_w || max_x <= 0.0 || min_y >= vp_h || max_y <= 0.0 {
+        return None;
+    }
+    let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+    let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+    Some(PatchCableInstance {
+        ndc_min: [ndc_x(min_x), ndc_y(min_y)],
+        ndc_max: [ndc_x(max_x), ndc_y(max_y)],
+        bounds_min: [min_x, min_y],
+        bounds_max: [max_x, max_y],
+        start: [path.start.0, path.start.1],
+        control1: [path.control1.0, path.control1.1],
+        control2: [path.control2.0, path.control2.1],
+        end: [path.end.0, path.end.1],
+        color,
+        radius_px,
+        is_segmented: 0.0,
+        segment_y_px: 0.0,
+        corner_radius_px: 0.0,
+        style: PATCH_CABLE_STYLE_SOLID,
+        plug_radius_px,
+        plug_levels,
+    })
 }
 
 /// One wavetable scope. Sample data comes from a separate bank buffer.

@@ -816,10 +816,10 @@ impl App {
             Some(scenes_before) => {
                 let scenes_after = self.state.capture_project_scenes();
                 finish_active_gesture(self);
-                let scene_patch = SceneStructurePatch {
-                    before: scenes_before,
-                    after: scenes_after,
-                };
+                let scene_patch = SceneStructurePatch::new(
+                    scenes_before,
+                    scenes_after,
+                );
                 let retained_bytes =
                     scene_patch.retained_bytes() + arrangement_patch.retained_bytes();
                 self.history.commit(

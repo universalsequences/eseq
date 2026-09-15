@@ -57,27 +57,55 @@ impl GraphController<'_> {
             &format!("{}_send", name),
             "create_track_shell send",
         )?;
-        let mod_out_id = add_gain_node_checked(
-            self.app.graph.lg.0,
-            1.0,
-            &format!("{}_mod_out", name),
-            "create_track_shell mod output",
-        )?;
-        let mod_in_clip_ids = std::array::from_fn(|input| {
-            let mod_in_name = CString::new(format!("{}_mod_in{}_clip", name, input + 1)).unwrap();
+        // The mod output hub and the four mod input clips are watched taps:
+        // the mixer reads their block peaks at meter rate to light the ports.
+        let mod_out_name = CString::new(format!("{}_mod_out", name))
+            .map_err(|_| "create_track_shell mod output: node name contains NUL".to_string())?;
+        let mod_out_id = unsafe {
+            crate::audiograph::add_node(
+                self.app.graph.lg.0,
+                crate::instruments::track_modulator::mod_out_tap_vtable(),
+                crate::instruments::track_modulator::MOD_OUT_TAP_STATE_SIZE
+                    * std::mem::size_of::<f32>(),
+                mod_out_name.as_ptr(),
+                1,
+                1,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if mod_out_id < 0 {
+            return Err(format!(
+                "create_track_shell mod output: failed to queue tap node '{}_mod_out'",
+                name
+            ));
+        }
+        unsafe {
+            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, mod_out_id);
+        }
+        let mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT] =
+            std::array::from_fn(|input| {
+                let mod_in_name =
+                    CString::new(format!("{}_mod_in{}_clip", name, input + 1)).unwrap();
+                unsafe {
+                    crate::audiograph::add_node(
+                        self.app.graph.lg.0,
+                        crate::instruments::track_modulator::mod_in_clip_vtable(),
+                        crate::instruments::track_modulator::MOD_IN_CLIP_STATE_SIZE
+                            * std::mem::size_of::<f32>(),
+                        mod_in_name.as_ptr(),
+                        1,
+                        1,
+                        std::ptr::null(),
+                        0,
+                    )
+                }
+            });
+        for mod_in_clip_id in mod_in_clip_ids {
             unsafe {
-                crate::audiograph::add_node(
-                    self.app.graph.lg.0,
-                    crate::instruments::track_modulator::mod_in_clip_vtable(),
-                    crate::instruments::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
-                    mod_in_name.as_ptr(),
-                    1,
-                    1,
-                    std::ptr::null(),
-                    0,
-                )
+                crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, mod_in_clip_id);
             }
-        });
+        }
         let mod_env_name = CString::new(format!("{}_mod_env", name)).unwrap();
         let mod_env_id = unsafe {
             crate::audiograph::add_node(

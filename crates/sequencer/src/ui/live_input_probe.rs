@@ -53,6 +53,7 @@ pub(super) fn run(
         cached_bus_peak_levels: vec![0.0; app.buses.len()],
         cached_modulator_phases: Vec::new(),
         cached_modulator_levels: Vec::new(),
+        cached_mod_port_levels: Default::default(),
         cached_mod_display_values: Default::default(),
         watched_display_modulators: Default::default(),
         mod_display_poll_fx_epoch: usize::MAX,

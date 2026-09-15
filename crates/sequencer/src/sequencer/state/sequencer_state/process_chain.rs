@@ -277,6 +277,211 @@ impl SequencerState {
         self.publish_scheduler_snapshot();
         true
     }
+    /// One track's scene-independent roster of user-added process slots
+    /// (eseq-53y7).
+    pub fn track_lane_roster(&self, track: usize) -> Option<crate::process::TrackLaneRoster> {
+        self.pattern.track_lane_rosters.lock().unwrap().get(track).cloned()
+    }
+
+    /// Every track's roster, in track order. The history memento for a
+    /// scene-structure edit carries this beside `capture_project_scenes`
+    /// (eseq-53y7.6): roster structure lives outside pattern data, so undo
+    /// has to restore both halves or the next reconcile re-applies the edit.
+    pub fn capture_track_lane_rosters(&self) -> Vec<crate::process::TrackLaneRoster> {
+        self.pattern.track_lane_rosters.lock().unwrap().clone()
+    }
+
+    /// Restore every track's roster from a history memento. A no-op — and in
+    /// particular no reconcile pass — when the stored rosters already match,
+    /// so scene-structure undo for edits that never touched a roster costs
+    /// nothing. Returns whether anything moved.
+    pub fn restore_track_lane_rosters(
+        &self,
+        rosters: &[crate::process::TrackLaneRoster],
+    ) -> bool {
+        {
+            let stored = self.pattern.track_lane_rosters.lock().unwrap();
+            let unchanged = stored.iter().enumerate().all(|(track, roster)| {
+                rosters.get(track).map_or(roster.is_empty(), |target| target == roster)
+            });
+            if unchanged {
+                return false;
+            }
+        }
+        self.install_track_lane_rosters(rosters.to_vec());
+        true
+    }
+
+    /// Replace every track's roster (project load) and reconcile the result
+    /// into every stored pattern chain plus every live chain.
+    pub fn install_track_lane_rosters(&self, rosters: Vec<crate::process::TrackLaneRoster>) {
+        {
+            let mut stored = self.pattern.track_lane_rosters.lock().unwrap();
+            for (track, slot) in stored.iter_mut().enumerate() {
+                *slot = rosters.get(track).cloned().unwrap_or_default();
+            }
+        }
+        // Bind the length first: a guard temporary in the `for` header would
+        // live for the whole loop and deadlock the reconcile below.
+        let track_count = self.pattern.track_lane_rosters.lock().unwrap().len();
+        for track in 0..track_count {
+            self.reconcile_track_lane_roster_everywhere(track);
+        }
+    }
+
+    /// Reconcile `track`'s roster into every pattern chain the track owns
+    /// (stored Patch entities, take chunks included) and into the live
+    /// chain. Idempotent: reconciliation only appends missing roster slots,
+    /// drops roster slots that left, and never touches pattern-owned values.
+    pub(crate) fn reconcile_track_lane_roster_everywhere(&self, track: usize) {
+        let roster = match self.pattern.track_lane_rosters.lock().unwrap().get(track) {
+            Some(roster) => roster.clone(),
+            None => return,
+        };
+        {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            if let Some(pool) = scenes.track_pools.get_mut(track) {
+                // Visit each Patch entity once: take chunks share one.
+                for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
+                    crate::process::reconcile_track_lane_roster(
+                        &mut patch.process_chain,
+                        &roster,
+                    );
+                }
+            }
+        }
+        if let Some(chain) = self.pattern.process_chains.lock().unwrap().get_mut(track) {
+            crate::process::reconcile_track_lane_roster(chain, &roster);
+        }
+    }
+
+    /// Rewrite `track`'s roster so its entries follow `order` (an instance-id
+    /// sequence read back off a chain). Entries `order` does not mention keep
+    /// their relative order at the end. Order is roster-owned structure, so a
+    /// reorder in one scene's chain lands in every scene (eseq-53y7.5).
+    pub(crate) fn reorder_track_lane_roster(
+        &self,
+        track: usize,
+        order: &[crate::process::ProcessInstanceId],
+    ) -> bool {
+        let mut rosters = self.pattern.track_lane_rosters.lock().unwrap();
+        let Some(roster) = rosters.get_mut(track) else {
+            return false;
+        };
+        let rank = |id: crate::process::ProcessInstanceId| {
+            order.iter().position(|listed| *listed == id).unwrap_or(usize::MAX)
+        };
+        let before = roster
+            .iter()
+            .map(|entry| entry.instance_id)
+            .collect::<Vec<_>>();
+        // Stable, so unlisted entries keep their relative order.
+        roster.sort_by_key(|entry| rank(entry.instance_id));
+        before != roster.iter().map(|entry| entry.instance_id).collect::<Vec<_>>()
+    }
+
+    /// Append one user-added process slot to `track`'s roster and to every
+    /// one of its pattern chains, returning the new instance id.
+    ///
+    /// The instance name is minted unique within the track: the bare
+    /// class-derived lane name when free, else `name 2`, `name 3`, … . The
+    /// default project lanes own their bare names on every track, so a
+    /// track's first added grab reads `grab 2`.
+    pub fn add_track_roster_slot(
+        &self,
+        track: usize,
+        class_name: &str,
+    ) -> Option<crate::process::ProcessInstanceId> {
+        self.add_track_roster_slot_with_id(track, class_name, None)
+    }
+
+    /// The instance id a new roster slot would take right now. The UI native
+    /// hands the new id back to Lisp before its host command has run, so the
+    /// id has to be decided ahead of the edit; `add_track_roster_slot_with_id`
+    /// takes it back.
+    pub fn next_track_roster_slot_id(&self) -> crate::process::ProcessInstanceId {
+        let rosters = self.pattern.track_lane_rosters.lock().unwrap();
+        crate::process::next_track_roster_instance_id(
+            rosters
+                .iter()
+                .flat_map(|roster| roster.iter().map(|entry| entry.instance_id)),
+        )
+    }
+
+    /// `add_track_roster_slot` with a caller-chosen instance id. A `requested`
+    /// id outside the roster band, or one another slot took between the mint
+    /// and this call, is ignored and a fresh id minted instead.
+    pub fn add_track_roster_slot_with_id(
+        &self,
+        track: usize,
+        class_name: &str,
+        requested: Option<crate::process::ProcessInstanceId>,
+    ) -> Option<crate::process::ProcessInstanceId> {
+        if track >= self.active_track_count() {
+            return None;
+        }
+        let instance_id = {
+            let mut rosters = self.pattern.track_lane_rosters.lock().unwrap();
+            // Ids are unique across every track: a roster slot's id is its
+            // runtime identity (see `track_process_slot_runtime_id`).
+            let free = |id: crate::process::ProcessInstanceId,
+                        rosters: &[crate::process::TrackLaneRoster]| {
+                crate::process::is_track_roster_instance_id(id)
+                    && !rosters
+                        .iter()
+                        .any(|roster| roster.iter().any(|entry| entry.instance_id == id))
+            };
+            let instance_id = match requested {
+                Some(id) if free(id, &rosters) => id,
+                _ => crate::process::next_track_roster_instance_id(
+                    rosters
+                        .iter()
+                        .flat_map(|roster| roster.iter().map(|entry| entry.instance_id)),
+                ),
+            };
+            let roster = rosters.get_mut(track)?;
+            let instance_name = crate::process::mint_track_roster_instance_name(
+                class_name,
+                &crate::process::taken_track_roster_instance_names(roster),
+            );
+            roster.push(crate::process::TrackLaneRosterSlot {
+                instance_id,
+                instance_name,
+                class_name: class_name.to_string(),
+            });
+            instance_id
+        };
+        self.reconcile_track_lane_roster_everywhere(track);
+        self.publish_process_chain_edit();
+        Some(instance_id)
+    }
+
+    /// Drop one roster slot from `track` — and therefore from every scene's
+    /// chain for that track, values included.
+    pub fn remove_track_roster_slot(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+    ) -> bool {
+        if track >= self.active_track_count() {
+            return false;
+        }
+        {
+            let mut rosters = self.pattern.track_lane_rosters.lock().unwrap();
+            let Some(roster) = rosters.get_mut(track) else {
+                return false;
+            };
+            let before = roster.len();
+            roster.retain(|entry| entry.instance_id != instance_id);
+            if roster.len() == before {
+                return false;
+            }
+        }
+        self.reconcile_track_lane_roster_everywhere(track);
+        self.publish_process_chain_edit();
+        true
+    }
+
     fn publish_process_chain_edit(&self) {
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
@@ -460,13 +665,34 @@ impl SequencerState {
                         .collect::<Vec<_>>(),
             )
         }
+        // A roster slot's order is scene-independent structure, so moving one
+        // rewrites the roster and reconciles every pattern (eseq-53y7.5).
+        let roster_slot = crate::process::is_track_roster_instance_id(instance_id);
+        let mut roster_order: Option<Vec<crate::process::ProcessInstanceId>> = None;
         let changed = {
             let mut chains = self.pattern.process_chains.lock().unwrap();
             let Some(chain) = chains.get_mut(track) else {
                 return false;
             };
-            move_slot_within_chain(chain, instance_id, before)
+            let changed = move_slot_within_chain(chain, instance_id, before);
+            if roster_slot && changed == Some(true) {
+                roster_order = Some(
+                    chain
+                        .slots
+                        .iter()
+                        .filter(|slot| crate::process::is_track_roster_slot(slot))
+                        .map(|slot| slot.instance_id)
+                        .collect(),
+                );
+            }
+            changed
         };
+        if let Some(order) = roster_order {
+            self.reorder_track_lane_roster(track, &order);
+            self.reconcile_track_lane_roster_everywhere(track);
+            self.publish_process_chain_edit();
+            return true;
+        }
         // Reordering a project slot moves it within the project layer only.
         let changed = changed.or_else(|| {
             let mut scenes = self.pattern.scenes.lock().unwrap();

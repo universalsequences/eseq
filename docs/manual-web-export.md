@@ -79,7 +79,7 @@ from disk. The header links back to the website's `../index.html`.
 The sidebar follows the menu graph starting at `index`; Previous and Next
 follow sibling menu order, as in the app. Pages without a path from the index
 produce a warning and are appended to the sidebar. Small screens use a native
-collapsible chapter menu. Clicking an illustration opens the original image.
+collapsible chapter menu. Illustrations render as ordinary, non-clickable images.
 App action labels render as inert text; Lisp forms never appear in the HTML
 and are never evaluated. HTML metacharacters are escaped in all authored text.
 

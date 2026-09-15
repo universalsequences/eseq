@@ -1,6 +1,6 @@
 # Default Process Lanes: Cirklon parity out of the box
 
-Status: spec rev 2, 2026-09-10. Rev 1 was the plan; rev 2 records what shipped (epic eseq-ks8x) and where it deviates. Companion to
+Status: spec rev 6, 2026-09-15. Rev 1 was the plan; rev 2 records what shipped (epic eseq-ks8x) and where it deviates; rev 3 (eseq-38k8) gives `grab` the Cirklon replace semantics; rev 4 is the lane patchbay (eseq-jrab), rev 5 bus-send targets (eseq-jmi9), rev 6 user-added track lanes (epic eseq-53y7). Companion to
 `docs/cirklon-process-accumulator-brainstorm.md` (normative process model) and
 `docs/cirklon-endgame-trajectory.md`. Design canvas (approved):
 https://claude.ai/code/artifact/b53be653-e637-4314-9332-23011c7be9ac
@@ -21,6 +21,13 @@ by a package the UI imports at startup. Untouched lanes are inert.
 - `:process-inlet` ports + `connect!` / `process-inlet` selectors (Phase 4);
   writes inside one chain land same-tick in slot order.
 - Previous-tick cross-track reads with `:steps-ago` / `:trigs-ago` (Phase 7).
+- Same-tick pattern reads `(track n :param :pattern)` (rev 3): the authored
+  value on the step the source track is currently on, recorded in the chunk
+  pre-pass before any process runs, held until the source's next boundary.
+  `:note` (chord base note, else the transpose p-lock) is only readable this
+  way; `(step-note)` is the same quantity for the running step, and
+  `(+ (current-note) (- new (step-note)))` is the replace-the-note write that
+  keeps accumulator offsets and moves chords as a block.
 
 ## The default layer (`eseq.lanes` package)
 
@@ -33,7 +40,7 @@ Chain order is dropdown order. Lane names have no instance prefix.
 | `reset` | gate lane | accumulator reset | resets `tacc`, `acc A`, `acc B` before the step |
 | `acc A` | float lane | aux C | generic accumulator, `out :mappable`, default hint `(step-param :retrig)` |
 | `acc B` | float lane | aux D | same def as `acc A`, default hint `(step-param :rate)` |
-| `grab` | float lane 0..1 amount | note/transpose grab | `target-add!` of `(read (track source :transpose :steps-ago lag))`; `source`, `lag` are slot inlets |
+| `grab` | gate lane | Cirklon grab (Inter Track) | `target-set!` replaces `value` (note / vel / dur picker) with the source track's current-step pattern value via `(read (track source :note :pattern))`; same tick, no scaling. `source` is a slot inlet. Rev 3, 2026-09-14: replaced the rev 2 additive `amount × (read … :steps-ago lag)` form, which was an invention with no Cirklon analog |
 | `rand` | gate lane `roll` | generator | seeded roll between `lo`/`hi` slot inlets, `out :process-inlet` |
 | `count` | gate lane `step` | generator | up-counter with `lo`/`hi`/`wrap`, `out :process-inlet` |
 | `cmp A` / `cmp B` | float lane `a` (input, or wired) | logic | 1/0 from `a` under `op` (`< > >= <= == !=`) against the `value` picker; `hold` 1 keeps the last wired input on quiet fires |
@@ -175,7 +182,7 @@ Where the build differs from the rev 1 plan, and why.
 - **Digit routing**: the row-wide soft number edit yields when any other
   number picker has focus; the row picker writes the whole selection when one
   exists. Lane ranges follow the slot's `lo`/`hi`. Track-typed inlets (grab's
-  `source`) are a track dropdown.
+  `source`) are a track dropdown; enum inlets (grab's `value`) a picker.
 - **Shared reset is wiring.** `lane-reset` has three `:process-inlet` ports
   (`a`, `b`, `c`) that the layer binds to the `reset` inlet of `tacc`, `acc A`,
   `acc B` by instance identity. Same-fire because `reset` sits above the
@@ -202,10 +209,16 @@ Where the build differs from the rev 1 plan, and why.
   wherever Stop caught them. `reset_transport` still leaves state alone on
   purpose: scene and pattern switches call it and accumulators ride across
   those.
-- **Dropdown**: default lanes show as their instance name with no index; other
-  lanes keep `N class/inlet`. The dropdown widget takes plain strings, so the
-  planned section header and kind column are not there. `Add lane…` is not
-  built; attaching a script still goes through the script picker.
+- **Dropdown**: default lanes show as their instance name with no index, and
+  so do lanes the user added to the track through the + cell (`grab 2`, the
+  minted roster name; the inlet is appended only when the class carries more
+  than one lane). Script-authored chain lanes keep `N class/inlet`. The
+  roster/default split comes from the `:roster` flag on the published lane
+  entry (`is_track_roster_slot`). The dropdown widget takes plain strings, so the
+  planned section header and kind column are not there. The planned trailing
+  `Add lane…` entry became the + cell at the end of the patch bay grid
+  instead (rev 6); attaching an authored script still goes through the script
+  picker.
 - **Reorder** is two buttons in the strip header (▲ ▼ via
   `seq-move-process-slot-before`), not drag in the dropdown.
 - **Theme slots** `process-lane-accent` (lane fill, chips, strip text) and
@@ -385,3 +398,74 @@ like every other target, writes on the process's own track.
   `…-send-proc-mapped` (1 while an enabled slot binds or fans out to that
   bus). The mixer send knob gates its `process-value` amber dot on the
   mapped flag, so an unbound send drops the dot without waiting for a write.
+
+## User-added track lanes (rev 6, epic eseq-53y7, 2026-09-15)
+
+One process instance does one job. The rev 3 `grab` has a single `source`
+track and a single `value` picker, so grabbing a note from track 1 and a
+velocity from track 3 needs two grabs. The same holds for every generator
+and comparator. The project layer is the wrong place to put the second one:
+it is shared by every track, and the user wants the extra instance on one
+track (2026-09-14). So a track carries its own added lanes.
+
+- **Model.** A track-level *roster* — `TrackLaneRosterSlot { instance_id,
+  instance_name, class_name }`, `TrackLaneRoster = Vec<…>`, all of them in
+  `PatternState.track_lane_rosters` (`runtime/process.rs`,
+  `state/core.rs`) — owns the *structure* of the track's own chain: which
+  instances it carries and in what order. It is scene-independent. Each
+  pattern's `TrackProcessChain` keeps everything else: lane values, inlet
+  literals, bindings, fan-out, `unbound_ports`, `enabled`. This is the same
+  split as the project layer's shared slot versus per-track
+  `ProjectSlotOverride`, one axis over.
+- **Identity by id band.** `TRACK_ROSTER_INSTANCE_ID_BASE = 1 << 46`,
+  `TRACK_ROSTER_INSTANCE_ID_END = 1 << 47` (where the default-lane block
+  starts). Both are exact in f64, which instance ids must be because they
+  cross into Lisp as numbers — the same reason default lanes abandoned the
+  name hash. `is_track_roster_slot` is how reconciliation tells a roster
+  slot from a slot a `(processes :track …)` form authored: the latter is
+  outside the band and is never touched. Runtime ids for roster slots key
+  on the band id, not the usual `class:name` hash, because names are minted
+  per track and two tracks can each hold a `grab 2`.
+- **Reconcile.** `reconcile_track_lane_roster(chain, roster)` appends every
+  missing roster slot at the END of the chain in roster order (track slots
+  always run after the project layer, see
+  `compose_effective_process_chain`), keeps an existing slot's
+  pattern-owned data untouched, drops roster-owned slots the roster no
+  longer lists, and refreshes class/display name from the roster. It runs
+  in both `TrackPatternData` activation funnels (`apply_to`,
+  `restore_to_impl`), so a pattern stored before a slot was added still
+  activates with it; `reconcile_track_lane_roster_everywhere` walks every
+  stored Patch entity (take chunks share one) plus the live chain on
+  add/remove; `install_track_lane_rosters` does the same on project load.
+  Idempotent by construction.
+- **Track topology.** Delete-track shifts rosters down with the track
+  (`topology.rs`, next to the solo-bit shift) and pushes an empty roster at
+  the end; `clear_live_track_lane` clears the one track's roster with its
+  chain.
+- **Persistence.** Project file version 10 → 11: `track_lane_rosters` on the
+  wire record, skipped when empty; a v10 file loads with empty rosters and
+  is unchanged.
+- **Naming.** `mint_track_roster_instance_name` takes the bare class-derived
+  lane name (`lane-grab` → `grab`) when free, else `name 2`, `name 3`, … .
+  `taken_track_roster_instance_names` seeds the taken set with every
+  `DEFAULT_LANES` name, which the project layer owns on every track, so a
+  track's first added grab is `grab 2`.
+- **Ordering.** Roster slots run after all project lanes, in roster order.
+  Reorder inside the track chain is still the strip's ▲ ▼
+  (`seq-move-process-slot-before`). Open: that command rewrites one
+  pattern's chain, so a reordered roster slot can sit at a different
+  position per scene while the slot *set* is scene-independent —
+  eseq-53y7.5 decides whether order belongs on the roster too.
+- **Surface.** `(seq-add-track-process-slot track class-name)` → instance
+  id, and a roster-aware `seq-remove-process-slot` that removes a roster
+  slot from the roster (and therefore every scene) rather than from the
+  active pattern only, keeping today's behaviour for project-layer slots
+  (bead eseq-53y7.2). The + cell at the end of the patch bay grid opens a
+  class picker over `DEFAULT_LANE_CLASSES` plus library process defs, calls
+  the native and selects the new lane (bead eseq-53y7.3).
+- **Gotcha (found in .1): no `MutexGuard` temporary in a `for` header.**
+  `for track in 0..self.pattern.track_lane_rosters.lock().unwrap().len()`
+  holds the guard for the whole loop body, and the reconcile inside locks
+  the same mutex — instant deadlock. Bind the `len()` to a local first. The
+  same shape lurks anywhere a `PatternState` field is read to drive a loop
+  that then edits state.

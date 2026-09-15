@@ -1627,7 +1627,7 @@ pub(crate) fn run_event_loop(
                         meters.last_meter_poll_at = Instant::now();
                         let rt = editor.runtime_mut();
 
-                        sync_pattern_state(rt, &shared.state);
+                        sync_project_scene_state(rt, &shared.state);
                         sync_project_state(rt, &app);
                         // Rebuild bus reactive (incl. SEQ.bus-ids) and groups so the
                         // loaded group headers can resolve their backing bus index.

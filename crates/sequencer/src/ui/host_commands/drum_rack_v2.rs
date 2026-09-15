@@ -189,6 +189,7 @@ pub(super) fn handle(
             };
             match app.replace_rack_with_sound(group_id, Path::new(&path)) {
                 Ok(track) => {
+                    super::initialize_loaded_rack_view(app, editor, track);
                     // The selected entity is now an ordinary track, not the
                     // removed rack's bus. Move the shared Lisp selection onto
                     // that track before rebuilding browser/sidebar state.
@@ -293,6 +294,7 @@ pub(super) fn sync_after_rack_structure_change(
     sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
     sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
     sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
+    sync_mod_port_level_fields(rt, &ctx.meters.cached_mod_port_levels);
     rt.clear_subtree_effects_for_named_target("*sequencer*");
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();

@@ -244,7 +244,7 @@
     (get p :value)))
 
 (def plock-group-header (domain)
-  (box :height 0.95
+  (box 
     (h-stack :gap 0.35 :align :center
       (label (plock-domain-title domain)
         :font-size 8.5 :color :dim :bg :transparent :width 4.5)
@@ -264,10 +264,11 @@
       :border-color (rgba 0.27 0.78 0.86 0.55)
       :corner-radius 2
       :on-click |x y r| (set! selected-plock-row idx)
-      (h-stack :width :fill :gap plock-col-gap :align :baseline
+      (h-stack :width :fill :gap plock-col-gap :align :center
         (label (substring (plock-row-title p) 0 12)
           :key (plock-row-key idx "param")
           :font-size 9.2 :width plock-param-col-width
+          :v-align :center
           :color (if (= selected-plock-row idx) :white :dim)
           :bg :transparent)
         (if (or (= (get p :source) "neuron") (get p :preview))
@@ -289,12 +290,13 @@
               :width plock-lock-col-width :height 1.0)))
         (label (if (get p :default-text) (get p :default-text) (str (get p :default)))
           :key (plock-row-key idx "def")
+          :v-align :center
           :font-size 9.2 :width plock-def-col-width
           :h-align :right :color :dark-gray :bg :transparent)))))
 
 (def plock-group (domain)
   (if (> (plock-domain-count domain) 0)
-    (v-stack :gap 0.12
+    (v-stack :gap 0.012
       (plock-group-header domain)
       (each SEQ.track-plocks |p idx|
         (if (= (plock-row-domain p) domain)

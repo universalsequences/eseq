@@ -2696,6 +2696,17 @@ impl App {
             scene_cell_presence,
             take_pools,
             track_sounds,
+            // Scene-independent per-track process slot rosters (eseq-53y7).
+            track_lane_rosters: {
+                let rosters = (0..self.tracks.len())
+                    .map(|track| self.state.track_lane_roster(track).unwrap_or_default())
+                    .collect::<Vec<_>>();
+                if rosters.iter().all(|roster| roster.is_empty()) {
+                    Vec::new()
+                } else {
+                    rosters
+                }
+            },
         })
     }
 
@@ -3841,6 +3852,7 @@ impl App {
             scene_cell_presence,
             take_pools,
             track_sounds,
+            track_lane_rosters,
         } = pending.project;
         let bank = pending.built_patterns;
         let bus_pattern_bank = pending.built_bus_patterns;
@@ -3964,6 +3976,11 @@ impl App {
         // that adopted a canonical one; drop those orphans now instead of
         // carrying them until the first save prunes them.
         self.state.prune_unreferenced_sounds();
+        // Per-track process lane rosters (eseq-53y7). Installed after the
+        // pattern pools exist so the roster reconciles into every stored
+        // chain — and into the live one — in one pass. Files below v11 carry
+        // no roster and install nothing.
+        self.state.install_track_lane_rosters(track_lane_rosters);
         // Per-track record-arm flags (takes spec 8.1), persisted like
         // mute/solo. The UI-shared arm vector syncs FROM `graph.record_armed`
         // on the next tick via `record_arm_sync_pending`.
@@ -5919,6 +5936,7 @@ mod tests {
             scene_cell_presence: Vec::new(),
             take_pools: Vec::new(),
             track_sounds: Vec::new(),
+            track_lane_rosters: Vec::new(),
         }
     }
 

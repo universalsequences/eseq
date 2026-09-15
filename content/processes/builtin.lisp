@@ -142,17 +142,41 @@
          (target-set! :wire 1)
          nil))
 
+;; Cirklon "grab" (manual ch. 13, Inter Track events): on a step where the
+;; aux is set, the chosen row value on this track is REPLACED by the value on
+;; the step the source track is currently sitting on. Same tick, no scaling,
+;; no history: `:pattern` reads the source's authored step data as of this
+;; beat and holds it until the source steps again, so a source running at a
+;; slower timebase transposes a whole bar at once, as on the Cirklon.
+;;
+;; A note grab keeps this track's own accumulator/process offsets: the write
+;; is the resolved transpose so far, minus this step's authored pitch, plus
+;; the source's. A chord step moves as a block so its base note lands on the
+;; source's note. The source's note is its chord base note when it has chord
+;; data, else its transpose p-lock, so a melody drawn in the piano roll and
+;; one typed into the trn lane both grab the same way. Before the source has
+;; stepped at all the read is nil and the step plays untouched.
 (def-process lane-grab
-  :doc "Transpose grab: add another track's previous-tick resolved transpose, lagged by source-track grid steps and scaled by the lane."
-  :target (step-param :transpose)
-  :in ((amount :float 0 1 :default 0 :lane true)
+  :doc "Cirklon grab: a high step replaces one value on this track (value: note, vel or dur) with the value on the step the source track is currently on, same tick. Note keeps this track's accumulator offsets and moves a chord with its base note."
+  :targets ((note (step-param :transpose))
+            (vel (step-param :velocity))
+            (dur (step-param :duration)))
+  :in ((grab :gate :default 0 :lane true)
        (source :track :default 0)
-       (lag :int 0 255 :default 0))
-  :run (target-add!
-         (* (in :amount)
-            (read (track (in :source)
-                         :transpose
-                         :steps-ago (in :lag))))))
+       (value :enum ("note" "vel" "dur") :default 0))
+  :run (if (> (in :grab) 0.5)
+         (let ((which (in :value)))
+           (if (< which 0.5)
+             (let ((src (read (track (in :source) :note :pattern))))
+               (if (= src nil)
+                 nil
+                 (target-set! :note (+ (current-note) (- src (step-note))))))
+             (if (< which 1.5)
+               (let ((src (read (track (in :source) :velocity :pattern))))
+                 (if (= src nil) nil (target-set! :vel src)))
+               (let ((src (read (track (in :source) :duration :pattern))))
+                 (if (= src nil) nil (target-set! :dur src))))))
+         nil))
 
 (def-process lane-rand
   :doc "Random generator: on a high roll step, draw a new value between lo and hi and send it. Quiet steps send nothing, so a wired accumulator only moves on a roll; hold 1 keeps sending the last draw every fire (sample-and-hold)."

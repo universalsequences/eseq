@@ -143,7 +143,7 @@ fn render_page(name: &str, pages: &BTreeMap<String, Chapter>, order: &[String]) 
             Block::Image { alt, src } => {
                 let (width, height) = chapter.images[src];
                 let url = escape(&url_path(src));
-                writeln!(html, "<figure><a class=\"figure-link\" href=\"{url}\" aria-label=\"Open image at full size: {}\"><img src=\"{url}\" alt=\"{}\" width=\"{width}\" height=\"{height}\" loading=\"lazy\" decoding=\"async\"></a>", escape(alt), escape(alt)).unwrap();
+                writeln!(html, "<figure><img src=\"{url}\" alt=\"{}\" width=\"{width}\" height=\"{height}\" loading=\"lazy\" decoding=\"async\">", escape(alt)).unwrap();
                 if !alt.is_empty() { writeln!(html, "<figcaption>{}</figcaption>", escape(alt)).unwrap(); }
                 html.push_str("</figure>\n");
             }
